@@ -8709,7 +8709,7 @@ pub(crate) fn proposition_of(
     let unsupported = |span| {
         Diagnostic::new(
             span,
-            "propositions support integer comparisons of earlier parameters, constants, 'x + c', and Bytes.len/Vec.len/Slice.len, joined by '&&'",
+            "propositions support linear integer comparisons over earlier parameters, constants, 'x + c', 'c * x', and Bytes.len/Vec.len/Slice.len, joined by '&&'",
         )
     };
     fn text(e: &ast::Expr) -> String {
@@ -8731,6 +8731,7 @@ pub(crate) fn proposition_of(
                     Kind::EqEq => "==",
                     Kind::Plus => "+",
                     Kind::Minus => "-",
+                    Kind::Star => "*",
                     Kind::AmpAmp => "&&",
                     _ => "?",
                 };
@@ -8739,29 +8740,29 @@ pub(crate) fn proposition_of(
             _ => "?".into(),
         }
     }
-    let linear = |e: &ast::Expr| -> Result<(ParamTerm, i128)> {
+    let linear = |e: &ast::Expr| -> Result<crate::facts::ParamLinear> {
+        use crate::facts::ParamLinear;
         fn go(
             e: &ast::Expr,
             resolution: &Resolution,
             params: &BTreeMap<BindingId, usize>,
             unsupported: &dyn Fn(Span) -> Diagnostic,
-        ) -> Result<(ParamTerm, i128)> {
+        ) -> Result<ParamLinear> {
             match &e.kind {
-                ast::ExprKind::Integer(n) => {
-                    Ok((ParamTerm::Zero, n.parse().map_err(|_| unsupported(e.span))?))
-                }
+                ast::ExprKind::Integer(n) => Ok(ParamLinear::constant(
+                    n.parse().map_err(|_| unsupported(e.span))?,
+                )),
                 ast::ExprKind::Unary {
                     op: Kind::Minus,
                     operand,
                     ..
-                } => match go(operand, resolution, params, unsupported)? {
-                    (ParamTerm::Zero, n) => Ok((ParamTerm::Zero, -n)),
-                    _ => Err(unsupported(e.span)),
-                },
+                } => go(operand, resolution, params, unsupported)?
+                    .negate()
+                    .ok_or_else(|| unsupported(e.span)),
                 ast::ExprKind::Name(_) => resolution
                     .reference(e.span)
                     .and_then(|id| params.get(&id))
-                    .map(|i| (ParamTerm::Param(*i), 0))
+                    .map(|i| ParamLinear::variable(ParamTerm::Param(*i), 1))
                     .ok_or_else(|| {
                         Diagnostic::new(
                             e.span,
@@ -8775,12 +8776,28 @@ pub(crate) fn proposition_of(
                 } => {
                     let l = go(left, resolution, params, unsupported)?;
                     let r = go(right, resolution, params, unsupported)?;
-                    let sign = if *op == Kind::Plus { 1 } else { -1 };
-                    match (l, r) {
-                        ((t, a), (ParamTerm::Zero, b)) => Ok((t, a + sign * b)),
-                        ((ParamTerm::Zero, a), (t, b)) if sign == 1 => Ok((t, a + b)),
-                        _ => Err(unsupported(e.span)),
+                    if *op == Kind::Plus {
+                        l.add(&r)
+                    } else {
+                        l.sub(&r)
                     }
+                    .ok_or_else(|| unsupported(e.span))
+                }
+                ast::ExprKind::Binary {
+                    op: Kind::Star,
+                    left,
+                    right,
+                } => {
+                    let l = go(left, resolution, params, unsupported)?;
+                    let r = go(right, resolution, params, unsupported)?;
+                    if l.coefficients.is_empty() {
+                        r.scale(l.constant)
+                    } else if r.coefficients.is_empty() {
+                        l.scale(r.constant)
+                    } else {
+                        None
+                    }
+                    .ok_or_else(|| unsupported(e.span))
                 }
                 ast::ExprKind::Call { callee, arguments } if arguments.len() == 1 => {
                     let builtin = resolution.reference(callee.span).is_some_and(|id| {
@@ -8789,7 +8806,18 @@ pub(crate) fn proposition_of(
                             && matches!(b.name.as_str(), "Bytes.len" | "Vec.len" | "Slice.len")
                     });
                     match (builtin, go(&arguments[0], resolution, params, unsupported)?) {
-                        (true, (ParamTerm::Param(i), 0)) => Ok((ParamTerm::Len(i), 0)),
+                        (true, argument)
+                            if argument.coefficients.len() == 1
+                                && argument.constant == 0
+                                && argument.coefficients.values().all(|c| *c == 1) =>
+                        {
+                            let ParamTerm::Param(index) =
+                                *argument.coefficients.keys().next().unwrap()
+                            else {
+                                return Err(unsupported(e.span));
+                            };
+                            Ok(ParamLinear::variable(ParamTerm::Len(index), 1))
+                        }
                         _ => Err(unsupported(e.span)),
                     }
                 }
@@ -8815,9 +8843,9 @@ pub(crate) fn proposition_of(
                 left,
                 right,
             } => {
-                let (l, lc) = linear(left)?;
-                let (r, rc) = linear(right)?;
-                atoms.push((l, lc, op.clone(), r, rc));
+                let l = linear(left)?;
+                let r = linear(right)?;
+                atoms.push((l, op.clone(), r));
             }
             _ => return Err(unsupported(e.span)),
         }
@@ -14219,16 +14247,24 @@ impl Checker<'_, '_> {
         let proposition = self.functions.proposition(self.resolution, parameter)?;
         let mut constraints = Vec::new();
         let params = self.parameter_slots();
-        for (l, lc, op, r, rc) in &proposition.atoms {
-            let term = |t: &crate::facts::ParamTerm, c: i128| {
+        for (l, op, r) in &proposition.atoms {
+            let term = |linear: &crate::facts::ParamLinear| -> Option<crate::facts::Linear> {
                 use crate::facts::{Linear, ParamTerm, Term};
-                match t {
-                    ParamTerm::Zero => Linear(Term::Zero, c),
-                    ParamTerm::Param(i) => Linear(Term::Var(params[*i], 0), c),
-                    ParamTerm::Len(i) => Linear(Term::Len(params[*i], 0), c),
+                let mut expression = Linear::constant(linear.constant);
+                for (base, coefficient) in &linear.coefficients {
+                    let part = match base {
+                        ParamTerm::Zero => Linear::constant(1),
+                        ParamTerm::Param(i) => Linear::variable(Term::Var(params[*i], 0)),
+                        ParamTerm::Len(i) => Linear::variable(Term::Len(params[*i], 0)),
+                    };
+                    expression = expression.add_scaled(&part, *coefficient)?;
                 }
+                Some(expression)
             };
-            crate::facts::compare(term(l, *lc), op, term(r, *rc), &mut constraints);
+            let (Some(left), Some(right)) = (term(l), term(r)) else {
+                continue;
+            };
+            crate::facts::compare(left, op, right, &mut constraints);
         }
         self.facts.add(constraints);
         self.proofs.insert(id, proposition);
@@ -14246,7 +14282,7 @@ impl Checker<'_, '_> {
         evidence: &ast::Expr,
         span: Span,
     ) -> Result<()> {
-        use crate::facts::{Constraint, Linear, ParamTerm, Term};
+        use crate::facts::{Constraint, Linear, ParamLinear, ParamTerm, Term};
         match &evidence.kind {
             ast::ExprKind::Name(name) if name == "_" => {}
             ast::ExprKind::Name(_)
@@ -14262,35 +14298,45 @@ impl Checker<'_, '_> {
             }
         }
         let mut goals: Vec<Constraint> = Vec::new();
-        for (l, lc, op, r, rc) in &proposition.atoms {
-            let term = |t: &ParamTerm, c: i128| -> Result<Linear> {
-                Ok(match t {
-                    ParamTerm::Zero => Linear(Term::Zero, c),
-                    ParamTerm::Param(i) => {
-                        let Linear(t, k) = self.facts.linear(&arguments[*i]).ok_or_else(|| {
-                            Diagnostic::new(
-                                arguments[*i].span,
-                                "this argument appears in a proof obligation; use a local, a constant, or 'local + constant'",
-                            )
-                        })?;
-                        Linear(t, k + c)
-                    }
-                    ParamTerm::Len(i) => {
-                        let slot = crate::facts::owner_slot(&arguments[*i]).ok_or_else(|| {
-                            Diagnostic::new(
-                                arguments[*i].span,
-                                "pass a named buffer here so its length can appear in a proof obligation",
-                            )
-                        })?;
-                        Linear(Term::Len(slot, self.facts.version(slot)), c)
-                    }
-                })
+        for (l, op, r) in &proposition.atoms {
+            let term = |linear: &ParamLinear| -> Result<Linear> {
+                let mut expression = Linear::constant(linear.constant);
+                for (base, coefficient) in &linear.coefficients {
+                    let part = match base {
+                        ParamTerm::Zero => Linear::constant(1),
+                        ParamTerm::Param(i) => {
+                            self.facts.linear(&arguments[*i]).ok_or_else(|| {
+                                Diagnostic::new(
+                                    arguments[*i].span,
+                                    "this argument appears in a proof obligation; use a linear expression such as a local, a constant, 'local + constant', or 'constant * local'",
+                                )
+                            })?
+                        }
+                        ParamTerm::Len(i) => {
+                            let slot =
+                                crate::facts::owner_slot(&arguments[*i]).ok_or_else(|| {
+                                    Diagnostic::new(
+                                        arguments[*i].span,
+                                        "pass a named buffer here so its length can appear in a proof obligation",
+                                    )
+                                })?;
+                            Linear::variable(Term::Len(slot, self.facts.version(slot)))
+                        }
+                    };
+                    expression = expression.add_scaled(&part, *coefficient).ok_or_else(|| {
+                        Diagnostic::new(
+                            span,
+                            "proof obligation coefficients overflow the bounded linear solver",
+                        )
+                    })?;
+                }
+                Ok(expression)
             };
-            crate::facts::compare(term(l, *lc)?, op, term(r, *rc)?, &mut goals);
+            crate::facts::compare(term(l)?, op, term(r)?, &mut goals);
         }
         for goal in goals {
-            let Some(steps) = self.facts.prove(goal) else {
-                let known = self.facts.snapshot(goal);
+            let Some(proof) = self.facts.prove(&goal) else {
+                let known = self.facts.snapshot(&goal);
                 let names = (0..self.locals.len())
                     .map(|s| self.local_name(s))
                     .collect::<Vec<_>>();
@@ -14301,12 +14347,15 @@ impl Checker<'_, '_> {
                     &|slot| names[slot].clone(),
                 ));
             };
-            let hypotheses = self.facts.snapshot(goal);
+            let hypotheses = self.facts.snapshot(&goal);
             self.functions.certificates.push(crate::facts::Certificate {
                 span,
                 obligation: proposition.text.clone(),
                 goal,
-                steps,
+                steps: proof.steps,
+                multipliers: proof.multipliers,
+                denominator: proof.denominator,
+                negation: proof.negation,
                 hypotheses,
             });
         }
@@ -23569,11 +23618,19 @@ impl Checker<'_, '_> {
         if name == "Slice.get" {
             self.require(PANIC, span)?;
         } else {
-            use crate::facts::{ParamTerm, Proposition};
+            use crate::facts::{ParamLinear, ParamTerm, Proposition};
             let proposition = Proposition {
                 atoms: vec![
-                    (ParamTerm::Zero, 0, Kind::Le, ParamTerm::Param(1), 0),
-                    (ParamTerm::Param(1), 0, Kind::Lt, ParamTerm::Len(0), 0),
+                    (
+                        ParamLinear::constant(0),
+                        Kind::Le,
+                        ParamLinear::variable(ParamTerm::Param(1), 1),
+                    ),
+                    (
+                        ParamLinear::variable(ParamTerm::Param(1), 1),
+                        Kind::Lt,
+                        ParamLinear::variable(ParamTerm::Len(0), 1),
+                    ),
                 ],
                 text: "0 <= index && index < Slice.len(slice)".to_owned(),
             };
@@ -24855,11 +24912,19 @@ impl Checker<'_, '_> {
             ));
         }
         if op == VecOp::At {
-            use crate::facts::{ParamTerm, Proposition};
+            use crate::facts::{ParamLinear, ParamTerm, Proposition};
             let proposition = Proposition {
                 atoms: vec![
-                    (ParamTerm::Zero, 0, Kind::Le, ParamTerm::Param(1), 0),
-                    (ParamTerm::Param(1), 0, Kind::Lt, ParamTerm::Len(0), 0),
+                    (
+                        ParamLinear::constant(0),
+                        Kind::Le,
+                        ParamLinear::variable(ParamTerm::Param(1), 1),
+                    ),
+                    (
+                        ParamLinear::variable(ParamTerm::Param(1), 1),
+                        Kind::Lt,
+                        ParamLinear::variable(ParamTerm::Len(0), 1),
+                    ),
                 ],
                 text: format!(
                     "0 <= index && index < {}.len(buffer)",
