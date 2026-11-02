@@ -1153,3 +1153,73 @@ fn allocator_contexts_and_containers_support_projected_shared_references() {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(&source, 42);
 }
+
+#[test]
+fn allocator_context_state_moves_are_checked_and_cleaned_up() {
+    let source = format!(
+        r#"{OWNING_STATE_ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let token = Box.new(7);
+            let ctx = AllocatorContext.new(OwnedCounting {{ calls: 0, live: 0, limit: 0, token: token }});
+            let b = AllocBox.new(ctx, 41);
+            AllocBox.take(b)
+        }}"#
+    );
+    assert_eq!(value(&source), 41);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 41);
+    let invalid = source.replace(
+        "let b = AllocBox.new(ctx, 41);",
+        "let taken = Box.take(token); let b = AllocBox.new(ctx, taken);",
+    );
+    rejects(&invalid, "move");
+    rejects(
+        &format!(
+            r#"{STATEFUL_ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let ctx = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
+            let first = AllocBox.new(ctx, 1);
+            drop(first);
+            let extra = AllocatorContext.share(&ctx);
+            AllocBox.take(AllocBox.new(extra, 2))
+        }}"#
+        ),
+        "move",
+    );
+}
+
+#[test]
+fn allocator_constructor_early_returns_release_contexts() {
+    for constructor in ["AllocBox.new", "AllocBox.try_new"] {
+        let source = format!(
+            r#"enum Result<T,E> {{ Ok(T), Err(E) }}
+            {OWNING_STATE_ALLOCATOR}
+            fn stash(ctx: AllocatorContext, flag: Bool) -> i64 ! {{alloc, panic}} {{
+                let b = {constructor}(ctx, if flag {{ return 7; }} else {{ 9 }});
+                drop(b);
+                0
+            }}
+            fn main() -> i64 ! {{alloc, panic}} {{
+                let ctx = AllocatorContext.new(OwnedCounting {{ calls: 0, live: 0, limit: 0, token: Box.new(1) }});
+                stash(ctx, true)
+            }}"#
+        );
+        assert_eq!(value(&source), 7);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        agrees(&source, 7);
+    }
+    let source = format!(
+        r#"{STATEFUL_ALLOCATOR}
+        fn build(ctx: AllocatorContext, flag: Bool) -> i64 ! {{alloc, panic}} {{
+            let v: AllocVec<i64> = AllocVec.with_capacity(ctx, if flag {{ return 7; }} else {{ 1 }});
+            AllocVec.len(&v)
+        }}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let ctx = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
+            build(ctx, true)
+        }}"#
+    );
+    assert_eq!(value(&source), 7);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 7);
+}

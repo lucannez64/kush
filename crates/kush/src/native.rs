@@ -4274,6 +4274,7 @@ impl Generator<'_, '_> {
             ExprKind::AllocBoxNew { allocator, value } => {
                 let pair = self.allocator_words(allocator)?;
                 let payload = lower!(self.expr(value));
+                self.consume(allocator);
                 let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
                 self.consume(value);
                 let block =
@@ -4300,6 +4301,7 @@ impl Generator<'_, '_> {
             } => {
                 let pair = self.allocator_words(allocator)?;
                 let payload = lower!(self.expr(value));
+                self.consume(allocator);
                 self.consume(value);
                 let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
                 let block = self.runtime_call(
@@ -4436,6 +4438,7 @@ impl Generator<'_, '_> {
                     Some(capacity) => lower!(self.scalar(capacity)),
                     None => self.constant(0),
                 };
+                self.consume(allocator);
                 let width = self.constant(self.program.width(*element) as i64);
                 let handle = self.runtime_call(
                     self.alloc_ops.vec_create,
@@ -6146,10 +6149,7 @@ impl Generator<'_, '_> {
         let zero = self.constant(0);
         match allocator.ty {
             Type::Allocator => Some([values[0], values[1], values[2], zero]),
-            Type::AllocatorContext => {
-                self.consume(allocator);
-                Some([zero, zero, zero, values[0]])
-            }
+            Type::AllocatorContext => Some([zero, zero, zero, values[0]]),
             _ => unreachable!("checked allocator operand"),
         }
     }

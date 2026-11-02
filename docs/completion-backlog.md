@@ -388,7 +388,7 @@ outstanding implementation item.
   context. Fallible refusal returns every owner and releases the operation's
   context reference exactly once; growth uses the instance's `grow` with the
   private typed-payload preservation. Affine copying, borrowed/task/linear
-  state, nested contexts, and non-record instances are explicit checked
+  state and non-record instances are explicit checked
   rejections. Explicit remaining limits: containers are runtime
   allocator-parameterized but `AllocBox<T>`/`AllocVec<T>` still take no static
   allocator type parameter (the context erases the concrete instance behind

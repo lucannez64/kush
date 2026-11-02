@@ -4240,9 +4240,6 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             } => {
                 let allocator_ast = allocator;
                 let allocator = value!(self.expr(allocator_ast, frame));
-                if allocator_ast.ty == Type::AllocatorContext {
-                    self.consume(allocator_ast, frame);
-                }
                 let capacity = match capacity {
                     Some(capacity) => {
                         let requested = value!(self.expr(capacity, frame)).scalar();
@@ -4252,6 +4249,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     }
                     None => None,
                 };
+                if allocator_ast.ty == Type::AllocatorContext {
+                    self.consume(allocator_ast, frame);
+                }
                 self.eval_alloc_vec_new(
                     allocator,
                     capacity,

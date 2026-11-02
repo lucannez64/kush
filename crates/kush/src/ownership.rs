@@ -4345,6 +4345,8 @@ impl Checker<'_> {
                     self.expr(realloc)?;
                 }
             }
+            ExprKind::AllocatorContextNew { value, .. }
+            | ExprKind::AllocatorContextShare(value) => self.expr(value)?,
             ExprKind::AllocBoxNew { allocator, value }
             | ExprKind::AllocBoxTryNew {
                 allocator, value, ..
