@@ -299,20 +299,21 @@ fn editor_symbols_semantic_tokens_and_hover_are_offered_for_unsaved_text() {
         (10, [2, 0, 11]),
         (15, [1, 0, 2]),
         (20, [0, 3, 4]),
-        (25, [1, 4, 3]),
-        (30, [0, 4, 6]),
-        (35, [0, 9, 2]),
+        (25, [0, 10, 3]),
+        (30, [1, 4, 3]),
+        (35, [0, 4, 6]),
+        (40, [0, 9, 2]),
     ];
     for (index, token) in expected {
         assert_eq!(&data[*index..index + 3], &token.to_vec());
     }
     // The token types follow in each block: keyword, namespace, comment,
-    // keyword, function, keyword, variable, number (0,3,8,0,1,0,10,7).
+    // keyword, function, type, keyword, variable, number (0,3,8,0,1,2,0,10,7).
     let types: Vec<u64> = data
         .chunks(5)
         .map(|block| block[3].as_u64().unwrap())
         .collect();
-    assert_eq!(types, vec![0, 3, 8, 0, 1, 0, 10, 7]);
+    assert_eq!(types, vec![0, 3, 8, 0, 1, 2, 0, 10, 7]);
     client.shutdown();
 }
 

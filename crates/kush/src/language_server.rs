@@ -1340,6 +1340,11 @@ const SEMANTIC_TOKEN_TYPES: &[&str] = &[
 
 const KEYWORD_WORDS: &[&str] = &["trait", "impl", "prop", "test", "effect", "row", "foreign"];
 
+const PRIMITIVE_TYPE_WORDS: &[&str] = &[
+    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f64", "bool", "char", "String", "Bytes",
+    "Nat", "Prop", "Unit", "Bool",
+];
+
 const KEYWORD: u64 = 0;
 const FUNCTION_TOKEN: u64 = 1;
 const TYPE_TOKEN: u64 = 2;
@@ -1420,6 +1425,28 @@ fn semantic_token_data(text: &str) -> Value {
             Kind::Ident(_) if expected == Expected::Variable => {
                 events.push((start, end, VARIABLE_TOKEN));
                 expected = Expected::None;
+            }
+            Kind::Ident(name)
+                if matches!(&token.kind, Kind::Ident(_))
+                    && PRIMITIVE_TYPE_WORDS.contains(&name.as_str()) =>
+            {
+                events.push((start, end, TYPE_TOKEN));
+            }
+            Kind::Mut => {
+                // `let mut name` keeps waiting for the binding name.
+                events.push((start, end, KEYWORD));
+            }
+            Kind::Return
+            | Kind::If
+            | Kind::Else
+            | Kind::Match
+            | Kind::While
+            | Kind::Loop
+            | Kind::Break
+            | Kind::Continue
+            | Kind::True
+            | Kind::False => {
+                events.push((start, end, KEYWORD));
             }
             Kind::Let | Kind::Pub => {
                 events.push((start, end, KEYWORD));
