@@ -569,11 +569,36 @@ struct ArenaState {
     /// noncapturing code pointer, so it cannot capture or dangle.
     strategy: Option<usize>,
 }
+/// The allocator recorded by one container. A legacy value is three checked
+/// code pointers and owns nothing; an instance context owns a reference to the
+/// compiler-owned state cell and calls the selected protocol methods.
+#[derive(Debug, Clone)]
+enum AllocatorBinding {
+    Static {
+        alloc: usize,
+        free: usize,
+        realloc: Option<usize>,
+    },
+    Context(Arc<AllocatorContextState>),
+}
+/// One reference-counted allocator instance. `instance` is the concrete state
+/// value; `alloc`, `free`, and `grow` are checked `&mut Self` method functions.
+/// The count is explicit because sharing is the checked
+/// `AllocatorContext.share` operation, never an implicit clone of an affine
+/// value.
+#[derive(Debug)]
+struct AllocatorContextState {
+    references: std::sync::atomic::AtomicUsize,
+    instance: Arc<Mutex<Value>>,
+    alloc: usize,
+    free: usize,
+    grow: usize,
+}
 /// Heap state of one `AllocBox<T>`. Boxed inside `Value` so the enum stays
 /// small: deeply recursive reference evaluation depends on a compact frame.
 #[derive(Debug, Clone)]
 struct AllocBoxState {
-    free: usize,
+    allocator: AllocatorBinding,
     block: Value,
     payload: Value,
 }
@@ -582,9 +607,7 @@ struct AllocBoxState {
 struct AllocVectorState {
     items: Vec<Value>,
     capacity: usize,
-    alloc: usize,
-    free: usize,
-    realloc: Option<usize>,
+    allocator: AllocatorBinding,
     block: Option<Value>,
 }
 /// One borrowed slice view. Boxed inside `Value` so adding field-view
@@ -683,6 +706,13 @@ enum Value {
         /// Optional growth hook function index; index zero is a valid hook.
         realloc: Option<usize>,
     },
+    /// An owning reference to one allocator instance. The context state holds
+    /// the concrete instance value and its checked method indices. The last
+    /// reference drops the instance exactly once.
+    AllocatorContext(Arc<AllocatorContextState>),
+    /// A temporary `&AllocatorContext` borrow used only by
+    /// `AllocatorContext.share`; it never owns a reference.
+    AllocatorContextRef(Arc<AllocatorContextState>),
     /// The heap state of one `AllocBox<T>`: the allocator pair, the `Bytes`
     /// block that owns the payload storage, and the payload itself. The
     /// reference evaluator models payload storage separately, but the block is
@@ -942,21 +972,57 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             .set_box_capacity(id, box_allocation_capacity(words * 8));
         value
     }
-    /// Extract the code pointers of a checked allocator value.
-    fn allocator_pair(&self, value: &Value, span: Span) -> Result<(usize, usize, Option<usize>)> {
-        if let Value::Allocator {
-            alloc,
-            free,
-            realloc,
-        } = value
-        {
-            Ok((*alloc, *free, *realloc))
-        } else {
-            Err(Diagnostic::new(
+    /// Extract the recorded allocator from a checked allocator value. The
+    /// context variant transfers its reference to the caller; the caller must
+    /// either store it in a container or release it.
+    fn allocator_binding(&mut self, value: Value, span: Span) -> Result<AllocatorBinding> {
+        match value {
+            Value::Allocator {
+                alloc,
+                free,
+                realloc,
+            } => Ok(AllocatorBinding::Static {
+                alloc,
+                free,
+                realloc,
+            }),
+            // The context's heap cell is only the owning handle; transferring
+            // the reference to a container releases the cell itself.
+            Value::AllocatorContext(state) => Ok(AllocatorBinding::Context(state)),
+            Value::Owned(id) => match self.heap.take(id) {
+                Some(Value::AllocatorContext(state)) => {
+                    self.stats.deallocation();
+                    Ok(AllocatorBinding::Context(state))
+                }
+                other => {
+                    if let Some(value) = other {
+                        self.heap.insert(id, value);
+                    }
+                    Err(Diagnostic::new(
+                        span,
+                        "internal error: expected a checked allocator context",
+                    ))
+                }
+            },
+            _ => Err(Diagnostic::new(
                 span,
                 "internal error: expected a checked allocator value",
-            ))
+            )),
         }
+    }
+    /// One context method call with the shared instance as its `&mut self`
+    /// receiver. The instance cell is pinned, so mutations are visible to every
+    /// later call through the same context.
+    fn allocator_context_call(
+        &mut self,
+        state: &AllocatorContextState,
+        function: usize,
+        arguments: Vec<Value>,
+    ) -> Result<Value> {
+        let mut values = Vec::with_capacity(arguments.len() + 1);
+        values.push(Value::RecordRef(state.instance.clone()));
+        values.extend(arguments);
+        self.call(function, values)
     }
     /// Ask a user allocator for a block of `bytes` payload storage. `None`
     /// means the callback returned a block that cannot hold the request; that
@@ -964,41 +1030,58 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     /// is reported, so a refusal never leaks storage.
     fn allocator_block(
         &mut self,
-        alloc: usize,
-        free: usize,
+        allocator: &AllocatorBinding,
         bytes: usize,
         span: Span,
     ) -> Result<Option<Value>> {
-        let block = self.call(alloc, vec![Value::Scalar(bytes as i64)])?;
-        let capacity = match &block {
-            Value::Owned(id) => match self.heap.get(*id) {
-                Some(Value::Buffer { capacity, .. }) => capacity,
-                _ => {
-                    return Err(Diagnostic::new(
-                        span,
-                        "internal error: allocator callback did not return a Bytes block",
-                    ));
-                }
-            },
-            _ => {
-                return Err(Diagnostic::new(
-                    span,
-                    "internal error: allocator callback did not return an owned Bytes block",
-                ));
+        let block = match allocator {
+            AllocatorBinding::Static { alloc, .. } => {
+                self.call(*alloc, vec![Value::Scalar(bytes as i64)])?
+            }
+            AllocatorBinding::Context(state) => {
+                self.allocator_context_call(state, state.alloc, vec![Value::Scalar(bytes as i64)])?
             }
         };
+        let capacity = self.allocator_block_capacity(&block, span)?;
         if capacity >= bytes {
             Ok(Some(block))
         } else {
-            self.allocator_release(free, block, span)?;
+            self.allocator_release(allocator, block, span)?;
             Ok(None)
+        }
+    }
+    fn allocator_block_capacity(&self, block: &Value, span: Span) -> Result<usize> {
+        match block {
+            Value::Owned(id) => match self.heap.get(*id) {
+                Some(Value::Buffer { capacity, .. }) => Ok(capacity),
+                _ => Err(Diagnostic::new(
+                    span,
+                    "internal error: allocator callback did not return a Bytes block",
+                )),
+            },
+            _ => Err(Diagnostic::new(
+                span,
+                "internal error: allocator callback did not return an owned Bytes block",
+            )),
         }
     }
     /// Release one allocator-supplied block through its recorded release
     /// function. The callback consumes the `Bytes` owner, so the underlying
     /// allocation is freed exactly once.
-    fn allocator_release(&mut self, free: usize, block: Value, span: Span) -> Result<()> {
-        let _ = self.call(free, vec![block])?;
+    fn allocator_release(
+        &mut self,
+        allocator: &AllocatorBinding,
+        block: Value,
+        span: Span,
+    ) -> Result<()> {
+        match allocator {
+            AllocatorBinding::Static { free, .. } => {
+                let _ = self.call(*free, vec![block])?;
+            }
+            AllocatorBinding::Context(state) => {
+                let _ = self.allocator_context_call(state, state.free, vec![block])?;
+            }
+        }
         let _ = span;
         Ok(())
     }
@@ -1007,7 +1090,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     /// a smaller result is a panic because the old block is already gone.
     fn allocator_realloc_block(
         &mut self,
-        realloc: usize,
+        allocator: &AllocatorBinding,
         mut block: Value,
         old_bytes: usize,
         bytes: usize,
@@ -1024,31 +1107,27 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             self.heap.insert(id, Value::Buffer { data, capacity });
             block = Value::Owned(id);
         }
-        let grown = self.call(
-            realloc,
-            vec![
-                block,
-                Value::Scalar(old_bytes as i64),
-                Value::Scalar(bytes as i64),
-            ],
-        )?;
-        let capacity = match &grown {
-            Value::Owned(id) => match self.heap.get(*id) {
-                Some(Value::Buffer { capacity, .. }) => capacity,
-                _ => {
-                    return Err(Diagnostic::new(
-                        span,
-                        "internal error: allocator growth callback did not return a Bytes block",
-                    ));
-                }
-            },
-            _ => {
+        let arguments = vec![
+            block,
+            Value::Scalar(old_bytes as i64),
+            Value::Scalar(bytes as i64),
+        ];
+        let grown = match allocator {
+            AllocatorBinding::Static {
+                realloc: Some(realloc),
+                ..
+            } => self.call(*realloc, arguments)?,
+            AllocatorBinding::Context(state) => {
+                self.allocator_context_call(state, state.grow, arguments)?
+            }
+            AllocatorBinding::Static { realloc: None, .. } => {
                 return Err(Diagnostic::new(
                     span,
-                    "internal error: allocator growth callback did not return an owned Bytes block",
+                    "internal error: no recorded allocator growth hook",
                 ));
             }
         };
+        let capacity = self.allocator_block_capacity(&grown, span)?;
         if capacity < bytes {
             return Err(Diagnostic::new(
                 span,
@@ -1057,10 +1136,36 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
         Ok(grown)
     }
-    /// Store an allocator pair and block as one owning metadata cell.
-    fn allocate_alloc_box(&mut self, free: usize, block: Value, payload: Value) -> Value {
+    /// Drop one allocator-context reference. The last reference destroys the
+    /// retained instance value exactly once and releases the compiler-owned
+    /// context and state cells.
+    fn allocator_context_release(&mut self, state: &Arc<AllocatorContextState>) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        if state.references.fetch_sub(1, Ordering::SeqCst) != 1 {
+            return Ok(());
+        }
+        let instance = std::mem::replace(&mut *state.instance.lock().unwrap(), Value::Scalar(0));
+        self.drop_value(instance)?;
+        // The state cell is compiler-owned bookkeeping; the owning context
+        // handle is a normal heap cell and is counted when it is dropped.
+        self.stats.deallocation();
+        Ok(())
+    }
+    fn release_allocator_binding(&mut self, binding: AllocatorBinding) -> Result<()> {
+        match binding {
+            AllocatorBinding::Static { .. } => Ok(()),
+            AllocatorBinding::Context(state) => self.allocator_context_release(&state),
+        }
+    }
+    /// Store an allocator binding and block as one owning metadata cell.
+    fn allocate_alloc_box(
+        &mut self,
+        allocator: AllocatorBinding,
+        block: Value,
+        payload: Value,
+    ) -> Value {
         self.allocate(Value::AllocBox(Box::new(AllocBoxState {
-            free,
+            allocator,
             block,
             payload,
         })))
@@ -1076,16 +1181,16 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         bytes: usize,
         span: Span,
     ) -> Result<Value> {
-        let (alloc, free, _) = self.allocator_pair(&allocator, span)?;
+        let allocator = self.allocator_binding(allocator, span)?;
         let block = self
-            .allocator_block(alloc, free, bytes, span)?
+            .allocator_block(&allocator, bytes, span)?
             .ok_or_else(|| {
                 Diagnostic::new(
                     span,
                     format!("panic: allocator refused a {bytes}-byte block"),
                 )
             })?;
-        Ok(self.allocate_alloc_box(free, block, payload))
+        Ok(self.allocate_alloc_box(allocator, block, payload))
     }
     #[inline(never)]
     fn eval_alloc_box_try_new(
@@ -1096,16 +1201,21 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         shape: ResultShape,
         span: Span,
     ) -> Result<Value> {
-        let (alloc, free, _) = self.allocator_pair(&allocator, span)?;
-        Ok(match self.allocator_block(alloc, free, bytes, span)? {
+        let allocator = self.allocator_binding(allocator, span)?;
+        Ok(match self.allocator_block(&allocator, bytes, span)? {
             Some(block) => Value::Enum {
                 tag: shape.ok_tag,
-                fields: vec![self.allocate_alloc_box(free, block, payload)],
+                fields: vec![self.allocate_alloc_box(allocator, block, payload)],
             },
-            None => Value::Enum {
-                tag: shape.err_tag,
-                fields: vec![payload],
-            },
+            None => {
+                // Nothing retained the context on refusal; release the
+                // operation's reference so the state is destroyed exactly once.
+                self.release_allocator_binding(allocator)?;
+                Value::Enum {
+                    tag: shape.err_tag,
+                    fields: vec![payload],
+                }
+            }
         })
     }
     #[inline(never)]
@@ -1116,7 +1226,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         width: usize,
         span: Span,
     ) -> Result<Value> {
-        let (alloc, free, realloc) = self.allocator_pair(&allocator, span)?;
+        let allocator = self.allocator_binding(allocator, span)?;
         let capacity = capacity.unwrap_or(0);
         let block = if capacity == 0 {
             None
@@ -1126,7 +1236,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 .and_then(|words| words.checked_mul(8))
                 .ok_or_else(|| Diagnostic::new(span, "panic: AllocVec capacity overflow"))?;
             Some(
-                self.allocator_block(alloc, free, bytes, span)?
+                self.allocator_block(&allocator, bytes, span)?
                     .ok_or_else(|| {
                         Diagnostic::new(
                             span,
@@ -1138,9 +1248,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         Ok(self.allocate(Value::AllocVector(Box::new(AllocVectorState {
             items: Vec::new(),
             capacity,
-            alloc,
-            free,
-            realloc,
+            allocator,
             block,
         }))))
     }
@@ -2176,9 +2284,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let AllocVectorState {
                     mut items,
                     mut capacity,
-                    alloc,
-                    free,
-                    realloc,
+                    allocator,
                     mut block,
                 } = *state;
                 if let Some(index) = index {
@@ -2189,9 +2295,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         Value::AllocVector(Box::new(AllocVectorState {
                             items,
                             capacity,
-                            alloc,
-                            free,
-                            realloc,
+                            allocator,
                             block,
                         })),
                     );
@@ -2211,16 +2315,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     // A fallible append always uses the fresh-block path so a
                     // refusal can leave the vector untouched. The infallible
                     // path uses the recorded growth hook when one exists.
+                    let can_grow = match &allocator {
+                        AllocatorBinding::Static { realloc, .. } => {
+                            realloc.is_some() && block.is_some()
+                        }
+                        AllocatorBinding::Context(_) => block.is_some(),
+                    };
                     let fresh = if op == AllocVecOp::TryPush {
-                        self.allocator_block(alloc, free, bytes, span)?
-                    } else if let Some(realloc) = realloc.filter(|_| block.is_some()) {
+                        self.allocator_block(&allocator, bytes, span)?
+                    } else if can_grow {
                         let old = block.take().expect("checked existing block");
                         let old_bytes = items.len() * width * 8;
                         let grown =
-                            self.allocator_realloc_block(realloc, old, old_bytes, bytes, span)?;
+                            self.allocator_realloc_block(&allocator, old, old_bytes, bytes, span)?;
                         Some(grown)
                     } else {
-                        self.allocator_block(alloc, free, bytes, span)?
+                        self.allocator_block(&allocator, bytes, span)?
                     };
                     let Some(fresh) = fresh else {
                         if op == AllocVecOp::TryPush {
@@ -2231,9 +2341,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                                 Value::AllocVector(Box::new(AllocVectorState {
                                     items,
                                     capacity,
-                                    alloc,
-                                    free,
-                                    realloc,
+                                    allocator,
                                     block,
                                 })),
                             );
@@ -2259,7 +2367,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         )));
                     };
                     if let Some(old) = block.take() {
-                        self.allocator_release(free, old, span)?;
+                        self.allocator_release(&allocator, old, span)?;
                     }
                     block = Some(fresh);
                     capacity = next;
@@ -2271,9 +2379,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Value::AllocVector(Box::new(AllocVectorState {
                         items,
                         capacity,
-                        alloc,
-                        free,
-                        realloc,
+                        allocator,
                         block,
                     })),
                 );
@@ -2301,9 +2407,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let AllocVectorState {
                     mut items,
                     capacity,
-                    alloc,
-                    free,
-                    realloc,
+                    allocator,
                     block,
                 } = *state;
                 let Some(item) = items.pop() else {
@@ -2314,9 +2418,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Value::AllocVector(Box::new(AllocVectorState {
                         items,
                         capacity,
-                        alloc,
-                        free,
-                        realloc,
+                        allocator,
                         block,
                     })),
                 );
@@ -2335,9 +2437,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let AllocVectorState {
                     mut items,
                     capacity,
-                    alloc,
-                    free,
-                    realloc,
+                    allocator,
                     block,
                 } = *state;
                 while let Some(item) = items.pop() {
@@ -2348,9 +2448,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Value::AllocVector(Box::new(AllocVectorState {
                         items,
                         capacity,
-                        alloc,
-                        free,
-                        realloc,
+                        allocator,
                         block,
                     })),
                 );
@@ -2954,17 +3052,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
             }
             Value::Allocator { .. } => {}
+            Value::AllocatorContext(state) => {
+                self.allocator_context_release(&state)?;
+            }
             Value::AllocBox(state) => {
                 self.drop_value(state.payload)?;
-                self.allocator_release(state.free, state.block, Span::default())?;
+                self.allocator_release(&state.allocator, state.block, Span::default())?;
+                self.release_allocator_binding(state.allocator)?;
             }
             Value::AllocVector(state) => {
                 for item in state.items.into_iter().rev() {
                     self.drop_value(item)?;
                 }
                 if let Some(block) = state.block {
-                    self.allocator_release(state.free, block, Span::default())?;
+                    self.allocator_release(&state.allocator, block, Span::default())?;
                 }
+                self.release_allocator_binding(state.allocator)?;
             }
             // A slice view borrows its base and owns nothing.
             Value::Slice(_) => {}
@@ -3536,11 +3639,60 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     realloc: realloc_function,
                 }
             }
+            ExprKind::AllocatorContextNew {
+                value: argument,
+                spec,
+            } => {
+                let instance = value!(self.expr(argument, frame));
+                self.consume(argument, frame);
+                let Some(spec) = self.program.allocator_contexts.get(*spec).copied() else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: allocator context has no checked method set",
+                    ));
+                };
+                // Two compiler-owned cells: the state block (counted here) and
+                // the context metadata (the owning heap cell below). The
+                // instance's own owners live inside the state.
+                self.stats.allocation();
+                let _ = spec.state;
+                let context = AllocatorContextState {
+                    references: std::sync::atomic::AtomicUsize::new(1),
+                    instance: Arc::new(Mutex::new(instance)),
+                    alloc: spec.alloc,
+                    free: spec.free,
+                    grow: spec.grow,
+                };
+                self.allocate(Value::AllocatorContext(Arc::new(context)))
+            }
+            ExprKind::AllocatorContextShare(argument) => {
+                let state = match value!(self.expr(argument, frame)) {
+                    Value::Borrowed(id) => {
+                        let Some(Value::AllocatorContext(state)) = self.heap.get(id) else {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal ownership error: dangling allocator context borrow",
+                            ));
+                        };
+                        state
+                    }
+                    Value::AllocatorContextRef(state) => state,
+                    _ => unreachable!("checked allocator context borrow"),
+                };
+                state
+                    .references
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Value::AllocatorContext(state)
+            }
             ExprKind::AllocBoxNew { allocator, value } => {
-                let allocator = value!(self.expr(allocator, frame));
+                let allocator_ast = allocator;
+                let allocator = value!(self.expr(allocator_ast, frame));
                 let payload = value!(self.expr(value, frame));
                 let bytes = self.program.width(value.ty) * 8;
                 self.consume(value, frame);
+                if allocator_ast.ty == Type::AllocatorContext {
+                    self.consume(allocator_ast, frame);
+                }
                 self.eval_alloc_box_new(allocator, payload, bytes, expr.span)?
             }
             ExprKind::AllocBoxTryNew {
@@ -3548,10 +3700,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 value: argument,
                 shape,
             } => {
-                let allocator = value!(self.expr(allocator, frame));
+                let allocator_ast = allocator;
+                let allocator = value!(self.expr(allocator_ast, frame));
                 let payload = value!(self.expr(argument, frame));
                 let bytes = self.program.width(argument.ty) * 8;
                 self.consume(argument, frame);
+                if allocator_ast.ty == Type::AllocatorContext {
+                    self.consume(allocator_ast, frame);
+                }
                 self.eval_alloc_box_try_new(allocator, payload, bytes, *shape, expr.span)?
             }
             ExprKind::AllocBoxRead(argument) => {
@@ -3578,7 +3734,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ));
                 };
                 self.stats.deallocation();
-                self.allocator_release(state.free, state.block, expr.span)?;
+                self.allocator_release(&state.allocator, state.block, expr.span)?;
+                self.release_allocator_binding(state.allocator)?;
                 state.payload
             }
             ExprKind::AllocVecNew {
@@ -3586,7 +3743,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 capacity,
                 element,
             } => {
-                let allocator = value!(self.expr(allocator, frame));
+                let allocator_ast = allocator;
+                let allocator = value!(self.expr(allocator_ast, frame));
+                if allocator_ast.ty == Type::AllocatorContext {
+                    self.consume(allocator_ast, frame);
+                }
                 let capacity = match capacity {
                     Some(capacity) => {
                         let requested = value!(self.expr(capacity, frame)).scalar();
@@ -4406,6 +4567,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         Value::Task(id) => Value::TaskRef(id),
                         Value::Arena { state } => Value::ArenaRef(state),
                         Value::ArenaBox { state, slot } => Value::ArenaBoxRef { state, slot },
+                        Value::AllocatorContext(state) => Value::AllocatorContextRef(state),
                         _ => unreachable!("checked borrow of an owned handle"),
                     }
                 }
@@ -4430,6 +4592,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             | ExprKind::ArenaBoxRead(..)
             | ExprKind::ArenaBoxTake(..)
             | ExprKind::AllocatorNew { .. }
+            | ExprKind::AllocatorContextNew { .. }
+            | ExprKind::AllocatorContextShare(_)
             | ExprKind::AllocBoxNew { .. }
             | ExprKind::AllocBoxTryNew { .. }
             | ExprKind::AllocBoxRead(..)

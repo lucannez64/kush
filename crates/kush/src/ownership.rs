@@ -640,6 +640,7 @@ fn owns(
         Type::Box(_)
         | Type::Arena
         | Type::ArenaBox(_)
+        | Type::AllocatorContext
         | Type::AllocBox(_)
         | Type::AllocVec(_)
         | Type::Bytes
@@ -6062,6 +6063,12 @@ fn expr_live(
             }
             live = expr_live(free, &live, views, heads, exits, out);
             live = expr_live(alloc, &live, views, heads, exits, out);
+        }
+        ExprKind::AllocatorContextNew { value, .. } => {
+            live = expr_live(value, live_after, views, heads, exits, out);
+        }
+        ExprKind::AllocatorContextShare(value) => {
+            live = expr_live(value, live_after, views, heads, exits, out);
         }
         ExprKind::AllocBoxNew { allocator, value }
         | ExprKind::AllocBoxTryNew {

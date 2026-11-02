@@ -632,33 +632,108 @@ uint64_t kush_bytes_from(const unsigned char *source, int64_t length) {
    release always uses the allocator that supplied the block. */
 typedef uint64_t (*KushAllocBlockFn)(uint64_t bytes);
 typedef void (*KushFreeBlockFn)(uint64_t block);
+typedef uint64_t (*KushReallocBlockFn)(uint64_t block, uint64_t old_bytes, uint64_t bytes);
+/* One checked, reference-counted allocator instance. `state` points at a
+   compiler-allocated block holding the concrete instance words; the drop thunk
+   loads those words, runs the instance's drop glue, and frees the block. The
+   allocate/release/grow thunks are ordinary generated `&mut Self` methods with
+   the state address as their receiver. */
+typedef struct {
+    uint64_t references;
+    uint64_t state;
+    uint64_t drop;
+    uint64_t alloc;
+    uint64_t release;
+    uint64_t grow;
+} KushAllocContext;
+typedef uint64_t (*KushContextAllocFn)(uint64_t state, uint64_t bytes);
+typedef void (*KushContextFreeFn)(uint64_t state, uint64_t block);
+typedef uint64_t (*KushContextGrowFn)(uint64_t state, uint64_t block,
+                                      uint64_t old_bytes, uint64_t bytes);
+typedef void (*KushContextDropFn)(uint64_t state);
+uint64_t kush_alloc_context_new(uint64_t state, uint64_t drop, uint64_t alloc,
+                                uint64_t release, uint64_t grow) {
+    if (state == 0 || drop == 0 || alloc == 0 || release == 0 || grow == 0) kush_panic();
+    KushAllocContext *context = (KushAllocContext *)(uintptr_t)kush_alloc(sizeof(KushAllocContext));
+    context->references = 1;
+    context->state = state;
+    context->drop = drop;
+    context->alloc = alloc;
+    context->release = release;
+    context->grow = grow;
+    return (uint64_t)(uintptr_t)context;
+}
+uint64_t kush_alloc_context_share(uint64_t handle) {
+    KushAllocContext *context = (KushAllocContext *)(uintptr_t)handle;
+    ++context->references;
+    return handle;
+}
+void kush_alloc_context_release(uint64_t handle) {
+    if (handle == 0) return;
+    KushAllocContext *context = (KushAllocContext *)(uintptr_t)handle;
+    if (context->references == 0) kush_panic();
+    if (--context->references != 0) return;
+    ((KushContextDropFn)(uintptr_t)context->drop)(context->state);
+    kush_free(handle);
+}
+static uint64_t kush_allocator_context_alloc(uint64_t context, uint64_t bytes) {
+    KushAllocContext *state = (KushAllocContext *)(uintptr_t)context;
+    uint64_t out = ((KushContextAllocFn)(uintptr_t)state->alloc)(state->state, bytes);
+    return out;
+}
+static void kush_allocator_context_free(uint64_t context, uint64_t block) {
+    if (block == 0) return;
+    KushAllocContext *state = (KushAllocContext *)(uintptr_t)context;
+    ((KushContextFreeFn)(uintptr_t)state->release)(state->state, block);
+}
+static uint64_t kush_allocator_context_grow(uint64_t context, uint64_t block,
+                                            uint64_t old_bytes, uint64_t bytes) {
+    KushAllocContext *state = (KushAllocContext *)(uintptr_t)context;
+    uint64_t out = ((KushContextGrowFn)(uintptr_t)state->grow)(state->state, block, old_bytes, bytes);
+    return out;
+}
 unsigned char *kush_alloc_block_data(uint64_t block) {
     return ((KushBytes *)(uintptr_t)block)->data;
 }
-static void kush_alloc_block_release(uint64_t release, uint64_t block) {
+static void kush_alloc_block_release(uint64_t release, uint64_t context, uint64_t block) {
     if (block == 0) return;
+    if (context != 0) {
+        kush_allocator_context_free(context, block);
+        return;
+    }
     if (release == 0) kush_panic();
     ((KushFreeBlockFn)(uintptr_t)release)(block);
 }
-uint64_t kush_alloc_block_try(uint64_t allocator, uint64_t release, uint64_t bytes) {
-    if (allocator == 0) kush_panic();
-    uint64_t block = ((KushAllocBlockFn)(uintptr_t)allocator)(bytes);
+uint64_t kush_alloc_block_try(uint64_t allocator, uint64_t release, uint64_t context,
+                              uint64_t bytes) {
+    uint64_t block;
+    if (context != 0) {
+        block = kush_allocator_context_alloc(context, bytes);
+    } else {
+        if (allocator == 0) kush_panic();
+        block = ((KushAllocBlockFn)(uintptr_t)allocator)(bytes);
+    }
     if (block == 0) return 0;
     if (((KushBytes *)(uintptr_t)block)->capacity < bytes) {
-        kush_alloc_block_release(release, block);
+        kush_alloc_block_release(release, context, block);
         return 0;
     }
     return block;
 }
-uint64_t kush_alloc_block(uint64_t allocator, uint64_t release, uint64_t bytes) {
-    uint64_t block = kush_alloc_block_try(allocator, release, bytes);
+uint64_t kush_alloc_block(uint64_t allocator, uint64_t release, uint64_t context,
+                          uint64_t bytes) {
+    uint64_t block = kush_alloc_block_try(allocator, release, context, bytes);
     if (block == 0) kush_panic();
     return block;
 }
-typedef struct { uint64_t allocator; uint64_t release; uint64_t block; } KushAllocBox;
-uint64_t kush_alloc_box_create(uint64_t allocator, uint64_t release, uint64_t block) {
+typedef struct {
+    uint64_t allocator; uint64_t release; uint64_t context; uint64_t block;
+} KushAllocBox;
+uint64_t kush_alloc_box_create(uint64_t allocator, uint64_t release, uint64_t block,
+                               uint64_t context) {
     KushAllocBox *box = (KushAllocBox *)(uintptr_t)kush_alloc(sizeof(KushAllocBox));
-    box->allocator = allocator; box->release = release; box->block = block;
+    box->allocator = allocator; box->release = release; box->context = context;
+    box->block = block;
     return (uint64_t)(uintptr_t)box;
 }
 unsigned char *kush_alloc_box_payload(uint64_t handle) {
@@ -666,14 +741,15 @@ unsigned char *kush_alloc_box_payload(uint64_t handle) {
 }
 void kush_alloc_box_release(uint64_t handle) {
     KushAllocBox *box = (KushAllocBox *)(uintptr_t)handle;
-    kush_alloc_block_release(box->release, box->block);
+    kush_alloc_block_release(box->release, box->context, box->block);
+    kush_alloc_context_release(box->context);
     kush_free(handle);
 }
 typedef struct {
     uint64_t length; uint64_t capacity; uint64_t width;
-    uint64_t allocator; uint64_t release; uint64_t realloc; uint64_t block;
+    uint64_t allocator; uint64_t release; uint64_t realloc; uint64_t context;
+    uint64_t block;
 } KushAllocVec;
-typedef uint64_t (*KushReallocBlockFn)(uint64_t block, uint64_t old_bytes, uint64_t bytes);
 static uint64_t kush_alloc_vec_block_bytes(uint64_t capacity, uint64_t width) {
     if (width == 0 || capacity > ((uint64_t)INT64_MAX) / 8 / width) kush_panic();
     return capacity * width * 8;
@@ -681,9 +757,9 @@ static uint64_t kush_alloc_vec_block_bytes(uint64_t capacity, uint64_t width) {
 /* The callback manages storage, never the representation of live typed
    elements. Preserve the payload privately and expose only zeroed readable
    bytes to the hook, then restore the typed prefix into the returned block. */
-static uint64_t kush_alloc_block_grow(uint64_t grow, uint64_t block, uint64_t old_bytes,
-                                      uint64_t bytes) {
-    if (grow == 0 || block == 0) kush_panic();
+static uint64_t kush_alloc_block_grow(uint64_t grow, uint64_t context, uint64_t block,
+                                      uint64_t old_bytes, uint64_t bytes) {
+    if ((grow == 0 && context == 0) || block == 0) kush_panic();
     unsigned char *saved = NULL;
     if (old_bytes != 0) {
         saved = (unsigned char *)malloc((size_t)old_bytes);
@@ -692,7 +768,12 @@ static uint64_t kush_alloc_block_grow(uint64_t grow, uint64_t block, uint64_t ol
         memset(kush_alloc_block_data(block), 0, (size_t)old_bytes);
     }
     ((KushBytes *)(uintptr_t)block)->length = old_bytes;
-    uint64_t grown = ((KushReallocBlockFn)(uintptr_t)grow)(block, old_bytes, bytes);
+    uint64_t grown;
+    if (context != 0) {
+        grown = kush_allocator_context_grow(context, block, old_bytes, bytes);
+    } else {
+        grown = ((KushReallocBlockFn)(uintptr_t)grow)(block, old_bytes, bytes);
+    }
     if (grown == 0 || ((KushBytes *)(uintptr_t)grown)->capacity < bytes) {
         free(saved);
         kush_panic();
@@ -702,29 +783,33 @@ static uint64_t kush_alloc_block_grow(uint64_t grow, uint64_t block, uint64_t ol
     return grown;
 }
 uint64_t kush_alloc_vec_create(uint64_t allocator, uint64_t release, uint64_t realloc,
-                               int64_t capacity, int64_t width) {
+                               uint64_t context, int64_t capacity, int64_t width) {
     if (capacity < 0 || width <= 0) kush_panic();
     KushAllocVec *v = (KushAllocVec *)(uintptr_t)kush_alloc(sizeof(KushAllocVec));
     v->length = 0; v->capacity = (uint64_t)capacity; v->width = (uint64_t)width;
-    v->allocator = allocator; v->release = release; v->realloc = realloc; v->block = 0;
+    v->allocator = allocator; v->release = release; v->realloc = realloc;
+    v->context = context; v->block = 0;
     if (capacity > 0) {
-        v->block = kush_alloc_block(allocator, release, kush_alloc_vec_block_bytes(v->capacity, v->width));
+        v->block = kush_alloc_block(allocator, release, context,
+                                    kush_alloc_vec_block_bytes(v->capacity, v->width));
     }
     return (uint64_t)(uintptr_t)v;
 }
 static void kush_alloc_vec_grow(KushAllocVec *v, uint64_t next) {
     uint64_t bytes = kush_alloc_vec_block_bytes(next, v->width);
     uint64_t block;
-    if (v->realloc != 0 && v->block != 0) {
-        block = kush_alloc_block_grow(v->realloc, v->block,
+    uint64_t can_grow = v->context != 0 ? v->block != 0
+                                        : v->realloc != 0 && v->block != 0;
+    if (can_grow) {
+        block = kush_alloc_block_grow(v->realloc, v->context, v->block,
                                       v->length * v->width * 8, bytes);
     } else {
-        block = kush_alloc_block(v->allocator, v->release, bytes);
+        block = kush_alloc_block(v->allocator, v->release, v->context, bytes);
         if (v->length != 0) {
             memcpy(kush_alloc_block_data(block), kush_alloc_block_data(v->block),
                    (size_t)(v->length * v->width * 8));
         }
-        kush_alloc_block_release(v->release, v->block);
+        kush_alloc_block_release(v->release, v->context, v->block);
     }
     v->block = block; v->capacity = next; ++kush_buffer_growths;
 }
@@ -733,13 +818,13 @@ static int kush_alloc_vec_try_grow(KushAllocVec *v, uint64_t next) {
     /* A fallible append never uses the growth hook: a hook that cannot honor
        the request has already consumed the old block, so refusal could not
        preserve the vector. The fresh-block path keeps every element. */
-    uint64_t block = kush_alloc_block_try(v->allocator, v->release, bytes);
+    uint64_t block = kush_alloc_block_try(v->allocator, v->release, v->context, bytes);
     if (block == 0) return 0;
     if (v->length != 0) {
         memcpy(kush_alloc_block_data(block), kush_alloc_block_data(v->block),
                (size_t)(v->length * v->width * 8));
     }
-    kush_alloc_block_release(v->release, v->block);
+    kush_alloc_block_release(v->release, v->context, v->block);
     v->block = block; v->capacity = next; ++kush_buffer_growths;
     return 1;
 }
@@ -799,7 +884,8 @@ unsigned char *kush_alloc_vec_data(uint64_t handle) {
 }
 void kush_alloc_vec_release(uint64_t handle) {
     KushAllocVec *v = (KushAllocVec *)(uintptr_t)handle;
-    kush_alloc_block_release(v->release, v->block);
+    kush_alloc_block_release(v->release, v->context, v->block);
+    kush_alloc_context_release(v->context);
     kush_free(handle);
 }
 int64_t kush_bytes_len(uint64_t handle) { return (int64_t)((KushBytes *)(uintptr_t)handle)->length; }
@@ -1665,7 +1751,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let mut alloc_block_sig = module.make_signature();
     alloc_block_sig
         .params
-        .extend((0..3).map(|_| AbiParam::new(I64)));
+        .extend((0..4).map(|_| AbiParam::new(I64)));
     alloc_block_sig.returns.push(AbiParam::new(I64));
     let alloc_block = module
         .declare_function("kush_alloc_block", Linkage::Import, &alloc_block_sig)
@@ -1691,7 +1777,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let mut alloc_vec_create_sig = module.make_signature();
     alloc_vec_create_sig
         .params
-        .extend((0..5).map(|_| AbiParam::new(I64)));
+        .extend((0..6).map(|_| AbiParam::new(I64)));
     alloc_vec_create_sig.returns.push(AbiParam::new(I64));
     let alloc_vec_create = module
         .declare_function(
@@ -1699,6 +1785,28 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             Linkage::Import,
             &alloc_vec_create_sig,
         )
+        .map_err(error)?;
+    let mut alloc_context_new_sig = module.make_signature();
+    alloc_context_new_sig
+        .params
+        .extend((0..5).map(|_| AbiParam::new(I64)));
+    alloc_context_new_sig.returns.push(AbiParam::new(I64));
+    let alloc_context_new = module
+        .declare_function(
+            "kush_alloc_context_new",
+            Linkage::Import,
+            &alloc_context_new_sig,
+        )
+        .map_err(error)?;
+    let alloc_context_share = module
+        .declare_function(
+            "kush_alloc_context_share",
+            Linkage::Import,
+            &alloc_unary_sig,
+        )
+        .map_err(error)?;
+    let alloc_context_release = module
+        .declare_function("kush_alloc_context_release", Linkage::Import, &free_sig)
         .map_err(error)?;
     let mut alloc_vec_push_sig = module.make_signature();
     alloc_vec_push_sig
@@ -1752,6 +1860,9 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let alloc_ops = AllocOps {
         block: alloc_block,
         block_try: alloc_block_try,
+        context_new: alloc_context_new,
+        context_share: alloc_context_share,
+        context_release: alloc_context_release,
         block_data: alloc_block_data,
         box_create: alloc_box_create,
         box_payload: alloc_box_payload,
@@ -1999,6 +2110,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
         arena_box_release,
         &alloc_ops,
     )?;
+    let context_drops = synthesize_context_drops(&mut module, program, &drops, free)?;
     let task_types = collect_task_types(program);
     let (task_wrappers, task_pointer_drops) =
         synthesize_task_wrappers(&mut module, program, &task_types, &drops)?;
@@ -2094,6 +2206,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             vec_restride,
             note_reuse,
             drops: &drops,
+            context_drops: &context_drops,
             tracked: vec![],
             function_index: index,
             bytes_from,
@@ -2359,6 +2472,9 @@ fn collect_closure_types(program: &Executable) -> Vec<Vec<Type>> {
 struct AllocOps {
     block: FuncId,
     block_try: FuncId,
+    context_new: FuncId,
+    context_share: FuncId,
+    context_release: FuncId,
     block_data: FuncId,
     box_create: FuncId,
     box_payload: FuncId,
@@ -2375,6 +2491,63 @@ struct AllocOps {
     vec_release: FuncId,
 }
 type DropTables = (BTreeMap<Type, FuncId>, BTreeMap<Vec<Type>, FuncId>);
+/// One drop thunk per allocator-context shape. The thunk receives the state
+/// block address, runs the concrete instance's checked drop glue (if any), and
+/// releases the block. It is called only when the final context reference goes
+/// away, after every container block has been released.
+fn synthesize_context_drops(
+    module: &mut ObjectModule,
+    program: &Executable,
+    drops: &BTreeMap<Type, FuncId>,
+    free: FuncId,
+) -> Result<Vec<FuncId>> {
+    let mut ids = Vec::new();
+    for (index, spec) in program.allocator_contexts.iter().enumerate() {
+        let mut signature = module.make_signature();
+        signature.params.push(AbiParam::new(I64));
+        ids.push(
+            module
+                .declare_function(
+                    &format!("kush_context_drop_{index}"),
+                    Linkage::Local,
+                    &signature,
+                )
+                .map_err(error)?,
+        );
+        let _ = spec;
+    }
+    for (index, spec) in program.allocator_contexts.iter().enumerate() {
+        let id = ids[index];
+        let mut context = module.make_context();
+        context.func.signature = module
+            .declarations()
+            .get_function_decl(id)
+            .signature
+            .clone();
+        let mut fc = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut fc);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let state = builder.block_params(entry)[0];
+        if program.owns(spec.state) {
+            let words = (0..program.width(spec.state))
+                .map(|word| {
+                    builder
+                        .ins()
+                        .load(I64, ir::MemFlagsData::new(), state, (word * 8) as i32)
+                })
+                .collect::<Vec<_>>();
+            emit_drop(&mut builder, module, drops[&spec.state.full()], &words);
+        }
+        emit_drop(&mut builder, module, free, &[state]);
+        builder.ins().return_(&[]);
+        builder.seal_all_blocks();
+        builder.finalize(module.target_config());
+        module.define_function(id, &mut context).map_err(error)?;
+    }
+    Ok(ids)
+}
 fn synthesize_drops(
     module: &mut ObjectModule,
     program: &Executable,
@@ -2390,7 +2563,7 @@ fn synthesize_drops(
         .chain((0..program.pointees.len()).map(Type::AllocVec))
         .chain((0..program.pointees.len()).map(Type::Vec))
         .chain((0..program.pointees.len()).map(Type::Task))
-        .chain([Type::Arena])
+        .chain([Type::Arena, Type::AllocatorContext])
         .chain((0..program.enums.len()).map(Type::Enum))
         .chain((0..program.unions.len()).map(Type::Union))
         .chain((0..program.dyn_object_names.len()).map(Type::DynObj))
@@ -2479,6 +2652,10 @@ fn synthesize_drops(
             }
             Type::Arena => {
                 emit_drop(&mut builder, module, arena_release, &args);
+                builder.ins().return_(&[]);
+            }
+            Type::AllocatorContext => {
+                emit_drop(&mut builder, module, alloc_ops.context_release, &args);
                 builder.ins().return_(&[]);
             }
             Type::DynObj(object) => {
@@ -2967,6 +3144,7 @@ struct Generator<'a, 'b> {
     vec_restride: FuncId,
     note_reuse: FuncId,
     drops: &'b BTreeMap<Type, FuncId>,
+    context_drops: &'b [FuncId],
     closure_drops: &'b BTreeMap<Vec<Type>, FuncId>,
     task_spawn: FuncId,
     task_join: FuncId,
@@ -3983,12 +4161,61 @@ impl Generator<'_, '_> {
                 };
                 return Some(vec![allocator[0], release[0], grow]);
             }
+            ExprKind::AllocatorContextNew { value, spec } => {
+                let spec_index =
+                    (*spec < self.program.allocator_contexts.len()).then_some(*spec)?;
+                let checked = self.program.allocator_contexts[spec_index];
+                let instance = lower!(self.expr(value));
+                self.consume(value);
+                let state_bytes =
+                    self.constant((self.program.width(checked.state).max(1) * 8) as i64);
+                let state = self.runtime_call(self.allocate, &[state_bytes]);
+                for (index, word) in instance.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        state,
+                        (index * 8) as i32,
+                    );
+                }
+                let drop = self
+                    .module
+                    .declare_func_in_func(self.context_drops[spec_index], self.builder.func);
+                let drop = self.builder.ins().func_addr(I64, drop);
+                let alloc = self
+                    .module
+                    .declare_func_in_func(self.ids[checked.alloc], self.builder.func);
+                let alloc = self.builder.ins().func_addr(I64, alloc);
+                let release = self
+                    .module
+                    .declare_func_in_func(self.ids[checked.free], self.builder.func);
+                let release = self.builder.ins().func_addr(I64, release);
+                let grow = self
+                    .module
+                    .declare_func_in_func(self.ids[checked.grow], self.builder.func);
+                let grow = self.builder.ins().func_addr(I64, grow);
+                let context = self.runtime_call(
+                    self.alloc_ops.context_new,
+                    &[state, drop, alloc, release, grow],
+                );
+                return Some(vec![context]);
+            }
+            ExprKind::AllocatorContextShare(argument) => {
+                let reference = lower!(self.scalar(argument));
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                let shared = self.runtime_call(self.alloc_ops.context_share, &[handle]);
+                return Some(vec![shared]);
+            }
             ExprKind::AllocBoxNew { allocator, value } => {
-                let pair = lower!(self.expr(allocator));
+                let pair = self.allocator_words(allocator)?;
                 let payload = lower!(self.expr(value));
                 let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
                 self.consume(value);
-                let block = self.runtime_call(self.alloc_ops.block, &[pair[0], pair[1], bytes]);
+                let block =
+                    self.runtime_call(self.alloc_ops.block, &[pair[0], pair[1], pair[3], bytes]);
                 let data = self.runtime_call(self.alloc_ops.block_data, &[block]);
                 for (index, word) in payload.iter().enumerate() {
                     self.builder.ins().store(
@@ -3998,8 +4225,10 @@ impl Generator<'_, '_> {
                         (index * 8) as i32,
                     );
                 }
-                let handle =
-                    self.runtime_call(self.alloc_ops.box_create, &[pair[0], pair[1], block]);
+                let handle = self.runtime_call(
+                    self.alloc_ops.box_create,
+                    &[pair[0], pair[1], block, pair[3]],
+                );
                 return Some(vec![handle]);
             }
             ExprKind::AllocBoxTryNew {
@@ -4007,11 +4236,14 @@ impl Generator<'_, '_> {
                 value,
                 shape,
             } => {
-                let pair = lower!(self.expr(allocator));
+                let pair = self.allocator_words(allocator)?;
                 let payload = lower!(self.expr(value));
                 self.consume(value);
                 let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
-                let block = self.runtime_call(self.alloc_ops.block_try, &[pair[0], pair[1], bytes]);
+                let block = self.runtime_call(
+                    self.alloc_ops.block_try,
+                    &[pair[0], pair[1], pair[3], bytes],
+                );
                 let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, block, 0);
                 let ok = self.builder.create_block();
                 let error = self.builder.create_block();
@@ -4034,8 +4266,10 @@ impl Generator<'_, '_> {
                         (index * 8) as i32,
                     );
                 }
-                let owner =
-                    self.runtime_call(self.alloc_ops.box_create, &[pair[0], pair[1], block]);
+                let owner = self.runtime_call(
+                    self.alloc_ops.box_create,
+                    &[pair[0], pair[1], block, pair[3]],
+                );
                 let tag = self.constant(shape.ok_tag as i64);
                 self.builder
                     .ins()
@@ -4075,6 +4309,9 @@ impl Generator<'_, '_> {
                         (index * 8) as i32,
                     );
                 }
+                // Nothing retained the context on refusal; drop the operation's
+                // reference before returning the untouched payload.
+                self.runtime_void(self.alloc_ops.context_release, &[pair[3]]);
                 self.builder.ins().jump(done, &[]);
                 self.builder.switch_to_block(done);
                 return Some(
@@ -4132,7 +4369,7 @@ impl Generator<'_, '_> {
                 capacity,
                 element,
             } => {
-                let pair = lower!(self.expr(allocator));
+                let pair = self.allocator_words(allocator)?;
                 let capacity = match capacity {
                     Some(capacity) => lower!(self.scalar(capacity)),
                     None => self.constant(0),
@@ -4140,7 +4377,7 @@ impl Generator<'_, '_> {
                 let width = self.constant(self.program.width(*element) as i64);
                 let handle = self.runtime_call(
                     self.alloc_ops.vec_create,
-                    &[pair[0], pair[1], pair[2], capacity, width],
+                    &[pair[0], pair[1], pair[2], pair[3], capacity, width],
                 );
                 return Some(vec![handle]);
             }
@@ -5837,6 +6074,22 @@ impl Generator<'_, '_> {
             }
         };
         Some(vec![scalar])
+    }
+    /// Evaluate one allocator operand into `(alloc, release, realloc,
+    /// context)`. The legacy value supplies three code pointers and no
+    /// context; an instance context supplies one retained handle and selects
+    /// its thunks inside the runtime helpers.
+    fn allocator_words(&mut self, allocator: &Expr) -> Option<[Value; 4]> {
+        let values = self.expr(allocator)?;
+        let zero = self.constant(0);
+        match allocator.ty {
+            Type::Allocator => Some([values[0], values[1], values[2], zero]),
+            Type::AllocatorContext => {
+                self.consume(allocator);
+                Some([zero, zero, zero, values[0]])
+            }
+            _ => unreachable!("checked allocator operand"),
+        }
     }
     /// Allocate one owned dynamic-object payload and copy the concrete member
     /// words into it. The corresponding `free` happens in `drop_value` for an

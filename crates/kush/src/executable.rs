@@ -104,6 +104,12 @@ pub(crate) enum Type {
     /// nothing, so it is copyable; containers store their own copy and never
     /// borrow the allocator binding.
     Allocator,
+    /// An owning, reference-counted allocator instance. One word: a handle to
+    /// compiler-owned context storage that holds the concrete integer state
+    /// value and checked allocate/release/grow thunks. Containers retain one
+    /// reference, so they may outlive the binding that created the context;
+    /// the last reference runs the state's drop glue exactly once.
+    AllocatorContext,
     /// An owning box whose storage was supplied by a user allocator. Three
     /// words: the allocation code pointer, the release code pointer, and the
     /// `Bytes` block that owns the payload storage. Dropping the box destroys
@@ -206,9 +212,23 @@ fn normalized_scalar(term: &Term) -> Option<Scalar> {
         _ => None,
     }
 }
+/// One concrete `AllocatorProtocol` instance shape used by an allocator
+/// context. `alloc`, `free`, and `grow` are checked method function indices
+/// whose first receiver is `&mut State`; both backends call them with the
+/// context's retained state address. The state type is recorded so native
+/// code can synthesize its drop thunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct AllocatorContextSpec {
+    pub(crate) state: Type,
+    pub(crate) alloc: usize,
+    pub(crate) free: usize,
+    pub(crate) grow: usize,
+}
 #[derive(Debug)]
 pub struct Executable {
     pub(crate) functions: Vec<Function>,
+    /// Checked allocator-context shapes, referenced by `AllocatorContextNew`.
+    pub(crate) allocator_contexts: Vec<AllocatorContextSpec>,
     pub(crate) entry: Option<usize>,
     pub(crate) enums: Vec<Enum>,
     pub(crate) pointees: Vec<Type>,
@@ -729,6 +749,18 @@ pub(crate) enum ExprKind {
         /// allocate-copy-release path.
         realloc: Option<Box<Expr>>,
     },
+    /// Create an owning allocator context from one concrete
+    /// `AllocatorProtocol` instance. The instance value is moved into
+    /// compiler-owned reference-counted storage together with checked thunks
+    /// for its three protocol methods. `spec` indexes
+    /// `Executable::allocator_contexts`.
+    AllocatorContextNew {
+        value: Box<Expr>,
+        spec: usize,
+    },
+    /// Add one reference to an allocator context. The context is affine, so
+    /// sharing is an explicit checked operation rather than an implicit copy.
+    AllocatorContextShare(Box<Expr>),
     /// Allocate `value` in a block supplied by the allocator. The box stores
     /// the allocator pair so release always uses the same allocator, even if
     /// the allocator binding is dropped or moved first.
@@ -1076,6 +1108,10 @@ impl Expr {
                 if let Some(realloc) = realloc {
                     f(realloc);
                 }
+            }
+            ExprKind::AllocatorContextNew { value, .. }
+            | ExprKind::AllocatorContextShare(value) => {
+                f(value);
             }
             ExprKind::AllocVecNew {
                 allocator,
@@ -1820,7 +1856,11 @@ fn fusion_expr_safe(
         | ExprKind::AllocBoxTryNew { .. }
         | ExprKind::AllocBoxRead(_)
         | ExprKind::AllocBoxTake(_)
-        | ExprKind::AllocVecNew { .. } => false,
+        | ExprKind::AllocVecNew { .. }
+        // Building a context allocates compiler-owned storage and sharing
+        // changes a reference count, so neither is an inert fusion stage.
+        | ExprKind::AllocatorContextNew { .. }
+        | ExprKind::AllocatorContextShare(_) => false,
         ExprKind::FnValue { function, captures } => {
             captures
                 .iter()
@@ -2038,6 +2078,9 @@ fn fuse_expr(
             if let Some(realloc) = realloc {
                 fuse_expr(realloc, types, signatures, safety, fusions);
             }
+        }
+        ExprKind::AllocatorContextNew { value, .. } | ExprKind::AllocatorContextShare(value) => {
+            fuse_expr(value, types, signatures, safety, fusions)
         }
         ExprKind::AllocBoxNew { allocator, value }
         | ExprKind::AllocBoxTryNew {
@@ -3542,6 +3585,8 @@ struct Functions<'a> {
     certificates: Vec<crate::facts::Certificate>,
     /// Checked nested map fusions produced while specializing bodies.
     fusions: usize,
+    /// Deduplicated allocator-context shapes built while checking bodies.
+    allocator_contexts: Vec<AllocatorContextSpec>,
     /// Set when any body uses a structured-task operation.
     uses_tasks: bool,
     /// Task body functions whose binding-based linear result must be rejected
@@ -3722,8 +3767,51 @@ pub fn check(source: &str) -> Result<Executable> {
     let program = crate::program::load_source("<input>", source).map_err(|(_, e)| e)?;
     check_program(&program)
 }
+/// The checked allocator-instance protocol. It is an ordinary trait declaration
+/// injected ahead of user items, so impls are checked exactly like any other
+/// trait: receiver modes, parameter/result layouts, grades, and effect rows must
+/// match. The context adapter runs `free` during implicit drop, hence its empty
+/// effect row.
+const ALLOCATOR_PROTOCOL_SOURCE: &str = r#"
+trait AllocatorProtocol {
+    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic};
+    fn free(self: &mut Self, block: Bytes) -> Unit ! {};
+    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic};
+}
+"#;
+/// Synthetic spans sit far above any admitted source file (the loader rejects
+/// programs over 16 MiB) so they cannot collide with a user declaration.
+const ALLOCATOR_PROTOCOL_BASE: usize = 1 << 40;
+/// Prepend the built-in allocator protocol trait to a loaded program.
+fn inject_allocator_protocol(program: &crate::program::Program) -> Result<crate::program::Program> {
+    let prelude = crate::parser::parse_at(ALLOCATOR_PROTOCOL_SOURCE, ALLOCATOR_PROTOCOL_BASE)?;
+    let added = prelude.items.len();
+    let mut injected = program.clone();
+    for (index, unit) in injected.units.iter_mut().enumerate() {
+        // The prelude belongs to the root unit, which is first. Later units
+        // keep their own item ranges, shifted by the inserted item count.
+        if index != 0 {
+            unit.items.start += added;
+        }
+        unit.items.end += added;
+    }
+    // A root module header must remain item zero.
+    let position = usize::from(
+        injected
+            .module
+            .items
+            .first()
+            .is_some_and(|item| matches!(item.item.kind, ast::ItemKind::Module(_))),
+    );
+    let tail = injected.module.items.split_off(position);
+    injected.module.items.extend(prelude.items);
+    injected.module.items.extend(tail);
+    Ok(injected)
+}
 /// Check a loaded multi-module program. Only the root module may define `main`.
 pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
+    let injected = inject_allocator_protocol(program)?;
+    let program = &injected;
     let module = &program.module;
     let mut resolution = resolve::resolve_program(program)?;
     // Default trait methods inherited by an impl need one synthetic function
@@ -3752,6 +3840,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         adapter_cache: BTreeMap::new(),
         certificates: Vec::new(),
         fusions: 0,
+        allocator_contexts: Vec::new(),
         uses_tasks: false,
         elided_lifetimes: 0,
         traits: BTreeMap::new(),
@@ -4199,6 +4288,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         fusions: functions.fusions,
         uses_tasks: functions.uses_tasks,
         certificates: functions.certificates,
+        allocator_contexts: functions.allocator_contexts,
         functions: functions.bodies.into_iter().map(Option::unwrap).collect(),
         entry,
         enums: types.enums,
@@ -17841,6 +17931,7 @@ impl Checker<'_, '_> {
                                 Type::Box(_)
                                     | Type::Arena
                                     | Type::ArenaBox(_)
+                                    | Type::AllocatorContext
                                     | Type::AllocBox(_)
                                     | Type::AllocVec(_)
                                     | Type::Bytes
@@ -18303,6 +18394,41 @@ impl Checker<'_, '_> {
                     }
                     if c.functions.declared.contains_key(&id) {
                         return c.user_call(id, explicit, arguments, expected, span);
+                    }
+                    if binding.kind == BindingKind::Builtin
+                        && binding.name.starts_with("AllocatorContext.")
+                    {
+                        if explicit.is_some() {
+                            return Err(Diagnostic::new(
+                                span,
+                                "allocator context operations take no explicit type arguments",
+                            ));
+                        }
+                        let name = binding.name.clone();
+                        return match name.as_str() {
+                            "AllocatorContext.new" => {
+                                if arguments.len() != 1 {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        "AllocatorContext.new expects one allocator-protocol instance",
+                                    ));
+                                }
+                                c.allocator_context_new(&arguments[0], span)
+                            }
+                            "AllocatorContext.share" => {
+                                if arguments.len() != 1 {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        "AllocatorContext.share expects one &AllocatorContext",
+                                    ));
+                                }
+                                c.allocator_context_share(&arguments[0], span)
+                            }
+                            _ => Err(Diagnostic::new(
+                                span,
+                                format!("unsupported allocator context operation '{name}'"),
+                            )),
+                        };
                     }
                     if binding.kind == BindingKind::Builtin
                         && (binding.name.starts_with("Allocator.")
@@ -21230,6 +21356,191 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
+    /// The injected allocator-instance protocol trait binding.
+    fn allocator_protocol_binding(&self) -> Result<BindingId> {
+        self.resolution
+            .bindings
+            .iter()
+            .position(|binding| {
+                binding.kind == BindingKind::Trait && binding.name == "AllocatorProtocol"
+            })
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    Span::default(),
+                    "internal error: the built-in AllocatorProtocol trait is not resolved",
+                )
+            })
+    }
+    /// Resolve and validate one `AllocatorProtocol` method for a concrete state
+    /// type.
+    fn allocator_protocol_method(
+        &mut self,
+        trait_id: BindingId,
+        state: Type,
+        name: &str,
+        expected: (&[Type], Type, u16),
+        span: Span,
+    ) -> Result<usize> {
+        let definition = self.lookup_method(
+            state,
+            name,
+            Some((trait_id, TraitArguments::default())),
+            span,
+        )?;
+        let index = self.functions.instance(
+            self.types,
+            self.resolution,
+            definition.binding,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            definition.impl_arguments,
+            Some(span),
+        )?;
+        let signature = self.functions.signatures[index].clone();
+        let (parameters, result, effects) = expected;
+        if signature.parameters != parameters
+            || signature.result != result
+            || signature.effects & !effects != 0
+            || signature.result_grade.is_some()
+            || signature
+                .parameter_grades
+                .iter()
+                .any(|grade| grade.is_some())
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "allocator state type '{}' has an incompatible checked '{name}' method after specialization",
+                    self.types.name(state)
+                ),
+            ));
+        }
+        Ok(index)
+    }
+    /// Check `AllocatorContext.new(instance)`. The instance is moved into the
+    /// context, so the state must be an owned record with stable inline
+    /// storage and no borrowed leaves. The three protocol methods are selected
+    /// statically for that concrete type and validated before the context is
+    /// constructed.
+    fn allocator_context_new(&mut self, value: &ast::Expr, span: Span) -> Result<Expr> {
+        self.require(ALLOC, span)?;
+        let value = self.expr(value)?;
+        if value.ty == Type::Never {
+            return Ok(Expr {
+                kind: ExprKind::AllocatorContextNew {
+                    value: Box::new(value),
+                    spec: usize::MAX,
+                },
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        let state = value.ty;
+        if !state
+            .layout()
+            .is_some_and(|id| self.types.enums[id].record && !self.types.enums[id].borrowed)
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "AllocatorContext.new requires an owned record instance with no borrowed fields, found {}",
+                    self.types.name(state)
+                ),
+            ));
+        }
+        if crate::runtime_types::has_borrow(self.types, state)
+            || crate::runtime_types::contains_task(self.types, state)
+            || self.linear_type(state)
+            || matches!(state, Type::AllocatorContext)
+        {
+            return Err(Diagnostic::new(
+                span,
+                "an allocator instance cannot contain borrowed leaves, task handles, linear obligations, or another allocator context",
+            ));
+        }
+        let trait_id = self.allocator_protocol_binding()?;
+        let pointer = self.types.pointer(state);
+        let receiver = Type::RefMut(pointer);
+        let alloc = self.allocator_protocol_method(
+            trait_id,
+            state,
+            "alloc",
+            (&[receiver, Type::I64], Type::Bytes, ALLOC | PANIC),
+            span,
+        )?;
+        let free = self.allocator_protocol_method(
+            trait_id,
+            state,
+            "free",
+            (&[receiver, Type::Bytes], Type::Unit, 0),
+            span,
+        )?;
+        let grow = self.allocator_protocol_method(
+            trait_id,
+            state,
+            "grow",
+            (
+                &[receiver, Type::Bytes, Type::I64, Type::I64],
+                Type::Bytes,
+                ALLOC | PANIC,
+            ),
+            span,
+        )?;
+        let spec = AllocatorContextSpec {
+            state,
+            alloc,
+            free,
+            grow,
+        };
+        let spec_index = match self
+            .functions
+            .allocator_contexts
+            .iter()
+            .position(|existing| *existing == spec)
+        {
+            Some(index) => index,
+            None => {
+                self.functions.allocator_contexts.push(spec);
+                self.functions.allocator_contexts.len() - 1
+            }
+        };
+        Ok(Expr {
+            kind: ExprKind::AllocatorContextNew {
+                value: Box::new(value),
+                spec: spec_index,
+            },
+            ty: Type::AllocatorContext,
+            span,
+            resource: None,
+        })
+    }
+    /// Check `AllocatorContext.share(&context)`: one explicit additional
+    /// reference. Contexts are affine, so this is the only way to hand the same
+    /// instance to several containers.
+    fn allocator_context_share(&mut self, value: &ast::Expr, span: Span) -> Result<Expr> {
+        let value = self.expr(value)?;
+        let Type::Ref(pointer) = value.ty else {
+            return Err(Diagnostic::new(
+                span,
+                "AllocatorContext.share requires an immutable &AllocatorContext",
+            ));
+        };
+        if self.types.pointees[pointer] != Type::AllocatorContext {
+            return Err(Diagnostic::new(
+                span,
+                "AllocatorContext.share requires an immutable &AllocatorContext",
+            ));
+        }
+        Ok(Expr {
+            kind: ExprKind::AllocatorContextShare(Box::new(value)),
+            ty: Type::AllocatorContext,
+            span,
+            resource: None,
+        })
+    }
     /// Shared payload validation for allocator-backed storage. Linear values
     /// are rejected because the container must destroy remaining contents
     /// implicitly; borrowed values are rejected because the block is not a
@@ -21283,6 +21594,23 @@ impl Checker<'_, '_> {
         let value = self.coerce(value, pointee, span)?;
         Ok((value, pointee))
     }
+    /// Check an allocator operand accepted by the container constructors. Both
+    /// the legacy copyable code-pointer value and an owning instance context
+    /// are admitted; the container records whichever was supplied.
+    fn allocator_operand(&mut self, value: &ast::Expr, operation: &str) -> Result<Expr> {
+        let value = self.expr(value)?;
+        if matches!(value.ty, Type::Allocator | Type::AllocatorContext) {
+            Ok(value)
+        } else {
+            Err(Diagnostic::new(
+                value.span,
+                format!(
+                    "{operation} requires an Allocator or AllocatorContext value, found {}",
+                    self.types.name(value.ty)
+                ),
+            ))
+        }
+    }
     /// Check `AllocBox.new(allocator, value)`.
     fn alloc_box_new(
         &mut self,
@@ -21299,8 +21627,7 @@ impl Checker<'_, '_> {
                 None
             }
         });
-        let allocator = self.expr_expected(allocator, Some(Type::Allocator))?;
-        self.expect(allocator.ty, Type::Allocator, allocator.span)?;
+        let allocator = self.allocator_operand(allocator, "AllocBox.new")?;
         let (value, pointee) =
             self.allocator_payload(value.clone(), expected_inner, "AllocBox.new", span)?;
         if value.ty == Type::Never {
@@ -21345,8 +21672,7 @@ impl Checker<'_, '_> {
             Type::AllocBox(index) => Some(self.types.pointees[index]),
             _ => None,
         });
-        let allocator = self.expr_expected(allocator, Some(Type::Allocator))?;
-        self.expect(allocator.ty, Type::Allocator, allocator.span)?;
+        let allocator = self.allocator_operand(allocator, "AllocBox.try_new")?;
         let (value, pointee) =
             self.allocator_payload(value.clone(), expected_inner, "AllocBox.try_new", span)?;
         if value.ty == Type::Never {
@@ -21456,8 +21782,7 @@ impl Checker<'_, '_> {
                 "AllocVec cannot hold a borrowed reference, slice view, or borrowed record (including &str text views)",
             ));
         }
-        let allocator = self.expr_expected(allocator, Some(Type::Allocator))?;
-        self.expect(allocator.ty, Type::Allocator, allocator.span)?;
+        let allocator = self.allocator_operand(allocator, "AllocVec.new")?;
         let capacity = match capacity {
             Some(capacity) => {
                 let capacity = self.expr_expected(capacity, Some(Type::I64))?;
@@ -21613,6 +21938,7 @@ impl Checker<'_, '_> {
                 Type::Box(_)
                 | Type::Arena
                 | Type::ArenaBox(_)
+                | Type::AllocatorContext
                 | Type::Bytes
                 | Type::String
                 | Type::Vec(_)
@@ -27689,6 +28015,7 @@ impl Executable {
             Type::Box(_)
             | Type::Arena
             | Type::ArenaBox(_)
+            | Type::AllocatorContext
             | Type::AllocBox(_)
             | Type::AllocVec(_)
             | Type::Bytes
