@@ -198,8 +198,12 @@ and the exact limits. Integrated Boat validation at compiler checkpoint
 and bindgen), formatting, and workspace/all-targets Clippy with warnings denied.
 Log: `/tmp/kush-boat-lsp-integration.log` (machine-local). The VS Code client's
 server-disable fix at `18577f7` also passes `node --check`; editor UI behavior
-has not been exercised inside VS Code. A full workspace gate and independent
-language-server review remain pending.
+has not been exercised inside VS Code.
+
+The subsequent full Boat gate at `414f170` passes **1116 workspace tests**,
+formatting, and Clippy. The sandbox stopped with its snapshot preserved.
+Log: `/tmp/kush-boat-lsp-full.log` (machine-local). Independent language-server
+review remains pending; the gate does not replace that review.
 
 Still unresolved: evaluator-wide TCP/process deadline behavior, secure todo
 file replacement and permissions, fuller editor features, and the other documented
