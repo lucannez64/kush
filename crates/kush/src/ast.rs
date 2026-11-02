@@ -22,8 +22,19 @@ pub struct Module {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declaration {
     pub public: bool,
-    pub attributes: Vec<Node<String>>,
+    pub attributes: Vec<Attribute>,
     pub item: Item,
+}
+/// One `#[name]` or `#[name("argument")]` declaration attribute.
+///
+/// The argument is a validated single string literal. Only `foreign` currently
+/// consumes it: `#[foreign("release_symbol")] struct Handle {}` declares an
+/// opaque foreign resource whose exactly-once release calls that C symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attribute {
+    pub kind: String,
+    pub argument: Option<String>,
+    pub span: Span,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemKind {
@@ -276,6 +287,10 @@ pub struct Function {
     pub result: Type,
     pub effects: Vec<Type>,
     pub body: Option<Block>,
+    /// `foreign "symbol" fn ...;`: the exact C ABI symbol imported from the
+    /// linked static libraries/objects. Foreign declarations have no body and
+    /// may only be called directly, never used as first-class values.
+    pub foreign: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {

@@ -1552,15 +1552,229 @@ int main(void) {
 }
 "#;
 
+/// Extra inputs for the native link step. Every path is passed to `cc` as one
+/// argument (no shell interpolation); library names are validated identifiers
+/// for `cc -l<name>`.
+///
+/// The compiler never invents search paths or downloads anything. A project
+/// manifest should turn its declared native dependencies into one of these
+/// values and pass it to [`build_with_options`].
+#[derive(Debug, Clone, Default)]
+pub struct LinkSpec {
+    /// Additional object files or static archives, linked before libraries.
+    pub objects: Vec<PathBuf>,
+    /// Static/shared libraries by absolute or caller-relative path.
+    pub libraries: Vec<PathBuf>,
+    /// Additional `-L` search directories.
+    pub library_dirs: Vec<PathBuf>,
+    /// Additional `-l` names (for example `pthread`), each a bare identifier.
+    pub system_libraries: Vec<String>,
+}
+impl LinkSpec {
+    /// Validate link inputs without touching the filesystem. Paths may not be
+    /// empty and library names cannot smuggle flags or shell syntax.
+    pub fn validate(&self) -> Result<()> {
+        for path in self.objects.iter().chain(&self.libraries) {
+            if path.as_os_str().is_empty() {
+                return Err(error("a native link input path must not be empty"));
+            }
+            if path.to_string_lossy().starts_with('-') {
+                return Err(error(format!(
+                    "native link input '{}' must not start with '-'; write an explicit path",
+                    path.display()
+                )));
+            }
+        }
+        for path in &self.library_dirs {
+            if path.as_os_str().is_empty() {
+                return Err(error("a native library search directory must not be empty"));
+            }
+        }
+        for name in &self.system_libraries {
+            let valid = !name.is_empty()
+                && !name.starts_with('-')
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '.'));
+            if !valid {
+                return Err(error(format!(
+                    "native library name '{name}' must be a bare -l name without flags or path separators"
+                )));
+            }
+        }
+        Ok(())
+    }
+    /// Map the reserved project manifest fields to concrete link inputs.
+    ///
+    /// * `libraries` entries that look like a path (contain a separator or end
+    ///   in `.a`/`.o`/`.so`/`.dylib`) become explicit paths, resolved against
+    ///   `root` when relative. Other entries are bare `-l` names.
+    /// * `library_paths` become `-L` directories.
+    /// * every `cargo_manifests` entry is built as a release static library
+    ///   with `cargo build --release --lib --message-format=json`; the emitted
+    ///   `.a` is linked explicitly. Rust std static libraries also need
+    ///   `pthread` and `dl` on the Linux backend, so those are added once.
+    ///
+    /// This is deliberately a pure mapping/validation step plus the explicit
+    /// Cargo subprocess for manifests the project author opted into. It never
+    /// searches the host for libraries, downloads crates implicitly, or shells
+    /// out through a command string.
+    pub fn from_project_native(
+        root: &Path,
+        libraries: &[String],
+        library_paths: &[PathBuf],
+        cargo_manifests: &[PathBuf],
+    ) -> Result<Self> {
+        let mut spec = Self {
+            library_dirs: library_paths.to_vec(),
+            ..Self::default()
+        };
+        for library in libraries {
+            if library.is_empty() || library.contains('\0') {
+                return Err(error("a native library entry must not be empty"));
+            }
+            if library.starts_with('-') {
+                return Err(error(format!(
+                    "native library entry '{library}' must not start with '-'; write a bare name or an explicit path"
+                )));
+            }
+            let path_like = library.contains('/')
+                || library.contains('\\')
+                || library.ends_with(".a")
+                || library.ends_with(".o")
+                || library.ends_with(".so")
+                || library.ends_with(".dylib");
+            if path_like {
+                spec.libraries.push(root.join(library));
+            } else {
+                spec.system_libraries.push(library.clone());
+            }
+        }
+        for manifest in cargo_manifests {
+            spec.libraries.push(build_cargo_static_library(manifest)?);
+            for library in ["pthread", "dl"] {
+                if !spec.system_libraries.iter().any(|name| name == library) {
+                    spec.system_libraries.push(library.to_owned());
+                }
+            }
+        }
+        spec.validate()?;
+        Ok(spec)
+    }
+}
+
+/// Build one Cargo adapter crate as a release static library and return the
+/// emitted `.a` path. The manifest must set `crate-type = ["staticlib"]`.
+/// Cargo's JSON artifact stream is the source of truth, so workspaces and custom
+/// target directories work without guessing paths.
+pub fn build_cargo_static_library(manifest: &Path) -> Result<PathBuf> {
+    let output = Command::new("cargo")
+        .arg("build")
+        .arg("--release")
+        .arg("--lib")
+        .arg("--message-format=json")
+        .arg("--manifest-path")
+        .arg(manifest)
+        .output()
+        .map_err(|e| {
+            error(format!(
+                "cannot start cargo for '{}': {e}",
+                manifest.display()
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(error(format!(
+            "cargo build failed for native adapter '{}': {}",
+            manifest.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if !line.contains("\"reason\":\"compiler-artifact\"") || !line.contains("\"staticlib\"") {
+            continue;
+        }
+        if let Some(path) = first_json_path_ending(line, ".a") {
+            return Ok(path);
+        }
+    }
+    Err(error(format!(
+        "native adapter '{}' did not emit a static library; set `crate-type = [\"staticlib\"]` in its [lib] section",
+        manifest.display()
+    )))
+}
+
+/// Extract the first string inside a JSON `"filenames":[...]` array that ends
+/// with `suffix`. Cargo controls this stream; the parser only accepts complete
+/// quoted paths and rejects malformed escapes rather than guessing.
+fn first_json_path_ending(line: &str, suffix: &str) -> Option<PathBuf> {
+    let start = line.find("\"filenames\":[")? + "\"filenames\":[".len();
+    let mut characters = line[start..].chars().peekable();
+    loop {
+        while characters
+            .peek()
+            .is_some_and(|c| c.is_whitespace() || *c == ',')
+        {
+            characters.next();
+        }
+        match characters.peek()? {
+            ']' => return None,
+            '"' => {
+                characters.next();
+            }
+            _ => return None,
+        }
+        let mut value = String::new();
+        loop {
+            match characters.next()? {
+                '"' => break,
+                '\\' => match characters.next()? {
+                    '"' => value.push('"'),
+                    '\\' => value.push('\\'),
+                    '/' => value.push('/'),
+                    'n' => value.push('\n'),
+                    't' => value.push('\t'),
+                    'r' => value.push('\r'),
+                    'u' => {
+                        let mut code = 0u32;
+                        for _ in 0..4 {
+                            code = code.checked_mul(16)?;
+                            code += characters.next()?.to_digit(16)?;
+                        }
+                        value.push(char::from_u32(code)?);
+                    }
+                    _ => return None,
+                },
+                character => value.push(character),
+            }
+        }
+        if value.ends_with(suffix) {
+            return Some(PathBuf::from(value));
+        }
+    }
+}
+
 /// Compile and link atomically in the output's directory. No shell expansion or
 /// user-supplied flags; a failed build leaves the previous output intact.
 pub fn build(program: &Executable, output: &Path) -> Result<()> {
-    build_with_stats(program, output, false)
+    build_with_options(program, output, false, &LinkSpec::default())
 }
 
 /// Build an executable that reports allocation diagnostics to stderr on a
 /// normal exit. The program's own stdout and exit status are unchanged.
 pub fn build_with_stats(program: &Executable, output: &Path, stats: bool) -> Result<()> {
+    build_with_options(program, output, stats, &LinkSpec::default())
+}
+
+/// Build with explicit native link inputs. `LinkSpec::validate` runs before any
+/// file is written or `cc` is started.
+pub fn build_with_options(
+    program: &Executable,
+    output: &Path,
+    stats: bool,
+    links: &LinkSpec,
+) -> Result<()> {
+    links.validate()?;
     let object = object(program)?;
     let parent = output
         .parent()
@@ -1577,10 +1791,20 @@ pub fn build_with_stats(program: &Executable, output: &Path, stats: bool) -> Res
         .arg("-std=c11")
         .arg("-O2")
         .arg(&object_path)
-        .arg(&runtime_path)
-        .arg("-o")
-        .arg(&binary_path)
-        .arg("-lm");
+        .arg(&runtime_path);
+    for path in &links.objects {
+        command.arg(path);
+    }
+    for path in &links.libraries {
+        command.arg(path);
+    }
+    for dir in &links.library_dirs {
+        command.arg("-L").arg(dir);
+    }
+    for name in &links.system_libraries {
+        command.arg(format!("-l{name}"));
+    }
+    command.arg("-o").arg(&binary_path).arg("-lm");
     if program.uses_tasks {
         command.arg("-DKUSH_HAS_TASKS=1");
     }
@@ -2131,7 +2355,18 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let (task_wrappers, task_pointer_drops) =
         synthesize_task_wrappers(&mut module, program, &task_types, &drops)?;
     let mut ids = Vec::new();
+    let mut foreign_ids = Vec::new();
     for (index, f) in program.functions.iter().enumerate() {
+        if let Some(Some(foreign)) = program.foreign_functions.get(index) {
+            let sig = foreign_abi_signature(&mut module, program, foreign);
+            let id = module
+                .declare_function(&foreign.symbol, Linkage::Import, &sig)
+                .map_err(error)?;
+            ids.push(id);
+            foreign_ids.push(Some(id));
+            continue;
+        }
+        foreign_ids.push(None);
         let mut sig = module.make_signature();
         let erased_result = f.result_grade.is_some_and(Grade::is_zero);
         if erased_result {
@@ -2180,6 +2415,14 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
         );
     }
     for (index, f) in program.functions.iter().enumerate() {
+        if program
+            .foreign_functions
+            .get(index)
+            .is_some_and(Option::is_some)
+        {
+            // The C import was declared above; there is no Kush body to define.
+            continue;
+        }
         let mut context = module.make_context();
         context.func.signature = module
             .declarations()
@@ -2192,6 +2435,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             builder,
             module: &mut module,
             ids: &ids,
+            foreign_ids: &foreign_ids,
             program,
             print,
             print_u64,
@@ -2402,6 +2646,87 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
 }
 fn aggregate_result(program: &Executable, ty: Type) -> bool {
     ty.layout().is_some() || program.width(ty) > 1
+}
+/// Exact C ABI scalar type for a supported bridge value. Narrow integers use
+/// their real width so `cc`/C and Cranelift agree; the backend canonicalizes
+/// them back to a checked Kush word at the call boundary.
+fn abi_value_type(ty: Type) -> ir::Type {
+    match ty {
+        Type::Bool => ir::types::I32,
+        Type::I64 => I64,
+        Type::Int(kind) => match kind {
+            IntKind::I8 => ir::types::I8,
+            IntKind::I16 => ir::types::I16,
+            IntKind::I32 => ir::types::I32,
+            IntKind::I64 => I64,
+            IntKind::U8 => ir::types::I8,
+            IntKind::U16 => ir::types::I16,
+            IntKind::U32 => ir::types::I32,
+            IntKind::U64 => I64,
+        },
+        Type::Float(kind) => match kind {
+            FloatKind::F32 => ir::types::F32,
+            FloatKind::F64 => ir::types::F64,
+        },
+        // Foreign resources are opaque `void *` handles. Every other admitted
+        // type is rejected by the checker before reaching the backend.
+        Type::Enum(_) => I64,
+        _ => I64,
+    }
+}
+/// C ABI signature of one checked foreign import. Slices and `&str` become
+/// `(const uint8_t *, int64_t)`. A fallible result becomes
+/// `int64_t symbol(..., T *out)`: zero status means success and the out slot
+/// holds `T`; any non-zero status is the checked `Err(i64)`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PointeeKind {
+    Buffer,
+    Resource,
+}
+/// References admitted at the foreign boundary are either buffer handles
+/// (`&Bytes`/`&String`/`&mut Bytes`) or opaque resource handles. The backend
+/// needs the distinction to know whether to pass `(pointer, length)` or one
+/// handle word.
+fn foreign_pointee_kind(program: &Executable, pointer: usize) -> PointeeKind {
+    match program.pointees[pointer] {
+        Type::Bytes | Type::String => PointeeKind::Buffer,
+        _ => PointeeKind::Resource,
+    }
+}
+fn foreign_abi_signature(
+    module: &mut ObjectModule,
+    program: &Executable,
+    foreign: &ex::ForeignFunction,
+) -> ir::Signature {
+    let mut sig = module.make_signature();
+    for ty in &foreign.parameters {
+        match ty {
+            Type::Str => {
+                sig.params.push(AbiParam::new(I64));
+                sig.params.push(AbiParam::new(I64));
+            }
+            Type::Ref(pointer) | Type::RefMut(pointer)
+                if matches!(foreign_pointee_kind(program, *pointer), PointeeKind::Buffer) =>
+            {
+                sig.params.push(AbiParam::new(I64));
+                sig.params.push(AbiParam::new(I64));
+            }
+            _ => sig.params.push(AbiParam::new(abi_value_type(*ty))),
+        }
+    }
+    match foreign.fallible {
+        Some(shape) => {
+            sig.returns.push(AbiParam::new(I64));
+            if shape.ok != Type::Unit {
+                sig.params.push(AbiParam::new(I64));
+            }
+        }
+        None if foreign.result == Type::Unit => {}
+        None => sig
+            .returns
+            .push(AbiParam::new(abi_value_type(foreign.result))),
+    }
+    sig
 }
 fn collect_literals<'a>(block: &'a ex::Block, out: &mut Vec<(usize, &'a [u8])>) {
     for statement in &block.statements {
@@ -2806,7 +3131,20 @@ fn synthesize_drops(
                 builder.ins().return_(&[]);
             }
             Type::Enum(index) => {
-                if let Some((element, capacity)) = program.enums[index].dynamic_array {
+                if let Some(foreign) = program.enums[index].foreign.clone() {
+                    // The one-word handle is released by the trusted foreign
+                    // contract exactly once. Linear foreign resources cannot be
+                    // implicitly dropped, so this path only runs for affine
+                    // resources (or when a linear value is explicitly consumed
+                    // by a compiled drop after a checked transfer).
+                    let mut signature = module.make_signature();
+                    signature.params.push(AbiParam::new(I64));
+                    let release = module
+                        .declare_function(&foreign.release, Linkage::Import, &signature)
+                        .map_err(error)?;
+                    emit_drop(&mut builder, module, release, &[args[0]]);
+                    builder.ins().return_(&[]);
+                } else if let Some((element, capacity)) = program.enums[index].dynamic_array {
                     if program.owns(element) {
                         // The runtime length is word zero; fields at or beyond
                         // it are uninitialized and must never be interpreted.
@@ -3113,6 +3451,7 @@ struct Generator<'a, 'b> {
     builder: FunctionBuilder<'a>,
     module: &'b mut ObjectModule,
     ids: &'b [FuncId],
+    foreign_ids: &'b [Option<FuncId>],
     program: &'b Executable,
     print: FuncId,
     print_u64: FuncId,
@@ -3687,6 +4026,144 @@ impl Generator<'_, '_> {
         let join = join.expect("a borrowed dynamic call always has a value result");
         self.builder.switch_to_block(join);
         self.builder.block_params(join).to_vec()
+    }
+    /// Lower one checked foreign import. `values` is the flattened internal
+    /// word list: slice/text parameters occupy their normal four-word
+    /// descriptor, from which only `(pointer, length)` reaches the C ABI.
+    fn foreign_call(&mut self, index: usize, values: &[Value]) -> Option<Words> {
+        let foreign = self.program.foreign_functions[index]
+            .as_ref()
+            .expect("checked foreign target")
+            .clone();
+        let id = self.foreign_ids[index].expect("foreign import declared");
+        let mut arguments = Vec::new();
+        let mut position = 0usize;
+        for ty in &foreign.parameters {
+            match ty {
+                Type::Str => {
+                    // `&str` is a four-word checked view; only the contiguous
+                    // byte pointer and byte length reach C.
+                    arguments.push(values[position]);
+                    arguments.push(values[position + 1]);
+                    position += 4;
+                }
+                Type::Ref(pointer) | Type::RefMut(pointer) => {
+                    let handle =
+                        self.builder
+                            .ins()
+                            .load(I64, ir::MemFlagsData::new(), values[position], 0);
+                    if foreign_pointee_kind(self.program, *pointer) == PointeeKind::Buffer {
+                        // KushBytes/KushString: length at +0, capacity at +8,
+                        // payload bytes at +16.
+                        let data = self.builder.ins().iadd_imm_s(handle, 16);
+                        let length = self.builder.ins().load(
+                            I64,
+                            ir::MemFlagsData::new(),
+                            handle,
+                            if matches!(ty, Type::RefMut(_)) { 8 } else { 0 },
+                        );
+                        arguments.push(data);
+                        arguments.push(length);
+                    } else {
+                        arguments.push(handle);
+                    }
+                    position += 1;
+                }
+                _ => {
+                    let word = values[position];
+                    position += 1;
+                    match ty {
+                        Type::Bool => {
+                            arguments.push(self.builder.ins().ireduce(ir::types::I32, word))
+                        }
+                        Type::Int(kind) if *kind != IntKind::I64 => {
+                            arguments.push(self.builder.ins().ireduce(abi_value_type(*ty), word))
+                        }
+                        Type::Float(FloatKind::F64) => arguments.push(self.builder.ins().bitcast(
+                            ir::types::F64,
+                            ir::MemFlagsData::new(),
+                            word,
+                        )),
+                        Type::Float(FloatKind::F32) => {
+                            let bits = self.builder.ins().ireduce(ir::types::I32, word);
+                            arguments.push(self.builder.ins().bitcast(
+                                ir::types::F32,
+                                ir::MemFlagsData::new(),
+                                bits,
+                            ));
+                        }
+                        _ => arguments.push(word),
+                    }
+                }
+            }
+        }
+        let mut out = None;
+        if let Some(shape) = foreign.fallible
+            && shape.ok != Type::Unit
+        {
+            let width = self.program.width(shape.ok).max(1);
+            let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                (width * 8) as u32,
+                3,
+            ));
+            let pointer = self.builder.ins().stack_addr(I64, slot, 0);
+            arguments.push(pointer);
+            out = Some((pointer, width));
+        }
+        let callee = self.module.declare_func_in_func(id, self.builder.func);
+        let call = self.builder.ins().call(callee, &arguments);
+        let returned = self.builder.inst_results(call).to_vec();
+        if let Some(shape) = foreign.fallible {
+            let status = returned[0];
+            let join = self.join(foreign.result).unwrap();
+            let success = self.builder.create_block();
+            let failure = self.builder.create_block();
+            let ok = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+            self.builder.ins().brif(ok, success, &[], failure, &[]);
+            self.builder.switch_to_block(success);
+            let mut values = vec![self.constant(shape.ok_tag as i64)];
+            if let Some((pointer, width)) = out {
+                values.extend(self.load_words(pointer, 0, width));
+            }
+            while values.len() < self.program.width(foreign.result) {
+                values.push(self.constant(0));
+            }
+            self.jump(join, &values);
+            self.builder.switch_to_block(failure);
+            let mut values = vec![self.constant(shape.err_tag as i64)];
+            if self.program.width(shape.error) == 1 {
+                values.push(status);
+            }
+            while values.len() < self.program.width(foreign.result) {
+                values.push(self.constant(0));
+            }
+            self.jump(join, &values);
+            self.builder.switch_to_block(join);
+            return Some(self.builder.block_params(join).to_vec());
+        }
+        if foreign.result == Type::Unit {
+            return Some(vec![self.constant(0)]);
+        }
+        let value = returned[0];
+        Some(vec![match foreign.result {
+            Type::Float(FloatKind::F64) => {
+                self.builder
+                    .ins()
+                    .bitcast(I64, ir::MemFlagsData::new(), value)
+            }
+            Type::Float(FloatKind::F32) => {
+                let low =
+                    self.builder
+                        .ins()
+                        .bitcast(ir::types::I32, ir::MemFlagsData::new(), value);
+                self.builder.ins().uextend(I64, low)
+            }
+            Type::Bool => self.builder.ins().uextend(I64, value),
+            Type::Int(kind) if kind.signed() => self.builder.ins().sextend(I64, value),
+            Type::Int(_) => self.builder.ins().uextend(I64, value),
+            _ => value,
+        }])
     }
     fn function_call(&mut self, index: usize, mut values: Words) -> Words {
         let function = &self.program.functions[index];
@@ -6000,6 +6477,7 @@ impl Generator<'_, '_> {
                         }
                     }
                     Target::Str(op) => return Some(self.str_call(*op, values)),
+                    Target::Foreign(index) => return self.foreign_call(*index, &values),
                     Target::Function(index)
                     | Target::ObjectFunction {
                         function: index, ..

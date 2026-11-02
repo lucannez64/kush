@@ -30,13 +30,39 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
         .iter()
         .any(|name| command == name);
     let ast = command == "parse" && args.len() == 3 && args[2] == "--ast";
-    let build = command == "build"
-        && args.len() >= 4
-        && args[2] == "-o"
-        && (args.len() == 4 || (args.len() == 5 && args[4] == "--stats"));
+    let mut links = kush::native::LinkSpec::default();
+    let mut build = false;
+    let mut build_stats = false;
+    if command == "build" && args.len() >= 4 && args[2] == "-o" {
+        build = true;
+        let mut index = 4;
+        while index < args.len() {
+            match args[index].to_str() {
+                Some("--stats") => build_stats = true,
+                Some("--link") | Some("--link-lib") => {
+                    let flag = args[index].to_str().unwrap_or_default();
+                    index += 1;
+                    let Some(value) = args.get(index).and_then(|value| value.to_str()) else {
+                        build = false;
+                        break;
+                    };
+                    if flag == "--link" {
+                        links.libraries.push(value.into());
+                    } else {
+                        links.system_libraries.push(value.to_owned());
+                    }
+                }
+                _ => {
+                    build = false;
+                    break;
+                }
+            }
+            index += 1;
+        }
+    }
     let run_like = command == "run" || command == "eval";
     let stats = (run_like && args.len() == 3 && args[2] == "--stats")
-        || (command == "build" && args.len() == 5);
+        || (command == "build" && build_stats);
     let valid = if command == "parse" {
         args.len() == 2 || ast
     } else if command == "build" {
@@ -132,7 +158,8 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
                     "output must not overwrite the source file",
                 )));
             }
-            kush::native::build_with_stats(&checked, output, stats).map_err(diagnostic)?;
+            kush::native::build_with_options(&checked, output, stats, &links)
+                .map_err(diagnostic)?;
             writeln!(out, "Built {} with Cranelift.", output.display()).map_err(output_error)?;
         } else {
             let scratch = kush::native::Scratch::new(&env::temp_dir()).map_err(diagnostic)?;

@@ -98,6 +98,18 @@ pub(crate) struct Enum {
     /// fields are stored in canonical name order, so equal rows intern to one
     /// layout. Structural width subtyping is checked field by field.
     pub structural: bool,
+    /// An opaque foreign resource declared with `#[foreign("release")] struct`.
+    /// Its one-word value is a host-owned handle. The layout owns the handle
+    /// (affine exactly-once release) even though its synthetic field is a plain
+    /// integer; generated drop glue calls `release`. Kush verifies ownership
+    /// and the call count, not the foreign implementation's memory safety.
+    pub foreign: Option<ForeignResource>,
+}
+/// A trusted foreign contract: the exact C symbol used to release an opaque
+/// host-owned resource exactly once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForeignResource {
+    pub release: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UnionType {
@@ -488,6 +500,9 @@ struct Definition<'a> {
     /// Present for records.
     fields: Option<&'a [ast::Field]>,
     linear: bool,
+    /// Set by `#[foreign("release")] struct Name {}`. Such a declaration is an
+    /// opaque one-word handle, not a constructible record.
+    foreign_release: Option<&'a str>,
 }
 /// Whether a type is the reserved unsized text type `str`, which is only
 /// admitted behind a shared borrow as `&str`.
@@ -714,6 +729,40 @@ impl<'a> Types<'a> {
                 }
             }
             let linear = declaration.attributes.iter().any(|a| a.kind == "linear");
+            let foreign_release = declaration
+                .attributes
+                .iter()
+                .find(|attribute| attribute.kind == "foreign")
+                .map(|attribute| {
+                    let Some(release) = &attribute.argument else {
+                        return Err(Diagnostic::new(
+                            attribute.span,
+                            "a foreign resource attribute needs one release symbol: #[foreign(\"c_release_symbol\")]",
+                        ));
+                    };
+                    if !crate::executable::valid_c_symbol(release) {
+                        return Err(Diagnostic::new(
+                            attribute.span,
+                            "a foreign resource release symbol must be a C identifier ([A-Za-z_][A-Za-z0-9_]*)",
+                        ));
+                    }
+                    Ok(release.as_str())
+                })
+                .transpose()?;
+            if foreign_release.is_some() {
+                if !generics.is_empty() || !lifetimes.is_empty() {
+                    return Err(Diagnostic::new(
+                        declaration.item.span,
+                        "a foreign resource declaration cannot take lifetime or type parameters; it is one opaque host-owned handle",
+                    ));
+                }
+                if fields.is_some_and(|fields| !fields.is_empty()) {
+                    return Err(Diagnostic::new(
+                        declaration.item.span,
+                        "a foreign resource declaration is opaque and has no fields; write '#[foreign(\"release\")] struct Name {}'",
+                    ));
+                }
+            }
             if let Some(fields) = fields {
                 validate_record_declaration(
                     declaration.item.span,
@@ -732,6 +781,7 @@ impl<'a> Types<'a> {
                     variants,
                     fields,
                     linear,
+                    foreign_release,
                 },
             );
         }
@@ -832,6 +882,7 @@ impl<'a> Types<'a> {
             dynamic_array: None,
             tuple: false,
             structural: false,
+            foreign: None,
         });
         Ok(Type::Enum(id))
     }
@@ -911,6 +962,7 @@ impl<'a> Types<'a> {
             dynamic_array: Some((element, capacity)),
             tuple: false,
             structural: false,
+            foreign: None,
         });
         Ok(Type::Enum(id))
     }
@@ -1006,6 +1058,7 @@ impl<'a> Types<'a> {
             dynamic_array: None,
             tuple: false,
             structural: true,
+            foreign: None,
         });
         self.structural_cache.insert(fields, id);
         Ok(Type::Enum(id))
@@ -1092,6 +1145,7 @@ impl<'a> Types<'a> {
             dynamic_array: None,
             tuple: true,
             structural: false,
+            foreign: None,
         });
         Ok(Type::Enum(id))
     }
@@ -1686,22 +1740,26 @@ impl<'a> Types<'a> {
                 }
                 return Ok(Type::RefMut(self.pointer(inner)));
             }
-            if !matches!(
-                inner,
-                Type::Box(_)
-                    | Type::Arena
-                    | Type::ArenaBox(_)
-                    | Type::Bytes
-                    | Type::String
-                    | Type::Vec(_)
-                    | Type::Allocator
-                    | Type::AllocatorContext
-                    | Type::AllocBox(_)
-                    | Type::AllocVec(_)
-            ) {
+            let foreign_resource =
+                matches!(inner, Type::Enum(id) if self.enums[id].foreign.is_some());
+            if !foreign_resource
+                && !matches!(
+                    inner,
+                    Type::Box(_)
+                        | Type::Arena
+                        | Type::ArenaBox(_)
+                        | Type::Bytes
+                        | Type::String
+                        | Type::Vec(_)
+                        | Type::Allocator
+                        | Type::AllocatorContext
+                        | Type::AllocBox(_)
+                        | Type::AllocVec(_)
+                )
+            {
                 return Err(Diagnostic::new(
                     ty.span,
-                    "borrowing supports immutable &Box<T>, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &Record, scalar/array places, and &[T] slice views",
+                    "borrowing supports immutable &Box<T>, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &Record, &ForeignResource, scalar/array places, and &[T] slice views",
                 ));
             }
             return Ok(Type::Ref(self.pointer(inner)));
@@ -3448,8 +3506,45 @@ impl<'a> Types<'a> {
             mutable_borrow: false,
             linear: def.linear,
             structural: false,
+            foreign: None,
         });
         self.cache.insert(key.clone(), index);
+        if let Some(foreign) = def.foreign_release.map(|release| ForeignResource {
+            release: release.to_owned(),
+        }) {
+            // A foreign resource is one opaque host-owned handle. The synthetic
+            // variant is never constructible from source; only a foreign call
+            // returning this type can produce one. Ownership marks it affine
+            // (or linear when `#[linear]` is also present), and generated drop
+            // glue invokes the declared release symbol exactly once.
+            self.enums[index] = Enum {
+                definition: id,
+                name: def.name.to_owned(),
+                arguments,
+                consts,
+                lifetimes,
+                variants: vec![Variant {
+                    name: "Handle".into(),
+                    fields: vec![Type::I64],
+                    tuple: true,
+                    names: vec![],
+                }],
+                words: 1,
+                result: None,
+                record: false,
+                field_lifetimes: Vec::new(),
+                borrowed: false,
+                mutable_borrow: false,
+                linear: def.linear,
+                array: None,
+                dynamic_array: None,
+                tuple: false,
+                structural: false,
+                foreign: Some(foreign),
+            };
+            self.active.remove(&id);
+            return Ok(index);
+        }
         let mut substitution = Subst::default();
         let mut type_arguments = arguments.iter();
         let mut const_arguments = consts.iter();
@@ -3742,6 +3837,7 @@ impl<'a> Types<'a> {
                 mutable_borrow,
                 linear: def.linear,
                 structural: false,
+                foreign: None,
             })
         })();
         self.active.remove(&id);
@@ -5194,6 +5290,94 @@ pub(crate) fn contains_task(types: &Types<'_>, ty: Type) -> bool {
         }
     }
     go(types, ty, &mut BTreeSet::new())
+}
+
+/// Render a runtime type without a live `Types` borrow. Used by public
+/// metadata such as checked foreign descriptions after layout construction.
+pub(crate) fn type_name_in(
+    ty: Type,
+    pointees: &[Type],
+    enums: &[Enum],
+    unions: &[UnionType],
+    functions: &[FunctionType],
+) -> String {
+    match ty {
+        Type::I64 => "i64".into(),
+        Type::Int(kind) => kind.name().into(),
+        Type::Float(kind) => kind.name().into(),
+        Type::Char => "Char".into(),
+        Type::Bool => "Bool".into(),
+        Type::Unit => "Unit".into(),
+        Type::Never => "Never".into(),
+        Type::Bytes => "Bytes".into(),
+        Type::String => "String".into(),
+        Type::Str => "&str".into(),
+        Type::Stdin => "Stdin".into(),
+        Type::Stdout => "Stdout".into(),
+        Type::Box(p) => format!(
+            "Box<{}>",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::Arena => "Arena".into(),
+        Type::ArenaBox(p) => format!(
+            "ArenaBox<{}>",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::Allocator => "Allocator".into(),
+        Type::AllocatorContext => "AllocatorContext".into(),
+        Type::AllocBox(p) => format!(
+            "AllocBox<{}>",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::AllocVec(p) => format!(
+            "AllocVec<{}>",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::Vec(p) => format!(
+            "Vec<{}>",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::Ref(p) => format!(
+            "&{}",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::RefMut(p) => format!(
+            "&mut {}",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::Annotated(p, _) => type_name_in(pointees[p], pointees, enums, unions, functions),
+        Type::Slice(p) => format!(
+            "&[{}]",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::SliceMut(p) => format!(
+            "&mut [{}]",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::Enum(id) => enums[id].name.clone(),
+        Type::Variants(id, _) => enums[id].name.clone(),
+        Type::Union(id) => unions[id]
+            .members
+            .iter()
+            .map(|member| type_name_in(*member, pointees, enums, unions, functions))
+            .collect::<Vec<_>>()
+            .join(" | "),
+        Type::Fn(id) | Type::Once(id) => format!(
+            "fn({}) -> {}",
+            functions[id]
+                .parameters
+                .iter()
+                .map(|parameter| type_name_in(*parameter, pointees, enums, unions, functions))
+                .collect::<Vec<_>>()
+                .join(", "),
+            type_name_in(functions[id].result, pointees, enums, unions, functions)
+        ),
+        Type::Task(p) => format!(
+            "Task<{}>",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::DynObj(_) => "dyn".into(),
+    }
 }
 
 pub(crate) fn width(

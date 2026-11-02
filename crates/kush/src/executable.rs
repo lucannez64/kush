@@ -249,6 +249,9 @@ pub struct Executable {
     pub(crate) reference_labels: Vec<String>,
     pub(crate) owned_enums: Vec<bool>,
     pub(crate) linear_enums: Vec<bool>,
+    /// Checked foreign imports aligned with `functions`; `Some` marks an
+    /// imported host function whose body is inert and never executed.
+    pub(crate) foreign_functions: Vec<Option<ForeignFunction>>,
     pub(crate) certificates: Vec<crate::facts::Certificate>,
     /// Total logical definitions checked by the kernel and erased from the IR.
     pub(crate) logical_definitions: Vec<String>,
@@ -426,6 +429,10 @@ pub(crate) enum Target {
     /// User-allocator-backed vector operation with its element type.
     AllocVec(AllocVecOp, Type),
     Function(usize),
+    /// A direct call to a checked `foreign "symbol" fn` import. The index is
+    /// the imported function's instance; the native backend emits a C ABI call
+    /// and the reference interpreter rejects it explicitly.
+    Foreign(usize),
     /// A synthesized borrowed object call reserves its source place while
     /// later arguments evaluate. Mutable calls also return it for write-back.
     ObjectFunction {
@@ -1362,9 +1369,130 @@ impl Signature {
         crate::runtime_types::grade_erases(self.parameter_grades.get(index).copied().flatten())
     }
 }
+/// One checked `foreign "symbol" fn` import. The ABI classification is derived
+/// from `parameters`/`result`; `fallible` is `Some` exactly when the declared
+/// result is the conventional `Result<T, i64>`, in which case the C symbol
+/// returns a status and writes `T` through a trailing out-pointer.
+#[derive(Debug, Clone)]
+pub(crate) struct ForeignFunction {
+    pub symbol: String,
+    pub parameters: Vec<Type>,
+    pub result: Type,
+    pub fallible: Option<ResultShape>,
+}
+/// Public, stable description of one checked foreign import, for build tooling
+/// and generated adapters. It does not claim the foreign implementation is
+/// verified: only the Kush-side signature, effects, and ownership are checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignFunctionInfo {
+    pub name: String,
+    pub symbol: String,
+    pub parameters: Vec<String>,
+    pub result: String,
+    pub fallible: bool,
+}
+/// Allow only the stable C ABI bridge subset. Pointers, Rust enums with
+/// payloads, owned text/buffers, and arbitrary aggregates are rejected here
+/// rather than guessed at the backend.
+fn foreign_value_supported(types: &Types<'_>, ty: Type) -> bool {
+    match ty {
+        Type::Unit
+        | Type::Bool
+        | Type::I64
+        | Type::Int(_)
+        | Type::Float(_)
+        | Type::Str
+        | Type::Bytes => true,
+        Type::Enum(id) => types.enums[id].foreign.is_some(),
+        // A shared reference to an opaque resource is a borrowed handle: the
+        // callee must not retain it past the call. `&Bytes`/`&String` pass an
+        // existing byte-contiguous buffer as `(pointer, length)` without
+        // copying or ownership transfer. Inline `&[u8]` arrays are deliberately
+        // excluded: their elements live in one checked word each, not in the
+        // byte-contiguous layout a C pointer would imply.
+        Type::Ref(pointer) => match types.pointees[pointer] {
+            Type::Enum(id) => types.enums[id].foreign.is_some(),
+            Type::Bytes | Type::String => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+fn foreign_result_supported(types: &Types<'_>, ty: Type, error: bool) -> bool {
+    if error {
+        return ty == Type::I64;
+    }
+    matches!(ty, Type::Unit) || foreign_value_supported(types, ty)
+}
+/// Validate the checked signature of a foreign declaration. The caller already
+/// required a concrete, monomorphic, non-erased signature with `io` in its row.
+fn validate_foreign_function(
+    types: &Types<'_>,
+    parameters: &[Type],
+    result: Type,
+    result_shape: Option<ResultShape>,
+    parameter_grades: &[Option<Grade>],
+    result_grade: Option<Grade>,
+    span: Span,
+) -> Result<()> {
+    if parameter_grades.iter().any(Option::is_some) || result_grade.is_some() {
+        return Err(Diagnostic::new(
+            span,
+            "foreign functions cannot carry usage grades; use the owning result type for exactly-once transfer, or Result<T, i64> for checked failure",
+        ));
+    }
+    for ty in parameters {
+        if !foreign_value_supported(types, *ty) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "foreign parameter type {} is not part of the stable C bridge ABI; supported inputs are fixed-width integers, f32/f64, Bool, &str, &Bytes, &String, and declared foreign resources",
+                    types.name(*ty)
+                ),
+            ));
+        }
+    }
+    if let Some(shape) = result_shape {
+        if !foreign_result_supported(types, shape.ok, false) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "foreign Result Ok type {} is not bridgeable; supported results are Unit, Bytes, fixed-width integers, f32/f64, Bool, and declared foreign resources",
+                    types.name(shape.ok)
+                ),
+            ));
+        }
+        if !foreign_result_supported(types, shape.error, true) {
+            return Err(Diagnostic::new(
+                span,
+                "a foreign Result must use i64 as its error type; the bridge returns a non-zero C status as Err(status)",
+            ));
+        }
+    } else if !foreign_result_supported(types, result, false) {
+        return Err(Diagnostic::new(
+            span,
+            format!(
+                "foreign result type {} is not part of the stable C bridge ABI; return Unit, Bytes, a fixed-width integer, f32/f64, Bool, a declared foreign resource, or Result<T, i64>",
+                types.name(result)
+            ),
+        ));
+    }
+    Ok(())
+}
 /// Split `T @[grade]` into the type and its grade expression.
 fn split_grade(ty: &ast::Type) -> (&ast::Type, Option<&ast::Type>) {
     grades::split(ty)
+}
+/// Whether a name is a bare C symbol. Foreign declarations and resource release
+/// hooks are passed to Cranelift and `cc` as arguments, never through a shell,
+/// but restricting the spelling keeps diagnostics and generated C/Rust shims
+/// predictable.
+pub(crate) fn valid_c_symbol(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 /// Expand an outer chain of transparent executable type aliases so a result
 /// contract can be written through an alias:
@@ -3664,6 +3792,9 @@ struct Functions<'a> {
     /// function index and the source/target arrow types.
     adapter_cache: BTreeMap<(Option<usize>, Type, Type), usize>,
     certificates: Vec<crate::facts::Certificate>,
+    /// Checked foreign imports, keyed by the function-instance index used by
+    /// `Target::Foreign`. Only direct calls reach these entries.
+    foreign_functions: BTreeMap<usize, ForeignFunction>,
     /// Checked nested map fusions produced while specializing bodies.
     fusions: usize,
     /// Deduplicated allocator-context shapes built while checking bodies.
@@ -3927,6 +4058,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         pending: Vec::new(),
         adapter_cache: BTreeMap::new(),
         certificates: Vec::new(),
+        foreign_functions: BTreeMap::new(),
         fusions: 0,
         allocator_contexts: Vec::new(),
         uses_tasks: false,
@@ -4019,20 +4151,38 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             ));
         }
         let function = matches!(declaration.item.kind, ast::ItemKind::Function(_));
+        let data = matches!(
+            declaration.item.kind,
+            ast::ItemKind::Struct { .. } | ast::ItemKind::Enum { .. }
+        );
         for attribute in &declaration.attributes {
             let valid = if function {
                 matches!(attribute.kind.as_str(), "noalloc" | "nosuspend")
+                    && attribute.argument.is_none()
+            } else if data {
+                (attribute.kind == "linear" && attribute.argument.is_none())
+                    || attribute.kind == "foreign"
             } else {
-                attribute.kind == "linear"
+                false
             };
             if !valid {
                 return Err(Diagnostic::new(
                     attribute.span,
                     if function {
                         "functions support the #[noalloc] and #[nosuspend] contracts"
+                    } else if data {
+                        "data declarations support #[linear] or #[foreign(\"release_symbol\")]"
                     } else {
-                        "data declarations support only the #[linear] attribute"
+                        "attributes apply to functions, enums, and structs only"
                     },
+                ));
+            }
+            if attribute.kind == "foreign"
+                && !matches!(declaration.item.kind, ast::ItemKind::Struct { .. })
+            {
+                return Err(Diagnostic::new(
+                    attribute.span,
+                    "#[foreign(\"release_symbol\")] declares an opaque resource and may only annotate a struct",
                 ));
             }
         }
@@ -4065,9 +4215,41 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         validate_erased_parameters(resolution, &logical, f)?;
         validate_length_templates(resolution, f)?;
         if f.body.is_none() {
+            let Some(symbol) = &f.foreign else {
+                return Err(Diagnostic::new(
+                    span,
+                    "executable functions require a body; declare an imported C function as 'foreign \"symbol\" fn name(...) -> T ! { io };'",
+                ));
+            };
+            if !valid_c_symbol(symbol) {
+                return Err(Diagnostic::new(
+                    span,
+                    "a foreign symbol must be a C identifier ([A-Za-z_][A-Za-z0-9_]*)",
+                ));
+            }
+            if !f.generics.is_empty() || !f.lifetimes.is_empty() {
+                return Err(Diagnostic::new(
+                    span,
+                    "a foreign function cannot be generic or lifetime-parameterized; declare one concrete C ABI signature",
+                ));
+            }
+            if f.parameters.iter().any(|parameter| parameter.erased) {
+                return Err(Diagnostic::new(
+                    span,
+                    "foreign functions cannot have erased proof parameters; FFI is runtime-only",
+                ));
+            }
+            let (effects, _) = crate::runtime_types::effect_bits_partial(resolution, &f.effects)?;
+            if effects & IO == 0 {
+                return Err(Diagnostic::new(
+                    span,
+                    "a foreign call has unchecked host side effects and requires the 'io' effect in its declared row",
+                ));
+            }
+        } else if f.foreign.is_some() {
             return Err(Diagnostic::new(
                 span,
-                "executable functions require a body; foreign declarations are not implemented",
+                "a foreign declaration has no body; remove the implementation block",
             ));
         }
         if f.parameters.len() > 64 {
@@ -4372,6 +4554,10 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     // source types while bodies are still being checked.
     let automatic = automatic_fusion(&types, &mut functions);
     functions.fusions += automatic;
+    let mut foreign_functions = vec![None; functions.bodies.len()];
+    for (index, foreign) in functions.foreign_functions {
+        foreign_functions[index] = Some(foreign);
+    }
     let mut executable = Executable {
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,
@@ -4395,6 +4581,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         reference_labels: types.reference_labels,
         owned_enums: vec![],
         linear_enums: vec![],
+        foreign_functions,
         logical_definitions: logical.definitions.clone(),
     };
     crate::ownership::check(&mut executable)?;
@@ -9355,6 +9542,34 @@ impl<'a> Functions<'a> {
         };
         let effects =
             crate::runtime_types::effect_bits_with(resolution, &f.effects, &effect_substitution)?;
+        let foreign = if let Some(symbol) = &f.foreign {
+            if effects & IO == 0 {
+                return Err(Diagnostic::new(
+                    declared.span,
+                    "a foreign call has unchecked host side effects and requires the 'io' effect in its declared row",
+                ));
+            }
+            let shape = result
+                .layout()
+                .and_then(|layout| types.enums[layout].result);
+            validate_foreign_function(
+                types,
+                &parameters,
+                result,
+                shape,
+                &parameter_grades,
+                result_grade,
+                declared.span,
+            )?;
+            Some(ForeignFunction {
+                symbol: symbol.clone(),
+                parameters: parameters.clone(),
+                result,
+                fallible: shape,
+            })
+        } else {
+            None
+        };
         let default_trait = declared
             .default_specialization
             .map(|index| self.default_specializations[index].clone());
@@ -9364,8 +9579,8 @@ impl<'a> Functions<'a> {
             origin: origin
                 .filter(|_| specialized)
                 .map(|span| (span, format!("'{name}'"))),
-            name,
-            parameters,
+            name: name.clone(),
+            parameters: parameters.clone(),
             result,
             effects,
             span: declared.span,
@@ -9373,18 +9588,62 @@ impl<'a> Functions<'a> {
             consts: const_substitution,
             grades: grade_substitution,
             effect_arguments: effect_substitution,
-            parameter_grades,
+            parameter_grades: parameter_grades.clone(),
             result_grade,
-            parameter_lifetimes,
-            result_lifetime,
-            lifetime_bounds,
+            parameter_lifetimes: parameter_lifetimes.clone(),
+            result_lifetime: result_lifetime.clone(),
+            lifetime_bounds: lifetime_bounds.clone(),
             self_type: substitution.self_type,
             default_trait,
             associated_consts,
         });
         self.instances.insert(key, index);
-        self.bodies.push(None);
-        self.pending.push(index);
+        if let Some(foreign) = foreign {
+            self.foreign_functions.insert(index, foreign);
+            // A foreign declaration has no source body. Store an inert,
+            // already-checked body so the pending-body loop and the ownership
+            // pass see the ordinary parameter/result shape, while the native
+            // backend declares an import instead of defining this instance.
+            let locals = parameters
+                .iter()
+                .map(|ty| Local {
+                    ty: *ty,
+                    mutable: false,
+                    linear: false,
+                    pinned: false,
+                    grade: None,
+                    span: declared.span,
+                })
+                .collect();
+            self.bodies.push(Some(Function {
+                name: name.clone(),
+                parameters: parameters.len(),
+                closure: None,
+                locals,
+                result,
+                body: Block {
+                    statements: Vec::new(),
+                    tail: Some(Box::new(Expr {
+                        kind: ExprKind::Constant(0),
+                        ty: result,
+                        span: declared.span,
+                        resource: None,
+                    })),
+                    ty: result,
+                },
+                span: declared.span,
+                resources: Vec::new(),
+                local_resources: Vec::new(),
+                parameter_grades: parameter_grades.clone(),
+                result_grade,
+                parameter_lifetimes: parameter_lifetimes.clone(),
+                result_lifetime: result_lifetime.clone(),
+                lifetime_bounds: lifetime_bounds.clone(),
+            }));
+        } else {
+            self.bodies.push(None);
+            self.pending.push(index);
+        }
         Ok(index)
     }
     /// Register a synthetic, already-checked function body (lambda or adapter).
@@ -20589,6 +20848,15 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Expr> {
         let f = self.functions.declared[&id].ast;
+        if f.foreign.is_some() {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "foreign function '{}' can only be called directly; a C function pointer has no checked Kush callable type",
+                    f.name
+                ),
+            ));
+        }
         if f.parameters.iter().any(|parameter| parameter.erased) {
             return Err(Diagnostic::new(
                 span,
@@ -24879,7 +25147,14 @@ impl Checker<'_, '_> {
             call_result_type(&signature)
         };
         let value = Expr {
-            kind: ExprKind::Call(Target::Function(index), values),
+            kind: ExprKind::Call(
+                if self.functions.foreign_functions.contains_key(&index) {
+                    Target::Foreign(index)
+                } else {
+                    Target::Function(index)
+                },
+                values,
+            ),
             ty,
             span,
             resource: None,
@@ -28550,6 +28825,42 @@ impl Executable {
     /// Checked nested in-place map fusions. Diagnostics-only observation.
     pub fn fusion_count(&self) -> usize {
         self.fusions
+    }
+    /// Checked foreign declarations in instance order. This reports the
+    /// Kush-side contract only; the foreign library remains trusted code that
+    /// Kush cannot verify for memory safety.
+    pub fn foreign_functions(&self) -> Vec<ForeignFunctionInfo> {
+        self.foreign_functions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, foreign)| {
+                foreign.as_ref().map(|foreign| ForeignFunctionInfo {
+                    name: self.functions[index].name.clone(),
+                    symbol: foreign.symbol.clone(),
+                    parameters: foreign
+                        .parameters
+                        .iter()
+                        .map(|ty| {
+                            crate::runtime_types::type_name_in(
+                                *ty,
+                                &self.pointees,
+                                &self.enums,
+                                &self.unions,
+                                &self.function_types,
+                            )
+                        })
+                        .collect(),
+                    result: crate::runtime_types::type_name_in(
+                        foreign.result,
+                        &self.pointees,
+                        &self.enums,
+                        &self.unions,
+                        &self.function_types,
+                    ),
+                    fallible: foreign.fallible.is_some(),
+                })
+            })
+            .collect()
     }
     pub(crate) fn entry(&self) -> Result<usize> {
         self.entry.ok_or_else(|| {

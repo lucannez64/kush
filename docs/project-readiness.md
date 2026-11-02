@@ -11,6 +11,13 @@ Active work targets useful applications and reusing existing Rust/C libraries:
    formatting and basic editor integration.
 4. Rust-first native-library integration, generated checked adapters and C ABI
    support, with ownership, errors, panic boundaries, and executable examples.
+   Implemented in this branch for Linux x86-64: `foreign "symbol" fn ...;`
+   declarations, checked `io`/signature/resource rules, `Result<T, i64>` status
+   lowering, exactly-once `#[foreign("release")]` resources, `LinkSpec` and
+   `build_with_options`, generated Rust adapter shims with panic containment,
+   the `[native]` manifest mapping, and `examples/rust-adapter/` reusing `sha2`.
+   See [native interop](native-interop.md). Project-manifest wiring and the
+   integrated Boat gate are parent-owned.
 5. Everyday library helpers and a persistent multi-file CLI application that
    demonstrates the project workflow end to end.
 

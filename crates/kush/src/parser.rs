@@ -130,13 +130,64 @@ impl Parser {
                 let start = self.tokens[self.pos - 1].span;
                 self.expect(&Kind::LBracket, "'[' after '#'")?;
                 let name = self.ident()?;
+                let argument = if self.eat(&Kind::LParen) {
+                    let value = match self.current().kind.clone() {
+                        Kind::String(value) => {
+                            self.bump();
+                            value
+                        }
+                        _ => {
+                            return Err(
+                                self.error("attribute arguments must be one string literal")
+                            );
+                        }
+                    };
+                    self.expect(&Kind::RParen, "')' after an attribute argument")?;
+                    Some(value)
+                } else {
+                    None
+                };
                 self.expect(&Kind::RBracket, "']' after attribute name")?;
-                attributes.push(Node::new(name, self.since(start)));
+                attributes.push(Attribute {
+                    kind: name,
+                    argument,
+                    span: self.since(start),
+                });
             }
             let public = self.eat(&Kind::Pub);
             let start = self.current().span;
             let total = self.eat(&Kind::Total);
-            let kind = if self.eat(&Kind::Fn) {
+            // `foreign "symbol" fn name(...) -> T ! { ... };` is contextual so
+            // `foreign` remains an ordinary identifier elsewhere. The string is
+            // the exact C symbol and is not re-derived from the Kush name.
+            let kind = if self.word_keyword("foreign")
+                && self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|token| matches!(token.kind, Kind::String(_)))
+            {
+                if total {
+                    return Err(self.error("'total' applies only to fn and enum declarations"));
+                }
+                self.bump();
+                let symbol = match self.current().kind.clone() {
+                    Kind::String(symbol) => {
+                        self.bump();
+                        symbol
+                    }
+                    _ => unreachable!("checked above"),
+                };
+                self.expect(&Kind::Fn, "'fn' after a foreign symbol")?;
+                let mut function = self.function(false)?;
+                if function.body.is_some() {
+                    return Err(Diagnostic::new(
+                        self.since(start),
+                        "a foreign declaration has no body; replace '{ ... }' with ';'",
+                    ));
+                }
+                function.foreign = Some(symbol);
+                ItemKind::Function(function)
+            } else if self.eat(&Kind::Fn) {
                 ItemKind::Function(self.function(total)?)
             } else if self.eat(&Kind::Module) {
                 let path = self.path()?;
@@ -711,6 +762,7 @@ impl Parser {
             result,
             effects,
             body,
+            foreign: None,
         })
     }
     /// Function generic binders may mix lifetime parameters with ordinary

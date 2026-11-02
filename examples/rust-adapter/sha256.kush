@@ -1,0 +1,48 @@
+// Rust-first interop example. Build the Rust static library with:
+//   cargo build --offline --release --manifest-path examples/rust-adapter/Cargo.toml
+// Then build and run this program with the Kush CLI:
+//   kush build examples/rust-adapter/sha256.kush -o /tmp/sha256-example \
+//     --link examples/rust-adapter/target/release/libkush_rust_adapter_example.a \
+//     --link-lib pthread --link-lib dl
+//   /tmp/sha256-example
+//
+// The Rust crate reuses sha2 0.10 through safe Rust functions. The generated
+// shims catch panics, map Result errors to status codes, and release the opaque
+// Hasher exactly once.
+enum Result<T, E> { Ok(T), Err(E) }
+
+#[foreign("kush_example_hasher_release")] struct Hasher {}
+
+foreign "kush_example_add" fn add(a: i64, b: i64) -> i64 ! {io};
+foreign "kush_example_sha256" fn sha256(data: &Bytes) -> Result<Bytes, i64> ! {io};
+foreign "kush_example_hasher_new" fn hasher_new() -> Hasher ! {io};
+foreign "kush_example_hasher_update" fn hasher_update(h: &Hasher, data: &Bytes) -> Result<i64, i64> ! {io};
+foreign "kush_example_hasher_finish" fn hasher_finish(h: &Hasher) -> Result<Bytes, i64> ! {io};
+foreign "kush_example_fail" fn fail(data: &Bytes) -> Result<i64, i64> ! {io};
+foreign "kush_example_boom" fn boom() -> Result<i64, i64> ! {io};
+foreign "kush_example_live" fn live() -> i64 ! {io};
+
+fn write_line(text: &Bytes) -> Unit ! {io, alloc, panic} {
+    match IO.write(IO.stdout(), text) { Ok(_) => (), Err(_) => () };
+    match IO.write(IO.stdout(), &Bytes.from("\n")) { Ok(_) => (), Err(_) => () }
+}
+
+fn main() -> Unit ! {io, alloc, panic} {
+    let input = Bytes.from("abc");
+    let direct = match sha256(&input) { Ok(value) => value, Err(_) => Bytes.from("") };
+    write_line(&direct);
+
+    let streamed = {
+        let hasher = hasher_new();
+        let _ = match hasher_update(&hasher, &input) { Ok(n) => n, Err(_) => 0 };
+        let part = match hasher_update(&hasher, &Bytes.from("")) { Ok(n) => n, Err(_) => 0 };
+        let _ = part;
+        match hasher_finish(&hasher) { Ok(value) => value, Err(_) => Bytes.from("") }
+    };
+    write_line(&streamed);
+
+    print_i64(add(19, 23));
+    print_i64(live());
+    print_i64(match fail(&input) { Ok(_) => 0, Err(code) => code });
+    print_i64(match boom() { Ok(_) => 0, Err(code) => code });
+}

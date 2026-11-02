@@ -9,6 +9,7 @@ mod facts;
 mod float;
 mod grades;
 mod int;
+pub mod interop;
 pub use facts::Certificate;
 pub mod kernel;
 mod length;
