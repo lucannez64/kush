@@ -243,6 +243,9 @@ FFI 15, resolver 9), formatting, and workspace/all-targets Clippy. Generated-fil
 drift checks and the Rust adapter project's **two app tests** pass. New tests
 reject invalid configs before any output writes and compile colliding-path
 namespaces and fallible Unit shims with warnings denied.
-Log: `/tmp/kush-boat-bindgen-review-fixes.log` (machine-local). Full workspace
-validation after these corrections is pending. Host deadlines/persistence and
-independent LSP review remain outstanding.
+Log: `/tmp/kush-boat-bindgen-review-fixes.log` (machine-local).
+
+Full Boat gate after corrections, source checkpoint `0b48a14`: **1119 workspace
+tests**, formatting, and Clippy pass. The sandbox stopped with its snapshot
+preserved. Log: `/tmp/kush-boat-bindgen-corrected-full.log` (machine-local).
+Host deadlines/persistence and independent LSP review remain outstanding.
