@@ -2516,6 +2516,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             unit: resolution.unit_of.get(&sig.binding).copied().unwrap_or(0),
             field_place: false,
             binding: sig.binding,
+            scalar_epochs: BTreeMap::new(),
             effect_constraints: Vec::new(),
         };
         let body = (|| {
@@ -2531,7 +2532,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                         grade.is_some_and(Grade::is_one) && checker.owned_type(*ty);
                     checker.validate_grade(*grade, *ty, p.ty.span)?;
                     let id = resolution.binder(p.span).unwrap();
-                    checker.admit_scalar_index(id, *ty)?;
+                    checker.admit_scalar_index(id, *ty, p.span)?;
                 }
             }
             let body = checker.block(f.body.as_ref().unwrap(), Some(sig.result))?;
@@ -7431,6 +7432,12 @@ struct Checker<'a, 't> {
     /// Binding of the function or method body being checked. Used to resolve
     /// `T.NAME` associated-constant projections through `T`'s trait bound.
     binding: BindingId,
+    /// Version of each admitted symbolic runtime scalar local. Assignments
+    /// append a fresh kernel binder and increment this counter, so later proof
+    /// uses denote the new value while already-shifted proof types denote the
+    /// old hypothesis. A mutable capture is still rejected because a closure
+    /// environment would observe an unsynchronized runtime location.
+    scalar_epochs: BTreeMap<BindingId, u32>,
     /// Pending effect-row inclusion constraints for the current inference
     /// group. `infer` takes a mark and solves them after every argument has
     /// contributed its evidence.
@@ -11135,6 +11142,9 @@ impl Checker<'_, '_> {
                     format!("invalid erased logical parameter: {e}"),
                 )
             })?;
+            // A hypothesis type is interpreted in the prefix of binders before
+            // its own position, so appending a later binder does not change its
+            // de Bruijn indices. The elaborated type is stored as-is.
             self.kernel_proofs.insert(id, ty.clone());
             self.kernel_types.insert(id, ty);
             self.kernel_locals.push(id);
@@ -11249,14 +11259,41 @@ impl Checker<'_, '_> {
             .map(|id| self.kernel_types[id].clone())
             .collect()
     }
-    /// Admit an immutable runtime scalar binding as a symbolic kernel index.
-    /// Mutable bindings are never admitted, so a proof for an old value can
-    /// never be reused after assignment, a branch join, or a loop iteration.
-    fn admit_scalar_index(&mut self, id: BindingId, ty: Type) -> Result<()> {
+    /// Admit a runtime scalar binding as a symbolic kernel index. Mutable
+    /// bindings are admitted at their current version; [`Self::renew_scalar_index`]
+    /// appends a fresh binder on assignment. The mutable local itself is never
+    /// a stable proof object: proofs are erased, cannot be bound to runtime
+    /// locals, and each use translates the *current* version at its call site.
+    fn admit_scalar_index(&mut self, id: BindingId, ty: Type, _span: Span) -> Result<()> {
         if let Some(carrier) = ty.scalar_carrier() {
             self.kernel_types.insert(id, Term::Scalar(carrier));
             self.kernel_locals.push(id);
+            self.scalar_epochs.insert(id, 0);
         }
+        Ok(())
+    }
+
+    /// Record that a mutable scalar local was assigned. Every stored kernel
+    /// proof type is shifted to keep its old outer hypotheses at the same
+    /// binding, then a fresh binder for the new value is appended. The de
+    /// Bruijn shift is essential: growing the context at the nearest end must
+    /// not reinterpret an earlier `Eq<i64, n, n>` as a different variable.
+    fn renew_scalar_index(&mut self, slot: usize) -> Result<()> {
+        let ty = self.locals[slot].ty;
+        let Some(carrier) = ty.scalar_carrier() else {
+            return Ok(());
+        };
+        let Some(id) = self
+            .slots
+            .iter()
+            .find_map(|(id, candidate)| (*candidate == slot).then_some(*id))
+        else {
+            return Ok(());
+        };
+        let _ = self.locals[slot].span;
+        self.kernel_types.insert(id, Term::Scalar(carrier));
+        self.kernel_locals.push(id);
+        *self.scalar_epochs.entry(id).or_insert(0) += 1;
         Ok(())
     }
     /// The de Bruijn term for an in-scope symbolic runtime scalar local. The
@@ -11812,10 +11849,12 @@ impl Checker<'_, '_> {
                         );
                     }
                     let slot = self.bind(pattern.span, ty, *mutable)?;
-                    if !*mutable {
-                        let id = self.resolution.binder(pattern.span).unwrap();
-                        self.admit_scalar_index(id, ty)?;
-                    }
+                    // Both immutable and mutable scalar bindings are symbolic
+                    // index candidates. A mutable one is versioned: assignment
+                    // appends a new binder instead of reinterpreting an old
+                    // proof at the final value.
+                    let id = self.resolution.binder(pattern.span).unwrap();
+                    self.admit_scalar_index(id, ty, pattern.span)?;
                     self.facts.define(slot, &value);
                     let must_use = self.observes_copyable_result(&value);
                     if must_use
@@ -12969,6 +13008,7 @@ impl Checker<'_, '_> {
                         }
                         c.locals[slot].linear |= c.value_moves_linear(&value);
                         c.facts.assign(slot, &value);
+                        c.renew_scalar_index(slot)?;
                         let ty = if value.ty == Type::Never {
                             Type::Never
                         } else {
@@ -14401,7 +14441,7 @@ impl Checker<'_, '_> {
                 if let Some(id) = id
                     && !*mutable
                 {
-                    self.admit_scalar_index(*id, *ty)?;
+                    self.admit_scalar_index(*id, *ty, Span::default())?;
                 }
             }
             for (parameter, ty) in lambda.parameters.iter().zip(&parameters) {
@@ -14411,7 +14451,7 @@ impl Checker<'_, '_> {
                     .is_some_and(Grade::is_one)
                     && self.owned_type(*ty);
                 let id = self.resolution.binder(parameter.span).unwrap();
-                self.admit_scalar_index(id, *ty)?;
+                self.admit_scalar_index(id, *ty, parameter.span)?;
             }
             self.result = result;
             self.result_grade = result_grade;

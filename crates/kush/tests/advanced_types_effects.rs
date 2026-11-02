@@ -177,6 +177,72 @@ fn row_constraint_solver_rejects_ambiguity_and_exclusions() {
 }
 
 // ---------------------------------------------------------------------------
+// Versioned runtime-dependent proofs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mutable_scalar_locals_index_erased_proofs_at_their_current_version() {
+    let source = r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n = 5;
+            let a = keep(n, refl::<i64>(n));
+            n = 7;
+            let b = keep(n, refl::<i64>(n));
+            a + b
+        }"#;
+    assert_eq!(value(source), 12);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 12);
+}
+
+#[test]
+fn an_old_value_proof_cannot_be_reused_after_a_write() {
+    rejects(
+        r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n = 5;
+            let a = keep(n, refl::<i64>(n));
+            n = 6;
+            a + keep(n, refl::<i64>(5))
+        }"#,
+        "proof does not establish",
+    );
+}
+
+#[test]
+fn proof_parameters_survive_unrelated_versioned_binders() {
+    let source = r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn outer(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {panic} {
+            let mut x = 3;
+            x = 4;
+            keep(n, p) + x
+        }
+        fn main() -> i64 ! {panic} { outer(5, refl::<i64>(5)) }"#;
+    assert_eq!(value(source), 9);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 9);
+}
+
+#[test]
+fn mutable_scalar_capture_is_a_frozen_independent_snapshot() {
+    // The closure copies the runtime scalar when it is constructed. Its proof
+    // is about that independent snapshot, not a later value of the mutable
+    // binding, so the write after capture is sound.
+    let source = r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut n = 5;
+            let f = fn() -> i64 ! {alloc, panic} { keep(n, refl::<i64>(n)) };
+            n = 6;
+            f() + n
+        }"#;
+    assert_eq!(value(source), 11);
+}
+
+// ---------------------------------------------------------------------------
 // Runtime-sized inline arrays
 // ---------------------------------------------------------------------------
 

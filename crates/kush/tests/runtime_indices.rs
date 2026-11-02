@@ -234,29 +234,45 @@ fn wrong_and_false_proofs_are_rejected_by_the_kernel() {
 }
 
 #[test]
-fn mutable_branch_loop_and_expression_indices_are_rejected() {
-    rejects(
-        "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
-         fn main() -> i64 ! {panic} { let mut n = 3; keep(n, refl::<i64>(n)) }",
-        "mutable runtime value cannot index",
+fn mutable_indices_use_the_current_version_at_each_call() {
+    assert_eq!(
+        evaluate(
+            "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
+             fn main() -> i64 ! {panic} { let mut n = 3; keep(n, refl::<i64>(n)) }"
+        ),
+        3
     );
+    assert_eq!(
+        evaluate(
+            "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
+             fn main() -> i64 ! {panic} {
+                 let mut n = 3;
+                 if true { n = 4; }
+                 keep(n, refl::<i64>(n))
+             }"
+        ),
+        4
+    );
+    assert_eq!(
+        evaluate(
+            "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {panic} { n }
+             fn main() -> i64 ! {panic} {
+                 let mut n = 0;
+                 while n < 3 { n = n + 1; }
+                 keep(n, refl::<i64>(n))
+             }"
+        ),
+        3
+    );
+    // A proof about an older literal is independent evidence for that literal,
+    // not for the mutable binding's new value.
     rejects(
         "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
          fn main() -> i64 ! {panic} {
-             let mut n = 3;
-             if true { n = 4; }
-             keep(n, refl::<i64>(n))
+             let mut n = 4;
+             keep(n, refl::<i64>(3))
          }",
-        "mutable runtime value cannot index",
-    );
-    rejects(
-        "fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {panic} { n }
-         fn main() -> i64 ! {panic} {
-             let mut n = 0;
-             while n < 3 { n = n + 1; }
-             keep(n, refl::<i64>(n))
-         }",
-        "mutable runtime value cannot index",
+        "proof does not establish",
     );
     // A scalar actual is frozen only when a later proof type actually names it.
     // Independent evaluated arguments keep their normal runtime evaluation.
@@ -416,7 +432,7 @@ fn machine_literals_are_range_checked_and_distinct_from_naturals() {
 }
 
 #[test]
-fn lambda_parameters_can_be_symbolic_indices_but_mutable_captures_cannot() {
+fn lambda_parameters_and_frozen_mutable_captures_are_symbolic_indices() {
     let source = r#"
         fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
         fn main() -> i64 ! {panic} {
@@ -437,17 +453,20 @@ fn lambda_parameters_can_be_symbolic_indices_but_mutable_captures_cannot() {
         }
     "#;
     assert_eq!(evaluate(captured), 42);
-    rejects(
-        r#"
+    // A mutable scalar is copied into the closure environment at construction.
+    // The proof is about that immutable copy, so assigning the outer binding
+    // afterwards cannot invalidate it or reinterpret it at the final value.
+    let frozen = r#"
         fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
         fn main() -> i64 ! {panic, alloc} {
             let mut n = 42;
-            let f: once fn() -> i64 ! {alloc, panic} = fn() -> i64 ! {alloc, panic} { keep(n, refl::<i64>(n)) };
-            f()
+            let f: once fn() -> i64 ! {alloc, panic} =
+                fn() -> i64 ! {alloc, panic} { keep(n, refl::<i64>(n)) };
+            n = 7;
+            f() + n
         }
-        "#,
-        "mutable runtime value cannot index",
-    );
+    "#;
+    assert_eq!(evaluate(frozen), 49);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

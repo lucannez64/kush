@@ -1,8 +1,8 @@
 # Runtime scalar indices in erased proofs
 
 Status: implemented restricted fragment. An executable function may have an
-erased logical parameter whose type depends on an earlier immutable runtime
-parameter or local of an admitted machine carrier (`i64`, `Bool`, or `Unit`).
+erased logical parameter whose type depends on an earlier runtime parameter or
+local of an admitted machine carrier (`i64`, `Bool`, or `Unit`).
 The runtime value is a symbolic kernel index, not a proof: the kernel checks the
 proposition, and the proof is still erased before reference evaluation and
 native lowering.
@@ -99,8 +99,8 @@ An erased logical parameter is elaborated in the callee's open kernel context.
 That context now contains, in source order:
 
 1. earlier erased logical binders (their proposition or logical type);
-2. earlier immutable runtime scalar parameters (`i64`, `Bool`, `Unit` as
-   hypothesis *types*).
+2. earlier runtime scalar parameters and locals (`i64`, `Bool`, `Unit` as
+   hypothesis *types*), with one binder per mutable version.
 
 Later parameter types may mention both. Every entry is validated as a type
 relative to the earlier entries. At a call:
@@ -111,8 +111,8 @@ relative to the earlier entries. At a call:
    evidence is checked against the resulting type in the caller's context.
 
 Runtime type generics, grades, compile-time `Nat` parameters, owning values,
-borrows, containers, and mutable locals are never added to this context. A proof
-type that mentions one fails elaboration instead of approximating it.
+borrows, and containers are never added to this context. A proof type that
+mentions one fails elaboration instead of approximating it.
 
 Aliases are transparent on both sides. A logical alias such as
 `type MyInt = i64;` or `type Same<T: Type, x: T> = Eq<T, x, x>;` works as an
@@ -128,18 +128,21 @@ The central soundness rule is:
 
 Implemented consequences:
 
-- Only **immutable** runtime locals and function/lambda parameters are admitted
-  as symbolic indices. `let mut n = 3; keep(n, refl::<i64>(n))` is rejected,
-  including after an `if` assignment or a loop.
+- Immutable and mutable scalar locals and parameters are admitted as symbolic
+  indices. A proof use translates the **current version** of a mutable local.
+  Assignment appends a fresh kernel binder for the new value instead of
+  rewriting the old hypothesis; a later `refl::<i64>(n)` therefore describes
+  the new value, and an old literal proof such as `refl::<i64>(5)` no longer
+  establishes `Eq<i64, n, n>` after `n = 6`.
 - An actual argument to a scalar-indexed parameter must be a canonical literal
-  or the **name** of an admitted immutable scalar. An arbitrary evaluated
-  expression such as `keep(make(3), refl::<i64>(3))` is rejected with a request
-  to bind an immutable local first. The compiler does not execute user code to
+  or the **name** of an in-scope scalar (immutable or mutable). An arbitrary
+  evaluated expression such as `keep(make(3), refl::<i64>(3))` is rejected with
+  a request to bind a local first. The compiler does not execute user code to
   decide an index.
-- Immutable locals are copied into a closure when captured; a capture of an
-  immutable scalar is therefore frozen and may index the lambda body's proofs.
-  A capture of a mutable binding stays conservatively rejected. Lambda
-  parameters are admitted for the body and scoped to it.
+- A closure capture of a scalar is a **copy made when the closure is
+  constructed**. That copy is an independent immutable snapshot: it may index
+  proofs in the lambda body even if the outer binding is later assigned. The
+  lambda observes the captured value, never the final mutable value.
 - Block scopes truncate symbolic binders, so a proof cannot mention a local
   after its scope. Local shadowing resolves to the innermost binder.
 - A proof parameter cannot be stored in a runtime value, returned as a runtime
@@ -149,10 +152,14 @@ Implemented consequences:
   value) but a bare runtime scalar is rejected as erased evidence of a
   proposition.
 
-This is deliberately conservative. It rejects some frozen expressions that a
-more elaborate def-use analysis could prove stable, but it never accepts a
-proof about an older value after assignment, a branch join, a loop, or a later
-argument mutation.
+The version rule is structural rather than a general def-use solver: each
+assignment produces a new binder for the mutable name, and older proof terms
+keep their own prefix context. It does not attempt to prove that an arbitrary
+expression over a mutable local is unchanged. It never accepts a proof about an
+older value after assignment, a branch join, or a loop iteration. The
+implementation is tested by `crates/kush/tests/advanced_types_effects.rs` with
+current-value proofs, old-literal rejection, unrelated versioned binders, and a
+frozen closure snapshot.
 
 ## 5. Erasure, grades, ownership, and `Prop`
 
@@ -179,11 +186,11 @@ argument mutation.
 Representative rejected forms:
 
 ```text
-let mut n = 3; keep(n, refl::<i64>(n))
-  -> a mutable runtime value cannot index an erased proof
+let mut n = 4; keep(n, refl::<i64>(3))
+  -> proof does not establish the erased proposition (old literal, new value)
 
 keep(make(3), refl::<i64>(3))
-  -> a symbolic proof index must be a literal or the name of an immutable scalar local
+  -> a symbolic proof index must be a literal or the name of an in-scope scalar local
 
 fn f(n: i64, erased p: Eq<Nat, n, n>)
   -> type mismatch: expected Nat, inferred Scalar(I64)
@@ -212,14 +219,15 @@ fn consume(erased p: Eq<i64, 0, 0>); consume(n)
   unit_proof())` works without an extra equality proof. This is a checked
   encoding for `Unit` only; there is no general singleton elimination for other
   types.
-- Only simple immutable `let` names, function/lambda parameters, and immutable
-  closure captures are symbolic. Destructured pattern bindings and temporary
-  compiler slots are conservatively not admitted.
-- An admitted immutable local is a symbolic kernel value, not its source
-  initializer. `let n = 0; keep_zero(n, zero_proof())` does not by itself
-  identify `n` with the literal `0`; pass the literal directly or supply an
-  explicit logical equality proof. This conservative choice keeps freezing
-  simple and avoids reusing an initializer after arbitrary control flow.
+- Only simple `let` names, function/lambda parameters, and scalar closure
+  captures are symbolic. Destructured pattern bindings and temporary compiler
+  slots are conservatively not admitted. A mutable name is admitted at its
+  current version; assignment appends a fresh version binder.
+- An admitted local is a symbolic kernel value, not its source initializer.
+  `let n = 0; keep_zero(n, zero_proof())` does not by itself identify `n` with
+  the literal `0`; pass the literal directly or supply an explicit logical
+  equality proof. This conservative choice keeps freezing simple and avoids
+  reusing an initializer after arbitrary control flow.
 - Runtime scalar values cannot size inline arrays. `[T; n]` still requires a
   compile-time `Nat` length; use `Vec<T>` or `&[T]` for runtime lengths.
 - There is no proof search, implicit argument, tactic, arithmetic solver, or
