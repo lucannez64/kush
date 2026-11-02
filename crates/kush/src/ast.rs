@@ -529,7 +529,9 @@ pub enum PatternKind {
     Bool(bool),
     Tuple(Vec<Pattern>),
     Slice(Vec<Pattern>),
-    Rest,
+    /// `..` or `..name` inside a slice/DynArray pattern. The optional name
+    /// binds the remaining elements (a `DynArray<T, capacity>` copy).
+    Rest(Option<String>),
     Constructor {
         path: Vec<String>,
         fields: Vec<Pattern>,

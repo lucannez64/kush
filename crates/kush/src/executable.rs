@@ -97,11 +97,12 @@ pub(crate) enum Type {
     /// layout never enumerates the trait's members, so adding a generic or
     /// blanket impl instantiation does not change it. See `DynObjectType`.
     DynObj(usize),
-    /// A checked user-defined allocator value: two words, the code pointers of
-    /// a noncapturing `fn(i64) -> Bytes` allocation function and a
-    /// noncapturing `fn(Bytes) -> Unit` release function. It owns nothing, so
-    /// it is copyable; containers store their own copy and never borrow the
-    /// allocator binding.
+    /// A checked user-defined allocator value: three words, the code pointers
+    /// of a noncapturing `fn(i64) -> Bytes` allocation function, a
+    /// noncapturing `fn(Bytes) -> Unit` release function, and an optional
+    /// `fn(Bytes, i64) -> Bytes` growth hook (zero when absent). It owns
+    /// nothing, so it is copyable; containers store their own copy and never
+    /// borrow the allocator binding.
     Allocator,
     /// An owning box whose storage was supplied by a user allocator. Three
     /// words: the allocation code pointer, the release code pointer, and the
@@ -594,6 +595,13 @@ pub(crate) enum AllocVecOp {
     Get,
     /// Append one element, growing the allocator-supplied block if needed.
     Push,
+    /// Fallible append. Growth uses a fresh allocation and reports refusal
+    /// instead of panicking; a refused call returns the unchanged vector and
+    /// the untouched element.
+    TryPush,
+    /// Remove and return the last live element as `(vector, element)`.
+    /// Copyable elements only, so the removed value cannot duplicate an owner.
+    Pop,
     /// Overwrite one live slot, dropping the previous element exactly once.
     Set,
     /// Drop every element and retain the block and metadata.
@@ -710,12 +718,16 @@ pub(crate) enum ExprKind {
         value: Box<Expr>,
         shape: ResultShape,
     },
-    /// Create a user-defined allocator value from two noncapturing functions:
+    /// Create a user-defined allocator value from noncapturing functions:
     /// `alloc(bytes) -> Bytes` supplies a block with at least that capacity, and
     /// `free(block)` releases it. The value is copyable and owns nothing.
     AllocatorNew {
         alloc: Box<Expr>,
         free: Box<Expr>,
+        /// Optional `fn(Bytes, i64) -> Bytes` growth hook used by `AllocVec`
+        /// when it must move an existing block. `None` falls back to the
+        /// allocate-copy-release path.
+        realloc: Option<Box<Expr>>,
     },
     /// Allocate `value` in a block supplied by the allocator. The box stores
     /// the allocator pair so release always uses the same allocator, even if
@@ -889,6 +901,17 @@ pub(crate) enum ExprKind {
         element: Type,
         capacity: usize,
     },
+    /// Elementwise equality of two runtime-sized inline arrays. Both operands
+    /// are read, never moved. Comparable one-word elements (integers, floats,
+    /// `Bool`, and `Char`) are compared with their ordinary `==`; a length
+    /// mismatch is unequal without reading any slot.
+    DynArrayEqual {
+        left: Box<Expr>,
+        right: Box<Expr>,
+        element: Type,
+        capacity: usize,
+        negate: bool,
+    },
     /// Read a local without moving it (only to project copyable fields).
     Peek(usize),
     /// Copy the field at a word offset out of a record value.
@@ -911,6 +934,11 @@ pub(crate) enum ExprKind {
         /// byte stride one, the result type is `&str`, and a checked range also
         /// verifies that both endpoints are UTF-8 scalar boundaries.
         text: bool,
+        /// A view directly over a `DynArray` field of a record place: the
+        /// field index path from the record root. The descriptor aliases the
+        /// live inline storage inside the pinned record, so writes through an
+        /// exclusive view update the record field in place.
+        field: Option<Vec<usize>>,
     },
     While(Box<Expr>, Block),
     Loop(Block),
@@ -1008,7 +1036,6 @@ impl Expr {
             | ExprKind::ArenaTryAlloc {
                 arena: a, value: b, ..
             }
-            | ExprKind::AllocatorNew { alloc: a, free: b }
             | ExprKind::AllocBoxNew {
                 allocator: a,
                 value: b,
@@ -1032,9 +1059,23 @@ impl Expr {
             | ExprKind::DynArrayPush {
                 array: a, value: b, ..
             }
+            | ExprKind::DynArrayEqual {
+                left: a, right: b, ..
+            }
             | ExprKind::BytesAt(a, b) => {
                 f(a);
                 f(b);
+            }
+            ExprKind::AllocatorNew {
+                alloc,
+                free,
+                realloc,
+            } => {
+                f(alloc);
+                f(free);
+                if let Some(realloc) = realloc {
+                    f(realloc);
+                }
             }
             ExprKind::AllocVecNew {
                 allocator,
@@ -1166,6 +1207,17 @@ pub(crate) enum Pattern {
         tag: usize,
         member: Type,
         inner: Box<Pattern>,
+    },
+    /// A length-checked pattern over a runtime-sized inline array. `prefix`
+    /// patterns match the leading live slots; `rest` allows any remaining
+    /// length and `rest_binding` receives a copy of the tail as
+    /// `DynArray<element, capacity>`. Elements must be copyable.
+    DynArray {
+        element: Type,
+        capacity: usize,
+        prefix: Vec<Pattern>,
+        rest: bool,
+        rest_binding: Option<usize>,
     },
 }
 #[derive(Clone)]
@@ -1750,12 +1802,19 @@ fn fusion_expr_safe(
         | ExprKind::TaskCheckCancel
         | ExprKind::TaskCancel(_)
         | ExprKind::TaskJoin { .. } => false,
-        // Allocator construction only packages two code pointers, so it is
+        // Allocator construction only packages code pointers, so it is
         // inert; every container operation can invoke a user callback or
         // allocate, so it is never fusion-safe.
-        ExprKind::AllocatorNew { alloc, free } => {
+        ExprKind::AllocatorNew {
+            alloc,
+            free,
+            realloc,
+        } => {
             safe(alloc, signatures, bodies, memo, visiting)
                 && safe(free, signatures, bodies, memo, visiting)
+                && realloc
+                    .as_deref()
+                    .is_none_or(|realloc| safe(realloc, signatures, bodies, memo, visiting))
         }
         ExprKind::AllocBoxNew { .. }
         | ExprKind::AllocBoxTryNew { .. }
@@ -1829,8 +1888,9 @@ fn fusion_expr_safe(
                 && safe(value, signatures, bodies, memo, visiting)
         }
         ExprKind::Binary(_, left, right)
+        | ExprKind::BytesAt(left, right)
         | ExprKind::StructEq { left, right, .. }
-        | ExprKind::BytesAt(left, right) => {
+        | ExprKind::DynArrayEqual { left, right, .. } => {
             safe(left, signatures, bodies, memo, visiting)
                 && safe(right, signatures, bodies, memo, visiting)
         }
@@ -1968,9 +2028,16 @@ fn fuse_expr(
             fuse_expr(arena, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
         }
-        ExprKind::AllocatorNew { alloc, free } => {
+        ExprKind::AllocatorNew {
+            alloc,
+            free,
+            realloc,
+        } => {
             fuse_expr(alloc, types, signatures, safety, fusions);
             fuse_expr(free, types, signatures, safety, fusions);
+            if let Some(realloc) = realloc {
+                fuse_expr(realloc, types, signatures, safety, fusions);
+            }
         }
         ExprKind::AllocBoxNew { allocator, value }
         | ExprKind::AllocBoxTryNew {
@@ -2034,8 +2101,9 @@ fn fuse_expr(
             fuse_expr(value, types, signatures, safety, fusions);
         }
         ExprKind::Binary(_, left, right)
+        | ExprKind::BytesAt(left, right)
         | ExprKind::StructEq { left, right, .. }
-        | ExprKind::BytesAt(left, right) => {
+        | ExprKind::DynArrayEqual { left, right, .. } => {
             fuse_expr(left, types, signatures, safety, fusions);
             fuse_expr(right, types, signatures, safety, fusions);
         }
@@ -16315,6 +16383,7 @@ impl Checker<'_, '_> {
             true,
             left_name.span,
             None,
+            None,
         )?;
         let mut right = self.slice_from_expr(
             base(right_name.span),
@@ -16324,6 +16393,7 @@ impl Checker<'_, '_> {
             true,
             true,
             right_name.span,
+            None,
             None,
         )?;
         if let ExprKind::Slice { split, .. } = &mut left.kind {
@@ -16765,6 +16835,9 @@ impl Checker<'_, '_> {
                     || self.value_moves_linear(value)
             }
             ExprKind::DynArrayPop { array, .. } => self.value_moves_linear(array),
+            ExprKind::DynArrayEqual { left, right, .. } => {
+                self.value_moves_linear(left) || self.value_moves_linear(right)
+            }
             ExprKind::HandlerPush { body, .. } => body
                 .tail
                 .as_deref()
@@ -16846,8 +16919,9 @@ impl Checker<'_, '_> {
                 | ExprKind::TaskCancel(inner)
                 | ExprKind::TaskJoin { task: inner, .. } => find(checker, inner),
                 ExprKind::Binary(_, left, right)
+                | ExprKind::BytesAt(left, right)
                 | ExprKind::StructEq { left, right, .. }
-                | ExprKind::BytesAt(left, right) => {
+                | ExprKind::DynArrayEqual { left, right, .. } => {
                     find(checker, left).or_else(|| find(checker, right))
                 }
                 ExprKind::RefAssign(reference, _, value) | ExprKind::BoxWrite(reference, value) => {
@@ -17504,7 +17578,8 @@ impl Checker<'_, '_> {
                         ));
                     }
                     c.require(PANIC, span)?;
-                    let view = c.slice_from_expr(base, None, None, element, false, false, span, None)?;
+                    let view =
+                        c.slice_from_expr(base, None, None, element, false, false, span, None, None)?;
                     let index = c.expr_expected(index, Some(Type::I64))?;
                     c.expect(index.ty, Type::I64, index.span)?;
                     let ty = if index.ty == Type::Never {
@@ -17981,6 +18056,50 @@ impl Checker<'_, '_> {
                         c.facts.reset(mark);
                         (left, right?)
                     };
+                    if matches!(op, Kind::EqEq | Kind::Ne)
+                        && left.ty == right.ty
+                        && let Some((element, capacity)) = left
+                            .ty
+                            .layout()
+                            .and_then(|id| c.types.enums[id].dynamic_array)
+                    {
+                        if c.owned_type(element) || c.linear_type(element) || element.is_view()
+                        {
+                            return Err(Diagnostic::new(
+                                span,
+                                "DynArray equality reads elements; owning, linear, and view elements are not comparable",
+                            ));
+                        }
+                        if !matches!(
+                            element,
+                            Type::I64 | Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char
+                        ) {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!(
+                                    "DynArray equality requires comparable one-word elements, found {}",
+                                    c.types.name(element)
+                                ),
+                            ));
+                        }
+                        let ty = if left.ty == Type::Never || right.ty == Type::Never {
+                            Type::Never
+                        } else {
+                            Type::Bool
+                        };
+                        return Ok(Expr {
+                            kind: ExprKind::DynArrayEqual {
+                                left: Box::new(left),
+                                right: Box::new(right),
+                                element,
+                                capacity,
+                                negate: *op == Kind::Ne,
+                            },
+                            ty,
+                            span,
+                            resource: None,
+                        });
+                    }
                     let ty = match op {
                         Kind::Plus | Kind::Minus | Kind::Star | Kind::Slash | Kind::Percent
                         | Kind::Amp | Kind::Pipe | Kind::Caret => {
@@ -18205,7 +18324,21 @@ impl Checker<'_, '_> {
                                         "Allocator.new expects an allocation function and a release function",
                                     ));
                                 }
-                                c.allocator_new(&arguments[0], &arguments[1], span)
+                                c.allocator_new(&arguments[0], &arguments[1], None, span)
+                            }
+                            "Allocator.with_realloc" => {
+                                if arguments.len() != 3 {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        "Allocator.with_realloc expects an allocation function, a release function, and a growth function",
+                                    ));
+                                }
+                                c.allocator_new(
+                                    &arguments[0],
+                                    &arguments[1],
+                                    Some(&arguments[2]),
+                                    span,
+                                )
                             }
                             "AllocBox.new" | "AllocBox.try_new" => {
                                 if arguments.len() != 2 {
@@ -18251,6 +18384,8 @@ impl Checker<'_, '_> {
                             "AllocVec.len"
                             | "AllocVec.get"
                             | "AllocVec.push"
+                            | "AllocVec.try_push"
+                            | "AllocVec.pop"
                             | "AllocVec.set"
                             | "AllocVec.clear" => {
                                 c.alloc_vec_call(&name, arguments, expected, span)
@@ -21032,17 +21167,63 @@ impl Checker<'_, '_> {
         }
         Ok(checked)
     }
+    /// Check one optional realloc hook. It consumes the previous `Bytes` block
+    /// and returns a block with at least `bytes` capacity. The callback may
+    /// allocate or panic; a smaller returned block is a runtime panic, never a
+    /// silent partial move, because the old block was already consumed.
+    fn allocator_realloc_callback(&mut self, value: &ast::Expr, span: Span) -> Result<Expr> {
+        let checked = self.expr(value)?;
+        let Type::Fn(id) = checked.ty else {
+            return Err(Diagnostic::new(
+                span,
+                "Allocator.with_realloc requires a noncapturing 'fn(Bytes, i64, i64) -> Bytes' growth function",
+            ));
+        };
+        let signature = self.types.function_types[id].clone();
+        if signature.parameters != vec![Type::Bytes, Type::I64, Type::I64]
+            || signature.result != Type::Bytes
+            || signature.result_grade.is_some()
+            || signature
+                .parameter_grades
+                .iter()
+                .any(|grade| grade.is_some())
+        {
+            return Err(Diagnostic::new(
+                span,
+                "Allocator.with_realloc expects an exact noncapturing 'fn(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes' growth function; graded parameters/results and other types are rejected",
+            ));
+        }
+        if signature.effects & !(ALLOC | PANIC) != 0 {
+            return Err(Diagnostic::new(
+                span,
+                "Allocator.with_realloc growth callbacks may only declare the 'alloc' and 'panic' effects",
+            ));
+        }
+        Ok(checked)
+    }
     /// Build a user-defined allocator value from an allocation function and a
     /// release function. The result is copyable: containers store their own
     /// copy of the pair, so moving or dropping the allocator binding can never
-    /// leave an allocation without its release function.
-    fn allocator_new(&mut self, alloc: &ast::Expr, free: &ast::Expr, span: Span) -> Result<Expr> {
+    /// leave an allocation without its release function. An optional growth
+    /// hook is stored as a third code pointer; it owns nothing.
+    fn allocator_new(
+        &mut self,
+        alloc: &ast::Expr,
+        free: &ast::Expr,
+        realloc: Option<&ast::Expr>,
+        span: Span,
+    ) -> Result<Expr> {
         let alloc = self.allocator_callback(alloc, true, span)?;
         let free = self.allocator_callback(free, false, span)?;
+        let realloc = realloc
+            .map(|realloc| self.allocator_realloc_callback(realloc, span))
+            .transpose()?
+            .map(Box::new);
         Ok(Expr {
             kind: ExprKind::AllocatorNew {
                 alloc: Box::new(alloc),
                 free: Box::new(free),
+                realloc,
             },
             ty: Type::Allocator,
             span,
@@ -21296,8 +21477,8 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
-    /// Check an `AllocVec` operation. `get`/`len` borrow; `push`/`set`/`clear`
-    /// consume the owning vector and return the same logical container.
+    /// Check an `AllocVec` operation. `get`/`len` borrow; `push`/`try_push`/
+    /// `pop`/`set`/`clear` consume the owning vector and return it.
     fn alloc_vec_call(
         &mut self,
         name: &str,
@@ -21306,8 +21487,8 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Expr> {
         let arity = match name {
-            "AllocVec.len" | "AllocVec.clear" => 1,
-            "AllocVec.get" | "AllocVec.push" => 2,
+            "AllocVec.len" | "AllocVec.clear" | "AllocVec.pop" => 1,
+            "AllocVec.get" | "AllocVec.push" | "AllocVec.try_push" => 2,
             "AllocVec.set" => 3,
             _ => 0,
         };
@@ -21333,9 +21514,11 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            ("AllocVec.clear" | "AllocVec.push" | "AllocVec.set", Type::AllocVec(pointer)) => {
-                self.types.pointees[pointer]
-            }
+            (
+                "AllocVec.clear" | "AllocVec.push" | "AllocVec.try_push" | "AllocVec.pop"
+                | "AllocVec.set",
+                Type::AllocVec(pointer),
+            ) => self.types.pointees[pointer],
             (_, ty) => {
                 return Err(Diagnostic::new(
                     span,
@@ -21350,17 +21533,26 @@ impl Checker<'_, '_> {
             "AllocVec.len" => AllocVecOp::Len,
             "AllocVec.get" => AllocVecOp::Get,
             "AllocVec.push" => AllocVecOp::Push,
+            "AllocVec.try_push" => AllocVecOp::TryPush,
+            "AllocVec.pop" => AllocVecOp::Pop,
             "AllocVec.set" => AllocVecOp::Set,
             _ => AllocVecOp::Clear,
         };
         if matches!(operation, AllocVecOp::Push | AllocVecOp::Clear) {
             self.require(ALLOC | PANIC, span)?;
         }
-        if matches!(operation, AllocVecOp::Get) {
+        if matches!(operation, AllocVecOp::TryPush) {
+            // Refusal is checked, not a panic, but the allocation callback may
+            // itself panic; the caller must declare the callback's effects.
+            self.require(ALLOC | PANIC, span)?;
+        }
+        if matches!(operation, AllocVecOp::Get | AllocVecOp::Pop) {
             if self.owned_type(element) || self.linear_type(element) || element.is_view() {
                 return Err(Diagnostic::new(
                     span,
-                    "AllocVec.get copies its element; owning, linear, and view elements need an explicit consuming operation",
+                    format!(
+                        "{name} copies its element; owning, linear, and view elements need an explicit consuming operation"
+                    ),
                 ));
             }
             self.require(PANIC, span)?;
@@ -21371,19 +21563,24 @@ impl Checker<'_, '_> {
             self.expect(index.ty, Type::I64, index.span)?;
             values.push(index);
         }
-        if matches!(operation, AllocVecOp::Push | AllocVecOp::Set) {
-            let value = self.expr_expected(
-                &arguments[2 - usize::from(operation == AllocVecOp::Push)],
-                Some(element),
-            )?;
+        if matches!(
+            operation,
+            AllocVecOp::Push | AllocVecOp::TryPush | AllocVecOp::Set
+        ) {
+            let value_index = if operation == AllocVecOp::Set { 2 } else { 1 };
+            let value = self.expr_expected(&arguments[value_index], Some(element))?;
             self.expect(value.ty, element, value.span)?;
             values.push(value);
         }
+        let vector = Type::AllocVec(self.types.pointer(element));
         let ty = match operation {
             AllocVecOp::Len => Type::I64,
             AllocVecOp::Get => element,
-            AllocVecOp::Push | AllocVecOp::Set | AllocVecOp::Clear => {
-                Type::AllocVec(self.types.pointer(element))
+            AllocVecOp::Push | AllocVecOp::Set | AllocVecOp::Clear => vector,
+            AllocVecOp::Pop => self.types.tuple(vec![vector, element], span)?,
+            AllocVecOp::TryPush => {
+                let failure = self.types.tuple(vec![vector, element], span)?;
+                self.types.result_type(vector, failure, span)?.0
             }
         };
         let value = Expr {
@@ -21512,6 +21709,43 @@ impl Checker<'_, '_> {
             ));
         }
         self.record_offset(base.ty, name, span)
+    }
+    /// Root local and field-index path of a record-field projection chain.
+    /// Only direct local places have stable storage that both backends can pin
+    /// for a live `DynArray` view; temporaries, calls, and reference
+    /// projections deliberately have no root.
+    fn projection_root(&self, expr: &Expr) -> Option<(usize, Vec<usize>)> {
+        let mut path = Vec::new();
+        let mut current = expr;
+        loop {
+            match &current.kind {
+                ExprKind::Project(base, offset) => {
+                    let id = base.ty.layout().filter(|id| self.types.enums[*id].record)?;
+                    let variant = &self.types.enums[id].variants[0];
+                    let mut field_offset = 1;
+                    let mut index = None;
+                    for (position, field) in variant.fields.iter().enumerate() {
+                        if field_offset == *offset {
+                            index = Some(position);
+                            break;
+                        }
+                        field_offset += self.types.width(*field);
+                    }
+                    path.push(index?);
+                    current = base;
+                }
+                ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot)
+                    if current
+                        .ty
+                        .layout()
+                        .is_some_and(|id| self.types.enums[id].record) =>
+                {
+                    path.reverse();
+                    return Some((*slot, path));
+                }
+                _ => return None,
+            }
+        }
     }
     fn record_offset(&self, ty: Type, name: &str, span: Span) -> Result<(usize, Type)> {
         let Some(id) = ty.layout().filter(|id| self.types.enums[*id].record) else {
@@ -24445,7 +24679,7 @@ impl Checker<'_, '_> {
         span: Span,
         expected: Option<Type>,
     ) -> Result<Expr> {
-        let (base, element, static_length) = if let ast::ExprKind::Slice {
+        let (base, element, static_length, field) = if let ast::ExprKind::Slice {
             value: inner,
             start: inner_start,
             end: inner_end,
@@ -24471,7 +24705,7 @@ impl Checker<'_, '_> {
             let Some(pointer) = base.ty.slice_element() else {
                 unreachable!("slice construction has slice type")
             };
-            (base, self.types.pointees[pointer], None)
+            (base, self.types.pointees[pointer], None, None)
         } else if matches!(value.kind, ast::ExprKind::Field { .. }) {
             // A nested record-field borrow: `outer.inner.view[..]`. The root is
             // still a direct local owner; the projection is checked by the
@@ -24481,22 +24715,46 @@ impl Checker<'_, '_> {
             let checked = self.expr(value);
             self.field_place = old_place;
             let base = checked?;
-            let Some(pointer) = base.ty.slice_element() else {
-                return Err(Diagnostic::new(
-                    value.span,
-                    format!(
-                        "only a borrowed slice field can be sub-sliced through a record projection, found {}",
-                        self.types.name(base.ty)
-                    ),
-                ));
-            };
-            if mutable && !base.ty.is_mut_slice() {
-                return Err(Diagnostic::new(
-                    value.span,
-                    "cannot create an exclusive '&mut [T]' view from a shared record field; shared storage cannot be upgraded",
-                ));
+            if let Some((element, _capacity)) = base
+                .ty
+                .layout()
+                .and_then(|id| self.types.enums[id].dynamic_array)
+            {
+                // A view over a DynArray field of a record place. The record
+                // root must be a direct local so both backends can pin its
+                // storage; the field path identifies the live inline slots.
+                let Some((root, path)) = self.projection_root(&base) else {
+                    return Err(Diagnostic::new(
+                        value.span,
+                        "a DynArray field view requires a record binding rooted at a direct local; bind the record to a local first",
+                    ));
+                };
+                if mutable && !self.locals[root].mutable {
+                    return Err(Diagnostic::new(
+                        value.span,
+                        "cannot create an exclusive '&mut [T]' view of a field of an immutable record binding; declare the record with 'let mut'",
+                    )
+                    .with_note(self.locals[root].span, "record declared here"));
+                }
+                (base, element, None, Some(path))
+            } else {
+                let Some(pointer) = base.ty.slice_element() else {
+                    return Err(Diagnostic::new(
+                        value.span,
+                        format!(
+                            "only a borrowed slice field or a DynArray field can be sub-sliced through a record projection, found {}",
+                            self.types.name(base.ty)
+                        ),
+                    ));
+                };
+                if mutable && !base.ty.is_mut_slice() {
+                    return Err(Diagnostic::new(
+                        value.span,
+                        "cannot create an exclusive '&mut [T]' view from a shared record field; shared storage cannot be upgraded",
+                    ));
+                }
+                (base, self.types.pointees[pointer], None, None)
             }
-            (base, self.types.pointees[pointer], None)
         } else {
             let slot = self.slot(value.span).map_err(|_| {
                 Diagnostic::new(
@@ -24537,29 +24795,32 @@ impl Checker<'_, '_> {
                     },
                     element,
                     Some(length),
+                    None,
                 )
             } else if let Some((element, _capacity)) = ty
                 .layout()
                 .and_then(|id| self.types.enums[id].dynamic_array)
             {
-                if mutable {
-                    return Err(Diagnostic::new(
-                        value.span,
-                        "a DynArray does not expose a mutable '&mut [T]' view; use DynArray.set for checked in-place writes",
-                    ));
-                }
                 // The view covers the live prefix: its length is the runtime
                 // length word, not the compile-time capacity. A reborrow via
                 // `Borrow` keeps the owner loaned for the view's lexical scope,
-                // so push/pop/assignment cannot run while the view is live.
+                // so push/pop/assignment cannot run while the view is live. An
+                // exclusive view requires a mutable binding (checked above) and
+                // is the only way to write slots through the view.
+                let owner = self.types.pointer(ty);
                 (
                     Expr {
                         kind: ExprKind::Borrow(slot),
-                        ty: Type::Ref(self.types.pointer(ty)),
+                        ty: if mutable {
+                            Type::RefMut(owner)
+                        } else {
+                            Type::Ref(owner)
+                        },
                         span: value.span,
                         resource: None,
                     },
                     element,
+                    None,
                     None,
                 )
             } else if let Type::Vec(pointer) = ty {
@@ -24574,6 +24835,7 @@ impl Checker<'_, '_> {
                     },
                     element,
                     None,
+                    None,
                 )
             } else if ty == Type::Bytes {
                 (
@@ -24584,6 +24846,7 @@ impl Checker<'_, '_> {
                         resource: None,
                     },
                     Type::I64,
+                    None,
                     None,
                 )
             } else if ty == Type::String {
@@ -24604,6 +24867,7 @@ impl Checker<'_, '_> {
                     },
                     self.types.pointees[pointer],
                     None,
+                    None,
                 )
             } else if let Type::Slice(pointer) = ty {
                 if mutable {
@@ -24620,6 +24884,7 @@ impl Checker<'_, '_> {
                         resource: None,
                     },
                     self.types.pointees[pointer],
+                    None,
                     None,
                 )
             } else {
@@ -24699,7 +24964,9 @@ impl Checker<'_, '_> {
         if let Some(end) = &end {
             self.expect(end.ty, Type::I64, end.span)?;
         }
-        self.slice_from_expr(base, start, end, element, checked, mutable, span, expected)
+        self.slice_from_expr(
+            base, start, end, element, checked, mutable, span, expected, field,
+        )
     }
     #[allow(clippy::too_many_arguments)]
     fn slice_from_expr(
@@ -24712,6 +24979,7 @@ impl Checker<'_, '_> {
         mutable: bool,
         span: Span,
         expected: Option<Type>,
+        field: Option<Vec<usize>>,
     ) -> Result<Expr> {
         if check {
             self.require(PANIC, span)?;
@@ -24731,6 +24999,7 @@ impl Checker<'_, '_> {
                 check,
                 split: None,
                 text: false,
+                field,
             },
             ty,
             span,
@@ -24782,6 +25051,7 @@ impl Checker<'_, '_> {
                 check,
                 split: None,
                 text: true,
+                field: None,
             },
             ty: Type::Str,
             span,
@@ -27203,14 +27473,67 @@ impl Checker<'_, '_> {
                 });
             }
             if let ast::PatternKind::Slice(parts) = &pattern.kind {
-                if ty
+                if let Some((element, capacity)) = ty
                     .layout()
-                    .is_some_and(|id| c.types.enums[id].dynamic_array.is_some())
+                    .and_then(|id| c.types.enums[id].dynamic_array)
                 {
-                    return Err(Diagnostic::new(
-                        pattern.span,
-                        "DynArray patterns are not supported: the runtime length is not a static variant tag; read DynArray.len and DynArray.get instead",
-                    ));
+                    if c.owned_type(element) || c.linear_type(element) || element.is_view() {
+                        return Err(Diagnostic::new(
+                            pattern.span,
+                            "DynArray patterns copy element bindings; owning, linear, and view elements cannot be matched by value",
+                        ));
+                    }
+                    let mut prefix = Vec::new();
+                    let mut rest = false;
+                    let mut rest_binding = None;
+                    for part in parts {
+                        if let ast::PatternKind::Rest(name) = &part.kind {
+                            if rest {
+                                return Err(Diagnostic::new(
+                                    part.span,
+                                    "a DynArray pattern may contain at most one '..'",
+                                ));
+                            }
+                            rest = true;
+                            rest_binding = match name {
+                                Some(name) => {
+                                    if let Some((slot, previous)) = bindings.get(name) {
+                                        c.expect(ty, *previous, part.span)?;
+                                        Some(*slot)
+                                    } else {
+                                        let slot = c.bind(part.span, ty, false)?;
+                                        bindings.insert(name.clone(), (slot, ty));
+                                        Some(slot)
+                                    }
+                                }
+                                None => None,
+                            };
+                            continue;
+                        }
+                        if rest {
+                            return Err(Diagnostic::new(
+                                part.span,
+                                "a DynArray pattern supports only a trailing '..' or '..name' rest; a suffix after the rest is not implemented",
+                            ));
+                        }
+                        prefix.push(c.pattern(part, element, bindings)?);
+                    }
+                    if prefix.len() > capacity {
+                        return Err(Diagnostic::new(
+                            pattern.span,
+                            format!(
+                                "DynArray pattern has {} element(s) but the capacity is {capacity}",
+                                prefix.len()
+                            ),
+                        ));
+                    }
+                    return Ok(Pattern::DynArray {
+                        element,
+                        capacity,
+                        prefix,
+                        rest,
+                        rest_binding,
+                    });
                 }
                 let Some((element, length)) = ty.layout().and_then(|id| c.types.enums[id].array)
                 else {
@@ -27219,6 +27542,15 @@ impl Checker<'_, '_> {
                         "array pattern requires an inline array",
                     ));
                 };
+                if parts
+                    .iter()
+                    .any(|part| matches!(part.kind, ast::PatternKind::Rest(_)))
+                {
+                    return Err(Diagnostic::new(
+                        pattern.span,
+                        "inline array patterns require an exact element count; use a DynArray for a '..' rest pattern",
+                    ));
+                }
                 if parts.len() != length {
                     return Err(Diagnostic::new(
                         pattern.span,
@@ -27527,10 +27859,13 @@ fn block_allocates(block: &Block) -> bool {
             ExprKind::Loop(block) => block_allocates(block),
             ExprKind::While(condition, block) => expr(condition) || block_allocates(block),
             ExprKind::BytesAt(a, b)
+            | ExprKind::Binary(_, a, b)
             | ExprKind::StructEq {
                 left: a, right: b, ..
             }
-            | ExprKind::Binary(_, a, b) => expr(a) || expr(b),
+            | ExprKind::DynArrayEqual {
+                left: a, right: b, ..
+            } => expr(a) || expr(b),
             ExprKind::RefAssign(reference, _, value) => expr(reference) || expr(value),
             ExprKind::Slice {
                 base, start, end, ..

@@ -2043,15 +2043,6 @@ fn runtime_sized_array_slice_views_cover_the_live_prefix() {
         }"#,
         "owning or linear elements",
     );
-    rejects(
-        r#"
-        fn main() -> i64 ! {panic} {
-            let mut a: DynArray<i64, 4> = [1, 2];
-            let view: &mut [i64] = &mut a[..];
-            0
-        }"#,
-        "does not expose a mutable '&mut [T]' view",
-    );
     // Releasing the view at the end of its block permits a later push.
     let released = r#"
         fn main() -> i64 ! {io, panic} {
@@ -2066,17 +2057,339 @@ fn runtime_sized_array_slice_views_cover_the_live_prefix() {
 }
 
 #[test]
-fn runtime_sized_array_patterns_are_rejected_explicitly() {
+fn runtime_sized_array_mutable_views_write_the_live_prefix() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [10, 20, 30];
+            {
+                let view: &mut [i64] = &mut a[1..3];
+                Slice.set(view, 0, 7);
+                Slice.set(view, 1, 9);
+            }
+            DynArray.len(&a) + DynArray.get(&a, 1) + DynArray.get(&a, 2)
+        }"#;
+    assert_eq!(value(source), 3 + 7 + 9);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 19);
+    // Writes through the view are visible to the owner and survive a later
+    // push after the view is released.
+    let released = r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [1];
+            {
+                let view: &mut [i64] = &mut a[..];
+                Slice.set(view, 0, 5);
+            }
+            let a = DynArray.push(a, 6);
+            DynArray.get(&a, 0) + DynArray.get(&a, 1)
+        }"#;
+    assert_eq!(value(released), 11);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(released, 11);
+    // A mutable view requires a mutable owner and an exclusive range.
     rejects(
         r#"
         fn main() -> i64 ! {panic} {
-            let a: DynArray<i64, 2> = [1, 2];
+            let a: DynArray<i64, 4> = [1, 2];
+            let view: &mut [i64] = &mut a[..];
+            Slice.len(view)
+        }"#,
+        "immutable binding",
+    );
+    // Two exclusive views of the same live prefix alias, so they are rejected.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [1, 2];
+            let first: &mut [i64] = &mut a[..];
+            let second: &mut [i64] = &mut a[..];
+            Slice.len(first) + Slice.len(second)
+        }"#,
+        "another view of the same owner is live",
+    );
+    // A shared view and an exclusive view cannot coexist.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [1, 2];
+            let shared: &[i64] = &a[..];
+            let exclusive: &mut [i64] = &mut a[..];
+            Slice.len(shared) + Slice.len(exclusive)
+        }"#,
+        "cannot create an exclusive",
+    );
+    // The owner cannot be read, pushed, set, popped, moved, or dropped while
+    // the exclusive view is live.
+    for body in [
+        "let b = DynArray.push(a, 3); Slice.len(view) + DynArray.len(&b)",
+        "let b = DynArray.set(a, 0, 3); Slice.len(view) + DynArray.len(&b)",
+        "let (b, _) = DynArray.pop(a); Slice.len(view) + DynArray.len(&b)",
+        "drop(a); Slice.len(view)",
+    ] {
+        let source = format!(
+            r#"
+            fn main() -> i64 ! {{panic}} {{
+                let mut a: DynArray<i64, 4> = [1, 2];
+                let view: &mut [i64] = &mut a[..];
+                {body}
+            }}"#
+        );
+        rejects(&source, "");
+    }
+    // The descriptor length is the live prefix, so an out-of-prefix write
+    // panics instead of touching an uninitialized capacity slot.
+    let out_of_bounds = r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [1, 2];
+            let view: &mut [i64] = &mut a[..];
+            Slice.set(view, 2, 3);
+            0
+        }"#;
+    let program = check(out_of_bounds).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(error.message.contains("index out of bounds"), "{error:?}");
+}
+
+#[test]
+fn runtime_sized_array_field_views_alias_the_record_storage() {
+    let source = r#"
+        struct Holder { tag: i64, xs: DynArray<i64, 4> }
+        fn main() -> i64 ! {panic} {
+            let mut holder = Holder { tag: 5, xs: [10, 20, 30] };
+            {
+                let shared: &[i64] = &holder.xs[..];
+                let middle: &[i64] = &holder.xs[1..3];
+                Slice.len(shared) + Slice.len(middle) + Slice.get(middle, 1)
+            }
+        }"#;
+    assert_eq!(value(source), 3 + 2 + 30);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 35);
+    // An exclusive field view writes the record field in place.
+    let write = r#"
+        struct Inner { xs: DynArray<i64, 4> }
+        struct Holder { tag: i64, inner: Inner }
+        fn main() -> i64 ! {panic} {
+            let mut holder = Holder { tag: 1, inner: Inner { xs: [4, 5, 6] } };
+            {
+                let view: &mut [i64] = &mut holder.inner.xs[1..];
+                Slice.set(view, 0, 50);
+            }
+            let inner = holder.inner;
+            let xs = inner.xs;
+            holder.tag + DynArray.len(&xs) + DynArray.get(&xs, 1)
+        }"#;
+    assert_eq!(value(write), 1 + 3 + 50);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(write, 54);
+    // The field loan blocks replacing or mutating the record while the view
+    // is live, and an exclusive field view needs a mutable record binding.
+    rejects(
+        r#"
+        struct Holder { xs: DynArray<i64, 4> }
+        fn main() -> i64 ! {panic} {
+            let mut holder = Holder { xs: [1] };
+            let view: &[i64] = &holder.xs[..];
+            holder = Holder { xs: [2] };
+            Slice.len(view)
+        }"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    rejects(
+        r#"
+        struct Holder { xs: DynArray<i64, 4> }
+        fn main() -> i64 ! {panic} {
+            let holder = Holder { xs: [1] };
+            let view: &mut [i64] = &mut holder.xs[..];
+            Slice.len(view)
+        }"#,
+        "immutable record binding",
+    );
+    // Moving an affine record while its field view is live is rejected.
+    rejects(
+        r#"
+        struct Holder { xs: DynArray<i64, 4>, boxed: Box<i64> }
+        fn main() -> i64 ! {alloc, panic} {
+            let holder = Holder { xs: [1], boxed: Box.new(2) };
+            let view: &[i64] = &holder.xs[..];
+            let moved = holder;
+            let Holder { xs, boxed } = moved;
+            Slice.len(view) + DynArray.len(&xs) + Box.take(boxed)
+        }"#,
+        "cannot move an owner while it is borrowed",
+    );
+    // A view through a temporary record is not pinned and is rejected.
+    rejects(
+        r#"
+        struct Holder { xs: DynArray<i64, 4> }
+        fn make() -> Holder ! {panic} { Holder { xs: [1] } }
+        fn main() -> i64 ! {panic} {
+            let view: &[i64] = &make().xs[..];
+            Slice.len(view)
+        }"#,
+        "bind the record to a local first",
+    );
+    // A view of a by-value parameter's inline field cannot escape the call.
+    rejects(
+        r#"
+        struct Holder { xs: DynArray<i64, 4> }
+        fn leak(holder: Holder) -> &[i64] ! {} { &holder.xs[..] }
+        fn main() -> Unit ! {} {}"#,
+        "cannot be returned",
+    );
+}
+
+#[test]
+fn runtime_sized_array_equality_compares_the_live_prefix() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let same: DynArray<i64, 4> = [1, 2, 3];
+            let copy: DynArray<i64, 4> = [1, 2, 3];
+            let shorter: DynArray<i64, 4> = [1, 2];
+            let longer: DynArray<i64, 4> = [1, 2, 3, 0];
+            let differs: DynArray<i64, 4> = [1, 2, 4];
+            (if same == copy { 1 } else { 0 })
+                + (if same == shorter { 10 } else { 0 })
+                + (if same == longer { 100 } else { 0 })
+                + (if same == differs { 1000 } else { 0 })
+                + (if same != differs { 1 } else { 0 })
+        }"#;
+    assert_eq!(value(source), 2);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 2);
+    let floats = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<f64, 3> = [1.5, 2.5];
+            let b: DynArray<f64, 3> = [1.5, 2.5];
+            let c: DynArray<f64, 3> = [1.5, 2.75];
+            (if a == b { 1 } else { 0 }) + (if a == c { 10 } else { 0 })
+        }"#;
+    assert_eq!(value(floats), 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(floats, 1);
+    // Owning and non-scalar elements are not comparable by value.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 2> = [Box.new(1)];
+            let b: DynArray<Box<i64>, 2> = [Box.new(1)];
+            if a == b { 1 } else { 0 }
+        }"#,
+        "owning, linear, and view elements are not comparable",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<[i64; 2], 2> = [[1, 2]];
+            let b: DynArray<[i64; 2], 2> = [[1, 2]];
+            if a == b { 1 } else { 0 }
+        }"#,
+        "comparable one-word elements",
+    );
+}
+
+#[test]
+fn runtime_sized_array_patterns_match_length_and_tail() {
+    let source = r#"
+        fn classify(a: DynArray<i64, 4>) -> i64 ! {panic} {
             match a {
+                [] => 0,
+                [x] => x,
+                [x, y] => x + y,
+                [first, ..rest] => first + DynArray.len(&rest),
+                _ => 99
+            }
+        }
+        fn main() -> i64 ! {panic} {
+            let empty: DynArray<i64, 4> = [];
+            let one: DynArray<i64, 4> = [5];
+            let two: DynArray<i64, 4> = [1, 2];
+            let many: DynArray<i64, 4> = [10, 20, 30];
+            classify(empty) + classify(one) + classify(two) + classify(many)
+        }"#;
+    assert_eq!(value(source), 5 + 3 + 12);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 20);
+    // A named rest binds a copy of the tail with the same capacity, so its
+    // prefix is readable and its length is the remaining live count.
+    let tail = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1, 2, 3];
+            match a {
+                [first, ..rest] => first + DynArray.len(&rest) * 10 + DynArray.get(&rest, 1),
+                _ => 0
+            }
+        }"#;
+    assert_eq!(value(tail), 24);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(tail, 24);
+    // Literals and an unnamed rest participate in element patterns.
+    let literal = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [7, 8, 9];
+            match a {
+                [7, y, ..] => y,
+                _ => 0
+            }
+        }"#;
+    assert_eq!(value(literal), 8);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(literal, 8);
+    // A guard can fall through to a later arm, including the catch-all.
+    let guarded = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1, 2];
+            match a {
+                [x, ..] if x == 9 => 100,
                 [x, y] => x + y,
                 _ => 0
             }
+        }"#;
+    assert_eq!(value(guarded), 3);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(guarded, 3);
+    // The runtime length is not statically exhaustive.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1];
+            match a {
+                [] => 0,
+                [x] => x
+            }
         }"#,
-        "DynArray patterns are not supported",
+        "non-exhaustive match",
+    );
+    // An earlier catch-all makes a later length pattern unreachable.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1];
+            match a {
+                _ => 0,
+                [x] => x
+            }
+        }"#,
+        "unreachable match arm",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 2> = [Box.new(1)];
+            match a {
+                [x] => 0,
+                _ => 1
+            }
+        }"#,
+        "owning, linear, and view elements cannot be matched by value",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 2> = [1, 2, 3];
+            a
+        }"#,
+        "capacity",
     );
 }
 

@@ -584,7 +584,20 @@ struct AllocVectorState {
     capacity: usize,
     alloc: usize,
     free: usize,
+    realloc: Option<usize>,
     block: Option<Value>,
+}
+/// One borrowed slice view. Boxed inside `Value` so adding field-view
+/// provenance does not grow every recursive evaluator frame.
+#[derive(Debug, Clone)]
+struct SliceValue {
+    base: Box<Value>,
+    start: usize,
+    len: usize,
+    array: Option<Arc<Mutex<Value>>>,
+    /// When the view is over a `DynArray` field of a record, the field index
+    /// path from the pinned record root in `array`.
+    field: Option<Vec<usize>>,
 }
 #[derive(Debug, Clone)]
 enum Value {
@@ -627,12 +640,7 @@ enum Value {
     /// inline array local, so writes through `&mut [T]` are visible to the
     /// owner. The base is a borrowed Vec/Bytes handle and is never itself a
     /// `Slice` (sub-slices are flattened).
-    Slice {
-        base: Box<Value>,
-        start: usize,
-        len: usize,
-        array: Option<Arc<Mutex<Value>>>,
-    },
+    Slice(Box<SliceValue>),
     /// An inline array local whose storage has been pinned in a shared cell so
     /// a mutable slice view can alias it. Reads materialize a fresh array value.
     ArrayCell(Arc<Mutex<Value>>),
@@ -667,11 +675,13 @@ enum Value {
         items: Vec<Value>,
         capacity: usize,
     },
-    /// A checked user allocator value: the two noncapturing function handles
+    /// A checked user allocator value: the noncapturing function handles
     /// for allocation and release. It owns nothing and is copyable.
     Allocator {
         alloc: usize,
         free: usize,
+        /// Optional growth hook code pointer; zero means none.
+        realloc: Option<usize>,
     },
     /// The heap state of one `AllocBox<T>`: the allocator pair, the `Bytes`
     /// block that owns the payload storage, and the payload itself. The
@@ -932,10 +942,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             .set_box_capacity(id, box_allocation_capacity(words * 8));
         value
     }
-    /// Extract the two function handles of a checked allocator value.
-    fn allocator_pair(&self, value: &Value, span: Span) -> Result<(usize, usize)> {
-        if let Value::Allocator { alloc, free } = value {
-            Ok((*alloc, *free))
+    /// Extract the code pointers of a checked allocator value.
+    fn allocator_pair(&self, value: &Value, span: Span) -> Result<(usize, usize, Option<usize>)> {
+        if let Value::Allocator {
+            alloc,
+            free,
+            realloc,
+        } = value
+        {
+            Ok((*alloc, *free, *realloc))
         } else {
             Err(Diagnostic::new(
                 span,
@@ -987,6 +1002,60 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         let _ = span;
         Ok(())
     }
+    /// Ask a user growth hook to resize one block. The callback consumes the
+    /// previous block and must return a block with at least `bytes` capacity;
+    /// a smaller result is a panic because the old block is already gone.
+    fn allocator_realloc_block(
+        &mut self,
+        realloc: usize,
+        mut block: Value,
+        old_bytes: usize,
+        bytes: usize,
+        span: Span,
+    ) -> Result<Value> {
+        // The evaluator models an allocator block as zero-initialized byte
+        // storage; expose `old_bytes` readable bytes so a copying growth hook
+        // behaves the same way as in the native backend.
+        if let Value::Owned(id) = block
+            && let Some(Value::Buffer { mut data, capacity }) = self.heap.get(id)
+        {
+            data.resize(old_bytes, 0);
+            self.heap.insert(id, Value::Buffer { data, capacity });
+            block = Value::Owned(id);
+        }
+        let grown = self.call(
+            realloc,
+            vec![
+                block,
+                Value::Scalar(old_bytes as i64),
+                Value::Scalar(bytes as i64),
+            ],
+        )?;
+        let capacity = match &grown {
+            Value::Owned(id) => match self.heap.get(*id) {
+                Some(Value::Buffer { capacity, .. }) => capacity,
+                _ => {
+                    return Err(Diagnostic::new(
+                        span,
+                        "internal error: allocator growth callback did not return a Bytes block",
+                    ));
+                }
+            },
+            _ => {
+                return Err(Diagnostic::new(
+                    span,
+                    "internal error: allocator growth callback did not return an owned Bytes block",
+                ));
+            }
+        };
+        if capacity < bytes {
+            return Err(Diagnostic::new(
+                span,
+                format!("panic: allocator growth hook returned a block smaller than {bytes} bytes"),
+            ));
+        }
+        Ok(grown)
+    }
     /// Store an allocator pair and block as one owning metadata cell.
     fn allocate_alloc_box(&mut self, free: usize, block: Value, payload: Value) -> Value {
         self.allocate(Value::AllocBox(Box::new(AllocBoxState {
@@ -1006,7 +1075,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         bytes: usize,
         span: Span,
     ) -> Result<Value> {
-        let (alloc, free) = self.allocator_pair(&allocator, span)?;
+        let (alloc, free, _) = self.allocator_pair(&allocator, span)?;
         let block = self
             .allocator_block(alloc, free, bytes, span)?
             .ok_or_else(|| {
@@ -1026,7 +1095,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         shape: ResultShape,
         span: Span,
     ) -> Result<Value> {
-        let (alloc, free) = self.allocator_pair(&allocator, span)?;
+        let (alloc, free, _) = self.allocator_pair(&allocator, span)?;
         Ok(match self.allocator_block(alloc, free, bytes, span)? {
             Some(block) => Value::Enum {
                 tag: shape.ok_tag,
@@ -1046,7 +1115,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         width: usize,
         span: Span,
     ) -> Result<Value> {
-        let (alloc, free) = self.allocator_pair(&allocator, span)?;
+        let (alloc, free, realloc) = self.allocator_pair(&allocator, span)?;
         let capacity = capacity.unwrap_or(0);
         let block = if capacity == 0 {
             None
@@ -1070,6 +1139,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             capacity,
             alloc,
             free,
+            realloc,
             block,
         }))))
     }
@@ -1419,15 +1489,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     /// subview), so this copies only host-side bytes for a read; it performs no
     /// program allocation.
     fn str_data(&self, value: &Value, span: Span) -> Result<Vec<u8>> {
-        let Value::Slice {
-            base, start, len, ..
-        } = value
-        else {
+        let Value::Slice(view) = value else {
             return Err(Diagnostic::new(
                 span,
                 "internal error: expected a &str view",
             ));
         };
+        let SliceValue {
+            base, start, len, ..
+        } = &**view;
         let Value::Borrowed(id) = base.as_ref() else {
             return Err(Diagnostic::new(
                 span,
@@ -1458,7 +1528,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     "internal ownership error: dangling text owner",
                 )),
             },
-            Value::Slice { .. } => self.str_data(value, span),
+            Value::Slice(_) => self.str_data(value, span),
             _ => Err(Diagnostic::new(
                 span,
                 "internal error: invalid text view source",
@@ -1506,9 +1576,145 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
         }
     }
+    /// Evaluate one slice construction. Kept out of the recursive expression
+    /// match so the evaluator's frame stays small enough for deep user
+    /// recursion (the JSON limit tests exercise that headroom).
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn eval_slice(
+        &mut self,
+        expr: &Expr,
+        base: &Expr,
+        start: &Option<Box<Expr>>,
+        end: &Option<Box<Expr>>,
+        check: bool,
+        text: bool,
+        field: &Option<Vec<usize>>,
+        frame: &mut Frame,
+    ) -> Result<Flow> {
+        let array = if field.is_some() {
+            let slot = projection_root_slot(base).ok_or_else(|| {
+                Diagnostic::new(expr.span, "internal error: field view has no record root")
+            })?;
+            let current = frame.locals[slot].clone();
+            let cell = match current {
+                Value::RecordCell(cell) => cell,
+                value => {
+                    let cell = Arc::new(Mutex::new(value));
+                    frame.locals[slot] = Value::RecordCell(cell.clone());
+                    cell
+                }
+            };
+            Some(cell)
+        } else {
+            match &base.kind {
+                ExprKind::Peek(slot) | ExprKind::Local(slot)
+                    if self.program.functions[frame.function].locals[*slot]
+                        .ty
+                        .layout()
+                        .is_some_and(|id| self.program.enums[id].array.is_some()) =>
+                {
+                    let current = frame.locals[*slot].clone();
+                    let cell = match current {
+                        Value::ArrayCell(cell) => cell,
+                        value => {
+                            let cell = Arc::new(Mutex::new(value));
+                            frame.locals[*slot] = Value::ArrayCell(cell.clone());
+                            cell
+                        }
+                    };
+                    Some(cell)
+                }
+                // A shared DynArray view aliases the pinned record cell, so
+                // later reads see the same live inline storage. The
+                // ownership pass rejects push/pop/assignment while the view
+                // is live, so this shared cell is never mutated behind it.
+                ExprKind::Borrow(slot)
+                    if self.program.functions[frame.function].locals[*slot]
+                        .ty
+                        .layout()
+                        .is_some_and(|id| self.program.enums[id].dynamic_array.is_some()) =>
+                {
+                    let current = frame.locals[*slot].clone();
+                    let cell = match current {
+                        Value::RecordCell(cell) => cell,
+                        value => {
+                            let cell = Arc::new(Mutex::new(value));
+                            frame.locals[*slot] = Value::RecordCell(cell.clone());
+                            cell
+                        }
+                    };
+                    Some(cell)
+                }
+                _ => None,
+            }
+        };
+        let base_value = match (&array, field) {
+            (Some(cell), Some(path)) => {
+                let value = cell.lock().unwrap().clone();
+                navigate_field(&value, path).cloned().ok_or_else(|| {
+                    Diagnostic::new(
+                        expr.span,
+                        "internal error: DynArray field view has no array field",
+                    )
+                })?
+            }
+            (Some(cell), None) => cell.lock().unwrap().clone(),
+            (None, _) => value!(self.expr(base, frame)),
+        };
+        let base_len = self.slice_len(&base_value, expr.span)?;
+        let start = match start {
+            Some(start) => value!(self.expr(start, frame)).scalar(),
+            None => 0,
+        };
+        let end = match end {
+            Some(end) => value!(self.expr(end, frame)).scalar(),
+            None => base_len as i64,
+        };
+        let (start, end) = (usize::try_from(start).ok(), usize::try_from(end).ok());
+        let (Some(start), Some(end)) = (start, end) else {
+            return Err(Diagnostic::new(
+                expr.span,
+                "panic: slice range out of bounds",
+            ));
+        };
+        if check && (start > end || end > base_len) {
+            return Err(Diagnostic::new(
+                expr.span,
+                "panic: slice range out of bounds",
+            ));
+        }
+        if text && check {
+            let bytes = self.text_base_bytes(&base_value, expr.span)?;
+            let boundary = |index: usize| index == bytes.len() || bytes[index] & 0xC0 != 0x80;
+            if !boundary(start) || !boundary(end) {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    "panic: text range is not on Unicode scalar boundaries",
+                ));
+            }
+        }
+        Ok(Flow::Value(match base_value {
+            Value::Slice(prior) => Value::Slice(Box::new(SliceValue {
+                base: prior.base,
+                start: prior.start + start,
+                len: end - start,
+                array: array.or(prior.array),
+                field: field.clone().or(prior.field),
+            })),
+            base => Value::Slice(Box::new(SliceValue {
+                base: Box::new(base),
+                start,
+                len: end - start,
+                array,
+                field: field.clone(),
+            })),
+        }))
+    }
+
     fn slice_len(&self, value: &Value, span: Span) -> Result<usize> {
         match value {
-            Value::Slice { len, .. } => Ok(*len),
+            Value::Slice(view) => Ok(view.len),
             Value::Enum { fields, .. } => Ok(fields.len()),
             Value::DynArray { items, .. } => Ok(items.len()),
             Value::RecordRef(cell) => match &*cell.lock().unwrap() {
@@ -1534,25 +1740,32 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
     }
     fn slice_element(&self, view: &Value, index: usize, span: Span) -> Result<Value> {
-        let Value::Slice {
-            base,
-            start,
-            len,
-            array,
-        } = view
-        else {
+        let Value::Slice(view) = view else {
             return Err(Diagnostic::new(
                 span,
                 "internal error: expected a slice view",
             ));
         };
+        let SliceValue {
+            base,
+            start,
+            len,
+            array,
+            field,
+        } = &**view;
         if index >= *len {
             return Err(Diagnostic::new(span, "panic: slice index out of bounds"));
         }
         let position = start + index;
         if let Some(cell) = array {
             let value = cell.lock().unwrap();
-            return match &*value {
+            let value = match field {
+                Some(path) => navigate_field(&value, path).ok_or_else(|| {
+                    Diagnostic::new(span, "internal error: slice DynArray field is missing")
+                })?,
+                None => &*value,
+            };
+            return match value {
                 Value::Enum { fields, .. } => fields.get(position).cloned().ok_or_else(|| {
                     Diagnostic::new(span, "internal error: slice array index out of bounds")
                 }),
@@ -1590,30 +1803,47 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
     }
     fn slice_set(&mut self, view: &Value, index: usize, value: Value, span: Span) -> Result<()> {
-        let Value::Slice {
-            base,
-            start,
-            len,
-            array,
-        } = view
-        else {
+        let Value::Slice(view) = view else {
             return Err(Diagnostic::new(
                 span,
                 "internal error: expected a slice view",
             ));
         };
+        let SliceValue {
+            base,
+            start,
+            len,
+            array,
+            field,
+        } = &**view;
         if index >= *len {
             return Err(Diagnostic::new(span, "panic: slice index out of bounds"));
         }
         let position = start + index;
         if let Some(cell) = array {
             let mut cell = cell.lock().unwrap();
-            return match &mut *cell {
+            let cell = match field {
+                Some(path) => navigate_field_mut(&mut cell, path).ok_or_else(|| {
+                    Diagnostic::new(span, "internal error: slice DynArray field is missing")
+                })?,
+                None => &mut *cell,
+            };
+            return match cell {
                 Value::Enum { fields, .. } => {
                     let Some(slot) = fields.get_mut(position) else {
                         return Err(Diagnostic::new(
                             span,
                             "internal error: slice array index out of bounds",
+                        ));
+                    };
+                    *slot = value;
+                    Ok(())
+                }
+                Value::DynArray { items, .. } => {
+                    let Some(slot) = items.get_mut(position) else {
+                        return Err(Diagnostic::new(
+                            span,
+                            "internal error: slice DynArray index out of bounds",
                         ));
                     };
                     *slot = value;
@@ -1904,6 +2134,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         op: AllocVecOp,
         element: Type,
         mut args: Vec<Value>,
+        result: Type,
         span: Span,
     ) -> Result<Value> {
         let failure = |message: &str| Diagnostic::new(span, message.to_owned());
@@ -1929,7 +2160,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
                 Ok(state.items[index_of(&args[1], state.items.len())?].clone())
             }
-            AllocVecOp::Push | AllocVecOp::Set => {
+            AllocVecOp::Push | AllocVecOp::TryPush | AllocVecOp::Set => {
                 let Value::Owned(id) = args.remove(0) else {
                     unreachable!("checked owned AllocVec")
                 };
@@ -1946,6 +2177,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     mut capacity,
                     alloc,
                     free,
+                    realloc,
                     mut block,
                 } = *state;
                 if let Some(index) = index {
@@ -1958,6 +2190,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             capacity,
                             alloc,
                             free,
+                            realloc,
                             block,
                         })),
                     );
@@ -1974,11 +2207,56 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         .checked_mul(width)
                         .and_then(|words| words.checked_mul(8))
                         .ok_or_else(|| failure("panic: AllocVec capacity overflow"))?;
-                    let fresh =
+                    // A fallible append always uses the fresh-block path so a
+                    // refusal can leave the vector untouched. The infallible
+                    // path uses the recorded growth hook when one exists.
+                    let fresh = if op == AllocVecOp::TryPush {
                         self.allocator_block(alloc, free, bytes, span)?
-                            .ok_or_else(|| {
-                                failure(&format!("panic: allocator refused a {bytes}-byte block"))
-                            })?;
+                    } else if let Some(realloc) = realloc.filter(|_| block.is_some()) {
+                        let old = block.take().expect("checked existing block");
+                        let old_bytes = items.len() * width * 8;
+                        let grown =
+                            self.allocator_realloc_block(realloc, old, old_bytes, bytes, span)?;
+                        Some(grown)
+                    } else {
+                        self.allocator_block(alloc, free, bytes, span)?
+                    };
+                    let Some(fresh) = fresh else {
+                        if op == AllocVecOp::TryPush {
+                            // Refusal: the vector keeps its elements, length,
+                            // capacity, and block; the element comes back.
+                            self.heap.insert(
+                                id,
+                                Value::AllocVector(Box::new(AllocVectorState {
+                                    items,
+                                    capacity,
+                                    alloc,
+                                    free,
+                                    realloc,
+                                    block,
+                                })),
+                            );
+                            let unchanged = Value::Owned(id);
+                            let shape = result
+                                .layout()
+                                .and_then(|id| self.program.enums[id].result)
+                                .ok_or_else(|| {
+                                    failure(
+                                        "internal error: AllocVec.try_push result is not Result",
+                                    )
+                                })?;
+                            return Ok(Value::Enum {
+                                tag: shape.err_tag,
+                                fields: vec![Value::Enum {
+                                    tag: 0,
+                                    fields: vec![unchanged, value],
+                                }],
+                            });
+                        }
+                        return Err(failure(&format!(
+                            "panic: allocator refused a {bytes}-byte block"
+                        )));
+                    };
                     if let Some(old) = block.take() {
                         self.allocator_release(free, old, span)?;
                     }
@@ -1994,10 +2272,57 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         capacity,
                         alloc,
                         free,
+                        realloc,
                         block,
                     })),
                 );
+                if op == AllocVecOp::TryPush {
+                    let shape = result
+                        .layout()
+                        .and_then(|id| self.program.enums[id].result)
+                        .ok_or_else(|| {
+                            failure("internal error: AllocVec.try_push result is not Result")
+                        })?;
+                    return Ok(Value::Enum {
+                        tag: shape.ok_tag,
+                        fields: vec![Value::Owned(id)],
+                    });
+                }
                 Ok(Value::Owned(id))
+            }
+            AllocVecOp::Pop => {
+                let Value::Owned(id) = args.remove(0) else {
+                    unreachable!("checked owned AllocVec")
+                };
+                let Some(Value::AllocVector(state)) = self.heap.take(id) else {
+                    return Err(failure("internal ownership error: moved AllocVec"));
+                };
+                let AllocVectorState {
+                    mut items,
+                    capacity,
+                    alloc,
+                    free,
+                    realloc,
+                    block,
+                } = *state;
+                let Some(item) = items.pop() else {
+                    return Err(failure("panic: AllocVec is empty"));
+                };
+                self.heap.insert(
+                    id,
+                    Value::AllocVector(Box::new(AllocVectorState {
+                        items,
+                        capacity,
+                        alloc,
+                        free,
+                        realloc,
+                        block,
+                    })),
+                );
+                Ok(Value::Enum {
+                    tag: 0,
+                    fields: vec![Value::Owned(id), item],
+                })
             }
             AllocVecOp::Clear => {
                 let Value::Owned(id) = args.remove(0) else {
@@ -2011,6 +2336,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     capacity,
                     alloc,
                     free,
+                    realloc,
                     block,
                 } = *state;
                 while let Some(item) = items.pop() {
@@ -2023,6 +2349,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         capacity,
                         alloc,
                         free,
+                        realloc,
                         block,
                     })),
                 );
@@ -2639,7 +2966,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
             }
             // A slice view borrows its base and owns nothing.
-            Value::Slice { .. } => {}
+            Value::Slice(_) => {}
             _ => {}
         }
         Ok(())
@@ -3167,7 +3494,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.arena_release(&state)?;
                 payload
             }
-            ExprKind::AllocatorNew { alloc, free } => {
+            ExprKind::AllocatorNew {
+                alloc,
+                free,
+                realloc,
+            } => {
                 let alloc = value!(self.expr(alloc, frame));
                 let free = value!(self.expr(free, frame));
                 let Value::Function {
@@ -3184,9 +3515,24 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 else {
                     unreachable!("checked allocator release callback")
                 };
+                let realloc_function = match realloc {
+                    Some(realloc) => {
+                        let realloc = value!(self.expr(realloc, frame));
+                        let Value::Function {
+                            function,
+                            environment: None,
+                        } = realloc
+                        else {
+                            unreachable!("checked allocator growth callback")
+                        };
+                        Some(function)
+                    }
+                    None => None,
+                };
                 Value::Allocator {
                     alloc: alloc_function,
                     free: free_function,
+                    realloc: realloc_function,
                 }
             }
             ExprKind::AllocBoxNew { allocator, value } => {
@@ -3369,7 +3715,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         self.dyn_array_call(*op, *element, values, expr.span)?
                     }
                     Target::AllocVec(op, element) => {
-                        self.alloc_vec_call(*op, *element, values, expr.span)?
+                        self.alloc_vec_call(*op, *element, values, expr.ty, expr.span)?
                     }
                     Target::Function(index)
                     | Target::ObjectFunction {
@@ -3905,6 +4251,40 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     fields: vec![array, item],
                 }
             }
+            ExprKind::DynArrayEqual {
+                left: left_expr,
+                right: right_expr,
+                element,
+                capacity,
+                negate,
+            } => {
+                let left = value!(self.expr(left_expr, frame));
+                let right = value!(self.expr(right_expr, frame));
+                let (
+                    Value::DynArray {
+                        items: left_items,
+                        capacity: left_capacity,
+                    },
+                    Value::DynArray {
+                        items: right_items,
+                        capacity: right_capacity,
+                    },
+                ) = (&left, &right)
+                else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: DynArray equality received a non-array value",
+                    ));
+                };
+                debug_assert_eq!(*left_capacity, *capacity);
+                debug_assert_eq!(*right_capacity, *capacity);
+                let equal = left_items.len() == right_items.len()
+                    && left_items
+                        .iter()
+                        .zip(right_items)
+                        .all(|(a, b)| comparable_equal(*element, a.scalar(), b.scalar()));
+                Value::Scalar(i64::from(equal != *negate))
+            }
             ExprKind::Local(slot) | ExprKind::Peek(slot) => {
                 self.materialize(frame.locals[*slot].clone())
             }
@@ -3935,104 +4315,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 check,
                 split: _,
                 text,
+                field,
             } => {
-                let array = match &base.kind {
-                    ExprKind::Peek(slot) | ExprKind::Local(slot)
-                        if self.program.functions[frame.function].locals[*slot]
-                            .ty
-                            .layout()
-                            .is_some_and(|id| self.program.enums[id].array.is_some()) =>
-                    {
-                        let current = frame.locals[*slot].clone();
-                        let cell = match current {
-                            Value::ArrayCell(cell) => cell,
-                            value => {
-                                let cell = Arc::new(Mutex::new(value));
-                                frame.locals[*slot] = Value::ArrayCell(cell.clone());
-                                cell
-                            }
-                        };
-                        Some(cell)
-                    }
-                    // A shared DynArray view aliases the pinned record cell, so
-                    // later reads see the same live inline storage. The
-                    // ownership pass rejects push/pop/assignment while the view
-                    // is live, so this shared cell is never mutated behind it.
-                    ExprKind::Borrow(slot)
-                        if self.program.functions[frame.function].locals[*slot]
-                            .ty
-                            .layout()
-                            .is_some_and(|id| self.program.enums[id].dynamic_array.is_some()) =>
-                    {
-                        let current = frame.locals[*slot].clone();
-                        let cell = match current {
-                            Value::RecordCell(cell) => cell,
-                            value => {
-                                let cell = Arc::new(Mutex::new(value));
-                                frame.locals[*slot] = Value::RecordCell(cell.clone());
-                                cell
-                            }
-                        };
-                        Some(cell)
-                    }
-                    _ => None,
-                };
-                let base_value = match &array {
-                    Some(cell) => cell.lock().unwrap().clone(),
-                    None => value!(self.expr(base, frame)),
-                };
-                let base_len = self.slice_len(&base_value, expr.span)?;
-                let start = match start {
-                    Some(start) => value!(self.expr(start, frame)).scalar(),
-                    None => 0,
-                };
-                let end = match end {
-                    Some(end) => value!(self.expr(end, frame)).scalar(),
-                    None => base_len as i64,
-                };
-                let (start, end) = (usize::try_from(start).ok(), usize::try_from(end).ok());
-                let (Some(start), Some(end)) = (start, end) else {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "panic: slice range out of bounds",
-                    ));
-                };
-                if *check && (start > end || end > base_len) {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "panic: slice range out of bounds",
-                    ));
-                }
-                if *text && *check {
-                    let bytes = self.text_base_bytes(&base_value, expr.span)?;
-                    let boundary =
-                        |index: usize| index == bytes.len() || bytes[index] & 0xC0 != 0x80;
-                    if !boundary(start) || !boundary(end) {
-                        return Err(Diagnostic::new(
-                            expr.span,
-                            "panic: text range is not on Unicode scalar boundaries",
-                        ));
-                    }
-                }
-                match base_value {
-                    Value::Slice {
-                        base,
-                        start: prior,
-                        len: _,
-                        array: prior_array,
-                    } => Value::Slice {
-                        base,
-                        start: prior + start,
-                        len: end - start,
-                        array: array.or(prior_array),
-                    },
-                    base => Value::Slice {
-                        base: Box::new(base),
-                        start,
-                        len: end - start,
-                        array,
-                    },
-                }
+                return self.eval_slice(expr, base, start, end, *check, *text, field, frame);
             }
             ExprKind::BytesAt(bytes, index) => {
                 let reference = value!(self.expr(bytes, frame));
@@ -4435,6 +4720,21 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let p = ps.iter().find(|p| pattern_test(p, value)).unwrap();
                 self.activate_pattern(p, value, frame)?;
             }
+            Pattern::DynArray {
+                prefix,
+                rest_binding,
+                ..
+            } => {
+                let Value::DynArray { items, .. } = value else {
+                    unreachable!()
+                };
+                if let Some(slot) = rest_binding {
+                    self.local_active(*slot, frame);
+                }
+                for (pattern, item) in prefix.iter().zip(items) {
+                    self.activate_pattern(pattern, item, frame)?;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -4465,6 +4765,21 @@ fn pattern_test(pattern: &Pattern, value: &Value) -> bool {
             };
             tag == actual && pattern_test(inner, value)
         }
+        Pattern::DynArray { prefix, rest, .. } => {
+            let Value::DynArray { items, .. } = value else {
+                return false;
+            };
+            let length_ok = if *rest {
+                items.len() >= prefix.len()
+            } else {
+                items.len() == prefix.len()
+            };
+            length_ok
+                && prefix
+                    .iter()
+                    .zip(items)
+                    .all(|(pattern, item)| pattern_test(pattern, item))
+        }
     }
 }
 fn pattern_matches(pattern: &Pattern, value: &Value, locals: &mut [Value]) -> bool {
@@ -4493,12 +4808,76 @@ fn pattern_matches(pattern: &Pattern, value: &Value, locals: &mut [Value]) -> bo
             let p = ps.iter().find(|p| pattern_test(p, value)).unwrap();
             pattern_matches(p, value, locals);
         }
+        Pattern::DynArray {
+            capacity,
+            prefix,
+            rest_binding,
+            ..
+        } => {
+            let Value::DynArray { items, .. } = value else {
+                unreachable!()
+            };
+            for (pattern, item) in prefix.iter().zip(items) {
+                pattern_matches(pattern, item, locals);
+            }
+            if let Some(slot) = rest_binding {
+                locals[*slot] = Value::DynArray {
+                    items: items[prefix.len()..].to_vec(),
+                    capacity: *capacity,
+                };
+            }
+        }
         _ => {}
     }
     true
 }
 
 /// Copy the field at a word offset out of a record value.
+/// Compare two one-word DynArray elements with the element type's ordinary
+/// equality. Floats compare numerically; integers compare exactly.
+fn comparable_equal(element: Type, left: i64, right: i64) -> bool {
+    if let Some(kind) = element.int_kind() {
+        crate::int::compare(kind, &crate::lexer::Kind::EqEq, left, right)
+    } else if let Some(kind) = element.float_kind() {
+        crate::float::compare(kind, &crate::lexer::Kind::EqEq, left, right)
+    } else {
+        left == right
+    }
+}
+/// Walk a record field index path into an evaluated record value.
+fn navigate_field<'a>(value: &'a Value, path: &[usize]) -> Option<&'a Value> {
+    let mut current = value;
+    for index in path {
+        let Value::Enum { fields, .. } = current else {
+            return None;
+        };
+        current = fields.get(*index)?;
+    }
+    Some(current)
+}
+fn navigate_field_mut<'a>(value: &'a mut Value, path: &[usize]) -> Option<&'a mut Value> {
+    let mut current = value;
+    for index in path {
+        let Value::Enum { fields, .. } = current else {
+            return None;
+        };
+        current = fields.get_mut(*index)?;
+    }
+    Some(current)
+}
+/// The direct local at the root of a field projection chain.
+fn projection_root_slot(expr: &Expr) -> Option<usize> {
+    let mut current = expr;
+    loop {
+        match &current.kind {
+            ExprKind::Project(base, _) => current = base,
+            ExprKind::Peek(slot) | ExprKind::Local(slot) | ExprKind::Move(slot) => {
+                return Some(*slot);
+            }
+            _ => return None,
+        }
+    }
+}
 fn project(
     pointees: &[Type],
     enums: &[crate::runtime_types::Enum],

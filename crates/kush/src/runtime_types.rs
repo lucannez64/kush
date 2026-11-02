@@ -5193,8 +5193,8 @@ pub(crate) fn width(
         // (data pointer, length, stride, byte-elements flag)
         4
     } else if matches!(ty, Type::Allocator) {
-        // (allocation code pointer, release code pointer)
-        2
+        // (allocation code pointer, release code pointer, optional growth hook)
+        3
     } else if matches!(ty, Type::Once(_)) {
         // (code pointer, owned environment pointer)
         2

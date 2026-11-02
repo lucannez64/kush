@@ -2567,7 +2567,14 @@ impl Checker<'_> {
                 out.insert(*slot);
             }
             ExprKind::Slice { base, .. } => self.collect_view_origins(base, out),
-            ExprKind::Project(..) if expr.ty.is_view() || expr.ty.is_ref() => {
+            ExprKind::Project(..)
+                if expr.ty.is_view()
+                    || expr.ty.is_ref()
+                    || expr
+                        .ty
+                        .layout()
+                        .is_some_and(|id| self.enums[id].dynamic_array.is_some()) =>
+            {
                 out.extend(self.view_loan(expr).origins.iter().copied());
             }
             ExprKind::Coerce { value, .. } => self.collect_view_origins(value, out),
@@ -3298,6 +3305,9 @@ impl Checker<'_> {
                     || self.value_moves_linear(value)
             }
             ExprKind::DynArrayPop { array, .. } => self.value_moves_linear(array),
+            ExprKind::DynArrayEqual { left, right, .. } => {
+                self.value_moves_linear(left) || self.value_moves_linear(right)
+            }
             ExprKind::HandlerPush { body, .. } => body
                 .tail
                 .as_deref()
@@ -4131,9 +4141,16 @@ impl Checker<'_> {
                 self.loans = loans;
             }
             ExprKind::ArenaBoxTake(value) => self.expr(value)?,
-            ExprKind::AllocatorNew { alloc, free } => {
+            ExprKind::AllocatorNew {
+                alloc,
+                free,
+                realloc,
+            } => {
                 self.expr(alloc)?;
                 self.expr(free)?;
+                if let Some(realloc) = realloc {
+                    self.expr(realloc)?;
+                }
             }
             ExprKind::AllocBoxNew { allocator, value }
             | ExprKind::AllocBoxTryNew {
@@ -5721,6 +5738,18 @@ pub(crate) fn pattern_bindings(pattern: &Pattern, slots: &mut BTreeSet<usize>) {
             }
         }
         Pattern::Type { inner, .. } => pattern_bindings(inner, slots),
+        Pattern::DynArray {
+            prefix,
+            rest_binding,
+            ..
+        } => {
+            if let Some(slot) = rest_binding {
+                slots.insert(*slot);
+            }
+            for p in prefix {
+                pattern_bindings(p, slots);
+            }
+        }
         Pattern::Or(ps) => {
             for p in ps {
                 pattern_bindings(p, slots);
@@ -5849,10 +5878,13 @@ pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
                 }
             }
             ExprKind::Binary(_, a, b)
+            | ExprKind::BytesAt(a, b)
             | ExprKind::StructEq {
                 left: a, right: b, ..
             }
-            | ExprKind::BytesAt(a, b) => {
+            | ExprKind::DynArrayEqual {
+                left: a, right: b, ..
+            } => {
                 walk(a, out);
                 walk(b, out);
             }
@@ -6020,8 +6052,15 @@ fn expr_live(
         ExprKind::ArenaNewWith { strategy } => {
             live = expr_live(strategy, live_after, views, heads, exits, out);
         }
-        ExprKind::AllocatorNew { alloc, free } => {
-            live = expr_live(free, live_after, views, heads, exits, out);
+        ExprKind::AllocatorNew {
+            alloc,
+            free,
+            realloc,
+        } => {
+            if let Some(realloc) = realloc {
+                live = expr_live(realloc, live_after, views, heads, exits, out);
+            }
+            live = expr_live(free, &live, views, heads, exits, out);
             live = expr_live(alloc, &live, views, heads, exits, out);
         }
         ExprKind::AllocBoxNew { allocator, value }
@@ -6073,8 +6112,9 @@ fn expr_live(
             live = expr_live(payload, &live, views, heads, exits, out);
         }
         ExprKind::Binary(_, left, right)
+        | ExprKind::BytesAt(left, right)
         | ExprKind::StructEq { left, right, .. }
-        | ExprKind::BytesAt(left, right) => {
+        | ExprKind::DynArrayEqual { left, right, .. } => {
             live = expr_live(right, live_after, views, heads, exits, out);
             live = expr_live(left, &live, views, heads, exits, out);
         }

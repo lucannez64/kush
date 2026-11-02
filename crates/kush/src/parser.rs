@@ -1861,14 +1861,19 @@ impl Parser {
                 let elements = self.separated(Kind::RBracket, |p| {
                     if p.at(&Kind::DotDot) {
                         let span = p.bump().span;
-                        Ok(Node::new(PatternKind::Rest, span))
+                        let name = if matches!(p.current().kind, Kind::Ident(_)) {
+                            Some(p.ident()?)
+                        } else {
+                            None
+                        };
+                        Ok(Node::new(PatternKind::Rest(name), span))
                     } else {
                         p.pattern()
                     }
                 })?;
                 if elements
                     .iter()
-                    .filter(|p| matches!(p.kind, PatternKind::Rest))
+                    .filter(|p| matches!(p.kind, PatternKind::Rest(_)))
                     .count()
                     > 1
                 {

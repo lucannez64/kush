@@ -297,17 +297,22 @@ outstanding implementation item.
 - [ ] Runtime-sized inline arrays with checked lifetime/storage layout.
   **Partial:** `DynArray<T, capacity>` has compile-time capacity, runtime
   length, inline storage, checked push overflow, checked reads, `set`, `pop`,
-  owning-prefix drop, contextual literals, and shared `&[T]` views over the
-  live prefix with owner-loan tracking. Literals are statically bounded by the
-  capacity and use the checked push sequence, so their overflow guards are
-  unreachable and no `panic` effect is added. Views read the runtime length
-  word, use the same slice operations as arrays, and reject owner
-  moves/drops/push/pop while live; a view cannot escape its owner's lexical
-  scope. Still missing: `DynArray` patterns (explicitly rejected because the
-  runtime length is not a static variant tag), mutable `&mut [T]` views
-  (explicitly rejected in favour of `DynArray.set`), views through a projected
-  record field, equality, and runtime `[T; n]`. Capacity remains a compile-time
-  `Nat`. See [dynamic-arrays.md](dynamic-arrays.md).
+  owning-prefix drop, contextual literals, shared `&[T]` views, exclusive
+  `&mut [T]` views over the live prefix with exclusive-loan rules, views
+  through a direct local record's `DynArray` field (including nested fields),
+  elementwise equality for one-word comparable elements, and length-checked
+  patterns with a trailing `..`/`..name` tail binding and mandatory catch-all.
+  Literals are statically bounded by the capacity and use the checked push
+  sequence, so their overflow guards are unreachable and no `panic` effect is
+  added. Views read the runtime length word, use the same slice operations as
+  arrays, reject owner moves/drops/push/set/pop/reads while live, reject
+  aliasing exclusive views, and cannot escape the owner's lexical scope. Still
+  missing: runtime `[T; n]` (the array length in a type annotation remains a
+  compile-time `Nat`; a runtime length is an explicit diagnostic pointing at
+  `Vec<T>`), a pattern suffix after `..`, borrowed-element or recursive
+  element patterns, and views over a `DynArray` inside a reference-based record
+  place or temporary record. Capacity remains a compile-time `Nat`. See
+  [dynamic-arrays.md](dynamic-arrays.md).
 
 ## Memory and optimization
 
@@ -332,27 +337,41 @@ outstanding implementation item.
   callback order, drop behavior, and final stride. `#[noalloc]` rejects all
   three; plain `Box.reuse` and the non-growing map operations keep their
   no-allocating-fallback contracts.
-- [x] Custom allocators and lifetime-safe allocator ownership.
-  **Implemented with a documented boundary:** `Allocator.new(alloc, free)`
-  packages two noncapturing callbacks, `fn(i64) -> Bytes` and
-  `fn(Bytes) -> Unit`, and is a copyable two-code-pointer value that owns
-  nothing. `AllocBox<T>` and `AllocVec<T>` store their own copy of the pair and
-  therefore keep the allocator alive with every allocation: dropping or moving
-  the allocator binding while containers are live is defined and safe, release
-  always uses the pair recorded in the container, and both containers are
-  affine so each block is released exactly once. Allocation callbacks may
-  declare only `alloc`/`panic`; release callbacks must be pure because they
-  also run during implicit drop. A returned `Bytes` block with less than the
-  requested capacity is a refusal: `AllocBox.new` panics, `AllocBox.try_new`
-  returns the untouched payload, and the refusal block is released through the
-  same allocator. `AllocVec` grows by allocating a fresh block, copying live
-  elements, and releasing the old block through the same pair; it drops owning
-  elements and the block exactly once. `Arena`/`ArenaBox` with
-  reference-retained regions, deterministic drop, function/task escape, and
-  `Arena.with_strategy` remain available. Explicit limits: no allocator trait,
-  no FFI or raw-pointer callbacks, no user-supplied per-container metadata
-  allocation (fixed headers are runtime-owned bookkeeping), and no general
-  `realloc` hook. See [memory-completion.md](memory-completion.md#41-user-defined-allocators).
+- [ ] Custom allocators and lifetime-safe allocator ownership.
+  **Partial:** `Allocator.new(alloc, free)` packages two noncapturing
+  callbacks, `fn(i64) -> Bytes` and `fn(Bytes) -> Unit`, and is a copyable
+  code-pointer value that owns nothing. `Allocator.with_realloc(alloc, free,
+  realloc)` adds a checked `fn(Bytes, old_bytes: i64, bytes: i64) -> Bytes`
+  growth hook; `AllocVec` growth uses it when a block already exists, and the
+  hook consumes the old block and returns a block with at least the requested
+  capacity that still contains the live bytes. `AllocBox<T>` and `AllocVec<T>`
+  store their own copy of the callbacks and therefore keep the allocator alive
+  with every allocation: dropping or moving the allocator binding while
+  containers are live is defined and safe, release always uses the copy
+  recorded in the container, and both containers are affine so each block is
+  released exactly once. Allocation callbacks may declare only
+  `alloc`/`panic`; release callbacks must be pure because they also run during
+  implicit drop. A returned `Bytes` block with less than the requested capacity
+  is a refusal: `AllocBox.new` panics, `AllocBox.try_new` returns the untouched
+  payload, and the refusal block is released through the same allocator.
+  `AllocVec.push` uses the growth hook or allocates a fresh block, copies live
+  elements, and releases the old block through the same pair. `AllocVec.try_push`
+  is fallible: refusal returns the unchanged vector and the untouched element
+  in `Err`, preserving every element, length, capacity, and block, and it never
+  uses the growth hook because a refusing hook would already have consumed the
+  old block. `AllocVec.pop` returns `(vector, element)` for copyable elements
+  and panics on an empty vector. `Arena`/`ArenaBox` with reference-retained
+  regions, deterministic drop, function/task escape, and
+  `Arena.with_strategy` remain available. Explicit remaining limits: no user
+  `Allocator` trait and no container type parameter over an allocator type;
+  containers accept the copyable code-pointer value, not an arbitrary
+  instance-carrying implementor. An instance-carrying allocator would need an
+  owned callable environment and a lifetime-safe vtable, and the language has
+  no FFI, raw pointers, or `unsafe`, so this remains an explicit language
+  boundary rather than a silent partial implementation. Also absent:
+  user-supplied per-container metadata allocation (fixed headers are
+  runtime-owned bookkeeping) and FFI/raw-pointer callbacks. See
+  [memory-completion.md](memory-completion.md#41-user-defined-allocators).
 - [x] Fallible allocation/reuse with exact cleanup on all failure paths.
   **Implemented:** `Box.try_new`, growth-capable `Box.try_reuse`,
   `Bytes.try_with_capacity`, `Vec.try_reserve`, `Arena.try_alloc`, and
@@ -975,3 +994,59 @@ mutable/consuming dispatch on projected fields, a projection required before any
 member of an object specialization is registered, multi-trait `dyn A + B`, and
 effect-row trait parameters (which the trait grammar does not support at all).
 See [traits.md](traits.md).
+
+## DynArray and allocator remainder checkpoint
+
+This checkout implements the remaining executable DynArray and allocator
+features on top of `15f62d3`:
+
+- `DynArray` now has exclusive `&mut [T]` views over the live prefix (with
+  `Slice.set` write-through and exclusive-loan rules), views through a direct
+  local record's `DynArray` field including nested fields, elementwise
+  `==`/`!=` for one-word comparable elements, and length-checked patterns with
+  a trailing `..`/`..name` tail binding. A pattern match over a runtime length
+  must end in an unguarded catch-all; a suffix after `..`, owning/linear/view
+  element bindings, and reference-based record places remain explicit,
+  tested rejections.
+- User allocators gain an optional checked growth hook
+  (`Allocator.with_realloc`) used by `AllocVec` growth, plus fallible
+  `AllocVec.try_push` (refusal returns the unchanged vector and untouched
+  element) and `AllocVec.pop` for copyable elements. The growth hook consumes
+  the previous block and observes its live byte count; a short returned block
+  panics rather than losing vector state.
+- Runtime `[T; n]` remains an explicit diagnostic; `DynArray` capacity is still
+  a compile-time `Nat`. No user `Allocator` trait, instance-carrying allocator,
+  container allocator parameter, FFI/raw-pointer callback, or per-element free
+  was added. The custom-allocator item therefore remains partial.
+
+Local Linux x86-64 validation used
+`CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/close-dynarray` with debug
+information disabled and two Cargo jobs:
+
+- Full `cargo test -p kush --offline -j 2`: **961 passed, 0 failed**.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p kush --all-targets --offline -j 2 -- -D warnings`: passed.
+
+New coverage lives in `crates/kush/tests/advanced_types_effects.rs` (mutable
+and field views, equality, patterns, hostile aliasing/move/drop/out-of-range
+cases, native/reference agreement and balanced cleanup) and
+`crates/kush/tests/allocator_containers.rs` (growth hook, fallible refusal with
+state and owning-element preservation, `pop`, and hostile hook signatures,
+effects, and short blocks). The remote Boat gate was not run from this
+checkout.
+
+## Combined queued-branch integration
+
+The row/proof, borrowed-record container/lifetime, generic dynamic method, and
+DynArray/allocator follow-ups are merged together after the `f6e5405` evaluator
+stack fix. Shared projected receivers retain checked owner loans; mutable and
+consuming projected dispatch remain rejected. Dynamic-method effect arguments
+use the full sixteen-bit row representation.
+
+The allocator merge also visits the realloc callback expression in native
+analyses, preserving literals and initializer cleanup. Reference evaluation
+stores the optional growth hook as `Option<usize>` so function index zero is a
+valid callback rather than a no-hook sentinel. Positive/refusal, initializer,
+first-declared-hook, DynArray, and JSON suites pass in both backends (95 focused
+tests). Full local and Boat combined validation is pending. Each feature's
+remaining explicit boundaries above remain outstanding.

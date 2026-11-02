@@ -263,16 +263,37 @@ let box = AllocBox.new(allocator, 41);
 let vector: AllocVec<i64> = AllocVec.with_capacity(allocator, 4);
 ```
 
+A third, optional growth hook extends the same value:
+
+```rust
+fn block_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+    // copy `old_bytes` from `block` into a fresh `bytes`-capacity block and
+    // release `block`
+}
+let growing = Allocator.with_realloc(block_alloc, block_free, block_grow);
+```
+
 - `Allocator.new(alloc, free)` requires two **noncapturing** function values:
   `fn(bytes: i64) -> Bytes` and `fn(block: Bytes) -> Unit`. The allocation
   callback may declare only `alloc` and `panic`; the release callback must have
   the empty effect row because it also runs during implicit drop. Graded
   parameters/results, captures, and other signatures are rejected.
-- The allocator value is two code pointers. It owns nothing and is copyable, so
-  passing it to a container copies it. A container stores its own pair; moving
+- The allocator value is three code pointers (allocation, release, and an
+  optional growth hook; zero means none). It owns nothing and is copyable, so
+  passing it to a container copies it. A container stores its own copy; moving
   or dropping the allocator binding can never leave an allocation without its
-  release function, and release always selects the pair recorded in the
+  release function, and release always selects the copy recorded in the
   container, so a mismatched allocator is not a reachable operation.
+- `Allocator.with_realloc(alloc, free, realloc)` additionally stores
+  `fn(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes`, which must be
+  noncapturing and may declare only `alloc` and `panic`. It consumes the
+  previous block, observes `old_bytes` readable bytes, and returns a block with
+  at least `bytes` capacity that still contains those bytes. A smaller returned
+  block panics because the previous block is already gone. `AllocVec` growth
+  uses this hook when the vector already has a block; the first block and the
+  fallible path use the ordinary allocation callback. The hook owns nothing
+  beyond the block it consumes and returns, so moving or dropping the allocator
+  binding remains safe.
 - The allocation callback supplies actual storage as an owned `Bytes` block
   with at least the requested capacity. A smaller block is a refusal, and the
   same release callback consumes that block before the refusal is reported, so
@@ -287,20 +308,42 @@ let vector: AllocVec<i64> = AllocVec.with_capacity(allocator, 4);
 - `AllocVec<T>` owns metadata (length, capacity, element width, allocator pair,
   block) plus one allocator-supplied element block. `AllocVec.new` starts empty;
   `AllocVec.with_capacity(allocator, n)` requests `n` element slots.
-  `len`/`get` borrow; `push` grows by allocating one fresh block, copying the
-  live elements, and releasing the previous block through the same pair;
-  `set` drops the replaced element exactly once; `clear` drops every element in
-  reverse order and retains the block; dropping the vector drops live elements,
-  releases the block, and frees the metadata header. `get` is limited to
-  copyable, non-linear elements.
+  `len`/`get` borrow; `push` grows through the recorded growth hook when one
+  exists and otherwise allocates one fresh block, copies the live elements, and
+  releases the previous block through the same pair; `try_push` is the fallible
+  append. It returns the conventional `Result<AllocVec<T>, (AllocVec<T>, T)>`:
+  `Ok` is the grown vector, and `Err` returns the unchanged vector together with
+  the untouched element. A refusal preserves every element, length, capacity,
+  block, and the element. `try_push` deliberately ignores the growth hook,
+  because a hook that cannot honor the request has already consumed the old
+  block; it always uses the fresh-block path so refusal can be exact. `pop`
+  removes and returns the last element as `(AllocVec<T>, T)`, requires a
+  nonempty vector, and copies its element, so it is limited to copyable,
+  non-linear elements. `set` drops the replaced element exactly once; `clear`
+  drops every element in reverse order and retains the block; dropping the
+  vector drops live elements, releases the block, and frees the metadata
+  header. `get` is limited to copyable, non-linear elements.
 - The blocks are real owned allocations and participate in the ordinary
   allocation diagnostics. Growth increments `buffer-growths` once. The fixed
   per-container metadata headers are runtime-owned bookkeeping, like the arena
   descriptor, and are not supplied to the user allocator.
 - Tests exercise a dropped/moved allocator binding while boxes and vectors are
   live, shared use of the copyable allocator value, refusal with payload
-  preservation, growth reuse-by-release, owning elements, balanced reference
-  and native counters, and hostile signature/duplication rejections.
+  preservation, growth reuse-by-release, growth through a realloc hook with
+  element preservation, fallible `try_push` refusal with vector and owning
+  element returned, `pop`, owning elements, balanced reference and native
+  counters, and hostile signature/effect/short-block rejections.
+
+Remaining boundary for this item: there is no user-defined `Allocator` trait and
+no allocator generic parameter on `AllocBox`/`AllocVec`. Containers accept the
+copyable code-pointer value, not an arbitrary type implementing `alloc`/`free`.
+An instance-carrying allocator cannot be represented by the code-pointer value
+because that value owns no environment, and the language has no FFI, raw
+pointers, or `unsafe`; adding such a representation would need an owned callable
+environment and a lifetime-safe vtable, neither of which is part of this
+subset. A checked allocator value therefore remains the explicit composition
+mechanism: package noncapturing functions, pass the copyable value, and let
+every container store its own copy.
 
 ### 4.2 The built-in `Arena`
 
@@ -411,10 +454,12 @@ or a proof obligation.
 
 ## Explicitly still absent
 
-- an allocator trait, FFI, or raw-pointer callbacks; user allocators are the
-  record-of-two-noncapturing-functions form above and supply `Bytes` blocks;
-- allocator-owned per-container metadata headers, a general `realloc` hook, or
-  per-element free inside `AllocVec`/an arena;
+- an allocator trait, FFI, or raw-pointer callbacks, and a container generic
+  parameter over an allocator type; user allocators are the copyable
+  code-pointer value form above and supply `Bytes` blocks;
+- allocator-owned per-container metadata headers or per-element free inside
+  `AllocVec`/an arena. A growth hook is available, but it is a checked
+  `Bytes`-block realloc, not an FFI/pointer realloc;
 - per-value free or compaction inside an arena;
 - automatic fusion of effectful (`io`, `panic`, `suspend`), recursive, looping,
   or indirectly called callbacks;
