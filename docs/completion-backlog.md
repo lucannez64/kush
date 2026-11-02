@@ -191,6 +191,33 @@ trace-free/total equivalence rather than silently changing the language's
 evaluation semantics; the unresolved general cases are listed in
 [memory-completion.md](memory-completion.md#unresolved-generality).
 
+## Advanced types and effects validation
+
+The six advanced items are implemented as the restricted fragments above, not
+as the complete v0.1 dependent/algebraic/effect calculus. Local evidence:
+
+```sh
+CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/types-effects \
+  CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo test -p kush --offline -j 6
+cargo fmt --all -- --check
+cargo clippy -p kush --all-targets --offline
+```
+
+The full workspace test run for this branch passed 778 tests across 58 test
+binaries, with formatting and Clippy clean. The new
+`crates/kush/tests/advanced_types_effects.rs` covers positive execution,
+rejection diagnostics, native/reference agreement, and owning cleanup for all
+six items. Existing exact-grade, trait, borrowing, async, runtime-index, and
+subtyping suites still pass unchanged except for the deliberate
+mutable-index/frozen-capture relaxations documented in
+[runtime-indices.md](runtime-indices.md).
+
+Baseline note: commit `3e478cf` did not compile in this checkout because a
+stale `result_linear` field was present in a `Function` literal at
+`crates/kush/src/executable.rs:8361`; that unrelated field was removed to
+restore compilation before this area's work.
+
 ## Completion evidence
 
 Each item needs positive and rejection tests, native/reference agreement where
