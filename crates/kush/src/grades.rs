@@ -1621,6 +1621,16 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
+            ExprKind::AllocatorContextNew { value, .. } => {
+                if !self.expr(value, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::AllocatorContextShare(value) => {
+                if !self.expr(value, multiplier)? {
+                    return Ok(false);
+                }
+            }
             ExprKind::AllocBoxNew { allocator, value }
             | ExprKind::AllocBoxTryNew {
                 allocator, value, ..

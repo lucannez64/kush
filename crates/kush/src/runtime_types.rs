@@ -1392,6 +1392,7 @@ impl<'a> Types<'a> {
             Type::Arena => "Arena".into(),
             Type::ArenaBox(p) => format!("ArenaBox<{}>", self.name(self.pointees[p])),
             Type::Allocator => "Allocator".into(),
+            Type::AllocatorContext => "AllocatorContext".into(),
             Type::AllocBox(p) => format!("AllocBox<{}>", self.name(self.pointees[p])),
             Type::AllocVec(p) => format!("AllocVec<{}>", self.name(self.pointees[p])),
             Type::Vec(p) => format!("Vec<{}>", self.name(self.pointees[p])),
@@ -1668,6 +1669,7 @@ impl<'a> Types<'a> {
                     | Type::String
                     | Type::Vec(_)
                     | Type::Allocator
+                    | Type::AllocatorContext
                     | Type::AllocBox(_)
                     | Type::AllocVec(_)
             ) {
@@ -2472,6 +2474,7 @@ impl<'a> Types<'a> {
                         "String" => return Ok(Type::String),
                         "Arena" => return Ok(Type::Arena),
                         "Allocator" => return Ok(Type::Allocator),
+                        "AllocatorContext" => return Ok(Type::AllocatorContext),
                         "str" => {
                             return Err(Diagnostic::new(
                                 ty.span,

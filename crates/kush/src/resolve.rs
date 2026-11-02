@@ -379,6 +379,9 @@ impl Resolver {
             "Allocator",
             "Allocator.new",
             "Allocator.with_realloc",
+            "AllocatorContext",
+            "AllocatorContext.new",
+            "AllocatorContext.share",
             "AllocBox",
             "AllocBox.new",
             "AllocBox.try_new",
@@ -656,6 +659,12 @@ impl Resolver {
                     }
                 };
                 let id = self.global(name, kind, item.span)?;
+                // The allocator protocol is injected ahead of user items but
+                // must be nameable from every module without an import.
+                if matches!(&item.kind, ItemKind::Trait { name, .. } if name == "AllocatorProtocol")
+                {
+                    self.builtins.insert(name.clone(), id);
+                }
                 if declaration.public {
                     self.result.public.insert(id);
                 }

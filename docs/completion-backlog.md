@@ -337,8 +337,9 @@ outstanding implementation item.
   callback order, drop behavior, and final stride. `#[noalloc]` rejects all
   three; plain `Box.reuse` and the non-growing map operations keep their
   no-allocating-fallback contracts.
-- [ ] Custom allocators and lifetime-safe allocator ownership.
-  **Partial:** `Allocator.new(alloc, free)` packages two noncapturing
+- [x] Custom allocators and lifetime-safe allocator ownership.
+  **Implemented:** the legacy copyable `Allocator.new(alloc, free)` value
+  packages two noncapturing
   callbacks, `fn(i64) -> Bytes` and `fn(Bytes) -> Unit`, and is a copyable
   code-pointer value that owns nothing. `Allocator.with_realloc(alloc, free,
   realloc)` adds a checked `fn(Bytes, old_bytes: i64, bytes: i64) -> Bytes`
@@ -362,15 +363,27 @@ outstanding implementation item.
   old block. `AllocVec.pop` returns `(vector, element)` for copyable elements
   and panics on an empty vector. `Arena`/`ArenaBox` with reference-retained
   regions, deterministic drop, function/task escape, and
-  `Arena.with_strategy` remain available. Explicit remaining limits: no user
-  `Allocator` trait and no container type parameter over an allocator type;
-  containers accept the copyable code-pointer value, not an arbitrary
-  instance-carrying implementor. An instance-carrying allocator would need an
-  owned callable environment and a lifetime-safe vtable, and the language has
-  no FFI, raw pointers, or `unsafe`, so this remains an explicit language
-  boundary rather than a silent partial implementation. Also absent:
-  user-supplied per-container metadata allocation (fixed headers are
-  runtime-owned bookkeeping) and FFI/raw-pointer callbacks. See
+  `Arena.with_strategy` remain available. The checked stateful protocol is the
+  real `AllocatorProtocol` trait: a concrete owned record instance implements
+  `alloc(&mut Self, ...)`, `free(&mut Self, ...)`, and
+  `grow(&mut Self, ...)` with exact checked signatures and effect rows.
+  `AllocatorContext.new(instance)` moves that state behind a compiler-owned,
+  reference-counted context; `AllocatorContext.share(&context)` adds an
+  explicit reference, and the last reference runs the state's ordinary drop
+  glue exactly once. Containers retain the context, so they may outlive the
+  creating binding, cross functions, and move into structured tasks.
+  `AllocBox`/`AllocVec` accept either the legacy copyable value or an owning
+  context. Fallible refusal returns every owner and releases the operation's
+  context reference exactly once; growth uses the instance's `grow` with the
+  private typed-payload preservation. Affine copying, borrowed/task/linear
+  state, nested contexts, and non-record instances are explicit checked
+  rejections. Explicit remaining limits: containers are runtime
+  allocator-parameterized but `AllocBox<T>`/`AllocVec<T>` still take no static
+  allocator type parameter (the context erases the concrete instance behind
+  compiler-owned thunks), and `dyn AllocatorProtocol` is not accepted as the
+  concrete state. Also absent: user-supplied per-container metadata allocation
+  (fixed headers are runtime-owned bookkeeping) and FFI/raw-pointer callbacks.
+  See
   [memory-completion.md](memory-completion.md#41-user-defined-allocators).
 - [x] Fallible allocation/reuse with exact cleanup on all failure paths.
   **Implemented:** `Box.try_new`, growth-capable `Box.try_reuse`,
@@ -1092,3 +1105,44 @@ Local focused borrowing-safety suite: 8 passed. The full Boat gate passed
 **1014 tests**, formatting, and Clippy; sandbox `bx_3m6vs6ah` was confirmed
 stopped afterwards. Log: `/tmp/kush-boat-loop-provenance-gate.log` (machine-local).
 The unchecked feature items above remain outstanding.
+
+## Allocator instance protocol checkpoint
+
+This checkout closes the custom-allocator item as far as the checked subset
+allows, on top of `edb98f1`:
+
+- `f81bd4d` injects the built-in `AllocatorProtocol` trait, adds the affine
+  `AllocatorContext` type, and carries instance state through
+  `AllocatorContext.new`/`share` and both backends. The concrete state is moved
+  into compiler-owned reference-counted storage with checked `alloc`/`free`/
+  `grow` method pointers and a generated drop thunk. `AllocBox`/`AllocVec`
+  accept either the legacy copyable `Allocator` value or a context, retain the
+  context reference, release the user block first, and destroy the state exactly
+  once after the last reference. Fallible box refusal releases the operation's
+  context reference; vector refusal keeps the unchanged vector and element.
+  Growth keeps the private typed-payload preservation and zeroed hook view.
+- `19d534f` adds reference/native coverage for state-dependent success and
+  refusal, sharing and dropping the original binding, owning state cleanup,
+  context-backed growth and hostile typed-payload overwrites, affine-copy and
+  borrowed-state rejections, wrong/missing protocol methods, and a structured
+  task and function boundaries, including a context passed and returned as an
+  ordinary function value. Task programs check balanced native cleanup
+  separately because scheduler bookkeeping is not part of the allocator-parity
+  contract.
+
+Local Linux x86-64 validation used mbx exclusively with
+`CARGO_TARGET_DIR=$HOME/.cache/kush-mbx-allocator-instances`, debug information
+disabled, and two jobs:
+
+- Full `mbx test -p kush --offline -j 2`: **1021 passed, 0 failed**.
+- `mbx fmt --all -- --check`: passed.
+- `mbx clippy -p kush --all-targets --offline -j 2 -- -D warnings`: passed.
+
+Explicit remaining limits: `AllocBox<T>`/`AllocVec<T>` are runtime
+allocator-parameterized, not statically generic over an allocator type; the
+context erases the concrete instance behind compiler-owned thunks. Contexts
+cannot hold borrowed state, and `dyn AllocatorProtocol` is not accepted in place
+of a concrete state record. There is still no FFI/raw-pointer callback and no
+user-supplied per-container metadata allocation. The full Boat gate for this
+checkpoint is pending.
+
