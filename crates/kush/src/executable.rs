@@ -23727,9 +23727,7 @@ impl Checker<'_, '_> {
             .collect::<Vec<_>>();
         let resume = self.resumption_continuation(
             captures,
-            result_id,
-            result_ty,
-            mutable,
+            (result_id, result_ty, mutable),
             suffix,
             body.tail.as_deref(),
             span,
@@ -23769,9 +23767,8 @@ impl Checker<'_, '_> {
     fn resumption_continuation(
         &mut self,
         captures: Vec<usize>,
-        result_id: Option<crate::resolve::BindingId>,
-        result_ty: Type,
-        result_mutable: bool,
+        // The perform's result binding: its name, type, and `mut`-ness.
+        (result_id, result_ty, result_mutable): (Option<crate::resolve::BindingId>, Type, bool),
         statements: &[ast::Statement],
         tail: Option<&ast::Expr>,
         span: Span,
