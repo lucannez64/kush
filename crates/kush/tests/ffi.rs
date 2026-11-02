@@ -84,6 +84,16 @@ void kush_test_counter_release(int64_t handle) {
     live--;
 }
 
+int64_t kush_test_take_plus(int64_t handle, int64_t n) {
+    Counter *counter = (Counter *)(uintptr_t)handle;
+    int64_t result = counter->value + n;
+    kush_test_counter_release(handle);
+    return result;
+}
+int64_t kush_test_counter_try(int64_t start, int64_t *out) {
+    *out = kush_test_counter_new(start); return 0;
+}
+uint64_t kush_test_echo_u64(uint64_t x) { return x; }
 int64_t kush_test_live(void) { return live; }
 "#;
 
@@ -661,4 +671,139 @@ fn cli_build_accepts_localized_link_flags() {
         .output()
         .unwrap();
     assert_eq!(rejected.status.code(), Some(2));
+}
+
+#[test]
+fn foreign_resource_layout_matches_calls_containers_and_result_slots() {
+    let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+    let archive = build_c_library(scratch.path());
+    let source = format!(
+        r#"{RESULT}
+        #[foreign("kush_test_counter_release")] struct H {{}}
+        foreign "kush_test_counter_new" fn make(x: i64) -> H ! {{io}};
+        foreign "kush_test_take_plus" fn take(h: H, n: i64) -> i64 ! {{io}};
+        foreign "kush_test_counter_try" fn try_make(x: i64) -> Result<H, i64> ! {{io}};
+        foreign "kush_test_echo_u64" fn echo(x: u64) -> u64 ! {{io}};
+        foreign "kush_test_live" fn live() -> i64 ! {{io}};
+        struct P {{ a: H, b: i64 }}
+        fn pass(h: H, x: i64) -> i64 ! {{io}} {{ x }}
+        fn main() -> Unit ! {{io, alloc, panic}} {{
+            let h = make(100);
+            print_i64(take(h, 7));
+            print_i64(pass(make(3), 7));
+            {{ let p = P {{ a: make(2), b: 5 }}; print_i64(p.b); }};
+            {{ let pair = (make(3), 9); print_i64(pair.1); }};
+            {{ let array: [H; 2] = [make(4), make(5)]; drop(array); }};
+            {{ let v: Vec<H> = Vec.with_capacity(1); let v = Vec.push(v, make(6)); drop(v); }};
+            {{ let boxed = Box.new(make(7)); drop(boxed); }};
+            let h = match try_make(30) {{ Ok(h) => h, Err(_) => make(0) }};
+            print_i64(take(h, 12));
+            print_i64(if echo(18446744073709551615) == 18446744073709551615 {{ 1 }} else {{ 0 }});
+            print_i64(live());
+        }}"#
+    );
+    let program = check(&source).unwrap();
+    let output = scratch.path().join("resource-layout");
+    build_with_options(
+        &program,
+        &output,
+        true,
+        &LinkSpec {
+            libraries: vec![archive],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let result = Command::new(output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"107\n7\n5\n9\n42\n1\n0\n");
+}
+
+#[test]
+fn foreign_borrowed_results_and_owned_buffer_inputs_are_rejected() {
+    for ty in ["&str", "&Bytes", "&String", "&H"] {
+        rejects(
+            &format!(
+                r#"#[foreign("release")] struct H {{}}
+            foreign "f" fn f(x: {ty}) -> {ty} ! {{io}};
+            fn main() -> Unit ! {{}} {{}}"#
+            ),
+            "foreign result type",
+        );
+        rejects(
+            &format!(
+                r#"{RESULT} #[foreign("release")] struct H {{}}
+            foreign "f" fn f(x: {ty}) -> Result<{ty}, i64> ! {{io}};
+            fn main() -> Unit ! {{}} {{}}"#
+            ),
+            "foreign Result Ok type",
+        );
+    }
+    for ty in ["Bytes", "Unit"] {
+        rejects(
+            &format!(
+                "foreign \"take\" fn take(x: {ty}) -> i64 ! {{io}}; fn main() -> Unit ! {{}} {{}}"
+            ),
+            "foreign parameter type",
+        );
+    }
+}
+
+#[test]
+fn cargo_selects_the_requested_adapter_not_its_staticlib_dependency() {
+    let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+    fs::create_dir_all(scratch.path().join("dep/src")).unwrap();
+    fs::create_dir_all(scratch.path().join("adapter/src")).unwrap();
+    fs::write(scratch.path().join("dep/Cargo.toml"), "[package]\nname=\"static_dep\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[lib]\ncrate-type=[\"rlib\",\"staticlib\"]\n").unwrap();
+    fs::write(
+        scratch.path().join("dep/src/lib.rs"),
+        "pub fn answer() -> i64 { 42 }",
+    )
+    .unwrap();
+    fs::write(scratch.path().join("adapter/Cargo.toml"), "[package]\nname=\"selected_adapter\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[lib]\ncrate-type=[\"staticlib\"]\n[dependencies]\nstatic_dep={path=\"../dep\"}\n").unwrap();
+    fs::write(scratch.path().join("adapter/src/lib.rs"), r#"#[unsafe(no_mangle)] pub extern "C" fn adapter_answer() -> i64 { static_dep::answer() }"#).unwrap();
+    let archive =
+        kush::native::build_cargo_static_library(&scratch.path().join("adapter/Cargo.toml"))
+            .unwrap();
+    assert_eq!(archive.file_name().unwrap(), "libselected_adapter.a");
+    let program = check(r#"foreign "adapter_answer" fn answer() -> i64 ! {io}; fn main() -> i64 ! {io} { answer() }"#).unwrap();
+    let binary = scratch.path().join("selected-adapter");
+    build_with_options(
+        &program,
+        &binary,
+        false,
+        &LinkSpec {
+            libraries: vec![archive],
+            system_libraries: vec!["pthread".into(), "dl".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(Command::new(binary).status().unwrap().code(), Some(42));
+}
+
+#[test]
+fn native_links_reject_response_files_and_package_escape_paths() {
+    let links = LinkSpec {
+        libraries: vec!["@arguments".into()],
+        ..Default::default()
+    };
+    assert!(
+        links
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("must not start")
+    );
+    let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+    for path in ["../escape.a", "/tmp/escape.a"] {
+        assert!(LinkSpec::from_project_native(scratch.path(), &[path.into()], &[], &[]).is_err());
+    }
+    let links = LinkSpec::from_project_native(scratch.path(), &["libsample.so.1".into()], &[], &[])
+        .unwrap();
+    assert_eq!(links.libraries, vec![scratch.path().join("libsample.so.1")]);
 }

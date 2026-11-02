@@ -2137,9 +2137,9 @@ impl LinkSpec {
             if path.as_os_str().is_empty() {
                 return Err(error("a native link input path must not be empty"));
             }
-            if path.to_string_lossy().starts_with('-') {
+            if path.to_string_lossy().starts_with(['-', '@']) {
                 return Err(error(format!(
-                    "native link input '{}' must not start with '-'; write an explicit path",
+                    "native link input '{}' must not start with '-' or '@'; write an explicit path",
                     path.display()
                 )));
             }
@@ -2202,8 +2202,19 @@ impl LinkSpec {
                 || library.ends_with(".a")
                 || library.ends_with(".o")
                 || library.ends_with(".so")
+                || library.contains(".so.")
                 || library.ends_with(".dylib");
             if path_like {
+                let path = Path::new(library);
+                if path.is_absolute()
+                    || path
+                        .components()
+                        .any(|part| matches!(part, std::path::Component::ParentDir))
+                {
+                    return Err(error(
+                        "native library paths must be relative to their package and may not contain '..'",
+                    ));
+                }
                 spec.libraries.push(root.join(library));
             } else {
                 spec.system_libraries.push(library.clone());
@@ -2259,67 +2270,37 @@ pub fn build_cargo_static_library(manifest: &Path) -> Result<PathBuf> {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        if !line.contains("\"reason\":\"compiler-artifact\"") || !line.contains("\"staticlib\"") {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message["reason"] != "compiler-artifact" {
             continue;
         }
-        if let Some(path) = first_json_path_ending(line, ".a") {
-            return Ok(path);
+        let Some(path) = message["manifest_path"].as_str() else {
+            continue;
+        };
+        if Path::new(path) != manifest {
+            continue;
+        }
+        if !message["target"]["crate_types"]
+            .as_array()
+            .is_some_and(|types| types.iter().any(|ty| ty == "staticlib"))
+        {
+            continue;
+        }
+        if let Some(archive) = message["filenames"].as_array().and_then(|files| {
+            files
+                .iter()
+                .filter_map(|file| file.as_str())
+                .find(|file| Path::new(file).extension().is_some_and(|ext| ext == "a"))
+        }) {
+            return Ok(PathBuf::from(archive));
         }
     }
     Err(error(format!(
         "native adapter '{}' did not emit a static library; set `crate-type = [\"staticlib\"]` in its [lib] section",
         manifest.display()
     )))
-}
-
-/// Extract the first string inside a JSON `"filenames":[...]` array that ends
-/// with `suffix`. Cargo controls this stream; the parser only accepts complete
-/// quoted paths and rejects malformed escapes rather than guessing.
-fn first_json_path_ending(line: &str, suffix: &str) -> Option<PathBuf> {
-    let start = line.find("\"filenames\":[")? + "\"filenames\":[".len();
-    let mut characters = line[start..].chars().peekable();
-    loop {
-        while characters
-            .peek()
-            .is_some_and(|c| c.is_whitespace() || *c == ',')
-        {
-            characters.next();
-        }
-        match characters.peek()? {
-            ']' => return None,
-            '"' => {
-                characters.next();
-            }
-            _ => return None,
-        }
-        let mut value = String::new();
-        loop {
-            match characters.next()? {
-                '"' => break,
-                '\\' => match characters.next()? {
-                    '"' => value.push('"'),
-                    '\\' => value.push('\\'),
-                    '/' => value.push('/'),
-                    'n' => value.push('\n'),
-                    't' => value.push('\t'),
-                    'r' => value.push('\r'),
-                    'u' => {
-                        let mut code = 0u32;
-                        for _ in 0..4 {
-                            code = code.checked_mul(16)?;
-                            code += characters.next()?.to_digit(16)?;
-                        }
-                        value.push(char::from_u32(code)?);
-                    }
-                    _ => return None,
-                },
-                character => value.push(character),
-            }
-        }
-        if value.ends_with(suffix) {
-            return Some(PathBuf::from(value));
-        }
-    }
 }
 
 /// Compile and link atomically in the output's directory. No shell expansion or
@@ -4685,7 +4666,7 @@ impl Generator<'_, '_> {
                         Type::Bool => {
                             arguments.push(self.builder.ins().ireduce(ir::types::I32, word))
                         }
-                        Type::Int(kind) if *kind != IntKind::I64 => {
+                        Type::Int(kind) if !matches!(kind, IntKind::I64 | IntKind::U64) => {
                             arguments.push(self.builder.ins().ireduce(abi_value_type(*ty), word))
                         }
                         Type::Float(FloatKind::F64) => arguments.push(self.builder.ins().bitcast(
@@ -4769,6 +4750,7 @@ impl Generator<'_, '_> {
                 self.builder.ins().uextend(I64, low)
             }
             Type::Bool => self.builder.ins().uextend(I64, value),
+            Type::Int(IntKind::I64 | IntKind::U64) => value,
             Type::Int(kind) if kind.signed() => self.builder.ins().sextend(I64, value),
             Type::Int(_) => self.builder.ins().uextend(I64, value),
             _ => value,

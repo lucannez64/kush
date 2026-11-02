@@ -1557,20 +1557,8 @@ pub struct ForeignFunctionInfo {
 /// rather than guessed at the backend.
 fn foreign_value_supported(types: &Types<'_>, ty: Type) -> bool {
     match ty {
-        Type::Unit
-        | Type::Bool
-        | Type::I64
-        | Type::Int(_)
-        | Type::Float(_)
-        | Type::Str
-        | Type::Bytes => true,
+        Type::Bool | Type::I64 | Type::Int(_) | Type::Float(_) | Type::Str => true,
         Type::Enum(id) => types.enums[id].foreign.is_some(),
-        // A shared reference to an opaque resource is a borrowed handle: the
-        // callee must not retain it past the call. `&Bytes`/`&String` pass an
-        // existing byte-contiguous buffer as `(pointer, length)` without
-        // copying or ownership transfer. Inline `&[u8]` arrays are deliberately
-        // excluded: their elements live in one checked word each, not in the
-        // byte-contiguous layout a C pointer would imply.
         Type::Ref(pointer) => match types.pointees[pointer] {
             Type::Enum(id) => types.enums[id].foreign.is_some(),
             Type::Bytes | Type::String => true,
@@ -1583,7 +1571,11 @@ fn foreign_result_supported(types: &Types<'_>, ty: Type, error: bool) -> bool {
     if error {
         return ty == Type::I64;
     }
-    matches!(ty, Type::Unit) || foreign_value_supported(types, ty)
+    match ty {
+        Type::Unit | Type::Bytes | Type::Bool | Type::I64 | Type::Int(_) | Type::Float(_) => true,
+        Type::Enum(id) => types.enums[id].foreign.is_some(),
+        _ => false,
+    }
 }
 /// Validate the checked signature of a foreign declaration. The caller already
 /// required a concrete, monomorphic, non-erased signature with `io` in its row.

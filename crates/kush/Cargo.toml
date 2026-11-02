@@ -15,3 +15,4 @@ cranelift-module = "=0.135.0"
 cranelift-native = "=0.135.0"
 cranelift-object = "=0.135.0"
 toml = { version = "=1.1.8", default-features = false, features = ["parse", "serde", "std"] }
+serde_json = "=1.0.150"

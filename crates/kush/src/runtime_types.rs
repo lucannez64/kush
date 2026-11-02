@@ -3883,6 +3883,10 @@ impl<'a> Types<'a> {
             if let Some(size) = sizes[id] {
                 return Ok(size);
             }
+            if enums[id].foreign.is_some() {
+                sizes[id] = Some(1);
+                return Ok(1);
+            }
             if active[id] {
                 return Err(Diagnostic::new(
                     span,
