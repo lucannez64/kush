@@ -169,33 +169,44 @@ outstanding implementation item.
   and multi-variable backtracking remain out of scope. See
   [subtyping.md](subtyping.md#contextual-and-algebraic-inference).
 - [ ] Effect handlers and checked resumption ownership. **Partial:** lexical
-  one-shot tail-resumptive `handle`/`perform`, nested shadowing, first-class
-  handler callables, a linear identity resumption token, handler-effect
-  propagation, owning payload/cleanup checks, and declared `effect` operations
-  with a dynamic one-shot handler stack across called functions work in both
-  backends. The dynamic stack stores pure noncapturing `fn` handlers and
-  restores its depth on early returns. A dynamically resolved `perform`
-  requires `panic`, since a missing handler aborts. Captured continuations, non-tail
-  continuation capture, multishot handlers, capturing dynamic handlers,
-  task-crossing dynamic frames, and user-defined effect-row names are not
-  implemented; `resume` remains an identity operation result. See
-  [effect-handlers.md](effect-handlers.md).
+  one-shot `handle`/`perform`, nested shadowing, first-class handler callables,
+  a linear resumption token, handler-effect propagation, owning payload/cleanup
+  checks, and declared `effect` operations with a dynamic one-shot handler
+  stack across called functions work in both backends. A tail `perform` keeps
+  the allocation-free identity token; a `perform` that is the whole value of a
+  top-level statement now lowers to a real one-shot continuation closure, so
+  the handler can run code after `resume(x)` returns. The continuation fragment
+  requires exactly one such perform, the body result to equal the operation
+  result, no `return`/`break`/`continue` through the resumption, and rejects
+  mutable/borrowed captures; a capturing continuation requires `alloc`. The
+  dynamic stack stores pure noncapturing `fn` handlers and restores its depth
+  on early returns. A dynamically resolved `perform` requires `panic`, since a
+  missing handler aborts. General expression-context and multi-prompt
+  continuations, non-tail dynamic resumption, multishot handlers, capturing
+  dynamic handlers, task-crossing dynamic frames, and user-defined effect-row
+  names are not implemented. See [effect-handlers.md](effect-handlers.md).
 - [ ] General row constraints beyond concrete exclusions. **Partial:** a finite
-  constraint solver accumulates inclusion constraints across every higher-order
-  argument, supports up to three unbound row variables (4096 assignments),
-  unions evidence from repeated row variables, applies exclusion bounds,
-  applies required-effect (`+`) lower bounds, and rejects ambiguous/nonminimal
-  groups. There is no row subtraction, recursive row unification, or open-row
-  principal inference. See
+  Boolean constraint solver accumulates inclusion constraints across every
+  higher-order argument, supports up to three unbound row variables (4096
+  assignments), unions evidence from repeated row variables, supports union and
+  subtraction inside declared rows (`{e - io}`), applies exclusion and
+  required-effect (`+`) lower bounds, and rejects ambiguous/nonminimal groups.
+  The unique componentwise-minimal solution is the principal row for solved
+  groups, but an unconstrained open row variable is still rejected rather than
+  defaulted to `{}`. There is no recursive row unification, row aliasing, or
+  general first-class row difference. See
   [effect-constraints.md](effect-constraints.md#accumulated-row-constraints).
 - [ ] Broader runtime-dependent proofs with mutation/version tracking.
   **Partial:** mutable scalar locals index erased proofs at their current
-  version; assignment appends a fresh versioned binder, an old literal proof is
-  rejected against the new value, a by-value scalar alias keeps the copied
-  binder across later mutation, and a closure capture is an independent frozen
-  snapshot. Proof-valued runtime locals, mutable captures as a live view, branch
-  or loop join inference, and arithmetic proof search remain absent. See
-  [runtime-indices.md](runtime-indices.md#4-freezing-and-mutation).
+  version; assignment appends a fresh versioned binder or records an assigned
+  canonical literal; an old literal proof is rejected against the new value; a
+  by-value scalar alias keeps the copied binder across later mutation; a
+  closure capture is an independent frozen snapshot. Branch joins keep an
+  index only when every reaching branch agrees, and loop joins invalidate a
+  changed scalar to a fresh binder. Erased proof-valued locals can alias
+  checked logical terms and be re-passed to erased parameters. Mutable captures
+  as a live view and arithmetic proof search remain absent. See
+  [runtime-indices.md](runtime-indices.md#4-freezing-mutation-and-joins).
 - [ ] Runtime-sized inline arrays with checked lifetime/storage layout.
   **Partial:** `DynArray<T, capacity>` has compile-time capacity, runtime
   length, inline storage, checked push overflow, checked reads, `set`, `pop`,
