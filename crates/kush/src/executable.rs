@@ -1645,6 +1645,9 @@ struct Functions<'a> {
     object_traits: BTreeMap<Type, Vec<(BindingId, TraitArguments)>>,
     /// Checked dynamic-dispatch functions, one per `(trait, arguments, method)`.
     dynamic_dispatch: BTreeMap<(BindingId, TraitArguments, String), usize>,
+    /// Associated-type values agreed by every concrete impl of one object
+    /// specialization. Used for `Self.Item` in object-safe method signatures.
+    object_associated: BTreeMap<(BindingId, TraitArguments), BTreeMap<String, Type>>,
     logical: &'a crate::check::LogicalEnvironment,
 }
 const MAX_FUNCTIONS: usize = 256;
@@ -1693,6 +1696,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         impl_instantiation_cache: BTreeMap::new(),
         object_traits: BTreeMap::new(),
         dynamic_dispatch: BTreeMap::new(),
+        object_associated: BTreeMap::new(),
         logical: &logical,
     };
     let mut monomorphic = Vec::new();
@@ -2685,6 +2689,58 @@ fn type_mentions_self(ty: &ast::Type) -> bool {
     }
 }
 
+/// Like [`type_mentions_self`], but `Self.Assoc` for an associated type that is
+/// agreed by every object impl is a concrete ABI type and is allowed.
+fn type_mentions_self_outside_assoc(ty: &ast::Type, allowed: &BTreeSet<String>) -> bool {
+    match &ty.kind {
+        ast::TypeKind::SelfType => true,
+        ast::TypeKind::Named { path, arguments } => {
+            if path.len() == 2
+                && path[0] == "Self"
+                && arguments.is_empty()
+                && allowed.contains(&path[1])
+            {
+                return false;
+            }
+            path.first().is_some_and(|name| name == "Self")
+                || arguments
+                    .iter()
+                    .any(|argument| type_mentions_self_outside_assoc(argument, allowed))
+        }
+        ast::TypeKind::Tuple(arguments) => arguments
+            .iter()
+            .any(|argument| type_mentions_self_outside_assoc(argument, allowed)),
+        ast::TypeKind::Dyn(inner) => type_mentions_self_outside_assoc(inner, allowed),
+        ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => {
+            type_mentions_self_outside_assoc(inner, allowed)
+        }
+        ast::TypeKind::Borrow { inner, .. } => type_mentions_self_outside_assoc(inner, allowed),
+        ast::TypeKind::Array(inner, length) => {
+            type_mentions_self_outside_assoc(inner, allowed)
+                || type_mentions_self_outside_assoc(length, allowed)
+        }
+        ast::TypeKind::Binary { left, right, .. } => {
+            type_mentions_self_outside_assoc(left, allowed)
+                || type_mentions_self_outside_assoc(right, allowed)
+        }
+        ast::TypeKind::Function {
+            parameters,
+            result,
+            effects,
+            ..
+        } => {
+            parameters
+                .iter()
+                .any(|parameter| type_mentions_self_outside_assoc(&parameter.ty, allowed))
+                || type_mentions_self_outside_assoc(result, allowed)
+                || effects
+                    .iter()
+                    .any(|effect| type_mentions_self_outside_assoc(effect, allowed))
+        }
+        _ => false,
+    }
+}
+
 /// Allocate one synthetic function binding for every trait default that an impl
 /// inherits, keyed by the impl declaration's start offset and the method name.
 /// This is a syntactic pre-pass: it does not type-check, and it must run before
@@ -3621,6 +3677,13 @@ fn prepare_trait_objects<'a>(
                 break;
             }
         }
+        let associated_type_names = definition
+            .associated
+            .iter()
+            .filter_map(|(name, item)| {
+                matches!(item, TraitAssociated::Type).then_some(name.clone())
+            })
+            .collect::<BTreeSet<_>>();
         if reason.is_none() {
             for (name, method) in &definition.methods {
                 let f = method.function;
@@ -3659,10 +3722,10 @@ fn prepare_trait_objects<'a>(
                     ));
                     break;
                 }
-                if let Some(parameter) = f.parameters[1..]
-                    .iter()
-                    .find(|parameter| parameter.erased || type_mentions_self(&parameter.ty))
-                {
+                if let Some(parameter) = f.parameters[1..].iter().find(|parameter| {
+                    parameter.erased
+                        || type_mentions_self_outside_assoc(&parameter.ty, &associated_type_names)
+                }) {
                     reason = Some(if parameter.erased {
                         format!(
                             "method '{name}' has an erased proof parameter; proof terms cannot be erased through dynamic dispatch"
@@ -3674,7 +3737,7 @@ fn prepare_trait_objects<'a>(
                     });
                     break;
                 }
-                if type_mentions_self(&f.result) {
+                if type_mentions_self_outside_assoc(&f.result, &associated_type_names) {
                     reason = Some(format!(
                         "method '{name}' mentions 'Self' in its result, so dynamic dispatch would erase the concrete result type"
                     ));
@@ -3693,19 +3756,14 @@ fn prepare_trait_objects<'a>(
             ));
         }
         let mut groups: BTreeMap<TraitArguments, Vec<Type>> = BTreeMap::new();
+        let mut object_associated: BTreeMap<TraitArguments, BTreeMap<String, Type>> =
+            BTreeMap::new();
         if reason.is_none() {
             let mut concrete: Vec<(TraitArguments, Type, ImplAssociated)> = Vec::new();
             for header in &functions.impl_headers {
                 if header.trait_id == Some(trait_id)
                     && let Some((arguments, member)) = &header.concrete
                 {
-                    if !matches!(member.full(), Type::Enum(_)) {
-                        reason = Some(format!(
-                            "concrete impl target '{}' is not a nominal record or enum; dyn objects must own inline values",
-                            types.name(*member)
-                        ));
-                        break;
-                    }
                     concrete.push((arguments.clone(), *member, header.associated.clone()));
                 }
             }
@@ -3713,15 +3771,13 @@ fn prepare_trait_objects<'a>(
                 if concrete.is_empty() {
                     reason = Some(format!("trait '{trait_name}' has no concrete impls"));
                 } else {
-                    let mut associated_types: BTreeMap<TraitArguments, BTreeMap<String, Type>> =
-                        BTreeMap::new();
                     let mut associated_consts: BTreeMap<
                         TraitArguments,
                         BTreeMap<String, ConstValue>,
                     > = BTreeMap::new();
                     for (arguments, member, associated) in &concrete {
                         groups.entry(arguments.clone()).or_default().push(*member);
-                        let types_entry = associated_types.entry(arguments.clone()).or_default();
+                        let types_entry = object_associated.entry(arguments.clone()).or_default();
                         for (name, value) in &associated.types {
                             let lowered =
                                 types.ty_in(value, &crate::runtime_types::Subst::default())?;
@@ -3778,7 +3834,23 @@ fn prepare_trait_objects<'a>(
                 ));
                 break;
             }
-            let object = types.union(members, resolution.bindings[trait_id].span)?;
+            let object = match types.union(members, resolution.bindings[trait_id].span) {
+                Ok(object) => object,
+                Err(error) => {
+                    // A trait with many impls that is never used as `dyn` must
+                    // not make an otherwise valid program fail.
+                    reason = Some(format!(
+                        "cannot build a closed-world union: {}",
+                        error.message
+                    ));
+                    break;
+                }
+            };
+            if let Some(values) = object_associated.get(&arguments) {
+                functions
+                    .object_associated
+                    .insert((trait_id, arguments.clone()), values.clone());
+            }
             types
                 .dyn_objects
                 .insert((trait_id, arguments.clone()), object);
@@ -4595,7 +4667,6 @@ fn collect_generic_impl<'a>(
                         format!("duplicate item '{name}' in one impl"),
                     ));
                 }
-                validate_impl_pattern(resolution, types, value, &generic_ids, "associated value")?;
                 impl_associated.types.insert(name.clone(), value.clone());
             }
             ast::Associated::Const {
@@ -5581,6 +5652,69 @@ impl<'a> Functions<'a> {
         let instantiated_self =
             impl_arguments.map(|index| self.impl_instantiations[index].self_type);
         substitution.self_type = instantiated_self.or(declared.self_ty);
+        // Projections in an impl's own associated values may depend on a bound
+        // of an impl parameter, as in `impl<T: Show> Wrap for W<T> { type Out =
+        // T.Out; }`. Install those projections before lowering signatures.
+        if let Some(index) = impl_arguments {
+            let instantiation = self.impl_instantiations[index].clone();
+            let header = self.impl_headers[instantiation.header].clone();
+            for (generic, actual) in header.generics.iter().zip(&instantiation.arguments.types) {
+                let Some(bound) = &generic.bound else {
+                    continue;
+                };
+                let Some(trait_id) = resolution.reference(bound.span) else {
+                    continue;
+                };
+                if resolution.bindings[trait_id].kind != BindingKind::Trait {
+                    continue;
+                }
+                let argument_ast = match &bound.kind {
+                    ast::TypeKind::Named { arguments, .. } => arguments.clone(),
+                    _ => Vec::new(),
+                };
+                let definition = self.traits[&trait_id].clone();
+                let required = evaluate_trait_arguments(
+                    types,
+                    resolution,
+                    self.logical,
+                    &definition.generics,
+                    &argument_ast,
+                    &substitution,
+                    &resolution.bindings[trait_id].name,
+                    generic.span,
+                )?;
+                let binder = resolution.binder(generic.span).unwrap();
+                if let Some(associated) = self
+                    .trait_associated
+                    .get(&(trait_id, required.clone(), *actual))
+                    .cloned()
+                {
+                    for (name, value) in associated.types {
+                        let lowered = types.ty_in(&value, &substitution)?;
+                        substitution.projections.insert((binder, name), lowered);
+                    }
+                } else if let Some(selected) = self.select_most_specific(
+                    resolution,
+                    &self.matching_impls(types, resolution, trait_id, &required, *actual, 0)?,
+                ) {
+                    let selected_header = self.impl_headers[selected.header].clone();
+                    let mut impl_substitution = substitution.clone();
+                    for (impl_generic, ty) in selected_header
+                        .generics
+                        .iter()
+                        .zip(&selected.arguments.types)
+                    {
+                        impl_substitution
+                            .types
+                            .insert(resolution.binder(impl_generic.span).unwrap(), *ty);
+                    }
+                    for (name, value) in selected_header.associated.types {
+                        let lowered = types.ty_in(&value, &impl_substitution)?;
+                        substitution.projections.insert((binder, name), lowered);
+                    }
+                }
+            }
+        }
         // Trait bounds are discharged at specialization time, before the body
         // is checked. A missing impl is an error even when the body never calls
         // a trait method. Bound arguments are substituted through this
@@ -7276,6 +7410,7 @@ impl Checker<'_, '_> {
             self_type: self.self_type,
             associated_types: BTreeMap::new(),
             projections: BTreeMap::new(),
+            self_projections: BTreeMap::new(),
         };
         evaluate_trait_arguments(
             self.types,
@@ -7780,11 +7915,18 @@ impl Checker<'_, '_> {
         let Some(declared) = self.functions.declared.get(&self.binding).copied() else {
             return Ok(None);
         };
+        let impl_generic = declared.impl_template.and_then(|template| {
+            self.functions.impl_headers[template]
+                .generics
+                .iter()
+                .find(|generic| self.resolution.binder(generic.span) == Some(binder))
+        });
         let Some(generic) = declared
             .ast
             .generics
             .iter()
             .find(|generic| self.resolution.binder(generic.span) == Some(binder))
+            .or(impl_generic)
         else {
             return Ok(None);
         };
@@ -7820,6 +7962,7 @@ impl Checker<'_, '_> {
             self_type: self.self_type,
             associated_types: BTreeMap::new(),
             projections: BTreeMap::new(),
+            self_projections: BTreeMap::new(),
         };
         let required = evaluate_trait_arguments(
             self.types,
@@ -8025,6 +8168,12 @@ impl Checker<'_, '_> {
         substitution.consts = consts;
         substitution.grades = grades;
         substitution.effects = effects;
+        substitution.self_projections = self
+            .functions
+            .object_associated
+            .get(&(trait_id, trait_arguments.clone()))
+            .cloned()
+            .unwrap_or_default();
         let shared_receiver = matches!(
             method
                 .parameters
@@ -9504,6 +9653,7 @@ impl Checker<'_, '_> {
             self_type: self.self_type,
             associated_types: BTreeMap::new(),
             projections: BTreeMap::new(),
+            self_projections: BTreeMap::new(),
         };
         self.types.ty_in(ty, &subst)
     }

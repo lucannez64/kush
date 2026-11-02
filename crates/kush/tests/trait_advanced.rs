@@ -514,6 +514,47 @@ fn trait_objects_with_arguments_and_effects_dispatch_by_alternative() {
 }
 
 #[test]
+fn dynamic_methods_may_return_affine_owning_values() {
+    let stats = agrees(
+        r#"
+        struct A { x: i64 }
+        struct B { y: i64 }
+        trait Make { fn make(self: Self) -> Box<i64> ! {alloc, panic}; }
+        impl Make for A { fn make(self: Self) -> Box<i64> ! {alloc, panic} { Box.new(self.x) } }
+        impl Make for B { fn make(self: Self) -> Box<i64> ! {alloc, panic} { Box.new(self.y) } }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let object: dyn Make = A { x: 4 };
+            print_i64(Box.take(object.make()));
+            0
+        }"#,
+        0,
+        "4\n",
+    );
+    assert_eq!(stats.allocations, 1, "{}", stats.allocations);
+}
+
+#[test]
+fn object_methods_may_project_a_shared_associated_type() {
+    agrees(
+        r#"
+        struct A { x: i64 }
+        struct B { y: i64 }
+        trait Show { type Out; fn show(self: Self) -> Self.Out ! {panic}; }
+        impl Show for A { type Out = i64; fn show(self: Self) -> i64 ! {panic} { self.x } }
+        impl Show for B { type Out = i64; fn show(self: Self) -> i64 ! {panic} { self.y } }
+        fn main() -> i64 ! {io, panic} {
+            let a: dyn Show = A { x: 5 };
+            let b: dyn Show = B { y: 6 };
+            print_i64(a.show());
+            print_i64(b.show());
+            0
+        }"#,
+        0,
+        "5\n6\n",
+    );
+}
+
+#[test]
 fn object_safety_rejections_are_explicit() {
     rejects(
         r#"

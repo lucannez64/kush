@@ -487,11 +487,15 @@ Object safety is checked at every `dyn` use:
   copyable; otherwise dispatch would move an owning object;
 - no method type parameters or lifetime parameters, and no erased proof
   parameters;
-- no `Self` in non-receiver parameters or in the result, so every alternative
-  has the same ABI;
-- no owning/`@[1]` result contract through dynamic dispatch;
+- no bare `Self` in non-receiver parameters or in the result, so every
+  alternative has the same ABI; `Self.Item` is allowed when every impl agrees
+  on that associated type;
+- no intrinsically linear or `@[1]` exact-use result through dynamic dispatch;
+  ordinary affine owning results such as `Box<i64>` are allowed and dropped
+  exactly once per alternative;
 - impls of one specialization must agree on every associated type and constant
-  value, so projection is unambiguous.
+  value, so projection is unambiguous; an agreed `Self.Item` can appear in an
+  object method's parameter and result types.
 
 An object union may represent several traits when their concrete member sets
 coincide. If more than one represented trait declares the called method name,
@@ -683,7 +687,7 @@ borrowed receivers with generic scalars, loan retention into later arguments,
 natural trait parameters, cross-module visibility, and the runnable
 `examples/generic_traits.kush` example.
 
-`trait_advanced.rs` adds twenty-two tests for associated type/constant
+`trait_advanced.rs` adds twenty-four tests for associated type/constant
 projection and substitution, `T.Out` in bounded generic results, inherited
 constant defaults, checked constant arithmetic and range/division diagnostics,
 missing/extra/mistyped associated items, contract rejection when a projection
@@ -691,8 +695,9 @@ and impl result disagree, generic and blanket impls with bound discharge,
 generic trait-argument patterns, borrowed receivers on generic impls,
 most-specific specialization, duplicate/incomparable coherence rejection,
 owned and shared closed-world trait objects, object-argument dispatch, object
-return and union coercion, owning-member cleanup and allocation balance,
-single-specialization generic objects, associated-item agreement, generic
+return and union coercion, owning-member cleanup and allocation balance, affine owning dynamic results,
+single-specialization generic objects, associated-item agreement, object
+methods projecting an agreed associated type, generic
 method inference, effect-exclusion bounds, and linear `@[1]` results on
 generic impls, and explicit
 object-safety rejections (open member sets, borrowed owning members, mutable

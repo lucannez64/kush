@@ -44,6 +44,9 @@ pub(crate) struct Subst {
     /// The key is the base generic binder and the declared associated name, so
     /// `T::Item` lowers to the value supplied by the impl selected for `T`.
     pub projections: BTreeMap<(BindingId, String), Type>,
+    /// Concrete closed-world values for `Self::Item` on a trait object. They are
+    /// populated only after every impl of the object specialization agrees.
+    pub self_projections: BTreeMap<String, Type>,
 }
 #[derive(Clone, Copy)]
 struct Alias<'a> {
@@ -1677,6 +1680,9 @@ impl<'a> Types<'a> {
                                 path[1]
                             ),
                         ));
+                    }
+                    if let Some(value) = substitution.self_projections.get(&path[1]) {
+                        return Ok(*value);
                     }
                     let value = substitution
                         .associated_types
