@@ -623,6 +623,42 @@ fn impl_parameter_categories_are_validated() {
 }
 
 #[test]
+fn mutable_dynamic_dispatch_writes_back_to_the_object_local() {
+    agrees(
+        r#"
+        struct Counter { value: i64 }
+        struct Offset { value: i64 }
+        trait Bump {
+            fn bump(self: &mut Self, by: i64) -> Unit ! {panic};
+            fn current(self: &Self) -> i64 ! {panic};
+        }
+        impl Bump for Counter {
+            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by; }
+            fn current(self: &Self) -> i64 ! {panic} { self.value }
+        }
+        impl Bump for Offset {
+            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by * 10; }
+            fn current(self: &Self) -> i64 ! {panic} { self.value }
+        }
+        fn make() -> dyn Bump ! {panic} { Counter { value: 10 } }
+        fn main() -> i64 ! {io, panic} {
+            let mut object: dyn Bump = Counter { value: 1 };
+            object.bump(2);
+            print_i64(object.current());
+            object.bump(3);
+            print_i64(object.current());
+            let mut other: dyn Bump = Offset { value: 4 };
+            other.bump(2);
+            print_i64(other.current());
+            make().bump(7);
+            0
+        }"#,
+        0,
+        "3\n6\n24\n",
+    );
+}
+
+#[test]
 fn closed_world_trait_objects_dispatch_and_clean_up_ownership() {
     let stats = agrees(
         r#"
@@ -739,19 +775,6 @@ fn object_safety_rejections_are_explicit() {
             0
         }"#,
         "owns storage",
-    );
-    rejects(
-        r#"
-        struct Point { x: i64 }
-        struct Other { y: i64 }
-        trait Update { fn update(self: &mut Self) -> i64 ! {panic}; }
-        impl Update for Point { fn update(self: &mut Self) -> i64 ! {panic} { 1 } }
-        impl Update for Other { fn update(self: &mut Self) -> i64 ! {panic} { 2 } }
-        fn main() -> i64 ! {panic} {
-            let object: dyn Update = Point { x: 1 };
-            0
-        }"#,
-        "exclusive '&mut self' receiver",
     );
     rejects(
         r#"

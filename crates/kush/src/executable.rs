@@ -2299,7 +2299,7 @@ struct Functions<'a> {
     /// unqualified dispatch then requires an unambiguous trait method name.
     object_traits: BTreeMap<Type, Vec<(BindingId, TraitArguments)>>,
     /// Checked dynamic-dispatch functions, one per `(trait, arguments, method)`.
-    dynamic_dispatch: BTreeMap<(BindingId, TraitArguments, String), usize>,
+    dynamic_dispatch: BTreeMap<(BindingId, TraitArguments, String), (usize, Type)>,
     /// Associated-type values agreed by every concrete impl of one object
     /// specialization. Used for `Self.Item` in object-safe method signatures.
     object_associated: BTreeMap<(BindingId, TraitArguments), BTreeMap<String, Type>>,
@@ -4603,15 +4603,14 @@ fn prepare_trait_objects<'a>(
                         inner,
                         ..
                     } if matches!(inner.kind, ast::TypeKind::SelfType) => {}
-                    ast::TypeKind::Borrow { mutable: true, .. } => {
-                        reason = Some(format!(
-                            "method '{name}' has an exclusive '&mut self' receiver; mutating a closed-world object would need a checked borrowed-object capability"
-                        ));
-                        break;
-                    }
+                    ast::TypeKind::Borrow {
+                        mutable: true,
+                        inner,
+                        ..
+                    } if matches!(inner.kind, ast::TypeKind::SelfType) => {}
                     _ => {
                         reason = Some(format!(
-                            "method '{name}' receiver must be 'self: Self', 'self: &Self', or '&self'"
+                            "method '{name}' receiver must be 'self: Self', 'self: &Self', '&self', 'self: &mut Self', or '&mut self'"
                         ));
                         break;
                     }
@@ -6190,6 +6189,27 @@ fn checked_generic_method_receiver(
     };
     let _ = (types, generics, resolution, shape);
     Ok(())
+}
+
+/// The receiver mode of a trait method declaration. Dynamic dispatch mirrors
+/// the three statically checked modes, but mutable dispatch additionally writes
+/// the updated object back to the caller's local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiverMode {
+    Owned,
+    Shared,
+    Mutable,
+}
+fn trait_receiver_mode(method: &ast::Function) -> ReceiverMode {
+    match method
+        .parameters
+        .first()
+        .map(|parameter| &parameter.ty.kind)
+    {
+        Some(ast::TypeKind::Borrow { mutable: true, .. }) => ReceiverMode::Mutable,
+        Some(ast::TypeKind::Borrow { mutable: false, .. }) => ReceiverMode::Shared,
+        _ => ReceiverMode::Owned,
+    }
 }
 
 impl<'a> Functions<'a> {
@@ -9251,7 +9271,22 @@ impl Checker<'_, '_> {
                 ),
             ));
         };
-        let dispatcher = self.dynamic_dispatcher(trait_id, &trait_arguments, name, span)?;
+        let method = self.functions.traits[&trait_id]
+            .methods
+            .get(name)
+            .map(|method| method.function)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    span,
+                    format!(
+                        "trait '{}' has no method '{name}'",
+                        self.resolution.bindings[trait_id].name
+                    ),
+                )
+            })?;
+        let receiver_mode = trait_receiver_mode(method);
+        let (dispatcher, method_result) =
+            self.dynamic_dispatcher(trait_id, &trait_arguments, name, receiver_mode, span)?;
         let signature = self.functions.signatures[dispatcher].clone();
         if arguments.len() + 1 != signature.parameters.len() {
             return Err(Diagnostic::new(
@@ -9281,6 +9316,122 @@ impl Checker<'_, '_> {
             let value = self.expr_expected(argument, Some(*ty))?;
             values.push(self.coerce(value, *ty, span)?);
         }
+        if receiver_mode == ReceiverMode::Mutable {
+            // The receiver was rewritten to a local/parameter place when it is
+            // one. Move the object into the dispatcher, which returns the
+            // updated object and the method result, then store the updated
+            // object back into the same place. A temporary receiver is consumed
+            // and its updated value is dropped because no later read can
+            // observe it.
+            let direct_slot = match &values[0].kind {
+                ExprKind::Local(slot) => Some(*slot),
+                _ => None,
+            };
+            let object = signature.parameters[0];
+            let result_ty = method_result;
+            let tuple_ty = self.types.tuple(vec![object, result_ty], span)?;
+            let tmp = self.temp(tuple_ty, span)?;
+            let extracted = self.temp(result_ty, span)?;
+            let call = Expr {
+                kind: ExprKind::Call(Target::Function(dispatcher), values),
+                ty: tuple_ty,
+                span,
+                resource: None,
+            };
+            let object_width = self.types.width(object);
+            let (pattern, arm_body) = if let Some(slot) = direct_slot {
+                let updated = self.temp(object, span)?;
+                (
+                    Pattern::Variant {
+                        tag: 0,
+                        fields: vec![
+                            (1, Pattern::Bind(updated)),
+                            (1 + object_width, Pattern::Bind(extracted)),
+                        ],
+                    },
+                    Block {
+                        statements: vec![Statement::Expr(Expr {
+                            kind: ExprKind::Assign(
+                                slot,
+                                Box::new(Expr {
+                                    kind: ExprKind::Local(updated),
+                                    ty: object,
+                                    span,
+                                    resource: None,
+                                }),
+                            ),
+                            ty: Type::Unit,
+                            span,
+                            resource: None,
+                        })],
+                        tail: Some(Box::new(Expr {
+                            kind: ExprKind::Local(extracted),
+                            ty: result_ty,
+                            span,
+                            resource: None,
+                        })),
+                        ty: result_ty,
+                    },
+                )
+            } else {
+                (
+                    Pattern::Variant {
+                        tag: 0,
+                        fields: vec![
+                            (1, Pattern::Any),
+                            (1 + object_width, Pattern::Bind(extracted)),
+                        ],
+                    },
+                    Block {
+                        statements: Vec::new(),
+                        tail: Some(Box::new(Expr {
+                            kind: ExprKind::Local(extracted),
+                            ty: result_ty,
+                            span,
+                            resource: None,
+                        })),
+                        ty: result_ty,
+                    },
+                )
+            };
+            let block = Block {
+                statements: vec![Statement::Let(tmp, call)],
+                tail: Some(Box::new(Expr {
+                    kind: ExprKind::Match(
+                        Box::new(Expr {
+                            kind: ExprKind::Local(tmp),
+                            ty: tuple_ty,
+                            span,
+                            resource: None,
+                        }),
+                        vec![Arm {
+                            pattern,
+                            guard: None,
+                            body: Expr {
+                                kind: ExprKind::Block(arm_body),
+                                ty: result_ty,
+                                span,
+                                resource: None,
+                            },
+                        }],
+                    ),
+                    ty: result_ty,
+                    span,
+                    resource: None,
+                })),
+                ty: result_ty,
+            };
+            let value = Expr {
+                kind: ExprKind::Block(block),
+                ty: result_ty,
+                span,
+                resource: None,
+            };
+            return match expected {
+                Some(expected) => self.coerce(value, expected, span),
+                None => Ok(value),
+            };
+        }
         let value = Expr {
             kind: ExprKind::Call(Target::Function(dispatcher), values),
             ty: call_result_type(&signature),
@@ -9302,11 +9453,12 @@ impl Checker<'_, '_> {
         trait_id: BindingId,
         trait_arguments: &TraitArguments,
         name: &str,
+        receiver_mode: ReceiverMode,
         span: Span,
-    ) -> Result<usize> {
+    ) -> Result<(usize, Type)> {
         let key = (trait_id, trait_arguments.clone(), name.to_owned());
-        if let Some(index) = self.functions.dynamic_dispatch.get(&key) {
-            return Ok(*index);
+        if let Some(entry) = self.functions.dynamic_dispatch.get(&key) {
+            return Ok(entry.clone());
         }
         let definition = self.functions.traits[&trait_id].clone();
         let method = definition
@@ -9356,13 +9508,8 @@ impl Checker<'_, '_> {
             .get(&(trait_id, trait_arguments.clone()))
             .cloned()
             .unwrap_or_default();
-        let shared_receiver = matches!(
-            method
-                .parameters
-                .first()
-                .map(|parameter| &parameter.ty.kind),
-            Some(ast::TypeKind::Borrow { mutable: false, .. })
-        );
+        let shared_receiver = receiver_mode == ReceiverMode::Shared;
+        let mutable_receiver = receiver_mode == ReceiverMode::Mutable;
         let mut parameters = vec![object];
         let mut parameter_grades = vec![None];
         for parameter in &method.parameters[1..] {
@@ -9388,6 +9535,15 @@ impl Checker<'_, '_> {
             ));
         }
         let result_erased = result_grade.is_some_and(Grade::is_zero);
+        let method_value_type = if result_erased { Type::Unit } else { result };
+        // A mutable dispatcher returns `(updated object, method result)` so the
+        // caller can write the mutated object back into its direct local. Other
+        // modes return the method result directly.
+        let function_result = if mutable_receiver {
+            self.types.tuple(vec![object, method_value_type], span)?
+        } else {
+            method_value_type
+        };
         let mut locals = parameters
             .iter()
             .map(|ty| Local {
@@ -9450,10 +9606,10 @@ impl Checker<'_, '_> {
                 ));
             }
             total_effects |= signature.effects;
-            signatures.push((index, signature, *member));
+            signatures.push((index, *member));
         }
         let mut arms = Vec::new();
-        for (tag, (index, signature, member)) in signatures.into_iter().enumerate() {
+        for (tag, (index, member)) in signatures.into_iter().enumerate() {
             let payload = locals.len();
             locals.push(Local {
                 ty: member,
@@ -9462,7 +9618,14 @@ impl Checker<'_, '_> {
                 grade: None,
                 span,
             });
-            let receiver_argument = if shared_receiver {
+            let receiver_argument = if mutable_receiver {
+                Expr {
+                    kind: ExprKind::Borrow(payload),
+                    ty: Type::RefMut(self.types.pointer(member)),
+                    span,
+                    resource: None,
+                }
+            } else if shared_receiver {
                 Expr {
                     kind: ExprKind::Borrow(payload),
                     ty: Type::Ref(self.types.pointer(member)),
@@ -9499,6 +9662,72 @@ impl Checker<'_, '_> {
                     },
                 );
             }
+            let method_call = Expr {
+                kind: ExprKind::Call(Target::Function(index), call_arguments),
+                ty: method_value_type,
+                span,
+                resource: None,
+            };
+            let body = if mutable_receiver {
+                // The method must run before the mutated payload is read. Bind
+                // its result in a hidden local, then build the tuple in the
+                // required field order `(updated object, result)`.
+                let result_slot = locals.len();
+                locals.push(Local {
+                    ty: method_value_type,
+                    mutable: false,
+                    linear: false,
+                    grade: None,
+                    span,
+                });
+                let updated_union = Expr {
+                    kind: ExprKind::Coerce {
+                        value: Box::new(Expr {
+                            kind: ExprKind::Move(payload),
+                            ty: member,
+                            span,
+                            resource: None,
+                        }),
+                        to: object,
+                        coercion: Coercion::Inject { tag },
+                    },
+                    ty: object,
+                    span,
+                    resource: None,
+                };
+                let tuple_layout = function_result
+                    .layout()
+                    .expect("mutable dispatcher result is a tuple layout");
+                Expr {
+                    kind: ExprKind::Block(Block {
+                        statements: vec![Statement::Let(result_slot, method_call)],
+                        tail: Some(Box::new(Expr {
+                            kind: ExprKind::Construct {
+                                enum_id: tuple_layout,
+                                tag: 0,
+                                fields: vec![
+                                    updated_union,
+                                    Expr {
+                                        kind: ExprKind::Local(result_slot),
+                                        ty: method_value_type,
+                                        span,
+                                        resource: None,
+                                    },
+                                ],
+                            },
+                            ty: function_result,
+                            span,
+                            resource: None,
+                        })),
+                        ty: function_result,
+                    }),
+                    ty: function_result,
+                    span,
+                    resource: None,
+                }
+            } else {
+                method_call
+            };
             arms.push(Arm {
                 pattern: Pattern::Type {
                     tag,
@@ -9506,16 +9735,7 @@ impl Checker<'_, '_> {
                     inner: Box::new(Pattern::Bind(payload)),
                 },
                 guard: None,
-                body: Expr {
-                    kind: ExprKind::Call(Target::Function(index), call_arguments),
-                    ty: if result_erased {
-                        Type::Unit
-                    } else {
-                        signature.result
-                    },
-                    span,
-                    resource: None,
-                },
+                body,
             });
         }
         let scrutinee = Expr {
@@ -9528,11 +9748,11 @@ impl Checker<'_, '_> {
             statements: Vec::new(),
             tail: Some(Box::new(Expr {
                 kind: ExprKind::Match(Box::new(scrutinee), arms),
-                ty: if result_erased { Type::Unit } else { result },
+                ty: function_result,
                 span,
                 resource: None,
             })),
-            ty: if result_erased { Type::Unit } else { result },
+            ty: function_result,
         };
         let function = Function {
             name: format!(
@@ -9542,13 +9762,13 @@ impl Checker<'_, '_> {
             parameters: parameters.len(),
             closure: None,
             locals,
-            result,
+            result: function_result,
             body,
             span,
             resources: vec![],
             local_resources: vec![],
             parameter_grades: parameter_grades.clone(),
-            result_grade,
+            result_grade: if mutable_receiver { None } else { result_grade },
             parameter_lifetimes: vec![None; parameters.len()],
             result_lifetime: None,
             lifetime_bounds: BTreeSet::new(),
@@ -9557,7 +9777,7 @@ impl Checker<'_, '_> {
             binding: usize::MAX,
             name: function.name.clone(),
             parameters,
-            result,
+            result: function_result,
             effects: total_effects,
             span,
             substitution: BTreeMap::new(),
@@ -9566,7 +9786,7 @@ impl Checker<'_, '_> {
             effect_arguments: BTreeMap::new(),
             origin: None,
             parameter_grades,
-            result_grade,
+            result_grade: if mutable_receiver { None } else { result_grade },
             parameter_lifetimes: vec![None; function.parameters],
             result_lifetime: None,
             lifetime_bounds: BTreeSet::new(),
@@ -9575,8 +9795,10 @@ impl Checker<'_, '_> {
             associated_consts: BTreeMap::new(),
         };
         let index = self.functions.add_synthetic(signature, function)?;
-        self.functions.dynamic_dispatch.insert(key, index);
-        Ok(index)
+        self.functions
+            .dynamic_dispatch
+            .insert(key, (index, method_value_type));
+        Ok((index, method_value_type))
     }
     /// The trait-argument substitution of an inherited default method, if the
     /// method was materialized from a trait default. Generic method inference
