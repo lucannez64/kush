@@ -228,6 +228,11 @@ pub struct LifetimeBound {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
     pub name: String,
+    /// For a structural conversion `value as struct { b: i64 from a }`: the
+    /// source field name. `None` means the target name is also the source name.
+    /// It is metadata for one explicit conversion, never part of the row's
+    /// runtime identity.
+    pub source: Option<String>,
     pub ty: Type,
     pub span: Span,
 }
@@ -294,7 +299,12 @@ pub enum TypeKind {
     /// boundary. It is a documented erased-row contract, not row unification.
     Structural {
         fields: Vec<Field>,
+        /// A trailing `..` (erased open row) or `..r` (a row variable that
+        /// preserves the unmentioned fields through monomorphization).
         open: bool,
+        /// `Some(row)` for `..row`: the row variable must be a declared type
+        /// generic bound to a concrete structural row at each specialization.
+        row: Option<Box<Type>>,
     },
     Borrow {
         /// Optional explicit lifetime, as in `&'a [T]`.
@@ -428,6 +438,13 @@ pub enum ExprKind {
     Specialize {
         callee: Box<Expr>,
         arguments: Vec<Type>,
+    },
+    /// `value as struct { target: Type from source, ... }`: an explicit
+    /// structural conversion with field renaming. Renaming is conversion
+    /// metadata, never part of a structural row's runtime identity.
+    Cast {
+        value: Box<Expr>,
+        ty: Type,
     },
     Field {
         value: Box<Expr>,

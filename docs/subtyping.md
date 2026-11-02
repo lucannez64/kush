@@ -158,8 +158,91 @@ fields are not preserved and cannot be returned or forwarded. A dropped field
 that carries a linear obligation, a borrow leaf that would change
 mutability/labels, and any other representation-changing rule above still
 apply. Empty open rows such as `struct { .. }` are accepted as a record-shaped
-parameter with no inspected fields. This is a documented representation, not
-row unification or a row variable.
+parameter with no inspected fields.
+
+A named tail `..r` is a **true row variable**, not an erased annotation:
+
+```rust
+fn keep<r>(v: struct { x: i64, ..r }) -> struct { x: i64, ..r } ! {panic} { v }
+```
+
+`r` is an ordinary type parameter used in row position. At each call the
+checker binds it to the argument's **residual canonical row**: the actual
+record fields not named by the structural pattern. The function is then
+monomorphized once per concrete residual row, so its parameter and result are
+the exact full row (named fields plus residual). Unmentioned fields are
+preserved across the call, including owning, linear, and borrowed leaves; the
+function may read, move, return, or consume them without erasing their
+obligations. A residual `struct { token: Token }` with a linear `Token` stays
+linear, and closing the result back to `struct { x: i64 }` is rejected because
+dropping `token` would lose its obligation. Borrowed residual fields keep their
+per-field loan through the call, so an exclusive borrow or replacement of the
+owner while the row value is live is rejected. Row binding recurses through
+nested structural fields, so `struct { inner: struct { a: i64, ..r } }` binds
+`r` to the nested residual row. One row variable must receive the same residual
+row from every parameter; disagreeing residuals are an explicit diagnostic, and
+an inferred row variable cannot be left unbound. Unlike an erased `..`, a row
+variable is type information, so a function that mentions it in its result must
+be called with a record argument (or an explicit structural row
+specialization) that determines the tail.
+
+A row variable may also appear in an impl header:
+
+```rust
+impl<r> Tag for struct { x: i64, ..r } {
+    fn tag(self: Self) -> i64 ! {panic} { self.x }
+}
+impl<r> struct { n: i64, ..r } {
+    fn double(self: Self) -> i64 ! {panic} { self.n * 2 }
+}
+```
+
+Dispatch matches only anonymous structural rows (nominal records still keep
+their own identity and must be coerced explicitly), binds `r` to the residual
+row, and instantiates the method for that concrete receiver. Overlap and
+specialization are decided by the named-field rows: an open header with more
+named fields is more specific, incomparable open headers are a declaration-time
+coherence error, and an open header and an exact structural header follow the
+ordinary concrete-over-generic rule. A bare `..` impl header has no parameter
+to bind the residual row and remains an explicit rejection.
+
+Borrowed structural **results** remain an explicit boundary: structural rows
+carry no declared field-lifetime labels, so returning `struct { view: &[i64], ..r }`
+is rejected. The view may travel through a row-variable parameter and be read or
+consumed inside the call, but a caller-owned structural result must be a nominal
+record with declared lifetimes.
+
+**Field renaming** is an explicit conversion, written with `from`:
+
+```rust
+let narrow = wide as struct { b: i64 from a, flag: Bool };
+```
+
+The target row keeps its own canonical names; `from` selects the source field
+for that target field. Each source field may be used at most once, unmentioned
+fields are dropped by the ordinary checked cleanup, borrowed leaves keep the
+same invariance rule, and a missing source field is an error. Only the explicit
+`value as struct { ... }` cast accepts `from`: a `from` in a general parameter
+or return annotation is rejected. Renaming is top-level only; nested target
+fields still match by name. A target field with no `from` matches the source
+field of the same name.
+
+**Structural equality** is available for structural records whose leaves are
+copyable scalars (integers, `Char`, `Bool`, `Unit`) or nested structural records
+of them:
+
+```rust
+if a == b { ... }   // field-by-field, both operands evaluated once
+```
+
+Both operands must have the same canonical row. The implementation compares the
+record words directly in the native backend and the materialized field values in
+the reference evaluator, including nested rows and both `==` and `!=`. Floating
+point leaves are excluded because their equality is numeric (`-0.0 == 0.0`,
+NaN) while the inline representation compares raw words; owning, borrowed,
+union, callable, and nominal leaves are excluded so equality never moves or
+inspects an opaque payload. Narrow a union member and compare scalars, or match
+fields explicitly, for those cases.
 
 A structural row may also be an inherent or trait impl receiver:
 
@@ -182,10 +265,15 @@ decidable. A nominal value reaches a structural impl only after an explicit
 width coercion to that row. Open rows are rejected in impl headers because
 width compatibility there would make dispatch depend on the call site's row.
 
-Structural records are still not a general row-polymorphic record calculus.
-There is no row variable, no field renaming, and no structural equality. Open
-rows are erased as described above, and structural impl dispatch is exact-row
-only.
+Structural records support named row variables, explicit field renaming, and
+equality over comparable leaves, but they are still not a general
+row-polymorphic record calculus. There is no row subtraction, row alias, or
+first-class row value; a row variable must be monomorphized by a concrete
+argument row. A bare `..` is erased, while `..r` preserves the residual row. The
+residual-row equality rule means a row variable cannot be solved from two
+parameters with different tails. Structural impl dispatch is exact-row or
+named-row-pattern; a bare `..` impl header is not accepted. Borrowed structural
+results remain rejected.
 
 ## Subtyping and conversions
 
@@ -262,25 +350,50 @@ The supported inference fragment is deliberately first-order and bounded:
   rejected rather than defaulting;
 - a union pattern with several bare unbound type variables, such as
   `T | U | i64`, partitions the residual alternatives with a bounded
-  backtracking search (4096 steps). Every variable must receive at least one
-  residual alternative; alternatives already covered by the concrete or
-  previously solved fixed part stay with the fixed part and are never
+  backtracking search (4096 steps per pattern). Every variable must receive at
+  least one residual alternative; alternatives already covered by the concrete
+  or previously solved fixed part stay with the fixed part and are never
   redistributed. The search order is canonical: residual alternatives keep
   their normalized order and are assigned to variables in declaration order.
-  This is deterministic but not principal, and it is not a cross-parameter
-  search: a later parameter can reject the committed partition even though a
-  different partition would have satisfied both parameters. That rejection is
-  the documented boundary, not a retry. Exhausting the step budget is an
-  explicit diagnostic;
-- there is still no recursive row/type unification and no general principal
-  inference for variables that can trade evidence across parameters;
+  Ordinary inference takes the first canonical partition;
+- **cross-parameter backtracking** is bounded and deterministic. If a later
+  parameter rejects the partition committed for an earlier one, `infer`
+  replays the entire accumulated constraint list from the base substitution,
+  enumerating partition choices in lexicographic order. The replay budget is
+  4096 complete attempts; exhausting it is an explicit diagnostic. Parameters
+  that mention a tentatively partitioned or row-bound variable are checked
+  without committing to the tentative expected type, so the replay can
+  reconsider instead of failing during contextual checking. The search changes
+  only type/row bindings; a literal whose own typing needs a later expected
+  type remains the usual explicit-annotation boundary;
+- row variables participate in this same first-order unification. A pattern
+  tail `..r` binds the actual residual canonical row, recursively through
+  nested structural fields. This is recursive row unification for the
+  monomorphized fragment, not row subtraction or row aliasing: a row variable
+  must receive the same residual row from every parameter;
+- **principal result for the decidable fragment.** The single-variable residual
+  rule (`T | i64` over a finite normalized union) is principal: the residual is
+  the unique set of actual alternatives not covered by the fixed part. A
+  multi-variable partition is not principal in general; ordinary inference and
+  replay choose the first canonical partition that satisfies every parameter.
+  When exactly one partition survives, that result is determined by the
+  constraints, and a completely unconstrained or symmetric case is reported as
+  ambiguous or as an unbound parameter instead of being guessed;
 - conflicting or incomparable evidence is always an error, never a silently
   chosen arm; explicit annotations/specialization are the escape hatch;
 - type inference does not infer unions from unconstrained literals: an empty
-  vector still needs an annotation.
+  vector still needs an annotation;
+- **indexed/dependent unions remain an explicit boundary.** Indexed enums,
+  runtime-indexed union alternatives, and dependent type families are not
+  inferred from a union actual in this executable fragment. A union of the same
+  generic constructor with different arguments (for example
+  `Option<i64> | Option<Bool>`) is not collapsed to `Option<i64 | Bool>`:
+  the constructor is invariant, so that would be unsound. Such calls require
+  an explicit `::<...>` specialization.
 
-This is a decidable bounded fragment, not a complete principal algebraic
-subtyping algorithm.
+This is a decidable bounded fragment with a precise boundary, not a complete
+principal algebraic subtyping algorithm. Indexed/dependent unions, row
+subtraction/aliasing, and unbounded cross-parameter search are outside it.
 
 ## Case analysis and narrowing
 
@@ -377,12 +490,15 @@ Deliberately unsupported, with explicit diagnostics:
 - **Structural record limits:** anonymous `struct { ... }` rows support width
   subtyping, canonical reordering, recursive nested structural rows,
   atom-to-union field injection, nested union-to-union repacking, checked
-  callable-field adapters, erased `..` open-row annotations, structural
-  literals and patterns, and exact-row structural impl headers, as described
-  above. Field renaming, true row variables that preserve unmentioned fields,
-  structural equality, and open rows in impl headers are rejected. Nominal
-  records remain invariant with respect to other nominal records and do not
-  match structural impl headers implicitly.
+  callable-field adapters, erased `..` open-row annotations, named `..r` row
+  variables that preserve unmentioned fields, explicit top-level field renaming
+  through `value as struct { target: T from source }`, structural equality over
+  comparable leaves, structural literals and patterns, and exact-row or
+  named-row-pattern structural impl headers, as described above. Remaining
+  boundaries: nested (non-top-level) field renaming, row subtraction/aliasing,
+  first-class row values, a bare `..` in an impl header, and borrowed structural
+  results. Nominal records remain invariant with respect to other nominal
+  records and do not match structural impl headers implicitly.
 - **Function subtyping:** arrow subtyping is implemented for first-class
   function values (`fn(...)`, owning `once fn(...)`, and `linear once fn(...)`),
   with contravariant parameters, covariant results, effect-row inclusion
@@ -405,12 +521,14 @@ Deliberately unsupported, with explicit diagnostics:
 - **Indexed/dependent unions and principal algebraic inference:** runtime type
   aliases (including unions) are elaborated transparently. Contextual literals
   and first-order generic matching accumulate constraints over the finite union
-  row as described above. Multi-variable union patterns now use a bounded,
-  canonical partition search, but general principal inference, cross-parameter
-  backtracking, recursive row unification, and indexed unions remain
-  explicit-specialization boundaries. Array length variables are a separate
-  compile-time fragment described in
-  [dependent-indices.md](dependent-indices.md).
+  row as described above. Multi-variable union patterns use a bounded canonical
+  partition search, and a bounded cross-parameter replay can reconsider an
+  earlier partition. Row variables add recursive residual-row unification.
+  The single-variable residual rule is principal; multi-variable partitions are
+  deterministic but not principal, and indexed/dependent unions, row
+  subtraction/aliasing, and unbounded search remain explicit-specialization
+  boundaries. Array length variables are a separate compile-time fragment
+  described in [dependent-indices.md](dependent-indices.md).
 - **Structural equality or ordering on union values:** no union equality; match
   a member and compare the narrowed scalar.
 - **Implicit numeric widening:** not part of subtyping.

@@ -1677,7 +1677,13 @@ impl<'a> Types<'a> {
             )?;
             return self.array(element, length, ty.span);
         }
-        if let ast::TypeKind::Structural { fields, .. } = &ty.kind {
+        if let ast::TypeKind::Structural { fields, row, .. } = &ty.kind {
+            if fields.iter().any(|field| field.source.is_some()) {
+                return Err(Diagnostic::new(
+                    ty.span,
+                    "field renaming ('from') is supported only in an explicit 'value as struct { target: Type from source }' conversion, not as a general structural type",
+                ));
+            }
             let mut lowered = Vec::with_capacity(fields.len());
             for field in fields {
                 let (inner, grade) = crate::grades::split(&field.ty);
@@ -1691,6 +1697,45 @@ impl<'a> Types<'a> {
                     field.name.clone(),
                     self.lower(inner, substitution, depth + 1)?,
                 ));
+            }
+            if let Some(row) = row {
+                let Some(binder) = self.resolution.reference(row.span) else {
+                    return Err(Diagnostic::new(
+                        row.span,
+                        "a row variable must be a declared type parameter, as in 'fn f<r>(x: struct { a: i64, ..r })'",
+                    ));
+                };
+                let Some(row_ty) = substitution.types.get(&binder).copied() else {
+                    return Err(Diagnostic::new(
+                        row.span,
+                        format!(
+                            "row variable '{}' is not bound to a concrete structural row in this specialization; call the generic with a record argument or specialize it with a structural row type",
+                            self.resolution.bindings[binder].name
+                        ),
+                    ));
+                };
+                let Some(row_fields) = self.structural_row(row_ty) else {
+                    return Err(Diagnostic::new(
+                        row.span,
+                        format!(
+                            "row variable '{}' must be bound to a structural row, found {}; a row cannot contain owner references or non-record values",
+                            self.resolution.bindings[binder].name,
+                            self.name(row_ty)
+                        ),
+                    ));
+                };
+                for (name, field_ty) in row_fields {
+                    if lowered.iter().any(|(existing, _)| *existing == name) {
+                        return Err(Diagnostic::new(
+                            row.span,
+                            format!(
+                                "row variable '{}' repeats structural field '{name}'; explicit fields and the row tail must be disjoint",
+                                self.resolution.bindings[binder].name
+                            ),
+                        ));
+                    }
+                    lowered.push((name, field_ty));
+                }
             }
             return self.structural(lowered, ty.span);
         }

@@ -1222,6 +1222,12 @@ impl Checker<'_> {
                         }
                     }
                     Some(_) => {}
+                    None if layout.structural => {
+                        // Structural rows erase field lifetime labels. The
+                        // actual loan lifetime stays in provenance, so a later
+                        // escape is still checked; there is no declared label
+                        // to compare against here.
+                    }
                     None => {
                         return Err(Diagnostic::new(
                             expr.span,
@@ -5483,7 +5489,11 @@ pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
                     walk(callback, out);
                 }
             }
-            ExprKind::Binary(_, a, b) | ExprKind::BytesAt(a, b) => {
+            ExprKind::Binary(_, a, b)
+            | ExprKind::StructEq {
+                left: a, right: b, ..
+            }
+            | ExprKind::BytesAt(a, b) => {
                 walk(a, out);
                 walk(b, out);
             }
@@ -5702,7 +5712,9 @@ fn expr_live(
             live = expr_live(resume, live_after, views, heads, exits, out);
             live = expr_live(payload, &live, views, heads, exits, out);
         }
-        ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
+        ExprKind::Binary(_, left, right)
+        | ExprKind::StructEq { left, right, .. }
+        | ExprKind::BytesAt(left, right) => {
             live = expr_live(right, live_after, views, heads, exits, out);
             live = expr_live(left, &live, views, heads, exits, out);
         }
