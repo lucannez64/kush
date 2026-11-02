@@ -19,7 +19,7 @@
 use crate::{
     Diagnostic, Span,
     ast::ItemKind,
-    lexer::Kind,
+    lexer::{self, Kind},
     program::{self, ModuleSource, Program, SourceFile, SourceMap},
     project::{self, Project},
 };
@@ -429,13 +429,12 @@ impl<W: Write> Server<W> {
         };
         if let Some(project) = &self.project
             && root == normalize_path(&project.package.entry_path())
-            && let Ok(module) = crate::parser::parse(&text)
-            && !matches!(module.items.first().map(|item| &item.item.kind),
-                Some(ItemKind::Module(parts)) if parts == std::slice::from_ref(&project.package.name))
+            && let (header, span) = parsed_entry_header(&text)
+            && header != std::slice::from_ref(&project.package.name)
         {
             let mut analysis = Analysis::default();
             analysis.add_local_diagnostic(&root, &text, &Diagnostic::new(
-                module.items.first().map_or(Span::default(), |item| item.item.span),
+                span,
                 format!("entry module must be declared as 'module {};': header does not match the package", project.package.name),
             ));
             return analysis;
@@ -863,6 +862,54 @@ fn module_path_for(path: &Path, project: Option<&Project>, root: &Path) -> Optio
         parts.push(text);
     }
     Some(parts)
+}
+
+/// The leading `module <path>;` header of an entry across a successful or
+/// failed parse. Returning `(Vec::new(), _)` means no header is present so a
+/// missing one still fails the package name check. A failed parse falls back
+/// to the next tokens, so unsaved files with later syntax errors keep their
+/// entry-header diagnostic instead of losing it to the parse error.
+fn parsed_entry_header(text: &str) -> (Vec<String>, Span) {
+    if let Ok(module) = crate::parser::parse(text) {
+        return match module.items.first() {
+            Some(item) => {
+                let parts = match &item.item.kind {
+                    ItemKind::Module(parts) => parts.clone(),
+                    _ => Vec::new(),
+                };
+                (parts, item.item.span)
+            }
+            None => (Vec::new(), Span::default()),
+        };
+    }
+    let Ok(tokens) = lexer::lex(text) else {
+        return (Vec::new(), Span::default());
+    };
+    if !matches!(&tokens.first().map(|token| &token.kind), Some(Kind::Module)) {
+        return (Vec::new(), Span::default());
+    }
+    let mut parts = Vec::new();
+    let mut index = 1;
+    let last = loop {
+        let Kind::Ident(name) = tokens
+            .get(index)
+            .map_or(Kind::Eof, |token| token.kind.clone())
+        else {
+            return (Vec::new(), Span::default());
+        };
+        parts.push(name);
+        index += 1;
+        let next = tokens
+            .get(index)
+            .map_or(Kind::Eof, |token| token.kind.clone());
+        if next != Kind::Dot {
+            break tokens
+                .get(index)
+                .map_or(Span::default(), |token| token.span);
+        }
+        index += 1;
+    };
+    (parts, tokens[0].span.through(last))
 }
 
 fn has_executable_items(program: &Program) -> bool {

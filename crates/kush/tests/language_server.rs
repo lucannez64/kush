@@ -774,14 +774,14 @@ fn symlink_aliases_clear_old_diagnostics_and_keep_unsaved_document_identity() {
 
     let new_path = alias.join("src/new.kush");
     let new_uri = path_to_uri(&new_path);
-    let new_text = "module demo.new;\npub fn value() -> i64 { 42 }\n";
+    let new_text = "module demo.new;\npub fn value() -> i64 ! {panic} { 42 }\n";
     client.open(&new_uri, 1, new_text);
     client.receive_diagnostics_for(&new_uri);
     fs::write(&new_path, new_text).unwrap();
     client.change(
         &new_uri,
         2,
-        "module demo.new;\npub fn value() -> i64 { missing() }\n",
+        "module demo.new;\npub fn value() -> i64 ! {panic} { missing() }\n",
     );
     let diagnostic = client.receive_diagnostics_for(&new_uri);
     assert_eq!(diagnostic["params"]["version"], 2);
