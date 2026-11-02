@@ -132,3 +132,31 @@ and all-targets Clippy with warnings denied pass; sandbox confirmed stopped.
 Log: `/tmp/kush-boat-project-host-reviewed-full.log` (machine-local). Independent
 host and interop review remain required; this is not a claim of complete LSP,
 full formatting, TLS, asynchronous I/O, or arbitrary library ABI compatibility.
+
+## Bridge core and shared helper review corrections
+
+The interop review found two high-severity checked-side defects: foreign handle
+layouts were recomputed as two words despite the one-word C ABI, and borrowed
+foreign results were accepted without a supported return ABI. `f36aaf5` fixes
+these, same-width u64 lowering, owned Bytes/Unit parameter rejection, requested
+Cargo artifact selection, response-file argument rejection, package library
+path confinement, and versioned shared-library paths. Tests cover handles in
+records/tuples/arrays/vectors/boxes/calls/Result slots, following arguments,
+release counts, rejected borrowed results, u64, and dependency staticlibs.
+
+Full Boat command at `3e74911` passes **1092 workspace tests**, formatting,
+Clippy, the Rust SHA-256 project, and the todo project's four tests. The
+combined log counter includes those four app tests separately (1096 total);
+they are not additional workspace tests.
+Log: `/tmp/kush-boat-ffi-core-reviewed-full.log` (machine-local).
+
+The host review found incorrect HTTP header termination. `b54696d` scans for
+the complete CRLF-CRLF terminator, preserving zero/one/multiple headers and
+empty bodies. It also fixes lone-CR trimming, root basenames, and dotfile
+extensions. Eleven focused host/helper tests and all-targets Clippy pass on
+Boat. Log: `/tmp/kush-boat-http-helper-review-fixes.log`. Sandbox stopped.
+
+Still unresolved: evaluator-wide TCP/process deadline behavior, secure todo
+file replacement and permissions, generated-adapter helper symbol collisions
+and validation, full LSP support, and the other documented readiness limits.
+These passing tests do not erase the outstanding review findings.
