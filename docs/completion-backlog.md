@@ -1131,9 +1131,10 @@ debug information disabled and two jobs:
 - All-targets Clippy with warnings denied: passed.
 
 New coverage lives in `crates/kush/tests/borrowing_references.rs` (nested,
-owning, array, vector, temporary, returned-field, affine-replacement, hostile
-alias/escape/bounds, and native/reference cases) with updated expectations in
-`borrowed_methods.rs` and `strings.rs`. The full Boat gate is parent-coordinated.
+owning, array, vector, temporary, branch-selected place, returned-field,
+affine-replacement, linear-replacement rejection, hostile alias/escape/bounds,
+and native/reference cases) with updated expectations in `borrowed_methods.rs`
+and `strings.rs`. The full Boat gate is parent-coordinated.
 The broader lifetime-inference item stays unchecked: recursive lifetime
 variables, record variance annotations, and row/lifetime unification remain
 outside the grammar and are not silently guessed.

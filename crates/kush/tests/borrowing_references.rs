@@ -620,6 +620,20 @@ fn field_index_and_temporary_places_are_checked_references() {
         15,
         "",
     );
+    // A branch may select different disjoint field places; the joined
+    // reference keeps the live storage identity.
+    agrees(
+        r#"struct Pair { a: i64, b: i64 }
+        fn main() -> i64 ! {panic} {
+            let mut p = Pair { a: 1, b: 2 };
+            let flag = p.a == 1;
+            let r = if flag { &mut p.a } else { &mut p.b };
+            *r = 7;
+            p.a + p.b
+        }"#,
+        9,
+        "",
+    );
 }
 
 #[test]
@@ -713,6 +727,14 @@ fn place_reference_hostile_forms_are_rejected() {
             0
         }"#,
         "an index reference would alias an owning or linear element",
+    );
+    // A linear referent is never silently dropped by reference replacement.
+    rejects(
+        r#"#[linear]
+        struct L { x: i64 }
+        fn replace(p: &mut L) -> Unit ! {panic} { *p = L { x: 1 }; }
+        fn main() -> Unit ! {panic} {}"#,
+        "cannot replace a linear payload",
     );
     // Text views are immutable; a `&mut str` parameter is rejected at its
     // declaration rather than pretending arbitrary byte mutation preserves
