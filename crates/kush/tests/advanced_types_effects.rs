@@ -51,6 +51,70 @@ fn agrees(source: &str, expected: i64) {
 }
 
 // ---------------------------------------------------------------------------
+// Algebraic subtype inference
+// ---------------------------------------------------------------------------
+
+#[test]
+fn contextual_union_inference_accumulates_literal_constraints() {
+    // Each shape enumerates every matching union alternative, checks the
+    // literal under each candidate, and requires exactly one survivor.
+    let source = r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: [i64; 2] | [Bool; 2] = [20, 22];
+            let b: Vec<i64> | Vec<Bool> = [1, 2];
+            let c: (i64, i64) | (Bool, Bool) = (3, 4);
+            match a {
+                [i64; 2] @ xs => xs[0] + xs[1] + match b {
+                    Vec<i64> @ vs => Vec.len(&vs) - 2,
+                    Vec<Bool> @ _ => 0,
+                } + match c {
+                    (i64, i64) @ _ => 0,
+                    (Bool, Bool) @ _ => 0,
+                },
+                [Bool; 2] @ _ => 0,
+            }
+        }"#;
+    assert_eq!(value(source), 42);
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: [i64; 2] | [Bool; 2] = [1, true];
+            0
+        }"#,
+        "type mismatch",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let v: Vec<i64> | Vec<Bool> = Vec.new();
+            0
+        }"#,
+        "fits several union alternatives",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let t: (i64, i64) | (Bool, Bool) = (1, true);
+            0
+        }"#,
+        "type mismatch",
+    );
+}
+
+#[test]
+fn generic_inference_across_union_alternatives_reports_conflicts() {
+    rejects(
+        r#"
+        fn sized<T>(v: Vec<T>) -> i64 ! {panic} { Vec.len(&v) }
+        fn make(c: Bool) -> Vec<i64> | Vec<Bool> ! {alloc, panic} {
+            if c { [1, 2] } else { [true, false] }
+        }
+        fn main() -> i64 ! {alloc, panic} { sized(make(true)) }"#,
+        "union alternatives disagree on type parameter 'T'",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // General effect-row constraints
 // ---------------------------------------------------------------------------
 

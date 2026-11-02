@@ -7548,7 +7548,65 @@ impl Checker<'_, '_> {
                 ));
             }
         }
-        let wanted = self.expected_tuple_elements(expected, values.len());
+        let candidates = self.expected_tuple_elements(expected, values.len());
+        if candidates.len() > 1 {
+            let mut accepted = Vec::new();
+            let mut first_error = None;
+            for candidate in &candidates {
+                let mut fields = Vec::with_capacity(values.len());
+                let mut failed = None;
+                for (index, value) in values.iter().enumerate() {
+                    match self.expr_expected(value, Some(candidate[index])) {
+                        Ok(value) => match self.coerce(value, candidate[index], span) {
+                            Ok(value) => fields.push(value),
+                            Err(error) => {
+                                failed = Some(error);
+                                break;
+                            }
+                        },
+                        Err(error) => {
+                            failed = Some(error);
+                            break;
+                        }
+                    }
+                }
+                if failed.is_none() {
+                    accepted.push((candidate.clone(), fields));
+                } else if first_error.is_none() {
+                    first_error = failed;
+                }
+            }
+            let (elements, fields) = match accepted.len() {
+                1 => accepted.pop().expect("one accepted tuple alternative"),
+                0 => {
+                    return Err(first_error.expect(
+                        "a tuple literal candidate always attempts one element",
+                    ));
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        span,
+                        "this tuple literal fits several union alternatives; add an explicit annotation",
+                    ));
+                }
+            };
+            let ty = self.types.tuple(elements, span)?;
+            let value = Expr {
+                kind: ExprKind::Construct {
+                    enum_id: ty.layout().unwrap(),
+                    tag: 0,
+                    fields,
+                },
+                ty,
+                span,
+                resource: None,
+            };
+            return match expected {
+                Some(expected) => self.coerce(value, expected, span),
+                None => Ok(value),
+            };
+        }
+        let wanted = candidates.into_iter().next();
         let mut fields = Vec::with_capacity(values.len());
         for (index, value) in values.iter().enumerate() {
             let hint = wanted.as_ref().map(|w| w[index]);
@@ -7602,7 +7660,7 @@ impl Checker<'_, '_> {
     /// alternative of an expected union with the same arity. An ambiguous
     /// union deliberately supplies no hints: each element stays independently
     /// typed and the whole tuple is injected into the union afterwards.
-    fn expected_tuple_elements(&self, expected: Option<Type>, arity: usize) -> Option<Vec<Type>> {
+    fn expected_tuple_elements(&self, expected: Option<Type>, arity: usize) -> Vec<Vec<Type>> {
         let elements = |ty: Type| {
             ty.layout()
                 .filter(|id| {
@@ -7610,20 +7668,14 @@ impl Checker<'_, '_> {
                 })
                 .map(|id| self.types.enums[id].arguments.clone())
         };
-        match expected? {
-            Type::Union(id) => {
-                let mut found = self.types.unions[id]
-                    .members
-                    .iter()
-                    .filter_map(|member| elements(*member));
-                let first = found.next()?;
-                if found.next().is_some() {
-                    None
-                } else {
-                    Some(first)
-                }
-            }
-            ty => elements(ty),
+        match expected {
+            Some(Type::Union(id)) => self.types.unions[id]
+                .members
+                .iter()
+                .filter_map(|member| elements(*member))
+                .collect(),
+            Some(ty) => elements(ty).into_iter().collect(),
+            None => Vec::new(),
         }
     }
     /// Whether `name` is one of the builtin methods eligible for receiver
@@ -12416,12 +12468,66 @@ impl Checker<'_, '_> {
                     return c.record(ty, fields, span, expected);
                 }
                 ast::ExprKind::Array(values) => {
-                    if let Some((id, element, length)) = c.expected_array(expected, values.len())
-                    {
-                        if values.len() != length {return Err(Diagnostic::new(span,"array literal length differs from its type"));}
-                        let fields = values.iter().map(|v| c.expr_expected(v,Some(element))).collect::<Result<Vec<_>>>()?;
-                        let ty = if fields.iter().any(|v|v.ty==Type::Never) {Type::Never} else {Type::Enum(id)};
-                        let value = Expr { kind: ExprKind::Construct {enum_id:id,tag:0,fields},ty,span,resource:None };
+                    let candidates = c.expected_array(expected, values.len());
+                    if !candidates.is_empty() {
+                        if values.len() != candidates[0].2 {
+                            return Err(Diagnostic::new(
+                                span,
+                                "array literal length differs from its type",
+                            ));
+                        }
+                        // Accumulate constraints instead of committing to the
+                        // first union alternative: every candidate array layout
+                        // is tried, and exactly one must accept every element.
+                        let mut accepted = Vec::new();
+                        let mut first_error = None;
+                        for (id, element, _) in &candidates {
+                            let mut fields = Vec::with_capacity(values.len());
+                            let mut failed = None;
+                            for value in values {
+                                match c.expr_expected(value, Some(*element)) {
+                                    Ok(value) => fields.push(value),
+                                    Err(error) => {
+                                        failed = Some(error);
+                                        break;
+                                    }
+                                }
+                            }
+                            if failed.is_none() {
+                                accepted.push((*id, fields));
+                            } else if first_error.is_none() {
+                                first_error = failed;
+                            }
+                        }
+                        let (id, fields) = match accepted.len() {
+                            1 => accepted.pop().expect("one accepted candidate"),
+                            0 => {
+                                return Err(first_error.expect(
+                                    "an array literal candidate always attempts one element",
+                                ));
+                            }
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    "this array literal fits several union alternatives; add an explicit annotation or type arguments",
+                                ));
+                            }
+                        };
+                        let ty = if fields.iter().any(|v| v.ty == Type::Never) {
+                            Type::Never
+                        } else {
+                            Type::Enum(id)
+                        };
+                        let value = Expr {
+                            kind: ExprKind::Construct {
+                                enum_id: id,
+                                tag: 0,
+                                fields,
+                            },
+                            ty,
+                            span,
+                            resource: None,
+                        };
                         return match expected {
                             Some(expected) => c.coerce(value, expected, span),
                             None => Ok(value),
@@ -15806,6 +15912,85 @@ impl Checker<'_, '_> {
         subst: &mut crate::runtime_types::Subst,
         span: Span,
     ) -> Result<()> {
+        // First-order inference through a union actual. Instead of reading the
+        // first union alternative that happens to bind a variable, every
+        // alternative contributes a constraint. A variable must receive the
+        // same binding from every alternative that constrains it; otherwise the
+        // union does not determine one specialization and the call is
+        // ambiguous. A bare type variable is not distributed: it captures the
+        // whole normalized union, as before.
+        let bare_variable = matches!(
+            &pattern.kind,
+            ast::TypeKind::Named { path, arguments }
+                if arguments.is_empty()
+                    && self.resolution.reference(pattern.span).is_some_and(|id| type_vars.contains(&id))
+                    && path.len() == 1
+        );
+        if let Type::Union(id) = actual
+            && !bare_variable
+        {
+            let members = self.types.unions[id].members.clone();
+            let mut merged = subst.clone();
+            let mut constrained = false;
+            for member in members {
+                let mut candidate = subst.clone();
+                self.unify(
+                    pattern,
+                    member,
+                    type_vars,
+                    const_vars,
+                    effect_vars,
+                    &mut candidate,
+                    span,
+                )?;
+                for variable in type_vars {
+                    if let Some(value) = candidate.types.get(variable).copied() {
+                        match merged.types.get(variable).copied() {
+                            Some(previous) if previous != value => {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    format!(
+                                        "union alternatives disagree on type parameter '{}': one alternative requires {} and another requires {}. Specialize it explicitly with '::<...>'",
+                                        self.resolution.bindings[*variable].name,
+                                        self.types.name(previous),
+                                        self.types.name(value)
+                                    ),
+                                ));
+                            }
+                            Some(_) => {}
+                            None => {
+                                merged.types.insert(*variable, value);
+                                constrained = true;
+                            }
+                        }
+                    }
+                }
+                for variable in const_vars {
+                    if let Some(value) = candidate.consts.get(variable).copied() {
+                        match merged.consts.get(variable).copied() {
+                            Some(previous) if previous != value => {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    format!(
+                                        "union alternatives disagree on natural parameter '{}': one alternative requires {previous} and another requires {value}",
+                                        self.resolution.bindings[*variable].name
+                                    ),
+                                ));
+                            }
+                            Some(_) => {}
+                            None => {
+                                merged.consts.insert(*variable, value);
+                                constrained = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if constrained {
+                *subst = merged;
+            }
+            return Ok(());
+        }
         match &pattern.kind {
             ast::TypeKind::Lifetime(_) => {}
             ast::TypeKind::Named { path, arguments } => {
@@ -17534,21 +17719,30 @@ impl Checker<'_, '_> {
         &self,
         expected: Option<Type>,
         length: usize,
-    ) -> Option<(usize, Type, usize)> {
-        let exact = expected.and_then(Type::layout);
-        if let Some(id) = exact
-            && let Some((element, declared)) = self.types.enums[id].array
-        {
-            return Some((id, element, declared));
-        }
-        let Some(Type::Union(id)) = expected else {
-            return None;
+    ) -> Vec<(usize, Type, usize)> {
+        let candidates = |expected: Type| -> Vec<(usize, Type, usize)> {
+            let Some(id) = expected.layout() else {
+                return Vec::new();
+            };
+            let Some((element, declared)) = self.types.enums[id].array else {
+                return Vec::new();
+            };
+            vec![(id, element, declared)]
         };
-        self.types.unions[id].members.iter().find_map(|member| {
-            let id = member.layout()?;
-            let (element, declared) = self.types.enums[id].array?;
-            (declared == length).then_some((id, element, declared))
-        })
+        match expected {
+            Some(Type::Union(id)) => self.types.unions[id]
+                .members
+                .iter()
+                .copied()
+                .filter_map(|member| {
+                    let id = member.layout()?;
+                    let (element, declared) = self.types.enums[id].array?;
+                    (declared == length).then_some((id, element, declared))
+                })
+                .collect(),
+            Some(expected) => candidates(expected),
+            None => Vec::new(),
+        }
     }
     fn vec_literal(
         &mut self,
@@ -17556,16 +17750,20 @@ impl Checker<'_, '_> {
         span: Span,
         expected: Option<Type>,
     ) -> Result<Expr> {
-        let mut element = match expected {
-            Some(Type::Vec(p)) => Some(self.types.pointees[p]),
-            Some(Type::Union(id)) => self.types.unions[id].members.iter().find_map(|member| {
-                if let Type::Vec(p) = member {
-                    Some(self.types.pointees[*p])
-                } else {
-                    None
+        let candidates = match expected {
+            Some(Type::Vec(p)) => vec![self.types.pointees[p]],
+            Some(Type::Union(id)) => {
+                let mut elements = Vec::new();
+                for member in self.types.unions[id].members.iter() {
+                    if let Type::Vec(p) = member
+                        && !elements.contains(&self.types.pointees[*p])
+                    {
+                        elements.push(self.types.pointees[*p]);
+                    }
                 }
-            }),
-            _ => None,
+                elements
+            }
+            _ => Vec::new(),
         };
         if values.len() > 4096 {
             return Err(Diagnostic::new(
@@ -17574,6 +17772,80 @@ impl Checker<'_, '_> {
             ));
         }
         self.require(ALLOC | PANIC, span)?;
+        let mut element = match candidates.len() {
+            0 => None,
+            1 => Some(candidates[0]),
+            _ => {
+                // Accumulate element constraints over every union
+                // alternative; the literal must identify exactly one.
+                let mut accepted = Vec::new();
+                let mut first_error = None;
+                for candidate in &candidates {
+                    let mut checked = Vec::with_capacity(values.len());
+                    let mut failed = None;
+                    for value in values {
+                        match self.expr_expected(value, Some(*candidate)) {
+                            Ok(value) => checked.push(value),
+                            Err(error) => {
+                                failed = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                    if failed.is_none() {
+                        accepted.push((*candidate, checked));
+                    } else if first_error.is_none() {
+                        first_error = failed;
+                    }
+                }
+                let (element, checked) = match accepted.len() {
+                    1 => accepted.pop().expect("one accepted vector element"),
+                    0 => {
+                        return Err(first_error.expect(
+                            "a vector literal candidate always attempts one element",
+                        ));
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            span,
+                            "this vector literal fits several union alternatives; annotate the element type or write Vec::<T>::new",
+                        ));
+                    }
+                };
+                let ty = Type::Vec(self.types.pointer(element));
+                let mut current = Expr {
+                    kind: ExprKind::Call(
+                        Target::Vec(VecOp::WithCapacity, element),
+                        vec![Expr {
+                            kind: ExprKind::Constant(values.len() as i64),
+                            ty: Type::I64,
+                            span,
+                            resource: None,
+                        }],
+                    ),
+                    ty,
+                    span,
+                    resource: None,
+                };
+                for value in checked {
+                    self.expect(value.ty, element, value.span)?;
+                    let diverges = value.ty == Type::Never;
+                    current = Expr {
+                        kind: ExprKind::Call(
+                            Target::Vec(VecOp::Push, element),
+                            vec![current, value],
+                        ),
+                        ty: if diverges { Type::Never } else { ty },
+                        span,
+                        resource: None,
+                    };
+                }
+                return match expected {
+                    Some(expected) => self.coerce(current, expected, span),
+                    None => Ok(current),
+                };
+            }
+        };
         let mut checked = Vec::new();
         for value in values {
             let value = self.expr_expected(value, element)?;
@@ -18236,18 +18508,26 @@ impl Checker<'_, '_> {
                 (Some(_), _) => return Err(Diagnostic::new(span, "Vec expects one element type")),
                 (None, Some(Type::Vec(p))) => self.types.pointees[p],
                 (None, Some(Type::Union(id))) => {
-                    match self.types.unions[id].members.iter().find_map(|member| {
-                        if let Type::Vec(p) = member {
-                            Some(self.types.pointees[*p])
-                        } else {
-                            None
+                    let mut elements = Vec::new();
+                    for member in self.types.unions[id].members.iter() {
+                        if let Type::Vec(p) = member
+                            && !elements.contains(&self.types.pointees[*p])
+                        {
+                            elements.push(self.types.pointees[*p]);
                         }
-                    }) {
-                        Some(element) => element,
-                        None => {
+                    }
+                    match elements.as_slice() {
+                        [element] => *element,
+                        [] => {
                             return Err(Diagnostic::new(
                                 span,
                                 "the expected union has no Vec<T> alternative for this constructor",
+                            ));
+                        }
+                        _ => {
+                            return Err(Diagnostic::new(
+                                span,
+                                "this empty vector constructor fits several union alternatives; write the element type explicitly as Vec.new::<T>()",
                             ));
                         }
                     }

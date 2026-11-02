@@ -163,6 +163,43 @@ diagnostic; there is no raw function-pointer relaundering.
 Conversion is coherent: tag order comes from the normalized, sorted alternative
 list, so the same subtype judgment always produces the same target tag.
 
+## Contextual and algebraic inference
+
+The checker no longer guesses the first union alternative that has the right
+shape. Two related mechanisms accumulate constraints instead:
+
+1. **Contextual literals.** For an inline-array, vector, or tuple literal whose
+   expected type is a union, every matching alternative is considered. The
+   literal is checked under each candidate element/tuple type and must be
+   accepted by exactly one. Zero survivors report the first candidate's real
+   type error; several survivors are an explicit ambiguity requesting an
+   annotation or `::<...>` specialization. `Vec.new()`/`Vec.with_capacity` with
+   an ambiguous union of `Vec<T>` alternatives are rejected rather than
+   choosing one unchecked element type.
+2. **Generic calls through a union actual.** First-order matching distributes a
+   declared pattern over every union member that constrains a type/natural
+   variable. Every member that binds a variable must agree. Disagreement is a
+   diagnostic naming the variable and both bindings; no alternative is silently
+   preferred. A bare type variable still captures the whole normalized union,
+   because that is the principal binding for `id<T>(x: T)`.
+
+The supported inference fragment is deliberately first-order and bounded:
+
+- matching is structural over the declared generic pattern (named data, `Box`,
+  `Vec`, arrays, tuples, arrows, aliases) and never runs user code;
+- union distribution is one level at the inferred position, with at most the
+  normalized 16 alternatives;
+- there is no backtracking search across multiple parameters, no recursive
+  row/type unification, and no principal inference for two variables that can
+  trade evidence;
+- conflicting or incomparable evidence is always an error, never a silently
+  chosen arm; explicit annotations/specialization are the escape hatch;
+- type inference does not infer unions from unconstrained literals: an empty
+  vector still needs an annotation.
+
+This is a decidable bounded fragment, not a complete principal algebraic
+subtyping algorithm.
+
 ## Case analysis and narrowing
 
 A heterogeneous union is narrowed with a type pattern:
@@ -280,11 +317,12 @@ Deliberately unsupported, with explicit diagnostics:
   checked explicit or conservatively elided lifetimes, but a view cannot escape
   through a union alternative.
 - **Indexed/dependent unions and principal algebraic inference:** runtime type
-  aliases (including unions) are elaborated transparently, but inference
-  through a union that mentions an unbound type variable asks for explicit
-  `::<...>` specialization instead of guessing. Array length variables are a
-  separate compile-time fragment described in
-  [dependent-indices.md](dependent-indices.md).
+  aliases (including unions) are elaborated transparently. Contextual literals
+  and first-order generic matching now accumulate constraints over the finite
+  union row as described above, but general principal inference, indexed
+  unions, and multi-variable backtracking remain explicit-specialization
+  boundaries. Array length variables are a separate compile-time fragment
+  described in [dependent-indices.md](dependent-indices.md).
 - **Structural equality or ordering on union values:** no union equality; match
   a member and compare the narrowed scalar.
 - **Implicit numeric widening:** not part of subtyping.
