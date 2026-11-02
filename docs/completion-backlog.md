@@ -1050,3 +1050,17 @@ valid callback rather than a no-hook sentinel. Positive/refusal, initializer,
 first-declared-hook, DynArray, and JSON suites pass in both backends (95 focused
 tests). Full local and Boat combined validation is pending. Each feature's
 remaining explicit boundaries above remain outstanding.
+
+## Realloc payload integrity correction
+
+An adversarial hook returning zero-filled replacement storage exposed a
+reference/native mismatch: reference elements survived, while native owning
+handles were corrupted and native execution aborted. The compiler now retains
+the typed payload privately across a hook, presents zeroed readable old bytes,
+and restores live elements into the validated returned block. The hook manages
+storage rather than typed representations. Reference callback byte views are
+also zeroed even when the original allocation callback filled its buffer.
+Regressions verify scalar preservation, owning cleanup, and callback opacity
+in both backends. The two stale invalid-effect diagnostic expectations from the
+combined local run were updated; both affected suites pass (33 tests). A new
+full combined local/Boat gate is pending for this correction.

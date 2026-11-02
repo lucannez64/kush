@@ -678,17 +678,27 @@ static uint64_t kush_alloc_vec_block_bytes(uint64_t capacity, uint64_t width) {
     if (width == 0 || capacity > ((uint64_t)INT64_MAX) / 8 / width) kush_panic();
     return capacity * width * 8;
 }
-/* A growth hook consumes the previous block and returns a block with at least
-   `bytes` capacity that still contains the old contents. A short result is a
-   panic because the old block is already gone. */
+/* The callback manages storage, never the representation of live typed
+   elements. Preserve the payload privately and expose only zeroed readable
+   bytes to the hook, then restore the typed prefix into the returned block. */
 static uint64_t kush_alloc_block_grow(uint64_t grow, uint64_t block, uint64_t old_bytes,
                                       uint64_t bytes) {
     if (grow == 0 || block == 0) kush_panic();
-    /* The growth hook observes `old_bytes` readable bytes, matching the
-       reference model's zero-filled block view. */
+    unsigned char *saved = NULL;
+    if (old_bytes != 0) {
+        saved = (unsigned char *)malloc((size_t)old_bytes);
+        if (saved == NULL) kush_panic();
+        memcpy(saved, kush_alloc_block_data(block), (size_t)old_bytes);
+        memset(kush_alloc_block_data(block), 0, (size_t)old_bytes);
+    }
     ((KushBytes *)(uintptr_t)block)->length = old_bytes;
     uint64_t grown = ((KushReallocBlockFn)(uintptr_t)grow)(block, old_bytes, bytes);
-    if (grown == 0 || ((KushBytes *)(uintptr_t)grown)->capacity < bytes) kush_panic();
+    if (grown == 0 || ((KushBytes *)(uintptr_t)grown)->capacity < bytes) {
+        free(saved);
+        kush_panic();
+    }
+    if (old_bytes != 0) memcpy(kush_alloc_block_data(grown), saved, (size_t)old_bytes);
+    free(saved);
     return grown;
 }
 uint64_t kush_alloc_vec_create(uint64_t allocator, uint64_t release, uint64_t realloc,

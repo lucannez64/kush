@@ -683,3 +683,41 @@ fn realloc_hook_declared_first_is_not_confused_with_no_hook() {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 4);
 }
+
+#[test]
+fn realloc_callbacks_cannot_overwrite_typed_elements_or_owning_handles() {
+    let source = r#"
+        fn allocate(bytes: i64) -> Bytes ! {alloc, panic} {
+            let mut block = Bytes.with_capacity(bytes);
+            let mut i = 0;
+            while i < bytes {block = Bytes.push_reserved(block, 255); i = i + 1;}
+            block
+        }
+        fn release(block: Bytes) -> Unit ! {} {drop(block)}
+        fn replace(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+            if old_bytes > 0 && Bytes.get(&block, 0) != 0 {
+                drop(block); return Bytes.with_capacity(0);
+            }
+            drop(block);
+            let mut fresh = Bytes.with_capacity(bytes);
+            let mut i = 0;
+            while i < bytes {fresh = Bytes.push_reserved(fresh, 0); i = i + 1;}
+            fresh
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let allocator = Allocator.with_realloc(allocate, release, replace);
+            let mut values: AllocVec<i64> = AllocVec.new(allocator);
+            let mut i = 0;
+            while i < 5 {values = AllocVec.push(values, i + 41); i = i + 1;}
+            let answer = AllocVec.get(&values, 0) + AllocVec.get(&values, 4);
+            let mut owners: AllocVec<Box<i64>> = AllocVec.new(allocator);
+            let mut j = 0;
+            while j < 5 {owners = AllocVec.push(owners, Box.new(j)); j = j + 1;}
+            let owners = AllocVec.clear(owners);
+            drop(owners);
+            answer
+        }"#;
+    assert_eq!(value(source), 86);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 86);
+}

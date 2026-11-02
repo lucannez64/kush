@@ -680,7 +680,7 @@ enum Value {
     Allocator {
         alloc: usize,
         free: usize,
-        /// Optional growth hook code pointer; zero means none.
+        /// Optional growth hook function index; index zero is a valid hook.
         realloc: Option<usize>,
     },
     /// The heap state of one `AllocBox<T>`: the allocator pair, the `Bytes`
@@ -1019,6 +1019,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         if let Value::Owned(id) = block
             && let Some(Value::Buffer { mut data, capacity }) = self.heap.get(id)
         {
+            data.clear();
             data.resize(old_bytes, 0);
             self.heap.insert(id, Value::Buffer { data, capacity });
             block = Value::Owned(id);

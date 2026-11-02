@@ -267,7 +267,7 @@ A third, optional growth hook extends the same value:
 
 ```rust
 fn block_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
-    // copy `old_bytes` from `block` into a fresh `bytes`-capacity block and
+    // optionally copy the zeroed readable prefix into a fresh block and
     // release `block`
 }
 let growing = Allocator.with_realloc(block_alloc, block_free, block_grow);
@@ -287,9 +287,14 @@ let growing = Allocator.with_realloc(block_alloc, block_free, block_grow);
 - `Allocator.with_realloc(alloc, free, realloc)` additionally stores
   `fn(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes`, which must be
   noncapturing and may declare only `alloc` and `panic`. It consumes the
-  previous block, observes `old_bytes` readable bytes, and returns a block with
-  at least `bytes` capacity that still contains those bytes. A smaller returned
-  block panics because the previous block is already gone. `AllocVec` growth
+  previous block, observes `old_bytes` zeroed readable bytes, and returns a block
+  with at least `bytes` capacity. Typed vector elements are opaque to the hook:
+  the compiler saves their live prefix privately, zeroes the callback's view,
+  and restores the typed prefix into the returned block. A callback can replace
+  or overwrite storage without corrupting element values or owning handles.
+  This requires temporary native storage proportional to the live payload;
+  it is freed after the hook and is not a source-level allocation in the logical
+  counters. A smaller returned block panics because the previous block is gone. `AllocVec` growth
   uses this hook when the vector already has a block; the first block and the
   fallible path use the ordinary allocation callback. The hook owns nothing
   beyond the block it consumes and returns, so moving or dropping the allocator

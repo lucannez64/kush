@@ -849,7 +849,7 @@ fn effect_specialization_is_checked_and_stays_separate_from_other_categories() {
     rejects(
         "fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { x }
          fn main() -> i64 ! {panic} { apply::<i64>(1) }",
-        "only io, alloc, suspend, and panic",
+        "expected a builtin effect",
     );
     // A shared row variable accumulates the union of every higher-order
     // argument. The specializing caller must declare that union; otherwise the
