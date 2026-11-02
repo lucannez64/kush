@@ -1037,3 +1037,16 @@ fn structural_borrowed_field_transfer_keeps_cleanup_balanced() {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 42);
 }
+
+#[test]
+fn dynamically_resolved_perform_requires_panic() {
+    // With no active handler the program aborts, so an empty row cannot
+    // perform a declared operation outside a lexical handler.
+    rejects(
+        r#"
+        effect Op: i64 -> i64;
+        fn pure() -> i64 ! {} { perform Op(20) }
+        fn main() -> i64 ! {} { pure() }"#,
+        "requires effects {panic}",
+    );
+}

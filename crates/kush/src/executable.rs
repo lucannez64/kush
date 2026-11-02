@@ -21005,6 +21005,9 @@ impl Checker<'_, '_> {
                 ),
             ));
         };
+        // No handler may be active at run time, which aborts the program, so
+        // a dynamically resolved operation can always panic.
+        self.require(PANIC, span)?;
         let payload = self.expr_expected(value, Some(declared.parameter))?;
         let payload = self.coerce(payload, declared.parameter, span)?;
         let resume = self.resume_value(declared.result, span)?;

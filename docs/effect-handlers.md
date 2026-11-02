@@ -82,6 +82,9 @@ lexically exactly as before, and in addition:
   every `return`, so an early return cannot leave a stale frame visible;
 - nested handling and shadowing follow the same innermost-first rule as direct
   performs.
+- a dynamically resolved `perform` requires `panic` in the enclosing row: when
+  no handler is active at run time the program aborts, so a function with an
+  empty row cannot perform a declared operation outside a lexical handler.
 
 The dynamic frame stores only a **noncapturing `fn`** handler and the handler
 must have an empty effect row. This is deliberate: a capturing/`once` handler

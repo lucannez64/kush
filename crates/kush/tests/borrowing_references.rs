@@ -612,3 +612,100 @@ fn shared_reference_vectors_can_replace_elements_and_clear_all_source_loans() {
         "enums cannot store borrowed",
     );
 }
+
+#[test]
+fn structural_record_coercion_keeps_per_field_borrows() {
+    // The kept field moves from source index 1 to target index 0; its loan
+    // must follow it through the conversion, both for slice views and
+    // reference containers, and through destructuring or projection.
+    rejects(
+        r#"struct Window<'a> { start: i64, view: &'a [i64] }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut data: Vec<i64> = [40];
+            let w = Window { start: 0, view: &data[..] };
+            let narrow: struct { view: &[i64] } = w;
+            match narrow { struct { view } => { data = [9]; Slice.get(view, 0) } }
+        }"#,
+        "cannot replace an owner",
+    );
+    rejects(
+        r#"struct Window<'a> { start: i64, view: &'a [i64] }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut data: Vec<i64> = [40];
+            let w = Window { start: 0, view: &data[..] };
+            let narrow: struct { view: &[i64] } = w;
+            let v = narrow.view;
+            data = [9];
+            Slice.get(v, 0)
+        }"#,
+        "cannot replace an owner",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Bundle { note: i64, points: Vec<&Point> }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut a = Point { x: 40, y: 2 };
+            let b = Bundle { note: 2, points: [&a] };
+            let narrow: struct { points: Vec<&Point> } = b;
+            match narrow { struct { points } => {
+                a = Point { x: 1, y: 1 };
+                Vec.get(&points, 0).x
+            } }
+        }"#,
+        "cannot replace an owner",
+    );
+    rejects(
+        r#"struct Pair<'a> { left: &'a [i64], right: &'a [i64] }
+        fn main() -> i64 ! {alloc, panic} {
+            let a: Vec<i64> = [1];
+            let mut b: Vec<i64> = [41];
+            let p = Pair { left: &a[..], right: &b[..] };
+            let narrow: struct { right: &[i64] } = p;
+            match narrow { struct { right } => { b = [9]; Slice.get(right, 0) } }
+        }"#,
+        "cannot replace an owner",
+    );
+    // The dropped field's loan ends with the field.
+    agrees(
+        r#"struct Pair<'a> { left: &'a [i64], right: &'a [i64] }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut a: Vec<i64> = [1];
+            let b: Vec<i64> = [41];
+            let p = Pair { left: &a[..], right: &b[..] };
+            let narrow: struct { right: &[i64] } = p;
+            match narrow { struct { right } => { a = [9]; Slice.get(right, 0) + 1 } }
+        }"#,
+        42,
+        "",
+    );
+}
+
+#[test]
+fn shared_reference_container_parameters_read_their_elements() {
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        fn read<'a>(b: &'a Box<&Point>) -> i64 ! {panic} {
+            let r = Box.read(b);
+            r.x + r.y
+        }
+        fn first<'a>(v: &'a Vec<&Point>) -> i64 ! {panic} { Vec.get(v, 0).x }
+        fn main() -> i64 ! {alloc, panic} {
+            let p = Point { x: 40, y: 2 };
+            let boxed: Box<&Point> = Box.new(&p);
+            let v: Vec<&Point> = [&p];
+            read(&boxed) + first(&v) - 40
+        }"#,
+        42,
+        "",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn leak<'a, 'b>(b: &'a Box<&'b Point>) -> &'a Point ! {panic} { Box.read(b) }
+        fn main() -> i64 ! {alloc, panic} {
+            let p = Point { x: 40, y: 2 };
+            let boxed: Box<&Point> = Box.new(&p);
+            leak(&boxed).x
+        }"#,
+        "reference result lifetime",
+    );
+}

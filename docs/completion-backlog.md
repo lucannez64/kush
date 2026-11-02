@@ -166,7 +166,8 @@ outstanding implementation item.
   propagation, owning payload/cleanup checks, and declared `effect` operations
   with a dynamic one-shot handler stack across called functions work in both
   backends. The dynamic stack stores pure noncapturing `fn` handlers and
-  restores its depth on early returns. Captured continuations, non-tail
+  restores its depth on early returns. A dynamically resolved `perform`
+  requires `panic`, since a missing handler aborts. Captured continuations, non-tail
   continuation capture, multishot handlers, capturing dynamic handlers,
   task-crossing dynamic frames, and user-defined effect-row names are not
   implemented; `resume` remains an identity operation result. See
@@ -371,3 +372,29 @@ and vector-source fixes, and the declared-effect/structural/DynArray follow-up.
 Boat reused the persistent workspace marker after resume. Remaining unchecked
 items above are still outstanding; this gate does not establish completeness
 or constitute an independent review of the latest borrowing/effect changes.
+
+## Independent borrowing/effects review follow-up
+
+An independent read-only review of `460ec58` (borrowing and advanced
+type/effect integration) found three defects, now fixed with regressions:
+
+- **High:** structural record coercion (`Coercion::Struct`) treated as
+  transparent by the ownership pass, so per-field borrow provenance stayed at
+  source field indices. A field that moved index lost its loan, letting the
+  owner be replaced while a slice view or `Vec<&T>` element was still live
+  (native read of freed storage). Provenance and field places are now remapped
+  through the coercion's target-to-source field map; dropped fields release
+  their loans.
+- **Medium:** shared `&Box<&T>` / `&Vec<&T>` parameters hit an internal
+  "stored reference has no capability provenance" error on any element read.
+  They now carry per-element provenance rooted at the parameter with the
+  declared element lifetime. `&mut` reference-container parameters keep the
+  previous behavior. Mismatched annotation labels on nested reference types
+  (`&'a Box<&'a T>` against an unlabeled argument) are still reported as a
+  type mismatch.
+- **Medium:** a dynamically resolved `perform` aborts when no handler is
+  active but did not require `panic`; it now does.
+
+The reviewer found handler-depth restoration (`break`, `return`, `?`, nested
+calls), task isolation of dynamic frames, and vector element-origin unions
+sound within its probe budget.

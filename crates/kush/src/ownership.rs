@@ -10,7 +10,7 @@
 //!   owner's scope. Loops must leave every outer owner as they found it.
 use crate::{
     Diagnostic, Span,
-    executable::{Block, Executable, Expr, ExprKind, Function, Pattern, Statement, Type},
+    executable::{Block, Coercion, Executable, Expr, ExprKind, Function, Pattern, Statement, Type},
     grades::Grade,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -224,6 +224,16 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                 // re-anchored, but a returned reference may name it.
                 checker.reference_lifetimes[index] =
                     function.parameter_lifetimes.get(index).cloned().flatten();
+                // A shared `&Box<&T>`/`&Vec<&T>` parameter reads element
+                // references owned by the caller; each element leaf is rooted
+                // at this parameter with the element's declared lifetime.
+                if let Some(container) = checker
+                    .shared_referent(local.ty)
+                    .filter(|ty| container_carries_borrow(checker.pointees, *ty))
+                {
+                    checker.record_sources[index] =
+                        Some(checker.parameter_record_provenance(index, container));
+                }
             } else if index < function.parameters && checker.is_carrier_type(local.ty) {
                 // A borrowed-record parameter is an aggregate of external
                 // field views. Each leaf is rooted at this parameter and
@@ -778,6 +788,14 @@ impl Checker<'_> {
         ty.layout().is_some_and(|id| self.enums[id].borrowed)
             || container_carries_borrow(self.pointees, ty)
     }
+    /// The referent of a shared reference type, through lifetime labels.
+    fn shared_referent(&self, ty: Type) -> Option<Type> {
+        match ty {
+            Type::Ref(p) => Some(self.pointees[p]),
+            Type::Annotated(p, _) => self.shared_referent(self.pointees[p]),
+            _ => None,
+        }
+    }
     fn is_task_exit(&self, ty: Type) -> bool {
         ty.layout()
             .is_some_and(|id| self.enums[id].name == "TaskExit")
@@ -827,7 +845,16 @@ impl Checker<'_> {
                     path.push(self.field_index(base.ty, *offset)?);
                     current = base;
                 }
-                ExprKind::Coerce { value, .. } => current = value,
+                ExprKind::Coerce {
+                    value, coercion, ..
+                } => {
+                    // `path` is outermost-first reversed; renumber the part
+                    // below this coercion into the source layout.
+                    path.reverse();
+                    path = coerce_field_path(coercion, &path)?;
+                    path.reverse();
+                    current = value;
+                }
                 ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot)
                     if current.ty.layout().is_some_and(|id| self.enums[id].record) =>
                 {
@@ -1203,7 +1230,9 @@ impl Checker<'_> {
                 }
                 provenance
             }
-            ExprKind::Coerce { value, .. } => self.record_provenance(value),
+            ExprKind::Coerce {
+                value, coercion, ..
+            } => coerce_provenance(coercion, self.record_provenance(value)),
             ExprKind::Block(block) => block
                 .tail
                 .as_ref()
@@ -4668,11 +4697,61 @@ impl Checker<'_> {
         }
     }
 }
+/// Strip representation-only coercions. A structural record conversion
+/// renumbers fields, so it is not transparent for per-field provenance.
 fn through_coerce(expr: &Expr) -> &Expr {
     match &expr.kind {
-        ExprKind::Coerce { value, .. } => through_coerce(value),
+        ExprKind::Coerce {
+            value, coercion, ..
+        } if !matches!(coercion, Coercion::Struct { .. }) => through_coerce(value),
         _ => expr,
     }
+}
+/// Move per-field provenance from a coercion's source layout to its target
+/// layout. Leaves of dropped source fields disappear with the field.
+fn coerce_provenance(coercion: &Coercion, provenance: RecordProvenance) -> RecordProvenance {
+    let Coercion::Struct { kept, .. } = coercion else {
+        return provenance;
+    };
+    let mut out = RecordProvenance::default();
+    if let Some(root) = provenance.leaves.get(&Vec::new()) {
+        out.leaves.insert(Vec::new(), root.clone());
+    }
+    for (target, source, nested) in kept {
+        let mut field = RecordProvenance::default();
+        for (path, loan) in &provenance.leaves {
+            if path.first() == Some(source) {
+                field.leaves.insert(path[1..].to_vec(), loan.clone());
+            }
+        }
+        if let Some(nested) = nested {
+            field = coerce_provenance(nested, field);
+        }
+        for (path, loan) in field.leaves {
+            let mut full = vec![*target];
+            full.extend(path);
+            out.leaves.insert(full, loan);
+        }
+    }
+    out
+}
+/// Map a target-layout field path back through a coercion to its source
+/// layout. `None` when the coercion does not keep that field.
+fn coerce_field_path(coercion: &Coercion, path: &[usize]) -> Option<Vec<usize>> {
+    let Coercion::Struct { kept, .. } = coercion else {
+        return Some(path.to_vec());
+    };
+    let Some((first, rest)) = path.split_first() else {
+        return Some(Vec::new());
+    };
+    let (_, source, nested) = kept.iter().find(|(target, ..)| target == first)?;
+    let rest = match nested {
+        Some(nested) => coerce_field_path(nested, rest)?,
+        None => rest.to_vec(),
+    };
+    let mut full = vec![*source];
+    full.extend(rest);
+    Some(full)
 }
 fn block_span(block: &Block) -> Span {
     block
