@@ -625,7 +625,7 @@ struct KushTask {
     void *result;
     size_t result_size;
     void (*drop)(void *);
-    int state, cancelled, joined, completed;
+    int state, cancelled, joined, completed, preserve;
     KushTask *waiter;
     uint64_t scope_ids[KUSH_MAX_SCOPES][KUSH_MAX_CHILDREN];
     int scope_counts[KUSH_MAX_SCOPES];
@@ -699,7 +699,7 @@ static void kush_task_init(void) {
     kush_initialized = 1;
 }
 uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
-                         uint64_t result_size, uint64_t drop) {
+                         uint64_t result_size, uint64_t drop, uint64_t preserve) {
     kush_task_init();
     if (kush_current->scope_depth == 0) kush_panic();
     if (kush_task_count >= KUSH_MAX_TASKS) kush_panic();
@@ -709,6 +709,7 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
     t->id = (uint64_t)id; t->wrapper = wrapper; t->code = code; t->env = env;
     t->result_size = result_size == 0 ? 8 : (size_t)result_size;
     t->drop = (void (*)(void *))(uintptr_t)drop;
+    t->preserve = preserve != 0;
     t->result = (void *)(uintptr_t)kush_alloc(t->result_size);
     void *base; size_t total;
     void *stack = kush_stack_alloc(KUSH_TASK_STACK, &base, &total);
@@ -735,7 +736,7 @@ static void kush_task_entry(unsigned int low, unsigned int high) {
     kush_current = t;
     ((void (*)(uint64_t, uint64_t, uint64_t))(uintptr_t)t->wrapper)(
         t->code, t->env, (uint64_t)(uintptr_t)t->result);
-    t->completed = t->cancelled ? 0 : 1;
+    t->completed = (t->cancelled && !t->preserve) ? 0 : 1;
     t->state = KUSH_FINISHED;
     if (t->waiter != NULL) {
         t->waiter->state = KUSH_READY;
@@ -757,6 +758,7 @@ uint64_t kush_task_join(uint64_t handle, void *out) {
         swapcontext(&kush_current->context, &kush_scheduler_context);
     }
     int completed = t->completed;
+    if (out == NULL && t->preserve) kush_panic();
     if (out != NULL) {
         memcpy(out, t->result, t->result_size);
     } else if (t->drop != NULL) {
@@ -1161,7 +1163,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let mut task_spawn_sig = module.make_signature();
     task_spawn_sig
         .params
-        .extend((0..5).map(|_| AbiParam::new(I64)));
+        .extend((0..6).map(|_| AbiParam::new(I64)));
     task_spawn_sig.returns.push(AbiParam::new(I64));
     let task_spawn = module
         .declare_function("kush_task_spawn", Linkage::Import, &task_spawn_sig)
@@ -3463,7 +3465,11 @@ impl Generator<'_, '_> {
                     .store(ir::MemFlagsData::new(), width, handle, 16);
                 handle
             }
-            ExprKind::TaskSpawn { body, result } => {
+            ExprKind::TaskSpawn {
+                body,
+                result,
+                obligation,
+            } => {
                 let values = lower!(self.expr(body));
                 let Type::Once(id) = body.ty else {
                     unreachable!("checked task body is once")
@@ -3480,15 +3486,17 @@ impl Generator<'_, '_> {
                 } else {
                     self.constant(0)
                 };
+                let preserve = self.constant(i64::from(*obligation));
                 self.runtime_call(
                     self.task_spawn,
-                    &[wrapper, values[0], values[1], bytes, drop],
+                    &[wrapper, values[0], values[1], bytes, drop, preserve],
                 )
             }
             ExprKind::TaskScope {
                 body,
                 result,
                 failure,
+                ..
             } => {
                 let values = lower!(self.expr(body));
                 let Type::Once(id) = body.ty else {
@@ -3558,7 +3566,7 @@ impl Generator<'_, '_> {
                 self.runtime_void(self.task_cancel, &[pointer]);
                 self.constant(0)
             }
-            ExprKind::TaskJoin { task, exit } => {
+            ExprKind::TaskJoin { task, exit, .. } => {
                 let handle = lower!(self.scalar(task));
                 self.consume(task);
                 let width = self.program.width(exit.payload).max(1);

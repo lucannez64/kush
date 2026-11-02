@@ -467,7 +467,21 @@ fn pending_graded_results_cannot_be_abandoned_by_early_exits() {
 }
 
 #[test]
-fn tasks_cannot_transfer_graded_results_through_cancellation() {
+fn linear_task_results_are_transferred_or_rejected_when_unjoined() {
+    value(
+        "use std.task.TaskExit;
+         fn make() -> Box<i64> @[1] ! {alloc, panic} { Box.new(1) }
+         fn main() -> i64 ! {alloc, panic, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+                let task: Task<Box<i64>> = Task.spawn(make);
+                match Task.join(task) {
+                    TaskExit.Completed(b) => Box.take(b),
+                    TaskExit.Cancelled => 0,
+                }
+            })
+         }",
+        1,
+    );
     rejects(
         "fn make() -> Box<i64> @[1] ! {alloc, panic} { Box.new(1) }
          fn main() -> Unit ! {alloc, panic, suspend} {
@@ -476,7 +490,7 @@ fn tasks_cannot_transfer_graded_results_through_cancellation() {
                     Task.spawn(fn() -> Box<i64> @[1] ! {alloc, panic, suspend} { make() });
             })
          }",
-        "task result",
+        "linear",
     );
 }
 

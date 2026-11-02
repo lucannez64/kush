@@ -219,9 +219,6 @@ pub(crate) struct Function {
     /// `(long, short)` means `'long: 'short`: storage named by `long` outlives
     /// storage named by `short`. Reflexivity is implicit.
     pub lifetime_bounds: BTreeSet<(String, String)>,
-    /// Whether any normal return transfers a binding-based linear obligation.
-    /// Task results use this to reject cancellation-discarded linear payloads.
-    pub result_linear: bool,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Local {
@@ -491,12 +488,19 @@ pub(crate) enum ExprKind {
     TaskSpawn {
         body: Box<Expr>,
         result: Type,
+        /// The spawned body returns an owning/intrinsically linear payload with
+        /// a transfer obligation. The handle is then linear (it must be joined
+        /// explicitly) and a cancellation-requested completion transfers the
+        /// payload as `Completed` instead of discarding it.
+        obligation: bool,
     },
     /// Run a once callable in the current task with a fresh structured scope
     /// frame. The epilogue joins every unjoined child before returning.
     TaskScope {
         body: Box<Expr>,
         result: Type,
+        /// The scope body result carries an owning/linear obligation.
+        obligation: bool,
         /// When the scope lambda returns the conventional `Result<T,E>`, an
         /// `Err` result requests cancellation of every unjoined child before
         /// the scope epilogue joins them.
@@ -515,6 +519,9 @@ pub(crate) enum ExprKind {
     TaskJoin {
         task: Box<Expr>,
         exit: TaskExitShape,
+        /// The joined task's payload carries an owning/linear obligation, so
+        /// the resulting `TaskExit<T>` transfers it to the caller.
+        obligation: bool,
     },
     /// Allocation-preserving in-place vector transform. `callbacks` are
     /// applied left-to-right to every element; their signatures determine the
@@ -1288,7 +1295,6 @@ struct Functions<'a> {
     uses_tasks: bool,
     /// Task body functions whose binding-based linear result must be rejected
     /// once their body has been checked.
-    pending_task_bodies: Vec<(usize, Span)>,
     /// Monotonic counter for compiler-internal elided input lifetimes. The
     /// generated names are not surface syntax, so they cannot collide with a
     /// declared lifetime name.
@@ -1341,7 +1347,6 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         certificates: Vec::new(),
         fusions: 0,
         uses_tasks: false,
-        pending_task_bodies: Vec::new(),
         elided_lifetimes: 0,
         traits: BTreeMap::new(),
         inherent: BTreeMap::new(),
@@ -1624,7 +1629,6 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 ),
             ));
         }
-        let result_linear = obligation.is_some();
         let locals = checker.locals;
         functions.bodies[index] = Some(Function {
             name: sig.name.clone(),
@@ -1641,7 +1645,6 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             parameter_lifetimes: sig.parameter_lifetimes.clone(),
             result_lifetime: sig.result_lifetime.clone(),
             lifetime_bounds: sig.lifetime_bounds.clone(),
-            result_linear,
         });
     }
     // Re-check every proof certificate without the search that produced it.
@@ -1657,19 +1660,6 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 bad.obligation
             ),
         ));
-    }
-    // A task result is discarded on cancellation. Reject bodies that transfer
-    // a binding-based or graded result obligation through their normal result.
-    for (index, span) in &functions.pending_task_bodies {
-        if functions.bodies[*index]
-            .as_ref()
-            .is_some_and(|function| function.result_linear || function.result_grade.is_some())
-        {
-            return Err(Diagnostic::new(
-                *span,
-                "a task result cannot carry a linear obligation: a cancelled task would have to discard it. Consume linear values inside the task and return a non-linear result",
-            ));
-        }
     }
     let mut executable = Executable {
         fusions: functions.fusions,
@@ -6603,7 +6593,6 @@ impl Checker<'_, '_> {
         let captures = capture_types.len();
         let mut parameter_grades = vec![None; captures];
         parameter_grades.extend(signature.parameter_grades.iter().copied());
-        let result_linear = body_returns_linear(&body, &locals);
         // The adapter is checked against the callable's borrow contract, like
         // a named function with the same explicit lifetimes.
         let mut parameter_lifetimes = vec![None; captures];
@@ -6628,7 +6617,6 @@ impl Checker<'_, '_> {
             parameter_lifetimes: parameter_lifetimes.clone(),
             result_lifetime: signature.borrows.result.clone(),
             lifetime_bounds: signature.borrows.bounds.clone(),
-            result_linear,
         };
         let synthetic = Signature {
             binding: usize::MAX,
@@ -7834,6 +7822,11 @@ impl Checker<'_, '_> {
             }
             // In-place map returns the same vector owner it consumed.
             ExprKind::VecMap { vector, .. } => self.value_moves_linear(vector),
+            // A task/scope whose result carries an owning or linear obligation
+            // transfers it to the handle (or to the joined TaskExit).
+            ExprKind::TaskSpawn { obligation, .. }
+            | ExprKind::TaskScope { obligation, .. }
+            | ExprKind::TaskJoin { obligation, .. } => *obligation,
             _ => false,
         }
     }
@@ -9996,7 +9989,6 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
-        let result_linear = obligation.is_some();
         let mut grades = vec![None; captures.len()];
         grades.extend(parameter_grades.iter().copied());
         let name = if once { "once lambda" } else { "lambda" };
@@ -10039,7 +10031,6 @@ impl Checker<'_, '_> {
             },
             result_lifetime: lambda_result_lifetime,
             lifetime_bounds: BTreeSet::new(),
-            result_linear,
         };
         let index = self.functions.add_synthetic(signature, function)?;
         let ty = if once {
@@ -11790,17 +11781,21 @@ impl Checker<'_, '_> {
                         "a task scope cannot return TaskExit<T> with a borrowed payload; match the join result and finish reading its fields inside the scope",
                     ));
                 }
-                if self.linear_type(result) || result_grade.is_some() {
+                if result_grade.is_some() && !(self.owned_type(result) || self.linear_type(result))
+                {
                     return Err(Diagnostic::new(
                         span,
-                        "a task scope result cannot carry a linear obligation: scope bodies are scheduled and cancelled like child tasks. Consume linear values inside the scope and return a non-linear result",
+                        "a copyable task result cannot carry a must-use @[1] obligation: cancellation has no place to deliver it. Return an owning resource or observe the value inside the task",
                     ));
                 }
+                let obligation =
+                    self.linear_type(result) || result_grade.is_some_and(Grade::is_one);
                 let failure = self.types.result(result, span).ok();
                 let value = Expr {
                     kind: ExprKind::TaskScope {
                         body: Box::new(body),
                         result,
+                        obligation,
                         failure,
                     },
                     ty: result,
@@ -11848,10 +11843,11 @@ impl Checker<'_, '_> {
                         "Task<T> cannot use Never as its result type; a task that cannot return cannot be joined",
                     ));
                 }
-                if self.linear_type(result) || result_grade.is_some() {
+                if result_grade.is_some() && !(self.owned_type(result) || self.linear_type(result))
+                {
                     return Err(Diagnostic::new(
                         span,
-                        "a task result cannot carry a linear obligation: a cancelled task would have to discard it. Consume linear values inside the task and return a non-linear result",
+                        "a copyable task result cannot carry a must-use @[1] obligation: cancellation has no place to deliver it. Return an owning resource or observe the value inside the task",
                     ));
                 }
                 let wanted = match (explicit, expected) {
@@ -11899,11 +11895,14 @@ impl Checker<'_, '_> {
                     }
                     None => result,
                 };
+                let obligation =
+                    self.linear_type(result) || result_grade.is_some_and(Grade::is_one);
                 let handle = Type::Task(self.types.pointer(result));
                 let value = Expr {
                     kind: ExprKind::TaskSpawn {
                         body: Box::new(body),
                         result,
+                        obligation,
                     },
                     ty: handle,
                     span,
@@ -12003,10 +12002,12 @@ impl Checker<'_, '_> {
                 self.require(SUSPEND, span)?;
                 let exit = self.types.task_exit(payload, span)?;
                 let ty = exit.result;
+                let obligation = self.linear_type(payload) || self.value_moves_linear(&task);
                 let value = Expr {
                     kind: ExprKind::TaskJoin {
                         task: Box::new(task),
                         exit,
+                        obligation,
                     },
                     ty,
                     span,
@@ -12078,9 +12079,6 @@ impl Checker<'_, '_> {
                     "{what} requires a statically known function or lambda body so cancellation cleanup can be checked; bind a named function or use an inline lambda"
                 ),
             ));
-        }
-        if static_body && let Some(function) = static_function {
-            self.functions.pending_task_bodies.push((function, span));
         }
         let target = self.types.function_type_with(
             vec![],
@@ -14449,99 +14447,6 @@ pub(crate) fn substitute_alias_type(
 /// Whether a checked function body returns a value that moves a binding-based
 /// linear obligation. Task results reject this because `TaskExit.Cancelled`
 /// would otherwise discard the obligation.
-fn body_returns_linear(block: &Block, locals: &[Local]) -> bool {
-    fn value(expr: &Expr, locals: &[Local]) -> bool {
-        match &expr.kind {
-            ExprKind::Local(slot) | ExprKind::Move(slot) => locals[*slot].linear,
-            ExprKind::Block(block) => block
-                .tail
-                .as_deref()
-                .is_some_and(|tail| value(tail, locals)),
-            ExprKind::If(_, yes, no) => {
-                (yes.ty != Type::Never && yes.tail.as_deref().is_some_and(|t| value(t, locals)))
-                    || (no.ty != Type::Never
-                        && no.tail.as_deref().is_some_and(|t| value(t, locals)))
-            }
-            ExprKind::Match(_, arms) => arms
-                .iter()
-                .any(|arm| arm.body.ty != Type::Never && value(&arm.body, locals)),
-            ExprKind::Construct { fields, .. } => fields.iter().any(|f| value(f, locals)),
-            ExprKind::Coerce { value: inner, .. } => value(inner, locals),
-            ExprKind::BoxNew(inner) => value(inner, locals),
-            ExprKind::BoxReuse { owner, payload } => value(owner, locals) || value(payload, locals),
-            ExprKind::VecMap { vector, .. } => value(vector, locals),
-            ExprKind::FnValue { captures, .. } => captures.iter().any(|c| value(c, locals)),
-            ExprKind::Loop(body) => crate::ownership::loop_break_values(body)
-                .into_iter()
-                .any(|v| value(v, locals)),
-            ExprKind::Try { value: inner, .. } => value(inner, locals),
-            _ => false,
-        }
-    }
-    fn returns(expr: &Expr, locals: &[Local]) -> bool {
-        match &expr.kind {
-            ExprKind::Return(v) => value(v, locals),
-            ExprKind::Block(block) => block_returns(block, locals),
-            ExprKind::If(_, yes, no) => block_returns(yes, locals) || block_returns(no, locals),
-            ExprKind::Match(_, arms) => arms.iter().any(|arm| returns(&arm.body, locals)),
-            ExprKind::Loop(block) | ExprKind::While(_, block) => block_returns(block, locals),
-            ExprKind::Call(_, args) | ExprKind::Construct { fields: args, .. } => {
-                args.iter().any(|arg| returns(arg, locals))
-            }
-            ExprKind::CallIndirect { callee, arguments } => {
-                returns(callee, locals) || arguments.iter().any(|arg| returns(arg, locals))
-            }
-            ExprKind::TaskSpawn { body, .. } | ExprKind::TaskScope { body, .. } => {
-                returns(body, locals)
-            }
-            ExprKind::TaskCancel(reference) => returns(reference, locals),
-            ExprKind::TaskJoin { task, .. } => returns(task, locals),
-            ExprKind::Unary(_, inner)
-            | ExprKind::BoxNew(inner)
-            | ExprKind::BoxTake(inner)
-            | ExprKind::BoxRead(inner)
-            | ExprKind::Drop(inner)
-            | ExprKind::Project(inner, _)
-            | ExprKind::Coerce { value: inner, .. }
-            | ExprKind::Assign(_, inner)
-            | ExprKind::Break(Some(inner), _) => returns(inner, locals),
-            ExprKind::Binary(_, a, b) | ExprKind::BytesAt(a, b) => {
-                returns(a, locals) || returns(b, locals)
-            }
-            ExprKind::RefAssign(reference, _, value) => {
-                returns(reference, locals) || returns(value, locals)
-            }
-            ExprKind::BoxReuse { owner, payload } => {
-                returns(owner, locals) || returns(payload, locals)
-            }
-            ExprKind::VecMap {
-                vector, callbacks, ..
-            } => returns(vector, locals) || callbacks.iter().any(|c| returns(c, locals)),
-            ExprKind::Slice {
-                base, start, end, ..
-            } => {
-                returns(base, locals)
-                    || start.as_deref().is_some_and(|e| returns(e, locals))
-                    || end.as_deref().is_some_and(|e| returns(e, locals))
-            }
-            ExprKind::FnValue { captures, .. } => captures.iter().any(|c| returns(c, locals)),
-            _ => false,
-        }
-    }
-    fn block_returns(block: &Block, locals: &[Local]) -> bool {
-        block.statements.iter().any(|statement| match statement {
-            Statement::Let(_, value) | Statement::Expr(value) => returns(value, locals),
-        }) || block
-            .tail
-            .as_deref()
-            .is_some_and(|tail| value(tail, locals) || returns(tail, locals))
-    }
-    block_returns(block, locals)
-}
-
-/// Whether a synthesized adapter body creates a capturing closure
-/// environment. Such a body allocates when the adapter is called, so the
-/// adapter's declared effect row must include `alloc` and `panic`.
 fn block_allocates(block: &Block) -> bool {
     fn expr(node: &Expr) -> bool {
         match &node.kind {

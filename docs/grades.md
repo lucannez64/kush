@@ -454,9 +454,10 @@ deferred:
   [subtyping.md](subtyping.md).
 - A machine-checked soundness proof for the combination of grades, affine
   ownership, dependent erasure, effect polymorphism, and subtyping.
-- Automatic cleanup of a linear result when a task or cancellation path would
-  otherwise discard it. Task results that would transfer a `@[1]` or
-  binding-based linear obligation stay rejected.
+- Forced cancellation delivery/unwinding. Cooperative cancellation already
+  transfers completed owning/linear task results and checks their handles; see
+  [linear task results](linear-task-results.md). Copyable must-use task results
+  remain rejected.
 - Grade-zero result erasure and erasure of an already-passed ABI argument. Local
   `@[0]` bindings are erased; parameter slots keep the call ABI but remain
   unobservable. See [grade-zero runtime erasure](grade-zero-erasure.md).

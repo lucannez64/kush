@@ -55,11 +55,29 @@ and remaining limits.
 
 ## Grades and linear resources
 
-- [ ] General grade inference beyond bare result-only expected-arrow inference.
-- [ ] User-defined grade algebras with validated laws and decidable checking boundaries.
-- [ ] Copyable exact-use result transfer across every control-flow/discard position.
-- [ ] Grade-zero runtime erasure with relevance/effect guarantees.
-- [ ] Cancellation cleanup of linear resources and linear task results.
+- [x] General grade inference beyond bare result-only expected-arrow inference.
+  Implemented as a single-occurrence affine solver over `+`/`*` for direct calls
+  with explicitly graded arguments and for expected arrows; unsolvable or
+  ambiguous equations stay explicit. See `docs/grade-inference.md`.
+- [x] User-defined grade algebras with validated laws and decidable checking
+  boundaries. Explicit finite carriers and total `add`/`mul` tables are checked
+  by exhaustive enumeration (closure, identities, associativity, commutativity,
+  distributivity, annihilation). See `docs/grade-algebras.md`.
+- [x] Copyable exact-use result transfer across every control-flow/discard
+  position. A copyable `@[1]` result is a must-use observation, never an owning
+  move; `let`, assignment, return, blocks, branches, match arms, loops, `?`,
+  captures, aggregates, and every tested discard position are checked. See
+  `docs/copyable-result-transfer.md`.
+- [x] Grade-zero runtime erasure with relevance/effect guarantees. Local
+  `@[0]` bindings are not materialized in either backend; initializer effects,
+  order, and allocation balance are preserved. Parameter slots remain ABI-bound
+  but unobservable, and result `@[0]` is still rejected. See
+  `docs/grade-zero-erasure.md`.
+- [x] Cancellation cleanup of linear resources and linear task results.
+  Cooperative cancellation transfers a completed owning/linear payload as
+  `Completed` instead of dropping it; such task handles are linear and must be
+  joined explicitly. Copyable must-use task results and forced cancellation
+  unwinding remain out of scope. See `docs/linear-task-results.md`.
 
 ## Advanced types and effects
 

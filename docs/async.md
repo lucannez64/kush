@@ -54,10 +54,14 @@ enum TaskExit<T> { Completed(T), Cancelled }
 ```
 
 `Task.join` consumes the handle. A task that returned normally yields
-`Completed(value)`. A task for which cancellation was requested and which then
-finished yields `Cancelled`; its discarded `T` payload is dropped (affine) or is
-rejected at compile time if it carries a linear obligation. A task body that
-panics aborts the process, as elsewhere in the current panic policy.
+`Completed(value)`. If the body completed with an owning or intrinsically linear
+payload under a `@[1]` contract, the payload is transferred as `Completed` even
+when a cancellation request was observed; the handle is linear and must be
+joined explicitly. An affine (ungraded) owning payload for which cancellation
+was requested yields `Cancelled` and is dropped exactly once. A copyable `@[1]`
+task result is rejected. A task body that panics aborts the process, as
+elsewhere in the current panic policy. See
+[linear task results and cancellation cleanup](linear-task-results.md).
 
 An expected `Task<U>` type or explicit `Task.spawn::<U>(...)` may widen the
 callable's result to a supertype. Representation changes, such as injecting an
@@ -118,7 +122,9 @@ Cancellation is cooperative and explicit:
 - When a task observes cancellation at a checkpoint and returns or propagates
   `?`, ordinary lexical cleanup runs exactly once for every exited frame. The
   ownership checker already requires every linear `#[linear]`/`@[1]` obligation
-  to be consumed on that exit path.
+  to be consumed on that exit path. A completed result that carries such an
+  obligation is transferred to the joiner as `Completed` rather than discarded;
+  handles for such tasks are linear and must be joined explicitly.
 - Automatic destruction never suspends. Task handles are affine; dropping one is
   a no-op at the runtime level. Scope completion is an explicit control phase
   (`Task.scope` epilogue), not a suspending destructor.
@@ -160,10 +166,11 @@ Task.spawn(fn() -> Unit ! {panic} { Slice.set(second, 0, sum(&input[3..6])); });
 
 See [task-borrows.kush](../examples/task-borrows.kush). Execution is still
 cooperative on one OS thread; this is not a claim of parallel data-race
-freedom across threads. Linear captures are
-therefore allowed, but a cancelled task must return through a checked path that
-consumes them. A task result type may not itself contain a linear obligation,
-because `TaskExit.Cancelled` would have to discard it.
+freedom across threads. Linear captures are therefore allowed, and a cancelled task must return through
+a checked path that consumes or transfers them. A task result type may carry an
+owning/linear obligation when the handle is linear and explicitly joined; a
+copyable must-use result stays rejected because `TaskExit.Cancelled` has no
+place to deliver it.
 
 If a future implementation adds forced cancellation delivery, it must add
 per-frame unwind metadata or masking; this document does not claim that feature.
@@ -211,7 +218,9 @@ behavior and ordinary finite-input tests.
   networking.
 - Cancellation is cooperative; no masking regions or cancellation handlers yet.
 - No nonblocking stream API; blocking I/O may stall the scheduler.
-- Task bodies cannot return `Task<T>` or linear payloads; handles cannot escape
+- Task bodies may return owning/linear results only through explicit `@[1]` (or
+  intrinsically linear) contracts; those handles are linear and must be joined.
+  Copyable must-use task results remain rejected. Handles still cannot escape
   their scope through data.
 - Fixed native limits: 255 spawned tasks per program execution (joined task IDs
   are not reused), 16 nested scopes per task, 64 children per

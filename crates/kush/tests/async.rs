@@ -388,7 +388,7 @@ fn noalloc_tasks_can_yield_and_join_existing_tasks() {
 }
 
 #[test]
-fn linear_task_results_and_linear_cancellation_paths_are_rejected() {
+fn linear_task_results_are_joined_and_consumed_or_rejected() {
     rejects(
         &format!(
             "{TASK_EXIT}
@@ -402,8 +402,8 @@ fn linear_task_results_and_linear_cancellation_paths_are_rejected() {
         ),
         "ungraded result",
     );
-    // A graded result arrow is also rejected at the task boundary: cancellation
-    // would have to discard the resource obligation.
+    // A graded task result transfers an owning obligation, so joining it with a
+    // wildcard discards a linear value.
     rejects(
         &format!(
             "{TASK_EXIT}
@@ -417,24 +417,31 @@ fn linear_task_results_and_linear_cancellation_paths_are_rejected() {
                 }})
             }}"
         ),
-        "a task result cannot carry a linear obligation",
+        "linear",
     );
-    rejects(
-        &format!(
-            "{TASK_EXIT}
-            fn main() -> Unit ! {{alloc, panic, suspend}} {{
-                Task.scope(fn() -> Unit ! {{alloc, panic, suspend}} {{
-                    let b: Box<i64> @[1] = Box.new(1);
-                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {{alloc, panic, suspend}} {{
-                        if Task.yield() {{ return 0; }}
-                        Box.take(b)
-                    }});
-                    let _ = Task.join(t);
-                }})
-            }}"
-        ),
-        "linear value is not consumed",
+    // Consuming the capture inside the task before a cancellation request is
+    // observed remains the ordinary cleanup path.
+    let source = format!(
+        "{TASK_EXIT}
+        fn main() -> Unit ! {{io, alloc, panic, suspend}} {{
+            Task.scope(fn() -> Unit ! {{io, alloc, panic, suspend}} {{
+                let b: Box<i64> @[1] = Box.new(1);
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{alloc, panic, suspend}} {{
+                    if Task.yield() {{ return Box.take(b); }}
+                    Box.take(b)
+                }});
+                Task.cancel(&t);
+                match Task.join(t) {{
+                    TaskExit.Completed(v) => print_i64(v),
+                    TaskExit.Cancelled => print_i64(-1),
+                }}
+            }})
+        }}"
     );
+    let (output, reference, native_stats) = compare(&source);
+    assert_eq!(String::from_utf8(output).unwrap(), "-1\n");
+    assert_eq!(reference.allocations, reference.deallocations);
+    assert_eq!(native_stats.allocations, native_stats.deallocations);
 }
 
 #[test]

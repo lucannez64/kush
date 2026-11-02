@@ -20,7 +20,7 @@ memory/performance superiority over Rust.
 | Memory/backend | Affine/linear checking, deterministic cleanup, checked box reuse, allocation-preserving in-place vector transforms, conservative pure-map fusion, independent evaluator, Cranelift native Linux x86-64 |
 | Borrowing/lifetimes | Explicit `'a` signatures with conservative single-input slice-result elision, explicit checked function outlives bounds (`<'long: 'short, 'short>`) for shared/mutable slice and borrowed-record returns, lifetime-aware callable types (`fn<'a>(&'a [T]) -> &'a [T]`) with checked substitution and call-through-value provenance, shared and mutable borrowed slice returns, checked capability ancestry with parent suspension/restoration, mutable sub-views and retained reborrows, last-use loan release with loop/branch fixed points, exclusive `&mut [T]` views, `Slice.set`, fallible `Slice.try_get`, checked disjoint mutable splits with `Slice.split_at_mut`, lexical `once fn` closures capturing borrowed slice views, lifetime-parameterized records with shared `&'a [T]` or exclusive `&'a mut [T]` fields, checked mixed `Box`/`Vec`/`Bytes` metadata, per-field provenance, destructuring, shared copies, move-only exclusive fields and checked helper returns, plus call-scoped nominal-record `&self`/`&mut self` receivers and ordinary `&Record`/`&mut Record` parameters with copyable field reads, exclusive copyable-field writes, exact receiver/trait contracts and call-argument loan retention |
 | Allocation diagnostics | Stable `--stats` stderr line for reference and native execution: allocations, deallocations, peak live, buffer growths, reuses, fusions |
-| Structured async | `suspend` effect, `#[nosuspend]`, `Task.scope`/`spawn`/`yield`/`join`/`cancel`/`check_cancel`, owned once task bodies, typed `TaskExit<T>`, cooperative cancellation, deterministic native/reference scheduling, guarded stackful native tasks, scoped slice borrowing by scope bodies and child tasks |
+| Structured async | `suspend` effect, `#[nosuspend]`, `Task.scope`/`spawn`/`yield`/`join`/`cancel`/`check_cancel`, owned once task bodies, typed `TaskExit<T>`, cooperative cancellation, deterministic native/reference scheduling, guarded stackful native tasks, scoped slice borrowing by scope bodies and child tasks, and owning/linear task results with explicit joined handles and cancellation-preserving payload transfer |
 
 ## Integrated application
 
@@ -226,8 +226,10 @@ payloads, constructors and destructuring, `Box.new`/`Box.take`/`Box.reuse`, and
 linear-once captures. Arrow subtyping requires an exact result-grade match.
 Ungraded results no longer silently make a binding-based `@[1]` owner affine;
 the former acceptance is replaced by an explicit diagnostic and graded
-replacement tests. Task and scope results that would carry a linear obligation
-stay rejected. The grade is static metadata erased at runtime: payload types,
+replacement tests. Task and scope results may carry owning/linear obligations
+when their handles are linear and explicitly joined; cancellation transfers a
+completed linear payload instead of discarding it. Copyable must-use task
+results stay rejected. The grade is static metadata erased at runtime: payload types,
 allocation counts, and the ABI are unchanged. Later milestones add general
 grade inference, validated finite grade algebras, copyable must-use results,
 grade-zero binding erasure, and cancellation-preserving linear task results.
@@ -282,9 +284,12 @@ Only `@[1]` is supported: `@[0]`, `> 1`, `many`, and abstract result grades with
 a concrete specialization remain rejected on both owning and copyable results.
 Copyable `@[1]` results are must-use observations, not owning moves. User-defined
 finite grade algebras are validated by exhaustive law enumeration; see
-[grade algebras](grade-algebras.md). General grade inference, grade-zero erasure,
-and cancellation-time linear cleanup are not implemented. Task results that
-would carry a linear obligation remain rejected.
+[grade algebras](grade-algebras.md). General grade inference is documented in
+[grade inference](grade-inference.md), local grade-zero erasure in
+[grade-zero erasure](grade-zero-erasure.md), and cancellation-preserving linear
+task results in [linear task results](linear-task-results.md). Copyable must-use
+task results remain rejected, and forced cancellation unwinding is not
+implemented.
 
 LLVM, general filesystem/FFI APIs, general automatic effectful fusion, widening reuse, nonblocking task I/O, forced cancellation unwinding, benchmarked
 performance superiority, and kernel/embedded targets remain future work. The

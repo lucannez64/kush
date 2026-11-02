@@ -1,0 +1,25 @@
+// User-defined finite grade algebra: saturated usage levels.
+algebra Usage {
+    elements { None, Once, Twice }
+    zero = None;
+    one = Once;
+    add {
+        None + None = None, None + Once = Once, None + Twice = Twice,
+        Once + None = Once, Once + Once = Twice, Once + Twice = Twice,
+        Twice + None = Twice, Twice + Once = Twice, Twice + Twice = Twice,
+    }
+    mul {
+        None * None = None, None * Once = None, None * Twice = None,
+        Once * None = None, Once * Once = Once, Once * Twice = Twice,
+        Twice * None = None, Twice * Once = Twice, Twice * Twice = Twice,
+    }
+}
+
+fn twice(x: i64 @[Usage.Twice]) -> i64 ! {panic} { x + x }
+
+fn make() -> i64 @[Usage.Once] ! {} { 21 }
+
+fn main() -> i64 ! {panic} {
+    let x: i64 @[Usage.Twice] = 10;
+    twice(x) + make()
+}

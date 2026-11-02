@@ -109,6 +109,7 @@ impl Executable {
                 entry,
                 None,
                 Vec::new(),
+                false,
             );
             ready.push_back(root);
             loop {
@@ -141,6 +142,7 @@ impl Executable {
                     TaskEvent::Spawn {
                         function,
                         environment,
+                        preserve,
                     } => {
                         let child = self.start_task(
                             scope,
@@ -152,6 +154,7 @@ impl Executable {
                             function,
                             environment,
                             Vec::new(),
+                            preserve,
                         );
                         let _ = records[id].commands.send(TaskCommand::Spawned(child));
                         records[child].state = TaskState::Ready;
@@ -221,7 +224,7 @@ impl Executable {
         stats.deallocation();
         let root = records.first().and_then(|record| record.outcome.clone());
         match root {
-            Some(TaskOutcome::Completed(value)) => {
+            Some(TaskOutcome::Completed(value, _)) => {
                 let mut evaluator = Evaluator {
                     program: self,
                     input: source,
@@ -256,6 +259,7 @@ impl Executable {
         function: usize,
         environment: Option<usize>,
         arguments: Vec<Value>,
+        preserve: bool,
     ) -> usize {
         let id = records.len();
         let (commands, command_receiver) = mpsc::channel();
@@ -303,12 +307,19 @@ impl Executable {
                         .as_ref()
                         .is_some_and(|task| task.cancelled.load(Ordering::Relaxed))
                     {
-                        match evaluator.drop_value(value) {
-                            Ok(()) => TaskOutcome::Cancelled,
-                            Err(error) => TaskOutcome::Failed(error),
+                        if preserve {
+                            // A completed payload with an owning/linear
+                            // obligation is transferred to the joiner instead
+                            // of being discarded.
+                            TaskOutcome::Completed(value, true)
+                        } else {
+                            match evaluator.drop_value(value) {
+                                Ok(()) => TaskOutcome::Cancelled,
+                                Err(error) => TaskOutcome::Failed(error),
+                            }
                         }
                     } else {
-                        TaskOutcome::Completed(value)
+                        TaskOutcome::Completed(value, preserve)
                     }
                 }
                 Err(error) => TaskOutcome::Failed(error),
@@ -549,7 +560,7 @@ struct Frame {
 }
 #[derive(Debug, Clone)]
 enum TaskOutcome {
-    Completed(Value),
+    Completed(Value, bool),
     Cancelled,
     Failed(Diagnostic),
 }
@@ -559,6 +570,7 @@ enum TaskEvent {
     Spawn {
         function: usize,
         environment: Option<usize>,
+        preserve: bool,
     },
     Join(usize),
     Cancel(usize),
@@ -613,7 +625,12 @@ impl TaskComm {
             )),
         }
     }
-    fn spawn(&mut self, function: usize, environment: Option<usize>) -> Result<usize> {
+    fn spawn(
+        &mut self,
+        function: usize,
+        environment: Option<usize>,
+        preserve: bool,
+    ) -> Result<usize> {
         let Some(scope) = self.scopes.last_mut() else {
             return Err(Diagnostic::new(
                 Span::default(),
@@ -624,6 +641,7 @@ impl TaskComm {
             .send(TaskEvent::Spawn {
                 function,
                 environment,
+                preserve,
             })
             .map_err(|_| Diagnostic::new(Span::default(), "task scheduler disconnected"))?;
         match self.commands.recv() {
@@ -1582,7 +1600,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         let mut failure = None;
         for child in children {
             match self.task_comm()?.join(child)? {
-                TaskOutcome::Completed(value) => self.drop_value(value)?,
+                TaskOutcome::Completed(value, preserve) => {
+                    if preserve {
+                        return Err(Diagnostic::new(
+                            Span::default(),
+                            "internal error: an unjoined task result carrying a linear obligation reached the scope epilogue; join it explicitly before the scope ends",
+                        ));
+                    }
+                    self.drop_value(value)?
+                }
                 TaskOutcome::Cancelled => {}
                 TaskOutcome::Failed(error) => {
                     if failure.is_none() {
@@ -1749,7 +1775,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     }
                 }
             }
-            ExprKind::TaskSpawn { body, .. } => {
+            ExprKind::TaskSpawn {
+                body, obligation, ..
+            } => {
                 let callable = value!(self.expr(body, frame));
                 let Value::Function {
                     function,
@@ -1762,7 +1790,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ));
                 };
                 self.consume(body, frame);
-                let id = self.task_comm()?.spawn(function, environment)?;
+                let id = self
+                    .task_comm()?
+                    .spawn(function, environment, *obligation)?;
                 Value::Task(id)
             }
             ExprKind::TaskScope { body, failure, .. } => {
@@ -1804,7 +1834,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.task_comm()?.cancel(id)?;
                 Value::Scalar(0)
             }
-            ExprKind::TaskJoin { task, exit } => {
+            ExprKind::TaskJoin { task, exit, .. } => {
                 let handle = value!(self.expr(task, frame));
                 self.consume(task, frame);
                 let Value::Task(id) = handle else {
@@ -1814,7 +1844,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ));
                 };
                 match self.task_comm()?.join(id)? {
-                    TaskOutcome::Completed(value) => Value::Enum {
+                    TaskOutcome::Completed(value, _) => Value::Enum {
                         tag: exit.completed_tag,
                         fields: vec![value],
                     },

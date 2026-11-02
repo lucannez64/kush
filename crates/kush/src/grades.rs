@@ -861,6 +861,9 @@ impl<'a> Checker<'a> {
             }
             ExprKind::VecMap { vector, .. } => self.value_moves_linear(vector),
             ExprKind::Coerce { value, .. } => self.value_moves_linear(value),
+            ExprKind::TaskSpawn { obligation, .. }
+            | ExprKind::TaskScope { obligation, .. }
+            | ExprKind::TaskJoin { obligation, .. } => *obligation,
             _ => false,
         }
     }
@@ -907,6 +910,9 @@ impl<'a> Checker<'a> {
             }
             ExprKind::VecMap { vector, .. } => self.value_has_grade_one(vector),
             ExprKind::Coerce { value, .. } => self.value_has_grade_one(value),
+            ExprKind::TaskSpawn { obligation, .. }
+            | ExprKind::TaskScope { obligation, .. }
+            | ExprKind::TaskJoin { obligation, .. } => *obligation,
             // A constructor or Box.new consumes its inputs and produces a new
             // value; dropping that new value is a separate affine action.
             _ => false,

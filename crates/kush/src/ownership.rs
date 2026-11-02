@@ -2527,6 +2527,9 @@ impl Checker<'_> {
                 self.value_moves_linear(owner) || self.value_moves_linear(payload)
             }
             ExprKind::VecMap { vector, .. } => self.value_moves_linear(vector),
+            ExprKind::TaskSpawn { obligation, .. }
+            | ExprKind::TaskScope { obligation, .. }
+            | ExprKind::TaskJoin { obligation, .. } => *obligation,
             ExprKind::Coerce { value, .. } => self.value_moves_linear(value),
             _ => false,
         }

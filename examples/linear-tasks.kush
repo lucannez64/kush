@@ -1,0 +1,14 @@
+// Owning task results transfer through an explicitly joined linear handle.
+use std.task.TaskExit;
+
+fn make() -> Box<i64> @[1] ! {alloc, panic} { Box.new(42) }
+
+fn main() -> i64 ! {alloc, panic, suspend} {
+    Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+        let task: Task<Box<i64>> = Task.spawn(make);
+        match Task.join(task) {
+            TaskExit.Completed(value) => Box.take(value),
+            TaskExit.Cancelled => 0,
+        }
+    })
+}
