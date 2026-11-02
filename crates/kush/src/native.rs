@@ -827,6 +827,59 @@ static size_t kush_scheduler_stack_total = 0;
 static int kush_initialized = 0;
 static int kush_ready[KUSH_MAX_TASKS];
 static int kush_ready_head = 0, kush_ready_tail = 0, kush_ready_count = 0;
+/* ---- Dynamic one-shot effect handlers -----------------------------------
+   Declared effect operations use a small per-task stack of copyable,
+   noncapturing handler code pointers. A lexical handle pushes one entry for
+   the duration of its body; a `perform` in a called function resolves the
+   innermost matching entry. Entries carry no owning environment: the checker
+   rejects consuming/capturing handlers here, and the ordinary lexical path
+   still consumes those values. */
+#define KUSH_HANDLER_MAX 64
+typedef struct {
+    int64_t operation;
+    int64_t code;
+    int64_t environment;
+} kush_handler_frame;
+typedef struct {
+    kush_handler_frame frames[KUSH_HANDLER_MAX];
+    int64_t depth;
+} kush_handler_context;
+static kush_handler_context kush_handler_contexts[KUSH_MAX_TASKS];
+static kush_handler_context *kush_handlers(void) {
+    int64_t id = kush_current == NULL ? 0 : (int64_t)kush_current->id;
+    if (id < 0 || id >= KUSH_MAX_TASKS) id = 0;
+    return &kush_handler_contexts[id];
+}
+int64_t kush_handler_depth(void) {
+    return kush_handlers()->depth;
+}
+void kush_handler_restore(int64_t depth) {
+    if (depth < 0) depth = 0;
+    if (depth < kush_handlers()->depth) kush_handlers()->depth = depth;
+}
+void kush_handler_push(int64_t operation, int64_t code, int64_t environment) {
+    kush_handler_context *handlers = kush_handlers();
+    if (handlers->depth >= KUSH_HANDLER_MAX) kush_panic();
+    handlers->frames[handlers->depth].operation = operation;
+    handlers->frames[handlers->depth].code = code;
+    handlers->frames[handlers->depth].environment = environment;
+    handlers->depth += 1;
+}
+void kush_handler_pop(void) {
+    kush_handler_context *handlers = kush_handlers();
+    if (handlers->depth > 0) handlers->depth -= 1;
+}
+int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
+    kush_handler_context *handlers = kush_handlers();
+    for (int64_t index = handlers->depth - 1; index >= 0; --index) {
+        if (handlers->frames[index].operation == operation) {
+            out[0] = handlers->frames[index].code;
+            out[1] = handlers->frames[index].environment;
+            return 1;
+        }
+    }
+    return 0;
+}
 static void *kush_stack_alloc(size_t bytes, void **base_out, size_t *total_out) {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     size_t total = ((bytes + page - 1) / page) * page + page;
@@ -1424,6 +1477,38 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let task_scope_end = module
         .declare_function("kush_task_scope_end", Linkage::Import, &task_unary_sig)
         .map_err(error)?;
+    let mut handler_depth_sig = module.make_signature();
+    handler_depth_sig.returns.push(AbiParam::new(I64));
+    let handler_depth = module
+        .declare_function("kush_handler_depth", Linkage::Import, &handler_depth_sig)
+        .map_err(error)?;
+    let mut handler_restore_sig = module.make_signature();
+    handler_restore_sig.params.push(AbiParam::new(I64));
+    let handler_restore = module
+        .declare_function(
+            "kush_handler_restore",
+            Linkage::Import,
+            &handler_restore_sig,
+        )
+        .map_err(error)?;
+    let mut handler_push_sig = module.make_signature();
+    handler_push_sig
+        .params
+        .extend((0..3).map(|_| AbiParam::new(I64)));
+    let handler_push = module
+        .declare_function("kush_handler_push", Linkage::Import, &handler_push_sig)
+        .map_err(error)?;
+    let handler_pop = module
+        .declare_function("kush_handler_pop", Linkage::Import, &task_unary_sig)
+        .map_err(error)?;
+    let mut handler_lookup_sig = module.make_signature();
+    handler_lookup_sig
+        .params
+        .extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    handler_lookup_sig.returns.push(AbiParam::new(I64));
+    let handler_lookup = module
+        .declare_function("kush_handler_lookup", Linkage::Import, &handler_lookup_sig)
+        .map_err(error)?;
     let mut literal_data = BTreeMap::new();
     let mut literals = Vec::new();
     for f in &program.functions {
@@ -1569,6 +1654,12 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             task_scope_begin,
             task_cancel_scope,
             task_scope_end,
+            handler_depth,
+            handler_restore,
+            handler_push,
+            handler_pop,
+            handler_lookup,
+            handler_base: Variable::from_u32(0),
             task_wrappers: &task_wrappers,
             task_pointer_drops: &task_pointer_drops,
             loops: Vec::new(),
@@ -1576,6 +1667,10 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
         let entry = g.builder.create_block();
         g.builder.append_block_params_for_function_params(entry);
         g.builder.switch_to_block(entry);
+        let handler_base = g.builder.declare_var(I64);
+        g.handler_base = handler_base;
+        let base = g.runtime_call(g.handler_depth, &[]);
+        g.builder.def_var(handler_base, base);
         for local in &f.locals {
             let variables = (0..program.width(local.ty))
                 .map(|_| g.builder.declare_var(I64))
@@ -1789,6 +1884,16 @@ fn collect_expr_literals<'a>(expr: &'a Expr, out: &mut Vec<(usize, &'a [u8])>) {
                 collect_expr_literals(argument, out);
             }
         }
+        ExprKind::HandlerPush { handler, body, .. } => {
+            collect_expr_literals(handler, out);
+            collect_literals(body, out);
+        }
+        ExprKind::DynamicPerform {
+            payload, resume, ..
+        } => {
+            collect_expr_literals(payload, out);
+            collect_expr_literals(resume, out);
+        }
         ExprKind::TaskSpawn { body, .. } | ExprKind::TaskScope { body, .. } => {
             collect_expr_literals(body, out);
         }
@@ -1835,6 +1940,16 @@ fn collect_closure_types(program: &Executable) -> Vec<Vec<Type>> {
                 }
             }
             ExprKind::Block(block) => walk_block(program, block, out),
+            ExprKind::HandlerPush { handler, body, .. } => {
+                walk(program, handler, out);
+                walk_block(program, body, out);
+            }
+            ExprKind::DynamicPerform {
+                payload, resume, ..
+            } => {
+                walk(program, payload, out);
+                walk(program, resume, out);
+            }
             ExprKind::Unary(_, value)
             | ExprKind::Try { value, .. }
             | ExprKind::Return(value)
@@ -2258,6 +2373,16 @@ fn collect_task_types(program: &Executable) -> Vec<usize> {
             ExprKind::TaskCancel(reference) => walk(reference, out),
             ExprKind::TaskJoin { task, .. } => walk(task, out),
             ExprKind::Block(block) => walk_block(block, out),
+            ExprKind::HandlerPush { handler, body, .. } => {
+                walk(handler, out);
+                walk_block(body, out);
+            }
+            ExprKind::DynamicPerform {
+                payload, resume, ..
+            } => {
+                walk(payload, out);
+                walk(resume, out);
+            }
             ExprKind::Unary(_, value)
             | ExprKind::Try { value, .. }
             | ExprKind::Return(value)
@@ -2522,8 +2647,10 @@ struct Generator<'a, 'b> {
     str_scalar_at: FuncId,
     str_to_string: FuncId,
     vec_ops: &'b BTreeMap<VecOp, FuncId>,
-    /// (continue target, break target, break carries a value)
-    loops: Vec<(ir::Block, ir::Block, bool)>,
+    /// (continue target, break target, break carries a value, handler depth at
+    /// loop entry). Break/continue restore the handler depth so a dynamic
+    /// handler frame inside the body cannot survive an early loop exit.
+    loops: Vec<(ir::Block, ir::Block, bool, Variable)>,
     literal_data: &'b BTreeMap<usize, DataId>,
     allocate: FuncId,
     try_allocate: FuncId,
@@ -2545,6 +2672,14 @@ struct Generator<'a, 'b> {
     task_scope_begin: FuncId,
     task_cancel_scope: FuncId,
     task_scope_end: FuncId,
+    handler_depth: FuncId,
+    handler_restore: FuncId,
+    handler_push: FuncId,
+    handler_pop: FuncId,
+    handler_lookup: FuncId,
+    /// Entry handler-stack depth for this function; every return restores it so
+    /// an early `return` cannot leave a dynamic handler frame visible.
+    handler_base: Variable,
     task_wrappers: &'b BTreeMap<usize, FuncId>,
     task_pointer_drops: &'b BTreeMap<Type, FuncId>,
     tracked: Vec<Tracked>,
@@ -2866,6 +3001,8 @@ impl Generator<'_, '_> {
         }
     }
     fn return_value(&mut self, values: &[Value]) {
+        let base = self.builder.use_var(self.handler_base);
+        self.runtime_void(self.handler_restore, &[base]);
         if let Some(pointer) = self.return_pointer {
             for (index, value) in values.iter().enumerate() {
                 self.builder.ins().store(
@@ -3125,6 +3262,78 @@ impl Generator<'_, '_> {
                 if result_erased {
                     return Some(vec![self.constant(0)]);
                 }
+                if let Some(pointer) = pointer {
+                    return Some(
+                        (0..self.program.width(result))
+                            .map(|i| {
+                                self.builder.ins().load(
+                                    I64,
+                                    ir::MemFlagsData::new(),
+                                    pointer,
+                                    (i * 8) as i32,
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+                return Some(self.builder.inst_results(call).to_vec());
+            }
+            ExprKind::HandlerPush {
+                operation,
+                handler,
+                body,
+            } => {
+                let code = lower!(self.scalar(handler));
+                self.consume(handler);
+                let zero = self.constant(0);
+                let op = self.constant(*operation as i64);
+                self.runtime_void(self.handler_push, &[op, code, zero]);
+                if let Some(values) = self.block(body) {
+                    self.runtime_void(self.handler_pop, &[]);
+                    return Some(values);
+                }
+                return None;
+            }
+            ExprKind::DynamicPerform {
+                operation,
+                payload,
+                resume,
+                handler,
+            } => {
+                let payload_values = lower!(self.expr(payload));
+                let resume_values = lower!(self.expr(resume));
+                self.consume(payload);
+                self.consume(resume);
+                let out = self.stack_words(2);
+                let op = self.constant(*operation as i64);
+                let found = self.runtime_call(self.handler_lookup, &[op, out]);
+                let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
+                self.guard(missing);
+                let code = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), out, 0);
+                let signature = self.program.function_types[*handler].clone();
+                let result = signature.result;
+                let pointer = if aggregate_result(self.program, result) {
+                    let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                        ir::StackSlotKind::ExplicitSlot,
+                        (self.program.width(result) * 8) as u32,
+                        3,
+                    ));
+                    Some(self.builder.ins().stack_addr(I64, slot, 0))
+                } else {
+                    None
+                };
+                let mut values = Vec::new();
+                if let Some(pointer) = pointer {
+                    values.push(pointer);
+                }
+                values.extend(payload_values);
+                values.extend(resume_values);
+                let signature = self.indirect_signature(*handler);
+                let signature = self.builder.import_signature(signature);
+                let call = self.builder.ins().call_indirect(signature, code, &values);
                 if let Some(pointer) = pointer {
                     return Some(
                         (0..self.program.width(result))
@@ -3756,9 +3965,9 @@ impl Generator<'_, '_> {
                         .builder
                         .ins()
                         .icmp_imm_s(IntCC::Equal, next, slot as i64);
-                    for word in 0..element_width {
+                    for (word, item_word) in item.iter_mut().enumerate() {
                         let index = 2 + slot * element_width + word;
-                        item[word] = self.builder.ins().select(active, values[index], item[word]);
+                        *item_word = self.builder.ins().select(active, values[index], *item_word);
                         values[index] = self.builder.ins().select(active, zero, values[index]);
                     }
                 }
@@ -3953,12 +4162,15 @@ impl Generator<'_, '_> {
                 let head = self.builder.create_block();
                 let enter = self.builder.create_block();
                 let exit = self.builder.create_block();
+                let depth = self.builder.declare_var(I64);
+                let at_entry = self.runtime_call(self.handler_depth, &[]);
+                self.builder.def_var(depth, at_entry);
                 self.jump(head, &[]);
                 self.builder.switch_to_block(head);
                 if let Some(test) = self.scalar(condition) {
                     self.builder.ins().brif(test, enter, &[], exit, &[]);
                     self.builder.switch_to_block(enter);
-                    self.loops.push((head, exit, false));
+                    self.loops.push((head, exit, false, depth));
                     let finished = self.block(body);
                     self.loops.pop();
                     if finished.is_some() {
@@ -3971,11 +4183,14 @@ impl Generator<'_, '_> {
             ExprKind::Loop(body) => {
                 let head = self.builder.create_block();
                 let exit = self.join(expr.ty);
+                let depth = self.builder.declare_var(I64);
+                let at_entry = self.runtime_call(self.handler_depth, &[]);
+                self.builder.def_var(depth, at_entry);
                 self.jump(head, &[]);
                 self.builder.switch_to_block(head);
                 // A loop without break has type Never; its exit is never targeted.
                 let target = exit.unwrap_or(head);
-                self.loops.push((head, target, true));
+                self.loops.push((head, target, true, depth));
                 let finished = self.block(body);
                 self.loops.pop();
                 if finished.is_some() {
@@ -3986,7 +4201,7 @@ impl Generator<'_, '_> {
                 return Some(self.builder.block_params(exit).to_vec());
             }
             ExprKind::Break(value, cleanup) => {
-                let (_, exit, carries) = *self.loops.last().unwrap();
+                let (_, exit, carries, depth) = *self.loops.last().unwrap();
                 let values = match value {
                     Some(value) => {
                         let values = lower!(self.expr(value));
@@ -3999,14 +4214,18 @@ impl Generator<'_, '_> {
                 for id in cleanup {
                     self.cleanup(Some(*id));
                 }
+                let depth = self.builder.use_var(depth);
+                self.runtime_void(self.handler_restore, &[depth]);
                 self.jump(exit, &values);
                 return None;
             }
             ExprKind::Continue(cleanup) => {
-                let (head, _, _) = *self.loops.last().unwrap();
+                let (head, _, _, depth) = *self.loops.last().unwrap();
                 for id in cleanup {
                     self.cleanup(Some(*id));
                 }
+                let depth = self.builder.use_var(depth);
+                self.runtime_void(self.handler_restore, &[depth]);
                 self.jump(head, &[]);
                 return None;
             }

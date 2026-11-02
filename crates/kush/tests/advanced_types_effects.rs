@@ -426,6 +426,134 @@ fn handler_effects_are_part_of_the_handle_contract() {
 }
 
 #[test]
+fn declared_effects_reach_handlers_through_called_functions() {
+    let source = r#"
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {panic} { perform Op(20) }
+        fn call() -> i64 ! {panic} { deep() + 1 }
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x) } {
+                call()
+            }
+        }"#;
+    assert_eq!(value(source), 21);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 21);
+    // A copyable noncapturing handler serves several performs from different
+    // called functions.
+    let many = r#"
+        effect Op: i64 -> i64;
+        fn a() -> i64 ! {panic} { perform Op(20) }
+        fn b() -> i64 ! {panic} { perform Op(1) }
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x) } {
+                a() + b() + 1
+            }
+        }"#;
+    assert_eq!(value(many), 22);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(many, 22);
+    // An early return leaves the handled body before the normal pop. The
+    // function-entry depth restoration must make the next perform handlerless.
+    let loop_restore = r#"
+        effect Op: i64 -> i64;
+        fn main() -> i64 ! {panic} {
+            let mut i = 0;
+            let mut sum = 0;
+            while i < 2 {
+                handle Op: i64 -> i64 with fn(
+                    x: i64,
+                    resume: linear once fn(i64) -> i64 ! {},
+                ) -> i64 ! {} { resume(x) } {
+                    if i == 0 {
+                        i = i + 1;
+                        continue;
+                    }
+                    sum = sum + perform Op(1);
+                }
+                i = i + 1;
+            }
+            sum + i
+        }"#;
+    assert_eq!(value(loop_restore), 3);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(loop_restore, 3);
+    let restored = r#"
+        effect Op: i64 -> i64;
+        fn scoped() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x) } {
+                return perform Op(1);
+            }
+        }
+        fn main() -> i64 ! {panic} {
+            let x = scoped();
+            perform Op(2) + x
+        }"#;
+    let program = check(restored).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("no dynamically active handler"),
+        "{error:?}"
+    );
+    rejects(
+        r#"
+        effect Op: i64 -> i64;
+        effect Op: Bool -> Bool;
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "duplicate or reserved declaration",
+    );
+    rejects(
+        r#"
+        effect Op: i64 -> i64;
+        fn main() -> i64 ! {io, panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {io, panic} { print_i64(x); resume(x) } {
+                perform Op(1)
+            }
+        }"#,
+        "dynamically visible handler must be pure",
+    );
+    rejects(
+        r#"
+        effect Op: i64 -> i64;
+        fn main() -> i64 ! {alloc, panic} {
+            let n = 1;
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x + n) } {
+                perform Op(1)
+            }
+        }"#,
+        "noncapturing 'fn' value",
+    );
+    rejects(
+        r#"
+        effect Op: i64 -> i64;
+        fn main() -> i64 ! {panic} {
+            handle Op: Bool -> i64 with fn(
+                x: Bool,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(1) } {
+                perform Op(1)
+            }
+        }"#,
+        "declared operation signature",
+    );
+}
+
+#[test]
 fn performs_require_a_lexical_handler_and_a_exact_resume_contract() {
     rejects(
         "fn main() -> i64 ! {panic} { perform Op(1) }",

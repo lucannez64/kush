@@ -84,6 +84,7 @@ pub(crate) fn check_program(
             | ItemKind::Trait { .. }
             | ItemKind::Impl { .. }
             | ItemKind::GradeAlgebra(_)
+            | ItemKind::Effect { .. }
             | ItemKind::Enum { total: false, .. } => continue,
             ItemKind::Function(f) if !f.total => continue,
             ItemKind::Function(_)
@@ -660,6 +661,7 @@ fn validate(declaration: &Declaration) -> Result<()> {
         )),
         ItemKind::Function(_)
         | ItemKind::Alias { .. }
+        | ItemKind::Effect { .. }
         | ItemKind::Enum { total: true, .. }
         | ItemKind::Prop { .. } => Ok(()),
         ItemKind::Enum { total: false, .. } | ItemKind::Struct { .. } => Err(Diagnostic::new(
@@ -1117,7 +1119,8 @@ impl Elaborator<'_> {
             | BindingKind::Parameter
             | BindingKind::Local
             | BindingKind::Trait
-            | BindingKind::GradeAlgebra => Err(Diagnostic::new(
+            | BindingKind::GradeAlgebra
+            | BindingKind::Effect => Err(Diagnostic::new(
                 span,
                 format!(
                     "runtime or generic binding '{}' cannot appear in an erased logical term; only checked logical definitions and erased logical parameters are relevant",

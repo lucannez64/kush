@@ -67,6 +67,7 @@ impl Executable {
             heap: heap.clone(),
             stats: stats.clone(),
             task: None,
+            dynamic_handlers: Vec::new(),
             try_budget: alloc_budget.map(|budget| Arc::new(AtomicUsize::new(budget))),
         };
         let result = evaluator.call(entry, vec![])?.scalar();
@@ -267,6 +268,7 @@ impl Executable {
                     heap,
                     stats,
                     task: None,
+                    dynamic_handlers: Vec::new(),
                     try_budget: try_budget.clone(),
                 };
                 let scalar = value.scalar();
@@ -316,6 +318,7 @@ impl Executable {
             heap: heap.clone(),
             stats: stats.clone(),
             task: Some(comm),
+            dynamic_handlers: Vec::new(),
             try_budget: try_budget.clone(),
         };
         stats.allocation();
@@ -815,6 +818,10 @@ struct Evaluator<'a, R: Read, W: Write> {
     heap: SharedHeap,
     stats: StatsHandle,
     task: Option<TaskComm>,
+    /// Dynamically scoped handlers for declared effect operations. Entries are
+    /// copyable noncapturing function values; the stack is unwound on every
+    /// normal or early exit from the handled body.
+    dynamic_handlers: Vec<(usize, Value)>,
     /// Remaining successful fallible allocation attempts for deterministic
     /// failure probes. `None` means unlimited.
     try_budget: Option<Arc<AtomicUsize>>,
@@ -2146,6 +2153,64 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         self.fuel -= 1;
         let panic = || Diagnostic::new(expr.span, "panic: checked arithmetic failed");
         let result = match &expr.kind {
+            ExprKind::HandlerPush {
+                operation,
+                handler,
+                body,
+            } => {
+                let handler_value = value!(self.expr(handler, frame));
+                self.consume(handler, frame);
+                let Value::Function {
+                    environment: None, ..
+                } = handler_value
+                else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: dynamic effect handler must be a noncapturing function",
+                    ));
+                };
+                self.dynamic_handlers.push((*operation, handler_value));
+                let flow = self.block(body, frame);
+                self.dynamic_handlers.pop();
+                match flow? {
+                    Flow::Value(value) => value,
+                    returned => return Ok(returned),
+                }
+            }
+            ExprKind::DynamicPerform {
+                operation,
+                payload,
+                resume,
+                ..
+            } => {
+                let Some((_, handler)) = self
+                    .dynamic_handlers
+                    .iter()
+                    .rev()
+                    .find(|(candidate, _)| candidate == operation)
+                    .cloned()
+                else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "no dynamically active handler for this operation",
+                    ));
+                };
+                let payload_value = value!(self.expr(payload, frame));
+                let resume_value = value!(self.expr(resume, frame));
+                self.consume(payload, frame);
+                self.consume(resume, frame);
+                let Value::Function {
+                    function,
+                    environment: None,
+                } = handler
+                else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: dynamic effect handler must be a noncapturing function",
+                    ));
+                };
+                self.call(function, vec![payload_value, resume_value])?
+            }
             ExprKind::Constant(n) => Value::Scalar(*n),
             // Only synthesized adapters use this placeholder, and the callee's
             // erased parameter position drops it. It is never observable.

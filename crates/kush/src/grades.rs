@@ -1484,6 +1484,22 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
+            ExprKind::HandlerPush { handler, body, .. } => {
+                if !self.expr(handler, Grade::ONE)? {
+                    return Ok(false);
+                }
+                self.block(body, false, multiplier)?;
+            }
+            ExprKind::DynamicPerform {
+                payload, resume, ..
+            } => {
+                if !self.expr(payload, Grade::ONE)? {
+                    return Ok(false);
+                }
+                if !self.expr(resume, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
             ExprKind::Local(slot) => {
                 let amount = if self.moves(self.function.locals[*slot].ty) {
                     Grade::ONE

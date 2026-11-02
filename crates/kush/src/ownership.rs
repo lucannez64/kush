@@ -2721,6 +2721,11 @@ impl Checker<'_> {
                     || self.value_moves_linear(value)
             }
             ExprKind::DynArrayPop { array, .. } => self.value_moves_linear(array),
+            ExprKind::HandlerPush { body, .. } => body
+                .tail
+                .as_deref()
+                .is_some_and(|tail| self.value_moves_linear(tail)),
+            ExprKind::DynamicPerform { .. } => self.moves(expr.ty),
             ExprKind::FnValue { captures, .. } => captures
                 .iter()
                 .any(|capture| self.value_moves_linear(capture)),
@@ -4246,6 +4251,16 @@ impl Checker<'_> {
                 self.expr(value)?;
             }
             ExprKind::DynArrayPop { array, .. } => self.expr(array)?,
+            ExprKind::HandlerPush { handler, body, .. } => {
+                self.expr(handler)?;
+                self.block(body)?;
+            }
+            ExprKind::DynamicPerform {
+                payload, resume, ..
+            } => {
+                self.expr(payload)?;
+                self.expr(resume)?;
+            }
             ExprKind::Construct {
                 enum_id,
                 fields,
@@ -4743,6 +4758,16 @@ pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
                 walk(value, out);
             }
             ExprKind::DynArrayPop { array, .. } => walk(array, out),
+            ExprKind::HandlerPush { handler, body, .. } => {
+                walk(handler, out);
+                walk_block(body, out);
+            }
+            ExprKind::DynamicPerform {
+                payload, resume, ..
+            } => {
+                walk(payload, out);
+                walk(resume, out);
+            }
             ExprKind::FnValue { captures, .. } => {
                 for capture in captures {
                     walk(capture, out);
@@ -4967,6 +4992,16 @@ fn expr_live(
         }
         ExprKind::DynArrayPop { array, .. } => {
             live = expr_live(array, live_after, views, heads, exits, out);
+        }
+        ExprKind::HandlerPush { handler, body, .. } => {
+            live = block_live(body, live_after, views, heads, exits, out);
+            live = expr_live(handler, &live, views, heads, exits, out);
+        }
+        ExprKind::DynamicPerform {
+            payload, resume, ..
+        } => {
+            live = expr_live(resume, live_after, views, heads, exits, out);
+            live = expr_live(payload, &live, views, heads, exits, out);
         }
         ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
             live = expr_live(right, live_after, views, heads, exits, out);

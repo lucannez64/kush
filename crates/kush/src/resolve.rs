@@ -20,6 +20,9 @@ pub enum BindingKind {
     /// A declared finite grade algebra. Its name is not a runtime type and is
     /// only meaningful as the qualifier of a grade annotation.
     GradeAlgebra,
+    /// A declared effect operation signature. The name is not a runtime value;
+    /// it names the dynamic handler stack entry used by `perform`.
+    Effect,
 }
 
 /// One declared finite grade algebra. The carrier and operation tables stay as
@@ -569,6 +572,7 @@ impl Resolver {
                     }
                     ItemKind::Prop { name, .. } => (name, BindingKind::Data),
                     ItemKind::Alias { name, .. } => (name, BindingKind::Alias),
+                    ItemKind::Effect { name, .. } => (name, BindingKind::Effect),
                     ItemKind::Trait { name, .. } => (name, BindingKind::Trait),
                     ItemKind::GradeAlgebra(algebra) => (&algebra.name, BindingKind::GradeAlgebra),
                     ItemKind::Impl { methods, .. } => {
@@ -838,6 +842,12 @@ impl Resolver {
                     ItemKind::Alias { generics, ty, .. } => {
                         r.generics(generics, GenericContext::Unsupported("a type alias"))?;
                         r.ty(ty)
+                    }
+                    ItemKind::Effect {
+                        parameter, result, ..
+                    } => {
+                        r.ty(parameter)?;
+                        r.ty(result)
                     }
                 })?;
             }

@@ -158,6 +158,22 @@ impl Parser {
                     associated,
                     methods,
                 }
+            } else if self.word_keyword("effect") {
+                if total {
+                    return Err(self.error("'total' applies only to fn and enum declarations"));
+                }
+                self.bump();
+                let name = self.ident()?;
+                self.expect(&Kind::Colon, "':' after the effect operation name")?;
+                let parameter = self.ty()?;
+                self.expect(&Kind::Arrow, "'->' in an effect operation signature")?;
+                let result = self.ty()?;
+                self.expect(&Kind::Semi, "';' after an effect declaration")?;
+                ItemKind::Effect {
+                    name,
+                    parameter,
+                    result,
+                }
             } else if self.word_keyword("impl") {
                 if total {
                     return Err(self.error("'total' applies only to fn and enum declarations"));

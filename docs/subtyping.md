@@ -120,10 +120,31 @@ fn main() -> i64 ! {alloc, panic} {
 }
 ```
 
-Structural records are not a general row-polymorphic record calculus. There is
-no open row variable, no field renaming, no structural record literal syntax,
-and no structural equality. An implementation type in an impl header cannot be
-an anonymous structural record; nominal declarations keep coherence decidable.
+A structural record literal is written with the same row syntax:
+
+```rust
+let r = struct { b: 20, a: 22 };
+let sum = match r { struct { a, b } => a + b };
+```
+
+Fields are evaluated in source order but stored in the canonical name-sorted
+row. A structural pattern matches any record that has the named fields; omitted
+fields and `..` are dropped by the ordinary pattern cleanup rules. When exactly
+one record alternative of a union has all named fields, the structural pattern
+narrows that alternative directly; several such alternatives require an
+explicit `Type @ pattern`.
+
+A retained field may now itself change representation, including a nested
+structural width conversion, atom-to-union injection, and a nested
+union-to-union repack. The repack is a checked tag remap; it copies only the
+active payload and never duplicates an owner.
+
+Structural records are still not a general row-polymorphic record calculus.
+There is no open row variable, no field renaming, and no structural equality.
+An implementation type in an impl header cannot be an anonymous structural
+record; nominal declarations keep coherence decidable. Callable fields whose
+arrow representation changes are still rejected inside a structural coercion:
+adapt the field explicitly first.
 
 ## Subtyping and conversions
 
@@ -190,11 +211,16 @@ The supported inference fragment is deliberately first-order and bounded:
 
 - matching is structural over the declared generic pattern (named data, `Box`,
   `Vec`, arrays, tuples, arrows, aliases) and never runs user code;
-- union distribution is one level at the inferred position, with at most the
-  normalized 16 alternatives;
+- union distribution is recursive at inferred positions, with at most the
+  normalized 16 alternatives per position;
+- a declared union pattern with exactly one bare type variable and a concrete
+  fixed part, such as `T | i64`, binds `T` to the residual actual alternatives
+  not covered by the fixed part. This is a decidable residual-union rule, not
+  row subtraction. If every alternative is already covered by the fixed part,
+  the residual is not unique and the call is rejected rather than defaulting;
 - there is no backtracking search across multiple parameters, no recursive
   row/type unification, and no principal inference for two variables that can
-  trade evidence;
+  trade evidence; two variable alternatives in one union pattern are rejected;
 - conflicting or incomparable evidence is always an error, never a silently
   chosen arm; explicit annotations/specialization are the escape hatch;
 - type inference does not infer unions from unconstrained literals: an empty
@@ -296,11 +322,12 @@ Implemented and tested:
 Deliberately unsupported, with explicit diagnostics:
 
 - **Structural record limits:** anonymous `struct { ... }` rows support width
-  subtyping, canonical reordering, recursive nested structural rows, and
-  atom-to-union field injection, as described above. Nested union-to-union
-  repacking, callable field adaptation, open rows, field renaming, generic
-  structural patterns, and structural records in impl headers are rejected.
-  Nominal records remain invariant with respect to other nominal records.
+  subtyping, canonical reordering, recursive nested structural rows,
+  atom-to-union field injection, nested union-to-union repacking, structural
+  literals, and structural patterns, as described above. Callable field
+  adaptation, open rows, field renaming, and structural records in impl headers
+  are rejected. Nominal records remain invariant with respect to other nominal
+  records.
 - **Function subtyping:** arrow subtyping is implemented for first-class
   function values (`fn(...)`, owning `once fn(...)`, and `linear once fn(...)`),
   with contravariant parameters, covariant results, effect-row inclusion

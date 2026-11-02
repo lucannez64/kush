@@ -139,6 +139,12 @@ Implemented consequences:
   evaluated expression such as `keep(make(3), refl::<i64>(3))` is rejected with
   a request to bind a local first. The compiler does not execute user code to
   decide an index.
+- A simple `let alias = scalar` is a by-value copy. The alias denotes the
+  **same frozen kernel binder** as the source at the binding point, so a proof
+  about the source value applies to the alias and conversely. A later
+  assignment to the source appends a new binder and leaves the alias frozen at
+  the old value; using the alias to prove a proposition about the new source
+  value is rejected. Chained aliases resolve to the original binder.
 - A closure capture of a scalar is a **copy made when the closure is
   constructed**. That copy is an independent immutable snapshot: it may index
   proofs in the lambda body even if the outer binding is later assigned. The
@@ -219,10 +225,11 @@ fn consume(erased p: Eq<i64, 0, 0>); consume(n)
   unit_proof())` works without an extra equality proof. This is a checked
   encoding for `Unit` only; there is no general singleton elimination for other
   types.
-- Only simple `let` names, function/lambda parameters, and scalar closure
-  captures are symbolic. Destructured pattern bindings and temporary compiler
-  slots are conservatively not admitted. A mutable name is admitted at its
-  current version; assignment appends a fresh version binder.
+- Only simple `let` names, by-value scalar aliases, function/lambda
+  parameters, and scalar closure captures are symbolic. Destructured pattern
+  bindings and temporary compiler slots are conservatively not admitted. A
+  mutable name is admitted at its current version; assignment appends a fresh
+  version binder and removes any alias status from the assigned name.
 - An admitted local is a symbolic kernel value, not its source initializer.
   `let n = 0; keep_zero(n, zero_proof())` does not by itself identify `n` with
   the literal `0`; pass the literal directly or supply an explicit logical

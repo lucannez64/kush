@@ -23,17 +23,22 @@ is inline: no heap allocation and no hidden pointer to a dynamic stack frame.
 ```rust
 DynArray.new::<T, capacity>()        -> DynArray<T, capacity> ! {}
 DynArray.push(a, value)              -> DynArray<T, capacity> ! {panic}
+DynArray.set(a, index, value)        -> DynArray<T, capacity> ! {panic}
+DynArray.pop(a)                      -> (DynArray<T, capacity>, T) ! {panic}
 DynArray.len(&a)                     -> i64 ! {}
 DynArray.get(&a, index)              -> T ! {panic}   // T must be copyable
 ```
 
 `DynArray.new` starts with length zero. `DynArray.push` evaluates the array,
 then the element, checks `length < capacity`, stores the element at the current
-length, increments the length, and returns the same inline storage. `len` and
-`get` borrow the array for the duration of the call, so a view into the dynamic
-storage cannot escape the lexical scope of its owner. `get` copies a copyable
-element; owning, linear, and view elements are rejected instead of being copied.
-There is no `pop`, `set`, or slice view yet.
+length, increments the length, and returns the same inline storage. `set`
+checks `index < length` and overwrites one initialized copyable slot without
+changing the length. `pop` checks `length > 0`, clears the last slot, decrements
+the length, and returns the array together with the removed copyable value.
+`len` and `get` borrow the array for the duration of the call, so a view into
+the dynamic storage cannot escape the lexical scope of its owner. `get`, `set`,
+and `pop` copy copyable elements; owning, linear, and view elements are rejected
+instead of being copied or duplicated. There is no slice view or literal yet.
 
 ## Layout and lifetime contract
 
@@ -65,8 +70,8 @@ words 1 .. 1 + capacity: inline element slots
 This is not `[T; n]` with a runtime `n`, not a dynamically sized stack allocation
 with a hidden layout descriptor, and not a general dependent array. The capacity
 is always a compile-time `Nat`; the length is a runtime word. There is no
-`DynArray` literal, pattern, equality, view, `pop`, `set`, or element-wise owning
-move. `Vec<T>` remains the growable owning container and `&[T]` the borrow for
+`DynArray` literal, pattern, equality, slice view, or element-wise owning move.
+`Vec<T>` remains the growable owning container and `&[T]` the borrow for
 arbitrary lengths.
 
 The implementation is checked by `crates/kush/tests/advanced_types_effects.rs`

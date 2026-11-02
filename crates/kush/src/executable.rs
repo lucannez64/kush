@@ -638,6 +638,23 @@ pub(crate) enum ExprKind {
         element: Type,
         capacity: usize,
     },
+    /// Push a copyable handler value on the dynamic one-shot handler stack for
+    /// the duration of `body`. Direct lexical `perform` lowering is unchanged;
+    /// the stack entry lets a called function resolve the same operation.
+    HandlerPush {
+        operation: usize,
+        handler: Box<Expr>,
+        body: Box<Block>,
+    },
+    /// `perform` resolved through the dynamic handler stack. The handler
+    /// contract is a pure `fn(P, linear once fn(R) -> R) -> R`, so no owning
+    /// environment crosses the stack entry.
+    DynamicPerform {
+        operation: usize,
+        payload: Box<Expr>,
+        resume: Box<Expr>,
+        handler: usize,
+    },
     /// Append one element, consuming and returning the same inline storage.
     /// The runtime length check panics before any out-of-capacity store.
     DynArrayPush {
@@ -1331,6 +1348,16 @@ fn fusion_expr_safe(
             safe(array, signatures, bodies, memo, visiting)
                 && safe(value, signatures, bodies, memo, visiting)
         }
+        ExprKind::HandlerPush { handler, body, .. } => {
+            safe(handler, signatures, bodies, memo, visiting)
+                && fusion_block_safe(body, signatures, bodies, memo, visiting)
+        }
+        ExprKind::DynamicPerform {
+            payload, resume, ..
+        } => {
+            safe(payload, signatures, bodies, memo, visiting)
+                && safe(resume, signatures, bodies, memo, visiting)
+        }
         ExprKind::DynArraySet {
             array,
             index,
@@ -1490,6 +1517,16 @@ fn fuse_expr(
         ExprKind::DynArrayPush { array, value, .. } => {
             fuse_expr(array, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
+        }
+        ExprKind::HandlerPush { handler, body, .. } => {
+            fuse_expr(handler, types, signatures, safety, fusions);
+            fuse_block(body, types, signatures, safety, fusions);
+        }
+        ExprKind::DynamicPerform {
+            payload, resume, ..
+        } => {
+            fuse_expr(payload, types, signatures, safety, fusions);
+            fuse_expr(resume, types, signatures, safety, fusions);
         }
         ExprKind::DynArraySet {
             array,
@@ -2686,6 +2723,56 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         object_associated: BTreeMap::new(),
         logical: &logical,
     };
+    let mut effect_operations = BTreeMap::new();
+    for declaration in &module.items {
+        let ast::ItemKind::Effect {
+            name,
+            parameter,
+            result,
+        } = &declaration.item.kind
+        else {
+            continue;
+        };
+        if effect_operations.contains_key(name) {
+            return Err(Diagnostic::new(
+                declaration.item.span,
+                format!("duplicate effect operation '{name}'"),
+            ));
+        }
+        let subst = crate::runtime_types::Subst::default();
+        let parameter_ty = types.ty_in(parameter, &subst)?;
+        let parameter_ty = types.full(parameter_ty, parameter.span)?;
+        let result_ty = types.ty_in(result, &subst)?;
+        let result_ty = types.full(result_ty, result.span)?;
+        let parameter = parameter_ty;
+        let result = result_ty;
+        if matches!(parameter, Type::Never) || matches!(result, Type::Never) {
+            return Err(Diagnostic::new(
+                declaration.item.span,
+                "an effect operation cannot use Never as its payload or result type",
+            ));
+        }
+        if parameter.is_view()
+            || result.is_view()
+            || matches!(parameter, Type::Ref(_) | Type::RefMut(_))
+            || matches!(result, Type::Ref(_) | Type::RefMut(_))
+        {
+            return Err(Diagnostic::new(
+                declaration.item.span,
+                "dynamic effect operations cannot carry borrowed payloads or results; a handler stack entry has no caller lifetime to borrow from",
+            ));
+        }
+        let id = effect_operations.len();
+        effect_operations.insert(
+            name.clone(),
+            EffectOperation {
+                id,
+                parameter,
+                result,
+            },
+        );
+    }
+    let effect_operations = &effect_operations;
     let mut monomorphic = Vec::new();
     for declaration in &module.items {
         let span = declaration.item.span;
@@ -2728,6 +2815,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             | ast::ItemKind::Trait { .. }
             | ast::ItemKind::Impl { .. }
             | ast::ItemKind::GradeAlgebra(_)
+            | ast::ItemKind::Effect { .. }
             | ast::ItemKind::Use(_) => continue,
             ast::ItemKind::Alias { .. } => continue,
             ast::ItemKind::Function(f) => f,
@@ -2922,6 +3010,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             binding: sig.binding,
             scalar_epochs: BTreeMap::new(),
             kernel_aliases: BTreeMap::new(),
+            effect_operations,
             handlers: Vec::new(),
             effect_constraints: Vec::new(),
         };
@@ -8204,6 +8293,15 @@ struct EffectConstraint {
     span: Span,
 }
 
+/// One declared effect operation. Dynamic `perform` calls use this signature;
+/// lexical handlers still drive direct performs, while the declaration lets a
+/// called function find the handler on the runtime stack.
+#[derive(Clone, Copy)]
+struct EffectOperation {
+    id: usize,
+    parameter: Type,
+    result: Type,
+}
 /// One lexical effect-handler binding. The handler is materialized in a hidden
 /// local so `perform` can call it and the ownership pass can enforce the
 /// callable's one-shot/linear contract.
@@ -8291,6 +8389,8 @@ struct Checker<'a, 't> {
     /// assignment to the source appends a new binder and leaves the alias
     /// denoting the value copied at binding time.
     kernel_aliases: BTreeMap<BindingId, usize>,
+    /// Declared effect operations used by dynamic performs in called bodies.
+    effect_operations: &'t BTreeMap<String, EffectOperation>,
     /// Lexically active effect handlers, innermost last. A handler is visible
     /// only to direct `perform` expressions in the same function body.
     handlers: Vec<HandlerScope>,
@@ -13622,6 +13722,13 @@ impl Checker<'_, '_> {
                     || self.value_moves_linear(value)
             }
             ExprKind::DynArrayPop { array, .. } => self.value_moves_linear(array),
+            ExprKind::HandlerPush { body, .. } => body
+                .tail
+                .as_deref()
+                .is_some_and(|tail| self.value_moves_linear(tail)),
+            ExprKind::DynamicPerform { .. } => {
+                self.owned_type(expr.ty) || self.linear_type(expr.ty)
+            }
             // A task/scope whose result carries an owning or linear obligation
             // transfers it to the handle (or to the joined TaskExit).
             ExprKind::TaskSpawn { obligation, .. }
@@ -13719,6 +13826,12 @@ impl Checker<'_, '_> {
                     .or_else(|| find(checker, index))
                     .or_else(|| find(checker, value)),
                 ExprKind::DynArrayPop { array, .. } => find(checker, array),
+                ExprKind::HandlerPush { handler, body, .. } => {
+                    find(checker, handler).or_else(|| find_in_block(checker, body))
+                }
+                ExprKind::DynamicPerform {
+                    payload, resume, ..
+                } => find(checker, payload).or_else(|| find(checker, resume)),
                 ExprKind::DynArrayNew { .. } => None,
                 ExprKind::VecMap {
                     vector, callbacks, ..
@@ -20628,6 +20741,21 @@ impl Checker<'_, '_> {
     ) -> Result<Expr> {
         let parameter_ty = self.ty(parameter)?;
         let result_ty = self.ty(result)?;
+        let declared = self.effect_operations.get(operation).copied();
+        if let Some(declared) = declared
+            && (parameter_ty != declared.parameter || result_ty != declared.result)
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "handler for '{operation}' must use the declared operation signature {} -> {}, found {} -> {}",
+                    self.types.name(declared.parameter),
+                    self.types.name(declared.result),
+                    self.types.name(parameter_ty),
+                    self.types.name(result_ty)
+                ),
+            ));
+        }
         if matches!(parameter_ty, Type::Never) || matches!(result_ty, Type::Never) {
             return Err(Diagnostic::new(
                 span,
@@ -20683,6 +20811,20 @@ impl Checker<'_, '_> {
             ));
         }
         self.require(signature.effects, span)?;
+        if declared.is_some() {
+            if !matches!(handler_value.ty, Type::Fn(_)) {
+                return Err(Diagnostic::new(
+                    handler.span,
+                    "a dynamically visible handler must be a noncapturing 'fn' value; one-shot capturing handlers stay lexical because their environment cannot be shared through the handler stack",
+                ));
+            }
+            if signature.effects != 0 {
+                return Err(Diagnostic::new(
+                    handler.span,
+                    "a dynamically visible handler must be pure; perform in a called function would otherwise hide the handler's effects from the caller's row",
+                ));
+            }
+        }
         let handler_type = handler_value.ty;
         let slot = self.fresh_local(span, handler_type)?;
         self.locals[slot].linear = signature.linear;
@@ -20699,15 +20841,33 @@ impl Checker<'_, '_> {
         self.handlers.pop();
         let inner = checked?;
         let ty = inner.ty;
+        let tail = match declared {
+            Some(declared) => Expr {
+                kind: ExprKind::HandlerPush {
+                    operation: declared.id,
+                    handler: Box::new(Expr {
+                        kind: ExprKind::Local(slot),
+                        ty: handler_type,
+                        span,
+                        resource: None,
+                    }),
+                    body: Box::new(inner),
+                },
+                ty,
+                span,
+                resource: None,
+            },
+            None => Expr {
+                kind: ExprKind::Block(inner),
+                ty,
+                span,
+                resource: None,
+            },
+        };
         Ok(Expr {
             kind: ExprKind::Block(Block {
                 statements: vec![Statement::Let(slot, handler_value)],
-                tail: Some(Box::new(Expr {
-                    kind: ExprKind::Block(inner),
-                    ty,
-                    span,
-                    resource: None,
-                })),
+                tail: Some(Box::new(tail)),
                 ty,
             }),
             ty,
@@ -20783,47 +20943,77 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
-        let Some(scope) = self
+        if let Some(scope) = self
             .handlers
             .iter()
             .rev()
             .find(|scope| scope.operation == operation)
-        else {
+        {
+            let (parameter, result, slot, handler_parameter, handler_result, effects) = (
+                scope.parameter,
+                scope.result,
+                scope.slot,
+                scope.handler_parameter,
+                scope.handler_result,
+                scope.effects,
+            );
+            let handler_ty = self.locals[slot].ty;
+            self.require(effects, span)?;
+            let payload = self.expr_expected(value, Some(parameter))?;
+            let payload = self.coerce(payload, handler_parameter, span)?;
+            let resume = self.resume_value(result, span)?;
+            let call = Expr {
+                kind: ExprKind::CallIndirect {
+                    callee: Box::new(Expr {
+                        kind: ExprKind::Local(slot),
+                        ty: handler_ty,
+                        span,
+                        resource: None,
+                    }),
+                    arguments: vec![payload, resume],
+                },
+                ty: handler_result,
+                span,
+                resource: None,
+            };
+            let call = self.coerce(call, result, span)?;
+            return match expected {
+                Some(expected) => self.coerce(call, expected, span),
+                None => Ok(call),
+            };
+        }
+        let Some(declared) = self.effect_operations.get(operation).copied() else {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "perform '{operation}' has no lexically enclosing handler; handlers cover direct performs in the same function body only"
+                    "perform '{operation}' has no lexically enclosing handler and no declared effect operation; write 'effect {operation}: P -> R;' to enable a dynamically scoped handler"
                 ),
             ));
         };
-        let (parameter, result, slot, handler_parameter, handler_result, effects) = (
-            scope.parameter,
-            scope.result,
-            scope.slot,
-            scope.handler_parameter,
-            scope.handler_result,
-            scope.effects,
+        let payload = self.expr_expected(value, Some(declared.parameter))?;
+        let payload = self.coerce(payload, declared.parameter, span)?;
+        let resume = self.resume_value(declared.result, span)?;
+        let handler = self.types.function_type_with(
+            vec![declared.parameter, resume.ty],
+            declared.result,
+            0,
+            vec![None, None],
+            None,
+            false,
+            false,
+            crate::runtime_types::BorrowSig::default(),
         );
-        let handler_ty = self.locals[slot].ty;
-        self.require(effects, span)?;
-        let payload = self.expr_expected(value, Some(parameter))?;
-        let payload = self.coerce(payload, handler_parameter, span)?;
-        let resume = self.resume_value(result, span)?;
         let call = Expr {
-            kind: ExprKind::CallIndirect {
-                callee: Box::new(Expr {
-                    kind: ExprKind::Local(slot),
-                    ty: handler_ty,
-                    span,
-                    resource: None,
-                }),
-                arguments: vec![payload, resume],
+            kind: ExprKind::DynamicPerform {
+                operation: declared.id,
+                payload: Box::new(payload),
+                resume: Box::new(resume),
+                handler,
             },
-            ty: handler_result,
+            ty: declared.result,
             span,
             resource: None,
         };
-        let call = self.coerce(call, result, span)?;
         match expected {
             Some(expected) => self.coerce(call, expected, span),
             None => Ok(call),

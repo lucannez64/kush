@@ -58,6 +58,15 @@ pub enum ItemKind {
         generics: Vec<Generic>,
         ty: Type,
     },
+    /// `effect Name: P -> R;` declares the payload/result signature of an
+    /// effect operation. A lexical `handle Name` may serve direct performs;
+    /// the declaration additionally lets a called function perform the
+    /// operation through the dynamic one-shot handler stack.
+    Effect {
+        name: String,
+        parameter: Type,
+        result: Type,
+    },
     /// `trait Name<T> { type Item; const LIMIT: i64; fn method(self: Self, ...) -> T ! { ... }; }`.
     ///
     /// Traits are static dispatch contracts. A method signature ends in

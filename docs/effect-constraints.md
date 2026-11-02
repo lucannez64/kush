@@ -110,7 +110,13 @@ decidable fragment is:
   choosing one arbitrarily;
 - an exclusion bound (`<e: Effects - io>`) removes bits from the variable's
   finite domain. If an argument requires an excluded effect, the diagnostic
-  names the excluded effect and the row parameter.
+  names the excluded effect and the row parameter;
+- an inclusion bound (`<e: Effects + io>`) removes assignments that omit the
+  required bits. The bound is checked at the same specialization choke point as
+  exclusions, so an explicit `::<...>` argument that omits a required effect is
+  rejected, and a lower bound that conflicts with an exclusion in the same
+  binder is rejected at declaration time. `#[noalloc]`/`#[nosuspend]` treat a
+  required forbidden effect as a declaration error rather than a guarantee.
 
 For example, a shared row variable receives the union of every argument:
 
@@ -137,10 +143,10 @@ expected arrow's effect row is added as one more constraint, so a callable
 parameter and the expected result contract are considered together.
 
 This is a finite constraint solver, not a general row-unification calculus.
-There are no lower bounds (`+ io`), no row subtraction, no polymorphic row
-aliases, no recursive row constraints, and no principal inference for open
-rows. Exceeding the four-bit universe or the 4096-assignment budget is an
-explicit diagnostic.
+Lower (`+`) and upper/exclusion (`-`) bounds are both finite domain
+restrictions; there is no row subtraction, no polymorphic row aliases, no
+recursive row constraints, and no principal inference for open rows. Exceeding
+the four-bit universe or the 4096-assignment budget is an explicit diagnostic.
 
 ## `#[noalloc]` and `#[nosuspend]`
 
@@ -177,7 +183,7 @@ attribute and are checked when their specialization is materialized.
 
 ## Boundaries
 
-- No row subtraction, row difference, aliasing rows, or subtyping on exclusion
+- No row subtraction, row difference, aliasing rows, or subtyping on bound
   sets.
 - No lower bounds (`<e: Effects + alloc>`), no inference of exclusion lists from
   a body, and no general recursive row unification. The implemented solver is
