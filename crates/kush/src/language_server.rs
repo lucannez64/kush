@@ -1353,6 +1353,7 @@ const STRING_TOKEN: u64 = 6;
 const NUMBER_TOKEN: u64 = 7;
 const COMMENT_TOKEN: u64 = 8;
 const VARIABLE_TOKEN: u64 = 10;
+const OPERATOR_TOKEN: u64 = 9;
 
 /// How the next identifier token should be colored, decided by the preceding
 /// declaration keyword.
@@ -1363,6 +1364,8 @@ enum Expected {
     Type,
     Namespace,
     Variable,
+    /// Effect operations inside `! { ... }`.
+    Effect,
 }
 
 fn semantic_token_data(text: &str) -> Value {
@@ -1404,6 +1407,22 @@ fn semantic_token_data(text: &str) -> Value {
                     Expected::None
                 };
             }
+            Kind::Arrow => {
+                // `-> Type` return annotations color the following name.
+                expected = Expected::Type;
+            }
+            Kind::Bang => {
+                // `! {row}` effect rows color their operations; plain `!flag`
+                // negation stays operator-only.
+                if tokens
+                    .get(index + 1)
+                    .is_some_and(|next| matches!(next.kind, Kind::LBrace))
+                {
+                    expected = Expected::Effect;
+                }
+                events.push((start, end, OPERATOR_TOKEN));
+            }
+            Kind::LBrace if expected == Expected::Effect => {}
             Kind::Ident(name)
                 if matches!(&token.kind, Kind::Ident(_))
                     && KEYWORD_WORDS.contains(&name.as_str()) =>
@@ -1425,6 +1444,16 @@ fn semantic_token_data(text: &str) -> Value {
             Kind::Ident(_) if expected == Expected::Variable => {
                 events.push((start, end, VARIABLE_TOKEN));
                 expected = Expected::None;
+            }
+            Kind::Ident(_) if expected == Expected::Effect => {
+                events.push((start, end, TYPE_TOKEN));
+                // The row can list several operations before `}`.
+            }
+            Kind::Ident(name)
+                if tokens.get(index + 1).is_some_and(|next| matches!(next.kind, Kind::LParen)) =>
+            {
+                // A call or constructor: function-name in function position.
+                events.push((start, end, FUNCTION_TOKEN));
             }
             Kind::Ident(name)
                 if matches!(&token.kind, Kind::Ident(_))
