@@ -1304,3 +1304,12 @@ with allocator context ownership and early-exit cleanup. The full Boat gate
 passed **1041 tests**, formatting, and Clippy. The sandbox was stopped after
 the run. Independent allocator safety recheck remains pending. The unchecked
 feature boundaries above are still outstanding.
+
+## Allocator safety independent recheck
+
+Independent review of `f0a784d` found no remaining proven allocator ownership or
+early-exit defect in its checked probes. Follow-up regressions cover a temporary
+shared context during early return and a moved context nested in another state
+record; the allocator suite passes **34 tests** locally in both backends. The
+review also checked `?`, breaks, refusal paths, and multiple move/share shapes.
+This focused follow-up does not replace the earlier full Boat gate at `77182b1`.

@@ -1170,7 +1170,7 @@ fn allocator_context_state_moves_are_checked_and_cleaned_up() {
     agrees(&source, 41);
     let invalid = source.replace(
         "let b = AllocBox.new(ctx, 41);",
-        "let taken = Box.take(token); let b = AllocBox.new(ctx, taken);",
+        "drop(Box.take(token)); let b = AllocBox.new(ctx, 41);",
     );
     rejects(&invalid, "move");
     rejects(
@@ -1222,4 +1222,45 @@ fn allocator_constructor_early_returns_release_contexts() {
     assert_eq!(value(&source), 7);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(&source, 7);
+}
+
+#[test]
+fn temporary_context_survives_later_early_return() {
+    let source = format!(
+        r#"{OWNING_STATE_ALLOCATOR}
+        fn run(ctx: AllocatorContext, flag: Bool) -> i64 ! {{alloc, panic}} {{
+            let b = AllocBox.new(AllocatorContext.share(&ctx), if flag {{ return 7; }} else {{ 9 }});
+            AllocBox.take(b)
+        }}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let ctx = AllocatorContext.new(OwnedCounting {{ calls: 0, live: 0, limit: 0, token: Box.new(1) }});
+            run(ctx, true)
+        }}"#
+    );
+    assert_eq!(value(&source), 7);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 7);
+}
+
+#[test]
+fn nested_context_state_moves_and_drops_once() {
+    let source = format!(
+        r#"{STATEFUL_ALLOCATOR}
+        struct Outer {{ inner: AllocatorContext, calls: i64 }}
+        impl AllocatorProtocol for Outer {{
+            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {{alloc, panic}} {{ Bytes.with_capacity(bytes) }}
+            fn free(self: &mut Self, block: Bytes) -> Unit ! {{}} {{ drop(block) }}
+            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {{alloc, panic}} {{
+                drop(old_bytes); drop(block); Bytes.with_capacity(bytes)
+            }}
+        }}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let inner = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
+            let outer = AllocatorContext.new(Outer {{ inner: inner, calls: 0 }});
+            AllocBox.take(AllocBox.new(outer, 41))
+        }}"#
+    );
+    assert_eq!(value(&source), 41);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 41);
 }
