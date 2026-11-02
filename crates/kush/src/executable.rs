@@ -1192,7 +1192,8 @@ fn fusion_expr_safe(
         | ExprKind::Move(_)
         | ExprKind::Borrow(_)
         | ExprKind::Peek(_)
-        | ExprKind::ArenaNew => true,
+        | ExprKind::ArenaNew
+        | ExprKind::DynArrayNew { .. } => true,
         // No loop has a checked termination argument here.
         ExprKind::While(..) | ExprKind::Loop(_) => false,
         ExprKind::Call(Target::Function(index), arguments) => {
@@ -1244,6 +1245,10 @@ fn fusion_expr_safe(
         | ExprKind::Project(value, _) => safe(value, signatures, bodies, memo, visiting),
         ExprKind::ArenaAlloc { arena, value } => {
             safe(arena, signatures, bodies, memo, visiting)
+                && safe(value, signatures, bodies, memo, visiting)
+        }
+        ExprKind::DynArrayPush { array, value, .. } => {
+            safe(array, signatures, bodies, memo, visiting)
                 && safe(value, signatures, bodies, memo, visiting)
         }
         ExprKind::BoxReuse { owner, payload }
@@ -1381,6 +1386,10 @@ fn fuse_expr(
         | ExprKind::Project(value, _) => fuse_expr(value, types, signatures, safety, fusions),
         ExprKind::ArenaAlloc { arena, value } => {
             fuse_expr(arena, types, signatures, safety, fusions);
+            fuse_expr(value, types, signatures, safety, fusions);
+        }
+        ExprKind::DynArrayPush { array, value, .. } => {
+            fuse_expr(array, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
         }
         ExprKind::BoxReuse { owner, payload }
@@ -1545,6 +1554,7 @@ fn fuse_expr(
         | ExprKind::Borrow(_)
         | ExprKind::Peek(_)
         | ExprKind::ArenaNew
+        | ExprKind::DynArrayNew { .. }
         | ExprKind::TaskYield
         | ExprKind::TaskCheckCancel
         | ExprKind::Continue(_) => {}
