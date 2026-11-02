@@ -1262,7 +1262,7 @@ impl Parser {
                 ExprKind::Char(value)
             }
             Kind::True | Kind::False => ExprKind::Bool(self.bump().kind == Kind::True),
-            Kind::Minus | Kind::Bang | Kind::Amp => {
+            Kind::Minus | Kind::Bang | Kind::Amp | Kind::Star => {
                 let op = self.bump().kind;
                 let mutable = op == Kind::Amp && self.eat(&Kind::Mut);
                 let operand = Box::new(self.expr_bp(11)?);

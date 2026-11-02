@@ -3124,12 +3124,12 @@ impl<'a> Functions<'a> {
             }
         } else if result.is_ref() {
             let pointee = result.ref_pointee().expect("reference pointee");
-            if types.pointees[pointee].layout().is_none() {
-                return Err(Diagnostic::new(
-                    f.result.span,
-                    "owner references (&Box/&Bytes/&Vec/&String) cannot be returned; only nominal-record references ('&Record'/'&mut Record') have stable caller-owned storage",
-                ));
-            }
+            // A returned reference must name the caller-owned storage of a
+            // matching reference parameter. Nominal records, Box, Vec, Bytes,
+            // and String all have stable caller-owned storage when reached
+            // through such a parameter; a reference to a by-value parameter or
+            // a local remains a dangling-borrow error in the ownership pass.
+            let result_pointee = types.pointees[pointee].full();
             let Some(lifetime) = &result_lifetime else {
                 return Err(Diagnostic::new(
                     f.result.span,
@@ -3141,6 +3141,9 @@ impl<'a> Functions<'a> {
                 .zip(parameters.iter())
                 .filter(|(parameter, ty)| {
                     ty.is_ref()
+                        && ty
+                            .ref_pointee()
+                            .is_some_and(|p| types.pointees[p].full() == result_pointee)
                         && parameter
                             .as_ref()
                             .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
@@ -3150,7 +3153,8 @@ impl<'a> Functions<'a> {
                 return Err(Diagnostic::new(
                     f.result.span,
                     format!(
-                        "reference result lifetime '{lifetime}' does not appear on any '&{lifetime} Record' parameter that outlives it; a returned reference must borrow caller-owned storage"
+                        "reference result lifetime '{lifetime}' does not appear on any reference parameter to the same '{}' pointee that outlives it; a returned reference must borrow caller-owned storage",
+                        types.name(result_pointee)
                     ),
                 ));
             }
@@ -3160,7 +3164,8 @@ impl<'a> Functions<'a> {
                 return Err(Diagnostic::new(
                     f.result.span,
                     format!(
-                        "an exclusive '&mut Record' result lifetime '{lifetime}' must appear on an exclusive '&mut Record' parameter that outlives it; shared storage cannot be returned mutably"
+                        "an exclusive '&mut {}' result lifetime '{lifetime}' must appear on an exclusive '&mut' parameter to the same pointee that outlives it; shared storage cannot be returned mutably",
+                        types.name(result_pointee)
                     ),
                 ));
             }
@@ -3223,6 +3228,14 @@ impl<'a> Functions<'a> {
                 f.result.span,
                 "a function cannot return a task handle; a child handle must not escape its scope",
             ));
+        }
+        for ty in parameters.iter().copied().chain(std::iter::once(result)) {
+            if crate::runtime_types::contains_task_exit_borrow(types, ty) {
+                return Err(Diagnostic::new(
+                    f.result.span,
+                    "TaskExit<T> with a borrowed payload is lexical to the task scope that joined it; match it immediately, or read the borrowed fields inside the scope instead of passing it across a function boundary",
+                ));
+            }
         }
         if parameters.iter().map(|ty| types.width(*ty)).sum::<usize>() > 128 {
             return Err(Diagnostic::new(
@@ -7302,10 +7315,10 @@ impl Checker<'_, '_> {
                         None => (None, None),
                     };
                     let value = self.expr_expected(value, annotation)?;
-                    if matches!(value.ty, Type::Ref(_) | Type::RefMut(_)) {
+                    if value.ty.is_ref() && *mutable {
                         return Err(Diagnostic::new(
-                            value.span,
-                            "borrowed references cannot be stored in local bindings; pass them directly to a call",
+                            pattern.span,
+                            "reference bindings are immutable: a reborrow derives from the stored reference, so assign a new reference by binding a fresh 'let' instead of rebinding it",
                         ));
                     }
                     if value.ty.is_view() && *mutable {
@@ -8046,6 +8059,54 @@ impl Checker<'_, '_> {
                     (ExprKind::Constant(int_literal(text, true, ty, span)?), ty)
                 }
                 ast::ExprKind::Unary { op: Kind::Amp, mutable, operand } => {
+                    // Explicit reborrow: `&*p` narrows an existing reference
+                    // for one call without consuming the reference binding, and
+                    // `&mut *p` may only reborrow an exclusive reference. The
+                    // runtime representation is the existing one-word pointer,
+                    // so the reborrow lowers to the reference local itself; the
+                    // ownership pass keeps the source capability live and
+                    // records the underlying storage provenance.
+                    if let ast::ExprKind::Unary {
+                        op: Kind::Star,
+                        operand: target,
+                        ..
+                    } = &operand.kind
+                    {
+                        let ast::ExprKind::Name(_) = &target.kind else {
+                            return Err(Diagnostic::new(
+                                span,
+                                "an explicit reborrow names one reference binding, as in '&*p' or '&mut *p'",
+                            ));
+                        };
+                        let slot = c.slot(target.span)?;
+                        let ty = c.locals[slot].ty;
+                        let Some(pointer) = ty.ref_pointee() else {
+                            return Err(Diagnostic::new(
+                                target.span,
+                                format!(
+                                    "explicit reborrow expects a reference binding, found {}",
+                                    c.types.name(ty)
+                                ),
+                            ));
+                        };
+                        if *mutable && !matches!(ty, Type::RefMut(_)) {
+                            return Err(Diagnostic::new(
+                                span,
+                                "cannot reborrow a shared reference as exclusive '&mut *p'; shared storage cannot be upgraded",
+                            ));
+                        }
+                        let reborrow = if *mutable {
+                            Type::RefMut(pointer)
+                        } else {
+                            Type::Ref(pointer)
+                        };
+                        return Ok(Expr {
+                            kind: ExprKind::Local(slot),
+                            ty: reborrow,
+                            span,
+                            resource: None,
+                        });
+                    }
                     if let ast::ExprKind::Slice { value, start, end } = &operand.kind {
                         return c.slice_view(
                             value,
@@ -8131,6 +8192,12 @@ impl Checker<'_, '_> {
                         Kind::Bang => {
                             c.expect(operand.ty, Type::Bool, span)?;
                             Type::Bool
+                        }
+                        Kind::Star => {
+                            return Err(Diagnostic::new(
+                                span,
+                                "dereferencing a reference is supported only as an explicit reborrow '&*p' or '&mut *p'; read fields through 'p.field' and pass the reference itself to a call",
+                            ));
                         }
                         _ => {
                             return Err(Diagnostic::new(
@@ -8957,6 +9024,17 @@ impl Checker<'_, '_> {
         if values.len() != variant.fields.len() {
             return Err(Diagnostic::new(span, "wrong enum payload arity"));
         }
+        if self.types.enums[enum_id].name == "TaskExit"
+            && variant
+                .fields
+                .iter()
+                .any(|ty| crate::runtime_types::has_borrow(self.types, *ty))
+        {
+            return Err(Diagnostic::new(
+                span,
+                "TaskExit<T> with a borrowed payload is produced only by Task.join; construct the record first, or join the child task and match its result",
+            ));
+        }
         let mut fields = Vec::new();
         let mut diverges = false;
         for (value, ty) in values.iter().zip(variant.fields) {
@@ -9139,6 +9217,14 @@ impl Checker<'_, '_> {
                 lambda.result.span,
                 "a function value cannot return a task handle; a child handle must not escape its scope",
             ));
+        }
+        for ty in parameters.iter().copied().chain(std::iter::once(result)) {
+            if crate::runtime_types::contains_task_exit_borrow(self.types, ty) {
+                return Err(Diagnostic::new(
+                    lambda.result.span,
+                    "TaskExit<T> with a borrowed payload is lexical to the task scope that joined it; match it immediately inside that scope instead of passing it through a callable",
+                ));
+            }
         }
         let effects = crate::runtime_types::effect_bits_with(
             self.resolution,
@@ -11254,6 +11340,12 @@ impl Checker<'_, '_> {
                         "Task.scope cannot return a task handle; a child handle must not escape its scope",
                     ));
                 }
+                if crate::runtime_types::contains_task_exit_borrow(self.types, result) {
+                    return Err(Diagnostic::new(
+                        span,
+                        "a task scope cannot return TaskExit<T> with a borrowed payload; match the join result and finish reading its fields inside the scope",
+                    ));
+                }
                 if self.linear_type(result) || result_grade.is_some() {
                     return Err(Diagnostic::new(
                         span,
@@ -11294,10 +11386,10 @@ impl Checker<'_, '_> {
                 }
                 let (mut body, result, _, result_grade) =
                     self.task_callable(&arguments[0], false, true, "Task.spawn", span)?;
-                if self.carrier_type(result) {
+                if crate::runtime_types::contains_task_exit_borrow(self.types, result) {
                     return Err(Diagnostic::new(
                         span,
-                        "a task cannot return a borrowed record; borrowed fields are lexical and cannot cross a task boundary",
+                        "a task cannot return TaskExit<T>; a joined borrow is lexical to the enclosing scope, and a task result is joined explicitly",
                     ));
                 }
                 if crate::runtime_types::contains_task(self.types, result) {

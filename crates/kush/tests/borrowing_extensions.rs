@@ -211,6 +211,107 @@ fn borrowed_records_are_lent_to_scope_bodies_and_child_tasks() {
 }
 
 #[test]
+fn borrowed_records_are_task_results_through_join_and_cancellation() {
+    // The child returns the captured record. Task.join carries its per-field
+    // provenance into the matched binding, and the scope's final join keeps the
+    // external storage loaned through the read.
+    agrees(
+        r#"use std.task.TaskExit;
+        struct Window<'a> { view: &'a [i64], start: i64 }
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {panic, suspend} {
+                    Task.yield();
+                    window
+                });
+                match Task.join(t) {
+                    TaskExit.Completed(w) => Slice.get(w.view, w.start),
+                    TaskExit.Cancelled => 0,
+                }
+            })
+        }
+        fn main() -> i64 ! {alloc, panic, suspend} {
+            let data: [i64; 3] = [1, 40, 2];
+            run(Window { view: &data[..], start: 1 })
+        }"#,
+        40,
+        "",
+    );
+    // Directly joining and matching is the same contract without an
+    // intermediate TaskExit binding.
+    agrees(
+        r#"use std.task.TaskExit;
+        struct Window<'a> { view: &'a [i64], start: i64 }
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+                match Task.join(Task.spawn(fn() -> Window<'a> ! {panic, suspend} {
+                    Task.yield();
+                    window
+                })) {
+                    TaskExit.Completed(w) => Slice.get(w.view, w.start),
+                    TaskExit.Cancelled => 0,
+                }
+            })
+        }
+        fn main() -> i64 ! {alloc, panic, suspend} {
+            let data: [i64; 3] = [1, 40, 2];
+            run(Window { view: &data[..], start: 1 })
+        }"#,
+        40,
+        "",
+    );
+    // Cancellation drops the completed result value in the child: its owned
+    // metadata is released exactly once, while the borrowed slice descriptor is
+    // inert and never frees the caller's storage.
+    agrees(
+        r#"use std.task.TaskExit;
+        struct Window<'a> { view: &'a [i64], owner: Vec<i64>, start: i64 }
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {alloc, panic, suspend} {
+                    Task.yield();
+                    Window { view: window.view, owner: [9, 8, 7], start: window.start }
+                });
+                Task.cancel(&t);
+                match Task.join(t) {
+                    TaskExit.Completed(w) => Slice.get(w.view, w.start),
+                    TaskExit.Cancelled => 42,
+                }
+            })
+        }
+        fn main() -> i64 ! {alloc, panic, suspend} {
+            let data: [i64; 3] = [1, 40, 2];
+            run(Window { view: &data[..], owner: [5], start: 1 }) + Slice.get(&data[..], 0)
+        }"#,
+        43,
+        "",
+    );
+    rejects(
+        r#"use std.task.TaskExit;
+        struct Window<'a> { view: &'a [i64] }
+        fn main() -> i64 ! {alloc, panic, suspend} {
+            let data: [i64; 1] = [7];
+            let forged = TaskExit.Completed(Window { view: &data[..] });
+            0
+        }"#,
+        "produced only by Task.join",
+    );
+    // A joined borrowed result is lexical to the scope that owns the loans.
+    rejects(
+        r#"use std.task.TaskExit;
+        struct Window<'a> { view: &'a [i64] }
+        fn forward<'a>(exit: TaskExit<Window<'a>>) -> i64 ! {panic} {
+            match exit {
+                TaskExit.Completed(w) => Slice.get(w.view, 0),
+                TaskExit.Cancelled => 0,
+            }
+        }
+        fn main() -> i64 ! {alloc, panic} { 0 }"#,
+        "lexical to the task scope",
+    );
+}
+
+#[test]
 fn child_tasks_cannot_borrow_record_storage_owned_by_the_scope_body() {
     rejects(
         r#"use std.task.TaskExit;
@@ -340,15 +441,95 @@ fn nominal_record_reference_escape_and_reborrow_contracts() {
         fn main() -> Unit ! {} {}"#,
         "cannot be returned",
     );
-    rejects(
+    // A stored reference is a lexical capability, not a copy of the owner.
+    agrees(
         r#"struct Point { x: i64, y: i64 }
         fn peek(p: &Point) -> i64 ! {panic} { p.x }
         fn main() -> i64 ! {panic} {
-            let p = Point { x: 1, y: 2 };
+            let p = Point { x: 40, y: 2 };
             let r = &p;
-            peek(r)
+            peek(r) + r.y
         }"#,
-        "stored in local bindings",
+        42,
+        "",
+    );
+    // Returning a reference parameter through a stored local keeps its
+    // caller lifetime.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        fn identity<'a>(p: &'a Point) -> &'a Point ! {panic} {
+            let stored = p;
+            stored
+        }
+        fn main() -> i64 ! {panic} {
+            let p = Point { x: 40, y: 2 };
+            let r = identity(&p);
+            r.x + r.y
+        }"#,
+        42,
+        "",
+    );
+    // Exclusive references are reborrowed on each use instead of moved, and an
+    // explicit reborrow narrows the stored capability.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {panic} {
+            p.x = p.x + 1;
+            p
+        }
+        fn read(p: &Point) -> i64 ! {panic} { p.x }
+        fn main() -> i64 ! {panic} {
+            let mut p = Point { x: 40, y: 2 };
+            let r = &mut p;
+            let a = read(&*r);
+            let x = bump(&mut *r).x;
+            let y = bump(r).y;
+            x + y + a
+        }"#,
+        83,
+        "",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn leak<'a>(p: &'a Point) -> &'a Point ! {panic} {
+            let local = Point { x: 1, y: 2 };
+            let stored = &local;
+            stored
+        }
+        fn main() -> Unit ! {panic} {}"#,
+        "escapes",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn leak<'a>(p: &'a Point) -> &'a Point ! {panic} {
+            let stored = &*p;
+            let local = Point { x: 1, y: 2 };
+            let other = &local;
+            other
+        }
+        fn main() -> Unit ! {panic} {}"#,
+        "escapes",
+    );
+    // Owner references have valid escape contracts too: the caller-owned
+    // Box/Vec/Bytes/String stays loaned for the returned reference's use.
+    agrees(
+        r#"fn box_value<'a>(b: &'a Box<i64>) -> &'a Box<i64> ! {panic} { b }
+        fn vec_value<'a>(v: &'a Vec<i64>) -> &'a Vec<i64> ! {panic} { v }
+        fn bytes_value<'a>(b: &'a Bytes) -> &'a Bytes ! {panic} { b }
+        fn text_value<'a>(s: &'a String) -> &'a String ! {panic} { s }
+        fn main() -> i64 ! {alloc, panic} {
+            let boxed: Box<i64> = Box.new(40);
+            let values: Vec<i64> = [2];
+            let bytes: Bytes = Bytes.from("x");
+            let text = String.from("y");
+            let b = box_value(&boxed);
+            let v = vec_value(&values);
+            let by = bytes_value(&bytes);
+            let t = text_value(&text);
+            Box.read(b) + Vec.len(v) + Bytes.len(by) + String.len(t)
+        }"#,
+        43,
+        "",
     );
 }
 

@@ -140,6 +140,10 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             bound_receivers: BTreeSet::new(),
             temporary_regions: Vec::new(),
             task_regions: Vec::new(),
+            task_results: BTreeMap::new(),
+            task_sources: vec![None; function.locals.len()],
+            wrapped_results: BTreeMap::new(),
+            wrapped_locals: vec![None; function.locals.len()],
             view_sources: vec![None; function.locals.len()],
             view_roots: vec![None; function.locals.len()],
             view_mut: vec![false; function.locals.len()],
@@ -579,6 +583,17 @@ struct Checker<'a> {
     /// suspension point until the scope's final join, so these loans hold for
     /// the rest of the scope body and survive every temporary restore.
     task_regions: Vec<RetainedView>,
+    /// Per-field provenance of a borrowed-record result produced by a child
+    /// task, keyed by the TaskSpawn expression. It moves with the handle and
+    /// then with the TaskExit value that Task.join produces.
+    task_results: BTreeMap<usize, RecordProvenance>,
+    /// Result provenance of each local Task<T> handle, keyed by binding slot.
+    task_sources: Vec<Option<RecordProvenance>>,
+    /// Borrowed-record provenance carried by a TaskExit<T> value, keyed by the
+    /// producing expression. Only Task.join creates one.
+    wrapped_results: BTreeMap<usize, RecordProvenance>,
+    /// Provenance of a local TaskExit<T> binding that wraps a borrowed record.
+    wrapped_locals: Vec<Option<RecordProvenance>>,
     /// For each slice view local, its flattened capability ancestry: every
     /// immediate source view and every owned storage root the view derives
     /// from. A parameter view has an empty ancestry and is itself a root.
@@ -677,6 +692,7 @@ impl Checker<'_> {
     fn is_local_view(&self, slot: usize) -> bool {
         slot >= self.parameter_count
             && (self.locals[slot].ty.is_view()
+                || self.locals[slot].ty.is_ref()
                 || self.borrowed_closures.contains_key(&slot)
                 || self.is_carrier_type(self.locals[slot].ty))
     }
@@ -757,12 +773,29 @@ impl Checker<'_> {
             ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot)
                 if expr.ty.is_ref() =>
             {
-                Loan {
-                    origins: BTreeSet::from([*slot]),
-                    mutable: matches!(expr.ty, Type::RefMut(_)),
-                    splits: SplitLabels::default(),
-                    lifetime: self.reference_lifetimes[*slot].clone(),
-                    field: None,
+                if self.is_local_view(*slot) {
+                    // A stored reference is a lexical capability over the
+                    // same storage as the reference it was created from. Its
+                    // derived origins and lifetime drive every later use, so a
+                    // local reborrow cannot silently re-anchor to the reference
+                    // descriptor itself.
+                    Loan {
+                        origins: self.view_origins(expr),
+                        mutable: self.view_mut[*slot],
+                        splits: self.view_splits[*slot].clone(),
+                        lifetime: self.view_lifetimes[*slot]
+                            .clone()
+                            .or_else(|| self.reference_lifetimes[*slot].clone()),
+                        field: None,
+                    }
+                } else {
+                    Loan {
+                        origins: BTreeSet::from([*slot]),
+                        mutable: matches!(expr.ty, Type::RefMut(_)),
+                        splits: SplitLabels::default(),
+                        lifetime: self.reference_lifetimes[*slot].clone(),
+                        field: None,
+                    }
                 }
             }
             ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot) => {
@@ -1700,6 +1733,67 @@ impl Checker<'_> {
         }
         Ok(())
     }
+    /// Propagate the borrowed-record payload of a joined `TaskExit<T>` into the
+    /// pattern that matches `Completed`. Only the conventional task-exit shape
+    /// carries this wrapper; every other enum payload is borrow-free.
+    fn bind_task_exit_provenance(
+        &mut self,
+        pattern: &Pattern,
+        ty: Type,
+        provenance: &RecordProvenance,
+    ) -> Result<()> {
+        match pattern {
+            Pattern::Type { member, inner, .. } => {
+                self.bind_task_exit_provenance(inner, *member, provenance)
+            }
+            Pattern::Variant { tag, fields } => {
+                let Some(id) = ty.layout() else {
+                    return Ok(());
+                };
+                let field_types = {
+                    let layout = &self.enums[id];
+                    if layout.name != "TaskExit"
+                        || layout
+                            .variants
+                            .get(*tag)
+                            .map_or(true, |variant| variant.name != "Completed")
+                    {
+                        return Ok(());
+                    }
+                    let variant = &layout.variants[*tag];
+                    let mut word = 1;
+                    let mut field_types = Vec::with_capacity(variant.fields.len());
+                    for field in &variant.fields {
+                        field_types.push((word, *field));
+                        word += crate::runtime_types::width(
+                            self.enums,
+                            self.unions,
+                            self.functions,
+                            *field,
+                        );
+                    }
+                    field_types
+                };
+                for (offset, inner) in fields {
+                    let Some((_, field_ty)) = field_types.iter().find(|(at, _)| at == offset)
+                    else {
+                        continue;
+                    };
+                    if self.is_carrier_type(*field_ty) {
+                        self.bind_pattern_provenance(inner, *field_ty, provenance)?;
+                    }
+                }
+                Ok(())
+            }
+            Pattern::Or(alternatives) => {
+                for alternative in alternatives {
+                    self.bind_task_exit_provenance(alternative, ty, provenance)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
     /// Whether a live view borrows `source` through its capability ancestry.
     fn derives_from(&self, view: usize, source: usize) -> bool {
         view != source
@@ -1757,7 +1851,9 @@ impl Checker<'_> {
     /// Reject direct access through a slot while its capability is suspended,
     /// or through an owner while an exclusive view of it is live.
     fn check_owner_access(&self, slot: usize, ptr: usize, span: Span, what: &str) -> Result<()> {
-        if self.locals[slot].ty.is_view() {
+        if self.locals[slot].ty.is_view()
+            || (slot >= self.parameter_count && self.locals[slot].ty.is_ref())
+        {
             if self.capability_suspended(slot, ptr) {
                 return Err(Diagnostic::new(
                     span,
@@ -1817,6 +1913,14 @@ impl Checker<'_> {
             return;
         }
         match &expr.kind {
+            ExprKind::Peek(slot) | ExprKind::Local(slot) | ExprKind::Move(slot)
+                if expr.ty.is_ref() =>
+            {
+                out.insert(*slot);
+                if let Some(origins) = &self.view_sources[*slot] {
+                    out.extend(origins.iter().copied());
+                }
+            }
             ExprKind::Peek(slot)
             | ExprKind::Borrow(slot)
             | ExprKind::Local(slot)
@@ -2162,6 +2266,42 @@ impl Checker<'_> {
             ));
         }
         for origin in origins {
+            if *origin >= self.parameter_count && self.is_local_view(*origin) {
+                // A stored reference local is a lexical child of the reference
+                // it was derived from. Nothing here owns storage, so every
+                // storage root must still be a reference parameter carrying the
+                // declared result lifetime. Returning a reference to a record
+                // parameter by value is rejected because that parameter's
+                // storage dies with the call.
+                if mutable && !self.view_mut[*origin] {
+                    return Err(Diagnostic::new(
+                        span,
+                        "an exclusive reference return cannot derive from a shared stored reference",
+                    )
+                    .with_note(self.locals[*origin].span, "shared reference declared here"));
+                }
+                for root in self.roots_of(*origin) {
+                    if root >= self.parameter_count || !self.locals[root].ty.is_ref() {
+                        return Err(Diagnostic::new(
+                            span,
+                            "returned reference would dangle: it is reborrowed from a stack local, a by-value parameter, or another non-reference place",
+                        )
+                        .with_note(self.locals[root].span, "borrowed storage declared here"));
+                    }
+                    if !self.parameter_carries_lifetime(root, lifetime, mutable) {
+                        return Err(Diagnostic::new(
+                            span,
+                            if mutable {
+                                "an exclusive reference return must derive from an exclusive reference parameter with the declared result lifetime"
+                            } else {
+                                "returned reference would dangle: the reference parameter does not carry the declared result lifetime"
+                            },
+                        )
+                        .with_note(self.locals[root].span, "reference parameter declared here"));
+                    }
+                }
+                continue;
+            }
             if *origin >= self.parameter_count || !self.locals[*origin].ty.is_ref() {
                 return Err(Diagnostic::new(
                     span,
@@ -2173,7 +2313,7 @@ impl Checker<'_> {
                 return Err(Diagnostic::new(
                     span,
                     if mutable {
-                        "an exclusive '&mut Record' return must derive from an exclusive '&mut Record' parameter with the declared result lifetime"
+                        "an exclusive reference return must derive from an exclusive reference parameter with the declared result lifetime"
                     } else {
                         "returned reference would dangle: the parameter does not carry the declared result lifetime"
                     },
@@ -2589,6 +2729,12 @@ impl Checker<'_> {
                     let site_pointer = site as *const Expr as usize;
                     let capture_site =
                         matches!(site.kind, ExprKind::FnValue { .. }).then_some(site_pointer);
+                    let inherited_wrapped = match &site.kind {
+                        ExprKind::Local(source) | ExprKind::Move(source) => {
+                            self.wrapped_locals[*source].clone()
+                        }
+                        _ => None,
+                    };
                     let old_capture_site = self.capture_site;
                     let old_callee_site = self.callee_site;
                     self.capture_site = capture_site;
@@ -2617,6 +2763,54 @@ impl Checker<'_> {
                             .reduce(|left, right| intersect_splits(&left, &right))
                             .unwrap_or_default();
                         self.acquire_record(slot, provenance, splits);
+                    } else if self.locals[slot].ty.is_ref() {
+                        // A stored reference is a lexical capability over its
+                        // source storage. It owns nothing at runtime: the
+                        // one-word pointer is the checked runtime value. The
+                        // lifetime is the source's declared lifetime when the
+                        // reference came from a parameter or a call result, and
+                        // a frame-local identity otherwise so an escape remains
+                        // a checked dangling-borrow error.
+                        let loan = self.view_loan(expr);
+                        let origins = if loan.origins.is_empty() {
+                            self.view_origins(expr)
+                        } else {
+                            loan.origins.clone()
+                        };
+                        if origins.is_empty() {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal error: stored reference has no capability provenance",
+                            ));
+                        }
+                        let lifetime = loan
+                            .lifetime
+                            .clone()
+                            .or_else(|| Some(self.anonymous_lifetime(&origins)));
+                        let mutable = matches!(self.locals[slot].ty, Type::RefMut(_));
+                        self.acquire_view(
+                            slot,
+                            mutable,
+                            origins,
+                            SplitLabels::default(),
+                            lifetime.clone(),
+                            None,
+                        );
+                        self.reference_lifetimes[slot] = lifetime;
+                    } else if let Some(provenance) = self.task_results.get(&site_pointer).cloned() {
+                        // A child task's borrowed-record result is still loaned
+                        // to the scope; the handle carries the provenance until
+                        // Task.join transfers it to the TaskExit value.
+                        self.task_sources[slot] = Some(provenance);
+                    } else if let Some(provenance) = self
+                        .wrapped_results
+                        .get(&site_pointer)
+                        .cloned()
+                        .or(inherited_wrapped)
+                    {
+                        // Copying or moving a TaskExit value that wraps a
+                        // borrowed record keeps the same loan provenance.
+                        self.wrapped_locals[slot] = Some(provenance);
                     } else if let Some(capture) = self.borrowed_values.get(&site_pointer).cloned() {
                         // The closure value is now a scoped loan holder. Its
                         // captures point at the original owners, and the
@@ -2663,9 +2857,9 @@ impl Checker<'_> {
             self.expr(tail)?;
         }
         if let Some(tail) = &block.tail
-            && (tail.ty.is_slice() || self.is_carrier_type(tail.ty))
+            && (tail.ty.is_slice() || tail.ty.is_ref() || self.is_carrier_type(tail.ty))
         {
-            let origins = if tail.ty.is_slice() {
+            let origins = if tail.ty.is_slice() || tail.ty.is_ref() {
                 self.view_origins(tail)
             } else {
                 let provenance = self.record_provenance(tail);
@@ -2683,6 +2877,8 @@ impl Checker<'_> {
                     tail.span,
                     if tail.ty.is_slice() {
                         "slice view would outlive the lexical scope of its owner"
+                    } else if tail.ty.is_ref() {
+                        "reference escapes the lexical scope of the storage it borrows"
                     } else {
                         "borrowed record would outlive the lexical scope of its owner"
                     },
@@ -2776,6 +2972,20 @@ impl Checker<'_> {
             .then(|| self.projection_field(expr))
             .flatten();
         match &mut expr.kind {
+            // Reading a stored reference is a reborrow, not a move: the
+            // binding keeps the underlying capability for its whole lexical
+            // lifetime, and each use narrows it for the enclosing expression.
+            // Explicit `&*p`/`&mut *p` lowers to this same node.
+            ExprKind::Local(slot) if self.locals[*slot].ty.is_ref() => {
+                if !self.available[*slot] {
+                    return Err(self.use_after_move(
+                        *slot,
+                        expr.span,
+                        "use of an uninitialized or unavailable reference binding",
+                    ));
+                }
+                self.check_owner_access(*slot, expr_ptr, expr.span, "use")?;
+            }
             ExprKind::Local(slot) if self.moves(expr.ty) || self.locals[*slot].linear => {
                 let slot = *slot;
                 if !self.available[slot] {
@@ -3355,6 +3565,14 @@ impl Checker<'_> {
                             field,
                         });
                     }
+                    if let Some(provenance) = info.result_record.clone() {
+                        // The child returns a borrowed record. Its leaves point
+                        // at storage captured from outside the scope, which the
+                        // task regions above already keep loaned until the final
+                        // join. Carry the same provenance on the handle so the
+                        // joined value remains checked after Task.join.
+                        self.task_results.insert(expr_ptr, provenance);
+                    }
                     self.apply_task_regions();
                 }
             }
@@ -3366,8 +3584,26 @@ impl Checker<'_> {
             }
             ExprKind::TaskJoin { task, .. } => {
                 let loans = self.loans.clone();
+                let task_value = through_coerce(task);
+                let task_ptr = task_value as *const Expr as usize;
+                let task_slot = match &task_value.kind {
+                    ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot) => {
+                        Some(*slot)
+                    }
+                    _ => None,
+                };
                 self.expr(task)?;
                 self.loans = loans;
+                if let Some(provenance) = task_slot
+                    .and_then(|slot| self.task_sources[slot].clone())
+                    .or_else(|| self.task_results.get(&task_ptr).cloned())
+                {
+                    // The joined TaskExit carries the child's borrowed-record
+                    // provenance. Whether the result is bound and matched or
+                    // matched directly, the ownership pass keeps every loaned
+                    // field alive until that value is consumed or dropped.
+                    self.wrapped_results.insert(expr_ptr, provenance);
+                }
             }
             ExprKind::FnValue { captures, .. } => {
                 // A borrowed-capture closure is a scoped lexical capability.
@@ -3560,7 +3796,24 @@ impl Checker<'_> {
                 // though the underlying type is merely affine.
                 let entry_scrutinee_loans = self.loans.clone();
                 let scrutinee_linear = self.value_moves_linear(value);
+                let wrapped_site = through_coerce(value) as *const Expr as usize;
+                let wrapped_slot = match &through_coerce(value).kind {
+                    ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot) => {
+                        Some(*slot)
+                    }
+                    _ => None,
+                };
+                let wrapped_before = self
+                    .wrapped_results
+                    .get(&wrapped_site)
+                    .cloned()
+                    .or_else(|| wrapped_slot.and_then(|slot| self.wrapped_locals[slot].clone()));
                 self.expr(value)?;
+                let wrapped = self
+                    .wrapped_results
+                    .get(&wrapped_site)
+                    .cloned()
+                    .or(wrapped_before);
                 // Pattern bindings now hold the scrutinee's obligations.
                 self.pending_linear.truncate(pending_linear);
                 let scrutinee = value.ty;
@@ -3591,6 +3844,9 @@ impl Checker<'_> {
                     if let Some(provenance) = &scrutinee_provenance {
                         self.bind_pattern_provenance(&arm.pattern, scrutinee, provenance)?;
                     }
+                    if let Some(provenance) = &wrapped {
+                        self.bind_task_exit_provenance(&arm.pattern, scrutinee, provenance)?;
+                    }
                     let mut bindings = BTreeSet::new();
                     pattern_bindings(&arm.pattern, &mut bindings);
                     for slot in &bindings {
@@ -3610,8 +3866,11 @@ impl Checker<'_> {
                     }
                     self.expr(&mut arm.body)?;
                     if arm.body.ty != Type::Never {
-                        if arm.body.ty.is_slice() || self.is_carrier_type(arm.body.ty) {
-                            let origins = if arm.body.ty.is_slice() {
+                        if arm.body.ty.is_slice()
+                            || arm.body.ty.is_ref()
+                            || self.is_carrier_type(arm.body.ty)
+                        {
+                            let origins = if arm.body.ty.is_slice() || arm.body.ty.is_ref() {
                                 self.view_origins(&arm.body)
                             } else {
                                 let provenance = self.record_provenance(&arm.body);
@@ -3629,6 +3888,8 @@ impl Checker<'_> {
                                     arm.body.span,
                                     if arm.body.ty.is_slice() {
                                         "slice view would outlive the lexical scope of its owner"
+                                    } else if arm.body.ty.is_ref() {
+                                        "reference escapes the lexical scope of the storage it borrows"
                                     } else {
                                         "borrowed record would outlive the lexical scope of its owner"
                                     },
@@ -4046,6 +4307,7 @@ fn loan_liveness(
         .enumerate()
         .filter_map(|(slot, local)| {
             (local.ty.is_view()
+                || local.ty.is_ref()
                 || matches!(local.ty, Type::Once(_))
                 || local.ty.layout().is_some_and(|id| enums[id].borrowed))
             .then_some(slot)

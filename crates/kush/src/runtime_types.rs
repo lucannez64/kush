@@ -1623,10 +1623,12 @@ impl<'a> Types<'a> {
                 }
                 let inner = self.lower(arguments[0], substitution, depth + 1)?;
                 let inner = self.full(inner, ty.span)?;
-                if matches!(
+                let task_borrowed_record = b.name == "Task" && is_borrowed_record(self, inner);
+                if (matches!(
                     inner,
                     Type::Ref(_) | Type::RefMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::Str
-                ) || has_borrow(self, inner)
+                ) || has_borrow(self, inner))
+                    && !task_borrowed_record
                 {
                     return Err(Diagnostic::new(
                         ty.span,
@@ -2677,6 +2679,7 @@ impl<'a> Types<'a> {
                     names: fields.iter().map(|f| f.name.clone()).collect(),
                 });
             }
+            let mut borrowed_payload: Option<Span> = None;
             for variant in def.variants {
                 let (types, tuple) = match &variant.payload {
                     ast::Payload::Unit => (&[][..], false),
@@ -2693,10 +2696,8 @@ impl<'a> Types<'a> {
                     .map(|t| self.lower(t, &substitution, 0).map(Type::full))
                     .collect::<Result<Vec<_>>>()?;
                 if fields.iter().any(|t| has_borrow(self, *t)) {
-                    return Err(Diagnostic::new(
-                        variant.span,
-                        "enums cannot store borrowed references or slice views (or borrowed records); keep the record and its views in a lexical scope",
-                    ));
+                    borrowed_payload.get_or_insert(variant.span);
+                    mutable_borrow |= fields.iter().any(|t| has_mutable_borrow(self, *t));
                 }
                 if fields.iter().any(|t| contains_task(self, *t)) {
                     return Err(Diagnostic::new(
@@ -2710,6 +2711,33 @@ impl<'a> Types<'a> {
                     tuple,
                     names: vec![],
                 });
+            }
+            if let Some(span) = borrowed_payload {
+                // The only enum value allowed to carry a borrowed payload is
+                // the conventional structured-task exit. `Task.join` produces
+                // it, and its borrow provenance is tracked by the ownership
+                // pass until the matched record is consumed. User construction
+                // of TaskExit<T> with a borrowed payload stays rejected, so the
+                // only way to obtain one is Task.join.
+                let completed = variants.iter().position(|v| v.name == "Completed");
+                let cancelled = variants.iter().position(|v| v.name == "Cancelled");
+                let conventional = def.name == "TaskExit"
+                    && def.generics.len() == 1
+                    && arguments.len() == 1
+                    && variants.len() == 2
+                    && is_borrowed_record(self, arguments[0])
+                    && completed.is_some_and(|index| {
+                        variants[index].tuple && variants[index].fields == [arguments[0]]
+                    })
+                    && cancelled.is_some_and(|index| {
+                        !variants[index].tuple && variants[index].fields.is_empty()
+                    });
+                if !conventional {
+                    return Err(Diagnostic::new(
+                        span,
+                        "enums cannot store borrowed references or slice views (or borrowed records); only TaskExit<T> may carry a borrowed task result, and only Task.join produces it",
+                    ));
+                }
             }
             // '?' recognizes the exact conventional Result<T,E> declaration,
             // never an arbitrary enum merely named Result with unrelated fields.
@@ -3731,6 +3759,49 @@ pub(crate) struct BorrowLeaf {
 pub(crate) fn is_borrowed_record(types: &Types<'_>, ty: Type) -> bool {
     ty.layout()
         .is_some_and(|id| types.enums[id].record && types.enums[id].borrowed)
+}
+/// Whether a type transitively contains a conventional `TaskExit<T>` whose
+/// payload carries borrowed storage. Such a value is produced only by
+/// `Task.join` and is checked lexically; it must not cross a function boundary,
+/// a callable type, or an aggregate that could hide it.
+pub(crate) fn contains_task_exit_borrow(types: &Types<'_>, ty: Type) -> bool {
+    fn go(types: &Types<'_>, ty: Type, seen: &mut BTreeSet<Type>) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        match ty {
+            Type::Enum(id) | Type::Variants(id, _) => {
+                let layout = &types.enums[id];
+                if layout.name == "TaskExit"
+                    && layout
+                        .variants
+                        .iter()
+                        .flat_map(|variant| variant.fields.iter())
+                        .any(|field| has_borrow(types, *field))
+                {
+                    return true;
+                }
+                layout
+                    .variants
+                    .iter()
+                    .flat_map(|variant| variant.fields.iter())
+                    .any(|field| go(types, *field, seen))
+            }
+            Type::Box(p) | Type::Vec(p) | Type::Task(p) => go(types, types.pointees[p], seen),
+            Type::Union(id) => types.unions[id]
+                .members
+                .iter()
+                .any(|member| go(types, *member, seen)),
+            Type::Fn(id) | Type::Once(id) => types.function_types[id]
+                .parameters
+                .iter()
+                .copied()
+                .chain(std::iter::once(types.function_types[id].result))
+                .any(|part| go(types, part, seen)),
+            _ => false,
+        }
+    }
+    go(types, ty, &mut BTreeSet::new())
 }
 
 pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {

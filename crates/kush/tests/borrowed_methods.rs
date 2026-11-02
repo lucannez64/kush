@@ -283,13 +283,16 @@ fn references_reject_temporaries_fields_storage_returns_and_owned_writes() {
         "#,
         "direct local binding",
     );
-    rejects(
+    // A stored reference is a lexical capability; reading it reborrows the
+    // same owner instead of copying or moving the storage.
+    agrees(
         r#"
         struct P { x: i64 }
         fn peek_ref(p: &P) -> i64 ! {panic} { p.x }
         fn main() -> i64 ! {panic} { let p = P { x: 1 }; let r = &p; peek_ref(r) }
         "#,
-        "cannot be stored in local bindings",
+        1,
+        "",
     );
     rejects(
         r#"

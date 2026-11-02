@@ -58,10 +58,9 @@ fn borrows_cannot_outlive_or_be_invalidated_by_later_arguments() {
         &format!("{prefix} fn main()->i64 ! {{alloc,panic}} {{ f({{let b=Box.new(1); &b}},0) }}"),
         "escapes",
     );
-    rejects("fn f()->&Box<i64> ! {} { panic() }", "cannot be returned");
     rejects(
-        "fn main()->Unit ! {alloc,panic} {let b=Box.new(1);let r=&b;}",
-        "cannot be stored",
+        "fn main()->Unit ! {alloc,panic} {let b=Box.new(1);let r=&b;drop(Box.take(b));}",
+        "while it is borrowed",
     );
     rejects(
         "enum E<T>{A(T)} fn f(e:E<&Box<i64>>)->Unit ! {} {}",

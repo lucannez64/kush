@@ -97,11 +97,12 @@ fn buffers_are_affine_and_borrows_cannot_be_invalidated() {
     "#,
         "while it is borrowed",
     );
-    rejects(
-        &main_program(r#"let b=Bytes.from("x"); let r=&b;"#),
-        "cannot be stored",
-    );
-    rejects("fn f(b:&Bytes)->&Bytes ! {} {b}", "cannot be returned");
+    // A stored shared owner reference is a lexical capability, and a shared
+    // owner reference may be returned from a reference parameter.
+    execute(&main_program(
+        r#"let b=Bytes.from("x"); let r=&b; print_i64(Bytes.len(r));"#,
+    ));
+    check("fn f<'a>(b:&'a Bytes)->&'a Bytes ! {} {b}").unwrap();
     rejects(
         &main_program(r#"let b=Bytes.from("x");Box.read(&b);"#),
         "requires an immutable &Box",
