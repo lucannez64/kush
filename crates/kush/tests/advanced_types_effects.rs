@@ -134,6 +134,43 @@ fn union_patterns_infer_the_residual_type_variable() {
 }
 
 #[test]
+fn union_patterns_partition_multiple_variables_deterministically() {
+    // `T | U | i64` over `Bool | Unit | i64` leaves the residual `Bool | Unit`.
+    // The bounded partition search hands residual alternatives to unbound
+    // variables in declaration order, so T=Bool and U=Unit.
+    let source = r#"
+        fn pick<T, U>(x: T | U | i64) -> i64 ! {panic} {
+            match x { i64 @ n => n, _ => 42 }
+        }
+        fn three(c: i64) -> Bool | Unit | i64 ! {panic} {
+            if c == 0 { true } else { if c == 1 { () } else { 41 } }
+        }
+        fn main() -> i64 ! {panic} { pick(three(0)) }"#;
+    assert_eq!(value(source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // There is no cross-parameter backtracking: the canonical partition from
+    // the first parameter is committed before the later parameter is checked.
+    // Another partition would fit, but this call stays an explicit boundary.
+    rejects(
+        r#"
+        fn pick<T, U>(x: T | U | i64, first: T) -> i64 ! {panic} { 0 }
+        fn two(c: i64) -> Bool | Unit ! {panic} {
+            if c == 0 { true } else { () }
+        }
+        fn main() -> i64 ! {panic} { pick(two(0), ()) }"#,
+        "type mismatch",
+    );
+    // A single residual alternative cannot bind two unbound variables.
+    rejects(
+        r#"
+        fn pick<T, U>(x: T | U | i64) -> i64 ! {panic} { 0 }
+        fn main() -> i64 ! {panic} { pick(true) }"#,
+        "no partition binds every variable",
+    );
+}
+
+#[test]
 fn structural_literals_accumulate_contextual_union_candidates() {
     let source = r#"
         fn main() -> i64 ! {panic} {

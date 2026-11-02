@@ -19054,24 +19054,24 @@ impl Checker<'_, '_> {
         }
         let mut alternatives = Vec::new();
         flatten(pattern, &mut alternatives);
-        let mut variable: Option<&ast::Type> = None;
+        // A bare unbound variable is a partition target. A variable that was
+        // already solved by an earlier parameter is part of the fixed cover, as
+        // is any concrete alternative.
+        let mut variables: Vec<(&ast::Type, BindingId)> = Vec::new();
         let mut fixed = Vec::new();
         for alternative in alternatives {
-            let is_variable = matches!(
+            let variable_id = matches!(
                 &alternative.kind,
                 ast::TypeKind::Named { path, arguments }
-                    if arguments.is_empty()
-                        && path.len() == 1
-                        && self
-                            .resolution
-                            .reference(alternative.span)
-                            .is_some_and(|id| type_vars.contains(&id))
-            );
-            if is_variable {
-                if variable.is_some() {
-                    return Ok(false);
-                }
-                variable = Some(alternative);
+                    if arguments.is_empty() && path.len() == 1
+            )
+            .then(|| self.resolution.reference(alternative.span))
+            .flatten()
+            .filter(|id| type_vars.contains(id));
+            if let Some(id) = variable_id
+                && !subst.types.contains_key(&id)
+            {
+                variables.push((alternative, id));
             } else if self.mentions(alternative, type_vars, const_vars, effect_vars, subst) {
                 // A non-bare variable alternative needs real backtracking over
                 // its shape. Leave that to the ordinary inference path.
@@ -19080,10 +19080,7 @@ impl Checker<'_, '_> {
                 fixed.push(alternative);
             }
         }
-        let Some(variable) = variable else {
-            return Ok(false);
-        };
-        if fixed.is_empty() {
+        if variables.is_empty() || fixed.is_empty() {
             return Ok(false);
         }
         let fixed_ty = {
@@ -19099,44 +19096,120 @@ impl Checker<'_, '_> {
                 residual.push(member);
             }
         }
-        let variable_id = self
-            .resolution
-            .reference(variable.span)
-            .expect("checked union-pattern variable reference");
-        let residual = self.types.union(residual, span)?;
-        if residual == Type::Never {
-            if let Some(bound) = subst.types.get(&variable_id).copied() {
-                let covered = self.types.union(vec![bound, fixed_ty], span)?;
-                if !self.subtype(actual, covered) {
-                    return Err(Diagnostic::new(
-                        span,
-                        format!(
-                            "union pattern '{}' does not cover the actual type {} for the inferred type parameter",
-                            self.types.name(covered),
-                            self.types.name(actual)
-                        ),
-                    ));
-                }
-                return Ok(true);
-            }
+        if residual.is_empty() {
+            let names = variables
+                .iter()
+                .map(|(_, id)| self.resolution.bindings[*id].name.clone())
+                .collect::<Vec<_>>()
+                .join("', '");
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "cannot infer type parameter '{}' from the union pattern: every actual alternative of {} is already covered by the fixed part, so the residual binding is not unique. Specialize it explicitly with '::<...>'",
-                    self.resolution.bindings[variable_id].name,
+                    "cannot infer type parameter '{names}' from the union pattern: every actual alternative of {} is already covered by the fixed part, so the residual binding is not unique. Specialize it explicitly with '::<...>'",
                     self.types.name(actual)
                 ),
             ));
         }
-        self.unify(
-            variable,
-            residual,
-            type_vars,
-            const_vars,
-            effect_vars,
-            subst,
-            span,
-        )?;
+        if variables.len() == 1 {
+            let (variable, _) = variables[0];
+            let residual = self.types.union(residual, span)?;
+            self.unify(
+                variable,
+                residual,
+                type_vars,
+                const_vars,
+                effect_vars,
+                subst,
+                span,
+            )?;
+            return Ok(true);
+        }
+        // Two or more unbound variables: enumerate partitions of the residual
+        // alternatives with bounded backtracking. Every variable must receive
+        // at least one residual alternative; fixed-covered alternatives stay
+        // with the fixed part and are never redistributed, which keeps the
+        // single-variable residual rule unchanged. A partition is accepted
+        // only when it is unique, so symmetric assignments such as `T | U`
+        // over `Bool | Unit` are an explicit ambiguity rather than an
+        // arbitrary choice.
+        let names = variables
+            .iter()
+            .map(|(_, id)| self.resolution.bindings[*id].name.clone())
+            .collect::<Vec<_>>()
+            .join("', '");
+        if residual.len() < variables.len() {
+            let residual_ty = self.types.union(residual.clone(), span)?;
+            let residual_name = self.types.name(residual_ty);
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "cannot infer type parameters '{names}' from the union pattern: the residual type {residual_name} has {} alternative(s) for {} unbound variables, so no partition binds every variable. Specialize explicitly with '::<...>'",
+                    residual.len(),
+                    variables.len()
+                ),
+            ));
+        }
+        fn assign(
+            index: usize,
+            members: &[Type],
+            slots: &mut Vec<Vec<Type>>,
+            budget: &mut usize,
+            solutions: &mut Vec<Vec<Vec<Type>>>,
+        ) -> bool {
+            if *budget == 0 {
+                return false;
+            }
+            *budget -= 1;
+            if index == members.len() {
+                if slots.iter().any(Vec::is_empty) {
+                    return true;
+                }
+                solutions.push(slots.clone());
+                return true;
+            }
+            let member = members[index];
+            for slot in 0..slots.len() {
+                slots[slot].push(member);
+                if !assign(index + 1, members, slots, budget, solutions) {
+                    return false;
+                }
+                slots[slot].pop();
+            }
+            true
+        }
+        const PARTITION_BUDGET: usize = 4096;
+        let mut budget = PARTITION_BUDGET;
+        let mut solutions = Vec::new();
+        let mut slots = vec![Vec::new(); variables.len()];
+        let complete = assign(0, &residual, &mut slots, &mut budget, &mut solutions);
+        if !complete || budget == 0 {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "cannot infer type parameters '{names}' from the union pattern: the bounded partition search exhausted {PARTITION_BUDGET} steps. Specialize explicitly with '::<...>'"
+                ),
+            ));
+        }
+        // The search order fixes a canonical partition: residual alternatives
+        // keep their normalized order and are handed to the unbound variables
+        // in declaration order, with backtracking only to skip partitions that
+        // leave a variable empty. This is deterministic and bounded, but it is
+        // not principal: a later parameter can still reject the chosen
+        // partition even though another one would have worked. That boundary
+        // is diagnosed at the later argument, never resolved by reordering.
+        let solution = solutions.into_iter().next().expect("one partition");
+        for ((variable, _), members) in variables.iter().zip(solution) {
+            let bound = self.types.union(members, span)?;
+            self.unify(
+                variable,
+                bound,
+                type_vars,
+                const_vars,
+                effect_vars,
+                subst,
+                span,
+            )?;
+        }
         Ok(true)
     }
     /// First-order matching of a declared type against an actual type.
