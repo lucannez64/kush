@@ -495,3 +495,25 @@ lifetime-parameterized object methods, per-member `Nat` impl substitution) on
 top of `7f372cf`. The full Boat gate passes **908 tests**, formatting, and
 all-targets Clippy. This work has not yet had an independent review.
 Remaining boundaries are listed in [traits.md](traits.md).
+
+## Dynamic trait-object review follow-up
+
+An independent review of the open dynamic trait objects (`2481d7d`,
+`7963eed`) found no memory unsafety in about 35 probes, but three type-system
+defects, fixed in `7909e58` with regressions:
+
+- **High:** object linearity was computed after layout linearity, so a record,
+  inline array, or enum holding a linear `dyn` object (and `DynArray` of
+  objects) could drop it implicitly. Layout and object linearity are now one
+  joint fixed point; `DynArray` elements and width-erased structural fields
+  conservatively reject dynamic objects.
+- **Medium:** a stored `&dyn` did not block a later `&mut dyn` or mutable
+  dispatch on the owner. Objects now use the record shared/exclusive borrow
+  discipline.
+- **Medium-low:** a trait with one concrete impl collapsed `dyn Trait` to the
+  member type, so stored `&dyn`/`&mut dyn` dispatch was rejected. Closed
+  objects now keep a one-alternative union representation.
+
+Documented limits added: generic-only traits cannot be `dyn`, and temporary
+shared receivers of open objects are rejected. Full Boat gate: **911 tests**,
+formatting, and Clippy pass.
