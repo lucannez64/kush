@@ -1724,7 +1724,7 @@ impl<'a> Checker<'a> {
                     *self = skipped;
                 }
             }
-            ExprKind::Binary(_, left, right) => {
+            ExprKind::Binary(_, left, right) | ExprKind::StructEq { left, right, .. } => {
                 if !self.expr(left, multiplier)? {
                     return Ok(false);
                 }

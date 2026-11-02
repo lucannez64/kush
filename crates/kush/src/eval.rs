@@ -1634,6 +1634,54 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             )),
         }
     }
+    /// Compare two structural record values field by field. The checker has
+    /// already restricted the row to comparable scalar leaves and nested
+    /// structural rows, so every compared value is a copyable scalar.
+    fn struct_value_eq(&self, ty: Type, left: &Value, right: &Value, span: Span) -> Result<bool> {
+        let (
+            Value::Enum {
+                fields: left_fields,
+                ..
+            },
+            Value::Enum {
+                fields: right_fields,
+                ..
+            },
+        ) = (left, right)
+        else {
+            return Err(Diagnostic::new(
+                span,
+                "internal error: structural equality received a non-record value",
+            ));
+        };
+        let layout = ty
+            .layout()
+            .filter(|id| self.program.enums[*id].structural)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    span,
+                    "internal error: structural equality type is not a structural row",
+                )
+            })?;
+        let types = &self.program.enums[layout].variants[0].fields;
+        if left_fields.len() != types.len() || right_fields.len() != types.len() {
+            return Err(Diagnostic::new(
+                span,
+                "internal error: structural equality field count disagrees with its row",
+            ));
+        }
+        for ((left, right), field) in left_fields.iter().zip(right_fields).zip(types) {
+            let equal = if field.layout().is_some() {
+                self.struct_value_eq(*field, left, right, span)?
+            } else {
+                left.scalar() == right.scalar()
+            };
+            if !equal {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     fn apply_struct_coercion(
         &mut self,
         value: Value,
@@ -3885,6 +3933,17 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ));
                 }
                 Value::Scalar(0)
+            }
+            ExprKind::StructEq {
+                left,
+                right,
+                negated,
+            } => {
+                let ty = left.ty;
+                let left = value!(self.expr(left, frame));
+                let right = value!(self.expr(right, frame));
+                let equal = self.struct_value_eq(ty, &left, &right, expr.span)?;
+                Value::Scalar(i64::from(equal ^ *negated))
             }
             ExprKind::Binary(op, left, right) => {
                 let left_float = left.ty.float_kind();

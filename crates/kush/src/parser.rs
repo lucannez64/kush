@@ -309,6 +309,7 @@ impl Parser {
             let ty = p.ty()?;
             Ok(Field {
                 name,
+                source: None,
                 ty,
                 span: p.since(start),
             })
@@ -948,20 +949,44 @@ impl Parser {
             )?;
             let mut fields = Vec::new();
             let mut open = false;
+            let mut row = None;
             while !self.at(&Kind::RBrace) {
                 if self.eat(&Kind::DotDot) {
+                    open = true;
+                    // `..r` names a row variable; a bare `..` is an erased
+                    // open row. The row variable is an ordinary single-segment
+                    // type path so the resolver binds it like a type generic.
+                    if let Kind::Ident(name) = &self.current().kind {
+                        let name = name.clone();
+                        let row_start = self.current().span;
+                        self.bump();
+                        row = Some(Box::new(Node::new(
+                            TypeKind::Named {
+                                path: vec![name],
+                                arguments: vec![],
+                            },
+                            self.since(row_start),
+                        )));
+                    }
                     if self.at(&Kind::Comma) {
                         self.bump();
                     }
-                    open = true;
                     break;
                 }
                 let field_start = self.current().span;
                 let name = self.ident()?;
                 self.expect(&Kind::Colon, "':' after structural record field name")?;
                 let ty = self.ty()?;
+                let source = if matches!(&self.current().kind, Kind::Ident(word) if word == "from")
+                {
+                    self.bump();
+                    Some(self.ident()?)
+                } else {
+                    None
+                };
                 fields.push(Field {
                     name,
+                    source,
                     ty,
                     span: self.since(field_start),
                 });
@@ -970,7 +995,10 @@ impl Parser {
                 }
             }
             self.expect(&Kind::RBrace, "'}' after structural record type")?;
-            Node::new(TypeKind::Structural { fields, open }, self.since(start))
+            Node::new(
+                TypeKind::Structural { fields, open, row },
+                self.since(start),
+            )
         } else if self.eat(&Kind::LBracket) {
             let inner = self.ty()?;
             let kind = if self.eat(&Kind::Semi) {
@@ -1375,6 +1403,18 @@ impl Parser {
                 }
                 if self.eat(&Kind::Question) {
                     left = Node::new(ExprKind::Try(Box::new(left)), self.since(start));
+                    continue;
+                }
+                if matches!(&self.current().kind, Kind::Ident(word) if word == "as") {
+                    self.bump();
+                    let ty = self.ty()?;
+                    left = Node::new(
+                        ExprKind::Cast {
+                            value: Box::new(left),
+                            ty,
+                        },
+                        self.since(start),
+                    );
                     continue;
                 }
                 if self.record_literal_ahead(&left) {

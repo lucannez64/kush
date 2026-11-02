@@ -717,6 +717,14 @@ pub(crate) enum ExprKind {
     Block(Block),
     Unary(Kind, Box<Expr>),
     Binary(Kind, Box<Expr>, Box<Expr>),
+    /// Structural record equality. Both operands are evaluated exactly once
+    /// and compared field by field; only copyable, non-owning, non-float leaf
+    /// fields are admitted. `negated` implements `!=`.
+    StructEq {
+        left: Box<Expr>,
+        right: Box<Expr>,
+        negated: bool,
+    },
     Assign(usize, Box<Expr>),
     /// Store a copyable field through an exclusive record reference. The
     /// reference is the evaluated pointer (`&mut Record`), `offset` is the word
@@ -974,6 +982,9 @@ impl Expr {
                 ..
             }
             | ExprKind::Binary(_, a, b)
+            | ExprKind::StructEq {
+                left: a, right: b, ..
+            }
             | ExprKind::RefAssign(a, _, b)
             | ExprKind::RefWrite(a, b)
             | ExprKind::DynamicPerform {
@@ -1494,6 +1505,7 @@ fn collect_body_returns<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
         ast::ExprKind::Unary { operand, .. }
         | ast::ExprKind::Try(operand)
         | ast::ExprKind::Field { value: operand, .. }
+        | ast::ExprKind::Cast { value: operand, .. }
         | ast::ExprKind::Specialize {
             callee: operand, ..
         } => {
@@ -1778,7 +1790,9 @@ fn fusion_expr_safe(
             safe(reference, signatures, bodies, memo, visiting)
                 && safe(value, signatures, bodies, memo, visiting)
         }
-        ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
+        ExprKind::Binary(_, left, right)
+        | ExprKind::StructEq { left, right, .. }
+        | ExprKind::BytesAt(left, right) => {
             safe(left, signatures, bodies, memo, visiting)
                 && safe(right, signatures, bodies, memo, visiting)
         }
@@ -1980,7 +1994,9 @@ fn fuse_expr(
             fuse_expr(reference, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
         }
-        ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
+        ExprKind::Binary(_, left, right)
+        | ExprKind::StructEq { left, right, .. }
+        | ExprKind::BytesAt(left, right) => {
             fuse_expr(left, types, signatures, safety, fusions);
             fuse_expr(right, types, signatures, safety, fusions);
         }
@@ -3208,6 +3224,10 @@ struct Functions<'a> {
     logical: &'a crate::check::LogicalEnvironment,
 }
 const MAX_FUNCTIONS: usize = 256;
+/// Total attempts for the bounded cross-parameter partition replay. This is a
+/// deterministic work budget, not a completeness claim: exhausting it is an
+/// explicit diagnostic asking for specialization.
+const UNIFY_BACKTRACK_BUDGET: usize = 4096;
 
 /// Traits that must use the dynamically dispatched object representation.
 /// A generic or blanket impl leaves the member set open; a `dyn` mention in
@@ -3251,9 +3271,12 @@ fn dynamic_trait_set(module: &ast::Module, resolution: &Resolution) -> BTreeSet<
                 scan(right, resolution, out);
             }
             ast::TypeKind::Graded { inner, .. } => scan(inner, resolution, out),
-            ast::TypeKind::Structural { fields, .. } => {
+            ast::TypeKind::Structural { fields, row, .. } => {
                 for field in fields {
                     scan(&field.ty, resolution, out);
+                }
+                if let Some(row) = row {
+                    scan(row, resolution, out);
                 }
             }
             _ => {}
@@ -3651,6 +3674,11 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             effect_operations,
             handlers: Vec::new(),
             effect_constraints: Vec::new(),
+            unify_plan: Vec::new(),
+            unify_decisions: Vec::new(),
+            unify_plan_active: false,
+            partition_bound: BTreeSet::new(),
+            row_bound: BTreeSet::new(),
             continuation_depth: 0,
         };
         let body = (|| {
@@ -3843,6 +3871,7 @@ fn expr_key(expr: &ast::Expr) -> String {
             arguments.iter().map(type_key).collect::<Vec<_>>().join(",")
         ),
         E::Field { value, name } => format!("{}.{name}", expr_key(value)),
+        E::Cast { value, ty } => format!("({} as {})", expr_key(value), type_key(ty)),
         E::Index { value, index } => format!("{}[{}]", expr_key(value), expr_key(index)),
         E::Slice { value, start, end } => format!(
             "{}[{}..{}]",
@@ -3896,19 +3925,23 @@ fn type_key(ty: &ast::Type) -> String {
             text
         }
         ast::TypeKind::Dyn(inner) => format!("dyn {}", type_key(inner)),
-        ast::TypeKind::Structural { fields, .. } => {
+        ast::TypeKind::Structural { fields, row, .. } => {
             let mut fields = fields
                 .iter()
                 .map(|field| (field.name.clone(), field.ty.clone()))
                 .collect::<Vec<_>>();
             fields.sort_by(|left, right| left.0.cmp(&right.0));
+            let tail = row
+                .as_ref()
+                .map(|row| format!(", ..{}", type_key(row)))
+                .unwrap_or_default();
             format!(
-                "struct{{{}}}",
+                "struct{{{}{tail}}}",
                 fields
                     .iter()
                     .map(|(name, ty)| format!("{name}:{}", type_key(ty)))
                     .collect::<Vec<_>>()
-                    .join(",")
+                    .join(","),
             )
         }
         ast::TypeKind::Integer(value) => value.clone(),
@@ -4092,16 +4125,18 @@ impl ContractNames {
             ast::TypeKind::Tuple(items) => {
                 ast::TypeKind::Tuple(items.iter().map(|item| self.ty(item)).collect())
             }
-            ast::TypeKind::Structural { fields, open } => ast::TypeKind::Structural {
+            ast::TypeKind::Structural { fields, open, row } => ast::TypeKind::Structural {
                 fields: fields
                     .iter()
                     .map(|field| ast::Field {
                         name: field.name.clone(),
+                        source: field.source.clone(),
                         ty: self.ty(&field.ty),
                         span: field.span,
                     })
                     .collect(),
                 open: *open,
+                row: row.as_ref().map(|row| Box::new(self.ty(row))),
             },
             ast::TypeKind::Slice(inner) => ast::TypeKind::Slice(Box::new(self.ty(inner))),
             ast::TypeKind::Array(inner, length) => {
@@ -4469,9 +4504,12 @@ fn type_self_associations(ty: &ast::Type, out: &mut BTreeSet<String>) {
                 type_self_associations(item, out);
             }
         }
-        ast::TypeKind::Structural { fields, .. } => {
+        ast::TypeKind::Structural { fields, row, .. } => {
             for field in fields {
                 type_self_associations(&field.ty, out);
+            }
+            if let Some(row) = row {
+                type_self_associations(row, out);
             }
         }
         ast::TypeKind::Slice(inner)
@@ -4598,8 +4636,9 @@ fn type_mentions_self(ty: &ast::Type) -> bool {
                 || arguments.iter().any(type_mentions_self)
         }
         ast::TypeKind::Tuple(arguments) => arguments.iter().any(type_mentions_self),
-        ast::TypeKind::Structural { fields, .. } => {
+        ast::TypeKind::Structural { fields, row, .. } => {
             fields.iter().any(|field| type_mentions_self(&field.ty))
+                || row.as_ref().is_some_and(|row| type_mentions_self(row))
         }
         ast::TypeKind::Dyn(inner) => type_mentions_self(inner),
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => {
@@ -5892,8 +5931,8 @@ fn prepare_trait_objects<'a>(
 /// headers require an exact canonical row, so they reject `..`.
 fn type_has_open_row(ty: &ast::Type) -> bool {
     match &ty.kind {
-        ast::TypeKind::Structural { fields, open } => {
-            *open || fields.iter().any(|field| type_has_open_row(&field.ty))
+        ast::TypeKind::Structural { fields, open, row } => {
+            *open || row.is_some() || fields.iter().any(|field| type_has_open_row(&field.ty))
         }
         ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => {
             arguments.iter().any(type_has_open_row)
@@ -6003,12 +6042,34 @@ fn validate_impl_pattern(
             Ok(())
         }
         ast::TypeKind::Integer(_) | ast::TypeKind::Bool(_) => Ok(()),
-        ast::TypeKind::Structural { fields, open } => {
-            if *open {
+        ast::TypeKind::Structural { fields, open, row } => {
+            if let Some(row) = row {
+                // An open-row impl header is monomorphized per concrete
+                // residual row. It must name a declared impl parameter, and
+                // the tail participates in coherence exactly like a nominal
+                // pattern variable.
+                let Some(binder) = resolution.reference(row.span) else {
+                    return Err(Diagnostic::new(
+                        row.span,
+                        format!(
+                            "an impl {what} row tail must name a declared impl parameter, as in 'impl<r> Trait for struct {{ x: i64, ..r }}'"
+                        ),
+                    ));
+                };
+                if !generics.contains(&binder) {
+                    return Err(Diagnostic::new(
+                        row.span,
+                        format!(
+                            "row tail '{}' is not an impl parameter of this header",
+                            resolution.bindings[binder].name
+                        ),
+                    ));
+                }
+            } else if *open {
                 return Err(Diagnostic::new(
                     pattern.span,
                     format!(
-                        "an impl {what} cannot use an open row ('..'); impl headers match one exact canonical structural row"
+                        "an impl {what} cannot use an unnamed open row ('..'); name a row parameter, as in 'impl<r> Trait for struct {{ x: i64, ..r }}'"
                     ),
                 ));
             }
@@ -6083,9 +6144,14 @@ fn pattern_has_unbound(
         ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => arguments
             .iter()
             .any(|argument| pattern_has_unbound(resolution, argument, bindings)),
-        ast::TypeKind::Structural { fields, .. } => fields
-            .iter()
-            .any(|field| pattern_has_unbound(resolution, &field.ty, bindings)),
+        ast::TypeKind::Structural { fields, row, .. } => {
+            fields
+                .iter()
+                .any(|field| pattern_has_unbound(resolution, &field.ty, bindings))
+                || row
+                    .as_ref()
+                    .is_some_and(|row| pattern_has_unbound(resolution, row, bindings))
+        }
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => {
             pattern_has_unbound(resolution, inner, bindings)
         }
@@ -6253,19 +6319,20 @@ fn match_type_pattern(
             }
             Ok(true)
         }
-        ast::TypeKind::Structural { fields, .. } => {
-            // Structural impl headers match an anonymous structural row
-            // exactly. Nominal records are deliberately not matched here:
-            // they keep their own identity, so a structural impl cannot
-            // silently overlap a nominal impl.
-            let Some(row) = types.structural_row(actual) else {
+        ast::TypeKind::Structural { fields, row, .. } => {
+            // Structural impl headers match an anonymous structural row.
+            // Nominal records are deliberately not matched here: they keep
+            // their own identity, so a structural impl cannot silently overlap
+            // a nominal impl. A `..r` tail binds the residual canonical row.
+            let Some(row_fields) = types.structural_row(actual) else {
                 return Ok(false);
             };
-            if row.len() != fields.len() {
+            if row.is_none() && row_fields.len() != fields.len() {
                 return Ok(false);
             }
             for field in fields {
-                let Some((_, actual_ty)) = row.iter().find(|(name, _)| name == &field.name) else {
+                let Some((_, actual_ty)) = row_fields.iter().find(|(name, _)| name == &field.name)
+                else {
                     return Ok(false);
                 };
                 if !match_type_pattern(
@@ -6277,6 +6344,28 @@ fn match_type_pattern(
                     depth + 1,
                 )? {
                     return Ok(false);
+                }
+            }
+            if let Some(row) = row {
+                let Some(binder) = resolution.reference(row.span) else {
+                    return Ok(false);
+                };
+                let declared = fields
+                    .iter()
+                    .map(|field| field.name.as_str())
+                    .collect::<BTreeSet<_>>();
+                let residual = row_fields
+                    .iter()
+                    .filter(|(name, _)| !declared.contains(name.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let residual = types.structural(residual, row.span)?;
+                if let Some(bound) = bindings.types.get(&binder).copied() {
+                    if types.structural_row(bound) != types.structural_row(residual) {
+                        return Ok(false);
+                    }
+                } else {
+                    bindings.types.insert(binder, residual);
                 }
             }
             Ok(true)
@@ -6567,28 +6656,55 @@ fn unify_ast_patterns(
                 })
         }
         (
-            ast::TypeKind::Structural { fields: left, .. },
-            ast::TypeKind::Structural { fields: right, .. },
+            ast::TypeKind::Structural {
+                fields: left,
+                row: left_row,
+                ..
+            },
+            ast::TypeKind::Structural {
+                fields: right,
+                row: right_row,
+                ..
+            },
         ) => {
-            // Structural rows are canonical by field name. Two impl headers
-            // overlap only when their rows have exactly the same field names;
-            // each field type then unifies recursively.
-            left.len() == right.len()
-                && left.iter().all(|left_field| {
-                    right
-                        .iter()
-                        .find(|right_field| right_field.name == left_field.name)
-                        .is_some_and(|right_field| {
-                            unify_ast_patterns(
-                                resolution,
-                                &left_field.ty,
-                                &right_field.ty,
-                                flexible,
-                                map,
-                                depth + 1,
-                            )
-                        })
-                })
+            // Structural rows are canonical by field name. Common fields must
+            // unify; a row tail can absorb every field the other header names.
+            // With two named rows their tails are left flexible, which is
+            // exactly the overlap relation needed for coherence.
+            let absorbable = |holder: &Option<Box<ast::Type>>| holder.is_some();
+            for left_field in left {
+                match right
+                    .iter()
+                    .find(|right_field| right_field.name == left_field.name)
+                {
+                    Some(right_field) => {
+                        if !unify_ast_patterns(
+                            resolution,
+                            &left_field.ty,
+                            &right_field.ty,
+                            flexible,
+                            map,
+                            depth + 1,
+                        ) {
+                            return false;
+                        }
+                    }
+                    None if absorbable(right_row) => {}
+                    None => return false,
+                }
+            }
+            for right_field in right {
+                if left
+                    .iter()
+                    .any(|left_field| left_field.name == right_field.name)
+                {
+                    continue;
+                }
+                if !absorbable(left_row) {
+                    return false;
+                }
+            }
+            true
         }
         (
             ast::TypeKind::Array(left_element, left_length),
@@ -6908,10 +7024,14 @@ fn collect_generic_impl<'a>(
                         .is_some_and(|id| resolution.bindings[id].kind == BindingKind::Data)
         )
         && !matches!(&self_ty.kind, ast::TypeKind::Named { .. })
+        && !matches!(
+            &self_ty.kind,
+            ast::TypeKind::Structural { row: Some(_), .. }
+        )
     {
         return Err(Diagnostic::new(
             self_ty.span,
-            "an inherent generic impl must target a nominal record or enum pattern",
+            "an inherent generic impl must target a nominal record/enum pattern or an open structural row with a row parameter",
         ));
     }
     let mut impl_associated = ImplAssociated::default();
@@ -7292,7 +7412,10 @@ fn type_references_any_binder(
                 || arguments.iter().any(mentions)
         }
         ast::TypeKind::Tuple(items) => items.iter().any(mentions),
-        ast::TypeKind::Structural { fields, .. } => fields.iter().any(|field| mentions(&field.ty)),
+        ast::TypeKind::Structural { fields, row, .. } => {
+            fields.iter().any(|field| mentions(&field.ty))
+                || row.as_ref().is_some_and(|row| mentions(row))
+        }
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => mentions(inner),
         ast::TypeKind::Borrow { inner, .. } => mentions(inner),
         ast::TypeKind::Array(inner, length) => mentions(inner) || mentions(length),
@@ -7853,10 +7976,15 @@ impl<'a> Functions<'a> {
                 ));
             }
         }
+        // A structural row type argument is a monomorphized canonical row, not
+        // an erased lifetime-bearing nominal identity: its borrowed fields keep
+        // their provenance through the ordinary structural conversion rules.
+        // This is what lets a row variable preserve a borrowed field. Nominal
+        // borrowed records still cannot cross an ordinary generic parameter.
         if key
             .1
             .iter()
-            .any(|ty| crate::runtime_types::has_borrow(types, *ty))
+            .any(|ty| crate::runtime_types::has_borrow(types, *ty) && !types.is_structural(*ty))
         {
             return Err(Diagnostic::new(
                 origin.unwrap_or(declared.span),
@@ -8975,9 +9103,12 @@ fn validate_type_template(
             }
             Ok(())
         }
-        ast::TypeKind::Structural { fields, .. } => {
+        ast::TypeKind::Structural { fields, row, .. } => {
             for field in fields {
                 validate_type_template(resolution, &field.ty, consts, false, false)?;
+            }
+            if let Some(row) = row {
+                validate_type_template(resolution, row, consts, false, false)?;
             }
             Ok(())
         }
@@ -9033,9 +9164,14 @@ fn type_references_binding(resolution: &Resolution, ty: &ast::Type, id: BindingI
         ast::TypeKind::Tuple(items) => items
             .iter()
             .any(|item| type_references_binding(resolution, item, id)),
-        ast::TypeKind::Structural { fields, .. } => fields
-            .iter()
-            .any(|field| type_references_binding(resolution, &field.ty, id)),
+        ast::TypeKind::Structural { fields, row, .. } => {
+            fields
+                .iter()
+                .any(|field| type_references_binding(resolution, &field.ty, id))
+                || row
+                    .as_ref()
+                    .is_some_and(|row| type_references_binding(resolution, row, id))
+        }
         ast::TypeKind::Dyn(inner) => type_references_binding(resolution, inner, id),
         ast::TypeKind::Slice(inner)
         | ast::TypeKind::Borrow { inner, .. }
@@ -9274,6 +9410,23 @@ struct Checker<'a, 't> {
     /// group. `infer` takes a mark and solves them after every argument has
     /// contributed its evidence.
     effect_constraints: Vec<EffectConstraint>,
+    /// Cross-parameter backtracking state. `unify_plan` is the current choice
+    /// sequence for multi-variable union partitions, `unify_decisions`
+    /// records each decision's cardinality in the current replay, and
+    /// `unify_plan_active` distinguishes a planned replay from ordinary
+    /// left-to-right inference (which deterministically takes choice zero).
+    unify_plan: Vec<usize>,
+    unify_decisions: Vec<usize>,
+    unify_plan_active: bool,
+    /// Type variables bound by a multi-variable union partition during the
+    /// current `infer` call. Parameters that mention one of them are checked
+    /// without a tentative expected type so the replay can reconsider the
+    /// partition instead of failing during contextual checking.
+    partition_bound: BTreeSet<BindingId>,
+    /// Type variables bound as structural row tails in the current `infer`
+    /// call. Parameters mentioning them are checked without a tentative
+    /// expected row so a residual-row mismatch is reported by unification.
+    row_bound: BTreeSet<BindingId>,
     /// Nonzero while checking the synthesized continuation of a non-tail
     /// effect resumption. Such a continuation must not `return`, `break`, or
     /// `continue` out of the handled body: those control transfers would cross
@@ -13187,6 +13340,30 @@ impl Checker<'_, '_> {
                 && actual.layout() == expected.layout()
                 && self.subtype(actual, expected))
     }
+    /// Whether a structural row can be compared with `==`: every leaf is a
+    /// copyable scalar (integers, Char, Bool, Unit) and nested structural rows
+    /// recurse. Floating-point leaves are excluded because their equality is
+    /// numeric (`-0.0 == 0.0`, NaN) while the inline representation compares
+    /// raw words; owning, borrowed, union, callable, and nominal fields are
+    /// excluded so equality never moves or inspects an opaque payload.
+    fn structurally_comparable(&self, ty: Type) -> bool {
+        let Some(layout) = ty.layout().filter(|id| self.types.enums[*id].structural) else {
+            return false;
+        };
+        self.types.enums[layout].variants[0]
+            .fields
+            .iter()
+            .all(|field| {
+                if field.layout().is_some() {
+                    self.structurally_comparable(*field)
+                } else {
+                    matches!(
+                        field,
+                        Type::I64 | Type::Int(_) | Type::Char | Type::Bool | Type::Unit
+                    )
+                }
+            })
+    }
     /// Insert the deterministic runtime conversion needed to use `value` as
     /// `expected`. Same-layout refinements stay narrow (no runtime work); atom
     /// injection and union repacking become explicit `Coerce` nodes.
@@ -13362,6 +13539,81 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
+    /// Check an explicit structural conversion `value as struct { ... }`.
+    /// Field renaming is expressed only here: the target row keeps its own
+    /// canonical names, while `from source` selects the source field. The
+    /// conversion is an ordinary checked `Coercion::Struct`, so field owners
+    /// are moved exactly once and unmentioned fields are cleaned up.
+    fn structural_cast(
+        &mut self,
+        value_ast: &ast::Expr,
+        target: &ast::Type,
+        span: Span,
+    ) -> Result<Expr> {
+        let ast::TypeKind::Structural { fields, open, row } = &target.kind else {
+            return Err(Diagnostic::new(
+                span,
+                "an 'as' structural conversion target must be an anonymous structural row, as in 'value as struct { b: i64 from a }'",
+            ));
+        };
+        if *open || row.is_some() {
+            return Err(Diagnostic::new(
+                span,
+                "a renaming structural cast needs a closed target row; give every target field explicitly",
+            ));
+        }
+        let mut mapping = BTreeMap::new();
+        let mut cleaned = Vec::with_capacity(fields.len());
+        for field in fields {
+            if let Some(source) = &field.source
+                && mapping.insert(field.name.clone(), source.clone()).is_some()
+            {
+                return Err(Diagnostic::new(
+                    field.span,
+                    format!("duplicate target field '{}' in structural cast", field.name),
+                ));
+            }
+            cleaned.push(ast::Field {
+                name: field.name.clone(),
+                source: None,
+                ty: field.ty.clone(),
+                span: field.span,
+            });
+        }
+        let mut seen_sources = BTreeSet::new();
+        for source in mapping.values() {
+            if !seen_sources.insert(source.clone()) {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "structural cast maps source field '{source}' to more than one target field"
+                    ),
+                ));
+            }
+        }
+        let cleaned = ast::Type {
+            kind: ast::TypeKind::Structural {
+                fields: cleaned,
+                open: false,
+                row: None,
+            },
+            span: target.span,
+        };
+        let target_ty = self.ty(&cleaned)?;
+        let value = self.expr(value_ast)?;
+        let rename = (!mapping.is_empty()).then_some(&mapping);
+        let coercion = self.struct_coercion_mapped(value.ty, target_ty, rename, span, 0)?;
+        Ok(Expr {
+            kind: ExprKind::Coerce {
+                value: Box::new(value),
+                to: target_ty,
+                coercion,
+            },
+            ty: target_ty,
+            span,
+            resource: None,
+        })
+    }
     /// Build the checked field mapping for a record-to-structural conversion.
     /// A retained field may itself need a nested structural conversion or an
     /// atom-to-union injection; union-to-union repacking is rejected because it
@@ -13371,6 +13623,20 @@ impl Checker<'_, '_> {
         &mut self,
         source: Type,
         expected: Type,
+        span: Span,
+        depth: usize,
+    ) -> Result<Coercion> {
+        self.struct_coercion_mapped(source, expected, None, span, depth)
+    }
+    /// Build a structural conversion, optionally with explicit source-field
+    /// names (`value as struct { b: i64 from a }`). Every kept source field
+    /// must be used exactly once, so a rename can never duplicate an owner or
+    /// silently reinterpret field offsets.
+    fn struct_coercion_mapped(
+        &mut self,
+        source: Type,
+        expected: Type,
+        rename: Option<&BTreeMap<String, String>>,
         span: Span,
         depth: usize,
     ) -> Result<Coercion> {
@@ -13397,56 +13663,70 @@ impl Checker<'_, '_> {
             ));
         };
         let source_variant = self.types.enums[source_layout].variants[0].clone();
-        if !self.subtype(source, expected) {
-            for (name, target_ty) in &target_row {
-                let Some(index) = source_variant.names.iter().position(|n| n == name) else {
-                    return Err(Diagnostic::new(
-                        span,
-                        format!(
-                            "cannot convert {} to {}: the source row has no field '{name}'",
-                            self.types.name(source),
-                            self.types.name(expected)
-                        ),
-                    ));
-                };
-                let source_ty = source_variant.fields[index];
-                if !self.subtype(source_ty, *target_ty) {
-                    return Err(Diagnostic::new(
-                        span,
-                        format!(
-                            "cannot convert field '{name}' from {} to {} in structural record conversion",
-                            self.types.name(source_ty),
-                            self.types.name(*target_ty)
-                        ),
-                    ));
-                }
-            }
-            return Err(Diagnostic::new(
-                span,
-                format!(
-                    "cannot convert {} to {}: a width-erased field carries a linear obligation or changes a borrowed leaf",
-                    self.types.name(source),
-                    self.types.name(expected)
-                ),
-            ));
-        }
+        let mut used_sources = BTreeSet::new();
         let mut kept = Vec::with_capacity(target_row.len());
         for (target_index, (name, target_ty)) in target_row.iter().enumerate() {
-            let source_index = source_variant
+            let source_name = rename
+                .and_then(|rename| rename.get(name))
+                .map(String::as_str)
+                .unwrap_or(name);
+            let Some(source_index) = source_variant
                 .names
                 .iter()
-                .position(|source| source == name)
-                .expect("structural subtype has every target field");
+                .position(|source| source == source_name)
+            else {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "cannot convert {} to {}: the source row has no field '{source_name}'{}",
+                        self.types.name(source),
+                        self.types.name(expected),
+                        if source_name == name {
+                            String::new()
+                        } else {
+                            format!(" for target field '{name}'")
+                        }
+                    ),
+                ));
+            };
+            if !used_sources.insert(source_index) {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "structural conversion uses source field '{source_name}' for more than one target field; each source field can be moved only once"
+                    ),
+                ));
+            }
             let source_ty = source_variant.fields[source_index];
+            if !self.subtype(source_ty, *target_ty) {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "cannot convert field '{source_name}' from {} to {} in structural record conversion",
+                        self.types.name(source_ty),
+                        self.types.name(*target_ty)
+                    ),
+                ));
+            }
+            if (crate::runtime_types::has_borrow(self.types, *target_ty)
+                || crate::runtime_types::has_mutable_borrow(self.types, *target_ty))
+                && source_ty != *target_ty
+            {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "cannot convert field '{source_name}' from {} to {}: borrowed leaves are invariant under structural conversion",
+                        self.types.name(source_ty),
+                        self.types.name(*target_ty)
+                    ),
+                ));
+            }
             let nested = self.nested_field_coercion(source_ty, *target_ty, span, depth + 1)?;
             kept.push((target_index, source_index, nested));
         }
         let mut drops = Vec::new();
         for (source_index, source_ty) in source_variant.fields.iter().enumerate() {
-            if target_row
-                .iter()
-                .any(|(name, _)| source_variant.names[source_index] == *name)
-            {
+            if used_sources.contains(&source_index) {
                 continue;
             }
             if crate::runtime_types::contains_linear(self.types, *source_ty)
@@ -15694,7 +15974,9 @@ impl Checker<'_, '_> {
                 | ExprKind::Try { value: inner, .. }
                 | ExprKind::TaskCancel(inner)
                 | ExprKind::TaskJoin { task: inner, .. } => find(checker, inner),
-                ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
+                ExprKind::Binary(_, left, right)
+                | ExprKind::StructEq { left, right, .. }
+                | ExprKind::BytesAt(left, right) => {
                     find(checker, left).or_else(|| find(checker, right))
                 }
                 ExprKind::RefAssign(reference, _, value) | ExprKind::BoxWrite(reference, value) => {
@@ -16138,6 +16420,13 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::StructuralLiteral(fields) => {
                     return c.structural_literal(fields, expected, span);
+                }
+                ast::ExprKind::Cast { value, ty } => {
+                    let expr = c.structural_cast(value, ty, span)?;
+                    return match expected {
+                        Some(expected) => c.coerce(expr, expected, span),
+                        None => Ok(expr),
+                    };
                 }
                 ast::ExprKind::Array(values) => {
                     let candidates = c.expected_array(expected, values.len());
@@ -16871,6 +17160,38 @@ impl Checker<'_, '_> {
                             Type::Bool
                         }
                         Kind::EqEq | Kind::Ne => {
+                            if left.ty.layout().is_some()
+                                && right.ty.layout().is_some()
+                                && c.types.is_structural(left.ty)
+                                && c.types.is_structural(right.ty)
+                            {
+                                if left.ty != right.ty {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        format!(
+                                            "structural equality operands must have the same canonical row, found {} and {}",
+                                            c.types.name(left.ty),
+                                            c.types.name(right.ty)
+                                        ),
+                                    ));
+                                }
+                                if !c.structurally_comparable(left.ty) {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        "structural equality requires copyable scalar fields (integers, Char, Bool, Unit) or nested structural records of them; owning, borrowed, union, callable, nominal, and floating-point fields are not comparable",
+                                    ));
+                                }
+                                return Ok(Expr {
+                                    kind: ExprKind::StructEq {
+                                        left: Box::new(left),
+                                        right: Box::new(right),
+                                        negated: *op == Kind::Ne,
+                                    },
+                                    ty: Type::Bool,
+                                    span,
+                                    resource: None,
+                                });
+                            }
                             let opaque = |t: Type| {
                                 t.layout().is_some()
                                     || t.is_union()
@@ -20495,9 +20816,13 @@ impl Checker<'_, '_> {
             ast::TypeKind::Tuple(items) => items
                 .iter()
                 .any(|a| self.mentions(a, type_vars, const_vars, effect_vars, subst)),
-            ast::TypeKind::Structural { fields, .. } => fields
-                .iter()
-                .any(|field| self.mentions(&field.ty, type_vars, const_vars, effect_vars, subst)),
+            ast::TypeKind::Structural { fields, row, .. } => {
+                fields.iter().any(|field| {
+                    self.mentions(&field.ty, type_vars, const_vars, effect_vars, subst)
+                }) || row.as_ref().is_some_and(|row| {
+                    self.mentions(row, type_vars, const_vars, effect_vars, subst)
+                })
+            }
             ast::TypeKind::Function {
                 parameters,
                 result,
@@ -20543,6 +20868,25 @@ impl Checker<'_, '_> {
             }
             _ => false,
         }
+    }
+    /// Select one candidate at a multi-variable union partition decision.
+    /// Ordinary inference takes choice zero; a cross-parameter backtracking
+    /// replay takes the next index from its plan. The decision cardinality is
+    /// recorded so the driver can enumerate choices deterministically.
+    fn union_partition_choice(&mut self, cardinality: usize) -> Result<usize> {
+        if !self.unify_plan_active {
+            return Ok(0);
+        }
+        let index = self.unify_decisions.len();
+        self.unify_decisions.push(cardinality);
+        let choice = self.unify_plan.get(index).copied().unwrap_or(0);
+        if choice >= cardinality {
+            return Err(Diagnostic::new(
+                Span::default(),
+                "internal cross-parameter partition replay exhausted its local choices",
+            ));
+        }
+        Ok(choice)
     }
     /// Solve a declared union pattern with exactly one bare type variable and
     /// a concrete fixed part, such as `T | i64`. The residual actual
@@ -20732,11 +21076,17 @@ impl Checker<'_, '_> {
         // The search order fixes a canonical partition: residual alternatives
         // keep their normalized order and are handed to the unbound variables
         // in declaration order, with backtracking only to skip partitions that
-        // leave a variable empty. This is deterministic and bounded, but it is
-        // not principal: a later parameter can still reject the chosen
-        // partition even though another one would have worked. That boundary
-        // is diagnosed at the later argument, never resolved by reordering.
-        let solution = solutions.into_iter().next().expect("one partition");
+        // leave a variable empty. Ordinary inference takes the first partition.
+        // A later parameter that rejects it triggers the bounded cross-parameter
+        // replay in `infer`, which reruns every constraint from the base
+        // substitution with the next deterministic partition choice. The total
+        // number of replay attempts is capped by
+        // `UNIFY_BACKTRACK_BUDGET`; exhausting it is an explicit diagnostic.
+        let choice = self.union_partition_choice(solutions.len())?;
+        let solution = solutions
+            .into_iter()
+            .nth(choice)
+            .expect("partition choice is in range");
         for ((variable, _), members) in variables.iter().zip(solution) {
             let bound = self.types.union(members, span)?;
             self.unify(
@@ -20748,6 +21098,9 @@ impl Checker<'_, '_> {
                 subst,
                 span,
             )?;
+            if let Some(binder) = self.resolution.reference(variable.span) {
+                self.partition_bound.insert(binder);
+            }
         }
         Ok(true)
     }
@@ -20886,7 +21239,24 @@ impl Checker<'_, '_> {
                         && !actual.is_view()
                     {
                         let full = self.types.full(actual, span)?;
-                        subst.types.entry(id).or_insert(full);
+                        match subst.types.get(&id).copied() {
+                            Some(bound) => {
+                                if !self.subtype(full, bound) {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        format!(
+                                            "type parameter '{}' was inferred as {}, but another argument requires {}; the inference group is inconsistent. Specialize it explicitly with '::<...>'",
+                                            self.resolution.bindings[id].name,
+                                            self.types.name(bound),
+                                            self.types.name(full)
+                                        ),
+                                    ));
+                                }
+                            }
+                            None => {
+                                subst.types.insert(id, full);
+                            }
+                        }
                     }
                     return Ok(());
                 }
@@ -21076,7 +21446,7 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            ast::TypeKind::Structural { fields, .. } => {
+            ast::TypeKind::Structural { fields, row, .. } => {
                 if let Some(layout) = actual.layout().filter(|id| self.types.enums[*id].record) {
                     let variant = self.types.enums[layout].variants[0].clone();
                     for field in fields {
@@ -21093,6 +21463,53 @@ impl Checker<'_, '_> {
                             subst,
                             span,
                         )?;
+                    }
+                    // A named row variable preserves every actual field the
+                    // declared row does not mention. It is monomorphized per
+                    // concrete residual row, so the binding is a structural
+                    // record type whose canonical row is exactly the residual.
+                    if let Some(row) = row {
+                        let Some(binder) = self.resolution.reference(row.span) else {
+                            return Err(Diagnostic::new(
+                                row.span,
+                                "a row variable must be a declared type parameter",
+                            ));
+                        };
+                        if type_vars.contains(&binder) {
+                            let declared = fields
+                                .iter()
+                                .map(|field| field.name.as_str())
+                                .collect::<BTreeSet<_>>();
+                            let residual = variant
+                                .names
+                                .iter()
+                                .cloned()
+                                .zip(variant.fields.iter().copied())
+                                .filter(|(name, _)| !declared.contains(name.as_str()))
+                                .collect::<Vec<_>>();
+                            let residual = self.types.structural(residual, span)?;
+                            match subst.types.get(&binder).copied() {
+                                Some(bound) => {
+                                    if self.types.structural_row(bound)
+                                        != self.types.structural_row(residual)
+                                    {
+                                        return Err(Diagnostic::new(
+                                            span,
+                                            format!(
+                                                "row variable '{}' was bound to {} by another argument, but this argument's residual row is {}; a row variable must receive the same residual row from every parameter. Specialize it explicitly with '::<...>'",
+                                                self.resolution.bindings[binder].name,
+                                                self.types.name(bound),
+                                                self.types.name(residual)
+                                            ),
+                                        ));
+                                    }
+                                }
+                                None => {
+                                    subst.types.insert(binder, residual);
+                                    self.row_bound.insert(binder);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -21478,6 +21895,81 @@ impl Checker<'_, '_> {
             )),
         }
     }
+    /// Replay the accumulated type constraints with deterministic
+    /// cross-parameter backtracking. Every multi-variable union partition is a
+    /// decision point; the driver enumerates choice plans in lexicographic
+    /// order and reruns the *whole* constraint list from `base`, so an earlier
+    /// partition can change when a later parameter rejects it. At most
+    /// [`UNIFY_BACKTRACK_BUDGET`] complete replays are attempted; a plan that
+    /// is locally impossible backtracks without spending a full replay.
+    fn replay_unification(
+        &mut self,
+        constraints: &[(&ast::Type, Type)],
+        base: Option<&crate::runtime_types::Subst>,
+        type_vars: &[BindingId],
+        const_vars: &[BindingId],
+        effect_vars: &[BindingId],
+        span: Span,
+    ) -> Result<Option<crate::runtime_types::Subst>> {
+        let mut plan: Vec<usize> = Vec::new();
+        let mut attempts = 0usize;
+        loop {
+            if attempts >= UNIFY_BACKTRACK_BUDGET {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "cross-parameter type inference exhausted its {UNIFY_BACKTRACK_BUDGET}-replay budget while searching union partitions. Specialize the ambiguous parameters explicitly with '::<...>'"
+                    ),
+                ));
+            }
+            attempts += 1;
+            self.unify_plan = plan.clone();
+            self.unify_decisions.clear();
+            self.unify_plan_active = true;
+            let effect_mark = self.effect_constraints.len();
+            let mut candidate = base.cloned().unwrap_or_default();
+            let mut failure = None;
+            for (pattern, actual) in constraints {
+                if let Err(error) = self.unify(
+                    pattern,
+                    *actual,
+                    type_vars,
+                    const_vars,
+                    effect_vars,
+                    &mut candidate,
+                    span,
+                ) {
+                    failure = Some(error);
+                    break;
+                }
+            }
+            self.unify_plan_active = false;
+            // Constraints are re-accumulated from the first pass; replay must
+            // not duplicate effect-row evidence.
+            self.effect_constraints.truncate(effect_mark);
+            if failure.is_none() {
+                return Ok(Some(candidate));
+            }
+            // Advance the most recent decision that still has an untried
+            // choice, dropping every later decision from the plan.
+            let mut advanced = false;
+            let mut index = self.unify_decisions.len();
+            while index > 0 {
+                index -= 1;
+                let cardinality = self.unify_decisions[index];
+                let current = plan.get(index).copied().unwrap_or(0);
+                if current + 1 < cardinality {
+                    plan.truncate(index);
+                    plan.push(current + 1);
+                    advanced = true;
+                    break;
+                }
+            }
+            if !advanced {
+                return Ok(None);
+            }
+        }
+    }
     /// Check values against declared types, inferring type and const variables
     /// left to right. Returns type, grade, and const arguments plus the checked
     /// values. `base` carries substitutions already fixed by the callee, such as
@@ -21527,6 +22019,13 @@ impl Checker<'_, '_> {
         let mut subst = base.cloned().unwrap_or_default();
         subst.self_type = self_type;
         let constraint_mark = self.effect_constraints.len();
+        // `(declared pattern, actual type)` for every parameter and result
+        // hint. A failed unification is deferred only long enough for the
+        // bounded cross-parameter replay to try another partition.
+        let mut constraints: Vec<(&ast::Type, Type)> = Vec::new();
+        let mut unify_error: Option<Diagnostic> = None;
+        self.partition_bound.clear();
+        self.row_bound.clear();
         let mut grade_arguments = Vec::new();
         if let Some(list) = explicit {
             if list.len() != generics.len() {
@@ -21573,8 +22072,13 @@ impl Checker<'_, '_> {
                 }
             }
         } else {
+            // Record every type constraint so a later cross-parameter replay
+            // can solve the whole group from the base substitution instead of
+            // committing to the first union partition.
             if let Some((declared, expected)) = result {
-                self.unify(
+                constraints.push((declared, expected));
+                let before = subst.clone();
+                if let Err(error) = self.unify(
                     declared,
                     expected,
                     &type_vars,
@@ -21582,7 +22086,10 @@ impl Checker<'_, '_> {
                     &effect_vars,
                     &mut subst,
                     span,
-                )?;
+                ) {
+                    subst = before;
+                    unify_error.get_or_insert(error);
+                }
             }
         }
         let parameter_grade_exprs = pairs
@@ -21605,10 +22112,18 @@ impl Checker<'_, '_> {
                     &mut subst,
                     span,
                 )?;
+                constraints.push((declared, checked.ty));
                 values.push(checked);
                 continue;
             }
-            let wanted = if self.mentions(declared, &type_vars, &const_vars, &effect_vars, &subst) {
+            let tentative_partition =
+                type_references_any_binder(self.resolution, declared, &self.partition_bound);
+            let tentative_row =
+                type_references_any_binder(self.resolution, declared, &self.row_bound);
+            let wanted = if tentative_partition
+                || tentative_row
+                || self.mentions(declared, &type_vars, &const_vars, &effect_vars, &subst)
+            {
                 None
             } else {
                 Some(self.types.ty_in(declared, &subst)?)
@@ -21624,7 +22139,9 @@ impl Checker<'_, '_> {
                 other => other,
             };
             let value = self.expr_expected(value, wanted)?;
-            self.unify(
+            constraints.push((declared, value.ty));
+            let before = subst.clone();
+            if let Err(error) = self.unify(
                 declared,
                 value.ty,
                 &type_vars,
@@ -21632,8 +22149,43 @@ impl Checker<'_, '_> {
                 &effect_vars,
                 &mut subst,
                 span,
-            )?;
+            ) {
+                subst = before;
+                unify_error.get_or_insert(error);
+            }
             values.push(value);
+        }
+        if let Some(error) = unify_error {
+            if explicit.is_some() {
+                return Err(error);
+            }
+            match self.replay_unification(
+                &constraints,
+                base,
+                &type_vars,
+                &const_vars,
+                &effect_vars,
+                span,
+            )? {
+                Some(replayed) => subst = replayed,
+                None => {
+                    if self.partition_bound.is_empty() {
+                        return Err(error);
+                    }
+                    let names = self
+                        .partition_bound
+                        .iter()
+                        .map(|binder| format!("'{}'", self.resolution.bindings[*binder].name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "no partition of the union alternatives satisfies every parameter for {names}; the bounded cross-parameter search tried every deterministic partition. Specialize the type arguments explicitly with '::<...>'"
+                        ),
+                    ));
+                }
+            }
         }
         self.solve_effect_constraints(constraint_mark, &effect_generics, &mut subst, span)?;
         // General grade inference for direct calls: solve grade parameters from
@@ -25892,16 +26444,20 @@ pub(crate) fn substitute_alias_type(
                 .map(|item| substitute_alias_type(resolution, item, map))
                 .collect(),
         ),
-        K::Structural { fields, open } => K::Structural {
+        K::Structural { fields, open, row } => K::Structural {
             fields: fields
                 .iter()
                 .map(|field| ast::Field {
                     name: field.name.clone(),
+                    source: field.source.clone(),
                     ty: substitute_alias_type(resolution, &field.ty, map),
                     span: field.span,
                 })
                 .collect(),
             open: *open,
+            row: row
+                .as_ref()
+                .map(|row| Box::new(substitute_alias_type(resolution, row, map))),
         },
         K::Slice(inner) => K::Slice(Box::new(substitute_alias_type(resolution, inner, map))),
         K::Array(element, length) => K::Array(
@@ -26003,7 +26559,11 @@ fn block_allocates(block: &Block) -> bool {
             | ExprKind::BytesTryWithCapacity { .. } => true,
             ExprKind::Loop(block) => block_allocates(block),
             ExprKind::While(condition, block) => expr(condition) || block_allocates(block),
-            ExprKind::BytesAt(a, b) | ExprKind::Binary(_, a, b) => expr(a) || expr(b),
+            ExprKind::BytesAt(a, b)
+            | ExprKind::StructEq {
+                left: a, right: b, ..
+            }
+            | ExprKind::Binary(_, a, b) => expr(a) || expr(b),
             ExprKind::RefAssign(reference, _, value) => expr(reference) || expr(value),
             ExprKind::Slice {
                 base, start, end, ..
@@ -26072,7 +26632,9 @@ fn contains_lexical_perform(expr: &ast::Expr, operation: &str) -> bool {
             .iter()
             .any(|(_, value)| contains_lexical_perform(value, operation)),
         ast::ExprKind::Block(block) => block_contains_lexical_perform(block, operation),
-        ast::ExprKind::Unary { operand, .. } | ast::ExprKind::Try(operand) => {
+        ast::ExprKind::Unary { operand, .. }
+        | ast::ExprKind::Try(operand)
+        | ast::ExprKind::Cast { value: operand, .. } => {
             contains_lexical_perform(operand, operation)
         }
         ast::ExprKind::Binary { left, right, .. } => {
@@ -26183,9 +26745,9 @@ fn collect_expr_refs(resolution: &Resolution, expr: &ast::Expr, out: &mut BTreeS
             }
         }
         ast::ExprKind::Block(block) => collect_lambda_refs(resolution, block, out),
-        ast::ExprKind::Unary { operand, .. } | ast::ExprKind::Try(operand) => {
-            collect_expr_refs(resolution, operand, out)
-        }
+        ast::ExprKind::Unary { operand, .. }
+        | ast::ExprKind::Try(operand)
+        | ast::ExprKind::Cast { value: operand, .. } => collect_expr_refs(resolution, operand, out),
         ast::ExprKind::Binary { left, right, .. } => {
             collect_expr_refs(resolution, left, out);
             collect_expr_refs(resolution, right, out);

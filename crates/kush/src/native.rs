@@ -5135,6 +5135,22 @@ impl Generator<'_, '_> {
                 self.consume(replacement);
                 self.constant(0)
             }
+            ExprKind::StructEq {
+                left,
+                right,
+                negated,
+            } => {
+                let ty = left.ty;
+                let left = lower!(self.expr(left));
+                let right = lower!(self.expr(right));
+                let equal = self.struct_eq_words(ty, &left, &right);
+                let value = if *negated {
+                    self.builder.ins().bxor_imm_s(equal, 1)
+                } else {
+                    equal
+                };
+                return Some(vec![self.builder.ins().uextend(I64, value)]);
+            }
             ExprKind::Binary(op, left, right_expr) => {
                 let left_ty = left.ty;
                 let left_kind = left.ty.int_kind();
@@ -5799,6 +5815,45 @@ impl Generator<'_, '_> {
             }
             StrOp::ToString => {
                 vec![self.runtime_call(self.str_to_string, &[pointer, length])]
+            }
+        }
+    }
+    /// Compare the words of two structural records field by field. The checker
+    /// admits only scalar leaves and nested structural rows, so every compared
+    /// word is a copyable representation word.
+    fn struct_eq_words(&mut self, ty: Type, left: &[Value], right: &[Value]) -> Value {
+        let layout = ty
+            .layout()
+            .expect("checked structural equality has a layout");
+        let types = self.program.enums[layout].variants[0].fields.clone();
+        let mut result: Option<Value> = None;
+        let mut offset = 1usize;
+        for field in types {
+            let width = self.program.width(field);
+            if width > 0 {
+                let equal = if field.layout().is_some() {
+                    self.struct_eq_words(
+                        field,
+                        &left[offset..offset + width],
+                        &right[offset..offset + width],
+                    )
+                } else {
+                    self.builder
+                        .ins()
+                        .icmp(IntCC::Equal, left[offset], right[offset])
+                };
+                result = Some(match result {
+                    Some(previous) => self.builder.ins().band(previous, equal),
+                    None => equal,
+                });
+            }
+            offset += width;
+        }
+        match result {
+            Some(value) => value,
+            None => {
+                let zero = self.constant(0);
+                self.builder.ins().icmp_imm_s(IntCC::Equal, zero, 0i64)
             }
         }
     }

@@ -1178,9 +1178,12 @@ impl Resolver {
                     // possible but leave algebra paths to the grade pass.
                     r.length(grade)?;
                 }
-                TypeKind::Structural { fields, .. } => {
+                TypeKind::Structural { fields, row, .. } => {
                     for field in fields {
                         r.ty(&field.ty)?;
+                    }
+                    if let Some(row) = row {
+                        r.ty(row)?;
                     }
                 }
                 TypeKind::Predicate(proposition) => r.expr(proposition)?,
@@ -1291,6 +1294,10 @@ impl Resolver {
                         }
                         r.expr(value)?;
                     }
+                }
+                ExprKind::Cast { value, ty } => {
+                    r.ty(ty)?;
+                    r.expr(value)?;
                 }
                 ExprKind::While { condition, body } => {
                     r.expr(condition)?;
