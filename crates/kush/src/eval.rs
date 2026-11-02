@@ -3903,6 +3903,32 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 };
                 Ok(self.host_result(shape, status, Value::Scalar(data.len() as i64)))
             }
+            HostOp::FsWriteExclusive => {
+                let path = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: host path is not borrowed"))?;
+                let data = self
+                    .borrowed_bytes(&args[1])
+                    .ok_or_else(|| failure("internal error: host data is not borrowed"))?;
+                if path.contains(&0) {
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let status = match options.open(path_from_bytes(&path)) {
+                    Ok(mut file) => match file.write_all(&data) {
+                        Ok(()) => 0,
+                        Err(error) => io_error_code(&error),
+                    },
+                    Err(error) => io_error_code(&error),
+                };
+                Ok(self.host_result(shape, status, Value::Scalar(data.len() as i64)))
+            }
             HostOp::FsRemove => {
                 let path = self
                     .borrowed_bytes(&args[0])
@@ -4245,6 +4271,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     return Ok(invalid());
                 }
                 let duration = Duration::from_millis(timeout_ms as u64);
+                // One shared deadline across connect, send, and receive mirrors
+                // the native implementation: no phase can restart the budget.
+                let deadline = if timeout_ms != 0 {
+                    Some(Instant::now() + duration)
+                } else {
+                    None
+                };
+                let remaining = || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
                 let connect = if timeout_ms == 0 {
                     TcpStream::connect((host.as_str(), port))
                 } else {
@@ -4253,12 +4287,24 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             let mut last = io::Error::from_raw_os_error(5);
                             let mut connected = None;
                             for address in addresses {
-                                match TcpStream::connect_timeout(&address, duration) {
+                                let Some(left) = remaining().filter(|left| !left.is_zero())
+                                else {
+                                    last = io::Error::from_raw_os_error(110);
+                                    break;
+                                };
+                                match TcpStream::connect_timeout(&address, left) {
                                     Ok(stream) => {
                                         connected = Some(stream);
                                         break;
                                     }
-                                    Err(error) => last = error,
+                                    Err(error) => {
+                                        let timed_out =
+                                            error.kind() == io::ErrorKind::TimedOut;
+                                        last = error;
+                                        if timed_out {
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                             connected.ok_or(last)
@@ -4278,12 +4324,53 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     }
                 };
                 if timeout_ms != 0 {
-                    let _ = stream.set_read_timeout(Some(duration));
-                    let _ = stream.set_write_timeout(Some(duration));
+                    let _ = stream.set_read_timeout(remaining());
+                    let _ = stream.set_write_timeout(remaining());
                 }
-                if let Err(error) = stream.write_all(&request) {
+                let mut send_status = 0;
+                if timeout_ms == 0 {
+                    if let Err(error) = stream.write_all(&request) {
+                        send_status = io_error_code(&error);
+                    }
+                } else {
+                    // Retrying partial writes until the shared deadline keeps
+                    // the total budget bounded like the native send loop.
+                    let mut sent = 0usize;
+                    while sent < request.len() {
+                        let Some(left) = remaining().filter(|left| !left.is_zero()) else {
+                            send_status = 110;
+                            break;
+                        };
+                        let _ = stream.set_write_timeout(Some(left));
+                        match stream.write(&request[sent..]) {
+                            Ok(0) => {
+                                send_status = 5;
+                                break;
+                            }
+                            Ok(count) => sent += count,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                                ) =>
+                            {
+                                send_status = 110;
+                                break;
+                            }
+                            Err(error) => {
+                                send_status = io_error_code(&error);
+                                break;
+                            }
+                        }
+                    }
+                    let _ = stream.set_write_timeout(remaining());
+                }
+                if send_status != 0 {
                     self.heap.insert(id, Value::Buffer { data, capacity });
-                    return Ok(self.host_result(shape, io_error_code(&error), Value::Scalar(0)));
+                    return Ok(
+                        self.host_result(shape, send_status, Value::Scalar(0))
+                    );
                 }
                 let _ = stream.shutdown(Shutdown::Write);
                 let initialized = data.len();
@@ -4301,6 +4388,16 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     } else {
                         &mut data[length..capacity]
                     };
+                    if timeout_ms != 0 {
+                        // Each wait is the remaining shared budget, so a slow
+                        // sender cannot extend the total past the deadline.
+                        match remaining().filter(|left| !left.is_zero()) {
+                            Some(left) => {
+                                let _ = stream.set_read_timeout(Some(left));
+                            }
+                            None => break 110,
+                        }
+                    }
                     match stream.read(target) {
                         Ok(0) => break 0,
                         Ok(_) if full => break 27,

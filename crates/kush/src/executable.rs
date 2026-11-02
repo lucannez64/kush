@@ -506,6 +506,7 @@ pub(crate) enum HostPayload {
 pub(crate) enum HostOp {
     FsRead,
     FsWrite,
+    FsWriteExclusive,
     FsAppend,
     FsRemove,
     FsRename,
@@ -532,6 +533,7 @@ impl HostOp {
         match name {
             "FS.read" => Some(Self::FsRead),
             "FS.write" => Some(Self::FsWrite),
+            "FS.write_exclusive" => Some(Self::FsWriteExclusive),
             "FS.append" => Some(Self::FsAppend),
             "FS.remove" => Some(Self::FsRemove),
             "FS.rename" => Some(Self::FsRename),
@@ -559,6 +561,7 @@ impl HostOp {
         match self {
             Self::FsRead => "kush_fs_read",
             Self::FsWrite => "kush_fs_write",
+            Self::FsWriteExclusive => "kush_fs_write_exclusive",
             Self::FsAppend => "kush_fs_append",
             Self::FsRemove => "kush_fs_remove",
             Self::FsRename => "kush_fs_rename",
@@ -585,7 +588,7 @@ impl HostOp {
     pub fn arity(self) -> usize {
         match self {
             Self::FsRead | Self::FsList => 2,
-            Self::FsWrite | Self::FsAppend | Self::FsRename => 2,
+            Self::FsWrite | Self::FsWriteExclusive | Self::FsAppend | Self::FsRename => 2,
             Self::EnvArg => 2,
             Self::EnvVar => 2,
             Self::OsStrerror => 2,
@@ -610,7 +613,7 @@ impl HostOp {
     pub fn borrowed(self) -> &'static [bool] {
         match self {
             Self::FsRead | Self::FsList => &[true, false],
-            Self::FsWrite | Self::FsAppend | Self::FsRename => &[true, true],
+            Self::FsWrite | Self::FsWriteExclusive | Self::FsAppend | Self::FsRename => &[true, true],
             Self::FsRemove
             | Self::FsMkdir
             | Self::FsRemoveDir
@@ -19658,7 +19661,8 @@ impl Checker<'_, '_> {
                         let borrowed = Type::Ref(c.types.pointer(Type::Bytes));
                         let parameters = match op {
                             HostOp::FsRead | HostOp::FsList => vec![borrowed, bytes],
-                            HostOp::FsWrite | HostOp::FsAppend | HostOp::FsRename => {
+                            HostOp::FsWrite | HostOp::FsWriteExclusive | HostOp::FsAppend
+                            | HostOp::FsRename => {
                                 vec![borrowed, borrowed]
                             }
                             HostOp::FsRemove

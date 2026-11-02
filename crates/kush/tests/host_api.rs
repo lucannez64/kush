@@ -195,6 +195,123 @@ fn filesystem_round_trip_metadata_listing_paths_and_errors_agree() {
     compare(FILESYSTEM, |root| vec![root.display().to_string()], &[]);
 }
 
+const WRITE_EXCLUSIVE: &str = r#"
+use std.result.Result;
+use std.text;
+use std.path;
+
+fn show(value: &Bytes) -> Unit ! {io, panic} {
+    let mut i = 0;
+    while i < Bytes.len(value) {
+        print_i64(Bytes.get(value, i));
+        i = i + 1;
+    }
+    print_i64(-1);
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let root = match ENV.arg(1, Bytes.with_capacity(4096)) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let victim = path.join(&root, &Bytes.from("victim.txt"));
+    let planted = path.join(&root, &Bytes.from("planted.tmp"));
+    let fresh = path.join(&root, &Bytes.from("fresh.tmp"));
+    let data = Bytes.from("over\n");
+    let initial = match FS.read(&victim, Bytes.with_capacity(16)) {
+        Ok(value) => value,
+        Err(code) => { print_i64(-code); return 0; },
+    };
+    show(&initial);
+    drop(initial);
+    match FS.write_exclusive(&planted, &data) {
+        Result.Ok(_) => print_i64(-1),
+        Result.Err(code) => print_i64(code),
+    }
+    print_i64(match FS.write_exclusive(&fresh, &data) {
+        Result.Ok(count) => count,
+        Result.Err(code) => -code,
+    });
+    match FS.write_exclusive(&fresh, &data) {
+        Result.Ok(_) => print_i64(-1),
+        Result.Err(code) => print_i64(code),
+    }
+    let read = match FS.read(&fresh, Bytes.with_capacity(16)) {        Ok(value) => value,
+        Err(code) => { print_i64(-code); return 0; },
+    };
+    show(&read);
+    drop(read);
+    drop(data);
+    drop(fresh);
+    drop(planted);
+    drop(victim);
+    drop(root);
+    0
+}
+"#;
+
+/// The victim stays untouched through the planted symlink, and both the
+/// reference and native runs create the fresh file with 0600 permissions.
+fn prepare_exclusive_fixture(root: &Path) {
+    fs::write(root.join("victim.txt"), b"keep\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("victim.txt"), root.join("planted.tmp")).unwrap();
+    #[cfg(not(unix))]
+    fs::write(root.join("planted.tmp"), b"preexisting").unwrap();
+}
+
+fn check_exclusive_run(root: &Path, observation: &Observation) {
+    assert_eq!(observation.status, 0);
+    if !cfg!(unix) {
+        return;
+    }
+    // Byte values stream: victim content shown before and after the planted
+    // attempt, the EEXIST refusal, the fresh 5-byte create, a second refusal,
+    // and the verification read of the fresh file.
+    let expected: &[&str] = &[
+        "107\n101\n101\n112\n10\n-1\n",
+        "17\n",
+        "5\n",
+        "17\n",
+        "111\n118\n101\n114\n10\n-1\n",
+    ];
+    assert_eq!(
+        observation.output,
+        expected.iter().flat_map(|line| line.as_bytes()).cloned().collect::<Vec<u8>>()
+    );
+    assert_eq!(fs::read(root.join("victim.txt")).unwrap(), b"keep\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(root.join("fresh.tmp")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "fresh file mode: {mode:o}");
+    }
+}
+
+#[test]
+fn write_exclusive_refuses_planted_paths_and_creates_0600_files() {
+    let reference_root = unique_directory("exclusive-reference");
+    prepare_exclusive_fixture(&reference_root);
+    let expected = reference(
+        WRITE_EXCLUSIVE,
+        &[reference_root.display().to_string()],
+        &[],
+    );
+    check_exclusive_run(&reference_root, &expected);
+    drop(&reference_root);
+    let native_root = unique_directory("exclusive-native");
+    prepare_exclusive_fixture(&native_root);
+    let actual = native(
+        WRITE_EXCLUSIVE,
+        &[native_root.display().to_string()],
+        &[],
+        &native_root,
+    );
+    check_exclusive_run(&native_root, &actual);
+    let _ = fs::remove_dir_all(&reference_root);
+    let _ = fs::remove_dir_all(&native_root);
+}
+
 const ENVIRONMENT: &str = r#"
 use std.result.Result;
 

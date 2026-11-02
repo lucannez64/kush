@@ -15,6 +15,7 @@ instead of guessing.
 ```text
 FS.read(path: &Bytes, buffer: Bytes) -> Result<Bytes, i64> ! {io}
 FS.write(path: &Bytes, data: &Bytes) -> Result<i64, i64> ! {io}
+FS.write_exclusive(path: &Bytes, data: &Bytes) -> Result<i64, i64> ! {io}
 FS.append(path: &Bytes, data: &Bytes) -> Result<i64, i64> ! {io}
 FS.remove(path: &Bytes) -> Result<Unit, i64> ! {io}
 FS.rename(from: &Bytes, to: &Bytes) -> Result<Unit, i64> ! {io}
@@ -48,7 +49,10 @@ OS.strerror(code: i64, buffer: Bytes) -> Result<Bytes, i64> ! {io}
 Paths and data are byte strings. Embedded NUL bytes are rejected with `EINVAL`
 instead of being silently truncated at the C interface. `FS.write` creates or
 truncates with mode `0666` subject to the process umask; `FS.append` creates or
-appends. `FS.read` appends to the initialized prefix of the supplied buffer and
+appends. `FS.write_exclusive` creates a brand-new file with `O_EXCL` and mode
+`0600`: a pre-existing path — including a symlink — is refused with `EEXIST`
+(17), which makes it the primitive for safe temporary files in atomic
+replacement. `FS.read` appends to the initialized prefix of the supplied buffer and
 never grows storage. A file larger than the remaining capacity reports `EFBIG`
 (27) and frees the consumed buffer. `FS.list` writes one entry name per line,
 excluding `.` and `..`; directory order is not specified. `FS.mkdir` is one
@@ -136,8 +140,9 @@ until EOF or capacity. It appends response bytes to the caller-owned `response`
 buffer and returns the number of bytes received from the socket, excluding any
 preexisting prefix and excluding the excess probe byte. On timeout or overflow
 the filled prefix remains in the caller-owned buffer. TCP is a byte stream: one
-call is not one message. The timeout applies to connect/send/receive after DNS
-resolution; DNS resolution itself is blocking and not timed.
+call is not one message. The timeout is one shared budget for the whole call:
+connect, send, and receive each spend the remaining time left by the previous
+phase, in both backends. DNS resolution itself is blocking and not timed.
 
 The API is explicitly blocking and one-shot. It does not expose sockets,
 nonblocking mode, polling, TLS, HTTP/2, redirects, proxies, or connection reuse.

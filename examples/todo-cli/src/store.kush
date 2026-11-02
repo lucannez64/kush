@@ -1,6 +1,7 @@
 module todo_cli.store;
 
 use std.result.Result;
+use std.text.format_i64_into;
 
 /// Persistent line format: one task per line, `<state>|<title>\n`, where state
 /// is ASCII `0` (open) or `1` (done). Titles may contain spaces but not `|`,
@@ -36,6 +37,14 @@ fn concat(first: &Bytes, second: &Bytes) -> Bytes ! {alloc, panic} {
     let mut out = Bytes.with_capacity(Bytes.len(first) + Bytes.len(second));
     out = append(out, first);
     append(out, second)
+}
+
+/// A fresh per-attempt temporary name for exclusive creation. The name is
+/// unpredictable and unique, so a planted path cannot be followed.
+fn unique_temp(path: &Bytes, seed: i64, attempt: i64) -> Bytes ! {alloc, panic} {
+    let prefix = concat(path, &Bytes.from("."));
+    let numbered = format_i64_into(prefix, seed + attempt);
+    concat(&numbered, &Bytes.from(".tmp"))
 }
 
 fn find_byte(text: &Bytes, byte: i64, start: i64) -> i64 ! {panic} {
@@ -103,27 +112,41 @@ pub fn load(path: &Bytes) -> Result<Bytes, i64> ! {io, alloc, panic} {
 }
 
 pub fn save(path: &Bytes, data: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
-    let suffix = Bytes.from(".tmp");
-    let temporary = concat(path, &suffix);
-    match FS.write(&temporary, data) {
-        Result.Err(code) => {
-            let _ = FS.remove(&temporary);
-            drop(temporary);
-            drop(suffix);
-            return Result.Err(code);
-        },
-        Result.Ok(_) => {},
+    let seed = match TIME.monotonic_ns() {
+        Ok(value) => value,
+        Err(code) => return Result.Err(code),
+    };
+    let mut attempt = 0;
+    let mut done = false;
+    let mut temporary = empty();
+    while attempt < 64 && !done {
+        let candidate = unique_temp(path, seed, attempt);
+        match FS.write_exclusive(&candidate, data) {
+            // Exclusive creation means a symlink or file planted at the
+            // temporary path cannot redirect or be truncated by the save.
+            Result.Ok(_) => {
+                temporary = candidate;
+                done = true;
+            },
+            Result.Err(17) => { drop(candidate); attempt = attempt + 1; },
+            Result.Err(code) => {
+                drop(candidate);
+                return Result.Err(code);
+            },
+        }
+    }
+    if !done {
+        drop(temporary);
+        return Result.Err(17);
     }
     match FS.rename(&temporary, path) {
         Result.Ok(_) => {
             drop(temporary);
-            drop(suffix);
             Result.Ok(())
         },
         Result.Err(code) => {
             let _ = FS.remove(&temporary);
             drop(temporary);
-            drop(suffix);
             Result.Err(code)
         },
     }

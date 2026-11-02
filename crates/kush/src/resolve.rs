@@ -273,6 +273,7 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "FS",
     "FS.read",
     "FS.write",
+    "FS.write_exclusive",
     "FS.append",
     "FS.remove",
     "FS.rename",

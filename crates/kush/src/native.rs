@@ -1158,6 +1158,30 @@ static int64_t kush_host_write_file(uint64_t path_handle, uint64_t data_handle, 
 int64_t kush_fs_write(uint64_t path_handle, uint64_t data_handle, uint64_t *out) {
     return kush_host_write_file(path_handle, data_handle, 0, out);
 }
+static int64_t kush_host_write_file_exclusive(uint64_t path_handle, uint64_t data_handle, uint64_t *out) {
+    int code = 0;
+    const KushBytes *data = (const KushBytes *)(uintptr_t)data_handle;
+    char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
+    if (path == NULL) return code;
+    int fd = kush_host_open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 1, 0600);
+    free(path);
+    if (fd < 0) return errno;
+    uint64_t offset = 0;
+    while (offset < data->length) {
+        ssize_t written = write(fd, data->data + offset, (size_t)(data->length - offset));
+        if (written < 0 && errno == EINTR) continue;
+        if (written < 0) { code = errno; break; }
+        if (written == 0) { code = EIO; break; }
+        offset += (uint64_t)written;
+    }
+    (void)close(fd);
+    if (code != 0) return code;
+    *out = (uint64_t)data->length;
+    return 0;
+}
+int64_t kush_fs_write_exclusive(uint64_t path_handle, uint64_t data_handle, uint64_t *out) {
+    return kush_host_write_file_exclusive(path_handle, data_handle, out);
+}
 int64_t kush_fs_append(uint64_t path_handle, uint64_t data_handle, uint64_t *out) {
     return kush_host_write_file(path_handle, data_handle, 1, out);
 }
@@ -2800,6 +2824,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let host_symbols = [
         HostOp::FsRead,
         HostOp::FsWrite,
+        HostOp::FsWriteExclusive,
         HostOp::FsAppend,
         HostOp::FsRemove,
         HostOp::FsRename,
