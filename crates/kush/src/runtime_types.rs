@@ -28,7 +28,7 @@ pub(crate) struct Subst {
     pub grades: BTreeMap<BindingId, Grade>,
     /// Concrete effect-row arguments for `e: Effects` parameters. Effects are
     /// compile-time bitsets; a row may combine a fixed part with variables.
-    pub effects: BTreeMap<BindingId, u8>,
+    pub effects: BTreeMap<BindingId, u16>,
     /// Erased lifetime substitution for a data declaration or alias. Names are
     /// lexical lifetime identities, not bindings in the value namespace.
     pub lifetimes: BTreeMap<String, String>,
@@ -122,7 +122,7 @@ pub(crate) struct DynObjectType {
 type FunctionKey = (
     Vec<Type>,
     Type,
-    u8,
+    u16,
     Vec<Option<Grade>>,
     Option<Grade>,
     bool,
@@ -438,7 +438,7 @@ type LayoutKey = (BindingId, Vec<Type>, Vec<usize>, Vec<String>);
 pub(crate) struct FunctionType {
     pub parameters: Vec<Type>,
     pub result: Type,
-    pub effects: u8,
+    pub effects: u16,
     pub parameter_grades: Vec<Option<Grade>>,
     pub result_grade: Option<Grade>,
     pub once: bool,
@@ -1139,7 +1139,7 @@ impl<'a> Types<'a> {
         &mut self,
         parameters: Vec<Type>,
         result: Type,
-        effects: u8,
+        effects: u16,
         parameter_grades: Vec<Option<Grade>>,
         result_grade: Option<Grade>,
         once: bool,
@@ -1488,11 +1488,12 @@ impl<'a> Types<'a> {
             format!("<{list}>")
         };
         let mut effects = Vec::new();
-        for (bit, name) in [(1u8, "panic"), (2, "io"), (4, "alloc"), (8, "suspend")] {
+        for (bit, name) in [(1u16, "panic"), (2, "io"), (4, "alloc"), (8, "suspend")] {
             if signature.effects & bit != 0 {
-                effects.push(name);
+                effects.push(name.to_owned());
             }
         }
+        effects.extend(user_effect_names(self.resolution, signature.effects));
         format!(
             "fn{binder}({parameters}) -> {}{} ! {{{}}}",
             with_lifetime(signature.result, borrows.result.as_ref()),
@@ -3934,7 +3935,7 @@ impl<'a> Types<'a> {
 /// surface grammar, so `(a | b) - c` is written with explicit parentheses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum EffectRowTerm {
-    Constant(u8),
+    Constant(u16),
     Variable(BindingId),
     Union(Box<EffectRowTerm>, Box<EffectRowTerm>),
     Difference(Box<EffectRowTerm>, Box<EffectRowTerm>),
@@ -3959,13 +3960,13 @@ impl EffectRowTerm {
     }
     /// Evaluate every variable from a complete substitution. `None` means a
     /// variable is still unbound.
-    pub(crate) fn evaluate(&self, subst: &BTreeMap<BindingId, u8>) -> Option<u8> {
+    pub(crate) fn evaluate(&self, subst: &BTreeMap<BindingId, u16>) -> Option<u16> {
         self.evaluate_with(&mut |id| subst.get(&id).copied())
     }
     pub(crate) fn evaluate_with(
         &self,
-        lookup: &mut impl FnMut(BindingId) -> Option<u8>,
-    ) -> Option<u8> {
+        lookup: &mut impl FnMut(BindingId) -> Option<u16>,
+    ) -> Option<u16> {
         Some(match self {
             EffectRowTerm::Constant(bits) => *bits,
             EffectRowTerm::Variable(id) => lookup(*id)?,
@@ -3980,7 +3981,7 @@ impl EffectRowTerm {
     /// Fixed bits that can be read without any variable binding. A subtraction
     /// whose right side cannot be evaluated contributes no fixed coverage; the
     /// caller must use [`Self::evaluate`] for a precise answer.
-    fn partial(&self) -> (u8, Vec<BindingId>) {
+    fn partial(&self) -> (u16, Vec<BindingId>) {
         match self {
             EffectRowTerm::Constant(bits) => (*bits, Vec::new()),
             EffectRowTerm::Variable(id) => (0, vec![*id]),
@@ -4010,8 +4011,8 @@ impl EffectRowTerm {
 pub(crate) fn effect_bits_with(
     resolution: &Resolution,
     effects: &[ast::Type],
-    subst: &BTreeMap<BindingId, u8>,
-) -> Result<u8> {
+    subst: &BTreeMap<BindingId, u16>,
+) -> Result<u16> {
     let term = effect_row_term(resolution, effects)?;
     term.evaluate(subst).ok_or_else(|| {
         let variable = term
@@ -4033,6 +4034,34 @@ pub(crate) fn effect_bits_with(
         }
     })
 }
+/// Names of declared (`effect Name: P -> R;`) row entries set in `bits`, in
+/// ascending bit order. Built-in effects are reported by the caller so it can
+/// keep its established diagnostic ordering.
+pub(crate) fn user_effect_names(resolution: &Resolution, bits: u16) -> Vec<String> {
+    let mut declared = resolution
+        .effect_bits
+        .iter()
+        .filter(|(_, bit)| bits & **bit != 0)
+        .map(|(name, bit)| (*bit, name.clone()))
+        .collect::<Vec<_>>();
+    declared.sort_by_key(|(bit, _)| *bit);
+    declared.into_iter().map(|(_, name)| name).collect()
+}
+/// Render every concrete effect set bit, built-ins first in the canonical
+/// `panic`, `io`, `alloc`, `suspend` order, then declared operations.
+pub(crate) fn effect_name_list(resolution: &Resolution, bits: u16) -> Vec<String> {
+    let mut names = [
+        (crate::executable::PANIC, "panic"),
+        (crate::executable::IO, "io"),
+        (crate::executable::ALLOC, "alloc"),
+        (crate::executable::SUSPEND, "suspend"),
+    ]
+    .into_iter()
+    .filter_map(|(bit, name)| (bits & bit != 0).then_some(name.to_owned()))
+    .collect::<Vec<_>>();
+    names.extend(user_effect_names(resolution, bits));
+    names
+}
 /// Parse a declared effect row into its finite Boolean expression.
 pub(crate) fn effect_row_term(
     resolution: &Resolution,
@@ -4052,7 +4081,7 @@ pub(crate) fn effect_row_term(
 pub(crate) fn effect_bits_partial(
     resolution: &Resolution,
     effects: &[ast::Type],
-) -> Result<(u8, Vec<BindingId>)> {
+) -> Result<(u16, Vec<BindingId>)> {
     Ok(effect_row_term(resolution, effects)?.partial())
 }
 fn effect_row_expr(resolution: &Resolution, effect: &ast::Type) -> Result<EffectRowTerm> {
@@ -4098,10 +4127,20 @@ fn effect_row_expr(resolution: &Resolution, effect: &ast::Type) -> Result<Effect
                 (BindingKind::Builtin, "io", true) => crate::executable::IO,
                 (BindingKind::Builtin, "alloc", true) => crate::executable::ALLOC,
                 (BindingKind::Builtin, "suspend", true) => crate::executable::SUSPEND,
+                (BindingKind::Effect, name, true) => {
+                    resolution.effect_bits.get(name).copied().ok_or_else(|| {
+                        Diagnostic::new(
+                            effect.span,
+                            format!(
+                                "declared effect operation '{name}' has no row bit; this is an internal compiler error"
+                            ),
+                        )
+                    })?
+                }
                 _ => {
                     return Err(Diagnostic::new(
                         effect.span,
-                        "only io, alloc, suspend, and panic effects are supported by the executable subset; use an '<e: Effects>' row variable for a polymorphic row",
+                        "only io, alloc, suspend, and panic effects, declared 'effect' operations, and '<e: Effects>' row variables are supported in an executable effect row",
                     ));
                 }
             };
@@ -4132,11 +4171,11 @@ pub(crate) fn is_effect_generic(resolution: &Resolution, generic: &ast::Generic)
 pub(crate) fn effect_excludes(
     resolution: &Resolution,
     generic: &ast::Generic,
-) -> Result<Option<u8>> {
+) -> Result<Option<u16>> {
     let Some(excludes) = &generic.excludes else {
         return Ok(None);
     };
-    let mut bits = 0u8;
+    let mut bits = 0u16;
     effect_exclusion_part(resolution, excludes, &mut bits)?;
     Ok(Some(bits))
 }
@@ -4144,15 +4183,15 @@ pub(crate) fn effect_excludes(
 pub(crate) fn effect_includes(
     resolution: &Resolution,
     generic: &ast::Generic,
-) -> Result<Option<u8>> {
+) -> Result<Option<u16>> {
     let Some(includes) = &generic.includes else {
         return Ok(None);
     };
-    let mut bits = 0u8;
+    let mut bits = 0u16;
     effect_exclusion_part(resolution, includes, &mut bits)?;
     Ok(Some(bits))
 }
-fn effect_exclusion_part(resolution: &Resolution, ty: &ast::Type, bits: &mut u8) -> Result<()> {
+fn effect_exclusion_part(resolution: &Resolution, ty: &ast::Type, bits: &mut u16) -> Result<()> {
     match &ty.kind {
         ast::TypeKind::Binary {
             op: crate::lexer::Kind::Pipe,
@@ -4181,11 +4220,21 @@ fn effect_exclusion_part(resolution: &Resolution, ty: &ast::Type, bits: &mut u8)
                 (BindingKind::Builtin, "io") => crate::executable::IO,
                 (BindingKind::Builtin, "alloc") => crate::executable::ALLOC,
                 (BindingKind::Builtin, "suspend") => crate::executable::SUSPEND,
+                (BindingKind::Effect, name) => {
+                    resolution.effect_bits.get(name).copied().ok_or_else(|| {
+                        Diagnostic::new(
+                            ty.span,
+                            format!(
+                                "declared effect operation '{name}' has no row bit; this is an internal compiler error"
+                            ),
+                        )
+                    })?
+                }
                 (BindingKind::Builtin, _) => {
                     return Err(Diagnostic::new(
                         ty.span,
                         format!(
-                            "'{}' is not an effect; supported effects are 'io', 'alloc', 'suspend', and 'panic'",
+                            "'{}' is not an effect; supported effects are 'io', 'alloc', 'suspend', 'panic', and declared 'effect' operations",
                             binding.name
                         ),
                     ));

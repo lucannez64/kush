@@ -14,11 +14,11 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 
 type Result<T> = std::result::Result<T, Diagnostic>;
-pub(crate) const PANIC: u8 = 1;
-pub(crate) const IO: u8 = 2;
-pub(crate) const ALLOC: u8 = 4;
-pub(crate) const SUSPEND: u8 = 8;
-pub(crate) const EFFECT_BITS: u8 = PANIC | IO | ALLOC | SUSPEND;
+pub(crate) const PANIC: u16 = 1;
+pub(crate) const IO: u16 = 2;
+pub(crate) const ALLOC: u16 = 4;
+pub(crate) const SUSPEND: u16 = 8;
+pub(crate) const EFFECT_BITS: u16 = PANIC | IO | ALLOC | SUSPEND;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Type {
     I64,
@@ -343,7 +343,7 @@ struct DynMethodContract {
     parameter_grades: Vec<Option<Grade>>,
     result: Type,
     result_grade: Option<Grade>,
-    effects: u8,
+    effects: u16,
     /// The expression type observed by the caller; a `@[0]` result is erased.
     value_type: Type,
 }
@@ -1127,7 +1127,7 @@ struct Signature {
     /// Runtime parameter types, in order. Erased parameters are absent.
     parameters: Vec<Type>,
     result: Type,
-    effects: u8,
+    effects: u16,
     span: Span,
     /// Generic parameter binder -> concrete type, for specialized instances.
     substitution: BTreeMap<BindingId, Type>,
@@ -1136,7 +1136,7 @@ struct Signature {
     /// Abstract grade binder -> concrete compile-time grade.
     grades: BTreeMap<BindingId, Grade>,
     /// Effect row binder -> concrete effect bitset for this instance.
-    effect_arguments: BTreeMap<BindingId, u8>,
+    effect_arguments: BTreeMap<BindingId, u16>,
     /// Where a generic instance was first requested, for diagnostics.
     origin: Option<(Span, String)>,
     /// Usage grade of each runtime parameter (`None` is unannotated).
@@ -2159,10 +2159,10 @@ fn fuse_expr(
     }
 }
 
-fn callback_effects(types: &Types<'_>, callback: &Expr) -> u8 {
+fn callback_effects(types: &Types<'_>, callback: &Expr) -> u16 {
     match callback.ty {
         Type::Fn(id) => types.function_types[id].effects,
-        _ => u8::MAX,
+        _ => u16::MAX,
     }
 }
 
@@ -2572,7 +2572,7 @@ fn first_unexcluded_effect_variable(
     resolution: &Resolution,
     function: &ast::Function,
     variables: &[BindingId],
-    effect: u8,
+    effect: u16,
 ) -> Result<Option<BindingId>> {
     for variable in variables {
         let generic = function
@@ -2597,18 +2597,10 @@ fn first_unexcluded_effect_variable(
     }
     Ok(None)
 }
-/// Render a concrete effect set for diagnostics, in declaration order.
-fn effect_names(bits: u8) -> String {
-    [
-        (PANIC, "panic"),
-        (IO, "io"),
-        (ALLOC, "alloc"),
-        (SUSPEND, "suspend"),
-    ]
-    .into_iter()
-    .filter_map(|(bit, name)| (bits & bit != 0).then_some(name))
-    .collect::<Vec<_>>()
-    .join(", ")
+/// Render a concrete effect set for diagnostics, in canonical order with
+/// declared operations after the built-in vocabulary.
+fn effect_names(resolution: &Resolution, bits: u16) -> String {
+    crate::runtime_types::effect_name_list(resolution, bits).join(", ")
 }
 /// An executable `fn` declaration before specialization.
 #[derive(Clone, Copy)]
@@ -2710,7 +2702,7 @@ pub(crate) struct TraitArguments {
     pub(crate) types: Vec<Type>,
     pub(crate) consts: Vec<usize>,
     pub(crate) grades: Vec<Grade>,
-    pub(crate) effects: Vec<u8>,
+    pub(crate) effects: Vec<u16>,
 }
 /// Concrete arguments for the generic parameters of one impl header. Stored by
 /// index so `MethodDefinition` stays `Copy`.
@@ -2719,7 +2711,7 @@ struct ImplArguments {
     types: Vec<Type>,
     consts: Vec<usize>,
     grades: Vec<Grade>,
-    effects: Vec<u8>,
+    effects: Vec<u16>,
 }
 /// One generic or blanket impl header. The self type and trait arguments are
 /// patterns over `generics`; concrete receivers are matched against them by
@@ -3123,16 +3115,16 @@ type InstanceKey = (
     Vec<Type>,
     Vec<Grade>,
     Vec<usize>,
-    Vec<u8>,
+    Vec<u16>,
     Option<usize>,
 );
 /// One receiver type's trait-provided methods, each with the specialization
 /// arguments that select it.
 type TraitMethodTable = BTreeMap<String, Vec<(BindingId, TraitArguments, MethodDefinition)>>;
 /// Type, grade, const, and effect arguments of one specialization.
-type GenericArguments = (Vec<Type>, Vec<Grade>, Vec<usize>, Vec<u8>);
+type GenericArguments = (Vec<Type>, Vec<Grade>, Vec<usize>, Vec<u16>);
 /// Generic arguments and checked values produced by inference.
-type Inferred = (Vec<Type>, Vec<Grade>, Vec<usize>, Vec<u8>, Vec<Expr>);
+type Inferred = (Vec<Type>, Vec<Grade>, Vec<usize>, Vec<u16>, Vec<Expr>);
 /// Function instances. A monomorphic function has one instance; a generic
 /// function gets one per distinct list of type arguments that is used.
 struct Functions<'a> {
@@ -4307,7 +4299,7 @@ fn insert_trait_arguments(
     substitution: &mut crate::runtime_types::Subst,
     consts: &mut BTreeMap<BindingId, usize>,
     grades: &mut BTreeMap<BindingId, Grade>,
-    effects: &mut BTreeMap<BindingId, u8>,
+    effects: &mut BTreeMap<BindingId, u16>,
 ) {
     let mut types = arguments.types.iter();
     let mut const_values = arguments.consts.iter();
@@ -4373,7 +4365,7 @@ fn trait_specialization_name(
             GenericCategory::Effect => {
                 let row = arguments.effects[effect_index];
                 effect_index += 1;
-                let names = [(1u8, "io"), (2, "alloc"), (4, "panic"), (8, "suspend")]
+                let names = [(1u16, "io"), (2, "alloc"), (4, "panic"), (8, "suspend")]
                     .into_iter()
                     .filter_map(|(bit, name)| (row & bit != 0).then_some(name))
                     .collect::<Vec<_>>();
@@ -6057,7 +6049,7 @@ struct PatternBindings {
     types: BTreeMap<BindingId, Type>,
     consts: BTreeMap<BindingId, usize>,
     grades: BTreeMap<BindingId, Grade>,
-    effects: BTreeMap<BindingId, u8>,
+    effects: BTreeMap<BindingId, u16>,
 }
 impl PatternBindings {
     fn subst(&self) -> crate::runtime_types::Subst {
@@ -7767,7 +7759,7 @@ impl<'a> Functions<'a> {
         type_arguments: Vec<Type>,
         grade_arguments: Vec<Grade>,
         const_arguments: Vec<usize>,
-        effect_arguments: Vec<u8>,
+        effect_arguments: Vec<u16>,
         impl_arguments: Option<usize>,
         origin: Option<Span>,
     ) -> Result<usize> {
@@ -7829,11 +7821,11 @@ impl<'a> Functions<'a> {
                     origin.unwrap_or(generic.span),
                     format!(
                         "effect argument {{{}}} for '{}' includes {}, which is excluded by '<{}: Effects - {}>'",
-                        effect_names(*effects),
+                        effect_names(resolution, *effects),
                         generic.name,
-                        effect_names(illegal),
+                        effect_names(resolution, illegal),
                         generic.name,
-                        effect_names(excluded)
+                        effect_names(resolution, excluded)
                     ),
                 ));
             }
@@ -7844,11 +7836,11 @@ impl<'a> Functions<'a> {
                     origin.unwrap_or(generic.span),
                     format!(
                         "effect argument {{{}}} for '{}' omits {}, which is required by '<{}: Effects + {}>'",
-                        effect_names(*effects),
+                        effect_names(resolution, *effects),
                         generic.name,
-                        effect_names(missing),
+                        effect_names(resolution, missing),
                         generic.name,
-                        effect_names(included)
+                        effect_names(resolution, included)
                     ),
                 ));
             }
@@ -8597,15 +8589,8 @@ impl<'a> Functions<'a> {
                         const_values.next().map(|value| value.to_string())
                     } else if crate::runtime_types::is_effect_generic(resolution, generic) {
                         effect_values.next().map(|effects| {
-                            let names = [
-                                (PANIC, "panic"),
-                                (IO, "io"),
-                                (ALLOC, "alloc"),
-                                (SUSPEND, "suspend"),
-                            ]
-                            .into_iter()
-                            .filter_map(|(bit, name)| (*effects & bit != 0).then_some(name))
-                            .collect::<Vec<_>>();
+                            let names =
+                                crate::runtime_types::effect_name_list(resolution, *effects);
                             format!("{{{}}}", names.join(", "))
                         })
                     } else {
@@ -9137,7 +9122,7 @@ struct Loop {
 #[derive(Debug, Clone)]
 struct EffectConstraint {
     row: crate::runtime_types::EffectRowTerm,
-    actual: u8,
+    actual: u16,
     span: Span,
 }
 
@@ -9179,7 +9164,10 @@ struct HandlerScope {
     slot: usize,
     handler_parameter: Type,
     handler_result: Type,
-    effects: u8,
+    effects: u16,
+    /// The handler accepts the copyable multishot resumption token. Only a
+    /// capture-free continuation has that representation.
+    multishot: bool,
 }
 
 struct Checker<'a, 't> {
@@ -9192,7 +9180,7 @@ struct Checker<'a, 't> {
     /// Concrete values of this instance's abstract grade parameters.
     grades: BTreeMap<BindingId, Grade>,
     /// Concrete effect rows of this instance's `e: Effects` parameters.
-    effect_arguments: BTreeMap<BindingId, u8>,
+    effect_arguments: BTreeMap<BindingId, u16>,
     locals: Vec<Local>,
     slots: BTreeMap<BindingId, usize>,
     result: Type,
@@ -9204,7 +9192,7 @@ struct Checker<'a, 't> {
     /// checked. Distinguishes owning `@[1]` transfers from must-use copyable
     /// transfers when a returned value is observed.
     result_grade: Option<Grade>,
-    effects: u8,
+    effects: u16,
     depth: usize,
     loops: Vec<Loop>,
     facts: crate::facts::Facts,
@@ -11615,7 +11603,7 @@ impl Checker<'_, '_> {
                 span,
             })
             .collect::<Vec<_>>();
-        let mut total_effects = 0u8;
+        let mut total_effects = 0u16;
         let mut signatures = Vec::new();
         for member in &members {
             let Some(impl_methods) =
@@ -13105,20 +13093,44 @@ impl Checker<'_, '_> {
             None => Ok(value),
         }
     }
-    fn require(&self, effects: u8, span: Span) -> Result<()> {
+    /// Every concrete effect bit in this program: the four built-ins plus each
+    /// declared `effect` operation's row bit.
+    fn all_effects(&self) -> u16 {
+        EFFECT_BITS
+            | self
+                .resolution
+                .effect_bits
+                .values()
+                .copied()
+                .fold(0u16, |bits, bit| bits | bit)
+    }
+    /// Row bit of a declared effect operation, or zero for an undeclared
+    /// lexically handled operation name.
+    fn operation_effect(&self, operation: &str) -> u16 {
+        self.resolution
+            .effect_bits
+            .get(operation)
+            .copied()
+            .unwrap_or(0)
+    }
+    fn require(&self, effects: u16, span: Span) -> Result<()> {
         let missing = effects & !self.effects;
         if missing == 0 {
             return Ok(());
         }
-        let names = [
+        let mut names = [
             (IO, "io"),
             (ALLOC, "alloc"),
             (PANIC, "panic"),
             (SUSPEND, "suspend"),
         ]
         .into_iter()
-        .filter_map(|(bit, name)| (missing & bit != 0).then_some(name))
+        .filter_map(|(bit, name)| (missing & bit != 0).then_some(name.to_owned()))
         .collect::<Vec<_>>();
+        names.extend(crate::runtime_types::user_effect_names(
+            self.resolution,
+            missing,
+        ));
         Err(Diagnostic::new(
             span,
             format!(
@@ -21126,7 +21138,7 @@ impl Checker<'_, '_> {
     fn unify_effects(
         &mut self,
         declared: &[ast::Type],
-        actual: u8,
+        actual: u16,
         effect_vars: &[BindingId],
         subst: &mut crate::runtime_types::Subst,
         span: Span,
@@ -21168,17 +21180,9 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
-    fn effect_row_mismatch(&self, actual: u8, covered: u8, span: Span) -> Diagnostic {
+    fn effect_row_mismatch(&self, actual: u16, covered: u16, span: Span) -> Diagnostic {
         let missing = actual & !covered;
-        let names = (0..4)
-            .filter(|bit| missing & (1 << bit) != 0)
-            .map(|bit| match 1u8 << bit {
-                crate::executable::PANIC => "panic",
-                crate::executable::IO => "io",
-                crate::executable::ALLOC => "alloc",
-                _ => "suspend",
-            })
-            .collect::<Vec<_>>();
+        let names = crate::runtime_types::effect_name_list(self.resolution, missing);
         Diagnostic::new(
             span,
             format!(
@@ -21210,15 +21214,15 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         let constraints = self.effect_constraints.split_off(mark);
-        let mut allowed: BTreeMap<BindingId, u8> = BTreeMap::new();
-        let mut required: BTreeMap<BindingId, u8> = BTreeMap::new();
+        let mut allowed: BTreeMap<BindingId, u16> = BTreeMap::new();
+        let mut required: BTreeMap<BindingId, u16> = BTreeMap::new();
         for generic in effect_generics {
             let binder = self.resolution.binder(generic.span).unwrap();
             let excluded =
                 crate::runtime_types::effect_excludes(self.resolution, generic)?.unwrap_or(0);
             let included =
                 crate::runtime_types::effect_includes(self.resolution, generic)?.unwrap_or(0);
-            allowed.insert(binder, EFFECT_BITS & !excluded);
+            allowed.insert(binder, self.all_effects() & !excluded);
             required.insert(binder, included);
         }
         let mut mentioned = BTreeSet::new();
@@ -21257,9 +21261,9 @@ impl Checker<'_, '_> {
                             format!(
                                 "specialized effect row for '{}' omits {}, which is required by '<{}: Effects + {}>'",
                                 generic.name,
-                                effect_names(missing),
+                                effect_names(self.resolution, missing),
                                 generic.name,
-                                effect_names(included)
+                                effect_names(self.resolution, included)
                             ),
                         ));
                     }
@@ -21282,29 +21286,53 @@ impl Checker<'_, '_> {
             }
             return Ok(());
         }
+        // Only effects that some constraint actually needs can appear in a
+        // *minimal* solution: adding any other bit only widens the row without
+        // helping cover an argument. Enumerating this relevant subset keeps the
+        // solver finite even when the declared-effect vocabulary is large.
+        let mut relevant = 0u16;
+        for constraint in &constraints {
+            relevant |= constraint.actual;
+        }
+        for bits in required.values() {
+            relevant |= *bits;
+        }
         let mut assignments: u128 = 1;
-        for _ in &unbound {
-            assignments *= 16;
+        for variable in &unbound {
+            let maximum = allowed.get(variable).copied().unwrap_or(EFFECT_BITS);
+            let choices = (relevant & maximum).count_ones();
+            if choices >= 63 {
+                return Err(Diagnostic::new(
+                    span,
+                    "effect-row constraint group exceeds the finite solver budget; specialize the effect rows explicitly with '::<...>'",
+                ));
+            }
+            assignments *= 1u128 << choices;
         }
         if assignments > 4096 {
             return Err(Diagnostic::new(
                 span,
-                "effect-row constraint group exceeds the finite solver budget (more than three unbound row variables); specialize the effect rows explicitly with '::<...>'",
+                "effect-row constraint group exceeds the finite solver budget (4096 assignments); specialize the effect rows explicitly with '::<...>'",
             ));
         }
-        let mut solutions: Vec<BTreeMap<BindingId, u8>> = vec![BTreeMap::new()];
+        let mut solutions: Vec<BTreeMap<BindingId, u16>> = vec![BTreeMap::new()];
         for variable in &unbound {
             let maximum = allowed.get(variable).copied().unwrap_or(EFFECT_BITS);
             let minimum = required.get(variable).copied().unwrap_or(0);
+            let candidates = relevant & maximum;
             let mut next = Vec::new();
             for solution in &solutions {
-                for bits in 0..=EFFECT_BITS {
-                    if bits & !maximum != 0 || bits & minimum != minimum {
-                        continue;
+                let mut bits = candidates;
+                loop {
+                    if bits & minimum == minimum {
+                        let mut candidate = solution.clone();
+                        candidate.insert(*variable, bits);
+                        next.push(candidate);
                     }
-                    let mut candidate = solution.clone();
-                    candidate.insert(*variable, bits);
-                    next.push(candidate);
+                    if bits == 0 {
+                        break;
+                    }
+                    bits = (bits - 1) & candidates;
                 }
             }
             solutions = next;
@@ -21334,15 +21362,7 @@ impl Checker<'_, '_> {
                 .unwrap_or(0);
             let excluded = first.actual & !reachable;
             if excluded != 0 {
-                let names = (0..4)
-                    .filter(|bit| excluded & (1 << bit) != 0)
-                    .map(|bit| match 1u8 << bit {
-                        crate::executable::PANIC => "panic",
-                        crate::executable::IO => "io",
-                        crate::executable::ALLOC => "alloc",
-                        _ => "suspend",
-                    })
-                    .collect::<Vec<_>>();
+                let names = crate::runtime_types::effect_name_list(self.resolution, excluded);
                 fn effect_spelling(ty: &ast::Type) -> String {
                     match &ty.kind {
                         ast::TypeKind::Named { path, .. } => path.join("."),
@@ -22112,7 +22132,7 @@ impl Checker<'_, '_> {
         static_body: bool,
         what: &str,
         span: Span,
-    ) -> Result<(Expr, Type, u8, Option<Grade>)> {
+    ) -> Result<(Expr, Type, u16, Option<Grade>)> {
         let value = if scope_root {
             let ast::ExprKind::Lambda(lambda) = &argument.kind else {
                 return Err(Diagnostic::new(
@@ -23594,24 +23614,37 @@ impl Checker<'_, '_> {
             ));
         };
         let signature = self.types.function_types[handler_id].clone();
-        let resume_ty = self.resume_type(result_ty);
+        let one_shot = self.resume_type(result_ty, false);
+        let multi_shot = self.resume_type(result_ty, true);
         if signature.parameters.len() != 2 {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "an effect handler takes the payload and one linear resumption token, found {} parameter(s)",
+                    "an effect handler takes the payload and one resumption token, found {} parameter(s)",
                     signature.parameters.len()
                 ),
             ));
         }
-        if signature.parameters[1] != resume_ty {
+        let multishot = if signature.parameters[1] == one_shot {
+            false
+        } else if signature.parameters[1] == multi_shot {
+            true
+        } else {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "the handler's second parameter must be exactly 'linear once fn({}) -> {}'",
+                    "the handler's second parameter must be exactly 'linear once fn({}) -> {}' for one-shot resumption or 'fn({}) -> {}' for multishot resumption",
+                    self.types.name(result_ty),
+                    self.types.name(result_ty),
                     self.types.name(result_ty),
                     self.types.name(result_ty)
                 ),
+            ));
+        };
+        if declared.is_some() && multishot {
+            return Err(Diagnostic::new(
+                span,
+                "multishot resumption is not supported for a declared operation: a dynamic perform always supplies the one-shot linear resumption token, so the handler contract would differ between lexical and called-function performs",
             ));
         }
         if !self.subtype(parameter_ty, signature.parameters[0]) {
@@ -23636,10 +23669,10 @@ impl Checker<'_, '_> {
         }
         self.require(signature.effects, span)?;
         if declared.is_some() {
-            if !matches!(handler_value.ty, Type::Fn(_)) {
+            if !matches!(handler_value.ty, Type::Fn(_) | Type::Once(_)) {
                 return Err(Diagnostic::new(
                     handler.span,
-                    "a dynamically visible handler must be a noncapturing 'fn' value; one-shot capturing handlers stay lexical because their environment cannot be shared through the handler stack",
+                    "a dynamically visible handler must be a fn or once fn value",
                 ));
             }
             if signature.effects != 0 {
@@ -23662,7 +23695,15 @@ impl Checker<'_, '_> {
             handler_parameter,
             handler_result,
             effects: signature.effects,
+            multishot,
         });
+        // A lexical handle discharges the declared operation's row requirement
+        // for its body: the body is checked as if `Op` were available, while the
+        // enclosing function row is untouched. Calls to other functions that
+        // declare `{Op}` are therefore satisfied here.
+        let operation_effect = self.operation_effect(operation);
+        let saved_effects = self.effects;
+        self.effects |= operation_effect;
         let checked = self.checked_effect_body(
             body,
             operation,
@@ -23675,7 +23716,9 @@ impl Checker<'_, '_> {
             handler_parameter,
             handler_result,
             signature.effects,
+            multishot,
         );
+        self.effects = saved_effects;
         self.handlers.pop();
         let inner = checked?;
         let ty = inner.ty;
@@ -23713,28 +23756,37 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
-    /// Intern the resumption callable type `linear once fn(R) -> R`.
-    fn resume_type(&mut self, result: Type) -> Type {
+    /// Intern a resumption callable type. One-shot resumption is
+    /// `linear once fn(R) -> R`; multishot resumption is the copyable
+    /// `fn(R) -> R`. The copyable form is only sound when the continuation
+    /// owns no environment, which the checker enforces at the perform site.
+    fn resume_type(&mut self, result: Type, multishot: bool) -> Type {
         let id = self.types.function_type_with(
             vec![result],
             result,
             0,
             vec![None],
             None,
-            true,
-            true,
+            !multishot,
+            !multishot,
             crate::runtime_types::BorrowSig::default(),
         );
-        Type::Once(id)
+        if multishot {
+            Type::Fn(id)
+        } else {
+            Type::Once(id)
+        }
     }
     /// Build the identity resumption value. The linear contract is enforced by
     /// the ordinary callable ownership rules; no hidden continuation or stack
     /// pointer exists, so a token that is transferred and called normally is
     /// still a one-shot operation result.
-    fn resume_value(&mut self, result: Type, span: Span) -> Result<Expr> {
-        let ty = self.resume_type(result);
-        let Type::Once(id) = ty else {
-            unreachable!("resume type is once")
+    fn resume_value(&mut self, result: Type, multishot: bool, span: Span) -> Result<Expr> {
+        let ty = self.resume_type(result, multishot);
+        let (id, env_parameter) = match ty {
+            Type::Once(id) => (id, true),
+            Type::Fn(id) => (id, false),
+            _ => unreachable!("resume type is callable"),
         };
         let signature = self.types.function_types[id].clone();
         let locals = vec![Local {
@@ -23758,7 +23810,7 @@ impl Checker<'_, '_> {
             "effect resume",
             &signature,
             vec![],
-            true,
+            env_parameter,
             locals,
             body,
             span,
@@ -23798,7 +23850,8 @@ impl Checker<'_, '_> {
         handler_ty: Type,
         handler_parameter: Type,
         handler_result: Type,
-        effects: u8,
+        effects: u16,
+        multishot: bool,
     ) -> Result<Block> {
         let unsupported = || {
             Diagnostic::new(
@@ -23936,6 +23989,7 @@ impl Checker<'_, '_> {
             suffix,
             body.tail.as_deref(),
             span,
+            multishot,
         )?;
         let handler = Expr {
             kind: ExprKind::Local(slot),
@@ -23977,7 +24031,14 @@ impl Checker<'_, '_> {
         statements: &[ast::Statement],
         tail: Option<&ast::Expr>,
         span: Span,
+        multishot: bool,
     ) -> Result<Expr> {
+        if multishot && !captures.is_empty() {
+            return Err(Diagnostic::new(
+                span,
+                "multishot resumption requires a continuation with no captured values; the copyable resumption token cannot own an environment. Copy the needed values into the operation payload or use a one-shot 'linear once fn' handler",
+            ));
+        }
         if self.linear_type(result_ty) {
             return Err(Diagnostic::new(
                 span,
@@ -24122,16 +24183,18 @@ impl Checker<'_, '_> {
             // Building an environment is a real allocation.
             self.require(ALLOC | PANIC, span)?;
         }
-        let ty = self.resume_type(result_ty);
-        let Type::Once(id) = ty else {
-            unreachable!("resume type is once")
+        let ty = self.resume_type(result_ty, multishot);
+        let (id, env_parameter) = match ty {
+            Type::Once(id) => (id, true),
+            Type::Fn(id) => (id, false),
+            _ => unreachable!("resume type is callable"),
         };
         let signature = self.types.function_types[id].clone();
         let function = self.register_adapter(
             "effect resumption",
             &signature,
             capture_types,
-            true,
+            env_parameter,
             locals,
             body,
             span,
@@ -24154,25 +24217,27 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
+        let operation_effect = self.operation_effect(operation);
         if let Some(scope) = self
             .handlers
             .iter()
             .rev()
             .find(|scope| scope.operation == operation)
         {
-            let (parameter, result, slot, handler_parameter, handler_result, effects) = (
+            let (parameter, result, slot, handler_parameter, handler_result, effects, multishot) = (
                 scope.parameter,
                 scope.result,
                 scope.slot,
                 scope.handler_parameter,
                 scope.handler_result,
                 scope.effects,
+                scope.multishot,
             );
             let handler_ty = self.locals[slot].ty;
-            self.require(effects, span)?;
+            self.require(effects | operation_effect, span)?;
             let payload = self.expr_expected(value, Some(parameter))?;
             let payload = self.coerce(payload, handler_parameter, span)?;
-            let resume = self.resume_value(result, span)?;
+            let resume = self.resume_value(result, multishot, span)?;
             let call = Expr {
                 kind: ExprKind::CallIndirect {
                     callee: Box::new(Expr {
@@ -24202,11 +24267,13 @@ impl Checker<'_, '_> {
             ));
         };
         // No handler may be active at run time, which aborts the program, so
-        // a dynamically resolved operation can always panic.
-        self.require(PANIC, span)?;
+        // a dynamically resolved operation can always panic. A declared
+        // operation is a concrete row effect too: the enclosing function must
+        // list it (a lexical handle removes it for its body).
+        self.require(PANIC | operation_effect, span)?;
         let payload = self.expr_expected(value, Some(declared.parameter))?;
         let payload = self.coerce(payload, declared.parameter, span)?;
-        let resume = self.resume_value(declared.result, span)?;
+        let resume = self.resume_value(declared.result, false, span)?;
         let handler = self.types.function_type_with(
             vec![declared.parameter, resume.ty],
             declared.result,
