@@ -272,6 +272,25 @@ fn owning_handler_payload_and_result_cleanup_once() {
 }
 
 #[test]
+fn linear_values_survive_a_perform_without_duplication() {
+    let source = r#"
+        #[linear]
+        struct Token { id: i64 }
+        fn main() -> i64 ! {panic} {
+            let token = Token { id: 5 };
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x) } {
+                let a = perform Op(1);
+                let Token { id } = token;
+                a + id
+            }
+        }"#;
+    assert_eq!(value(source), 6);
+}
+
+#[test]
 fn handler_effects_are_part_of_the_handle_contract() {
     let source = r#"
         fn main() -> Unit ! {io, panic} {
@@ -362,6 +381,21 @@ fn mutable_scalar_locals_index_erased_proofs_at_their_current_version() {
     assert_eq!(value(source), 12);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 12);
+}
+
+#[test]
+fn total_logical_evidence_is_independent_and_versioned() {
+    let source = r#"
+        total fn same_i64(n: i64) -> Eq<i64, n, n> ! {} { refl::<i64>(n) }
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n = 5;
+            let a = keep(n, same_i64(n));
+            n = 7;
+            let b = keep(n, same_i64(n));
+            a + b
+        }"#;
+    assert_eq!(value(source), 12);
 }
 
 #[test]
