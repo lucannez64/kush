@@ -2206,6 +2206,15 @@ impl<'a> Types<'a> {
             }
             let id = self.resolution.reference(ty.span).unwrap();
             let b = &self.resolution.bindings[id];
+            if b.kind == BindingKind::EffectRow {
+                return Err(Diagnostic::new(
+                    ty.span,
+                    format!(
+                        "effect row alias '{}' is not a runtime type; use it only inside an effect row such as '! {{ {} }}'",
+                        b.name, b.name
+                    ),
+                ));
+            }
             let (lifetime_arguments, arguments) =
                 split_lifetime_arguments(arguments, substitution, ty.span)?;
             if b.kind == BindingKind::Alias {

@@ -744,8 +744,9 @@ Local Linux x86-64 validation used
 `CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/close-rows-proofs` with
 debug information disabled and two Cargo jobs:
 
-- Full `cargo test -p kush --offline -j 2`: **965 passed, 0 failed** across 63
-  test binaries (including the new `arithmetic_proofs` binary).
+- Full `cargo test -p kush --offline -j 2`: **968 passed, 0 failed** across 63
+  test binaries (including the new `arithmetic_proofs` binary and three
+  independent certificate-verifier unit tests).
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy -p kush --all-targets --offline -j 2 -- -D warnings`: passed.
 

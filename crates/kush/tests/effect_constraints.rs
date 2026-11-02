@@ -644,6 +644,11 @@ fn effect_row_aliases_are_finite_and_cannot_take_arguments() {
          fn main() -> i64 ! {Io<i64>} { 0 }",
         "does not take arguments",
     );
+    rejects(
+        "effect row Io = {io};
+         fn main() -> i64 ! {panic} { let x: Io = 1; x }",
+        "is not a runtime type",
+    );
 }
 
 // ---------------------------------------------------------------------------

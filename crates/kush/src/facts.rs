@@ -952,3 +952,69 @@ pub(crate) fn failure(
         ),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inequality(coefficients: &[(Term, i128)], bound: i128) -> Constraint {
+        Constraint {
+            coefficients: coefficients.iter().copied().collect(),
+            bound,
+        }
+    }
+
+    fn certificate(hypotheses: Vec<Constraint>, goal: Constraint) -> Certificate {
+        let proof = prove_with(&hypotheses, &goal).expect("linear implication");
+        Certificate {
+            span: Span::default(),
+            obligation: "test".to_owned(),
+            goal,
+            steps: proof.steps,
+            multipliers: proof.multipliers,
+            denominator: proof.denominator,
+            negation: proof.negation,
+            hypotheses,
+        }
+    }
+
+    #[test]
+    fn independent_verifier_accepts_a_valid_linear_certificate() {
+        let x = Term::Var(0, 0);
+        let hypotheses = vec![inequality(&[(x, 2)], 4)];
+        let goal = inequality(&[(x, 1)], 2);
+        let certificate = certificate(hypotheses, goal);
+        assert!(verify(&certificate));
+    }
+
+    #[test]
+    fn independent_verifier_rejects_tampered_multipliers_and_bounds() {
+        let x = Term::Var(0, 0);
+        let hypotheses = vec![inequality(&[(x, 2)], 4)];
+        let goal = inequality(&[(x, 1)], 2);
+        let good = certificate(hypotheses, goal);
+        assert!(verify(&good));
+
+        let mut tampered = good.clone();
+        tampered.multipliers[0] += 1;
+        assert!(!verify(&tampered));
+
+        let mut wrong_goal = good;
+        wrong_goal.goal = inequality(&[(x, 1)], 1);
+        assert!(!verify(&wrong_goal));
+    }
+
+    #[test]
+    fn difference_shaped_facts_still_prove_and_refute() {
+        let x = Term::Var(0, 0);
+        let y = Term::Var(1, 0);
+        let hypotheses = vec![
+            inequality(&[(x, 1), (y, -1)], 2),
+            inequality(&[(y, 1), (x, -1)], 1),
+        ];
+        // y - x <= 1 does not imply x - y <= 0.
+        assert!(prove_with(&hypotheses, &inequality(&[(x, 1), (y, -1)], 0)).is_none());
+        // Together they imply 2 <= 3, a trivially constant goal.
+        assert!(prove_with(&hypotheses, &inequality(&[], 3)).is_some());
+    }
+}
