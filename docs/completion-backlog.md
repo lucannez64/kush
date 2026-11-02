@@ -252,6 +252,8 @@ memory changes are integrated on `main`. Local Linux x86-64 validation used
 - Memory benchmark smoke run: all five workloads preserved native/reference
   allocation-counter parity; results are observations, not a speed claim.
 
-The final combined Boat gate and independent review are pending. Earlier
-branch-only test counts above are historical evidence, not evidence that the
-remaining unchecked features are complete.
+The combined Boat gate passed for source checkpoint `20e9a0d`: **832 tests,
+formatting, and Clippy**, with the sandbox confirmed stopped afterwards.
+Independent review is pending. Earlier branch-only test counts above are
+historical evidence, not evidence that the remaining unchecked features are
+complete.
