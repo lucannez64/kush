@@ -182,7 +182,7 @@ fn unsupported_runtime_features_cannot_enter_the_checked_ir() {
         "main must not be generic",
     );
     rejects("fn main() -> Nat ! {} { 0 }", "logical Nat");
-    rejects("#[unknown] fn main() -> Unit ! {} {}", "contracts");
+    rejects("#[unknown] fn main() -> Unit ! {} {}", "functions support");
     // A scalar alias used only logically is a checked machine-carrier alias.
     let scalar_alias = check("type A = i64; fn main() -> Unit ! {} {}").unwrap();
     assert!(
