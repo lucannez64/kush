@@ -494,8 +494,8 @@ fn handler_effects_are_part_of_the_handle_contract() {
 fn declared_effects_reach_handlers_through_called_functions() {
     let source = r#"
         effect Op: i64 -> i64;
-        fn deep() -> i64 ! {panic} { perform Op(20) }
-        fn call() -> i64 ! {panic} { deep() + 1 }
+        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
+        fn call() -> i64 ! {Op, panic} { deep() + 1 }
         fn main() -> i64 ! {panic} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
@@ -511,8 +511,8 @@ fn declared_effects_reach_handlers_through_called_functions() {
     // called functions.
     let many = r#"
         effect Op: i64 -> i64;
-        fn a() -> i64 ! {panic} { perform Op(20) }
-        fn b() -> i64 ! {panic} { perform Op(1) }
+        fn a() -> i64 ! {Op, panic} { perform Op(20) }
+        fn b() -> i64 ! {Op, panic} { perform Op(1) }
         fn main() -> i64 ! {panic} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
@@ -528,7 +528,7 @@ fn declared_effects_reach_handlers_through_called_functions() {
     // function-entry depth restoration must make the next perform handlerless.
     let loop_restore = r#"
         effect Op: i64 -> i64;
-        fn next() -> i64 ! {panic} { perform Op(1) }
+        fn next() -> i64 ! {Op, panic} { perform Op(1) }
         fn main() -> i64 ! {panic} {
             let mut i = 0;
             let mut sum = 0;
@@ -552,7 +552,7 @@ fn declared_effects_reach_handlers_through_called_functions() {
     agrees(loop_restore, 3);
     let restored = r#"
         effect Op: i64 -> i64;
-        fn next() -> i64 ! {panic} { perform Op(1) }
+        fn next() -> i64 ! {Op, panic} { perform Op(1) }
         fn scoped() -> i64 ! {panic} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
@@ -561,7 +561,7 @@ fn declared_effects_reach_handlers_through_called_functions() {
                 return next();
             }
         }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {Op, panic} {
             let x = scoped();
             perform Op(2) + x
         }"#;
@@ -603,7 +603,7 @@ fn declared_effects_reach_handlers_through_called_functions() {
                 perform Op(1)
             }
         }"#,
-        "noncapturing 'fn' value",
+        "dynamically visible handler must be pure",
     );
     rejects(
         r#"
@@ -617,6 +617,247 @@ fn declared_effects_reach_handlers_through_called_functions() {
             }
         }"#,
         "declared operation signature",
+    );
+}
+
+#[test]
+fn capturing_dynamic_handlers_own_their_environment() {
+    // A pure once handler may capture copyable values. The frame owns its
+    // environment, the first dynamic perform consumes it, and the callee frees
+    // the environment exactly once.
+    let source = r#"
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
+        fn main() -> i64 ! {alloc, panic} {
+            let n = 1;
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(n) } {
+                deep()
+            }
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 1);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 1);
+
+    // A capturing handler that is never performed is dropped when its lexical
+    // frame pops.
+    let unused = r#"
+        effect Op: i64 -> i64;
+        fn main() -> i64 ! {alloc, panic} {
+            let n = 1;
+            let r = handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(n) } {
+                5
+            };
+            r + n
+        }"#;
+    let (result, stats) = evaluate(unused);
+    assert_eq!(result, 6);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(unused, 6);
+
+    // Early return crosses the dynamic frame boundary. The function epilogue
+    // must drop the unconsumed owning handler exactly once.
+    let early = r#"
+        effect Op: i64 -> i64;
+        fn scoped() -> i64 ! {alloc, panic} {
+            let n = 5;
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(n) } {
+                return n;
+            }
+        }
+        fn main() -> i64 ! {alloc, panic} { scoped() }"#;
+    let (result, stats) = evaluate(early);
+    assert_eq!(result, 5);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(early, 5);
+}
+
+#[test]
+fn a_once_dynamic_handler_is_consumed_by_its_first_perform() {
+    // The first called function consumes the single owning environment. A
+    // second perform finds no active copyable frame and aborts rather than
+    // reusing freed state.
+    let source = r#"
+        effect Op: i64 -> i64;
+        fn a() -> i64 ! {Op, panic} { perform Op(1) }
+        fn b() -> i64 ! {Op, panic} { perform Op(2) }
+        fn main() -> i64 ! {alloc, panic} {
+            let n = 10;
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(n) } {
+                a() + b()
+            }
+        }"#;
+    let program = check(source).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("no dynamically active handler"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn tasks_inherit_copyable_dynamic_frames_with_isolated_extents() {
+    // A copyable noncapturing handler frame crosses a structured task spawn,
+    // so a child can resolve the operation its parent installed.
+    let inherited = r#"
+        use std.task.TaskExit;
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {Op, panic} { perform Op(10) }
+        fn main() -> i64 ! {suspend, alloc, panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x) } {
+                Task.scope(fn() -> i64 ! {suspend, alloc, Op, panic} {
+                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {Op, panic} { deep() });
+                    match Task.join(t) {
+                        TaskExit.Completed(v) => v,
+                        TaskExit.Cancelled => 0,
+                    }
+                })
+            }
+        }"#;
+    assert_eq!(value(inherited), 10);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(inherited, 10);
+
+    // A capturing once frame is a task boundary: its owned environment is not
+    // shared with the child, so the child cannot resolve the operation.
+    let isolated = r#"
+        use std.task.TaskExit;
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {Op, panic} { perform Op(10) }
+        fn main() -> i64 ! {suspend, alloc, panic} {
+            let n = 1;
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(n) } {
+                Task.scope(fn() -> i64 ! {suspend, alloc, Op, panic} {
+                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {Op, panic} { deep() });
+                    match Task.join(t) {
+                        TaskExit.Completed(v) => v,
+                        TaskExit.Cancelled => 0,
+                    }
+                })
+            }
+        }"#;
+    let program = check(isolated).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("no dynamically active handler"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn declared_effect_names_are_checked_row_entries() {
+    // A declared operation contributes a row bit. A function that performs it
+    // dynamically must list it, and a lexical handle discharges it for the
+    // body while still requiring the handler's own effects.
+    let source = r#"
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
+        fn call() -> i64 ! {Op, panic} { deep() + 1 }
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x) } {
+                call()
+            }
+        }"#;
+    assert_eq!(value(source), 21);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 21);
+    // Omitting the declared row entry is an ordinary effect-row error.
+    rejects(
+        r#"
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {panic} { perform Op(20) }
+        fn main() -> i64 ! {panic} { deep() }"#,
+        "requires effects {Op}",
+    );
+    // The handle removes the operation from the enclosing requirement but not
+    // the handler's or the body's other effects.
+    rejects(
+        r#"
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {io, panic} { print_i64(x); resume(x) } {
+                deep()
+            }
+        }"#,
+        "requires effects {io}",
+    );
+    // An unknown row name remains rejected.
+    rejects(
+        r#"
+        effect Op: i64 -> i64;
+        fn main() -> i64 ! {Missing, panic} { 0 }"#,
+        "unknown name",
+    );
+    // Declared effects participate in ordinary row inference and exclusions.
+    let inferred = r#"
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
+        fn apply<e: Effects>(f: fn() -> i64 ! {e}) -> i64 ! {panic, e} { f() }
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x) } {
+                apply(deep)
+            }
+        }"#;
+    assert_eq!(value(inferred), 20);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(inferred, 20);
+    rejects(
+        r#"
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
+        fn only<e: Effects - Op>(f: fn() -> i64 ! {e}) -> i64 ! {panic, e} { f() }
+        fn main() -> i64 ! {panic} { only(deep) }"#,
+        "excluded",
+    );
+    // A declared operation's dynamic perform supplies the one-shot token, so a
+    // multishot handler contract cannot be shared with called functions.
+    rejects(
+        r#"
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {Op, panic} { perform Op(20) }
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x) } {
+                deep()
+            }
+        }"#,
+        "multishot resumption is not supported for a declared operation",
     );
 }
 
@@ -656,8 +897,8 @@ fn performs_require_a_lexical_handler_and_a_exact_resume_contract() {
         fn main() -> i64 ! {panic} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
-                resume: fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(x) } { perform Op(1) }
+                resume: fn(Bool) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(true) } { perform Op(1) }
         }"#,
         "second parameter must be exactly",
     );
@@ -756,6 +997,79 @@ fn non_tail_resumption_rejects_unsupported_continuation_shapes() {
                 x: Token,
                 resume: linear once fn(Token) -> Token ! {},
             ) -> Token ! {panic} { resume(x) } {
+                let a = perform Op(Token { id: 1 });
+                a
+            }
+        }"#,
+        "linear operation result",
+    );
+}
+
+#[test]
+fn multishot_resumption_reuses_a_capture_free_continuation() {
+    // A copyable `fn(R) -> R` resumption token may be called more than once.
+    // The continuation owns no environment, so each call re-runs the suffix
+    // from the perform point with the supplied value.
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {} {
+                let a = resume(1);
+                resume(2)
+            } {
+                let v = perform Op(0);
+                v + 1
+            }
+        }"#;
+    assert_eq!(value(source), 3);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 3);
+    // A tail perform with a copyable token is the allocation-free identity
+    // resumption, callable repeatedly.
+    let tail = r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {} {
+                resume(x)
+            } {
+                perform Op(7)
+            }
+        }"#;
+    assert_eq!(value(tail), 7);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(tail, 7);
+    // A captured environment would make the token owning, so multishot with
+    // captures stays an explicit rejection rather than silently sharing it.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let n = 1;
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {} {
+                resume(x)
+            } {
+                let v = perform Op(0);
+                v + n
+            }
+        }"#,
+        "multishot resumption requires a continuation with no captured values",
+    );
+    // Owning operation results still cannot travel through a resumption.
+    rejects(
+        r#"
+        #[linear]
+        struct Token { id: i64 }
+        fn main() -> i64 ! {panic} {
+            handle Op: Token -> Token with fn(
+                x: Token,
+                resume: fn(Token) -> Token ! {},
+            ) -> Token ! {} { resume(x) } {
                 let a = perform Op(Token { id: 1 });
                 a
             }
@@ -1584,7 +1898,7 @@ fn dynamically_resolved_perform_requires_panic() {
         effect Op: i64 -> i64;
         fn pure() -> i64 ! {} { perform Op(20) }
         fn main() -> i64 ! {} { pure() }"#,
-        "requires effects {panic}",
+        "requires effects {panic, Op}",
     );
 }
 
