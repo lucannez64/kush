@@ -30,6 +30,10 @@ pub enum Kind {
     Loop,
     Break,
     Continue,
+    /// Lexical tail-resumptive effect handler and operation perform.
+    Handle,
+    Perform,
+    With,
     True,
     False,
     LParen,
@@ -217,6 +221,9 @@ impl Lexer<'_> {
                 "loop" => Kind::Loop,
                 "break" => Kind::Break,
                 "continue" => Kind::Continue,
+                "handle" => Kind::Handle,
+                "perform" => Kind::Perform,
+                "with" => Kind::With,
                 text => Kind::Ident(text.to_owned()),
             });
         }

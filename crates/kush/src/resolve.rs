@@ -1250,6 +1250,19 @@ impl Resolver {
                     })?;
                 }
                 ExprKind::Block(block) => r.block(block)?,
+                ExprKind::Handle {
+                    parameter,
+                    result,
+                    handler,
+                    body,
+                    operation: _,
+                } => {
+                    r.ty(parameter)?;
+                    r.ty(result)?;
+                    r.expr(handler)?;
+                    r.block(body)?;
+                }
+                ExprKind::Perform { value, operation: _ } => r.expr(value)?,
                 ExprKind::Unary { operand, .. } | ExprKind::Try(operand) => r.expr(operand)?,
                 ExprKind::Binary { left, right, .. } => {
                     r.expr(left)?;

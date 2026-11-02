@@ -1043,6 +1043,13 @@ fn collect_body_returns<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
                 collect_body_returns(argument, out);
             }
         }
+        ast::ExprKind::Handle {
+            handler, body, ..
+        } => {
+            collect_body_returns(handler, out);
+            collect_block_returns(body, out);
+        }
+        ast::ExprKind::Perform { value, .. } => collect_body_returns(value, out),
         ast::ExprKind::If {
             condition,
             then,
@@ -2517,6 +2524,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             field_place: false,
             binding: sig.binding,
             scalar_epochs: BTreeMap::new(),
+            handlers: Vec::new(),
             effect_constraints: Vec::new(),
         };
         let body = (|| {
@@ -2639,6 +2647,7 @@ fn expr_key(expr: &ast::Expr) -> String {
         E::String(value) => format!("{value:?}"),
         E::Char(value) => format!("'{value}'"),
         E::Bool(value) => value.to_string(),
+        E::Handle { .. } | E::Perform { .. } => format!("{:?}", expr.kind),
         E::Tuple(items) => format!(
             "({})",
             items.iter().map(expr_key).collect::<Vec<_>>().join(",")
@@ -7373,6 +7382,19 @@ struct EffectConstraint {
     span: Span,
 }
 
+/// One lexical effect-handler binding. The handler is materialized in a hidden
+/// local so `perform` can call it and the ownership pass can enforce the
+/// callable's one-shot/linear contract.
+struct HandlerScope {
+    operation: String,
+    parameter: Type,
+    result: Type,
+    slot: usize,
+    handler_parameter: Type,
+    handler_result: Type,
+    effects: u8,
+}
+
 struct Checker<'a, 't> {
     types: &'t mut Types<'a>,
     resolution: &'a Resolution,
@@ -7438,6 +7460,9 @@ struct Checker<'a, 't> {
     /// old hypothesis. A mutable capture is still rejected because a closure
     /// environment would observe an unsynchronized runtime location.
     scalar_epochs: BTreeMap<BindingId, u32>,
+    /// Lexically active effect handlers, innermost last. A handler is visible
+    /// only to direct `perform` expressions in the same function body.
+    handlers: Vec<HandlerScope>,
     /// Pending effect-row inclusion constraints for the current inference
     /// group. `infer` takes a mark and solves them after every argument has
     /// contributed its evidence.
@@ -12311,6 +12336,27 @@ impl Checker<'_, '_> {
                         c.resolution.bindings[id].name
                     ),
                 ));
+            }
+            if let ast::ExprKind::Handle {
+                operation,
+                parameter,
+                result,
+                handler,
+                body,
+            } = &expr.kind
+            {
+                return c.handle_effect(
+                    operation,
+                    parameter,
+                    result,
+                    handler,
+                    body,
+                    expected,
+                    span,
+                );
+            }
+            if let ast::ExprKind::Perform { operation, value } = &expr.kind {
+                return c.perform_effect(operation, value, expected, span);
             }
             if c.constructor_target(expr).is_some() {
                 return c.construct(expr, None, expected, span);
@@ -18523,6 +18569,229 @@ impl Checker<'_, '_> {
             None => Ok(value),
         }
     }
+    /// Check one lexically scoped, one-shot tail-resumptive handler.
+    ///
+    /// The handler is an ordinary first-class callable of type
+    /// `fn(P, linear once fn(R) -> R) -> R` (or `once`/`linear once`). It is
+    /// evaluated once and stored in a hidden local. `perform` calls it with the
+    /// payload and a fresh identity resumption token. The token is linear, so
+    /// the handler must invoke it exactly once on every normal path; invoking it
+    /// twice is a use-after-move, and returning without invoking it is an
+    /// unconsumed linear obligation. There is no captured continuation, so a
+    /// second resumption (multishot) is unrepresentable.
+    fn handle_effect(
+        &mut self,
+        operation: &str,
+        parameter: &ast::Type,
+        result: &ast::Type,
+        handler: &ast::Expr,
+        body: &ast::Block,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        let parameter_ty = self.ty(parameter)?;
+        let result_ty = self.ty(result)?;
+        if matches!(parameter_ty, Type::Never) || matches!(result_ty, Type::Never) {
+            return Err(Diagnostic::new(
+                span,
+                "a handled operation cannot use Never as its payload or result type",
+            ));
+        }
+        let handler_value = self.expr(handler)?;
+        let Some((handler_id, _)) = Self::function_parts(handler_value.ty) else {
+            return Err(Diagnostic::new(
+                handler.span,
+                "an effect handler must be a first-class fn/once fn value",
+            ));
+        };
+        let signature = self.types.function_types[handler_id].clone();
+        let resume_ty = self.resume_type(result_ty);
+        if signature.parameters.len() != 2 {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "an effect handler takes the payload and one linear resumption token, found {} parameter(s)",
+                    signature.parameters.len()
+                ),
+            ));
+        }
+        if signature.parameters[1] != resume_ty {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the handler's second parameter must be exactly 'linear once fn({}) -> {}'",
+                    self.types.name(result_ty),
+                    self.types.name(result_ty)
+                ),
+            ));
+        }
+        if !self.subtype(parameter_ty, signature.parameters[0]) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the handler parameter accepts {}, which is not a supertype of the performed payload {}",
+                    self.types.name(signature.parameters[0]),
+                    self.types.name(parameter_ty)
+                ),
+            ));
+        }
+        if !self.subtype(signature.result, result_ty) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the handler returns {}, which is not a subtype of the operation result {}",
+                    self.types.name(signature.result),
+                    self.types.name(result_ty)
+                ),
+            ));
+        }
+        self.require(signature.effects, span)?;
+        let handler_type = handler_value.ty;
+        let slot = self.fresh_local(span, handler_type)?;
+        self.locals[slot].linear = signature.linear;
+        self.handlers.push(HandlerScope {
+            operation: operation.to_owned(),
+            parameter: parameter_ty,
+            result: result_ty,
+            slot,
+            handler_parameter: signature.parameters[0],
+            handler_result: signature.result,
+            effects: signature.effects,
+        });
+        let checked = self.block(body, expected);
+        self.handlers.pop();
+        let inner = checked?;
+        let ty = inner.ty;
+        Ok(Expr {
+            kind: ExprKind::Block(Block {
+                statements: vec![Statement::Let(slot, handler_value)],
+                tail: Some(Box::new(Expr {
+                    kind: ExprKind::Block(inner),
+                    ty,
+                    span,
+                    resource: None,
+                })),
+                ty,
+            }),
+            ty,
+            span,
+            resource: None,
+        })
+    }
+    /// Intern the resumption callable type `linear once fn(R) -> R`.
+    fn resume_type(&mut self, result: Type) -> Type {
+        let id = self.types.function_type_with(
+            vec![result],
+            result,
+            0,
+            vec![None],
+            None,
+            true,
+            true,
+            crate::runtime_types::BorrowSig::default(),
+        );
+        Type::Once(id)
+    }
+    /// Build the identity resumption value. The linear contract is enforced by
+    /// the ordinary callable ownership rules; no hidden continuation or stack
+    /// pointer exists, so a token that is transferred and called normally is
+    /// still a one-shot operation result.
+    fn resume_value(&mut self, result: Type, span: Span) -> Result<Expr> {
+        let ty = self.resume_type(result);
+        let Type::Once(id) = ty else {
+            unreachable!("resume type is once")
+        };
+        let signature = self.types.function_types[id].clone();
+        let locals = vec![Local {
+            ty: result,
+            mutable: false,
+            linear: false,
+            grade: None,
+            span,
+        }];
+        let body = Block {
+            statements: vec![],
+            tail: Some(Box::new(Expr {
+                kind: ExprKind::Local(0),
+                ty: result,
+                span,
+                resource: None,
+            })),
+            ty: result,
+        };
+        let function = self.register_adapter(
+            "effect resume",
+            &signature,
+            vec![],
+            true,
+            locals,
+            body,
+            span,
+        )?;
+        Ok(Expr {
+            kind: ExprKind::FnValue {
+                function,
+                captures: vec![],
+            },
+            ty,
+            span,
+            resource: None,
+        })
+    }
+    /// Check a direct `perform` against the innermost lexical handler.
+    fn perform_effect(
+        &mut self,
+        operation: &str,
+        value: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        let Some(scope) = self
+            .handlers
+            .iter()
+            .rev()
+            .find(|scope| scope.operation == operation)
+        else {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "perform '{operation}' has no lexically enclosing handler; handlers cover direct performs in the same function body only"
+                ),
+            ));
+        };
+        let (parameter, result, slot, handler_parameter, handler_result, effects) = (
+            scope.parameter,
+            scope.result,
+            scope.slot,
+            scope.handler_parameter,
+            scope.handler_result,
+            scope.effects,
+        );
+        let handler_ty = self.locals[slot].ty;
+        self.require(effects, span)?;
+        let payload = self.expr_expected(value, Some(parameter))?;
+        let payload = self.coerce(payload, handler_parameter, span)?;
+        let resume = self.resume_value(result, span)?;
+        let call = Expr {
+            kind: ExprKind::CallIndirect {
+                callee: Box::new(Expr {
+                    kind: ExprKind::Local(slot),
+                    ty: handler_ty,
+                    span,
+                    resource: None,
+                }),
+                arguments: vec![payload, resume],
+            },
+            ty: handler_result,
+            span,
+            resource: None,
+        };
+        let call = self.coerce(call, result, span)?;
+        match expected {
+            Some(expected) => self.coerce(call, expected, span),
+            None => Ok(call),
+        }
+    }
     /// Runtime-sized inline array constructors and reads. The capacity is a
     /// compile-time bound; only the length is dynamic. `DynArray.new` and
     /// `DynArray.push` preserve the inline representation (no heap allocation),
@@ -20080,6 +20349,13 @@ fn collect_expr_refs(resolution: &Resolution, expr: &ast::Expr, out: &mut BTreeS
                 collect_expr_refs(resolution, argument, out);
             }
         }
+        ast::ExprKind::Handle {
+            handler, body, ..
+        } => {
+            collect_expr_refs(resolution, handler, out);
+            collect_lambda_refs(resolution, body, out);
+        }
+        ast::ExprKind::Perform { value, .. } => collect_expr_refs(resolution, value, out),
         ast::ExprKind::Lambda(lambda) => collect_lambda_refs(resolution, &lambda.body, out),
         ast::ExprKind::Specialize { callee, .. } => collect_expr_refs(resolution, callee, out),
         ast::ExprKind::Field { value, .. } => collect_expr_refs(resolution, value, out),

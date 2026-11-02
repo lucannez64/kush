@@ -177,6 +177,160 @@ fn row_constraint_solver_rejects_ambiguity_and_exclusions() {
 }
 
 // ---------------------------------------------------------------------------
+// One-shot tail-resumptive effect handlers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn handler_resumes_once_and_returns_the_operation_result() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} {
+                let r = resume(x + 1);
+                r * 2
+            } {
+                let a = perform Op(20);
+                a + 1
+            }
+        }"#;
+    assert_eq!(value(source), 43);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 43);
+}
+
+#[test]
+fn handlers_shadow_lexically_and_pure_handlers_serve_many_performs() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x + 1) } {
+                let outer = perform Op(1);
+                let inner = handle Op: i64 -> i64 with fn(
+                    x: i64,
+                    resume: linear once fn(i64) -> i64 ! {},
+                ) -> i64 ! {panic} { resume(x + 10) } {
+                    perform Op(2)
+                };
+                outer + inner
+            }
+        }"#;
+    assert_eq!(value(source), 14);
+}
+
+#[test]
+fn resumption_is_linear_and_cannot_be_duplicated_or_ignored() {
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} {
+                let a = resume(x);
+                let b = resume(x + 1);
+                a + b
+            } { perform Op(20) }
+        }"#,
+        "use after move",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { 0 } { perform Op(20) }
+        }"#,
+        "consumed",
+    );
+}
+
+#[test]
+fn owning_handler_payload_and_result_cleanup_once() {
+    let source = r#"
+        fn main() -> i64 ! {alloc, panic} {
+            handle Op: Box<i64> -> Box<i64> with fn(
+                x: Box<i64>,
+                resume: linear once fn(Box<i64>) -> Box<i64> ! {},
+            ) -> Box<i64> ! {alloc, panic} {
+                resume(x)
+            } {
+                let b = perform Op(Box.new(42));
+                Box.take(b)
+            }
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+}
+
+#[test]
+fn handler_effects_are_part_of_the_handle_contract() {
+    let source = r#"
+        fn main() -> Unit ! {io, panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {io, panic} {
+                print_i64(x);
+                resume(x + 1)
+            } {
+                print_i64(perform Op(41));
+            }
+        }"#;
+    check(source).unwrap();
+    rejects(
+        r#"
+        fn main() -> Unit ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {io, panic} {
+                print_i64(x);
+                resume(x + 1)
+            } { print_i64(perform Op(41)); }
+        }"#,
+        "requires effects {io}",
+    );
+}
+
+#[test]
+fn performs_require_a_lexical_handler_and_a_exact_resume_contract() {
+    rejects(
+        "fn main() -> i64 ! {panic} { perform Op(1) }",
+        "no lexically enclosing handler",
+    );
+    rejects(
+        r#"
+        fn call() -> i64 ! {panic} { perform Op(1) }
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x) } { call() }
+        }"#,
+        "no lexically enclosing handler",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x) } { perform Op(1) }
+        }"#,
+        "second parameter must be exactly",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Versioned runtime-dependent proofs
 // ---------------------------------------------------------------------------
 

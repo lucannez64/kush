@@ -1222,6 +1222,7 @@ impl Parser {
                     ExprKind::If { .. }
                         | ExprKind::Match { .. }
                         | ExprKind::Block(_)
+                        | ExprKind::Handle { .. }
                         | ExprKind::While { .. }
                         | ExprKind::Loop(_)
                 ) {
@@ -1506,6 +1507,32 @@ impl Parser {
                 ExprKind::Array(self.separated(Kind::RBracket, |p| p.expr())?)
             }
             Kind::LBrace => ExprKind::Block(self.block()?),
+            Kind::Handle => {
+                self.bump();
+                let operation = self.ident()?;
+                self.expect(&Kind::Colon, "':' after the handled operation name")?;
+                let parameter = Box::new(self.ty()?);
+                self.expect(&Kind::Arrow, "'->' in a handled operation signature")?;
+                let result = Box::new(self.ty()?);
+                self.expect(&Kind::With, "'with' before the handler expression")?;
+                let handler = Box::new(self.expr()?);
+                let body = Box::new(self.block()?);
+                ExprKind::Handle {
+                    operation,
+                    parameter,
+                    result,
+                    handler,
+                    body,
+                }
+            }
+            Kind::Perform => {
+                self.bump();
+                let operation = self.ident()?;
+                self.expect(&Kind::LParen, "'(' after the performed operation name")?;
+                let value = Box::new(self.expr()?);
+                self.expect(&Kind::RParen, "')' after the performed operation payload")?;
+                ExprKind::Perform { operation, value }
+            }
             Kind::Fn => ExprKind::Lambda(Box::new(self.lambda()?)),
             Kind::While => {
                 self.bump();

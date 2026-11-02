@@ -377,6 +377,26 @@ pub enum ExprKind {
         callee: Box<Expr>,
         arguments: Vec<Expr>,
     },
+    /// A lexically scoped, one-shot tail-resumptive effect handler.
+    ///
+    /// `handle Op: P -> R with h { body }` binds `h` for direct `perform Op(v)`
+    /// expressions inside `body`. `h` has the callable contract
+    /// `fn(P, linear once fn(R) -> R) -> R` (or the corresponding `once` /
+    /// `linear once` mode); the resumption token must be invoked exactly once
+    /// and supplies the operation's result. There is no captured continuation
+    /// and no multishot operation.
+    Handle {
+        operation: String,
+        parameter: Box<Type>,
+        result: Box<Type>,
+        handler: Box<Expr>,
+        body: Box<Block>,
+    },
+    /// `perform Op(value)`: call the innermost lexical handler for `Op`.
+    Perform {
+        operation: String,
+        value: Box<Expr>,
+    },
     Lambda(Box<Lambda>),
     Specialize {
         callee: Box<Expr>,
