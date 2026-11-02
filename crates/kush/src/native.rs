@@ -3404,7 +3404,7 @@ impl Generator<'_, '_> {
             );
             let function = *entry
                 .methods
-                .get(&spec.method)
+                .get(&spec.key)
                 .expect("checked dynamic member registers every object-safe trait method");
             let out = self.function_call(function, arguments);
             if let Some(join) = join {

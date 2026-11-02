@@ -2664,7 +2664,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ),
                 )
             })?;
-        let function = *entry.methods.get(&spec.method).ok_or_else(|| {
+        let function = *entry.methods.get(&spec.key).ok_or_else(|| {
             Diagnostic::new(
                 span,
                 format!(

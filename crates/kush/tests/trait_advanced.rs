@@ -978,18 +978,20 @@ fn object_safety_rejections_are_explicit() {
         }"#,
         "needs copyable members",
     );
+    // A `Self`-dependent non-receiver parameter would have a different ABI per
+    // member and cannot cross a dynamic boundary.
     rejects(
         r#"
         struct A { x: i64 }
         struct B { y: i64 }
-        trait Convert { fn make<U>(self: Self, value: U) -> i64 ! {panic}; }
-        impl Convert for A { fn make<U>(self: Self, value: U) -> i64 ! {panic} { self.x } }
-        impl Convert for B { fn make<U>(self: Self, value: U) -> i64 ! {panic} { self.y } }
+        trait Convert { fn make(self: Self, value: [Self; 2]) -> i64 ! {panic}; }
+        impl Convert for A { fn make(self: Self, value: [Self; 2]) -> i64 ! {panic} { self.x } }
+        impl Convert for B { fn make(self: Self, value: [Self; 2]) -> i64 ! {panic} { self.y } }
         fn main() -> i64 ! {panic} {
             let object: dyn Convert = A { x: 1 };
             0
         }"#,
-        "generic method",
+        "mentions 'Self' in a non-receiver parameter",
     );
     rejects(
         r#"
@@ -2018,5 +2020,91 @@ fn owned_receivers_may_return_views_of_caller_arguments_through_open_objects() {
         }"#,
         0,
         "4\n3\n",
+    );
+}
+
+#[test]
+fn generic_methods_dispatch_through_dyn_with_per_call_monomorphization() {
+    let stats = agrees(
+        r#"
+        struct A { x: i64 }
+        struct B { y: i64 }
+        trait Pairing {
+            fn pair<U>(self: Self, value: U) -> (i64, U) ! {};
+            fn combine<U>(self: &Self, left: U, right: U) -> U ! {panic};
+        }
+        impl Pairing for A {
+            fn pair<U>(self: Self, value: U) -> (i64, U) ! {} { (self.x, value) }
+            fn combine<U>(self: &Self, left: U, right: U) -> U ! {panic} { left }
+        }
+        impl Pairing for B {
+            fn pair<U>(self: Self, value: U) -> (i64, U) ! {} { (self.y, value) }
+            fn combine<U>(self: &Self, left: U, right: U) -> U ! {panic} { right }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let a: dyn Pairing = A { x: 5 };
+            let pair = a.pair(true);
+            print_i64(pair.0);
+            if pair.1 { print_i64(1); } else { print_i64(0); }
+            let b: dyn Pairing = B { y: 9 };
+            print_i64(b.pair::<i64>(7).1);
+            let c: dyn Pairing = A { x: 1 };
+            print_i64(c.combine(3, 4));
+            let d: dyn Pairing = B { y: 2 };
+            print_i64(d.combine::<i64>(3, 4));
+            0
+        }"#,
+        0,
+        "5\n1\n7\n3\n4\n",
+    );
+    assert_eq!(stats.allocations, 4, "{}", stats.allocations);
+}
+
+#[test]
+fn generic_methods_may_take_natural_parameters_through_dyn() {
+    agrees(
+        r#"
+        struct A { x: i64 }
+        struct B { y: i64 }
+        trait Sizer {
+            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {panic};
+        }
+        impl Sizer for A {
+            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {panic} { self.x + data[0] }
+        }
+        impl Sizer for B {
+            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {panic} { self.y + data[N - 1] }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let a: dyn Sizer = A { x: 5 };
+            print_i64(a.gather([1, 2]));
+            let b: dyn Sizer = B { y: 9 };
+            print_i64(b.gather([3, 4, 10]));
+            0
+        }"#,
+        0,
+        "6\n19\n",
+    );
+}
+
+#[test]
+fn generic_method_member_abi_disagreement_is_rejected() {
+    rejects(
+        r#"
+        struct A { x: i64 }
+        struct B { y: i64 }
+        trait Pairing { fn pair<U>(self: Self, value: U) -> (i64, U) ! {}; }
+        impl Pairing for A {
+            fn pair<U>(self: Self, value: U) -> (i64, U) ! {} { (self.x, value) }
+        }
+        impl Pairing for B {
+            fn pair<U>(self: Self, value: U) -> (U, U) ! {} { (value, value) }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let b: dyn Pairing = B { y: 9 };
+            print_i64(b.pair(7).0);
+            0
+        }"#,
+        "does not match the trait signature",
     );
 }

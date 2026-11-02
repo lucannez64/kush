@@ -306,7 +306,25 @@ pub(crate) struct Expr {
 #[derive(Debug, Clone)]
 pub(crate) struct DynMember {
     pub member: Type,
-    pub methods: BTreeMap<String, usize>,
+    pub methods: BTreeMap<DynMethodKey, usize>,
+}
+/// The monomorphized type, grade, natural, and effect arguments of one generic
+/// method instance. A non-generic method uses an empty key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DynMethodKey {
+    pub name: String,
+    pub types: Vec<Type>,
+    pub consts: Vec<usize>,
+    pub grades: Vec<Grade>,
+    pub effects: Vec<u8>,
+}
+impl DynMethodKey {
+    pub(crate) fn plain(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            ..Default::default()
+        }
+    }
 }
 /// A checked call site on a dynamically dispatched trait object. The native
 /// and reference backends resolve the member identifier carried by the object
@@ -316,6 +334,8 @@ pub(crate) struct DynCallSpec {
     pub object: usize,
     pub trait_name: String,
     pub method: String,
+    /// Monomorphized generic-method arguments selecting the member-table entry.
+    pub key: DynMethodKey,
     pub mode: ReceiverMode,
     /// Usage grade of each non-receiver argument, used by the grade checker.
     pub parameter_grades: Vec<Option<Grade>>,
@@ -346,6 +366,16 @@ struct DynMethodContract {
     effects: u8,
     /// The expression type observed by the caller; a `@[0]` result is erased.
     value_type: Type,
+}
+/// Concrete method type/grade/natural/effect arguments selected at one dynamic
+/// call site. Vectors are in declaration order among parameters of each
+/// category, exactly like a function instance key.
+#[derive(Debug, Clone, Default)]
+struct MethodArguments {
+    types: Vec<Type>,
+    consts: Vec<usize>,
+    grades: Vec<Grade>,
+    effects: Vec<u8>,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Target {
@@ -3198,6 +3228,9 @@ struct Functions<'a> {
     /// Registered members of each dynamically dispatched object specialization.
     /// Indexed by `Type::DynObj`. A member identifier is its position here.
     dyn_members: Vec<Vec<DynMember>>,
+    /// Monomorphized generic-method contracts per dynamic object. A member
+    /// registered after a call site instantiates every recorded contract.
+    dyn_methods: BTreeMap<usize, BTreeMap<DynMethodKey, DynMethodContract>>,
     /// Checked call sites on dynamically dispatched trait objects.
     dyn_calls: Vec<DynCallSpec>,
     /// Checked borrowed call sites on closed-world union objects.
@@ -3278,6 +3311,18 @@ fn dynamic_trait_set(module: &ast::Module, resolution: &Resolution) -> BTreeSet<
                     scan(&field.ty, resolution, &mut out);
                 }
             }
+            ast::ItemKind::Trait { methods, .. }
+                if methods
+                    .iter()
+                    .any(|method| !method.function.generics.is_empty()) =>
+            {
+                // A generic method needs per-call monomorphization, which the
+                // fixed-layout dynamic representation provides; keep the trait
+                // out of the closed-world union path.
+                if let Some(id) = resolution.declarations.get(&declaration.item.span.start) {
+                    out.insert(*id);
+                }
+            }
             ast::ItemKind::Enum { variants, .. } => {
                 for variant in variants {
                     match &variant.payload {
@@ -3354,6 +3399,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         object_traits: BTreeMap::new(),
         dynamic_dispatch: BTreeMap::new(),
         dyn_members: Vec::new(),
+        dyn_methods: BTreeMap::new(),
         dyn_calls: Vec::new(),
         union_calls: Vec::new(),
         object_associated: BTreeMap::new(),
@@ -5681,9 +5727,9 @@ fn prepare_trait_objects<'a>(
                         break;
                     }
                 }
-                if !f.generics.is_empty() {
+                if !f.generics.is_empty() && !dynamic {
                     reason = Some(format!(
-                        "method '{name}' is generic; a generic method cannot be dispatched through a dyn object without runtime type arguments"
+                        "method '{name}' is generic; a generic method cannot be dispatched through a closed-world union object"
                     ));
                     break;
                 }
@@ -10342,6 +10388,7 @@ impl Checker<'_, '_> {
                     receiver,
                     name,
                     trait_selection.clone(),
+                    explicit,
                     arguments,
                     expected,
                     span,
@@ -10365,6 +10412,7 @@ impl Checker<'_, '_> {
                 receiver,
                 name,
                 trait_selection.clone(),
+                explicit,
                 arguments,
                 expected,
                 span,
@@ -10586,6 +10634,7 @@ impl Checker<'_, '_> {
         trait_id: BindingId,
         trait_arguments: &TraitArguments,
         name: &str,
+        method_arguments: Option<&MethodArguments>,
         span: Span,
     ) -> Result<DynMethodContract> {
         let definition = self.functions.traits[&trait_id].clone();
@@ -10619,6 +10668,45 @@ impl Checker<'_, '_> {
         substitution.consts = consts;
         substitution.grades = grades;
         substitution.effects = effects;
+        // Method type/grade/natural/effect parameters are monomorphized at this
+        // call site, exactly like a static generic call.
+        if let Some(arguments) = method_arguments {
+            let mut type_index = 0;
+            let mut const_index = 0;
+            let mut grade_index = 0;
+            let mut effect_index = 0;
+            for generic in &method.generics {
+                let Some(binder) = self.resolution.binder(generic.span) else {
+                    continue;
+                };
+                match generic_category(self.resolution, generic) {
+                    GenericCategory::Type => {
+                        if let Some(ty) = arguments.types.get(type_index) {
+                            substitution.types.insert(binder, *ty);
+                        }
+                        type_index += 1;
+                    }
+                    GenericCategory::Const => {
+                        if let Some(value) = arguments.consts.get(const_index) {
+                            substitution.consts.insert(binder, *value);
+                        }
+                        const_index += 1;
+                    }
+                    GenericCategory::Grade => {
+                        if let Some(grade) = arguments.grades.get(grade_index) {
+                            substitution.grades.insert(binder, *grade);
+                        }
+                        grade_index += 1;
+                    }
+                    GenericCategory::Effect => {
+                        if let Some(bits) = arguments.effects.get(effect_index) {
+                            substitution.effects.insert(binder, *bits);
+                        }
+                        effect_index += 1;
+                    }
+                }
+            }
+        }
         substitution.self_projections = self
             .functions
             .object_associated
@@ -10685,7 +10773,7 @@ impl Checker<'_, '_> {
                 )
             })?;
         let members = self.types.union_members(object);
-        let contract = self.dyn_method_contract(trait_id, trait_arguments, name, span)?;
+        let contract = self.dyn_method_contract(trait_id, trait_arguments, name, None, span)?;
         let mut out = Vec::with_capacity(members.len());
         for (tag, member) in members.into_iter().enumerate() {
             let impl_methods = self
@@ -10908,7 +10996,13 @@ impl Checker<'_, '_> {
             }
         }
         let mut methods = BTreeMap::new();
-        for name in definition.methods.keys() {
+        for (name, method) in &definition.methods {
+            // Generic methods are monomorphized per call-site argument list and
+            // registered on demand; eager registration only covers the
+            // non-generic fixed entries.
+            if !method.function.generics.is_empty() {
+                continue;
+            }
             let selected = self.lookup_method(
                 member,
                 name,
@@ -10926,7 +11020,8 @@ impl Checker<'_, '_> {
                 selected.impl_arguments,
                 Some(span),
             )?;
-            let contract = self.dyn_method_contract(info.trait_id, &info.arguments, name, span)?;
+            let contract =
+                self.dyn_method_contract(info.trait_id, &info.arguments, name, None, span)?;
             let signature = self.functions.signatures[function].clone();
             if signature.parameters.len() != contract.parameters.len() + 1
                 || signature.parameters[1..] != contract.parameters[..]
@@ -10943,10 +11038,96 @@ impl Checker<'_, '_> {
                     ),
                 ));
             }
-            methods.insert(name.clone(), function);
+            methods.insert(DynMethodKey::plain(name), function);
         }
         self.functions.dyn_members[object][index].methods = methods;
+        // A call site may already have recorded a generic-method instance
+        // before this member was coerced. Instantiate every recorded contract
+        // for the new member now.
+        if let Some(contracts) = self.functions.dyn_methods.get(&object).cloned() {
+            for (key, contract) in contracts {
+                self.register_dyn_method_for_member(object, index, &key, &contract, span)?;
+            }
+        }
         Ok(index)
+    }
+    /// Instantiate one monomorphized generic method for one registered member
+    /// and insert it into that member's dispatch table.
+    fn register_dyn_method_for_member(
+        &mut self,
+        object: usize,
+        member_index: usize,
+        key: &DynMethodKey,
+        contract: &DynMethodContract,
+        span: Span,
+    ) -> Result<()> {
+        if self.functions.dyn_members[object][member_index]
+            .methods
+            .contains_key(key)
+        {
+            return Ok(());
+        }
+        let member = self.functions.dyn_members[object][member_index].member;
+        let info = self.types.objects[object].clone();
+        let selected = self.lookup_method(
+            member,
+            &key.name,
+            Some((info.trait_id, info.arguments.clone())),
+            span,
+        )?;
+        let function = self.functions.instance(
+            self.types,
+            self.resolution,
+            selected.binding,
+            key.types.clone(),
+            key.grades.clone(),
+            key.consts.clone(),
+            key.effects.clone(),
+            selected.impl_arguments,
+            Some(span),
+        )?;
+        let signature = self.functions.signatures[function].clone();
+        if signature.parameters.len() != contract.parameters.len() + 1
+            || signature.parameters[1..] != contract.parameters[..]
+            || signature.parameter_grades[1..] != contract.parameter_grades[..]
+            || signature.result != contract.result
+            || signature.result_grade != contract.result_grade
+            || signature.effects != contract.effects
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "concrete member '{}' has a different ABI for generic object method '{}'; dynamically dispatched methods must agree on every non-receiver parameter, result, usage grade, and effect for the same method arguments",
+                    self.types.name(member),
+                    key.name
+                ),
+            ));
+        }
+        self.functions.dyn_members[object][member_index]
+            .methods
+            .insert(key.clone(), function);
+        Ok(())
+    }
+    /// Record the contract of a monomorphized generic method for one dynamic
+    /// object and instantiate it for every member registered so far.
+    fn ensure_dyn_method(
+        &mut self,
+        object: usize,
+        key: &DynMethodKey,
+        contract: &DynMethodContract,
+        span: Span,
+    ) -> Result<()> {
+        self.functions
+            .dyn_methods
+            .entry(object)
+            .or_default()
+            .entry(key.clone())
+            .or_insert_with(|| contract.clone());
+        let count = self.functions.dyn_members.get(object).map_or(0, Vec::len);
+        for member_index in 0..count {
+            self.register_dyn_method_for_member(object, member_index, key, contract, span)?;
+        }
+        Ok(())
     }
     /// Dynamic dispatch on an open/generic trait object. The value carries a
     /// checked member identifier; the backends resolve it against the
@@ -10957,6 +11138,7 @@ impl Checker<'_, '_> {
         receiver: Expr,
         name: &str,
         trait_selection: Option<(BindingId, TraitArguments)>,
+        explicit: Option<&[ast::Type]>,
         arguments: &[ast::Expr],
         expected: Option<Type>,
         span: Span,
@@ -10991,19 +11173,76 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
-        if !self.functions.traits[&info.trait_id]
+        let method = self.functions.traits[&info.trait_id]
             .methods
-            .contains_key(name)
-        {
+            .get(name)
+            .map(|method| method.function)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    span,
+                    format!(
+                        "trait '{}' has no method '{name}'",
+                        self.resolution.bindings[info.trait_id].name
+                    ),
+                )
+            })?;
+        if explicit.is_some() && method.generics.is_empty() {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "trait '{}' has no method '{name}'",
-                    self.resolution.bindings[info.trait_id].name
+                    "method '{name}' is not generic: non-generic methods take no explicit type arguments"
                 ),
             ));
         }
-        let contract = self.dyn_method_contract(info.trait_id, &info.arguments, name, span)?;
+        let mut method_arguments = MethodArguments::default();
+        let mut prechecked: Option<Vec<Expr>> = None;
+        if !method.generics.is_empty() {
+            let pairs = method.parameters[1..]
+                .iter()
+                .zip(arguments)
+                .filter(|(parameter, _)| !parameter.erased)
+                .map(|(parameter, argument)| (&parameter.ty, argument))
+                .collect::<Vec<_>>();
+            let what = format!("method '{name}'");
+            let hint = match expected {
+                Some(expected) => Some((self.result_type_hint(&method.result)?, expected)),
+                None => None,
+            };
+            let (types, grades, consts, effects, values) = self.infer(
+                &method.generics,
+                explicit,
+                &pairs,
+                hint.as_ref()
+                    .map(|(declared, expected)| (declared, *expected)),
+                true,
+                None,
+                None,
+                &what,
+                span,
+            )?;
+            method_arguments = MethodArguments {
+                types,
+                consts,
+                grades,
+                effects,
+            };
+            prechecked = Some(values);
+        }
+        let method_arguments_ref = (!method.generics.is_empty()).then_some(&method_arguments);
+        let contract = self.dyn_method_contract(
+            info.trait_id,
+            &info.arguments,
+            name,
+            method_arguments_ref,
+            span,
+        )?;
+        let key = DynMethodKey {
+            name: name.to_owned(),
+            types: method_arguments.types.clone(),
+            consts: method_arguments.consts.clone(),
+            grades: method_arguments.grades.clone(),
+            effects: method_arguments.effects.clone(),
+        };
         if arguments.len() != contract.parameters.len() {
             return Err(Diagnostic::new(
                 span,
@@ -11114,15 +11353,23 @@ impl Checker<'_, '_> {
             }
         };
         let mut values = vec![receiver];
-        for (argument, ty) in arguments.iter().zip(&contract.parameters) {
-            let value = self.expr_expected(argument, Some(*ty))?;
-            values.push(self.coerce(value, *ty, span)?);
+        if let Some(prechecked) = prechecked {
+            for (value, ty) in prechecked.into_iter().zip(&contract.parameters) {
+                values.push(self.coerce(value, *ty, span)?);
+            }
+        } else {
+            for (argument, ty) in arguments.iter().zip(&contract.parameters) {
+                let value = self.expr_expected(argument, Some(*ty))?;
+                values.push(self.coerce(value, *ty, span)?);
+            }
         }
+        self.ensure_dyn_method(object, &key, &contract, span)?;
         let spec = self.functions.dyn_calls.len();
         self.functions.dyn_calls.push(DynCallSpec {
             object,
             trait_name: self.resolution.bindings[info.trait_id].name.clone(),
             method: name.to_owned(),
+            key,
             mode: contract.mode,
             parameter_grades: contract.parameter_grades.clone(),
             result: contract.result,
@@ -11317,7 +11564,8 @@ impl Checker<'_, '_> {
                 )
             };
             let _ = reference_ty;
-            let contract = self.dyn_method_contract(trait_id, &trait_arguments, name, span)?;
+            let contract =
+                self.dyn_method_contract(trait_id, &trait_arguments, name, None, span)?;
             if arguments.len() != contract.parameters.len() {
                 return Err(Diagnostic::new(
                     span,

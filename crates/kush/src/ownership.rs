@@ -176,7 +176,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                 .dyn_members
                 .get(spec.object)
                 .and_then(|members| members.first())
-                .and_then(|member| member.methods.get(&spec.method))
+                .and_then(|member| member.methods.get(&spec.key))
                 .and_then(|function| calls.get(*function))
                 .cloned()
                 .unwrap_or_else(|| empty_call.clone())
