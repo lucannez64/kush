@@ -19,6 +19,31 @@ coverage where relevant, native/reference agreement where supported, exact
 unsupported-boundary diagnostics, and full integrated Boat checks. This file
 tracks work in progress, not a claim that these APIs exist already.
 
+## Checked host surface (implementation pass)
+
+The first practical host surface is implemented in both the native runtime and
+the reference evaluator: bounded filesystem read/write/append/remove/rename/
+mkdir/list/metadata, process arguments and environment, wall/monotonic clocks
+and sleeping, a bounded non-shell subprocess runner with explicit timeout, and
+one-shot plain TCP exchange. Blocking semantics, errno values, ownership, and
+explicit timeouts are documented in [host-api.md](host-api.md). Reference
+evaluation accepts deterministic `Host` arguments/environment; native output
+reads the real process argv, so the project `ProgramInvocation` forwarding
+requires no source rewriting.
+
+Everyday helpers live in `std.text`, `std.path`, `std.sort`, and
+`std.collections`. `examples/todo-cli` is a project-shaped multi-file CLI with
+atomic file replacement, `--file`, `KUSH_TODO_FILE`, invalid-file rejection, and
+reload tests. It can move under the project manifest workflow without source
+changes.
+
+Still missing and not claimed: recursive directory operations, file handles and
+seek, stderr capture, environment mutation, persistent sockets/nonblocking or
+TLS HTTP, DNS timeouts, and resource-handle types. The cooperative scheduler is
+not used to pretend blocking host calls are cancellable. A frontend limitation
+prevents `return i64` inside `while`; the helpers use found flags instead. Full
+integrated/Boat validation remains parent-owned.
+
 Initial safety correction: indexed-place base/index evaluation order now
 matches checking; InitOwner place reads retain one owner; hidden declarations
 use their real source span for lexical escape detection. Focused local checks:

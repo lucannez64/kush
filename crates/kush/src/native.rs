@@ -7,8 +7,8 @@ use crate::int::IntKind;
 use crate::{
     Diagnostic, Span,
     executable::{
-        self as ex, AllocVecOp, BytesOp, Coercion, DynArrayOp, Executable, Expr, ExprKind, IoOp,
-        Pattern, ReceiverMode, SliceOp, StrOp, StringOp, Target, Type, VecOp,
+        self as ex, AllocVecOp, BytesOp, Coercion, DynArrayOp, Executable, Expr, ExprKind, HostOp,
+        IoOp, Pattern, ReceiverMode, SliceOp, StrOp, StringOp, Target, Type, VecOp,
     },
     lexer::Kind,
 };
@@ -35,6 +35,7 @@ fn error(message: impl std::fmt::Display) -> Diagnostic {
     Diagnostic::new(Span::default(), message.to_string())
 }
 const RUNTIME: &str = r#"
+#define _GNU_SOURCE
 #include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -44,6 +45,17 @@ const RUNTIME: &str = r#"
 #include <stdio.h>
 #include <math.h>
 #include <locale.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <poll.h>
+#include <time.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+extern char **environ;
 extern int64_t kush_entry(void);
 _Noreturn void kush_panic(void) {
     static const char message[] = "panic: checked arithmetic, memory, or I/O failure\n";
@@ -1063,6 +1075,552 @@ int64_t kush_io_write(int64_t stream, uint64_t handle) {
     }
     return 0;
 }
+/* ---- Checked host operations ---------------------------------------------
+   Filesystem, environment, clock, subprocess, and TCP operations are
+   synchronous. Each entry point returns zero on success or a positive Linux
+   errno and writes its success payload through `out`. Owned buffers are
+   released on failure; borrowed buffers are never modified or freed. */
+static int kush_host_argc = 0;
+static char **kush_host_argv = NULL;
+static void kush_host_init(int argc, char **argv) {
+    kush_host_argc = argc;
+    kush_host_argv = argv;
+}
+/* Copy a non-NUL-terminated checked path/value into a temporary C string.
+   Embedded NUL bytes are rejected because the OS interface is C-string based. */
+static char *kush_host_c_path(const KushBytes *b, int *code) {
+    if (memchr(b->data, 0, (size_t)b->length) != NULL) { *code = EINVAL; return NULL; }
+    char *text = (char *)malloc((size_t)b->length + 1);
+    if (text == NULL) { *code = ENOMEM; return NULL; }
+    memcpy(text, b->data, (size_t)b->length);
+    text[b->length] = 0;
+    return text;
+}
+static int kush_host_open(const char *path, int flags, int with_mode, mode_t mode) {
+    for (;;) {
+        int fd = with_mode ? open(path, flags, mode) : open(path, flags);
+        if (fd >= 0 || errno != EINTR) return fd;
+    }
+}
+static int64_t kush_host_append(KushBytes *b, const unsigned char *data, uint64_t length) {
+    if (b->length > b->capacity || length > b->capacity - b->length) return EFBIG;
+    if (length != 0) memcpy(b->data + b->length, data, (size_t)length);
+    b->length += length;
+    return 0;
+}
+int64_t kush_fs_read(uint64_t path_handle, uint64_t buffer_handle, uint64_t *out) {
+    int code = 0;
+    char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
+    if (path == NULL) { kush_free(buffer_handle); return code; }
+    int fd = kush_host_open(path, O_RDONLY | O_CLOEXEC, 0, 0);
+    free(path);
+    if (fd < 0) { code = errno; kush_free(buffer_handle); return code; }
+    KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
+    unsigned char probe;
+    for (;;) {
+        int full = b->length == b->capacity;
+        void *destination = full ? (void *)&probe : (void *)(b->data + b->length);
+        size_t count = full ? 1 : (size_t)(b->capacity - b->length);
+        ssize_t received = read(fd, destination, count);
+        if (received < 0 && errno == EINTR) continue;
+        if (received < 0) { code = errno; break; }
+        if (received == 0) { code = 0; break; }
+        if (full) { code = EFBIG; break; }
+        b->length += (uint64_t)received;
+    }
+    (void)close(fd);
+    if (code != 0) { kush_free(buffer_handle); return code; }
+    *out = buffer_handle;
+    return 0;
+}
+static int64_t kush_host_write_file(uint64_t path_handle, uint64_t data_handle, int append, uint64_t *out) {
+    int code = 0;
+    const KushBytes *data = (const KushBytes *)(uintptr_t)data_handle;
+    char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
+    if (path == NULL) return code;
+    int flags = O_WRONLY | O_CREAT | O_CLOEXEC | (append ? O_APPEND : O_TRUNC);
+    int fd = kush_host_open(path, flags, 1, 0666);
+    free(path);
+    if (fd < 0) return errno;
+    uint64_t offset = 0;
+    while (offset < data->length) {
+        ssize_t written = write(fd, data->data + offset, (size_t)(data->length - offset));
+        if (written < 0 && errno == EINTR) continue;
+        if (written < 0) { code = errno; break; }
+        if (written == 0) { code = EIO; break; }
+        offset += (uint64_t)written;
+    }
+    (void)close(fd);
+    if (code != 0) return code;
+    *out = (uint64_t)data->length;
+    return 0;
+}
+int64_t kush_fs_write(uint64_t path_handle, uint64_t data_handle, uint64_t *out) {
+    return kush_host_write_file(path_handle, data_handle, 0, out);
+}
+int64_t kush_fs_append(uint64_t path_handle, uint64_t data_handle, uint64_t *out) {
+    return kush_host_write_file(path_handle, data_handle, 1, out);
+}
+static int64_t kush_host_unary_path(uint64_t path_handle, int operation, uint64_t *out) {
+    int code = 0;
+    char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
+    if (path == NULL) return code;
+    int result;
+    for (;;) {
+        result = operation == 0 ? unlink(path) : operation == 1 ? mkdir(path, 0777) : rmdir(path);
+        if (result == 0 || errno != EINTR) break;
+    }
+    code = result == 0 ? 0 : errno;
+    free(path);
+    if (code == 0) *out = 0;
+    return code;
+}
+int64_t kush_fs_remove(uint64_t path_handle, uint64_t *out) {
+    return kush_host_unary_path(path_handle, 0, out);
+}
+int64_t kush_fs_mkdir(uint64_t path_handle, uint64_t *out) {
+    return kush_host_unary_path(path_handle, 1, out);
+}
+int64_t kush_fs_remove_dir(uint64_t path_handle, uint64_t *out) {
+    return kush_host_unary_path(path_handle, 2, out);
+}
+int64_t kush_fs_rename(uint64_t from_handle, uint64_t to_handle, uint64_t *out) {
+    int code = 0;
+    char *from = kush_host_c_path((const KushBytes *)(uintptr_t)from_handle, &code);
+    if (from == NULL) return code;
+    char *to = kush_host_c_path((const KushBytes *)(uintptr_t)to_handle, &code);
+    if (to == NULL) { free(from); return code; }
+    int result;
+    for (;;) {
+        result = rename(from, to);
+        if (result == 0 || errno != EINTR) break;
+    }
+    code = result == 0 ? 0 : errno;
+    free(from); free(to);
+    if (code == 0) *out = 0;
+    return code;
+}
+int64_t kush_fs_list(uint64_t path_handle, uint64_t buffer_handle, uint64_t *out) {
+    int code = 0;
+    char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
+    if (path == NULL) { kush_free(buffer_handle); return code; }
+    DIR *directory = opendir(path);
+    free(path);
+    if (directory == NULL) { code = errno; kush_free(buffer_handle); return code; }
+    KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (entry == NULL) { if (errno != 0) code = errno; break; }
+        const char *name = entry->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        uint64_t length = (uint64_t)strlen(name);
+        int status = (int)kush_host_append(b, (const unsigned char *)name, length);
+        if (status != 0) { code = status; break; }
+        status = (int)kush_host_append(b, (const unsigned char *)"\n", 1);
+        if (status != 0) { code = status; break; }
+    }
+    (void)closedir(directory);
+    if (code != 0) { kush_free(buffer_handle); return code; }
+    *out = buffer_handle;
+    return 0;
+}
+static int64_t kush_host_stat_flags(uint64_t path_handle, int kind, uint64_t *out) {
+    int code = 0;
+    char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
+    if (path == NULL) return code;
+    struct stat info;
+    int result;
+    for (;;) {
+        result = stat(path, &info);
+        if (result == 0 || errno != EINTR) break;
+    }
+    code = result == 0 ? 0 : errno;
+    free(path);
+    if (code != 0) {
+        if (kind != 2 && (code == ENOENT || code == ENOTDIR)) { *out = 0; return 0; }
+        return code;
+    }
+    if (kind == 0) *out = S_ISREG(info.st_mode) ? 1 : 0;
+    else if (kind == 1) *out = S_ISDIR(info.st_mode) ? 1 : 0;
+    else if (kind == 2) *out = (uint64_t)info.st_size;
+    else *out = 1;
+    return 0;
+}
+int64_t kush_fs_is_file(uint64_t path_handle, uint64_t *out) {
+    return kush_host_stat_flags(path_handle, 0, out);
+}
+int64_t kush_fs_is_dir(uint64_t path_handle, uint64_t *out) {
+    return kush_host_stat_flags(path_handle, 1, out);
+}
+int64_t kush_fs_size(uint64_t path_handle, uint64_t *out) {
+    return kush_host_stat_flags(path_handle, 2, out);
+}
+int64_t kush_fs_exists(uint64_t path_handle, uint64_t *out) {
+    return kush_host_stat_flags(path_handle, 3, out);
+}
+int64_t kush_env_arg_count(uint64_t *out) {
+    *out = (uint64_t)(kush_host_argc < 0 ? 0 : kush_host_argc);
+    return 0;
+}
+int64_t kush_env_arg(int64_t index, uint64_t buffer_handle, uint64_t *out) {
+    KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
+    if (index < 0 || index >= (int64_t)kush_host_argc || kush_host_argv == NULL) {
+        kush_free(buffer_handle); return ENOENT;
+    }
+    const char *value = kush_host_argv[index];
+    int64_t code = kush_host_append(b, (const unsigned char *)value, (uint64_t)strlen(value));
+    if (code != 0) { kush_free(buffer_handle); return code; }
+    *out = buffer_handle;
+    return 0;
+}
+int64_t kush_env_var_count(uint64_t *out) {
+    uint64_t count = 0;
+    if (environ != NULL) {
+        for (char **entry = environ; *entry != NULL; ++entry) {
+            if (strchr(*entry, '=') != NULL) ++count;
+        }
+    }
+    *out = count;
+    return 0;
+}
+int64_t kush_env_var(const KushBytes *name, uint64_t buffer_handle, uint64_t *out) {
+    int code = 0;
+    char *text = kush_host_c_path(name, &code);
+    if (text == NULL) { kush_free(buffer_handle); return code; }
+    const char *value = getenv(text);
+    free(text);
+    if (value == NULL) { kush_free(buffer_handle); return ENOENT; }
+    code = (int)kush_host_append((KushBytes *)(uintptr_t)buffer_handle,
+        (const unsigned char *)value, (uint64_t)strlen(value));
+    if (code != 0) { kush_free(buffer_handle); return code; }
+    *out = buffer_handle;
+    return 0;
+}
+static int64_t kush_host_now_ns(clockid_t clock, uint64_t *out) {
+    struct timespec now;
+    if (clock_gettime(clock, &now) != 0) return errno;
+    if (now.tv_sec < 0 || (uint64_t)now.tv_sec > (uint64_t)INT64_MAX / UINT64_C(1000000000)) {
+        return EOVERFLOW;
+    }
+    uint64_t seconds = (uint64_t)now.tv_sec * UINT64_C(1000000000);
+    if (seconds > (uint64_t)INT64_MAX - (uint64_t)now.tv_nsec) return EOVERFLOW;
+    *out = seconds + (uint64_t)now.tv_nsec;
+    return 0;
+}
+int64_t kush_time_unix_seconds(uint64_t *out) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) return errno;
+    *out = (uint64_t)now.tv_sec;
+    return 0;
+}
+int64_t kush_time_monotonic_ns(uint64_t *out) {
+    return kush_host_now_ns(CLOCK_MONOTONIC, out);
+}
+int64_t kush_time_sleep_ms(int64_t milliseconds, uint64_t *out) {
+    if (milliseconds < 0) return EINVAL;
+    struct timespec request;
+    request.tv_sec = (time_t)(milliseconds / 1000);
+    request.tv_nsec = (long)((milliseconds % 1000) * 1000000);
+    while (nanosleep(&request, &request) != 0) {
+        if (errno != EINTR) return errno;
+    }
+    *out = 0;
+    return 0;
+}
+int64_t kush_os_strerror(int64_t code, uint64_t buffer_handle, uint64_t *out) {
+    if (code < 0 || code > 4095) { kush_free(buffer_handle); return EINVAL; }
+    const char *text = strerror((int)code);
+    if (text == NULL) text = "Unknown error";
+    int64_t status = kush_host_append((KushBytes *)(uintptr_t)buffer_handle,
+        (const unsigned char *)text, (uint64_t)strlen(text));
+    if (status != 0) { kush_free(buffer_handle); return status; }
+    *out = buffer_handle;
+    return 0;
+}
+static int64_t kush_host_now_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+/* -1 means no deadline; zero means the budget is exhausted. */
+static int kush_host_remaining(int64_t deadline) {
+    if (deadline < 0) return -1;
+    int64_t now = kush_host_now_ms();
+    if (now < 0) return 0;
+    if (now >= deadline) return 0;
+    int64_t left = deadline - now;
+    return left > 60000 ? 60000 : (int)left;
+}
+static void kush_host_reap(pid_t child, int *status) {
+    for (;;) {
+        pid_t result = waitpid(child, status, 0);
+        if (result == child || (result < 0 && errno != EINTR)) return;
+    }
+}
+/* Split NUL-separated arguments. Empty segments and a trailing NUL are
+   ignored. The program text itself must be one nonempty C-compatible path. */
+static char **kush_host_proc_argv(const KushBytes *program, const KushBytes *arguments,
+                                  int *count, int *code) {
+    char *path = kush_host_c_path(program, code);
+    if (path == NULL) return NULL;
+    if (program->length == 0 || memchr(program->data, 0, (size_t)program->length) != NULL) {
+        free(path); *code = EINVAL; return NULL;
+    }
+    uint64_t total = 1;
+    uint64_t start = 0;
+    for (uint64_t i = 0; i < arguments->length; ++i) {
+        if (arguments->data[i] == 0) {
+            if (i > start) ++total;
+            start = i + 1;
+        }
+    }
+    if (start < arguments->length) ++total;
+    char **argv = (char **)calloc((size_t)total + 1, sizeof(char *));
+    if (argv == NULL) { free(path); *code = ENOMEM; return NULL; }
+    argv[0] = path;
+    uint64_t at = 1;
+    start = 0;
+    for (uint64_t i = 0; i <= arguments->length; ++i) {
+        int boundary = i == arguments->length || arguments->data[i] == 0;
+        if (!boundary) continue;
+        if (i > start) {
+            uint64_t length = i - start;
+            char *text = (char *)malloc((size_t)length + 1);
+            if (text == NULL) {
+                for (uint64_t j = 0; j < at; ++j) free(argv[j]);
+                free(argv); *code = ENOMEM; return NULL;
+            }
+            memcpy(text, arguments->data + start, (size_t)length);
+            text[length] = 0;
+            argv[at++] = text;
+        }
+        start = i + 1;
+    }
+    *count = (int)at;
+    return argv;
+}
+static void kush_host_proc_free(char **argv, int count) {
+    if (argv == NULL) return;
+    for (int i = 0; i < count; ++i) free(argv[i]);
+    free(argv);
+}
+int64_t kush_proc_run(uint64_t program_handle, uint64_t args_handle,
+                      uint64_t buffer_handle, int64_t timeout_ms, uint64_t *out) {
+    if (timeout_ms < 0) { return EINVAL; }
+    int code = 0;
+    int count = 0;
+    char **argv = kush_host_proc_argv((const KushBytes *)(uintptr_t)program_handle,
+                                      (const KushBytes *)(uintptr_t)args_handle, &count, &code);
+    if (argv == NULL) { return code; }
+    int outpipe[2] = {-1, -1}, errpipe[2] = {-1, -1};
+    if (pipe2(outpipe, O_CLOEXEC) != 0 || pipe2(errpipe, O_CLOEXEC) != 0) {
+        code = errno;
+        if (outpipe[0] >= 0) { (void)close(outpipe[0]); (void)close(outpipe[1]); }
+        kush_host_proc_free(argv, count);
+        return code;
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        code = errno;
+        (void)close(outpipe[0]); (void)close(outpipe[1]);
+        (void)close(errpipe[0]); (void)close(errpipe[1]);
+        kush_host_proc_free(argv, count);
+        return code;
+    }
+    if (child == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            (void)dup2(devnull, 0);
+            (void)dup2(devnull, 2);
+            if (devnull > 2) (void)close(devnull);
+        }
+        (void)dup2(outpipe[1], 1);
+        (void)close(outpipe[0]);
+        if (outpipe[1] > 2) (void)close(outpipe[1]);
+        (void)close(errpipe[0]);
+        execvp(argv[0], argv);
+        int failure = errno;
+        (void)write(errpipe[1], &failure, sizeof(failure));
+        _exit(127);
+    }
+    (void)close(outpipe[1]);
+    (void)close(errpipe[1]);
+    (void)fcntl(outpipe[0], F_SETFL, O_NONBLOCK);
+    (void)fcntl(errpipe[0], F_SETFL, O_NONBLOCK);
+    KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
+    uint64_t length = b->length;
+    int64_t deadline = timeout_ms == 0 ? -1 : kush_host_now_ms() + timeout_ms;
+    int failed = 0, timed_out = 0;
+    for (;;) {
+        int full = length == b->capacity;
+        struct pollfd waiting = { outpipe[0], POLLIN | POLLHUP, 0 };
+        int ready = poll(&waiting, 1, kush_host_remaining(deadline));
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            code = errno; failed = 1; break;
+        }
+        if (ready == 0) { timed_out = 1; break; }
+        if (full) {
+            unsigned char probe;
+            ssize_t received = read(outpipe[0], &probe, 1);
+            if (received < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+            if (received < 0) { code = errno; failed = 1; break; }
+            if (received == 0) break;
+            code = EFBIG; failed = 1; break;
+        }
+        ssize_t received = read(outpipe[0], b->data + length, (size_t)(b->capacity - length));
+        if (received < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        if (received < 0) { code = errno; failed = 1; break; }
+        if (received == 0) break;
+        length += (uint64_t)received;
+        b->length = length;
+    }
+    int status = 0;
+    int exec_error = 0;
+    if (!failed && !timed_out) {
+        for (;;) {
+            pid_t result = waitpid(child, &status, WNOHANG);
+            if (result == child) break;
+            if (result < 0 && errno != EINTR) { code = errno; failed = 1; break; }
+            if (kush_host_remaining(deadline) == 0) { timed_out = 1; break; }
+            struct timespec pause = {0, 2000000};
+            (void)nanosleep(&pause, NULL);
+        }
+    }
+    if (failed || timed_out) {
+        (void)kill(child, SIGKILL);
+        kush_host_reap(child, &status);
+    }
+    for (;;) {
+        int failure = 0;
+        ssize_t received = read(errpipe[0], &failure, sizeof(failure));
+        if (received == (ssize_t)sizeof(failure)) { exec_error = failure; continue; }
+        if (received < 0 && errno == EINTR) continue;
+        break;
+    }
+    (void)close(outpipe[0]);
+    (void)close(errpipe[0]);
+    kush_host_proc_free(argv, count);
+    if (timed_out) { return ETIMEDOUT; }
+    if (failed) { return code; }
+    if (exec_error != 0) { return exec_error; }
+    if (WIFEXITED(status)) {
+        *out = (uint64_t)WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        *out = (uint64_t)(128 + WTERMSIG(status));
+    } else {
+        return EIO;
+    }
+    return 0;
+}
+static int64_t kush_host_connect(struct addrinfo *address, int64_t deadline) {
+    int fd = socket(address->ai_family, address->ai_socktype | SOCK_CLOEXEC,
+                    address->ai_protocol);
+    if (fd < 0) return -errno;
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        int code = errno; (void)close(fd); return -code;
+    }
+    if (connect(fd, address->ai_addr, address->ai_addrlen) != 0) {
+        if (errno != EINPROGRESS) {
+            int code = errno; (void)close(fd); return -code;
+        }
+        struct pollfd waiting = { fd, POLLOUT, 0 };
+        int ready;
+        for (;;) {
+            ready = poll(&waiting, 1, kush_host_remaining(deadline));
+            if (ready < 0 && errno == EINTR) continue;
+            break;
+        }
+        if (ready < 0) { int code = errno; (void)close(fd); return -code; }
+        if (ready == 0) { (void)close(fd); return -ETIMEDOUT; }
+        int error = 0; socklen_t length = sizeof(error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) != 0) {
+            int code = errno; (void)close(fd); return -code;
+        }
+        if (error != 0) { (void)close(fd); return -error; }
+    }
+    return fd;
+}
+int64_t kush_net_tcp_exchange(uint64_t host_handle, int64_t port,
+                              uint64_t request_handle, uint64_t response_handle,
+                              int64_t timeout_ms, uint64_t *out) {
+    if (timeout_ms < 0 || port <= 0 || port > 65535) {
+        return EINVAL;
+    }
+    int code = 0;
+    char *host = kush_host_c_path((const KushBytes *)(uintptr_t)host_handle, &code);
+    if (host == NULL) { return code; }
+    char service[8];
+    (void)snprintf(service, sizeof(service), "%lld", (long long)port);
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *addresses = NULL;
+    int resolved = getaddrinfo(host, service, &hints, &addresses);
+    free(host);
+    if (resolved != 0) {
+        int failure = resolved == EAI_MEMORY ? ENOMEM : resolved == EAI_SYSTEM ? errno : EINVAL;
+        return failure == 0 ? EINVAL : failure;
+    }
+    int64_t deadline = timeout_ms == 0 ? -1 : kush_host_now_ms() + timeout_ms;
+    int fd = -1;
+    int last = ECONNREFUSED;
+    for (struct addrinfo *address = addresses; address != NULL; address = address->ai_next) {
+        int64_t opened = kush_host_connect(address, deadline);
+        if (opened >= 0) { fd = (int)opened; break; }
+        last = (int)(-opened);
+        if (last == ETIMEDOUT) break;
+    }
+    freeaddrinfo(addresses);
+    if (fd < 0) { return last; }
+    const KushBytes *request = (const KushBytes *)(uintptr_t)request_handle;
+    uint64_t sent = 0;
+    while (sent < request->length) {
+        ssize_t written = send(fd, request->data + sent, (size_t)(request->length - sent),
+                               MSG_NOSIGNAL);
+        if (written < 0 && errno == EINTR) continue;
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct pollfd waiting = { fd, POLLOUT, 0 };
+            int ready = poll(&waiting, 1, kush_host_remaining(deadline));
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready < 0) { code = errno; break; }
+            if (ready == 0) { code = ETIMEDOUT; break; }
+            continue;
+        }
+        if (written < 0) { code = errno; break; }
+        if (written == 0) { code = EIO; break; }
+        sent += (uint64_t)written;
+    }
+    if (code == 0) (void)shutdown(fd, SHUT_WR);
+    KushBytes *b = (KushBytes *)(uintptr_t)response_handle;
+    uint64_t length = b->length;
+    uint64_t received_total = 0;
+    while (code == 0) {
+        int full = length == b->capacity;
+        struct pollfd waiting = { fd, POLLIN | POLLHUP, 0 };
+        int ready = poll(&waiting, 1, kush_host_remaining(deadline));
+        if (ready < 0) { if (errno == EINTR) continue; code = errno; break; }
+        if (ready == 0) { code = ETIMEDOUT; break; }
+        unsigned char probe;
+        void *destination = full ? (void *)&probe : (void *)(b->data + length);
+        size_t room = full ? 1 : (size_t)(b->capacity - length);
+        ssize_t count = recv(fd, destination, room, 0);
+        if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        if (count < 0) { code = errno; break; }
+        if (count == 0) break;
+        if (full) { code = EFBIG; break; }
+        length += (uint64_t)count;
+        received_total += (uint64_t)count;
+        b->length = length;
+    }
+    (void)close(fd);
+    if (code != 0) { return code; }
+    *out = received_total;
+    return 0;
+}
 /* Vectors store fixed-width elements of `width` 64-bit words each. */
 typedef struct { uint64_t length; uint64_t capacity; uint64_t width; uint64_t data[]; } KushVec;
 static uint64_t kush_vec_bytes(uint64_t capacity, uint64_t width) {
@@ -1507,7 +2065,8 @@ static void kush_task_finish(void) {
     kush_current = NULL;
     kush_task_count = 0;
 }
-int main(void) {
+int main(int argc, char **argv) {
+    kush_host_init(argc, argv);
     /* Broken pipes become recoverable EPIPE results instead of process signals. */
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) kush_panic();
     /* Formatting and parse-back must never depend on the host locale. */
@@ -2021,6 +2580,45 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let write = module
         .declare_function("kush_io_write", Linkage::Import, &io_sig)
         .map_err(error)?;
+    // Every checked host operation takes its source arguments plus one out
+    // pointer and returns zero or a positive errno.
+    let host_symbols = [
+        HostOp::FsRead,
+        HostOp::FsWrite,
+        HostOp::FsAppend,
+        HostOp::FsRemove,
+        HostOp::FsRename,
+        HostOp::FsMkdir,
+        HostOp::FsRemoveDir,
+        HostOp::FsList,
+        HostOp::FsIsFile,
+        HostOp::FsIsDir,
+        HostOp::FsSize,
+        HostOp::FsExists,
+        HostOp::EnvArgCount,
+        HostOp::EnvArg,
+        HostOp::EnvVarCount,
+        HostOp::EnvVar,
+        HostOp::TimeUnixSeconds,
+        HostOp::TimeMonotonicNs,
+        HostOp::TimeSleepMs,
+        HostOp::ProcRun,
+        HostOp::NetTcpExchange,
+        HostOp::OsStrerror,
+    ];
+    let mut host_ops = BTreeMap::new();
+    for op in host_symbols {
+        let mut sig = module.make_signature();
+        sig.params
+            .extend((0..=op.arity()).map(|_| AbiParam::new(I64)));
+        sig.returns.push(AbiParam::new(I64));
+        host_ops.insert(
+            op,
+            module
+                .declare_function(op.symbol(), Linkage::Import, &sig)
+                .map_err(error)?,
+        );
+    }
     let mut task_spawn_sig = module.make_signature();
     task_spawn_sig
         .params
@@ -2230,6 +2828,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             read_line,
             read_chunk,
             write,
+            host_ops: &host_ops,
             bytes_ops: &bytes_ops,
             string_validate,
             string_scalar_len,
@@ -3135,6 +3734,7 @@ struct Generator<'a, 'b> {
     read_line: FuncId,
     read_chunk: FuncId,
     write: FuncId,
+    host_ops: &'b BTreeMap<HostOp, FuncId>,
     bytes_ops: &'b BTreeMap<BytesOp, FuncId>,
     string_validate: FuncId,
     string_scalar_len: FuncId,
@@ -5934,6 +6534,32 @@ impl Generator<'_, '_> {
                             return Some(vec![tag, payload]);
                         }
                     },
+                    Target::Host(op, shape) => {
+                        let mut arguments = values.clone();
+                        for (index, borrowed) in op.borrowed().iter().enumerate() {
+                            if *borrowed {
+                                arguments[index] = self.builder.ins().load(
+                                    I64,
+                                    ir::MemFlagsData::new(),
+                                    arguments[index],
+                                    0,
+                                );
+                            }
+                        }
+                        let out = self.stack_words(1);
+                        arguments.push(out);
+                        let status = self.runtime_call(self.host_ops[op], &arguments);
+                        let success = self.builder.ins().icmp_imm_s(IntCC::Equal, status, 0);
+                        let value = self
+                            .builder
+                            .ins()
+                            .load(I64, ir::MemFlagsData::new(), out, 0);
+                        let ok_tag = self.constant(shape.ok_tag as i64);
+                        let err_tag = self.constant(shape.err_tag as i64);
+                        let tag = self.builder.ins().select(success, ok_tag, err_tag);
+                        let payload = self.builder.ins().select(success, value, status);
+                        return Some(vec![tag, payload]);
+                    }
                     Target::Bytes(op) => {
                         if op.borrowed() {
                             values[0] =

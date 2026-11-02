@@ -411,6 +411,10 @@ struct MethodArguments {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Target {
     Io(IoOp, Option<ResultShape>),
+    /// Checked host operation (filesystem, environment, clock, process, or
+    /// network). Every operation returns `Result<T, i64>`; error payloads are
+    /// positive Linux errno values.
+    Host(HostOp, ResultShape),
     Bytes(BytesOp),
     /// Validated UTF-8 text operation (same native buffer representation).
     String(StringOp),
@@ -473,6 +477,163 @@ impl IoOp {
             "IO.read_chunk" => Some(Self::ReadChunk),
             "IO.write" => Some(Self::Write),
             _ => None,
+        }
+    }
+}
+/// Successful payload of a checked host operation. `Bytes` operations
+/// preserve the storage of the owned buffer they consume; `I64` operations
+/// report a count, flag, clock value, or child exit status; `Unit` reports
+/// plain success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostPayload {
+    Bytes,
+    I64,
+    Unit,
+}
+/// Checked synchronous host operations. Every native entry point has the same
+/// shape: `int64_t f(..., uint64_t *out)` returns zero on success or a positive
+/// Linux errno on failure, and writes the success payload through `out`.
+/// Borrowed `&Bytes` parameters arrive as pointers to the caller's buffer
+/// handle; owned `Bytes` parameters arrive as the handle itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum HostOp {
+    FsRead,
+    FsWrite,
+    FsAppend,
+    FsRemove,
+    FsRename,
+    FsMkdir,
+    FsRemoveDir,
+    FsList,
+    FsIsFile,
+    FsIsDir,
+    FsSize,
+    FsExists,
+    EnvArgCount,
+    EnvArg,
+    EnvVarCount,
+    EnvVar,
+    TimeUnixSeconds,
+    TimeMonotonicNs,
+    TimeSleepMs,
+    ProcRun,
+    NetTcpExchange,
+    OsStrerror,
+}
+impl HostOp {
+    pub fn named(name: &str) -> Option<Self> {
+        match name {
+            "FS.read" => Some(Self::FsRead),
+            "FS.write" => Some(Self::FsWrite),
+            "FS.append" => Some(Self::FsAppend),
+            "FS.remove" => Some(Self::FsRemove),
+            "FS.rename" => Some(Self::FsRename),
+            "FS.mkdir" => Some(Self::FsMkdir),
+            "FS.remove_dir" => Some(Self::FsRemoveDir),
+            "FS.list" => Some(Self::FsList),
+            "FS.is_file" => Some(Self::FsIsFile),
+            "FS.is_dir" => Some(Self::FsIsDir),
+            "FS.size" => Some(Self::FsSize),
+            "FS.exists" => Some(Self::FsExists),
+            "ENV.arg_count" => Some(Self::EnvArgCount),
+            "ENV.arg" => Some(Self::EnvArg),
+            "ENV.var_count" => Some(Self::EnvVarCount),
+            "ENV.var" => Some(Self::EnvVar),
+            "TIME.unix_seconds" => Some(Self::TimeUnixSeconds),
+            "TIME.monotonic_ns" => Some(Self::TimeMonotonicNs),
+            "TIME.sleep_ms" => Some(Self::TimeSleepMs),
+            "PROC.run" => Some(Self::ProcRun),
+            "NET.tcp_exchange" => Some(Self::NetTcpExchange),
+            "OS.strerror" => Some(Self::OsStrerror),
+            _ => None,
+        }
+    }
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::FsRead => "kush_fs_read",
+            Self::FsWrite => "kush_fs_write",
+            Self::FsAppend => "kush_fs_append",
+            Self::FsRemove => "kush_fs_remove",
+            Self::FsRename => "kush_fs_rename",
+            Self::FsMkdir => "kush_fs_mkdir",
+            Self::FsRemoveDir => "kush_fs_remove_dir",
+            Self::FsList => "kush_fs_list",
+            Self::FsIsFile => "kush_fs_is_file",
+            Self::FsIsDir => "kush_fs_is_dir",
+            Self::FsSize => "kush_fs_size",
+            Self::FsExists => "kush_fs_exists",
+            Self::EnvArgCount => "kush_env_arg_count",
+            Self::EnvArg => "kush_env_arg",
+            Self::EnvVarCount => "kush_env_var_count",
+            Self::EnvVar => "kush_env_var",
+            Self::TimeUnixSeconds => "kush_time_unix_seconds",
+            Self::TimeMonotonicNs => "kush_time_monotonic_ns",
+            Self::TimeSleepMs => "kush_time_sleep_ms",
+            Self::ProcRun => "kush_proc_run",
+            Self::NetTcpExchange => "kush_net_tcp_exchange",
+            Self::OsStrerror => "kush_os_strerror",
+        }
+    }
+    /// Number of source-level arguments, excluding the native out-pointer.
+    pub fn arity(self) -> usize {
+        match self {
+            Self::FsRead | Self::FsList => 2,
+            Self::FsWrite | Self::FsAppend | Self::FsRename => 2,
+            Self::EnvArg => 2,
+            Self::EnvVar => 2,
+            Self::OsStrerror => 2,
+            Self::ProcRun => 4,
+            Self::NetTcpExchange => 5,
+            Self::EnvArgCount
+            | Self::EnvVarCount
+            | Self::TimeUnixSeconds
+            | Self::TimeMonotonicNs => 0,
+            Self::TimeSleepMs => 1,
+            Self::FsRemove
+            | Self::FsMkdir
+            | Self::FsRemoveDir
+            | Self::FsIsFile
+            | Self::FsIsDir
+            | Self::FsSize
+            | Self::FsExists => 1,
+        }
+    }
+    /// Which source arguments are borrowed `&Bytes` handles. The native
+    /// lowering loads the buffer handle from these pointer words.
+    pub fn borrowed(self) -> &'static [bool] {
+        match self {
+            Self::FsRead | Self::FsList => &[true, false],
+            Self::FsWrite | Self::FsAppend | Self::FsRename => &[true, true],
+            Self::FsRemove
+            | Self::FsMkdir
+            | Self::FsRemoveDir
+            | Self::FsIsFile
+            | Self::FsIsDir
+            | Self::FsSize
+            | Self::FsExists => &[true],
+            Self::EnvArg => &[false, false],
+            Self::EnvVar => &[true, false],
+            Self::OsStrerror => &[false, false],
+            Self::ProcRun => &[true, true, true, false],
+            Self::NetTcpExchange => &[true, false, true, true, false],
+            Self::EnvArgCount
+            | Self::EnvVarCount
+            | Self::TimeUnixSeconds
+            | Self::TimeMonotonicNs
+            | Self::TimeSleepMs => &[],
+        }
+    }
+    pub fn payload(self) -> HostPayload {
+        match self {
+            Self::FsRead | Self::FsList | Self::EnvArg | Self::EnvVar | Self::OsStrerror => {
+                HostPayload::Bytes
+            }
+            Self::FsRemove
+            | Self::FsRename
+            | Self::FsMkdir
+            | Self::FsRemoveDir
+            | Self::TimeSleepMs => HostPayload::Unit,
+            _ => HostPayload::I64,
         }
     }
 }
@@ -1892,6 +2053,7 @@ fn fusion_expr_safe(
         }
         ExprKind::Call(
             Target::Io(..)
+            | Target::Host(..)
             | Target::Print
             | Target::PrintInt(_)
             | Target::PrintFloat(_)
@@ -19223,6 +19385,7 @@ impl Checker<'_, '_> {
                     }
                     let bytes_op = (binding.kind == BindingKind::Builtin).then(|| BytesOp::named(&binding.name)).flatten();
                     let io_op = (binding.kind == BindingKind::Builtin).then(|| IoOp::named(&binding.name)).flatten();
+                    let host_op = (binding.kind == BindingKind::Builtin).then(|| HostOp::named(&binding.name)).flatten();
                     let (target, parameters, result, effects) = if let Some(op) = io_op {
                         match op {
                             IoOp::Stdin => (Target::Io(op, None), vec![], Type::Stdin, IO),
@@ -19239,6 +19402,48 @@ impl Checker<'_, '_> {
                                 (Target::Io(op, Some(shape)), parameters, result, IO)
                             }
                         }
+                    } else if let Some(op) = host_op {
+                        let bytes = Type::Bytes;
+                        let borrowed = Type::Ref(c.types.pointer(Type::Bytes));
+                        let parameters = match op {
+                            HostOp::FsRead | HostOp::FsList => vec![borrowed, bytes],
+                            HostOp::FsWrite | HostOp::FsAppend | HostOp::FsRename => {
+                                vec![borrowed, borrowed]
+                            }
+                            HostOp::FsRemove
+                            | HostOp::FsMkdir
+                            | HostOp::FsRemoveDir
+                            | HostOp::FsIsFile
+                            | HostOp::FsIsDir
+                            | HostOp::FsSize
+                            | HostOp::FsExists => vec![borrowed],
+                            HostOp::EnvArgCount | HostOp::EnvVarCount => vec![],
+                            HostOp::EnvArg => vec![Type::I64, bytes],
+                            HostOp::EnvVar => vec![borrowed, bytes],
+                            HostOp::TimeUnixSeconds | HostOp::TimeMonotonicNs => vec![],
+                            HostOp::TimeSleepMs => vec![Type::I64],
+                            HostOp::ProcRun => vec![
+                                borrowed,
+                                borrowed,
+                                Type::RefMut(c.types.pointer(bytes)),
+                                Type::I64,
+                            ],
+                            HostOp::NetTcpExchange => vec![
+                                borrowed,
+                                Type::I64,
+                                borrowed,
+                                Type::RefMut(c.types.pointer(bytes)),
+                                Type::I64,
+                            ],
+                            HostOp::OsStrerror => vec![Type::I64, bytes],
+                        };
+                        let ok = match op.payload() {
+                            HostPayload::Bytes => Type::Bytes,
+                            HostPayload::I64 => Type::I64,
+                            HostPayload::Unit => Type::Unit,
+                        };
+                        let (result, shape) = c.types.result_type(ok, Type::I64, span)?;
+                        (Target::Host(op, shape), parameters, result, IO)
                     } else if let Some(op) = bytes_op {
                         let borrowed = Type::Ref(c.types.pointer(Type::Bytes));
                         let parameters = match op {

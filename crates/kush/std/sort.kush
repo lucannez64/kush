@@ -1,0 +1,51 @@
+module std.sort;
+
+/// In-place insertion sort for small integer arrays and mutable slices. The
+/// algorithm is deliberately simple and allocation-free; it is O(n^2) and is
+/// intended for application-sized data, not bulk sorting.
+pub fn sort_i64(values: &mut [i64]) -> Unit ! {panic} {
+    let n = Slice.len(values);
+    let mut i = 1;
+    while i < n {
+        let key = Slice.get(values, i);
+        let mut j = i;
+        while j > 0 {
+            let previous = Slice.get(values, j - 1);
+            if previous <= key { break; }
+            Slice.set(values, j, previous);
+            j = j - 1;
+        }
+        Slice.set(values, j, key);
+        i = i + 1;
+    }
+}
+
+/// Index of `target` in an ascending sorted slice, or -1.
+pub fn binary_search_i64(values: &[i64], target: i64) -> i64 ! {panic} {
+    let mut low = 0;
+    let mut high = Slice.len(values);
+    let mut found = -1;
+    let mut done = false;
+    while low < high && !done {
+        let middle = low + (high - low) / 2;
+        let value = Slice.get(values, middle);
+        if value < target {
+            low = middle + 1;
+        } else {
+            if value > target { high = middle; }
+            else { found = middle; done = true; }
+        }
+    }
+    found
+}
+
+/// True when the slice is nondecreasing.
+pub fn is_sorted_i64(values: &[i64]) -> Bool ! {panic} {
+    let n = Slice.len(values);
+    let mut i = 1;
+    while i < n {
+        if Slice.get(values, i - 1) > Slice.get(values, i) { return false; }
+        i = i + 1;
+    }
+    true
+}

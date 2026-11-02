@@ -1,0 +1,151 @@
+module std.http;
+
+use std.result.Result;
+use std.text;
+
+/// A minimal HTTP/1.1 client over the checked plain-TCP operation. It does not
+/// implement TLS, redirects, content-length/chunked decoding, or connection
+/// reuse. `body` starts immediately after the header terminator and may contain
+/// chunk framing when the server sends `Transfer-Encoding: chunked`.
+pub struct Response {
+    status: i64,
+    headers: Bytes,
+    body: Bytes,
+}
+
+pub fn response_status(response: &Response) -> i64 ! {} {
+    response.status
+}
+
+fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < Bytes.len(text) {
+        out = Bytes.push(out, Bytes.get(text, i));
+        i = i + 1;
+    }
+    out
+}
+
+fn find_pair(text: &Bytes, first: i64, second: i64, start: i64) -> i64 ! {panic} {
+    let n = Bytes.len(text);
+    if start < 0 || start + 1 >= n { return -1; }
+    let mut at = start;
+    let mut found = -1;
+    let mut done = false;
+    while at + 1 < n && !done {
+        if Bytes.get(text, at) == first && Bytes.get(text, at + 1) == second {
+            found = at;
+            done = true;
+        }
+        at = at + 1;
+    }
+    found
+}
+
+fn status_line(text: &Bytes, line_end: i64) -> Result<i64, i64> ! {panic} {
+    if line_end < 12 { return Result.Err(22); }
+    if Bytes.get(text, 0) != 72 || Bytes.get(text, 1) != 84
+        || Bytes.get(text, 2) != 84 || Bytes.get(text, 3) != 80
+        || Bytes.get(text, 4) != 47 {
+        return Result.Err(22);
+    }
+    let mut space = -1;
+    let mut at = 0;
+    while at < line_end {
+        if Bytes.get(text, at) == 32 {
+            space = at;
+            break;
+        }
+        at = at + 1;
+    }
+    if space < 0 || space + 3 >= line_end { return Result.Err(22); }
+    let a = Bytes.get(text, space + 1);
+    let b = Bytes.get(text, space + 2);
+    let c = Bytes.get(text, space + 3);
+    if a < 48 || a > 57 || b < 48 || b > 57 || c < 48 || c > 57 {
+        return Result.Err(22);
+    }
+    Result.Ok((a - 48) * 100 + (b - 48) * 10 + (c - 48))
+}
+
+fn parse(raw: Bytes) -> Result<Response, i64> ! {alloc, panic} {
+    let line_end = find_pair(&raw, 13, 10, 0);
+    if line_end < 0 {
+        drop(raw);
+        return Result.Err(22);
+    }
+    let status = match status_line(&raw, line_end) {
+        Result.Ok(code) => code,
+        Result.Err(code) => {
+            drop(raw);
+            return Result.Err(code);
+        }
+    };
+    let headers_end = find_pair(&raw, 13, 10, line_end + 2);
+    if headers_end < 0 {
+        drop(raw);
+        return Result.Err(22);
+    }
+    let headers = match text.slice(&raw, line_end + 2, headers_end) {
+        Result.Ok(value) => value,
+        Result.Err(code) => {
+            drop(raw);
+            return Result.Err(code);
+        }
+    };
+    let body = match text.slice(&raw, headers_end + 4, Bytes.len(&raw)) {
+        Result.Ok(value) => value,
+        Result.Err(code) => {
+            drop(raw);
+            return Result.Err(code);
+        }
+    };
+    drop(raw);
+    Result.Ok(Response { status: status, headers: headers, body: body })
+}
+
+/// Issue one request and parse the response. The request has a bounded response
+/// capacity of 64 KiB; a larger response reports `EFBIG` (27).
+pub fn request(
+    method: &Bytes,
+    host: &Bytes,
+    port: i64,
+    path: &Bytes,
+    body: &Bytes,
+    timeout_ms: i64,
+) -> Result<Response, i64> ! {io, alloc, panic} {
+    let mut outgoing = Bytes.with_capacity(4096);
+    let prefix = Bytes.from(" HTTP/1.1\r\nHost: ");
+    let headers = Bytes.from("\r\nConnection: close\r\nContent-Length: ");
+    let terminator = Bytes.from("\r\n\r\n");
+    outgoing = append(outgoing, method);
+    outgoing = Bytes.push(outgoing, 32);
+    outgoing = append(outgoing, path);
+    outgoing = append(outgoing, &prefix);
+    outgoing = append(outgoing, host);
+    outgoing = Bytes.push(outgoing, 58);
+    outgoing = text.format_i64_into(outgoing, port);
+    outgoing = append(outgoing, &headers);
+    outgoing = text.format_i64_into(outgoing, Bytes.len(body));
+    outgoing = append(outgoing, &terminator);
+    outgoing = append(outgoing, body);
+    drop(prefix);
+    drop(headers);
+    drop(terminator);
+    let mut response = Bytes.with_capacity(65536);
+    let _received = NET.tcp_exchange(host, port, &outgoing, &mut response, timeout_ms)?;
+    drop(outgoing);
+    parse(response)
+}
+
+pub fn get(
+    host: &Bytes,
+    port: i64,
+    path: &Bytes,
+    timeout_ms: i64,
+) -> Result<Response, i64> ! {io, alloc, panic} {
+    let method = Bytes.from("GET");
+    let empty = Bytes.with_capacity(0);
+    request(&method, host, port, path, &empty, timeout_ms)
+}

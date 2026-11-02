@@ -1,0 +1,400 @@
+module todo_cli.cli;
+
+use std.result.Result;
+use std.text;
+use todo_cli.store;
+
+fn unit_error(code: i64) -> Result<Unit, i64> ! {} {
+    Result.Err(code)
+}
+
+fn id_error(code: i64) -> Result<i64, i64> ! {} {
+    Result.Err(code)
+}
+
+fn write(bytes: &Bytes) -> Result<Unit, i64> ! {io} {
+    IO.write(IO.stdout(), bytes)
+}
+
+fn line(message: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
+    let newline = Bytes.from("\n");
+    let result = match write(message) {
+        Result.Ok(_) => write(&newline),
+        Result.Err(code) => unit_error(code),
+    };
+    drop(newline);
+    result
+}
+
+fn usage() -> Result<Unit, i64> ! {io, alloc, panic} {
+    let help = Bytes.from("usage: todo [--file PATH] <command> [args]\n\ncommands:\n  add <title...>   add a task\n  list             list tasks\n  done <id>        mark a task complete (1-based line)\n  remove <id>      remove a task\n\nKUSH_TODO_FILE supplies the default path (todo.txt).\nData format: one <0|1>|<title> line per task; invalid files are rejected without being rewritten.\n");
+    let result = write(&help);
+    drop(help);
+    match result {
+        Result.Ok(_) => Result.Err(2),
+        Result.Err(code) => unit_error(code),
+    }
+}
+
+fn invalid_file() -> Result<Unit, i64> ! {io, alloc, panic} {
+    let message = Bytes.from("error: task file is invalid; no changes were made.");
+    let result = line(&message);
+    drop(message);
+    match result {
+        Result.Ok(_) => Result.Err(2),
+        Result.Err(code) => unit_error(code),
+    }
+}
+
+fn io_failure(code: i64) -> Result<Unit, i64> ! {io, alloc, panic} {
+    let mut message = Bytes.with_capacity(32);
+    let prefix = Bytes.from("error: host I/O failure ");
+    message = append(message, &prefix);
+    message = text.format_i64_into(message, code);
+    let result = line(&message);
+    drop(prefix);
+    drop(message);
+    match result {
+        Result.Ok(_) => Result.Err(1),
+        Result.Err(code) => unit_error(code),
+    }
+}
+
+fn append(out: Bytes, value: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < Bytes.len(value) {
+        out = Bytes.push(out, Bytes.get(value, i));
+        i = i + 1;
+    }
+    out
+}
+
+fn append_range(out: Bytes, value: &Bytes, start: i64, end: i64) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = start;
+    while i < end {
+        out = Bytes.push(out, Bytes.get(value, i));
+        i = i + 1;
+    }
+    out
+}
+
+fn find_byte(value: &Bytes, byte: i64, start: i64) -> i64 ! {panic} {
+    let n = Bytes.len(value);
+    let mut at = start;
+    let mut found = -1;
+    let mut done = false;
+    while at < n && !done {
+        if Bytes.get(value, at) == byte {
+            found = at;
+            done = true;
+        }
+        at = at + 1;
+    }
+    found
+}
+
+fn load(path: &Bytes) -> Result<Bytes, i64> ! {io, alloc, panic} {
+    match store.load(path) {
+        Result.Ok(value) => Result.Ok(value),
+        Result.Err(22) => {
+            let _ = invalid_file();
+            Result.Err(2)
+        },
+        Result.Err(code) => {
+            let _ = io_failure(code);
+            Result.Err(1)
+        },
+    }
+}
+
+fn save(path: &Bytes, data: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
+    match store.save(path, data) {
+        Result.Ok(_) => Result.Ok(()),
+        Result.Err(code) => {
+            let _ = io_failure(code);
+            Result.Err(1)
+        },
+    }
+}
+
+fn list(path: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
+    let data = match load(path) {
+        Result.Ok(value) => value,
+        Result.Err(code) => return Result.Err(code),
+    };
+    let count = store.task_count(&data);
+    if count == 0 {
+        drop(data);
+        let message = Bytes.from("No tasks.\n");
+        let result = write(&message);
+        drop(message);
+        return result;
+    }
+    let mut out = Bytes.with_capacity(65536);
+    let open = Bytes.from("  [");
+    let close = Bytes.from("] ");
+    let dot = Bytes.from(". ");
+    let n = Bytes.len(&data);
+    let mut start = 0;
+    let mut number = 1;
+    while start < n {
+        let found = find_byte(&data, 10, start);
+        let end = if found < 0 { n } else { found };
+        let state = Bytes.get(&data, start);
+        out = append(out, &open);
+        if state == 49 { out = Bytes.push(out, 120); }
+        else { out = Bytes.push(out, 32); }
+        out = append(out, &close);
+        out = text.format_i64_into(out, number);
+        out = append(out, &dot);
+        out = append_range(out, &data, start + 2, end);
+        out = Bytes.push(out, 10);
+        start = end + 1;
+        number = number + 1;
+    }
+    drop(data);
+    drop(open);
+    drop(close);
+    drop(dot);
+    let result = write(&out);
+    drop(out);
+    result
+}
+
+fn title_byte_allowed(byte: i64) -> Bool ! {} {
+    byte != 0 && byte != 10 && byte != 13 && byte != 124
+}
+
+fn add(path: &Bytes, first: i64, argc: i64) -> Result<Unit, i64> ! {io, alloc, panic} {
+    if first >= argc {
+        let _ = usage();
+        return Result.Err(2);
+    }
+    let mut title = Bytes.with_capacity(256);
+    let mut at = first;
+    while at < argc {
+        let argument = match ENV.arg(at, Bytes.with_capacity(4096)) {
+            Result.Ok(value) => value,
+            Result.Err(code) => return io_failure(code),
+        };
+        let mut i = 0;
+        while i < Bytes.len(&argument) {
+            if !title_byte_allowed(Bytes.get(&argument, i)) {
+                drop(argument);
+                drop(title);
+                let message = Bytes.from("error: titles cannot contain NUL, CR, LF, or '|'.");
+                let _ = line(&message);
+                drop(message);
+                return Result.Err(2);
+            }
+            i = i + 1;
+        }
+        if at > first { title = Bytes.push(title, 32); }
+        title = append(title, &argument);
+        drop(argument);
+        at = at + 1;
+    }
+    if Bytes.len(&title) == 0 {
+        drop(title);
+        let _ = usage();
+        return Result.Err(2);
+    }
+    let data = match load(path) {
+        Result.Ok(value) => value,
+        Result.Err(code) => { drop(title); return Result.Err(code); },
+    };
+    let updated = store.append_task(data, &title);
+    drop(title);
+    let result = match save(path, &updated) {
+        Result.Ok(_) => {
+            let message = Bytes.from("Added.\n");
+            let written = write(&message);
+            drop(message);
+            written
+        },
+        Result.Err(code) => unit_error(code),
+    };
+    drop(updated);
+    result
+}
+
+fn parse_id(argc: i64, first: i64) -> Result<i64, i64> ! {io, alloc, panic} {
+    if first + 1 != argc {
+        let _ = usage();
+        return Result.Err(2);
+    }
+    let argument = match ENV.arg(first, Bytes.with_capacity(32)) {
+        Result.Ok(value) => value,
+        Result.Err(code) => {
+            match io_failure(code) {
+                Result.Ok(_) => return id_error(1),
+                Result.Err(status) => return id_error(status),
+            }
+        },
+    };
+    let parsed = text.parse_i64(&argument);
+    drop(argument);
+    match parsed {
+        Result.Ok(value) => Result.Ok(value),
+        Result.Err(_) => {
+            let message = Bytes.from("error: task id must be a positive integer.");
+            let _ = line(&message);
+            drop(message);
+            Result.Err(2)
+        },
+    }
+}
+
+fn change(path: &Bytes, first: i64, argc: i64, remove: Bool) -> Result<Unit, i64> ! {io, alloc, panic} {
+    let id = match parse_id(argc, first) {
+        Result.Ok(value) => value,
+        Result.Err(code) => return Result.Err(code),
+    };
+    let data = match load(path) {
+        Result.Ok(value) => value,
+        Result.Err(code) => return Result.Err(code),
+    };
+    let updated = if remove {
+        store.remove_task(data, id)
+    } else {
+        store.set_state(data, id, 1)
+    };
+    let data = match updated {
+        Result.Ok(value) => value,
+        Result.Err(_) => {
+            let message = Bytes.from("error: no task with that id.");
+            let _ = line(&message);
+            drop(message);
+            return Result.Err(2);
+        },
+    };
+    let message = if remove { Bytes.from("Removed.\n") } else { Bytes.from("Completed.\n") };
+    let result = match save(path, &data) {
+        Result.Ok(_) => write(&message),
+        Result.Err(code) => unit_error(code),
+    };
+    drop(message);
+    drop(data);
+    result
+}
+
+pub fn run() -> Result<Unit, i64> ! {io, alloc, panic} {
+    let argc = match ENV.arg_count() {
+        Result.Ok(value) => value,
+        Result.Err(code) => return io_failure(code),
+    };
+    let environment_name = Bytes.from("KUSH_TODO_FILE");
+    let mut path = match ENV.var(&environment_name, Bytes.with_capacity(4096)) {
+        Result.Ok(value) => value,
+        Result.Err(2) => Bytes.from("todo.txt"),
+        Result.Err(code) => {
+            drop(environment_name);
+            return io_failure(code);
+        },
+    };
+    drop(environment_name);
+    if Bytes.len(&path) == 0 {
+        drop(path);
+        path = Bytes.from("todo.txt");
+    }
+    let file_flag = Bytes.from("--file");
+    let help_flag = Bytes.from("--help");
+    let mut at = 1;
+    let mut command = Bytes.with_capacity(0);
+    let mut have_command = false;
+    while at < argc && !have_command {
+        let argument = match ENV.arg(at, Bytes.with_capacity(4096)) {
+            Result.Ok(value) => value,
+            Result.Err(code) => {
+                drop(file_flag);
+                drop(help_flag);
+                drop(path);
+                return io_failure(code);
+            },
+        };
+        if text.eq(&argument, &file_flag) {
+            if at + 1 >= argc {
+                drop(argument);
+                drop(file_flag);
+                drop(help_flag);
+                drop(path);
+                let _ = usage();
+                return Result.Err(2);
+            }
+            let replacement = match ENV.arg(at + 1, Bytes.with_capacity(4096)) {
+                Result.Ok(value) => value,
+                Result.Err(code) => {
+                    drop(argument);
+                    drop(file_flag);
+                    drop(help_flag);
+                    drop(path);
+                    return io_failure(code);
+                },
+            };
+            drop(path);
+            path = replacement;
+            drop(argument);
+            at = at + 2;
+        } else if text.eq(&argument, &help_flag) {
+            drop(argument);
+            drop(file_flag);
+            drop(help_flag);
+            drop(path);
+            let _ = usage();
+            return Result.Ok(());
+        } else if Bytes.len(&argument) > 0 && Bytes.get(&argument, 0) == 45 {
+            drop(argument);
+            drop(file_flag);
+            drop(help_flag);
+            drop(path);
+            let _ = usage();
+            return Result.Err(2);
+        } else {
+            command = argument;
+            have_command = true;
+            at = at + 1;
+        }
+    }
+    drop(file_flag);
+    drop(help_flag);
+    if !have_command {
+        drop(path);
+        drop(command);
+        let _ = usage();
+        return Result.Err(2);
+    }
+    let add_command = Bytes.from("add");
+    let list_command = Bytes.from("list");
+    let done_command = Bytes.from("done");
+    let remove_command = Bytes.from("remove");
+    let result = if text.eq(&command, &add_command) {
+        add(&path, at, argc)
+    } else if text.eq(&command, &list_command) {
+        if at != argc {
+            let _ = usage();
+            return Result.Err(2);
+        }
+        list(&path)
+    } else if text.eq(&command, &done_command) {
+        change(&path, at, argc, false)
+    } else if text.eq(&command, &remove_command) {
+        change(&path, at, argc, true)
+    } else {
+        let message = Bytes.from("error: unknown command (try --help).");
+        let shown = line(&message);
+        drop(message);
+        match shown {
+            Result.Ok(_) => return unit_error(2),
+            Result.Err(code) => unit_error(code),
+        }
+    };
+    drop(add_command);
+    drop(list_command);
+    drop(done_command);
+    drop(remove_command);
+    drop(command);
+    drop(path);
+    result
+}

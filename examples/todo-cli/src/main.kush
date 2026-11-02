@@ -1,0 +1,11 @@
+module todo_cli;
+
+use std.result.Result;
+use todo_cli.cli;
+
+fn main() -> i64 ! {io, alloc, panic} {
+    match cli.run() {
+        Result.Ok(_) => 0,
+        Result.Err(code) => code,
+    }
+}
