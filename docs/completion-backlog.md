@@ -1077,3 +1077,18 @@ The full Boat gate also passes **1011 tests, formatting, and Clippy** for
 compiler checkpoint `9df5bb6`; the sandbox was confirmed stopped afterwards.
 Unchecked backlog items remain unresolved. Independent combined review and
 reference-place/stateful-allocator implementation continue separately.
+
+## Loop-result provenance review correction
+
+Compiler checkpoint `24fb4b9` fixes the independent review's loop/break
+provenance hole: borrowed records and reference containers retain a snapshot of
+all possible break-result leaves, and loop-local owners cannot escape through
+those results. Direct `Box.set` replacement releases the old element's loans
+without releasing loans held by an earlier read. Added regressions cover
+records, vectors, boxes, assignment, multiple breaks, nested loops, lexical
+escape, and both replacement owners.
+
+Local focused borrowing-safety suite: 8 passed. The full Boat gate passed
+**1014 tests**, formatting, and Clippy; sandbox `bx_3m6vs6ah` was confirmed
+stopped afterwards. Log: `/tmp/kush-boat-loop-provenance-gate.log` (machine-local).
+The unchecked feature items above remain outstanding.
