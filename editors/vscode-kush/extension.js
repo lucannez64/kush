@@ -35,10 +35,10 @@ async function stopClient() {
 
 async function startClient() {
   const configuration = vscode.workspace.getConfiguration('kush');
+  await stopClient();
   if (!configuration.get('server.enabled', true)) {
     return;
   }
-  await stopClient();
   if (!outputChannel) {
     outputChannel = vscode.window.createOutputChannel('Kush Language Server');
   }
