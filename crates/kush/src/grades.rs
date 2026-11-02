@@ -284,7 +284,9 @@ fn grade_occurrences(resolution: &Resolution, ty: &ast::Type, binder: BindingId)
             .iter()
             .map(|item| grade_occurrences(resolution, item, binder))
             .sum(),
-        K::Slice(inner) | K::Borrow { inner, .. } => grade_occurrences(resolution, inner, binder),
+        K::Slice(inner) | K::Borrow { inner, .. } | K::Dyn(inner) => {
+            grade_occurrences(resolution, inner, binder)
+        }
         K::Array(element, length) => {
             grade_occurrences(resolution, element, binder)
                 + grade_occurrences(resolution, length, binder)

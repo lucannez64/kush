@@ -8350,7 +8350,6 @@ impl Checker<'_, '_> {
             parameter_lifetimes: vec![None; parameters.len()],
             result_lifetime: None,
             lifetime_bounds: BTreeSet::new(),
-            result_linear: false,
         };
         let signature = Signature {
             binding: usize::MAX,
