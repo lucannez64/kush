@@ -925,27 +925,39 @@ fn result_contract(
 /// never makes a copyable value move-owning.
 fn validate_result_contract(
     grade: Option<Grade>,
-    _owning: bool,
-    _name: &str,
+    owning: bool,
+    name: &str,
     span: Span,
 ) -> Result<()> {
     match grade {
         None => Ok(()),
         Some(grade) if grade.is_one() => Ok(()),
+        Some(grade) if grade.is_zero() && !owning => Ok(()),
         Some(grade) if grade.is_zero() => Err(Diagnostic::new(
             span,
-            "a result graded @[0] would discard the value it returns; use an owning @[1] result contract or return Unit",
+            format!(
+                "a result graded @[0] would silently discard the owning/linear value {name}; use an owning @[1] result contract, consume it inside the function, or return Unit"
+            ),
         )),
         Some(grade) if grade.is_many() => Err(Diagnostic::new(
             span,
-            "a result graded 'many' could duplicate one owning resource; result contracts currently support exactly @[1]",
+            "a result graded 'many' could duplicate one owning resource; result contracts currently support exactly @[1] or a copyable @[0]",
         )),
         Some(grade) => Err(Diagnostic::new(
             span,
             format!(
-                "a result graded @[{grade}] could duplicate one owning resource; result contracts currently support exactly @[1]"
+                "a result graded @[{grade}] could duplicate one owning resource; result contracts currently support exactly @[1] or a copyable @[0]"
             ),
         )),
+    }
+}
+/// The runtime type of a direct call expression. A `@[0]` result has no
+/// observable payload, so callers see `Unit`.
+fn call_result_type(signature: &Signature) -> Type {
+    if crate::runtime_types::grade_erases(signature.result_grade) {
+        Type::Unit
+    } else {
+        signature.result
     }
 }
 /// Outer lifetime annotation of a borrow type, if any.
@@ -2518,6 +2530,12 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     "main must have no parameters and return i64 or Unit",
                 ));
             }
+            if sig.result_grade.is_some() {
+                return Err(Diagnostic::new(
+                    sig.span,
+                    "main cannot carry a result usage contract; its process result has no caller to transfer or erase it",
+                ));
+            }
             entry = Some(index);
         }
         let mut checker = Checker {
@@ -2596,6 +2614,31 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             }
             e
         })?;
+        // A copyable `@[0]` result has no payload at runtime. The value is
+        // still computed for effects (and for type checking against the
+        // declared result), then erased in the callee. `Drop` is a checked
+        // no-op for copyable values; an owning result is rejected by the
+        // contract validator before this point.
+        let mut body = body;
+        if sig.result_grade.is_some_and(Grade::is_zero) && body.ty != Type::Never {
+            let span = body.tail.as_deref().map_or(sig.span, |tail| tail.span);
+            let tail = body.tail.take().unwrap_or_else(|| {
+                Box::new(Expr {
+                    kind: ExprKind::Constant(0),
+                    ty: Type::Unit,
+                    span,
+                    resource: None,
+                })
+            });
+            let erased = Expr {
+                kind: ExprKind::Drop(tail),
+                ty: Type::Unit,
+                span,
+                resource: None,
+            };
+            body.tail = Some(Box::new(erased));
+            body.ty = Type::Unit;
+        }
         let obligation = checker.return_obligation(&body);
         if let Some(span) = obligation
             && sig.result_grade.is_none()
@@ -8871,7 +8914,7 @@ impl Checker<'_, '_> {
         }
         let value = Expr {
             kind: ExprKind::Call(Target::Function(dispatcher), values),
-            ty: signature.result,
+            ty: call_result_type(&signature),
             span,
             resource: None,
         };
@@ -8969,12 +9012,13 @@ impl Checker<'_, '_> {
             &method.result,
         )?;
         let result = self.types.ty_in(&result, &substitution)?;
-        if result_grade.is_some() || self.linear_type(result) {
+        if result_grade.is_some_and(|grade| !grade.is_zero()) || self.linear_type(result) {
             return Err(Diagnostic::new(
                 span,
-                "a dynamic method cannot return an owning exact-use contract; consume the object statically or return a copyable value",
+                "a dynamic method cannot return an owning/exact-use @[1] contract; consume the object statically or return an ordinary or erased copyable value",
             ));
         }
+        let result_erased = result_grade.is_some_and(Grade::is_zero);
         let mut locals = parameters
             .iter()
             .map(|ty| Local {
@@ -9095,7 +9139,11 @@ impl Checker<'_, '_> {
                 guard: None,
                 body: Expr {
                     kind: ExprKind::Call(Target::Function(index), call_arguments),
-                    ty: signature.result,
+                    ty: if result_erased {
+                        Type::Unit
+                    } else {
+                        signature.result
+                    },
                     span,
                     resource: None,
                 },
@@ -9111,11 +9159,11 @@ impl Checker<'_, '_> {
             statements: Vec::new(),
             tail: Some(Box::new(Expr {
                 kind: ExprKind::Match(Box::new(scrutinee), arms),
-                ty: result,
+                ty: if result_erased { Type::Unit } else { result },
                 span,
                 resource: None,
             })),
-            ty: result,
+            ty: if result_erased { Type::Unit } else { result },
         };
         let function = Function {
             name: format!(
@@ -9367,7 +9415,7 @@ impl Checker<'_, '_> {
         let ty = if diverges {
             Type::Never
         } else {
-            signature.result
+            call_result_type(&signature)
         };
         let value = Expr {
             kind: ExprKind::Call(Target::Function(index), coerced),
@@ -11103,17 +11151,30 @@ impl Checker<'_, '_> {
             };
             arguments.push(self.coerce(argument, *source_parameter, span)?);
         }
+        let erased_result = crate::runtime_types::grade_erases(source_signature.result_grade);
         let call = Expr {
             kind: ExprKind::Call(Target::Function(source), arguments),
-            ty: source_signature.result,
+            ty: if erased_result {
+                Type::Unit
+            } else {
+                source_signature.result
+            },
             span,
             resource: None,
         };
-        let result = self.coerce(call, target.result, span)?;
+        let result = if erased_result {
+            call
+        } else {
+            self.coerce(call, target.result, span)?
+        };
         let body = Block {
             statements: vec![],
             tail: Some(Box::new(result)),
-            ty: target.result,
+            ty: if crate::runtime_types::grade_erases(target.result_grade) {
+                Type::Unit
+            } else {
+                target.result
+            },
         };
         self.check_adapter_effects(&body, &target, span)?;
         let pure_id = self.types.function_type_with(
@@ -11196,17 +11257,30 @@ impl Checker<'_, '_> {
             };
             arguments.push(self.coerce(argument, *source_parameter, span)?);
         }
+        let erased_result = crate::runtime_types::grade_erases(source_signature.result_grade);
         let call = Expr {
             kind: ExprKind::Call(Target::Function(source), arguments),
-            ty: source_signature.result,
+            ty: if erased_result {
+                Type::Unit
+            } else {
+                source_signature.result
+            },
             span,
             resource: None,
         };
-        let result = self.coerce(call, target.result, span)?;
+        let result = if erased_result {
+            call
+        } else {
+            self.coerce(call, target.result, span)?
+        };
         let body = Block {
             statements: vec![],
             tail: Some(Box::new(result)),
-            ty: target.result,
+            ty: if crate::runtime_types::grade_erases(target.result_grade) {
+                Type::Unit
+            } else {
+                target.result
+            },
         };
         self.check_adapter_effects(&body, &target, span)?;
         let index =
@@ -11272,20 +11346,33 @@ impl Checker<'_, '_> {
             };
             arguments.push(self.coerce(argument, *source_parameter, span)?);
         }
+        let erased_result = crate::runtime_types::grade_erases(source.result_grade);
         let call = Expr {
             kind: ExprKind::CallIndirect {
                 callee: Box::new(callee),
                 arguments,
             },
-            ty: source.result,
+            ty: if erased_result {
+                Type::Unit
+            } else {
+                source.result
+            },
             span,
             resource: None,
         };
-        let result = self.coerce(call, target.result, span)?;
+        let result = if erased_result {
+            call
+        } else {
+            self.coerce(call, target.result, span)?
+        };
         let body = Block {
             statements: vec![],
             tail: Some(Box::new(result)),
-            ty: target.result,
+            ty: if crate::runtime_types::grade_erases(target.result_grade) {
+                Type::Unit
+            } else {
+                target.result
+            },
         };
         self.check_adapter_effects(&body, &target, span)?;
         let index = self.register_adapter(
@@ -12121,7 +12208,7 @@ impl Checker<'_, '_> {
             ));
         }
         let tail = tail
-            .map(|tail| self.expr_expected(tail, expected).map(Box::new))
+            .map(|tail| self.expr_expected_result(tail, expected).map(Box::new))
             .transpose()?;
         let ty = if diverges {
             Type::Never
@@ -13795,7 +13882,7 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::Return(value) => {
                     let value = if let Some(value) = value {
-                        c.expr_expected(value, Some(c.result))?
+                        c.expr_expected_result(value, Some(c.result))?
                     } else {
                         let unit = Expr {
                             kind: ExprKind::Constant(0),
@@ -13844,7 +13931,7 @@ impl Checker<'_, '_> {
                             }
                             None => None,
                         };
-                        let tail = c.expr_expected(otherwise, context);
+                        let tail = c.expr_expected_result(otherwise, context);
 
                         let tail = tail?;
                         let ty = tail.ty;
@@ -13862,10 +13949,16 @@ impl Checker<'_, '_> {
                     };
                     c.facts = crate::facts::Facts::branch_join(&baseline, &then_facts, &c.facts);
                     let (then, otherwise, ty) = if has_else {
-                        let ty = c.join(then.ty, otherwise.ty, span)?;
-                        let then = c.coerce_block(then, ty, span)?;
-                        let otherwise = c.coerce_block(otherwise, ty, span)?;
-                        (then, otherwise, ty)
+                        if c.erased_result_context(expected)
+                            && (then.ty == Type::Unit || otherwise.ty == Type::Unit)
+                        {
+                            (c.erase_block_value(then, span), c.erase_block_value(otherwise, span), Type::Unit)
+                        } else {
+                            let ty = c.join(then.ty, otherwise.ty, span)?;
+                            let then = c.coerce_block(then, ty, span)?;
+                            let otherwise = c.coerce_block(otherwise, ty, span)?;
+                            (then, otherwise, ty)
+                        }
                     } else {
                         // An `if` without `else` is a statement: the taken
                         // branch must produce Unit, never an implicit optional
@@ -13940,7 +14033,7 @@ impl Checker<'_, '_> {
                             }
                             None => None,
                         };
-                        let body = c.expr_expected(&arm.body, context);
+                        let body = c.expr_expected_result(&arm.body, context);
                         c.facts.reset(mark);
                         let body = body?;
                         result = c.join(result, body.ty, body.span)?;
@@ -13961,6 +14054,26 @@ impl Checker<'_, '_> {
                             span,
                             "non-exhaustive match; add missing cases or an unguarded catch-all",
                         ));
+                    }
+                    if c.erased_result_context(expected)
+                        && (checked.iter().any(|arm| {
+                            arm.body.ty == Type::Unit || arm.body.ty == Type::Never
+                        }))
+                    {
+                        for arm in &mut checked {
+                            if arm.body.ty == Type::Never {
+                                continue;
+                            }
+                            let placeholder = Expr {
+                                kind: ExprKind::Constant(0),
+                                ty: Type::Unit,
+                                span: arm.body.span,
+                                resource: None,
+                            };
+                            let body = std::mem::replace(&mut arm.body, placeholder);
+                            arm.body = c.erase_value(body, span);
+                        }
+                        result = Type::Unit;
                     }
                     if result != Type::Never && result != expected.unwrap_or(Type::Never) {
                         for arm in &mut checked {
@@ -15372,6 +15485,8 @@ impl Checker<'_, '_> {
         }
         let ty = if diverges {
             Type::Never
+        } else if signature.result_erased() {
+            Type::Unit
         } else {
             signature.result
         };
@@ -17828,7 +17943,7 @@ impl Checker<'_, '_> {
         let ty = if diverges {
             Type::Never
         } else {
-            signature.result
+            call_result_type(&signature)
         };
         let value = Expr {
             kind: ExprKind::Call(Target::Function(index), values),

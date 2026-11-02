@@ -1965,6 +1965,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     let value = value!(self.expr(expr, frame));
                     self.consume(expr, frame);
                     if self.erased_local(*slot, frame) {
+                        // Erased bindings have no storage. Affine owned values
+                        // are destroyed eagerly exactly once; linear ones are
+                        // rejected by the checker.
+                        if self.program.owns(expr.ty) {
+                            self.drop_value(value)?;
+                        }
                         continue;
                     }
                     self.store_local(*slot, value, frame);
@@ -2701,6 +2707,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     )?;
                     self.store_local(*slot, value, frame);
                     self.local_active(*slot, frame);
+                } else if self.program.owns(arg.ty) {
+                    self.drop_value(value)?;
                 }
                 Value::Scalar(0)
             }

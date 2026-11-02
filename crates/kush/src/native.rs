@@ -1433,7 +1433,10 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let mut ids = Vec::new();
     for (index, f) in program.functions.iter().enumerate() {
         let mut sig = module.make_signature();
-        if aggregate_result(program, f.result) {
+        let erased_result = f.result_grade.is_some_and(Grade::is_zero);
+        if erased_result {
+            // A copyable `@[0]` result has no payload and no ABI return slot.
+        } else if aggregate_result(program, f.result) {
             sig.params.push(AbiParam::new(I64));
         } else {
             sig.returns.push(AbiParam::new(I64));
@@ -1604,7 +1607,8 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             });
         }
         let mut offset = 0;
-        if aggregate_result(program, f.result) {
+        let erased_result = f.result_grade.is_some_and(Grade::is_zero);
+        if !erased_result && aggregate_result(program, f.result) {
             g.return_pointer = Some(g.builder.block_params(entry)[0]);
             offset = 1;
         }
@@ -1641,7 +1645,14 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
         }
         if let Some(value) = g.block(&f.body) {
             g.cleanup_all();
-            g.return_value(&value);
+            if erased_result {
+                // Preserve actual cleanup for a copyable erased result, then
+                // return without an ABI payload.
+                g.drop_value(f.result, &value);
+                g.return_value(&[]);
+            } else {
+                g.return_value(&value);
+            }
         }
         g.builder.seal_all_blocks();
         g.builder.finalize(g.module.target_config());
@@ -2867,8 +2878,10 @@ impl Generator<'_, '_> {
         self.builder.ins().call(callee, values);
     }
     fn function_call(&mut self, index: usize, mut values: Words) -> Words {
-        let result = self.program.functions[index].result;
-        let pointer = if aggregate_result(self.program, result) {
+        let function = &self.program.functions[index];
+        let result = function.result;
+        let erased_result = function.result_grade.is_some_and(Grade::is_zero);
+        let pointer = if !erased_result && aggregate_result(self.program, result) {
             let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                 ir::StackSlotKind::ExplicitSlot,
                 (self.program.width(result) * 8) as u32,
@@ -2884,6 +2897,9 @@ impl Generator<'_, '_> {
             .module
             .declare_func_in_func(self.ids[index], self.builder.func);
         let call = self.builder.ins().call(callee, &values);
+        if erased_result {
+            return vec![self.constant(0)];
+        }
         if let Some(pointer) = pointer {
             (0..self.program.width(result))
                 .map(|i| {
@@ -2899,19 +2915,23 @@ impl Generator<'_, '_> {
     fn indirect_signature(&self, id: usize) -> ir::Signature {
         let signature = &self.program.function_types[id];
         let mut result = self.module.make_signature();
-        let aggregate = aggregate_result(self.program, signature.result);
+        let aggregate =
+            !signature.result_erased() && aggregate_result(self.program, signature.result);
         if aggregate {
             result.params.push(AbiParam::new(I64));
         }
         if signature.once {
             result.params.push(AbiParam::new(I64));
         }
-        for parameter in &signature.parameters {
+        for (index, parameter) in signature.parameters.iter().enumerate() {
+            if signature.parameter_erased(index) {
+                continue;
+            }
             result
                 .params
                 .extend((0..self.program.width(*parameter)).map(|_| AbiParam::new(I64)));
         }
-        if !aggregate {
+        if !aggregate && !signature.result_erased() {
             result
                 .returns
                 .extend((0..self.program.width(signature.result)).map(|_| AbiParam::new(I64)));
@@ -2941,6 +2961,9 @@ impl Generator<'_, '_> {
                     let value = lower!(self.expr(expr));
                     self.consume(expr);
                     if self.erased_local(*slot) {
+                        if self.program.owns(expr.ty) {
+                            self.drop_value(expr.ty, &value);
+                        }
                         continue;
                     }
                     self.assign(*slot, &value);
@@ -3038,7 +3061,8 @@ impl Generator<'_, '_> {
                 };
                 let signature = self.program.function_types[id].clone();
                 let result = signature.result;
-                let pointer = if aggregate_result(self.program, result) {
+                let result_erased = signature.result_erased();
+                let pointer = if !result_erased && aggregate_result(self.program, result) {
                     let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                         ir::StackSlotKind::ExplicitSlot,
                         (self.program.width(result) * 8) as u32,
@@ -3072,6 +3096,9 @@ impl Generator<'_, '_> {
                     .builder
                     .ins()
                     .call_indirect(signature, callable[0], &values);
+                if result_erased {
+                    return Some(vec![self.constant(0)]);
+                }
                 if let Some(pointer) = pointer {
                     return Some(
                         (0..self.program.width(result))
@@ -3993,6 +4020,8 @@ impl Generator<'_, '_> {
                     );
                     self.assign(*slot, &value);
                     self.activate_local(*slot);
+                } else if self.program.owns(replacement.ty) {
+                    self.drop_value(replacement.ty, &value);
                 }
                 self.constant(0)
             }
@@ -4463,7 +4492,15 @@ impl Generator<'_, '_> {
                 let value = lower!(self.expr(arg));
                 self.consume(arg);
                 self.cleanup_all();
-                self.return_value(&value);
+                let erased_result = self.program.functions[self.function_index]
+                    .result_grade
+                    .is_some_and(Grade::is_zero);
+                if erased_result {
+                    self.drop_value(arg.ty, &value);
+                    self.return_value(&[]);
+                } else {
+                    self.return_value(&value);
+                }
                 return None;
             }
             ExprKind::If(condition, yes, no) => {

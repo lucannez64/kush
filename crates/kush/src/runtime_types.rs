@@ -1720,10 +1720,21 @@ impl<'a> Types<'a> {
                 .transpose()?;
             let result = self.lower(result_inner, substitution, depth + 1)?;
             if result_grade.is_some() && !result_grade.is_some_and(Grade::is_one) {
-                return Err(Diagnostic::new(
-                    result_ast.span,
-                    "callable result grades currently support only exactly @[1]; @[0] would discard the returned value and a larger or unbounded grade could duplicate it",
-                ));
+                if result_grade.is_some_and(Grade::is_zero) && !self.owns(result) {
+                    // A copyable erased result carries no payload and no
+                    // observable value. It is representable as `Unit` at the
+                    // ABI boundary.
+                } else if result_grade.is_some_and(Grade::is_zero) {
+                    return Err(Diagnostic::new(
+                        result_ast.span,
+                        "a grade-zero arrow result would silently discard an owning/linear value; return an owning @[1] contract or Unit",
+                    ));
+                } else {
+                    return Err(Diagnostic::new(
+                        result_ast.span,
+                        "callable result grades currently support exactly @[1] or @[0] on a copyable result; a larger or unbounded grade could duplicate the value",
+                    ));
+                }
             }
             let mut result_lifetime = None;
             let mut result_leaves: Vec<BorrowLeaf> = Vec::new();
