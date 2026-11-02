@@ -1240,3 +1240,13 @@ their temporary owner. The full Boat gate is deliberately held until temporary
 initialization stays at its source evaluation point while backing storage and
 cleanup remain valid for the extended reference lifetime. This checkpoint is
 not a validated completion claim.
+
+## Allocator context safety correction
+
+Commit `f0a784d` visits context creation and sharing during ownership checking,
+so moved state and stale context handles are rejected. Allocator constructors
+keep the context resource active while evaluating later arguments, preserving
+cleanup on early return. The allocator-container suite passed locally and on
+Boat: **32 tests**, including native/reference regression cases. The separate
+place-reference temporary-initializer ordering regression above remains open;
+the full workspace gate has not been rerun for this checkpoint.
