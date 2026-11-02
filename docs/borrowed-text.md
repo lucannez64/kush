@@ -107,16 +107,18 @@ splitting are not implemented for text views.
   owner's shared loan, released at the view's checked last use (loop- and
   branch-aware);
 - while a view or any alias/subview can still be used, the owner cannot be
-  moved, dropped, assigned over, consumed by `String.bytes`/`String.from_utf8`,
-  or mutably borrowed (mutable owner borrows do not exist);
+  moved, dropped, assigned over, or consumed by `String.bytes`/
+  `String.from_utf8`; an exclusive `&mut String` borrow is checked like any
+  other mutable owner reference and excludes shared aliases;
 - a shared view may be copied to another binding, and nested shared subviews may
   coexist;
 - a view of a local owner or temporary cannot escape: a returned view must be
   tied to a parameter carrying the declared result lifetime;
 - named functions accept `&str` parameters and return `&str` with explicit
-  lifetimes or conservative single-input elision, including helper chains and
-  explicit outlives shortening (`fn f<'long: 'short, 'short>(s: &'long str) ->
-  &'short str`);
+  lifetimes or conservative single-input elision, including helper chains.
+  Explicit outlives shortening may also omit the bound
+  (`fn f<'long, 'short>(s: &'long str) -> &'short str`), in which case
+  `'long: 'short` is inferred and validated at each call site.
 - call results and later arguments preserve the same loans: an earlier text
   argument keeps its owner loaned through later argument evaluation.
 
@@ -138,11 +140,11 @@ rejected.
 ## Rejected positions
 
 A text view must stay in a lexical binding, be passed directly to a named
-function, or be copied by `Str.to_string`. It cannot be stored in or escape
-through:
+function, be stored in a declared-lifetime `&str` record field or a
+`Box<&str>`/`Vec<&str>` reference container, or be copied by `Str.to_string`.
+It cannot be stored in or escape through:
 
-- a record field (including declared-lifetime borrowed records), tuple, inline
-  array, `Vec`, `Box`, enum payload, union alternative, or generic type
+- a tuple, inline array, enum payload, union alternative, or generic type
   parameter;
 - a closure capture, task body, function-arrow type, first-class function value,
   or match scrutinee/pattern;

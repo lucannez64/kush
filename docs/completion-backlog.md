@@ -14,24 +14,31 @@ Integrated on `main` in `401662d` and `342537d`; see
 and remaining limits.
 
 - [ ] General shared/exclusive reference support, including escape and reborrow
-  contracts. **Partial:** reference parameters may be returned and reborrowed through calls;
-  stored shared/exclusive reference locals, implicit use reborrow, explicit
-  `&*p`/`&mut *p`, shared `&Box`/`&Vec`/`&Bytes`/`&String` escape contracts, and
-  direct reference fields in nominal records are checked. `Box<&T>` and
-  `Vec<&T>` element containers carry explicit type-level lifetime annotations
-  and preserve owner loans through construction, reads, calls, records, and
-  arrows. Reference-valued arrow parameters/results are checked for direct and
-  indirect calls, including lambda parameters and single-parameter reference
-  results. Mutable owner borrows (`&mut Box`/`&mut Vec`/`&mut Bytes`/`&mut
-  String`), `&str` fields/containers, and reading a reference field through
-  `&Record` remain deliberate exclusions. See
+  contracts. **Partial:** reference parameters may be returned and reborrowed
+  through calls; stored shared/exclusive reference locals, implicit use
+  reborrow, explicit `&*p`/`&mut *p`, shared and exclusive
+  `&Box`/`&Vec`/`&Bytes`/`&String` escape contracts, direct reference fields in
+  nominal records, and reading shared reference/slice/text fields through
+  `&Record` are checked. `Box<&T>`, `Vec<&T>`, `Box<&str>`, and `Vec<&str>`
+  element containers carry explicit type-level lifetime annotations and
+  preserve owner loans through construction, reads, calls, records, and arrows.
+  Mutable owner borrows are supported for `&mut Box`/`&mut Vec`/`&mut Bytes`/
+  `&mut String`: `Box.set` and `Vec.push`/`set`/`clear`/`reserve` update the
+  caller's container, and a written reference must outlive the declared element
+  lifetime. A call that mutates a `&mut` container also merges the written
+  reference's owner loan into the caller's container provenance. Remaining
+  exclusions: mutable owner borrows of temporaries and field/index results,
+  `&mut str`, containers of borrowed records, general `&record.field`
+  reference-taking, and some borrowed-`TaskExit` boundaries. See
   [borrowing-extensions.md](borrowing-extensions.md).
 - [ ] Broader sound lifetime inference. **Partial:** function/arrow/lambda
   results can be inferred from a single record-field source or a per-field body
-  origin. A multi-lifetime record now supports per-field selection, including
-  nested field paths; several returned lifetimes remain explicitly ambiguous.
-  Inferred outlives bounds, helper-call body inference, and general unification
-  are still absent.
+  origin. A multi-lifetime record supports per-field selection, including
+  nested field paths. Missing outlives bounds between a returned direct
+  parameter lifetime and an explicit result lifetime are inferred and validated
+  at call sites, and a body that delegates to a helper follows the helper's
+  declared result source. Several returned lifetimes, inference through local
+  destructuring bindings, and general unification remain explicitly absent.
 - [x] Capturing lambdas returning borrowed slices with represented provenance.
   The capture index and field path travel in the callable contract and the
   result is resolved against the capture's outer provenance.
