@@ -99,7 +99,7 @@ fn discard_positions_are_rejected() {
     );
     rejects(
         &format!("{MAKE}\nfn main() -> i64 ! {{}} {{ let mut y = 0; y = make(); y }}"),
-        "assigning it to an ungraded binding",
+        "another grade would lose the obligation",
     );
 }
 

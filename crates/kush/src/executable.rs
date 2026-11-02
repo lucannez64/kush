@@ -13382,12 +13382,14 @@ impl Checker<'_, '_> {
                         }
                         let value = c.expr_expected(right, Some(c.locals[slot].ty))?;
                         c.expect(value.ty, c.locals[slot].ty, right.span)?;
-                        if c.observes_copyable_result(&value)
-                            && !c.locals[slot].grade.is_some_and(Grade::is_one)
+                        if let Some(required) = c.copyable_result_grade(&value)
+                            && !c.locals[slot].grade.is_some_and(|grade| grade == required)
                         {
                             return Err(Diagnostic::new(
                                 right.span,
-                                "this copyable result has the must-use `@[1]` contract; assigning it to an ungraded binding would lose the obligation. Bind it with `let` or assign it to a @[1] binding",
+                                format!(
+                                    "this copyable result has the must-use @[{required}] contract; assigning it to a binding with another grade would lose the obligation. Bind it with `let` or assign it to a matching @[{required}] binding"
+                                ),
                             ));
                         }
                         c.locals[slot].linear |= c.value_moves_linear(&value);
@@ -17497,11 +17499,10 @@ impl Checker<'_, '_> {
                         "a task scope cannot return TaskExit<T> with a borrowed payload; match the join result and finish reading its fields inside the scope",
                     ));
                 }
-                if result_grade.is_some() && !(self.owned_type(result) || self.linear_type(result))
-                {
+                if result_grade.is_some_and(|grade| !grade.is_one()) {
                     return Err(Diagnostic::new(
                         span,
-                        "a copyable task result cannot carry a must-use @[1] obligation: cancellation has no place to deliver it. Return an owning resource or observe the value inside the task",
+                        "a task result supports exactly @[1] (owning transfer or copyable must-use) or no grade",
                     ));
                 }
                 let obligation =
@@ -17559,11 +17560,10 @@ impl Checker<'_, '_> {
                         "Task<T> cannot use Never as its result type; a task that cannot return cannot be joined",
                     ));
                 }
-                if result_grade.is_some() && !(self.owned_type(result) || self.linear_type(result))
-                {
+                if result_grade.is_some_and(|grade| !grade.is_one()) {
                     return Err(Diagnostic::new(
                         span,
-                        "a copyable task result cannot carry a must-use @[1] obligation: cancellation has no place to deliver it. Return an owning resource or observe the value inside the task",
+                        "a task result supports exactly @[1] (owning transfer or copyable must-use) or no grade",
                     ));
                 }
                 let wanted = match (explicit, expected) {
