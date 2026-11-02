@@ -3173,10 +3173,12 @@ impl<'a> Functions<'a> {
                         }
                     }
                 }
-                if let (Some(binder), [name]) = (binder, record_lifetimes.as_slice())
+                if let Some(binder) = binder
+                    && record_lifetimes.len() == 1
                     && !parameter_binder_lifetimes.contains_key(&binder)
                 {
-                    parameter_binder_lifetimes.insert(binder, name.clone());
+                    parameter_binder_lifetimes
+                        .insert(binder, record_lifetimes.into_iter().next().unwrap());
                 }
             }
         }
@@ -3228,9 +3230,11 @@ impl<'a> Functions<'a> {
                         // every returned origin, so this seed never widens a
                         // borrow beyond what the body actually returns.
                         let mut returned = Vec::new();
-                        collect_block_returns(&f.body, &mut returned);
-                        if let Some(tail) = &f.body.tail {
-                            returned.push(tail);
+                        if let Some(body) = &f.body {
+                            collect_block_returns(body, &mut returned);
+                            if let Some(tail) = &body.tail {
+                                returned.push(tail);
+                            }
                         }
                         let mut body_lifetimes = BTreeSet::new();
                         for value in returned {
@@ -11861,7 +11865,7 @@ impl Checker<'_, '_> {
             signature.result_grade,
             true,
             signature.linear,
-            crate::runtime_types::BorrowSig::default(),
+            signature.borrows.clone(),
         );
         let value = self.coerce(value, Type::Once(target), span)?;
         Ok((value, result, effects, signature.result_grade))

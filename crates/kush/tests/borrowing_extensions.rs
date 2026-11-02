@@ -289,11 +289,11 @@ fn borrowed_records_are_task_results_through_join_and_cancellation() {
     rejects(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64] }
-        fn main() -> i64 ! {alloc, panic, suspend} {
-            let data: [i64; 1] = [7];
-            let forged = TaskExit.Completed(Window { view: &data[..] });
+        fn forge<'a>(view: &'a [i64]) -> i64 ! {} {
+            let forged: TaskExit<Window<'a>> = TaskExit.Completed(Window { view: view });
             0
-        }"#,
+        }
+        fn main() -> i64 ! {} { 0 }"#,
         "produced only by Task.join",
     );
     // A joined borrowed result is lexical to the scope that owns the loans.

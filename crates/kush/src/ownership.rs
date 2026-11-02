@@ -2705,14 +2705,6 @@ impl Checker<'_> {
             match statement {
                 Statement::Let(slot, expr) => {
                     let slot = *slot;
-                    if let Some(pointer) = self.locals[slot].ty.ref_pointee()
-                        && self.pointees[pointer].layout().is_some()
-                    {
-                        return Err(Diagnostic::new(
-                            self.locals[slot].span,
-                            "record references are call-scoped: bind the owning record and pass '&owner'/'&mut owner' directly to a function or borrowed method instead of storing the reference in a local",
-                        ));
-                    }
                     // Elaboration tracks later assignments for capture typing.
                     // Start this binding with its declaration's obligation, not
                     // a flag inherited from a future replacement value.
