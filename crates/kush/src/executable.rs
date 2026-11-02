@@ -3171,6 +3171,13 @@ type TraitMethodTable = BTreeMap<String, Vec<(BindingId, TraitArguments, MethodD
 type GenericArguments = (Vec<Type>, Vec<Grade>, Vec<usize>, Vec<u8>);
 /// Generic arguments and checked values produced by inference.
 type Inferred = (Vec<Type>, Vec<Grade>, Vec<usize>, Vec<u8>, Vec<Expr>);
+/// Lifetime metadata copied from the first member method into a synthesized
+/// closed-world dispatcher: parameter lifetimes, result lifetime, and bounds.
+type WitnessLifetimes = (
+    Vec<Option<String>>,
+    Option<String>,
+    BTreeSet<(String, String)>,
+);
 /// Function instances. A monomorphic function has one instance; a generic
 /// function gets one per distinct list of type arguments that is used.
 struct Functions<'a> {
@@ -10900,7 +10907,7 @@ impl Checker<'_, '_> {
         let Some(index) = selected.impl_arguments else {
             return Ok(BTreeMap::new());
         };
-        let declared = self.functions.declared[&selected.binding].clone();
+        let declared = self.functions.declared[&selected.binding];
         let Some(associated_index) = declared.impl_associated else {
             return Ok(BTreeMap::new());
         };
@@ -12106,11 +12113,7 @@ impl Checker<'_, '_> {
             .collect::<Vec<_>>();
         let mut total_effects = 0u8;
         let mut signatures = Vec::new();
-        let mut witness_lifetimes: Option<(
-            Vec<Option<String>>,
-            Option<String>,
-            BTreeSet<(String, String)>,
-        )> = None;
+        let mut witness_lifetimes: Option<WitnessLifetimes> = None;
         for member in &members {
             let Some(impl_methods) =
                 self.functions
