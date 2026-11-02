@@ -156,11 +156,9 @@ integer set/map helpers over caller-owned arrays and mutable slices; capacity is
 the slice length and lookup is linear. These helpers intentionally avoid hidden
 allocation and do not claim hash-map performance.
 
-The standard library currently has a frontend limitation: an `i64`-returning
-function cannot use `return value;` inside a `while` loop. Returning `Bool`,
-`Unit`, `Bytes`, or `Result` from those positions works. The helper modules use
-explicit found/break flags instead. This is a compiler limitation, not an API
-property, and is recorded here rather than hidden.
+The helpers use explicit found/break flags for their loop searches. This does
+not imply a blanket restriction on returning `i64` from a `while` loop; simple
+loop-return forms are accepted by the current compiler.
 
 Not implemented in this pass: recursive directory trees, globbing, symlink
 inspection, file descriptors or seek, append-and-sync durability, stderr

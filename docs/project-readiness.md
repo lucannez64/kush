@@ -113,3 +113,22 @@ This provides a native-only trusted C ABI bridge, not arbitrary Rust ABI/type
 compatibility. Interpreter foreign calls are rejected explicitly. Independent
 interop review remains pending; host APIs and fuller editor/library support
 remain in progress.
+
+## Host integration and reviewed project fixes
+
+Host API checkpoint `d6ba475` merges filesystem, argv/environment, clocks,
+bounded subprocess/TCP operations, std.text/path/sort/collections/http, and the
+persistent todo CLI. Project commands check the app and run its four tests;
+CLI eval/native argument and environment behavior agree in regression tests.
+
+Project review follow-ups (`34ed66e`, `77eb93a`, `bda56ac`) separate test
+artifacts from package executable names, check normal test targets even with an
+empty filter, validate entry headers and lexical identifiers, report actual
+lock read errors, retain dash-prefixed single-file commands, and align source
+symlink/custom test-path behavior. All 15 project tests pass.
+
+Full Boat gate at compiler checkpoint `bda56ac`: **1088 tests**, formatting,
+and all-targets Clippy with warnings denied pass; sandbox confirmed stopped.
+Log: `/tmp/kush-boat-project-host-reviewed-full.log` (machine-local). Independent
+host and interop review remain required; this is not a claim of complete LSP,
+full formatting, TLS, asynchronous I/O, or arbitrary library ABI compatibility.

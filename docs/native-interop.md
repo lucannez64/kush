@@ -73,7 +73,7 @@ only calls it for a live affine value, but the C example guards zero anyway).
 | `Result<T, i64>` | `int64_t status`; `0` = `Ok`, non-zero = `Err(status)`; non-Unit `T` is written through a trailing `int64_t *out` |
 
 For a fallible non-Unit result the C signature is
-`int64_t symbol(params..., T *out)`. A direct result returns the scalar or
+`int64_t symbol(params..., int64_t *out)`. A direct result returns the scalar or
 handle. Integers in the out slot are sign/zero-extended; float words contain
 raw IEEE-754 bits; a `Bytes` out word is a `KushBytes *` handle.
 

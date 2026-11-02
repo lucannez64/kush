@@ -306,3 +306,19 @@ diagnostics, name collisions, filtering and failure exit status, source
 diagnostics, comment/string-preserving formatting, paths with spaces, nested
 directory discovery, single-file command compatibility, argument forwarding,
 and native adapter linking.
+
+## Project validation and source boundaries
+
+Package, dependency, and module components must be lexical identifiers, not
+reserved language keywords. Entry files must declare `module <package>;`.
+Explicit test targets outside `src/` and `tests/` are indexed relative to the
+package root, for example `check_me.kush` declares `module app.check_me;`.
+Source entries and source-tree roots through symlinks are rejected, keeping
+build and formatter behavior consistent; path dependency directories themselves
+are resolved canonically as before.
+
+Normal test runs check the full test target even when a filter matches nothing.
+`--list` remains a parse/discovery-only operation. Test executables are stored
+under `target/kush/.tests`, separate from any legal package executable name.
+Lockfile read failures are reported as read errors; only a missing file is
+reported as missing.
