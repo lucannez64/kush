@@ -427,6 +427,11 @@ fn box_allocation_capacity(bytes: usize) -> usize {
         bytes
     }
 }
+/// Reference model of the native arena bump requirement: an eight-byte arena
+/// box header followed by the payload, rounded up to the 16-byte alignment.
+fn arena_round(bytes: usize) -> usize {
+    (bytes.saturating_add(8)).div_ceil(16) * 16
+}
 
 #[derive(Debug, Clone)]
 struct HeapState {
@@ -540,6 +545,15 @@ struct ArenaState {
     slots: Vec<Option<Value>>,
     /// One owner plus one reference per live `ArenaBox`.
     references: usize,
+    /// Modelled bytes consumed in the current chunk. Native chunks are
+    /// physical storage and are not counted as logical allocations.
+    chunk_used: usize,
+    /// Capacity of the current chunk in payload bytes, including the box
+    /// header and alignment padding.
+    chunk_capacity: usize,
+    /// Optional user chunk-sizing strategy. The function value is a
+    /// noncapturing code pointer, so it cannot capture or dangle.
+    strategy: Option<usize>,
 }
 #[derive(Debug, Clone)]
 enum Value {
@@ -849,24 +863,108 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             .set_box_capacity(id, box_allocation_capacity(words * 8));
         value
     }
-    fn arena_new_value(&mut self) -> Value {
+    fn arena_new_value(&mut self, strategy: Option<usize>) -> Value {
         self.stats.allocation();
         Value::Arena {
             state: Arc::new(Mutex::new(ArenaState {
                 slots: Vec::new(),
                 references: 1,
+                chunk_used: 0,
+                chunk_capacity: 0,
+                strategy,
             })),
         }
     }
-    fn arena_allocate(&mut self, state: &Arc<Mutex<ArenaState>>, payload: Value) -> Value {
+    /// Choose the capacity of a fresh chunk. The default is the native 4 KiB
+    /// minimum; a user strategy receives `(need, current_capacity)` and may
+    /// choose any larger capacity. A strategy result below `need` is clamped,
+    /// matching the native runtime.
+    fn arena_chunk_capacity(
+        &mut self,
+        state: &Arc<Mutex<ArenaState>>,
+        need: usize,
+        current: usize,
+    ) -> Result<usize> {
+        let strategy = state.lock().unwrap().strategy;
+        let Some(function) = strategy else {
+            return Ok(need.max(4096));
+        };
+        let chosen = self.call(
+            function,
+            vec![Value::Scalar(need as i64), Value::Scalar(current as i64)],
+        )?;
+        let chosen = usize::try_from(chosen.scalar()).unwrap_or(0);
+        Ok(chosen.max(need))
+    }
+    /// Allocate one payload in the region, growing a chunk when the current
+    /// bump area cannot fit it. The reference model keeps the region's logical
+    /// allocation count unchanged; chunks are physical storage.
+    fn arena_allocate(
+        &mut self,
+        state: &Arc<Mutex<ArenaState>>,
+        payload: Value,
+        bytes: usize,
+    ) -> Result<Value> {
+        let need = arena_round(bytes);
+        let (needs_chunk, current) = {
+            let arena = state.lock().unwrap();
+            (
+                arena.chunk_capacity.saturating_sub(arena.chunk_used) < need,
+                arena.chunk_capacity,
+            )
+        };
+        if needs_chunk {
+            let capacity = self.arena_chunk_capacity(state, need, current)?;
+            let mut arena = state.lock().unwrap();
+            arena.chunk_capacity = capacity;
+            arena.chunk_used = 0;
+        }
         let mut arena = state.lock().unwrap();
         let slot = arena.slots.len();
         arena.slots.push(Some(payload));
         arena.references += 1;
-        Value::ArenaBox {
+        arena.chunk_used += need;
+        Ok(Value::ArenaBox {
             state: state.clone(),
             slot,
+        })
+    }
+    /// Fallible variant of `arena_allocate`. A refused chunk request spends one
+    /// attempt, leaves every region field untouched, and returns the payload in
+    /// `Err`; a payload that fits the current chunk spends nothing and cannot
+    /// fail.
+    fn arena_try_allocate(
+        &mut self,
+        state: &Arc<Mutex<ArenaState>>,
+        payload: Value,
+        bytes: usize,
+    ) -> Result<std::result::Result<Value, Value>> {
+        let need = arena_round(bytes);
+        let (needs_chunk, current) = {
+            let arena = state.lock().unwrap();
+            (
+                arena.chunk_capacity.saturating_sub(arena.chunk_used) < need,
+                arena.chunk_capacity,
+            )
+        };
+        if needs_chunk {
+            if !self.try_charge() {
+                return Ok(Err(payload));
+            }
+            let capacity = self.arena_chunk_capacity(state, need, current)?;
+            let mut arena = state.lock().unwrap();
+            arena.chunk_capacity = capacity;
+            arena.chunk_used = 0;
         }
+        let mut arena = state.lock().unwrap();
+        let slot = arena.slots.len();
+        arena.slots.push(Some(payload));
+        arena.references += 1;
+        arena.chunk_used += need;
+        Ok(Ok(Value::ArenaBox {
+            state: state.clone(),
+            slot,
+        }))
     }
     /// Drop one region reference. The last reference releases the region's
     /// logical allocation and any payload still stored in it.
@@ -1729,14 +1827,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
     }
     /// Apply one or more checked callback steps in place. The vector's host
-    /// item buffer and capacity are preserved; no storage is acquired.
-    fn vec_map_call(&mut self, id: usize, functions: Vec<Value>, span: Span) -> Result<Value> {
+    /// item buffer and capacity are preserved unless `grow` is set, in which
+    /// case the physical stride may grow/move under `{alloc, panic}`.
+    fn vec_map_call(
+        &mut self,
+        id: usize,
+        functions: Vec<Value>,
+        grow: bool,
+        target_width: usize,
+        span: Span,
+    ) -> Result<Value> {
         // Keep the live vector allocation represented while callbacks execute;
         // removing it would undercount peak-live when a callback allocates.
         let Some(Value::Vector {
             mut items,
             capacity,
-            usable,
+            mut usable,
         }) = self.heap.take(id)
         else {
             return Err(Diagnostic::new(
@@ -1744,6 +1850,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 "internal ownership error: moved vector in map_in_place",
             ));
         };
+        if grow {
+            let requested = 24usize.saturating_add(
+                capacity
+                    .checked_mul(target_width)
+                    .and_then(|words| words.checked_mul(8))
+                    .unwrap_or(usize::MAX),
+            );
+            if requested > usable {
+                usable = box_allocation_capacity(requested);
+                self.stats.growth();
+            }
+        }
         for item in items.iter_mut() {
             let mut current = std::mem::replace(item, Value::Scalar(0));
             for function in &functions {
@@ -2765,15 +2883,50 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.stats.reuse();
                 Value::Owned(id)
             }
-            ExprKind::ArenaNew => self.arena_new_value(),
+            ExprKind::ArenaNew => self.arena_new_value(None),
+            ExprKind::ArenaNewWith { strategy } => {
+                let strategy = value!(self.expr(strategy, frame));
+                let Value::Function {
+                    function,
+                    environment: None,
+                } = strategy
+                else {
+                    unreachable!("checked arena strategy is a noncapturing function")
+                };
+                self.arena_new_value(Some(function))
+            }
             ExprKind::ArenaAlloc { arena, value } => {
                 let Value::ArenaRef(state) = value!(self.expr(arena, frame)) else {
                     unreachable!("checked arena borrow")
                 };
                 let payload = value!(self.expr(value, frame));
+                let bytes = self.program.width(value.ty) * 8;
                 self.consume(arena, frame);
                 self.consume(value, frame);
-                self.arena_allocate(&state, payload)
+                self.arena_allocate(&state, payload, bytes)?
+            }
+            ExprKind::ArenaTryAlloc {
+                arena,
+                value: argument,
+                shape,
+            } => {
+                let Value::ArenaRef(state) = value!(self.expr(arena, frame)) else {
+                    unreachable!("checked arena borrow")
+                };
+                let payload = value!(self.expr(argument, frame));
+                let bytes = self.program.width(argument.ty) * 8;
+                self.consume(arena, frame);
+                self.consume(argument, frame);
+                match self.arena_try_allocate(&state, payload, bytes)? {
+                    Ok(owner) => Value::Enum {
+                        tag: shape.ok_tag,
+                        fields: vec![owner],
+                    },
+                    Err(payload) => Value::Enum {
+                        tag: shape.err_tag,
+                        fields: vec![payload],
+                    },
+                }
             }
             ExprKind::ArenaBoxRead(argument) => {
                 let Value::ArenaBoxRef { state, slot } = value!(self.expr(argument, frame)) else {
@@ -3067,7 +3220,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 vector,
                 callbacks,
                 source: _,
-                target: _,
+                target,
+                grow,
             } => {
                 let Value::Owned(id) = value!(self.expr(vector, frame)) else {
                     unreachable!("checked map vector")
@@ -3080,7 +3234,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 for callback in callbacks {
                     self.consume(callback, frame);
                 }
-                return self.vec_map_call(id, functions, expr.span).map(Flow::Value);
+                return self
+                    .vec_map_call(id, functions, *grow, self.program.width(*target), expr.span)
+                    .map(Flow::Value);
             }
             ExprKind::Call(target, args) => {
                 let mut values = Vec::new();

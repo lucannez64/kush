@@ -3426,9 +3426,19 @@ impl Checker<'_> {
                 self.expr(value)?;
             }
             ExprKind::ArenaNew => {}
+            ExprKind::ArenaNewWith { strategy } => self.expr(strategy)?,
             ExprKind::ArenaAlloc { arena, value } => {
                 // The arena borrow lasts for the call only; the returned box
                 // carries its own region reference.
+                let loans = self.loans.clone();
+                self.expr(arena)?;
+                self.hold_reference_argument(arena)?;
+                self.expr(value)?;
+                self.loans = loans;
+            }
+            ExprKind::ArenaTryAlloc { arena, value, .. } => {
+                // A refused allocation returns the payload in `Err`; the
+                // region borrow still ends with the call.
                 let loans = self.loans.clone();
                 self.expr(arena)?;
                 self.hold_reference_argument(arena)?;
@@ -4805,11 +4815,17 @@ pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
             | ExprKind::ArenaAlloc {
                 arena: owner,
                 value: payload,
+            }
+            | ExprKind::ArenaTryAlloc {
+                arena: owner,
+                value: payload,
+                ..
             } => {
                 walk(owner, out);
                 walk(payload, out);
             }
             ExprKind::ArenaNew => {}
+            ExprKind::ArenaNewWith { strategy } => walk(strategy, out),
             ExprKind::VecMap {
                 vector, callbacks, ..
             } => {
@@ -4970,11 +4986,19 @@ fn expr_live(
         | ExprKind::ArenaAlloc {
             arena: owner,
             value: payload,
+        }
+        | ExprKind::ArenaTryAlloc {
+            arena: owner,
+            value: payload,
+            ..
         } => {
             live = expr_live(payload, live_after, views, heads, exits, out);
             live = expr_live(owner, &live, views, heads, exits, out);
         }
         ExprKind::ArenaNew => {}
+        ExprKind::ArenaNewWith { strategy } => {
+            live = expr_live(strategy, live_after, views, heads, exits, out);
+        }
         ExprKind::DynArrayNew { .. } => {}
         ExprKind::DynArrayPush { array, value, .. } => {
             live = expr_live(value, live_after, views, heads, exits, out);

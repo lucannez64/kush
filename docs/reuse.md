@@ -191,9 +191,11 @@ implemented or guaranteed here:
 
 - arbitrary user-defined allocator callbacks or an FFI allocator interface
   (the native runtime has a [bounded small-block pool](allocator-pool.md) and
-  the source-level `Arena` strategy; neither is a pluggable user allocator);
-- widening a vector element in place (widening a **box** payload is available
-  through the explicit `Box.reuse_grow` contract);
+  the source-level `Arena` strategy; neither is a pluggable user allocator, and
+  `Arena.with_strategy` only chooses chunk capacity);
+- automatic widening of a vector element (widening is available through the
+  explicit `Vec.map_in_place_grow` and `Vec.map_chain_in_place_grow` contracts;
+  widening a **box** payload is available through `Box.reuse_grow`);
 - general compiler fusion of arbitrary expressions, effectful callbacks with
   I/O/panic/suspend, or callable arguments with observable evaluation;
 - in-place transformation of borrowed, shared, or aliased storage;

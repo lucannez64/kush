@@ -1556,7 +1556,20 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::ArenaNew => {}
+            ExprKind::ArenaNewWith { strategy } => {
+                if !self.expr(strategy, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
             ExprKind::ArenaAlloc { arena, value } => {
+                if !self.expr(arena, Grade::ONE)? {
+                    return Ok(false);
+                }
+                if !self.expr(value, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::ArenaTryAlloc { arena, value, .. } => {
                 if !self.expr(arena, Grade::ONE)? {
                     return Ok(false);
                 }

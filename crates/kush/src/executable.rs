@@ -538,11 +538,27 @@ pub(crate) enum ExprKind {
     /// Create an owning bump-allocator region. The region descriptor is one
     /// logical allocation; its internal chunks are not separately counted.
     ArenaNew,
+    /// Create a region whose chunk sizing is chosen by the supplied pure
+    /// `fn(need, current_capacity) -> capacity` strategy. The strategy is a
+    /// noncapturing function pointer, so the region never owns a dangling
+    /// environment.
+    ArenaNewWith {
+        strategy: Box<Expr>,
+    },
     /// Allocate `value` in the borrowed arena. The returned box retains the
     /// region until its payload has been dropped.
     ArenaAlloc {
         arena: Box<Expr>,
         value: Box<Expr>,
+    },
+    /// Fallible arena allocation. `Ok` carries an `ArenaBox<T>` and one region
+    /// reference; `Err` returns the untouched payload. A refused chunk request
+    /// leaves the region's references, chunks, and current bump position
+    /// unchanged.
+    ArenaTryAlloc {
+        arena: Box<Expr>,
+        value: Box<Expr>,
+        shape: ResultShape,
     },
     /// Read a copyable payload through an `&ArenaBox<T>`.
     ArenaBoxRead(Box<Expr>),
@@ -623,15 +639,17 @@ pub(crate) enum ExprKind {
         /// the resulting `TaskExit<T>` transfers it to the caller.
         obligation: bool,
     },
-    /// Allocation-preserving in-place vector transform. `callbacks` are
-    /// applied left-to-right to every element; their signatures determine the
-    /// intermediate layouts. The final `target` must be no wider than
-    /// `source`. A checked fusion may contain two pure callback steps.
+    /// In-place vector transform. `callbacks` are applied left-to-right to
+    /// every element; their signatures determine the intermediate layouts.
+    /// The final `target` must be no wider than `source` unless `grow` is set,
+    /// in which case the allocation may be grown/moved under `{alloc, panic}`.
+    /// A checked fusion may contain two pure callback steps.
     VecMap {
         vector: Box<Expr>,
         callbacks: Vec<Expr>,
         source: Type,
         target: Type,
+        grow: bool,
     },
     /// Construct an empty runtime-sized inline array with zeroed capacity.
     DynArrayNew {
@@ -1344,6 +1362,11 @@ fn fusion_expr_safe(
             safe(arena, signatures, bodies, memo, visiting)
                 && safe(value, signatures, bodies, memo, visiting)
         }
+        ExprKind::ArenaNewWith { strategy } => safe(strategy, signatures, bodies, memo, visiting),
+        ExprKind::ArenaTryAlloc { arena, value, .. } => {
+            safe(arena, signatures, bodies, memo, visiting)
+                && safe(value, signatures, bodies, memo, visiting)
+        }
         ExprKind::DynArrayPush { array, value, .. } => {
             safe(array, signatures, bodies, memo, visiting)
                 && safe(value, signatures, bodies, memo, visiting)
@@ -1514,6 +1537,13 @@ fn fuse_expr(
             fuse_expr(arena, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
         }
+        ExprKind::ArenaNewWith { strategy } => {
+            fuse_expr(strategy, types, signatures, safety, fusions);
+        }
+        ExprKind::ArenaTryAlloc { arena, value, .. } => {
+            fuse_expr(arena, types, signatures, safety, fusions);
+            fuse_expr(value, types, signatures, safety, fusions);
+        }
         ExprKind::DynArrayPush { array, value, .. } => {
             fuse_expr(array, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
@@ -1617,10 +1647,17 @@ fn fuse_expr(
             callbacks,
             source,
             target: _,
+            grow,
         } => {
             fuse_expr(vector, types, signatures, safety, fusions);
             for callback in callbacks.iter_mut() {
                 fuse_expr(callback, types, signatures, safety, fusions);
+            }
+            // A growth-capable transform may allocate/move the vector. Merging
+            // it with another pass can change allocation and callback order, so
+            // it is never an automatic fusion candidate.
+            if *grow {
+                return;
             }
             let mut merged = Vec::new();
             std::mem::swap(callbacks, &mut merged);
@@ -1630,9 +1667,11 @@ fn fuse_expr(
                     ExprKind::VecMap {
                         target: inner_target,
                         callbacks: inner_callbacks,
+                        grow: inner_grow,
                         ..
                     } => {
-                        *inner_target == *source
+                        !*inner_grow
+                            && *inner_target == *source
                             && inner_callbacks
                                 .iter()
                                 .chain(merged.iter())
@@ -1664,6 +1703,7 @@ fn fuse_expr(
                     callbacks: mut inner_callbacks,
                     source: inner_source,
                     target: inner_target,
+                    grow: inner_grow,
                 } = old.kind
                 else {
                     unreachable!("checked compatible map")
@@ -1683,6 +1723,7 @@ fn fuse_expr(
                             callbacks: inner_callbacks,
                             source: inner_source,
                             target: inner_target,
+                            grow: inner_grow,
                         },
                         ty: old_ty,
                         span: old_span,
@@ -13720,6 +13761,7 @@ impl Checker<'_, '_> {
             | ExprKind::BytesTryWithCapacity {
                 capacity: value, ..
             }
+            | ExprKind::ArenaTryAlloc { value, .. }
             | ExprKind::ArenaBoxTake(value) => self.value_moves_linear(value),
             // In-place map returns the same vector owner it consumed.
             ExprKind::VecMap { vector, .. } => self.value_moves_linear(vector),
@@ -13827,8 +13869,14 @@ impl Checker<'_, '_> {
                 | ExprKind::ArenaAlloc {
                     arena: owner,
                     value: payload,
+                }
+                | ExprKind::ArenaTryAlloc {
+                    arena: owner,
+                    value: payload,
+                    ..
                 } => find(checker, owner).or_else(|| find(checker, payload)),
                 ExprKind::ArenaNew => None,
+                ExprKind::ArenaNewWith { strategy } => find(checker, strategy),
                 ExprKind::DynArrayPush { array, value, .. } => {
                     find(checker, array).or_else(|| find(checker, value))
                 }
@@ -15077,14 +15125,19 @@ impl Checker<'_, '_> {
                     if binding.kind == BindingKind::Builtin
                         && matches!(
                             binding.name.as_str(),
-                            "Arena.new" | "Arena.alloc" | "ArenaBox.read" | "ArenaBox.take"
+                            "Arena.new"
+                                | "Arena.with_strategy"
+                                | "Arena.alloc"
+                                | "Arena.try_alloc"
+                                | "ArenaBox.read"
+                                | "ArenaBox.take"
                         )
                     {
                         let name = binding.name.as_str();
                         let arity = match name {
                             "Arena.new" => 0,
-                            "Arena.alloc" => 2,
-                            _ => 1,
+                            "Arena.with_strategy" | "ArenaBox.read" | "ArenaBox.take" => 1,
+                            _ => 2,
                         };
                         if arguments.len() != arity {
                             return Err(Diagnostic::new(
@@ -15094,8 +15147,19 @@ impl Checker<'_, '_> {
                         }
                         match name {
                             "Arena.new" => return c.arena_new(span),
+                            "Arena.with_strategy" => {
+                                return c.arena_new_with(&arguments[0], span);
+                            }
                             "Arena.alloc" => {
                                 return c.arena_alloc(&arguments[0], &arguments[1], expected, span);
+                            }
+                            "Arena.try_alloc" => {
+                                return c.arena_try_alloc(
+                                    &arguments[0],
+                                    &arguments[1],
+                                    expected,
+                                    span,
+                                );
                             }
                             "ArenaBox.read" => {
                                 return c.arena_box_read(&arguments[0], span);
@@ -17412,6 +17476,54 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
+    /// Create a region with a user-defined chunk-sizing strategy.
+    ///
+    /// The strategy is a copyable noncapturing `fn(need, current) -> capacity`
+    /// with the empty effect row. It is stored in the region as a code pointer,
+    /// so no environment, borrow, or owning value can outlive the region. The
+    /// strategy only chooses chunk capacity; arbitrary user-supplied
+    /// allocator/deallocator callbacks remain outside this contract.
+    fn arena_new_with(&mut self, strategy: &ast::Expr, span: Span) -> Result<Expr> {
+        self.require(ALLOC | PANIC, span)?;
+        let strategy = self.expr(strategy)?;
+        let Type::Fn(index) = strategy.ty else {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "Arena.with_strategy expects a noncapturing fn(i64, i64) -> i64 strategy, found {}",
+                    self.types.name(strategy.ty)
+                ),
+            ));
+        };
+        let signature = self.types.function_types[index].clone();
+        if signature.parameters.len() != 2
+            || signature.parameters[0] != Type::I64
+            || signature.parameters[1] != Type::I64
+            || signature.result != Type::I64
+            || signature.parameter_erased(0)
+            || signature.parameter_erased(1)
+            || signature.result_erased()
+        {
+            return Err(Diagnostic::new(
+                span,
+                "Arena.with_strategy expects an exact fn(i64, i64) -> i64 signature; graded parameters or results and other types are rejected",
+            ));
+        }
+        if signature.effects != 0 {
+            return Err(Diagnostic::new(
+                span,
+                "Arena.with_strategy requires a pure strategy with the empty effect row; a strategy that allocates, performs I/O, suspends, or panics cannot run inside allocator bookkeeping",
+            ));
+        }
+        Ok(Expr {
+            kind: ExprKind::ArenaNewWith {
+                strategy: Box::new(strategy),
+            },
+            ty: Type::Arena,
+            span,
+            resource: None,
+        })
+    }
     /// Check `Arena.alloc(&arena, value)`. The borrow keeps the arena value
     /// live for the duration of the call; the returned `ArenaBox` carries its
     /// own region reference, so dropping the arena binding does not invalidate
@@ -17480,6 +17592,90 @@ impl Checker<'_, '_> {
             kind: ExprKind::ArenaAlloc {
                 arena: Box::new(arena),
                 value: Box::new(value),
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(expression, expected, span),
+            None => Ok(expression),
+        }
+    }
+    /// Fallible arena allocation. A refused chunk request returns the untouched
+    /// payload in `Err`; the region's references, chunks, and bump position are
+    /// unchanged, so a later ordinary or fallible allocation can proceed.
+    fn arena_try_alloc(
+        &mut self,
+        arena: &ast::Expr,
+        value: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        self.require(ALLOC, span)?;
+        let expected_shape = expected.and_then(|ty| self.types.result(ty, span).ok());
+        let expected_inner = expected_shape.and_then(|shape| match shape.ok {
+            Type::ArenaBox(index) => Some(self.types.pointees[index]),
+            _ => None,
+        });
+        let pointer = self.types.pointer(Type::Arena);
+        let arena = self.expr_expected(arena, Some(Type::Ref(pointer)))?;
+        self.expect(arena.ty, Type::Ref(pointer), arena.span)?;
+        let value = self.expr_expected(value, expected_inner)?;
+        if value.ty == Type::Never {
+            let shape = expected_shape.unwrap_or(ResultShape {
+                ok_tag: 0,
+                err_tag: 1,
+                ok: Type::Unit,
+                error: Type::Unit,
+            });
+            return Ok(Expr {
+                kind: ExprKind::ArenaTryAlloc {
+                    arena: Box::new(arena),
+                    value: Box::new(value),
+                    shape,
+                },
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        if crate::runtime_types::has_borrow(self.types, value.ty) {
+            return Err(Diagnostic::new(
+                span,
+                "Arena.try_alloc cannot store a borrowed reference, slice view, or borrowed record (including &str text views)",
+            ));
+        }
+        if crate::runtime_types::contains_task(self.types, value.ty) {
+            return Err(Diagnostic::new(
+                span,
+                "task handles cannot be stored in Arena; join them in the scope that owns them",
+            ));
+        }
+        let pointee = self.types.full(value.ty, span)?;
+        if self.linear_type(pointee) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "Arena.try_alloc cannot place the linear value {} in a region that destroys its contents implicitly; consume it inside the region scope instead",
+                    self.types.name(pointee)
+                ),
+            ));
+        }
+        if self.value_moves_linear(&value) && self.owned_type(pointee) {
+            return Err(Diagnostic::new(
+                span,
+                "Arena.try_alloc cannot store an owned payload that may carry a propagated linear obligation; consume it explicitly",
+            ));
+        }
+        let value = self.coerce(value, pointee, span)?;
+        let ok = Type::ArenaBox(self.types.pointer(pointee));
+        let (ty, shape) = self.types.result_type(ok, pointee, span)?;
+        let expression = Expr {
+            kind: ExprKind::ArenaTryAlloc {
+                arena: Box::new(arena),
+                value: Box::new(value),
+                shape,
             },
             ty,
             span,
@@ -21315,8 +21511,13 @@ impl Checker<'_, '_> {
         let arity = match name {
             "Vec.new" => 0,
             "Vec.with_capacity" | "Vec.len" | "Vec.pop" | "Vec.clear" => 1,
-            "Vec.get" | "Vec.push" | "Vec.map_in_place" | "Vec.reserve" | "Vec.try_reserve" => 2,
-            "Vec.map_chain_in_place" => 3,
+            "Vec.get"
+            | "Vec.push"
+            | "Vec.map_in_place"
+            | "Vec.map_in_place_grow"
+            | "Vec.reserve"
+            | "Vec.try_reserve" => 2,
+            "Vec.map_chain_in_place" | "Vec.map_chain_in_place_grow" => 3,
             _ => 3,
         };
         if arguments.len() != arity {
@@ -21337,7 +21538,12 @@ impl Checker<'_, '_> {
         if explicit.is_some()
             && !matches!(
                 name,
-                "Vec.new" | "Vec.with_capacity" | "Vec.map_in_place" | "Vec.map_chain_in_place"
+                "Vec.new"
+                    | "Vec.with_capacity"
+                    | "Vec.map_in_place"
+                    | "Vec.map_in_place_grow"
+                    | "Vec.map_chain_in_place"
+                    | "Vec.map_chain_in_place_grow"
             )
         {
             return Err(Diagnostic::new(
@@ -21352,10 +21558,16 @@ impl Checker<'_, '_> {
             resource: None,
         };
         if name == "Vec.map_in_place" {
-            return self.vec_map_call(explicit, arguments, expected, span);
+            return self.vec_map_call(false, explicit, arguments, expected, span);
+        }
+        if name == "Vec.map_in_place_grow" {
+            return self.vec_map_call(true, explicit, arguments, expected, span);
         }
         if name == "Vec.map_chain_in_place" {
-            return self.vec_map_chain_call(explicit, arguments, expected, span);
+            return self.vec_map_chain_call(false, explicit, arguments, expected, span);
+        }
+        if name == "Vec.map_chain_in_place_grow" {
+            return self.vec_map_chain_call(true, explicit, arguments, expected, span);
         }
         if matches!(name, "Vec.new" | "Vec.with_capacity") {
             let element = match (explicit, expected) {
@@ -21610,11 +21822,17 @@ impl Checker<'_, '_> {
     /// the source element layout, because the vector allocation is preserved.
     fn vec_map_call(
         &mut self,
+        grow: bool,
         explicit: Option<&[ast::Type]>,
         arguments: &[ast::Expr],
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
+        if grow {
+            // Growth is an explicit allocating fallback and may abort on
+            // exhausted storage, exactly like `Box.reuse_grow`.
+            self.require(ALLOC | PANIC, span)?;
+        }
         let vector = self.expr(&arguments[0])?;
         let Type::Vec(index) = vector.ty else {
             if vector.ty == Type::Never {
@@ -21665,6 +21883,7 @@ impl Checker<'_, '_> {
                     callbacks: vec![callback],
                     source,
                     target,
+                    grow,
                 },
                 ty: Type::Never,
                 span,
@@ -21766,11 +21985,11 @@ impl Checker<'_, '_> {
         }
         let source_width = self.types.width(source);
         let target_width = self.types.width(target);
-        if target_width > source_width {
+        if !grow && target_width > source_width {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "Vec.map_in_place cannot widen elements from {source_width} to {target_width} word(s) in the preserved allocation; build a new Vec<{}> instead",
+                    "Vec.map_in_place cannot widen elements from {source_width} to {target_width} word(s) in the preserved allocation; build a new Vec<{}> instead, or use Vec.map_in_place_grow for an explicit {{alloc, panic}} fallback",
                     self.types.name(target)
                 ),
             ));
@@ -21787,6 +22006,7 @@ impl Checker<'_, '_> {
                 callbacks,
                 source,
                 target,
+                grow,
             },
             ty,
             span,
@@ -21809,11 +22029,15 @@ impl Checker<'_, '_> {
     /// element layout has to fit the preserved allocation.
     fn vec_map_chain_call(
         &mut self,
+        grow: bool,
         explicit: Option<&[ast::Type]>,
         arguments: &[ast::Expr],
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
+        if grow {
+            self.require(ALLOC | PANIC, span)?;
+        }
         let vector = self.expr(&arguments[0])?;
         if vector.ty == Type::Never {
             // The receiver diverges before either callback is evaluated, but
@@ -21871,6 +22095,7 @@ impl Checker<'_, '_> {
                 callbacks,
                 source,
                 target,
+                grow,
             },
             ty: Type::Never,
             span,
@@ -21914,11 +22139,11 @@ impl Checker<'_, '_> {
         self.vec_map_chain_payload(target, span, "final")?;
         let source_width = self.types.width(source);
         let target_width = self.types.width(target);
-        if target_width > source_width {
+        if !grow && target_width > source_width {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "Vec.map_chain_in_place cannot widen elements from {source_width} to {target_width} word(s) in the preserved allocation; build a new Vec<{}> instead",
+                    "Vec.map_chain_in_place cannot widen elements from {source_width} to {target_width} word(s) in the preserved allocation; build a new Vec<{}> instead, or use Vec.map_chain_in_place_grow for an explicit {{alloc, panic}} fallback",
                     self.types.name(target)
                 ),
             ));
@@ -21930,6 +22155,7 @@ impl Checker<'_, '_> {
                 callbacks: vec![first, second],
                 source,
                 target,
+                grow,
             },
             ty,
             span,
@@ -22720,6 +22946,8 @@ fn block_allocates(block: &Block) -> bool {
                 value: payload,
             } => expr(owner) || expr(payload),
             ExprKind::ArenaNew
+            | ExprKind::ArenaNewWith { .. }
+            | ExprKind::ArenaTryAlloc { .. }
             | ExprKind::BoxTryNew { .. }
             | ExprKind::BytesTryWithCapacity { .. } => true,
             ExprKind::Loop(block) => block_allocates(block),
