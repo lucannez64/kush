@@ -1,0 +1,92 @@
+module std.path;
+
+/// Byte-oriented POSIX path helpers. The host filesystem calls accept the same
+/// bytes; no normalization or symlink resolution is performed here.
+
+pub fn is_absolute(path: &Bytes) -> Bool ! {panic} {
+    Bytes.len(path) > 0 && Bytes.get(path, 0) == 47
+}
+
+pub fn basename(path: &Bytes) -> Bytes ! {alloc, panic} {
+    let n = Bytes.len(path);
+    let mut end = n;
+    while end > 0 && Bytes.get(path, end - 1) == 47 { end = end - 1; }
+    let mut start = end;
+    while start > 0 && Bytes.get(path, start - 1) != 47 { start = start - 1; }
+    let mut out = Bytes.with_capacity(end - start);
+    let mut i = start;
+    while i < end {
+        out = Bytes.push_reserved(out, Bytes.get(path, i));
+        i = i + 1;
+    }
+    out
+}
+
+pub fn dirname(path: &Bytes) -> Bytes ! {alloc, panic} {
+    let n = Bytes.len(path);
+    let mut end = n;
+    while end > 1 && Bytes.get(path, end - 1) == 47 { end = end - 1; }
+    while end > 0 && Bytes.get(path, end - 1) != 47 { end = end - 1; }
+    while end > 1 && Bytes.get(path, end - 1) == 47 { end = end - 1; }
+    if end == 0 { return Bytes.from("."); }
+    let mut out = Bytes.with_capacity(end);
+    let mut i = 0;
+    while i < end {
+        out = Bytes.push_reserved(out, Bytes.get(path, i));
+        i = i + 1;
+    }
+    out
+}
+
+pub fn extension(path: &Bytes) -> Bytes ! {alloc, panic} {
+    let name = basename(path);
+    let n = Bytes.len(&name);
+    let mut at = n;
+    while at > 0 {
+        if Bytes.get(&name, at - 1) == 46 {
+            let mut out = Bytes.with_capacity(n - at);
+            let mut i = at;
+            while i < n {
+                out = Bytes.push_reserved(out, Bytes.get(&name, i));
+                i = i + 1;
+            }
+            return out;
+        }
+        at = at - 1;
+    }
+    Bytes.with_capacity(0)
+}
+
+fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < Bytes.len(text) {
+        out = Bytes.push(out, Bytes.get(text, i));
+        i = i + 1;
+    }
+    out
+}
+
+fn copy(text: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(Bytes.len(text));
+    let mut i = 0;
+    while i < Bytes.len(text) {
+        out = Bytes.push_reserved(out, Bytes.get(text, i));
+        i = i + 1;
+    }
+    out
+}
+
+/// Join two paths with exactly one separator. An absolute second component
+/// replaces the first.
+pub fn join(first: &Bytes, second: &Bytes) -> Bytes ! {alloc, panic} {
+    if is_absolute(second) { return copy(second); }
+    if Bytes.len(first) == 0 { return copy(second); }
+    if Bytes.len(second) == 0 { return copy(first); }
+    let mut out = Bytes.with_capacity(Bytes.len(first) + Bytes.len(second) + 1);
+    out = append(out, first);
+    if Bytes.get(first, Bytes.len(first) - 1) != 47 {
+        out = Bytes.push(out, 47);
+    }
+    append(out, second)
+}

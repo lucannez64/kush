@@ -193,3 +193,33 @@ fn enum_only_modules_use_runtime_type_checking_without_requiring_main() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("0 executable functions"));
 }
+
+#[test]
+fn eval_and_native_run_receive_program_arguments_and_environment() {
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let source = scratch.path().join("host inputs.kush");
+    std::fs::write(&source, r#"use std.result.Result;
+        fn main() -> Unit ! {io, alloc, panic} {
+            match ENV.arg_count() { Result.Ok(n) => print_i64(n), Result.Err(_) => print_i64(-1) };
+            let arg = match ENV.arg(1, Bytes.with_capacity(64)) { Result.Ok(b) => b, Result.Err(_) => Bytes.from("") };
+            print_i64(Bytes.len(&arg));
+            let key = Bytes.from("KUSH_CLI_HOST_TEST");
+            let value = match ENV.var(&key, Bytes.with_capacity(64)) { Result.Ok(b) => b, Result.Err(_) => Bytes.from("") };
+            print_i64(Bytes.len(&value));
+        }"#).unwrap();
+    for mode in ["eval", "run"] {
+        let output = command()
+            .arg(mode)
+            .arg(&source)
+            .args(["--", "hello world", "--flag"])
+            .env("KUSH_CLI_HOST_TEST", "present")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"3\n11\n7\n");
+    }
+}

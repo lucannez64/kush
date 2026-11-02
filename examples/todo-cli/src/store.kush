@@ -1,0 +1,196 @@
+module todo_cli.store;
+
+use std.result.Result;
+
+/// Persistent line format: one task per line, `<state>|<title>\n`, where state
+/// is ASCII `0` (open) or `1` (done). Titles may contain spaces but not `|`,
+/// CR, or LF. A final line without a newline is accepted; blank lines and any
+/// other shape make the whole file invalid without changing it.
+
+
+pub fn empty() -> Bytes ! {alloc, panic} {
+    Bytes.with_capacity(0)
+}
+
+fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < Bytes.len(text) {
+        out = Bytes.push(out, Bytes.get(text, i));
+        i = i + 1;
+    }
+    out
+}
+
+fn append_range(out: Bytes, text: &Bytes, start: i64, end: i64) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = start;
+    while i < end {
+        out = Bytes.push(out, Bytes.get(text, i));
+        i = i + 1;
+    }
+    out
+}
+
+fn concat(first: &Bytes, second: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(Bytes.len(first) + Bytes.len(second));
+    out = append(out, first);
+    append(out, second)
+}
+
+fn find_byte(text: &Bytes, byte: i64, start: i64) -> i64 ! {panic} {
+    let n = Bytes.len(text);
+    let mut at = start;
+    let mut found = -1;
+    let mut done = false;
+    while at < n && !done {
+        if Bytes.get(text, at) == byte {
+            found = at;
+            done = true;
+        }
+        at = at + 1;
+    }
+    found
+}
+
+/// `data` must already be loaded. This checks the full file before any rewrite.
+pub fn validate(data: &Bytes) -> Result<Unit, i64> ! {panic} {
+    let n = Bytes.len(data);
+    let mut start = 0;
+    while start < n {
+        let found = find_byte(data, 10, start);
+        let end = if found < 0 { n } else { found };
+        if end == start {
+            return Result.Err(22);
+        }
+        let state = Bytes.get(data, start);
+        if state != 48 && state != 49 {
+            return Result.Err(22);
+        }
+        if start + 1 >= end || Bytes.get(data, start + 1) != 124 {
+            return Result.Err(22);
+        }
+        if start + 2 >= end {
+            return Result.Err(22);
+        }
+        let mut at = start + 2;
+        while at < end {
+            let byte = Bytes.get(data, at);
+            if byte == 0 || byte == 13 || byte == 124 {
+                return Result.Err(22);
+            }
+            at = at + 1;
+        }
+        start = end + 1;
+    }
+    Result.Ok(())
+}
+
+pub fn load(path: &Bytes) -> Result<Bytes, i64> ! {io, alloc, panic} {
+    match FS.read(path, Bytes.with_capacity(65536)) {
+        Result.Ok(data) => {
+            match validate(&data) {
+                Result.Ok(_) => Result.Ok(data),
+                Result.Err(code) => {
+                    drop(data);
+                    Result.Err(code)
+                },
+            }
+        },
+        Result.Err(2) => Result.Ok(empty()),
+        Result.Err(code) => Result.Err(code),
+    }
+}
+
+pub fn save(path: &Bytes, data: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
+    let suffix = Bytes.from(".tmp");
+    let temporary = concat(path, &suffix);
+    match FS.write(&temporary, data) {
+        Result.Err(code) => {
+            let _ = FS.remove(&temporary);
+            drop(temporary);
+            drop(suffix);
+            return Result.Err(code);
+        },
+        Result.Ok(_) => {},
+    }
+    match FS.rename(&temporary, path) {
+        Result.Ok(_) => {
+            drop(temporary);
+            drop(suffix);
+            Result.Ok(())
+        },
+        Result.Err(code) => {
+            let _ = FS.remove(&temporary);
+            drop(temporary);
+            drop(suffix);
+            Result.Err(code)
+        },
+    }
+}
+
+pub fn append_task(data: Bytes, title: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = data;
+    if Bytes.len(&out) > 0 && Bytes.get(&out, Bytes.len(&out) - 1) != 10 {
+        out = Bytes.push(out, 10);
+    }
+    out = Bytes.push(out, 48);
+    out = Bytes.push(out, 124);
+    out = append(out, title);
+    Bytes.push(out, 10)
+}
+
+fn rewrite(data: Bytes, id: i64, mode: i64, state: i64) -> Result<Bytes, i64> ! {alloc, panic} {
+    let n = Bytes.len(&data);
+    let mut out = Bytes.with_capacity(n);
+    let mut start = 0;
+    let mut line = 1;
+    let mut changed = false;
+    while start < n {
+        let found = find_byte(&data, 10, start);
+        let end = if found < 0 { n } else { found };
+        if line == id {
+            if mode == 0 {
+                out = Bytes.push(out, 48 + state);
+                out = append_range(out, &data, start + 1, end);
+                if found >= 0 { out = Bytes.push(out, 10); }
+            }
+            changed = true;
+        } else {
+            out = append_range(out, &data, start, end);
+            if found >= 0 { out = Bytes.push(out, 10); }
+        }
+        start = end + 1;
+        line = line + 1;
+    }
+    if !changed {
+        drop(out);
+        drop(data);
+        return Result.Err(22);
+    }
+    drop(data);
+    Result.Ok(out)
+}
+
+pub fn set_state(data: Bytes, id: i64, state: i64) -> Result<Bytes, i64> ! {alloc, panic} {
+    if id < 1 || (state != 0 && state != 1) { return Result.Err(22); }
+    rewrite(data, id, 0, state)
+}
+
+pub fn remove_task(data: Bytes, id: i64) -> Result<Bytes, i64> ! {alloc, panic} {
+    if id < 1 { return Result.Err(22); }
+    rewrite(data, id, 1, 0)
+}
+
+pub fn task_count(data: &Bytes) -> i64 ! {panic} {
+    let n = Bytes.len(data);
+    let mut count = 0;
+    let mut start = 0;
+    while start < n {
+        let found = find_byte(data, 10, start);
+        let end = if found < 0 { n } else { found };
+        count = count + 1;
+        start = end + 1;
+    }
+    count
+}

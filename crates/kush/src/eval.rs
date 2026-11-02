@@ -4,13 +4,19 @@ use crate::grades::Grade;
 use crate::{Diagnostic, Span, executable::*, lexer::Kind, runtime_types::ResultShape};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    ffi::OsString,
+    fs::{self, OpenOptions},
     io::{self, Cursor, Read, Write},
+    net::{Shutdown, TcpStream, ToSocketAddrs},
+    path::PathBuf,
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 type Result<T> = std::result::Result<T, Diagnostic>;
 impl Executable {
@@ -31,7 +37,27 @@ impl Executable {
         input: &mut dyn Read,
         output: &mut dyn Write,
     ) -> Result<(i64, MemoryStats)> {
-        self.evaluate_with_io_limits(input, output, None)
+        self.evaluate_with_io_limits(input, output, None, &Host::empty())
+    }
+    /// Reference evaluation with explicit standard streams and host inputs.
+    /// Native programs always observe the real process; this entry point makes
+    /// arguments and environment observable and testable without global state.
+    pub fn evaluate_with_host(
+        &self,
+        input: &mut dyn Read,
+        output: &mut dyn Write,
+        host: &Host,
+    ) -> Result<i64> {
+        self.evaluate_with_host_and_stats(input, output, host)
+            .map(|(value, _)| value)
+    }
+    pub fn evaluate_with_host_and_stats(
+        &self,
+        input: &mut dyn Read,
+        output: &mut dyn Write,
+        host: &Host,
+    ) -> Result<(i64, MemoryStats)> {
+        self.evaluate_with_io_limits(input, output, None, host)
     }
     /// Reference evaluation with a deterministic budget for **fallible**
     /// allocation attempts. Normal allocation is unaffected. A budget of zero
@@ -44,16 +70,17 @@ impl Executable {
         output: &mut dyn Write,
         budget: usize,
     ) -> Result<(i64, MemoryStats)> {
-        self.evaluate_with_io_limits(&mut io::empty(), output, Some(budget))
+        self.evaluate_with_io_limits(&mut io::empty(), output, Some(budget), &Host::empty())
     }
     fn evaluate_with_io_limits(
         &self,
         input: &mut dyn Read,
         output: &mut dyn Write,
         alloc_budget: Option<usize>,
+        host: &Host,
     ) -> Result<(i64, MemoryStats)> {
         if self.uses_tasks {
-            return self.evaluate_tasks(input, output, alloc_budget);
+            return self.evaluate_tasks(input, output, alloc_budget, host);
         }
         let entry = self.entry()?;
         let heap = SharedHeap::new();
@@ -69,6 +96,7 @@ impl Executable {
             task: None,
             dynamic_handlers: Vec::new(),
             try_budget: alloc_budget.map(|budget| Arc::new(AtomicUsize::new(budget))),
+            host: Arc::new(host.clone()),
         };
         let result = evaluator.call(entry, vec![])?.scalar();
         if heap.len() != 0 {
@@ -87,6 +115,7 @@ impl Executable {
         input: &mut dyn Read,
         output: &mut dyn Write,
         alloc_budget: Option<usize>,
+        host: &Host,
     ) -> Result<(i64, MemoryStats)> {
         let entry = self.entry()?;
         let mut bytes = Vec::new();
@@ -104,6 +133,7 @@ impl Executable {
             source,
             sink.clone(),
             alloc_budget.map(|budget| Arc::new(AtomicUsize::new(budget))),
+            Arc::new(host.clone()),
         );
         let output_bytes = std::mem::take(&mut *sink.0.lock().unwrap());
         output
@@ -118,6 +148,7 @@ impl Executable {
         }
         Ok((result, stats.snapshot()))
     }
+    #[allow(clippy::too_many_arguments)]
     fn run_scheduler(
         &self,
         entry: usize,
@@ -126,6 +157,7 @@ impl Executable {
         source: SharedInput,
         sink: SharedWriter,
         try_budget: Option<Arc<AtomicUsize>>,
+        host: Arc<Host>,
     ) -> Result<i64> {
         let mut records: Vec<TaskRecord> = Vec::new();
         let mut ready: VecDeque<usize> = VecDeque::new();
@@ -139,6 +171,7 @@ impl Executable {
                 &source,
                 &sink,
                 &try_budget,
+                &host,
                 entry,
                 None,
                 Vec::new(),
@@ -187,6 +220,7 @@ impl Executable {
                             &source,
                             &sink,
                             &try_budget,
+                            &host,
                             function,
                             environment,
                             Vec::new(),
@@ -273,6 +307,7 @@ impl Executable {
                     task: None,
                     dynamic_handlers: Vec::new(),
                     try_budget: try_budget.clone(),
+                    host: host.clone(),
                 };
                 let scalar = value.scalar();
                 evaluator.drop_value(value)?;
@@ -296,6 +331,7 @@ impl Executable {
         source: &SharedInput,
         sink: &SharedWriter,
         try_budget: &Option<Arc<AtomicUsize>>,
+        host: &Arc<Host>,
         function: usize,
         environment: Option<usize>,
         arguments: Vec<Value>,
@@ -334,6 +370,7 @@ impl Executable {
                 })
                 .collect(),
             try_budget: try_budget.clone(),
+            host: host.clone(),
         };
         stats.allocation();
         stats.allocation();
@@ -404,6 +441,119 @@ fn io_error_code(error: &io::Error) -> i64 {
         .raw_os_error()
         .filter(|code| *code > 0)
         .map_or(5, i64::from)
+}
+fn os_bytes(value: OsString) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        value.into_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        value.to_string_lossy().into_owned().into_bytes()
+    }
+}
+fn value_bytes(value: &[u8]) -> OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(value.to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        OsString::from(String::from_utf8_lossy(value).into_owned())
+    }
+}
+fn path_from_bytes(value: &[u8]) -> PathBuf {
+    PathBuf::from(value_bytes(value))
+}
+/// Split a NUL-separated argument encoding, ignoring empty segments and a
+/// trailing NUL exactly like the native subprocess path.
+fn split_nul(value: &[u8]) -> Vec<OsString> {
+    let mut arguments = Vec::new();
+    let mut start = 0;
+    for index in 0..=value.len() {
+        if index == value.len() || value[index] == 0 {
+            if index > start {
+                arguments.push(value_bytes(&value[start..index]));
+            }
+            start = index + 1;
+        }
+    }
+    arguments
+}
+fn exit_status_code(status: std::process::ExitStatus) -> i64 {
+    if let Some(code) = status.code() {
+        return i64::from(code);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        128 + status.signal().map_or(0, i64::from)
+    }
+    #[cfg(not(unix))]
+    {
+        128
+    }
+}
+/// Host inputs visible to the reference evaluator. Native executables read the
+/// real process arguments and environment; tests and tooling use this value to
+/// provide explicit, deterministic inputs instead. `evaluate_with_io` and
+/// `evaluate` use an empty host, while `Host::process` mirrors the CLI process.
+#[derive(Debug, Clone)]
+pub struct Host {
+    args: Arc<Vec<Vec<u8>>>,
+    environment: Arc<BTreeMap<Vec<u8>, Vec<u8>>>,
+    monotonic_origin: Instant,
+}
+impl Default for Host {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+impl Host {
+    /// No arguments and no environment variables. This is the deterministic
+    /// default for existing reference evaluation entry points.
+    pub fn empty() -> Self {
+        Self {
+            args: Arc::new(Vec::new()),
+            environment: Arc::new(BTreeMap::new()),
+            monotonic_origin: Instant::now(),
+        }
+    }
+    /// The current process arguments (including argv[0]) and environment.
+    pub fn process() -> Self {
+        let args = std::env::args_os().map(os_bytes).collect();
+        let environment = std::env::vars_os()
+            .map(|(name, value)| (os_bytes(name), os_bytes(value)))
+            .collect();
+        Self {
+            args: Arc::new(args),
+            environment: Arc::new(environment),
+            monotonic_origin: Instant::now(),
+        }
+    }
+    /// Replace argv while retaining this host's environment and clock origin.
+    pub fn with_args(mut self, args: Vec<Vec<u8>>) -> Self {
+        self.args = Arc::new(args);
+        self
+    }
+    /// Explicit raw-byte arguments and environment entries. Later duplicate
+    /// names replace earlier ones.
+    pub fn new(args: Vec<Vec<u8>>, environment: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
+        Self {
+            args: Arc::new(args),
+            environment: Arc::new(environment.into_iter().collect()),
+            monotonic_origin: Instant::now(),
+        }
+    }
+    fn var(&self, name: &[u8]) -> Option<&[u8]> {
+        self.environment.get(name).map(Vec::as_slice)
+    }
+    fn monotonic_ns(&self) -> i64 {
+        let elapsed = self.monotonic_origin.elapsed();
+        (elapsed.as_nanos().min(i64::MAX as u128)) as i64
+    }
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MemoryStats {
@@ -1002,6 +1152,9 @@ struct Evaluator<'a, R: Read, W: Write> {
     /// Remaining successful fallible allocation attempts for deterministic
     /// failure probes. `None` means unlimited.
     try_budget: Option<Arc<AtomicUsize>>,
+    /// Injected arguments/environment and the monotonic clock origin. Native
+    /// execution reads the real process instead.
+    host: Arc<Host>,
 }
 macro_rules! value {
     ($e:expr) => {
@@ -3617,6 +3770,585 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }],
         })
     }
+    fn host_result(&self, shape: ResultShape, status: i64, value: Value) -> Value {
+        if status == 0 {
+            Value::Enum {
+                tag: shape.ok_tag,
+                fields: vec![value],
+            }
+        } else {
+            Value::Enum {
+                tag: shape.err_tag,
+                fields: vec![Value::Scalar(status)],
+            }
+        }
+    }
+    fn borrowed_bytes(&self, value: &Value) -> Option<Vec<u8>> {
+        let Value::Borrowed(id) = value else {
+            return None;
+        };
+        match self.heap.get(*id) {
+            Some(Value::Buffer { data, .. }) => Some(data.clone()),
+            _ => None,
+        }
+    }
+    fn take_buffer(&mut self, value: &Value) -> Option<(usize, Vec<u8>, usize)> {
+        let Value::Owned(id) = value else {
+            return None;
+        };
+        match self.heap.take(*id) {
+            Some(Value::Buffer { data, capacity }) => Some((*id, data, capacity)),
+            _ => None,
+        }
+    }
+    fn append_bounded(data: &mut Vec<u8>, capacity: usize, bytes: &[u8]) -> Option<i64> {
+        if data.len() > capacity || bytes.len() > capacity - data.len() {
+            return Some(27); // EFBIG
+        }
+        data.extend_from_slice(bytes);
+        None
+    }
+    /// Reference implementation of the checked host operations. Its observable
+    /// contract (buffer ownership, errno values, bounded reads, explicit
+    /// timeouts) mirrors the generated native runtime; the two implementations
+    /// share no host call path.
+    fn host_call(
+        &mut self,
+        op: HostOp,
+        shape: ResultShape,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value> {
+        self.fuel = self
+            .fuel
+            .checked_sub(1)
+            .ok_or_else(|| Diagnostic::new(span, "reference host computation budget exhausted"))?;
+        let failure = |message: &str| Diagnostic::new(span, message.to_owned());
+        match op {
+            HostOp::FsRead => {
+                let path = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: FS.read path is not borrowed"))?;
+                let (id, mut data, capacity) = self
+                    .take_buffer(&args[1])
+                    .ok_or_else(|| failure("internal error: FS.read buffer is not owned"))?;
+                if path.contains(&0) {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let mut file = match fs::File::open(path_from_bytes(&path)) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        self.stats.deallocation();
+                        return Ok(self.host_result(
+                            shape,
+                            io_error_code(&error),
+                            Value::Scalar(0),
+                        ));
+                    }
+                };
+                let initialized = data.len();
+                data.resize(capacity, 0);
+                let mut length = initialized;
+                let mut probe = [0u8; 1];
+                let status = loop {
+                    self.fuel = self.fuel.checked_sub(1).ok_or_else(|| {
+                        Diagnostic::new(span, "reference host computation budget exhausted")
+                    })?;
+                    let full = length == capacity;
+                    let target: &mut [u8] = if full {
+                        &mut probe[..]
+                    } else {
+                        &mut data[length..capacity]
+                    };
+                    match file.read(target) {
+                        Ok(0) => break 0,
+                        Ok(_) if full => break 27,
+                        Ok(count) => length += count,
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error) => break io_error_code(&error),
+                    }
+                };
+                data.truncate(length);
+                if status != 0 {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                Ok(self.host_result(shape, 0, Value::Owned(id)))
+            }
+            HostOp::FsWrite | HostOp::FsAppend => {
+                let path = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: host path is not borrowed"))?;
+                let data = self
+                    .borrowed_bytes(&args[1])
+                    .ok_or_else(|| failure("internal error: host data is not borrowed"))?;
+                if path.contains(&0) {
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let mut options = OpenOptions::new();
+                options.write(true).create(true);
+                if op == HostOp::FsAppend {
+                    options.append(true);
+                } else {
+                    options.truncate(true);
+                }
+                let status = match options.open(path_from_bytes(&path)) {
+                    Ok(mut file) => match file.write_all(&data) {
+                        Ok(()) => 0,
+                        Err(error) => io_error_code(&error),
+                    },
+                    Err(error) => io_error_code(&error),
+                };
+                Ok(self.host_result(shape, status, Value::Scalar(data.len() as i64)))
+            }
+            HostOp::FsRemove => {
+                let path = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: FS.remove path is not borrowed"))?;
+                if path.contains(&0) {
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let status = fs::remove_file(path_from_bytes(&path))
+                    .err()
+                    .map_or(0, |error| io_error_code(&error));
+                Ok(self.host_result(shape, status, Value::Scalar(0)))
+            }
+            HostOp::FsRename => {
+                let from = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: FS.rename source is not borrowed"))?;
+                let to = self.borrowed_bytes(&args[1]).ok_or_else(|| {
+                    failure("internal error: FS.rename destination is not borrowed")
+                })?;
+                if from.contains(&0) || to.contains(&0) {
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let status = fs::rename(path_from_bytes(&from), path_from_bytes(&to))
+                    .err()
+                    .map_or(0, |error| io_error_code(&error));
+                Ok(self.host_result(shape, status, Value::Scalar(0)))
+            }
+            HostOp::FsMkdir => {
+                let path = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: FS.mkdir path is not borrowed"))?;
+                if path.contains(&0) {
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let status = fs::create_dir(path_from_bytes(&path))
+                    .err()
+                    .map_or(0, |error| io_error_code(&error));
+                Ok(self.host_result(shape, status, Value::Scalar(0)))
+            }
+            HostOp::FsRemoveDir => {
+                let path = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: FS.remove_dir path is not borrowed"))?;
+                if path.contains(&0) {
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let status = fs::remove_dir(path_from_bytes(&path))
+                    .err()
+                    .map_or(0, |error| io_error_code(&error));
+                Ok(self.host_result(shape, status, Value::Scalar(0)))
+            }
+            HostOp::FsList => {
+                let path = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: FS.list path is not borrowed"))?;
+                let (id, mut data, capacity) = self
+                    .take_buffer(&args[1])
+                    .ok_or_else(|| failure("internal error: FS.list buffer is not owned"))?;
+                if path.contains(&0) {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let mut status = 0;
+                match fs::read_dir(path_from_bytes(&path)) {
+                    Ok(entries) => {
+                        for entry in entries {
+                            match entry {
+                                Ok(entry) => {
+                                    let name = os_bytes(entry.file_name());
+                                    if let Some(failure) = Self::append_bounded(
+                                        &mut data, capacity, &name,
+                                    )
+                                    .or_else(|| Self::append_bounded(&mut data, capacity, b"\n"))
+                                    {
+                                        status = failure;
+                                        break;
+                                    }
+                                }
+                                Err(error) => {
+                                    status = io_error_code(&error);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => status = io_error_code(&error),
+                }
+                if status != 0 {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                Ok(self.host_result(shape, 0, Value::Owned(id)))
+            }
+            HostOp::FsIsFile | HostOp::FsIsDir | HostOp::FsSize | HostOp::FsExists => {
+                let path = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: FS metadata path is not borrowed"))?;
+                if path.contains(&0) {
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                match fs::metadata(path_from_bytes(&path)) {
+                    Ok(metadata) => {
+                        let value = match op {
+                            HostOp::FsIsFile => (metadata.is_file() as i64, 0),
+                            HostOp::FsIsDir => (metadata.is_dir() as i64, 0),
+                            HostOp::FsExists => (1, 0),
+                            HostOp::FsSize => match i64::try_from(metadata.len()) {
+                                Ok(size) => (size, 0),
+                                Err(_) => (0, 75), // EOVERFLOW
+                            },
+                            _ => unreachable!(),
+                        };
+                        Ok(self.host_result(shape, value.1, Value::Scalar(value.0)))
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        let status = if op == HostOp::FsSize {
+                            io_error_code(&error)
+                        } else {
+                            0
+                        };
+                        Ok(self.host_result(shape, status, Value::Scalar(0)))
+                    }
+                    Err(error) => {
+                        Ok(self.host_result(shape, io_error_code(&error), Value::Scalar(0)))
+                    }
+                }
+            }
+            HostOp::EnvArgCount => {
+                let count = self.host.args.len();
+                Ok(self.host_result(shape, 0, Value::Scalar(count as i64)))
+            }
+            HostOp::EnvArg => {
+                let index = args[0].scalar();
+                let (id, mut data, capacity) = self
+                    .take_buffer(&args[1])
+                    .ok_or_else(|| failure("internal error: ENV.arg buffer is not owned"))?;
+                let Some(index) = usize::try_from(index)
+                    .ok()
+                    .filter(|index| *index < self.host.args.len())
+                else {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, 2, Value::Scalar(0)));
+                };
+                let value = self.host.args[index].clone();
+                if let Some(status) = Self::append_bounded(&mut data, capacity, &value) {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                Ok(self.host_result(shape, 0, Value::Owned(id)))
+            }
+            HostOp::EnvVarCount => {
+                let count = self.host.environment.len();
+                Ok(self.host_result(shape, 0, Value::Scalar(count as i64)))
+            }
+            HostOp::EnvVar => {
+                let name = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: ENV.var name is not borrowed"))?;
+                let (id, mut data, capacity) = self
+                    .take_buffer(&args[1])
+                    .ok_or_else(|| failure("internal error: ENV.var buffer is not owned"))?;
+                if name.contains(&0) {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let Some(value) = self.host.var(&name).map(<[u8]>::to_vec) else {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, 2, Value::Scalar(0)));
+                };
+                if let Some(status) = Self::append_bounded(&mut data, capacity, &value) {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                Ok(self.host_result(shape, 0, Value::Owned(id)))
+            }
+            HostOp::TimeUnixSeconds => {
+                let seconds = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(duration) => i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+                    Err(error) => -i64::try_from(error.duration().as_secs()).unwrap_or(i64::MAX),
+                };
+                Ok(self.host_result(shape, 0, Value::Scalar(seconds)))
+            }
+            HostOp::TimeMonotonicNs => {
+                Ok(self.host_result(shape, 0, Value::Scalar(self.host.monotonic_ns())))
+            }
+            HostOp::TimeSleepMs => {
+                let milliseconds = args[0].scalar();
+                if milliseconds < 0 {
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                thread::sleep(Duration::from_millis(milliseconds as u64));
+                Ok(self.host_result(shape, 0, Value::Scalar(0)))
+            }
+            HostOp::ProcRun => {
+                let program = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: PROC.run program is not borrowed"))?;
+                let arguments = self.borrowed_bytes(&args[1]).ok_or_else(|| {
+                    failure("internal error: PROC.run arguments are not borrowed")
+                })?;
+                let timeout = args[3].scalar();
+                let Value::Borrowed(id) = args[2] else {
+                    return Err(failure("internal error: PROC.run output is not borrowed"));
+                };
+                let Some(Value::Buffer { data, capacity }) = self.heap.take(id) else {
+                    return Err(failure("internal error: PROC.run output is not a buffer"));
+                };
+                let initialized = data.len();
+                let mut data = data;
+                if timeout < 0 || program.is_empty() || program.contains(&0) {
+                    self.heap.insert(id, Value::Buffer { data, capacity });
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let mut command = Command::new(value_bytes(&program));
+                command
+                    .args(split_nul(&arguments))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null());
+                let mut child = match command.spawn() {
+                    Ok(child) => child,
+                    Err(error) => {
+                        self.heap.insert(id, Value::Buffer { data, capacity });
+                        return Ok(self.host_result(
+                            shape,
+                            io_error_code(&error),
+                            Value::Scalar(0),
+                        ));
+                    }
+                };
+                let mut stdout = child.stdout.take().expect("piped stdout");
+                let limit = capacity - initialized;
+                let overflow_flag = Arc::new(AtomicBool::new(false));
+                let reader_overflow = overflow_flag.clone();
+                let reader = thread::spawn(move || {
+                    let mut captured = Vec::new();
+                    let mut buffer = [0u8; 4096];
+                    let mut overflow = false;
+                    loop {
+                        match stdout.read(&mut buffer) {
+                            Ok(0) => break,
+                            Ok(count) => {
+                                if captured.len() + count > limit {
+                                    let room = limit.saturating_sub(captured.len());
+                                    captured.extend_from_slice(&buffer[..room]);
+                                    overflow = true;
+                                    reader_overflow.store(true, Ordering::Relaxed);
+                                    break;
+                                }
+                                captured.extend_from_slice(&buffer[..count]);
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(error) => return (captured, overflow, Some(io_error_code(&error))),
+                        }
+                    }
+                    (captured, overflow, None)
+                });
+                let deadline =
+                    (timeout != 0).then(|| Instant::now() + Duration::from_millis(timeout as u64));
+                let mut timed_out = false;
+                let status = loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break Some(status),
+                        Ok(None) => {}
+                        Err(_) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break None;
+                        }
+                    }
+                    if overflow_flag.load(Ordering::Relaxed)
+                        || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                    {
+                        timed_out = deadline.is_some_and(|deadline| Instant::now() >= deadline);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break None;
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                };
+                let (captured, overflow, read_error) = reader.join().unwrap();
+                let append_status = Self::append_bounded(&mut data, capacity, &captured);
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                if timed_out {
+                    return Ok(self.host_result(shape, 110, Value::Scalar(0)));
+                }
+                if let Some(error) = read_error {
+                    return Ok(self.host_result(shape, error, Value::Scalar(0)));
+                }
+                if overflow {
+                    return Ok(self.host_result(shape, 27, Value::Scalar(0)));
+                }
+                let Some(status) = status else {
+                    return Ok(self.host_result(shape, 5, Value::Scalar(0)));
+                };
+                if let Some(status_code) = append_status {
+                    return Ok(self.host_result(shape, status_code, Value::Scalar(0)));
+                }
+                Ok(self.host_result(shape, 0, Value::Scalar(exit_status_code(status))))
+            }
+            HostOp::NetTcpExchange => {
+                let host = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: NET host is not borrowed"))?;
+                let request = self
+                    .borrowed_bytes(&args[2])
+                    .ok_or_else(|| failure("internal error: NET request is not borrowed"))?;
+                let port = args[1].scalar();
+                let timeout_ms = args[4].scalar();
+                let Value::Borrowed(id) = args[3] else {
+                    return Err(failure("internal error: NET response is not borrowed"));
+                };
+                let Some(Value::Buffer { data, capacity }) = self.heap.take(id) else {
+                    return Err(failure("internal error: NET response is not a buffer"));
+                };
+                let mut data = data;
+                let invalid = || self.host_result(shape, 22, Value::Scalar(0));
+                if host.contains(&0) {
+                    self.heap.insert(id, Value::Buffer { data, capacity });
+                    return Ok(invalid());
+                }
+                let Ok(host) = String::from_utf8(host) else {
+                    self.heap.insert(id, Value::Buffer { data, capacity });
+                    return Ok(invalid());
+                };
+                let Ok(port) = u16::try_from(port) else {
+                    self.heap.insert(id, Value::Buffer { data, capacity });
+                    return Ok(invalid());
+                };
+                if port == 0 || timeout_ms < 0 {
+                    self.heap.insert(id, Value::Buffer { data, capacity });
+                    return Ok(invalid());
+                }
+                let duration = Duration::from_millis(timeout_ms as u64);
+                let connect = if timeout_ms == 0 {
+                    TcpStream::connect((host.as_str(), port))
+                } else {
+                    match (host.as_str(), port).to_socket_addrs() {
+                        Ok(addresses) => {
+                            let mut last = io::Error::from_raw_os_error(5);
+                            let mut connected = None;
+                            for address in addresses {
+                                match TcpStream::connect_timeout(&address, duration) {
+                                    Ok(stream) => {
+                                        connected = Some(stream);
+                                        break;
+                                    }
+                                    Err(error) => last = error,
+                                }
+                            }
+                            connected.ok_or(last)
+                        }
+                        Err(error) => Err(error),
+                    }
+                };
+                let mut stream = match connect {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        self.heap.insert(id, Value::Buffer { data, capacity });
+                        return Ok(self.host_result(
+                            shape,
+                            io_error_code(&error),
+                            Value::Scalar(0),
+                        ));
+                    }
+                };
+                if timeout_ms != 0 {
+                    let _ = stream.set_read_timeout(Some(duration));
+                    let _ = stream.set_write_timeout(Some(duration));
+                }
+                if let Err(error) = stream.write_all(&request) {
+                    self.heap.insert(id, Value::Buffer { data, capacity });
+                    return Ok(self.host_result(shape, io_error_code(&error), Value::Scalar(0)));
+                }
+                let _ = stream.shutdown(Shutdown::Write);
+                let initialized = data.len();
+                data.resize(capacity, 0);
+                let mut length = initialized;
+                let mut received_total = 0i64;
+                let mut probe = [0u8; 1];
+                let status = loop {
+                    self.fuel = self.fuel.checked_sub(1).ok_or_else(|| {
+                        Diagnostic::new(span, "reference host computation budget exhausted")
+                    })?;
+                    let full = length == capacity;
+                    let target: &mut [u8] = if full {
+                        &mut probe[..]
+                    } else {
+                        &mut data[length..capacity]
+                    };
+                    match stream.read(target) {
+                        Ok(0) => break 0,
+                        Ok(_) if full => break 27,
+                        Ok(count) => {
+                            length += count;
+                            received_total += count as i64;
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            break 110;
+                        }
+                        Err(error) => break io_error_code(&error),
+                    }
+                };
+                data.truncate(length);
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                if status != 0 {
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                Ok(self.host_result(shape, 0, Value::Scalar(received_total)))
+            }
+            HostOp::OsStrerror => {
+                let code = args[0].scalar();
+                let (id, mut data, capacity) = self
+                    .take_buffer(&args[1])
+                    .ok_or_else(|| failure("internal error: OS.strerror buffer is not owned"))?;
+                if !(0..=4095).contains(&code) {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let mut text = io::Error::from_raw_os_error(code as i32).to_string();
+                if let Some(at) = text.rfind(" (os error ") {
+                    text.truncate(at);
+                }
+                if let Some(status) = Self::append_bounded(&mut data, capacity, text.as_bytes()) {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                Ok(self.host_result(shape, 0, Value::Owned(id)))
+            }
+        }
+    }
     fn consume(&self, expr: &Expr, frame: &mut Frame) {
         if let Some(id) = expr.resource {
             frame.resources[id] = None;
@@ -4525,6 +5257,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
                 match target {
                     Target::Io(op, shape) => self.io_call(*op, *shape, values, expr.span)?,
+                    Target::Host(op, shape) => self.host_call(*op, *shape, values, expr.span)?,
                     Target::Bytes(op) => self.bytes_call(*op, values, expr.span)?,
                     Target::String(op) => self.string_call(*op, values, expr.span)?,
                     Target::Str(op) => self.str_call(*op, values, expr.span)?,

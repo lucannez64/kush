@@ -1,0 +1,71 @@
+module todo_cli.tests.main;
+
+use std.result.Result;
+use std.test;
+use std.text;
+use todo_cli.store;
+
+#[test]
+fn accepts_well_formed_lines() -> Unit ! {alloc, panic} {
+    let data = Bytes.from("0|Buy milk\n1|Ship code\n0|No trailing newline");
+    test.is_true(match store.validate(&data) {
+        Result.Ok(_) => true,
+        Result.Err(_) => false,
+    });
+}
+
+#[test]
+fn rejects_malformed_lines() -> Unit ! {alloc, panic} {
+    let blank = Bytes.from("\n");
+    let bad_state = Bytes.from("2|no\n");
+    let missing_separator = Bytes.from("0 no\n");
+    let empty_title = Bytes.from("0|\n");
+    test.is_false(match store.validate(&blank) {
+        Result.Ok(_) => true,
+        Result.Err(_) => false,
+    });
+    test.is_false(match store.validate(&bad_state) {
+        Result.Ok(_) => true,
+        Result.Err(_) => false,
+    });
+    test.is_false(match store.validate(&missing_separator) {
+        Result.Ok(_) => true,
+        Result.Err(_) => false,
+    });
+    test.is_false(match store.validate(&empty_title) {
+        Result.Ok(_) => true,
+        Result.Err(_) => false,
+    });
+}
+
+#[test]
+fn appends_after_a_line_without_a_newline() -> Unit ! {alloc, panic} {
+    let data = Bytes.from("0|Existing");
+    let title = Bytes.from("New");
+    let updated = store.append_task(data, &title);
+    let expected = Bytes.from("0|Existing\n0|New\n");
+    test.is_true(text.eq(&updated, &expected));
+}
+
+#[test]
+fn marks_and_removes_one_task() -> Unit ! {alloc, panic} {
+    let data = Bytes.from("0|One\n0|Two\n0|Three\n");
+    let marked = match store.set_state(data, 2, 1) {
+        Result.Ok(value) => value,
+        Result.Err(_) => { test.fail(); Bytes.with_capacity(0) },
+    };
+    test.is_true(match store.validate(&marked) {
+        Result.Ok(_) => true,
+        Result.Err(_) => false,
+    });
+    let removed = match store.remove_task(marked, 2) {
+        Result.Ok(value) => value,
+        Result.Err(_) => { test.fail(); Bytes.with_capacity(0) },
+    };
+    let expected = Bytes.from("0|One\n0|Three\n");
+    test.is_true(match store.validate(&removed) {
+        Result.Ok(_) => true,
+        Result.Err(_) => false,
+    });
+    test.is_true(text.eq(&removed, &expected));
+}

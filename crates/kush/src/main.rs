@@ -20,7 +20,7 @@ Single files:\n\
   kush check <file.kush>\n\
   kush build <file.kush> -o <executable> [--stats] [--link <archive>] [--link-lib <name>]\n\
   kush run <file.kush> [--stats] [-- <program args>...]\n\
-  kush eval <file.kush> [--stats]\n\n\
+  kush eval <file.kush> [--stats] [-- <program args>...]\n\n\
 Projects (Kush.toml):\n\
   kush new <directory> [--name <name>]\n\
   kush check [--manifest-path <Kush.toml>] [--locked]\n\
@@ -404,7 +404,7 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
         || (command == "build" && build_stats);
     let mut program_arguments = Vec::new();
     let mut run_file_valid = false;
-    if command == "run" && args.len() >= 3 && args[1] != "--stats" {
+    if run_like && args.len() >= 3 && args[1] != "--stats" {
         let mut index = 2;
         if args.get(index).is_some_and(|value| value == "--stats") {
             stats = true;
@@ -425,7 +425,7 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
     } else if command == "run" {
         args.len() == 2 || run_file_valid
     } else if command == "eval" {
-        args.len() == 2 || stats
+        args.len() == 2 || run_file_valid
     } else {
         args.len() == 2
     };
@@ -498,15 +498,20 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
         let checked = kush::executable::check_program(&program)
             .map_err(|e| (1, program.sources.render(&e)))?;
         if command == "eval" {
+            let argv = std::iter::once(&args[1])
+                .chain(program_arguments.iter())
+                .map(|value| value.as_encoded_bytes().to_vec())
+                .collect();
+            let host = kush::Host::process().with_args(argv);
             if stats {
                 let (result, stats) = checked
-                    .evaluate_with_io_and_stats(&mut io::stdin().lock(), out)
+                    .evaluate_with_host_and_stats(&mut io::stdin().lock(), out, &host)
                     .map_err(diagnostic)?;
                 eprintln!("{}", stats.report());
                 return Ok((result as u64 & 255) as u8);
             }
             let result = checked
-                .evaluate_with_io(&mut io::stdin().lock(), out)
+                .evaluate_with_host(&mut io::stdin().lock(), out, &host)
                 .map_err(diagnostic)?;
             return Ok((result as u64 & 255) as u8);
         }

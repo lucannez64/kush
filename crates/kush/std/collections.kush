@@ -1,0 +1,130 @@
+module std.collections;
+
+use std.option.Option;
+
+/// Fixed-capacity integer set and map helpers over caller-owned arrays and
+/// mutable slices. This avoids hidden allocations and keeps capacity explicit:
+/// the capacity is `Slice.len(items)`. `set_contains`, `map_get`, and the
+/// mutating helpers use linear lookup. Insertion order is preserved.
+
+pub fn set_contains(items: &[i64], count: i64, value: i64) -> Bool ! {panic} {
+    let mut i = 0;
+    while i < count {
+        if Slice.get(items, i) == value { return true; }
+        i = i + 1;
+    }
+    false
+}
+
+/// Insert one value and return the new count. Duplicates and a full slice leave
+/// the count unchanged.
+pub fn set_add(items: &mut [i64], count: i64, value: i64) -> i64 ! {panic} {
+    let mut i = 0;
+    let mut present = false;
+    while i < count {
+        if Slice.get(items, i) == value { present = true; break; }
+        i = i + 1;
+    }
+    if present || count >= Slice.len(items) { return count; }
+    Slice.set(items, count, value);
+    count + 1
+}
+
+/// Remove every occurrence of `value` and return the new count.
+pub fn set_remove(items: &mut [i64], count: i64, value: i64) -> i64 ! {panic} {
+    let mut read = 0;
+    let mut write = 0;
+    while read < count {
+        let item = Slice.get(items, read);
+        if item != value {
+            Slice.set(items, write, item);
+            write = write + 1;
+        }
+        read = read + 1;
+    }
+    write
+}
+
+/// Append the live members to an existing byte buffer.
+pub fn set_write(items: &[i64], count: i64, out: Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < count {
+        out = Bytes.push(out, Slice.get(items, i));
+        i = i + 1;
+    }
+    out
+}
+
+pub fn map_get(keys: &[i64], values: &[i64], count: i64, key: i64) -> Option<i64> ! {panic} {
+    let mut i = 0;
+    let mut found = false;
+    let mut answer = 0;
+    while i < count {
+        if Slice.get(keys, i) == key {
+            found = true;
+            answer = Slice.get(values, i);
+            break;
+        }
+        i = i + 1;
+    }
+    if found { Option.Some(answer) } else { Option.None }
+}
+
+/// Insert or replace one key and return the new count. Adding to a full key
+/// slice leaves the maps unchanged.
+pub fn map_set(
+    keys: &mut [i64],
+    values: &mut [i64],
+    count: i64,
+    key: i64,
+    value: i64,
+) -> i64 ! {panic} {
+    let mut i = 0;
+    let mut existing = -1;
+    while i < count {
+        if Slice.get(keys, i) == key { existing = i; break; }
+        i = i + 1;
+    }
+    if existing >= 0 {
+        Slice.set(values, existing, value);
+        return count;
+    }
+    if count >= Slice.len(keys) || count >= Slice.len(values) { return count; }
+    Slice.set(keys, count, key);
+    Slice.set(values, count, value);
+    count + 1
+}
+
+pub fn map_remove(
+    keys: &mut [i64],
+    values: &mut [i64],
+    count: i64,
+    key: i64,
+) -> i64 ! {panic} {
+    let mut at = 0;
+    let mut found = -1;
+    while at < count {
+        if Slice.get(keys, at) == key { found = at; break; }
+        at = at + 1;
+    }
+    if found < 0 { return count; }
+    let mut i = found;
+    while i + 1 < count {
+        Slice.set(keys, i, Slice.get(keys, i + 1));
+        Slice.set(values, i, Slice.get(values, i + 1));
+        i = i + 1;
+    }
+    count - 1
+}
+
+/// Append the live keys to an existing byte buffer.
+pub fn map_write_keys(keys: &[i64], count: i64, out: Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < count {
+        out = Bytes.push(out, Slice.get(keys, i));
+        i = i + 1;
+    }
+    out
+}

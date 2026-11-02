@@ -4,6 +4,7 @@ pub mod ast;
 pub mod check;
 mod coverage;
 mod eval;
+pub use eval::Host;
 pub mod executable;
 mod facts;
 mod float;

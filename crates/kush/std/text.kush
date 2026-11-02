@@ -1,0 +1,342 @@
+module std.text;
+
+use std.result.Result;
+
+/// Byte-oriented text helpers. `Bytes` may contain arbitrary bytes; these
+/// functions never validate or reinterpret UTF-8. Numeric parsing is strict:
+/// an optional sign followed by one or more ASCII digits, with no whitespace.
+
+pub fn is_space(byte: i64) -> Bool ! {} {
+    byte == 32 || byte == 9 || byte == 10 || byte == 13
+}
+
+pub fn eq(a: &Bytes, b: &Bytes) -> Bool ! {panic} {
+    if Bytes.len(a) != Bytes.len(b) { return false; }
+    let mut i = 0;
+    while i < Bytes.len(a) {
+        if Bytes.get(a, i) != Bytes.get(b, i) { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+pub fn starts_with(text: &Bytes, prefix: &Bytes) -> Bool ! {panic} {
+    if Bytes.len(prefix) > Bytes.len(text) { return false; }
+    let mut i = 0;
+    while i < Bytes.len(prefix) {
+        if Bytes.get(text, i) != Bytes.get(prefix, i) { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+pub fn ends_with(text: &Bytes, suffix: &Bytes) -> Bool ! {panic} {
+    let n = Bytes.len(text);
+    let m = Bytes.len(suffix);
+    if m > n { return false; }
+    let mut i = 0;
+    while i < m {
+        if Bytes.get(text, n - m + i) != Bytes.get(suffix, i) { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+/// First byte offset of `needle` at or after `start`, or -1. An empty needle
+/// matches at `start` when `start` is in `0..=len`.
+pub fn find_from(text: &Bytes, needle: &Bytes, start: i64) -> i64 ! {panic} {
+    let n = Bytes.len(text);
+    let m = Bytes.len(needle);
+    if start < 0 || start > n { return -1; }
+    if m == 0 { return start; }
+    let mut at = start;
+    let mut found = -1;
+    let mut done = false;
+    while at + m <= n && !done {
+        let mut i = 0;
+        let mut same = true;
+        while i < m {
+            if Bytes.get(text, at + i) != Bytes.get(needle, i) {
+                same = false;
+                break;
+            }
+            i = i + 1;
+        }
+        if same { found = at; done = true; }
+        at = at + 1;
+    }
+    found
+}
+
+pub fn find(text: &Bytes, needle: &Bytes) -> i64 ! {panic} {
+    find_from(text, needle, 0)
+}
+
+pub fn contains(text: &Bytes, needle: &Bytes) -> Bool ! {panic} {
+    find(text, needle) >= 0
+}
+
+/// Number of bytes in `needle` between `start` and `end` (inclusive start,
+/// exclusive end), or -1 when the range is invalid or the needle is empty.
+pub fn count_range(text: &Bytes, needle: &Bytes, start: i64, end: i64) -> i64 ! {panic} {
+    let n = Bytes.len(text);
+    let m = Bytes.len(needle);
+    if m == 0 || start < 0 || end > n || start > end { return -1; }
+    let mut count = 0;
+    let mut at = start;
+    while at + m <= end {
+        let mut i = 0;
+        let mut same = true;
+        while i < m {
+            if Bytes.get(text, at + i) != Bytes.get(needle, i) {
+                same = false;
+                break;
+            }
+            i = i + 1;
+        }
+        if same {
+            count = count + 1;
+            at = at + m;
+        } else {
+            at = at + 1;
+        }
+    }
+    count
+}
+
+pub fn count(text: &Bytes, needle: &Bytes) -> i64 ! {panic} {
+    count_range(text, needle, 0, Bytes.len(text))
+}
+
+fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < Bytes.len(text) {
+        out = Bytes.push(out, Bytes.get(text, i));
+        i = i + 1;
+    }
+    out
+}
+
+/// Copy the bytes in `[start, end)`.
+pub fn slice(text: &Bytes, start: i64, end: i64) -> Result<Bytes, i64> ! {alloc, panic} {
+    let n = Bytes.len(text);
+    if start < 0 || end < start || end > n { return Result.Err(22); }
+    let mut out = Bytes.with_capacity(end - start);
+    let mut i = start;
+    while i < end {
+        out = Bytes.push_reserved(out, Bytes.get(text, i));
+        i = i + 1;
+    }
+    Result.Ok(out)
+}
+
+/// Remove leading and trailing ASCII whitespace into a new buffer.
+pub fn trim(text: &Bytes) -> Bytes ! {alloc, panic} {
+    let n = Bytes.len(text);
+    let mut start = 0;
+    while start < n && is_space(Bytes.get(text, start)) { start = start + 1; }
+    let mut end = n;
+    while end > start && is_space(Bytes.get(text, end - 1)) { end = end - 1; }
+    let mut out = Bytes.with_capacity(end - start);
+    let mut i = start;
+    while i < end {
+        out = Bytes.push_reserved(out, Bytes.get(text, i));
+        i = i + 1;
+    }
+    out
+}
+
+/// Remove one trailing LF and, if present, one preceding CR.
+pub fn trim_newline(text: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut end = Bytes.len(text);
+    if end > 0 && Bytes.get(text, end - 1) == 10 { end = end - 1; }
+    if end > 0 && Bytes.get(text, end - 1) == 13 { end = end - 1; }
+    let mut out = Bytes.with_capacity(end);
+    let mut i = 0;
+    while i < end {
+        out = Bytes.push_reserved(out, Bytes.get(text, i));
+        i = i + 1;
+    }
+    out
+}
+
+/// Replace every non-overlapping occurrence. An empty needle returns the input
+/// unchanged. The input buffer is consumed and released.
+pub fn replace(text: Bytes, needle: &Bytes, replacement: &Bytes) -> Bytes ! {alloc, panic} {
+    let n = Bytes.len(&text);
+    let m = Bytes.len(needle);
+    if m == 0 { return text; }
+    let mut out = Bytes.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let mut same = i + m <= n;
+        if same {
+            let mut j = 0;
+            while j < m {
+                if Bytes.get(&text, i + j) != Bytes.get(needle, j) {
+                    same = false;
+                    break;
+                }
+                j = j + 1;
+            }
+        }
+        if same {
+            out = append(out, replacement);
+            i = i + m;
+        } else {
+            out = Bytes.push(out, Bytes.get(&text, i));
+            i = i + 1;
+        }
+    }
+    drop(text);
+    out
+}
+
+/// Number of delimiter-separated fields. An empty input has one empty field.
+pub fn split_count(text: &Bytes, delimiter: i64) -> i64 ! {panic} {
+    let n = Bytes.len(text);
+    let mut count = 1;
+    let mut i = 0;
+    while i < n {
+        if Bytes.get(text, i) == delimiter { count = count + 1; }
+        i = i + 1;
+    }
+    count
+}
+
+/// Copy one delimiter-separated field. Delimiters are single bytes.
+pub fn split_part(text: &Bytes, delimiter: i64, index: i64) -> Result<Bytes, i64> ! {alloc, panic} {
+    if index < 0 { return Result.Err(22); }
+    let n = Bytes.len(text);
+    let mut at = 0;
+    let mut field = 0;
+    let mut start = 0;
+    while at <= n {
+        if at == n || Bytes.get(text, at) == delimiter {
+            if field == index {
+                let mut out = Bytes.with_capacity(at - start);
+                let mut i = start;
+                while i < at {
+                    out = Bytes.push_reserved(out, Bytes.get(text, i));
+                    i = i + 1;
+                }
+                return Result.Ok(out);
+            }
+            field = field + 1;
+            start = at + 1;
+        }
+        at = at + 1;
+    }
+    Result.Err(22)
+}
+
+/// Append the decimal representation of `value`. Handles `i64.MIN` exactly.
+pub fn format_i64_into(out: Bytes, value: i64) -> Bytes ! {alloc, panic} {
+    if value == i64.MIN {
+        return append(out, &Bytes.from("-9223372036854775808"));
+    }
+    let mut out = out;
+    let negative = value < 0;
+    let mut magnitude = if negative { -value } else { value };
+    if negative { out = Bytes.push(out, 45); }
+    let mut digits = 1;
+    let mut rest = magnitude;
+    while rest >= 10 {
+        rest = rest / 10;
+        digits = digits + 1;
+    }
+    let mut divisor = 1;
+    let mut i = 1;
+    while i < digits {
+        divisor = divisor * 10;
+        i = i + 1;
+    }
+    while divisor > 0 {
+        let digit = magnitude / divisor;
+        out = Bytes.push(out, 48 + digit);
+        magnitude = magnitude - digit * divisor;
+        divisor = divisor / 10;
+    }
+    out
+}
+
+pub fn format_i64(value: i64) -> Bytes ! {alloc, panic} {
+    format_i64_into(Bytes.with_capacity(20), value)
+}
+
+/// Strict signed decimal parse. Errors are `EINVAL` (22) for syntax and
+/// `ERANGE` (34) for values outside `i64`.
+pub fn parse_i64(text: &Bytes) -> Result<i64, i64> ! {panic} {
+    let n = Bytes.len(text);
+    if n == 0 { return Result.Err(22); }
+    let mut at = 0;
+    let mut negative = false;
+    let first = Bytes.get(text, 0);
+    if first == 45 {
+        negative = true;
+        at = 1;
+    } else if first == 43 {
+        at = 1;
+    }
+    if at == n { return Result.Err(22); }
+    let limit = 922337203685477580;
+    let mut magnitude = 0;
+    while at < n {
+        let byte = Bytes.get(text, at);
+        if byte < 48 || byte > 57 { return Result.Err(22); }
+        let digit = byte - 48;
+        if magnitude > limit { return Result.Err(34); }
+        if magnitude == limit {
+            let maximum = if negative { 8 } else { 7 };
+            if digit > maximum { return Result.Err(34); }
+            if negative && digit == 8 {
+                if at == n - 1 { return Result.Ok(i64.MIN); }
+                return Result.Err(34);
+            }
+        }
+        magnitude = magnitude * 10 + digit;
+        at = at + 1;
+    }
+    if negative { Result.Ok(-magnitude) } else { Result.Ok(magnitude) }
+}
+
+/// Parse an unsigned decimal into a nonnegative `i64`. Leading `+` is allowed;
+/// a leading `-` is rejected.
+pub fn parse_u63(text: &Bytes) -> Result<i64, i64> ! {panic} {
+    let n = Bytes.len(text);
+    if n == 0 { return Result.Err(22); }
+    let mut at = 0;
+    if Bytes.get(text, 0) == 43 { at = 1; }
+    if at == n { return Result.Err(22); }
+    let limit = 922337203685477580;
+    let mut magnitude = 0;
+    while at < n {
+        let byte = Bytes.get(text, at);
+        if byte < 48 || byte > 57 { return Result.Err(22); }
+        let digit = byte - 48;
+        if magnitude > limit { return Result.Err(34); }
+        if magnitude == limit && digit > 7 { return Result.Err(34); }
+        magnitude = magnitude * 10 + digit;
+        at = at + 1;
+    }
+    Result.Ok(magnitude)
+}
+
+/// Parse `true`/`false` exactly; anything else is `EINVAL`.
+pub fn parse_bool(text: &Bytes) -> Result<Bool, i64> ! {panic} {
+    let n = Bytes.len(text);
+    if n == 4
+        && Bytes.get(text, 0) == 116 && Bytes.get(text, 1) == 114
+        && Bytes.get(text, 2) == 117 && Bytes.get(text, 3) == 101 {
+        return Result.Ok(true);
+    }
+    if n == 5
+        && Bytes.get(text, 0) == 102 && Bytes.get(text, 1) == 97
+        && Bytes.get(text, 2) == 108 && Bytes.get(text, 3) == 115
+        && Bytes.get(text, 4) == 101 {
+        return Result.Ok(false);
+    }
+    Result.Err(22)
+}
+
