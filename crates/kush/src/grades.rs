@@ -974,7 +974,8 @@ impl<'a> Checker<'a> {
             | Type::String
             | Type::Vec(_)
             | Type::Once(_)
-            | Type::Task(_) => true,
+            | Type::Task(_)
+            | Type::DynObj(_) => true,
             Type::Enum(id) | Type::Variants(id, _) => {
                 self.program.owned_enums.get(id).copied().unwrap_or(false)
                     || self.program.linear_enums.get(id).copied().unwrap_or(false)
@@ -1023,6 +1024,11 @@ impl<'a> Checker<'a> {
             ) => self.program.functions.get(*index).is_some_and(|function| {
                 function.result_grade.is_some_and(Grade::is_one) && self.moves(function.result)
             }),
+            ExprKind::Call(Target::DynCall { spec, .. }, _) => {
+                self.program.dyn_calls.get(*spec).is_some_and(|spec| {
+                    spec.result_grade.is_some_and(Grade::is_one) && self.moves(spec.result)
+                })
+            }
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
                 Type::Fn(id) | Type::Once(id) => {
                     self.program
@@ -1092,6 +1098,11 @@ impl<'a> Checker<'a> {
                 .functions
                 .get(*index)
                 .is_some_and(|function| function.result_grade.is_some_and(Grade::is_one)),
+            ExprKind::Call(Target::DynCall { spec, .. }, _) => self
+                .program
+                .dyn_calls
+                .get(*spec)
+                .is_some_and(|spec| spec.result_grade.is_some_and(Grade::is_one)),
             ExprKind::Call(
                 crate::executable::Target::Vec(
                     crate::executable::VecOp::Reserve
@@ -1962,6 +1973,32 @@ impl<'a> Checker<'a> {
                     Some(grade) if grade.is_zero() => Grade::ONE,
                     Some(grade) => *grade,
                 }),
+            Target::DynCall { spec, .. } => self
+                .program
+                .dyn_calls
+                .get(spec)
+                .and_then(|spec| spec.parameter_grades.get(index.saturating_sub(1)))
+                .copied()
+                .flatten()
+                .map_or(
+                    Grade::ONE,
+                    |grade| {
+                        if grade.is_zero() { Grade::ONE } else { grade }
+                    },
+                ),
+            Target::UnionBorrowCall { spec, .. } => self
+                .program
+                .union_calls
+                .get(spec)
+                .and_then(|spec| spec.parameter_grades.get(index.saturating_sub(1)))
+                .copied()
+                .flatten()
+                .map_or(
+                    Grade::ONE,
+                    |grade| {
+                        if grade.is_zero() { Grade::ONE } else { grade }
+                    },
+                ),
             _ => Grade::ONE,
         }
     }

@@ -8,7 +8,7 @@ use crate::{
     Diagnostic, Span,
     executable::{
         self as ex, BytesOp, Coercion, DynArrayOp, Executable, Expr, ExprKind, IoOp, Pattern,
-        SliceOp, StrOp, StringOp, Target, Type, VecOp,
+        ReceiverMode, SliceOp, StrOp, StringOp, Target, Type, VecOp,
     },
     lexer::Kind,
 };
@@ -1687,7 +1687,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             // the local reads and writes. Inline arrays keep their existing
             // pinning rule.
             let record = local.ty.layout().is_some_and(|id| program.enums[id].record);
-            let object = matches!(local.ty, Type::Union(_));
+            let object = matches!(local.ty, Type::Union(_) | Type::DynObj(_));
             if array || record || object {
                 let width = program.width(local.ty);
                 let slot = g.builder.create_sized_stack_slot(ir::StackSlotData::new(
@@ -2081,6 +2081,7 @@ fn synthesize_drops(
         .chain([Type::Arena])
         .chain((0..program.enums.len()).map(Type::Enum))
         .chain((0..program.unions.len()).map(Type::Union))
+        .chain((0..program.dyn_object_names.len()).map(Type::DynObj))
         .chain(
             (0..program.function_types.len())
                 .filter(|id| program.function_types[*id].once)
@@ -2166,6 +2167,41 @@ fn synthesize_drops(
             }
             Type::Arena => {
                 emit_drop(&mut builder, module, arena_release, &args);
+                builder.ins().return_(&[]);
+            }
+            Type::DynObj(object) => {
+                // args = [member identifier, payload pointer]. The identifier
+                // selects the concrete payload type; its drop runs in place,
+                // then the payload allocation is released exactly once.
+                let members = program.dyn_members.get(object).cloned().unwrap_or_default();
+                for (index, entry) in members.iter().enumerate() {
+                    let hit = builder.create_block();
+                    let next = builder.create_block();
+                    let condition = builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, args[0], index as i64);
+                    builder.ins().brif(condition, hit, &[], next, &[]);
+                    builder.switch_to_block(hit);
+                    if program.owns(entry.member) {
+                        let fields = (0..program.width(entry.member))
+                            .map(|i| {
+                                builder.ins().load(
+                                    I64,
+                                    ir::MemFlagsData::new(),
+                                    args[1],
+                                    (i * 8) as i32,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        emit_drop(&mut builder, module, ids[&entry.member.full()], &fields);
+                    }
+                    emit_drop(&mut builder, module, free, &[args[1]]);
+                    builder.ins().return_(&[]);
+                    builder.switch_to_block(next);
+                }
+                // No registered member can reach here, but release the
+                // payload allocation defensively rather than leaking it.
+                emit_drop(&mut builder, module, free, &[args[1]]);
                 builder.ins().return_(&[]);
             }
             Type::Vec(index) => {
@@ -3040,6 +3076,139 @@ impl Generator<'_, '_> {
         let callee = self.module.declare_func_in_func(id, self.builder.func);
         self.builder.ins().call(callee, values);
     }
+    /// Resolve a dynamic-object member identifier and call the checked method
+    /// selected for that member. Owned dispatch loads the payload and releases
+    /// its allocation before the call; borrowed dispatch passes the payload
+    /// pointer directly so an owning/linear member is never copied.
+    fn dyn_call(&mut self, spec_index: usize, values: Words) -> Words {
+        let spec = self.program.dyn_calls[spec_index].clone();
+        let members = self
+            .program
+            .dyn_members
+            .get(spec.object)
+            .cloned()
+            .unwrap_or_default();
+        let result_ty = if spec.result_grade.is_some_and(Grade::is_zero) {
+            Type::Unit
+        } else {
+            spec.result
+        };
+        let join = self.join(result_ty);
+        let owned = spec.mode == ReceiverMode::Owned;
+        let member_id = if owned {
+            values[0]
+        } else {
+            self.builder
+                .ins()
+                .load(I64, ir::MemFlagsData::new(), values[0], 0)
+        };
+        let argument_start = if owned { 2 } else { 1 };
+        for (index, entry) in members.iter().enumerate() {
+            let hit = self.builder.create_block();
+            let next = self.builder.create_block();
+            let condition = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, member_id, index as i64);
+            self.builder.ins().brif(condition, hit, &[], next, &[]);
+            self.builder.switch_to_block(hit);
+            let mut arguments = if owned {
+                let pointer = values[1];
+                let payload = (0..self.program.width(entry.member))
+                    .map(|word| {
+                        self.builder.ins().load(
+                            I64,
+                            ir::MemFlagsData::new(),
+                            pointer,
+                            (word * 8) as i32,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                emit_drop(&mut self.builder, self.module, self.free, &[pointer]);
+                payload
+            } else {
+                let pointer = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), values[0], 8);
+                vec![pointer]
+            };
+            arguments.extend(
+                self.physical_dyn_arguments(&spec.parameter_grades, &values[argument_start..]),
+            );
+            let function = *entry
+                .methods
+                .get(&spec.method)
+                .expect("checked dynamic member registers every object-safe trait method");
+            let out = self.function_call(function, arguments);
+            if let Some(join) = join {
+                self.jump(join, &out);
+            }
+            self.builder.switch_to_block(next);
+        }
+        // No registered member can reach this point; a trait object value is
+        // always created by a coercion that registered its member.
+        self.abort();
+        let join = join.expect("a dynamic call always has a value result");
+        self.builder.switch_to_block(join);
+        self.builder.block_params(join).to_vec()
+    }
+    /// Drop grade-zero logical arguments; they have no physical ABI slot but
+    /// were still evaluated in source order by the call expression.
+    fn physical_dyn_arguments(&self, grades: &[Option<Grade>], values: &[Value]) -> Vec<Value> {
+        values
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                !grades
+                    .get(*index)
+                    .copied()
+                    .flatten()
+                    .is_some_and(Grade::is_zero)
+            })
+            .map(|(_, value)| *value)
+            .collect()
+    }
+    /// Dispatch a borrowed closed-world object in place. `values[0]` is a
+    /// pointer to the inline union; the payload starts one word after the tag,
+    /// so the selected member method receives that address as its borrowed
+    /// receiver and no payload is copied or dropped.
+    fn union_borrow_call(&mut self, spec_index: usize, values: Words) -> Words {
+        let spec = self.program.union_calls[spec_index].clone();
+        let result_ty = if spec.result_grade.is_some_and(Grade::is_zero) {
+            Type::Unit
+        } else {
+            spec.result
+        };
+        let join = self.join(result_ty);
+        let pointer = values[0];
+        let tag = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), pointer, 0);
+        let payload = self.builder.ins().iadd_imm_s(pointer, 8);
+        for (member_tag, _member, function) in &spec.members {
+            let hit = self.builder.create_block();
+            let next = self.builder.create_block();
+            let condition = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, tag, *member_tag as i64);
+            self.builder.ins().brif(condition, hit, &[], next, &[]);
+            self.builder.switch_to_block(hit);
+            let mut arguments = vec![payload];
+            arguments.extend(self.physical_dyn_arguments(&spec.parameter_grades, &values[1..]));
+            let out = self.function_call(*function, arguments);
+            if let Some(join) = join {
+                self.jump(join, &out);
+            }
+            self.builder.switch_to_block(next);
+        }
+        self.abort();
+        let join = join.expect("a borrowed dynamic call always has a value result");
+        self.builder.switch_to_block(join);
+        self.builder.block_params(join).to_vec()
+    }
     fn function_call(&mut self, index: usize, mut values: Words) -> Words {
         let function = &self.program.functions[index];
         let result = function.result;
@@ -3377,7 +3546,7 @@ impl Generator<'_, '_> {
                     .ty
                     .layout()
                     .is_some_and(|id| self.program.enums[id].record);
-                if record || matches!(local.ty, Type::Union(_)) {
+                if record || matches!(local.ty, Type::Union(_) | Type::DynObj(_)) {
                     let pointer = self.locations[*slot]
                         .expect("checked inline object borrow is pinned to stack storage");
                     return Some(vec![pointer]);
@@ -3867,6 +4036,14 @@ impl Generator<'_, '_> {
                         self.builder.ins().trap(TrapCode::unwrap_user(2));
                         self.builder.switch_to_block(exit);
                         return Some(self.builder.block_params(exit).to_vec());
+                    }
+                    Coercion::DynBox {
+                        member,
+                        member_type,
+                        ..
+                    } => {
+                        let pointer = self.allocate_dyn_payload(*member_type, &values);
+                        return Some(vec![self.constant(*member as i64), pointer]);
                     }
                 }
             }
@@ -4787,6 +4964,10 @@ impl Generator<'_, '_> {
                     | Target::ObjectFunction {
                         function: index, ..
                     } => return Some(self.function_call(*index, values)),
+                    Target::DynCall { spec, .. } => return Some(self.dyn_call(*spec, values)),
+                    Target::UnionBorrowCall { spec, .. } => {
+                        return Some(self.union_borrow_call(*spec, values));
+                    }
                     Target::Vec(op, element) => return Some(self.vec_call(*op, *element, values)),
                     Target::Slice(op, element) => {
                         return Some(self.slice_call(*op, *element, values));
@@ -4901,6 +5082,19 @@ impl Generator<'_, '_> {
             }
         };
         Some(vec![scalar])
+    }
+    /// Allocate one owned dynamic-object payload and copy the concrete member
+    /// words into it. The corresponding `free` happens in `drop_value` for an
+    /// owned object or immediately before an owning method consumes it.
+    fn allocate_dyn_payload(&mut self, ty: Type, values: &[Value]) -> Value {
+        let bytes = self.constant((self.program.width(ty) * 8) as i64);
+        let pointer = self.runtime_call(self.allocate, &[bytes]);
+        for (index, value) in values.iter().enumerate() {
+            self.builder
+                .ins()
+                .store(ir::MemFlagsData::new(), *value, pointer, (index * 8) as i32);
+        }
+        pointer
     }
     fn stack_words(&mut self, words: usize) -> Value {
         let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
@@ -5084,6 +5278,14 @@ impl Generator<'_, '_> {
                 self.builder.ins().trap(TrapCode::unwrap_user(2));
                 self.builder.switch_to_block(exit);
                 self.builder.block_params(exit).to_vec()
+            }
+            Coercion::DynBox {
+                member,
+                member_type,
+                ..
+            } => {
+                let pointer = self.allocate_dyn_payload(*member_type, values);
+                vec![self.constant(*member as i64), pointer]
             }
         }
     }

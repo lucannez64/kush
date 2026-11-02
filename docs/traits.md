@@ -1,9 +1,16 @@
 # Static traits and user-defined methods
 
 This page is the authoritative description of the implemented trait and method
-subset. Static calls are monomorphized; `dyn Trait` is a checked closed-world
-union with owned, shared, and mutable dispatch plus stored borrowed forms. It is
-not a general vtable or open-world typeclass system.
+subset. Static calls are monomorphized. `dyn Trait` has two checked
+representations: a finite closed-world union for traits whose member set is
+closed and never appears in a nominal field, and a dynamically dispatched
+fat object for open/generic member sets and for any trait used inside a nominal
+field. Both support owned, shared, and mutable dispatch and stored borrowed
+forms. The dynamic form carries a member identifier and an owned payload
+pointer, with a compile-time-registered method table per concrete member; the
+value layout never enumerates the trait's members. This is still a closed
+program analysis with checked object safety, not an FFI-compatible vtable or a
+general open-world typeclass system.
 
 ```sh
 cargo run -p kush -- run examples/traits.kush
@@ -121,8 +128,8 @@ rejected with an explicit diagnostic. Trait parameters may not themselves
 carry trait bounds; put the bound on the function type parameter that uses the
 trait. A method parameter may not reuse a trait parameter's name, which would
 make substitution ambiguous. `impl Trait` in type position and a trait name used
-as a runtime type are rejected. `dyn Trait` is a closed-world trait object; see
-[trait objects](#closed-world-trait-objects).
+as a runtime type are rejected. `dyn Trait` is a checked trait object; see
+[trait objects](#trait-objects-closed-unions-and-open-dynamic-objects).
 
 ## Static dispatch and call lowering
 
@@ -141,8 +148,9 @@ A method call `receiver.name(arguments...)` is checked as follows:
 The user-defined call lowers to the same `Target::Function` call node as an
 ordinary function call, with the checked receiver as argument zero. Static
 dispatch adds no vtable, trait value, function pointer, or runtime allocation.
-Trait-object dispatch uses a checked closed-world union matcher instead; see
-[trait objects](#closed-world-trait-objects). Receiver evaluation order,
+Trait-object dispatch uses a checked closed-world union matcher or a fixed
+dynamic member table instead; see
+[trait objects](#trait-objects-closed-unions-and-open-dynamic-objects). Receiver evaluation order,
 argument order, coercions, erased-proof discharge, effects, grades, and
 ownership are the ordinary call rules.
 
@@ -477,7 +485,7 @@ Only the specified specialization rule is implemented: a more-specific impl may
 replace a blanket one, but there is no `default fn`, negative impl, or arbitrary
 overlap accepted as specialization.
 
-## Closed-world trait objects
+## Trait objects: closed unions and open dynamic objects
 
 `dyn Trait` and `dyn Trait<Arguments>` are supported when the trait has a
 finite, nonempty set of concrete impls. The object representation is the
@@ -507,67 +515,78 @@ the representation is a union, every alternative is still an owning or copyable
 value with the same drop behavior as a statically dispatched call. A method
 that consumes an owning receiver consumes the object exactly once.
 
-Three receiver modes dispatch dynamically:
+When a trait has a generic or blanket impl, or appears anywhere in a nominal
+field (including through an alias), it uses the dynamic representation instead.
+`dyn Trait` is then a two-word fat object: a registered member identifier and an
+owned payload pointer. Coercion registers the concrete member in the object's
+method table, allocates the payload once, and requires the `alloc` effect. The
+member table maps every object-safe trait method to the checked function
+selected for that concrete type, so generic/blanket impls are instantiated at
+coercion and non-type impl parameters (such as `Nat` array lengths) are solved
+by the ordinary impl matcher. Dispatch resolves the identifier at runtime and
+calls that member's function. Adding an impl or a new instantiation changes the
+method table, never the object layout; the representation does not enumerate
+the trait's members.
 
-- An owned `self: Self` method consumes the object alternative once.
-- A shared `self: &Self` method is accepted only when every concrete member is
-  copyable; the dispatcher borrows a copy and leaves the object available.
-- An exclusive `self: &mut Self` method is dispatched through a synthesized
-  function that takes the object by value, pins the matched payload, calls the
-  impl's borrowed method, then returns `(updated object, method result)`. The
-  caller stores the updated object back into a direct object local. A temporary
-  receiver is consumed and its updated value is dropped because no later read
-  can observe it. This preserves ordinary field-write visibility without a
-  borrowed-object vtable or allocation.
+Three receiver modes dispatch dynamically in both representations:
 
-A mutable call on a direct object local requires `let mut`; a temporary
-receiver needs no writable source place. The checker reserves the receiver
-through every later argument, so a nested argument cannot replace, mutate, or
-read a receiver reserved by an exclusive call. Shared calls retain a shared
-loan through their arguments: nested shared reads are legal, while replacing
-or mutably borrowing the object is rejected. Stored references retain the
-corresponding child loan for the same interval. These reservations end before
-mutable write-back and before subsequent calls.
+- An owned `self: Self` method consumes the object alternative once. For a
+  dynamic object the dispatch loads the payload and releases its allocation
+  before the call.
+- A shared `self: &Self` method borrows the receiver in place. For a direct
+  local or a stored `&dyn`, dispatch passes a reference to the payload; the
+  object is not copied, so owning and linear members remain in the object.
+- An exclusive `self: &mut Self` method likewise borrows in place. Writes stay
+  in the payload and are visible to the owner without an explicit write-back
+  step. A dynamic call on a direct object local requires `let mut`.
 
-A stored `&dyn Trait` is a reference to the same union. A shared reference reads
-a copy through the reference and dispatches a shared method; it is permitted
-only when the object union is copyable. A stored `&mut dyn Trait` additionally
-writes the updated object back through the same exclusive reference, so
-mutation remains visible on the owner and through later calls on the reference.
-Calling an owning method through a borrowed object, or an exclusive method
-through a shared reference, is rejected. Borrowed object dispatch therefore
-requires a copyable object; owning alternatives remain available as owned
-objects or inside `Box<dyn Trait>`. Both stored forms are ordinary checked
-reference locals and can be passed to functions taking `&dyn Trait` or
-`&mut dyn Trait`.
+A *temporary* shared receiver that owns storage or is linear remains an error:
+there is no caller-owned place to borrow and copying would duplicate or drop
+the payload. Bind it to a local or take a stored reference first. A temporary
+mutable receiver is consumed by the ordinary union write-back path and its
+updated value is dropped because no later read can observe it.
 
-Nominal record and enum declarations are laid out before impl collection. A
-declared nominal field whose type mentions `dyn Trait` is therefore rejected,
-including a field spelled `Box<dyn Trait>`, `Vec<dyn Trait>`, or a tuple/array
-containing an object. A generic field written as `T` can be instantiated later
-with an object type, so `Wrap<dyn Trait>` and `Bag<dyn Trait>` with a `Vec<T>`
-field are supported. The same object type also works inside function signatures,
-local `Box`/`Vec`/tuple/array values, and object parameters/results.
+The checker reserves a borrowed receiver through every later argument, so a
+nested argument cannot replace, mutate, or read a receiver reserved by an
+exclusive call. Shared calls retain a shared loan through their arguments:
+nested shared reads are legal, while replacing or mutably borrowing the object
+is rejected. These reservations end before subsequent calls.
+
+A stored `&dyn Trait`/`&mut dyn Trait` is an ordinary checked reference to the
+object storage. Shared dispatch reads and calls in place; exclusive dispatch
+writes through the same reference. Calling an owning method through a borrowed
+object, or an exclusive method through a shared reference, is rejected. Owning
+and linear alternatives are therefore usable through both owned objects and
+stored borrowed references; a linear object must still be consumed by an owned
+method before its binding goes out of scope.
+
+Nominal record and enum declarations may spell `dyn Trait` directly, including
+`Box<dyn Trait>`, `Vec<dyn Trait>`, and containers or tuples containing an
+object. A trait named this way uses the fixed-width dynamic representation, so
+its layout is independent of impl collection. Generic fields written as `T`
+may still be instantiated later with an object type, so `Wrap<dyn Trait>` is
+also supported.
 
 Method receivers must not move an owning field out of its aggregate. Destructure
 an owning tuple or generic wrapper into a local before dispatching. Mutable
-dynamic calls on projected fields are rejected even when the object is copyable;
-they cannot silently mutate a temporary copy and discard the update.
+dynamic calls on projected fields are rejected; they cannot silently mutate a
+temporary copy and discard the update.
 
 Object safety is checked at every `dyn` use:
 
-- no generic or blanket impls for the trait (the member set must be closed);
-- ordinary type parameters only; Nat, Grade, and effect parameters are not
-  object-safe;
+- open/generic member sets are supported only by the dynamic representation;
+  a closed-world union still requires a finite non-generic member set;
+- ordinary type parameters only; Nat, Grade, and effect trait parameters are
+  not object-safe;
 - every trait method takes `self: Self`, `self: &Self`, `&self`,
   `self: &mut Self`, or `&mut self`;
-- a shared `&self` method is accepted only when every concrete member is
-  copyable; otherwise dispatch would move an owning object;
-- a stored borrowed object requires every member to be copyable, because
-  `&dyn`/`&mut dyn` dispatch reads and writes the whole object through the
-  reference;
-- no method type parameters or lifetime parameters, and no erased proof
-  parameters;
+- method type parameters and erased proof parameters are rejected;
+- lifetime parameters and borrowed results are accepted when the result is
+  tied to a borrowed receiver or another caller-owned argument. The call-site
+  lifetime relation is checked against the selected member contract, so the
+  returned view cannot outlive its source. An owned receiver cannot return a
+  borrowed result (its payload is consumed), and a temporary receiver cannot
+  return a view because the receiver is dropped before the result is used;
 - no bare `Self` in non-receiver parameters or in the result, so every
   alternative has the same ABI; `Self.Item` is allowed when every impl agrees
   on that associated type, including when the type is inherited from a trait
@@ -577,18 +596,20 @@ Object safety is checked at every `dyn` use:
   exactly once per alternative;
 - impls of one specialization must agree on every associated type and constant
   value, so projection is unambiguous; an agreed `Self.Item` can appear in an
-  object method's parameter and result types.
+  object method's parameter and result types. A dynamic member with a different
+  ABI, effect row, or associated value is rejected when it is registered.
 
 An object union may represent several traits when their concrete member sets
 coincide. If more than one represented trait declares the called method name,
 the call is ambiguous; qualify it as `object.Trait.method(...)`. A method that
 belongs to only one represented trait needs no qualification. This closed-world
 sharing is sound because every member of the union implements every represented
-trait, but adding an impl rebuilds the member set.
+trait, but adding an impl rebuilds the member set. A dynamic object represents
+exactly one trait specialization.
 
-Trait objects containing borrowed records, object methods with lifetime or
-exact-use contracts, references that escape their owner's scope, and direct
-`dyn Trait` fields remain outside this subset.
+Object methods with borrowed *results* tied to a lifetime, references that
+escape their owner's scope, and associated projections supplied only by generic
+impls whose value depends on the impl parameter remain outside this subset.
 
 ## Checked contracts
 
@@ -676,10 +697,15 @@ further shared aliases but still prevents moves, drops, replacement, and
 exclusive aliases. After the full expression completes, the owner is usable
 again at its checked last use.
 
-Methods may still declare ordinary lifetimes and return borrowed slice/text
-views tied to their non-receiver parameters; those signatures use the normal
-lifetime checks. A borrowed result cannot be tied to the receiver, and the
-general `&Self`/`&mut Self` escape or reborrow-alias system is not implemented.
+Statically dispatched methods may still declare ordinary lifetimes and return
+borrowed slice/text views tied to their non-receiver parameters; those
+signatures use the normal lifetime checks. A borrowed result cannot be tied to
+the receiver, and the general `&Self`/`&mut Self` escape or reborrow-alias
+system is not implemented. Object methods may also return a borrowed view tied
+to a borrowed receiver or another caller-owned argument; dynamic dispatch uses
+the selected member's checked borrow contract as the lifetime witness, so the
+result's loan is tracked like a static call. An owned or temporary receiver
+cannot return a borrowed view.
 
 Generic methods compose with borrowed receivers: the generic parameters are
 ordinary inferred/explicit type, grade, natural, or effect arguments, while the
@@ -706,14 +732,16 @@ inherited defaults private to the module that declares the trait.
 
 The following remain intentionally outside the implemented subset:
 
-- vtables, fat pointers, and open-world trait objects; the represented member
-  set must still be finite and closed at compile time;
-- fields explicitly spelling `dyn Trait` in a declared nominal record or enum
-  (including `Box<dyn Trait>`/`Vec<dyn Trait>`), because layout happens before
-  impl collection; keep the object in a function-local container or a
-  function parameter/result instead;
-- borrowed trait objects whose members own storage or are linear, and object
-  methods with lifetime or exact-use contracts;
+- FFI-compatible vtables and open-world membership beyond a whole-program
+  checked method table; a dynamic object still requires every impl that can be
+  coerced in the program to be known at compile time;
+- object methods that return a borrowed result through an owned receiver or a
+  temporary receiver; borrowed results tied to a borrowed receiver or another
+  caller-owned argument are supported through a checked member-contract
+  lifetime witness;
+- associated projections supplied only by a generic impl when the value depends
+  on the impl parameter; a dynamic object needs one agreed projected type, so
+  traits without a concrete agreed impl remain rejected for such signatures;
 - associated `Nat`/grade/effect values, owning or `String` associated
   constants, and associated constants that depend on an impl type parameter;
 - effect parameters on impl headers and lifetime-parameterized impl headers;
@@ -733,9 +761,10 @@ the existing rule that unused generic bodies are not emitted. A generic impl
 method is checked only for the concrete instantiations dispatch selects.
 
 This is a coherent static-dispatch subset with generic and blanket impls,
-associated items and defaults, deterministic specialization, and closed-world
-owned/shared/mutable/borrowed objects, not a claim of a complete typeclass
-system or Rust-compatible object model.
+associated items and defaults, deterministic specialization, closed-world
+owned/shared/mutable/borrowed objects, and fixed-layout dynamic objects for
+open/generic member sets. It is not a claim of a complete typeclass system or
+Rust-compatible object model.
 
 ## Verification
 
@@ -773,7 +802,7 @@ borrowed receivers with generic scalars, loan retention into later arguments,
 natural trait parameters, cross-module visibility, and the runnable
 `examples/generic_traits.kush` example.
 
-`trait_advanced.rs` adds thirty-seven tests for associated type/constant
+`trait_advanced.rs` adds fifty-three tests for associated type/constant
 projection and substitution, `T.Out` in bounded generic results, inherited
 constant defaults, tuple/array aggregate constants with aliases and length diagnostics, checked constant arithmetic and range/division diagnostics,
 associated type defaults (trait-argument substitution, chained `Self::Other`
@@ -790,9 +819,15 @@ dispatch, object-argument dispatch, object return and union coercion,
 owning-member cleanup and allocation balance, affine owning dynamic results,
 single-specialization generic objects, associated-item agreement, object
 methods projecting an agreed associated type, generic method inference,
-effect-exclusion bounds, linear `@[1]` results on generic impls, and explicit
-object-safety and borrowed-object rejections (open member sets, borrowed owning
-members, generic methods, associated-type disagreement, no impls, non-copyable
-stored objects, mutable-through-shared dispatch, and owning-through-borrowed
-dispatch). Each accepted program is compared between the reference evaluator
-and the native backend.
+effect-exclusion bounds, linear `@[1]` results on generic impls, open/generic
+object member sets with checked runtime member tables, generic and blanket
+member registration, nominal fields spelling `dyn Trait` (including
+`Box<dyn Trait>`), borrowed objects with owning and linear members dispatched in
+place, lifetime-parameterized object methods that return a view of a caller
+argument (both closed union and open dynamic), non-type (`Nat`) impl-parameter
+substitution for dynamic members, and explicit object-safety and
+borrowed-object rejections (generic methods, associated-type disagreement, no
+impls, temporary shared dispatch of an owning object, temporary-receiver
+borrowed results, owned-receiver borrowed results, mutable-through-shared
+dispatch, and owning-through-borrowed dispatch). Each accepted program is
+compared between the reference evaluator and the native backend.

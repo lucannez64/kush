@@ -9,7 +9,7 @@ memory/performance superiority over Rust.
 | Modules | Imports, visibility, cross-file spans, embedded library modules |
 | Generic data/functions | Type, natural-const, grade and effect specialization; nominal records/enums; transparent aliases |
 | Collections | Owning vectors and bytes, const-length inline arrays, shared and exclusive slice views |
-| Basic values | Checked `i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64` arithmetic and explicit conversions, Unicode `Char`, inline tuples of 2–16 elements with positional projection/destructuring, validated UTF-8 `String` over owning buffers, immutable borrowed `&str` text views with checked byte-offset substrings, builtin method spellings, and statically dispatched user-defined inherent/trait methods, generic traits with explicit type/`Nat`/`Grade` specializations, generic and blanket impls with coherence and deterministic specialization, associated types (including defaults) and scalar associated constants, generic methods, inherited default method bodies, compile-time bounded-generic obligations, and closed-world owned/shared/mutable/borrowed trait objects with checked object safety |
+| Basic values | Checked `i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64` arithmetic and explicit conversions, Unicode `Char`, inline tuples of 2–16 elements with positional projection/destructuring, validated UTF-8 `String` over owning buffers, immutable borrowed `&str` text views with checked byte-offset substrings, builtin method spellings, and statically dispatched user-defined inherent/trait methods, generic traits with explicit type/`Nat`/`Grade` specializations, generic and blanket impls with coherence and deterministic specialization, associated types (including defaults) and scalar associated constants, generic methods, inherited default method bodies, compile-time bounded-generic obligations, and checked owned/shared/mutable/borrowed trait objects with closed-union and dynamic open/generic representations |
 | Control flow | Exhaustive matching, guards, loops, early returns, Result propagation |
 | Dependent core | Universes, dependent functions, equality/transport/J, positive indexed logical data and elimination |
 | Propositions | Impredicative Prop, proof irrelevance with restricted elimination, constructor-local indices |
@@ -247,7 +247,8 @@ The advanced-trait stage adds associated types and compile-time scalar
 associated constants, associated type defaults, generic and blanket impl
 headers (including `Nat` and `Grade` parameters) with first-order matching and
 per-instantiation body checking, deterministic most-specific specialization
-with incomparable-overlap rejection, and closed-world trait objects.
+with incomparable-overlap rejection, and checked closed-union and dynamic
+trait objects.
 
 Associated types project through `Self::Out` in trait/impl signatures (written
 `Self.Out` in source) and through a bounded generic parameter `T.Out`. The impl
@@ -275,35 +276,42 @@ incomparable overlaps are rejected rather than resolved by declaration order.
 The unique most-specific applicable impl wins; a concrete impl outranks a
 blanket one.
 
-`dyn Trait` is represented by the normalized union of its concrete impl targets.
-Dispatch matches the alternative and calls the ordinary checked impl method, so
-there is no vtable, fat pointer, erasure, or extra allocation, and native and
-reference cleanup agree. Owned receivers consume the object once. A shared
-`&self` receiver is accepted only when every member is copyable. A mutable
-`&mut self` receiver dispatches through a synthesized function returning
-`(updated object, result)`, and the caller writes the updated object back into
-a direct object local; temporary receivers are consumed. A stored `&dyn Trait`
-is a reference to the same union and copies a copyable object; `&mut dyn Trait`
-also writes the mutated object back through its exclusive reference. Object
-safety requires a finite closed member set, ordinary type parameters, no `Self`
-in non-receiver parameters/results, no generic or lifetime method parameters,
-no erased proof parameters, and consistent associated values (including
-defaults). Borrowed objects additionally require copyable members, and
-owning/linear members remain usable through owned objects or `Box<dyn Trait>`.
-Two traits with identical member sets share one representation; an unqualified
-name that both declare is ambiguous and requires `object.Trait.method(...)`.
+`dyn Trait` has two checked representations. A trait with a finite non-generic
+member set and no nominal-field use keeps the normalized union of its concrete
+impl targets: dispatch matches the alternative and calls the ordinary checked
+impl method, with no erasure or extra allocation. A trait with a generic or
+blanket impl, or used inside a nominal field, uses a fixed two-word fat object:
+a registered member identifier and an owned payload pointer. Coercion registers
+the concrete member, instantiates its object-safe methods (including generic and
+non-type impl parameters), allocates the payload once under the `alloc` effect,
+and adds it to the checked method table. Dispatch resolves the identifier and
+calls that member's function, so adding an impl changes the table, not the value
+layout. Native and reference cleanup agree.
 
-Open/generic object member sets, explicit `dyn Trait` syntax inside a nominal field
-(including `Box<dyn Trait>`), borrowed
-objects with owning/linear members, object methods with lifetime or exact-use
-contracts, owning or `String` associated constants, associated constants that
-depend on an impl type parameter, effect/lifetime impl parameters, `default fn`, negative impls, and
-arbitrary-overlap specialization remain outside this subset. Nominal record/enum
-declarations are laid out before impl collection, so `dyn Trait` is supported in
-function signatures and local `Box`/`Vec`/tuple/array values but not anywhere
-inside a directly declared nominal field. Generic fields instantiated later
-with `dyn Trait` are supported; destructure owning fields into locals before
-method dispatch. See [static traits](traits.md) and the focused
+Owned receivers consume the object once. Shared and mutable receivers on a
+direct local or a stored `&dyn`/`&mut dyn` dispatch in place: the payload is
+borrowed rather than copied, mutations are visible directly, and owning or
+linear members remain valid in the object. A *temporary* shared receiver that
+owns storage or is linear remains an error because there is no caller-owned
+place to borrow. Object safety requires ordinary type parameters, no generic
+method type parameters, no `Self` in non-receiver parameters/results, no erased
+proof parameters, and consistent associated values (including defaults).
+Lifetime parameters and borrowed results are accepted when the result is tied
+to a borrowed receiver or another caller-owned argument; dispatch uses the
+selected member's checked borrow contract so the returned view cannot outlive
+its source. An owned receiver cannot return a borrowed result, and a temporary
+receiver cannot return a view of itself. Two closed-union traits with identical
+member sets share one representation; an unqualified name that both declare is
+ambiguous and requires `object.Trait.method(...)`. A dynamic object represents
+exactly one trait specialization.
+
+Object methods returning a borrow through an owned or temporary receiver,
+associated projections supplied
+only by a generic impl whose value depends on the impl parameter, owning or
+`String` associated constants, associated constants that depend on an impl type
+parameter, effect/lifetime impl parameters, `default fn`, negative impls, and
+arbitrary-overlap specialization remain outside this subset. See
+[static traits](traits.md) and the focused
 `crates/kush/tests/trait_advanced.rs` regression file.
 
 The advanced-trait changes were validated locally on Linux x86-64 with the
