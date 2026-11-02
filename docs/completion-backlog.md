@@ -543,3 +543,10 @@ subtraction, and branch/loop proof joins with proof-valued locals (`87de1ef`
 through `d3ab542`) on top of the dynamic-object review fixes. The full Boat
 gate passes **919 tests**, formatting, and Clippy. An independent review of
 this merge is pending.
+
+## Merged gate with structural adapters, open rows, and partition inference
+
+Merge `a6a99ac` adds structural callable-field adapters, structural impl
+headers, erased open rows, and bounded multi-variable union partition
+inference (`0a93e3f` through `f27606a`). The full Boat gate passes
+**924 tests**, formatting, and Clippy. An independent review is pending.
