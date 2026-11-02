@@ -9,7 +9,9 @@ containers, shared reference fields and their projection through `&Record`,
 reference element containers (including `&str` elements), reference-valued
 arrows, borrowed `Task.scope` records and `TaskExit` values across
 function/callable boundaries, mutable owner references with in-place container
-writes, per-field body lifetime inference, inferred outlives bounds, and
+writes, containers of borrowed records with per-field element provenance,
+per-field body lifetime inference, inferred outlives bounds, multi-source
+anonymous intersection results, destructuring-derived inference, and
 helper-call body inference. The reference evaluator and the Cranelift native
 backend agree on every positive case in `tests/borrowing_extensions.rs`,
 `tests/borrowing_references.rs`, and `tests/strings.rs`. This is an engineering
@@ -278,15 +280,26 @@ representation while their declared lifetime travels in the same annotation.
   exclusive element cannot be copied out (`Box.read` rejects it) and must be
   moved with `Box.take`. Vectors admit only shared elements because a vector
   read copies.
+- A container element may itself be a nominal borrowed record
+  (`Vec<Holder<'a>>` and `Box<Holder<'a>>`). Every borrowed field of the record
+  is a separate element leaf addressed relative to the element, so construction,
+  `Vec.get`/`Vec.at`, `Vec.push`/`Vec.set`, `Vec.clear`, `Box.new`/`Box.read`/
+  `Box.take`, `Box.set` through `&mut`, records containing the container, and
+  direct or indirect calls all preserve the owners behind those fields. A
+  borrowed record element must satisfy each declared field lifetime exactly like
+  a record value. `AllocBox`/`AllocVec` continue to reject every borrowed
+  element because their allocator-owned storage carries no element provenance.
 - Container provenance is tracked exactly like a record's per-field
-  provenance: the owner stays loaned while the container or a read reference is
-  live, and replacing or dropping the owner is rejected. Containers of
-  borrowed records (rather than direct references) remain rejected.
+  provenance: the owner stays loaned while the container or a read element is
+  live, and replacing or dropping the owner is rejected. For a borrowed-record
+  element the leaves are relative field paths; for a direct reference or text
+  element they collapse to the element root.
 - Reference vectors retain the union of every possible element source after
   literals, `push`, and `set`; updating one index does not prove that an old
   source is absent from other indices. This is conservative: source loans end
   after `clear`, destruction, or the vector's checked last use, rather than
   after a particular replacement. A read reference keeps its own source loan.
+  Borrowed-record vectors use the same union, per field path.
 - Fallible reserve of a reference vector remains rejected because general
   borrow-carrying `Result` payloads are unsupported; `Vec.reserve` preserves
   reference-vector provenance without a sum-type boundary.
@@ -392,15 +405,27 @@ captures:
   record fields as candidates. Ambiguous origins are rejected rather than
   unified.
 - When an elided function result has several input-lifetime candidates, the
-  function body is inspected for returned values rooted in a parameter. A
-  direct name, field projection (including nested field paths), or slice of one
-  parameter resolves the result to that parameter's or field's lifetime. A
-  multi-lifetime record therefore supports per-field inference: returning
-  `two.first` selects `'a` even when the same record also carries `'b`. Block,
-  `if`, and `match` value positions keep only the branches that produce the
-  result. Return positions that mention several parameter lifetimes remain an
-  explicit ambiguity error, and the ownership pass still checks every returned
-  origin against the selected lifetime.
+  function body is inspected for returned values rooted in parameters or in
+  local bindings derived from them. A direct name, field projection (including
+  nested field paths), slice of one parameter, or a destructuring binding
+  resolves the result. A multi-lifetime record therefore supports per-field
+  inference: returning `two.first` selects `'a` even when the same record also
+  carries `'b`.
+- When the body can return borrows from several distinct input lifetimes, the
+  result receives a fresh anonymous internal lifetime that is outlived by every
+  contributing source. The result is therefore an intersection/shortest
+  contract: every source owner stays loaned through the result's last use, the
+  result cannot be named as a caller lifetime, and a call site selects the
+  shortest provable actual lifetime when it can prove an order (`'b: 'a`) and
+  otherwise keeps the anonymous identity. This is conservative but sound: no
+  branch source is forgotten.
+- Local `let` destructuring and simple aliases propagate a parameter or field
+  lifetime to the new binding before result inference runs. `let Pair { left,
+  right } = pair;` and nested `let Outer { inner } = outer; let Inner { left,
+  right } = inner;` therefore contribute `'a` and `'b` exactly like direct
+  field projections. A binding with no unique candidate contributes nothing,
+  so an unrecognized path still reports an explicit annotation error rather
+  than guessing.
 - A body that returns a helper call follows the helper's declared result
   source: an explicit result lifetime selects the helper parameter carrying
   that lifetime, and an elided helper result must have one unambiguous input
@@ -410,32 +435,70 @@ captures:
   parameter borrow, the function's outlives bounds are inferred (`source:
   result`) and closed transitively. Calling such a function requires the same
   relation between the caller's actual lifetimes; validation reuses the normal
-  call-site outlives check. Inference is limited to direct parameter lifetimes:
-  selecting a different field lifetime of a multi-lifetime record remains an
-  explicit error, and a result lifetime longer than the returned source is
+  call-site outlives check. Inference through local destructuring bindings now
+  feeds this same path, so `let child = &mut b[1..]; child` infers `'b: 'a` for
+  an explicit `'a` result instead of requiring a source rewrite. Selecting a
+  different field lifetime of a multi-lifetime record still requires an
+  explicit bound, and a result lifetime longer than the returned source is
   rejected rather than inferred.
-- No variance annotations, no inference through local destructuring bindings,
-  and no general unification. A value returned through a local binding still
-  needs an explicit bound or annotation.
+- No variance annotations, no recursive row/lifetime unification, and no
+  inference through arbitrary function-returning-local chains. A value returned
+  through an unsupported binding still needs an explicit bound or annotation.
+
+## Lifetime constraints and decidability
+
+Result inference is a finite constraint closure over the lifetimes declared by
+one function:
+
+- Each returned value contributes a source constraint `source outlives
+  result`. Record element results contribute one constraint per declared leaf.
+- An explicit result lifetime receives only constraints from a parameter's own
+  declared lifetime. An elided multi-source result receives constraints from
+  every contributing parameter or record-field lifetime and is represented by
+  an internal anonymous lifetime.
+- Constraints are edges in a directed graph `(longer, shorter)`. The checker
+  closes the graph transitively and rejects a constraint that would invert an
+  already-declared edge (`result outlives source`), so a longer source can never
+  be relabelled as a shorter result.
+- The decision procedure is a reachability query on at most the number of
+  declared lifetimes of that function. There are no lifetime variables
+  generated after signature lowering, no row variables, and no recursive types,
+  so closure terminates and each call-site proof is a finite reachability
+  check. Ambiguous or unprovable relations fail closed with an explicit error.
+- This is not a principal unification algorithm for arbitrary recursive
+  lifetime constraints, variance, higher-kinded rows, or interprocedural
+  constraint solving. Those remain outside the subset.
 
 ## Remaining deliberate limits
 
-- Mutable owner borrows of temporaries, fields, or index results, `&mut str`,
-  and `Vec.try_reserve` through `&mut Vec<T>` remain outside the subset.
-  `&mut Bytes`/`&mut String` provide read access but no mutating builtins.
-  Shared and exclusive owner references, `&str` fields/containers, and `&mut`
-  nominal records are supported as described above.
-- A child task cannot return a borrowed `TaskExit<T>`, and a lambda or task
-  cannot capture a borrowed `TaskExit<T>` in its environment. Match it in the
-  scope that joined it before hiding it in a callable or child task.
+- Mutable owner borrows of temporaries, record fields, or index results,
+  `&mut str`, and `Vec.try_reserve` through `&mut Vec<T>` remain outside the
+  subset. Each is an explicit, tested rejection; there is no silent temporary
+  address, field pointer, or element pointer. `&mut Bytes`/`&mut String`
+  provide read access but no mutating builtins. Shared and exclusive owner
+  references, `&str` fields/containers, `&mut` nominal records, and containers
+  of borrowed records are supported as described above.
+- A child task cannot return a borrowed `TaskExit<T>` (rejected when the
+  `Task<TaskExit<...>>` result type is formed), and a lambda or task cannot
+  capture a borrowed `TaskExit<T>` in its environment. Match it in the scope
+  that joined it before hiding it in a callable or child task.
 - There is no general `&record.field` reference-taking form. Shared reference,
-  shared slice, and text fields are readable through `&Record`; exclusive
-  reference/slice fields and arbitrary field addresses are not.
+  shared slice, and text fields are readable through `&Record`, and a slice
+  field can be sub-sliced with `&record.view[..]` or `&mut record.view[..]`;
+  exclusive reference/slice fields and arbitrary field addresses still require
+  destructuring. `&record.field` itself is an explicit rejection.
+- Containers of borrowed records are supported for `Box` and `Vec`; `AllocBox`
+  and `AllocVec` reject every borrowed element because their allocator-owned
+  storage has no per-element provenance. Inline arrays of borrowed records
+  remain rejected.
 - Disjoint-field reasoning is structural and path-based, not a general range or
   alias algebra. Merged record values lose field identity.
 - Capture-result lambdas cannot mix environment and parameter origins, and
   cannot be coerced or passed on unless the target contract is exactly
   compatible.
+- Result inference is a finite constraint closure over one function's declared
+  lifetimes, not principal unification for recursive lifetime constraints,
+  variance, or row variables.
 - The analysis remains path-insensitive and conservative. Both backends and
   the runtime are trusted implementation components.
 

@@ -2511,12 +2511,11 @@ fn bind_local_lifetime<'a>(
                 let lifetime = parameter_field_lifetimes
                     .get(&root)
                     .and_then(|fields| fields.get(&path.join(".")).cloned());
-                if let Some(lifetime) = lifetime {
-                    if let ast::PatternKind::Name(_) = subpattern.kind
-                        && let Some(id) = resolution.binder(subpattern.span)
-                    {
-                        parameter_lifetimes.insert(id, lifetime);
-                    }
+                if let Some(lifetime) = lifetime
+                    && let ast::PatternKind::Name(_) = subpattern.kind
+                    && let Some(id) = resolution.binder(subpattern.span)
+                {
+                    parameter_lifetimes.insert(id, lifetime);
                 }
                 if let ast::PatternKind::Name(_) = subpattern.kind
                     && let Some(id) = resolution.binder(subpattern.span)

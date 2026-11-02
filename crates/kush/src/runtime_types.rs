@@ -2263,6 +2263,12 @@ impl<'a> Types<'a> {
                 let direct_reference = matches!(inner, Type::Ref(_) | Type::RefMut(_) | Type::Str)
                     && matches!(arguments[0].kind, ast::TypeKind::Borrow { .. });
                 let task_borrowed_record = b.name == "Task" && is_borrowed_record(self, inner);
+                if b.name == "Task" && is_borrowed_task_exit(self, inner) {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "a child task cannot return a borrowed TaskExit<T>; join the child in the scope that owns the borrowed storage and match the exit there",
+                    ));
+                }
                 let borrowed_record_element =
                     matches!(b.name.as_str(), "Box" | "Vec") && is_borrowed_record(self, inner);
                 if (matches!(

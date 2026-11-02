@@ -542,6 +542,92 @@ fn reference_element_containers_reject_aliasing_and_escapes() {
 }
 
 #[test]
+fn remaining_reference_forms_are_explicit_rejections() {
+    // Mutable owner borrows of temporaries, record fields, and index results
+    // stay outside the checked subset; the diagnostic names every excluded
+    // form instead of silently materializing a temporary address.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn main() -> i64 ! {panic} {
+            let mut p = Point { x: 1, y: 2 };
+            let r = &mut p.x;
+            0
+        }"#,
+        "mutable owner borrows of temporaries, fields, and index results are rejected",
+    );
+    rejects(
+        r#"fn main() -> i64 ! {alloc, panic} {
+            let mut values: Vec<i64> = [1, 2];
+            let r = &mut values[0];
+            0
+        }"#,
+        "mutable owner borrows of temporaries, fields, and index results are rejected",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn main() -> i64 ! {panic} {
+            let r = &mut (Point { x: 1, y: 2 });
+            0
+        }"#,
+        "temporary borrows are not supported",
+    );
+    // General `&record.field` reference-taking is not implemented. Shared
+    // slice/text/reference fields remain readable through `&Record` and a
+    // slice field can be sub-sliced in place.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn main() -> i64 ! {panic} {
+            let p = Point { x: 1, y: 2 };
+            let r = &p.x;
+            0
+        }"#,
+        "borrow a direct local binding",
+    );
+    // Text views are immutable; a `&mut str` parameter is rejected at its
+    // declaration rather than pretending byte mutation is available.
+    rejects(
+        r#"fn read(text: &mut str) -> i64 ! {panic} { Str.len(text) }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "mutable borrowed text '&mut str' is not supported",
+    );
+}
+
+#[test]
+fn borrowed_task_exit_child_and_environment_boundaries_are_rejected() {
+    rejects(
+        r#"use std.task.TaskExit;
+        struct Window<'a> { view: &'a [i64], start: i64 }
+        fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
+            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+                let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {panic, suspend} { panic() });
+                Task.join(t);
+                0
+            })
+        }
+        fn main() -> i64 ! {alloc, panic, suspend} { 0 }"#,
+        "a child task cannot return a borrowed TaskExit",
+    );
+    rejects(
+        r#"use std.task.TaskExit;
+        struct Window<'a> { view: &'a [i64], start: i64 }
+        fn run<'a>(window: Window<'a>) -> once fn() -> i64 ! {panic} ! {alloc, panic, suspend} {
+            Task.scope(fn() -> once fn() -> i64 ! {panic} ! {alloc, panic, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {panic, suspend} { window });
+                let exit = Task.join(t);
+                fn() -> i64 ! {panic} {
+                    match exit {
+                        TaskExit.Completed(w) => Slice.get(w.view, w.start),
+                        TaskExit.Cancelled => 0,
+                    }
+                }
+            })
+        }
+        fn main() -> i64 ! {alloc, panic, suspend} { 0 }"#,
+        "cannot capture TaskExit",
+    );
+}
+
+#[test]
 fn borrowed_record_containers_preserve_per_field_element_provenance() {
     // A vector element that is itself a borrowed record keeps every field
     // leaf: construction, indexed reads, append, replacement, and clearing all
