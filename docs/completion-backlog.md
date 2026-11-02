@@ -56,7 +56,7 @@ and remaining limits.
   patterns, parameter solving, bound discharge, unconstrained-parameter
   rejection, duplicate detection, and per-instantiation method checking are
   implemented and tested.
-- [x] Trait objects and checked dynamic dispatch/object safety. Closed-world
+- [ ] Trait objects and checked dynamic dispatch/object safety. **Partial:** Closed-world
   union representation, owned and copyable shared receivers, object-argument
   dispatch, owning cleanup, associated-item agreement, and explicit rejection
   of open sets, mutable/generic/borrowing-ownership cases are implemented and
@@ -66,6 +66,12 @@ and remaining limits.
   most-specific resolution, concrete-over-generic preference, duplicate
   rejection, and incomparable-overlap rejection are implemented and tested.
   `default fn`, negative impls, and arbitrary overlap remain rejected.
+
+Open trait work still includes mutable dynamic dispatch and stored borrowed
+trait objects, open/generic object member sets, const/grade/effect/lifetime impl
+parameters, associated type defaults, and non-scalar associated constants. The
+implemented closed-world union dispatch is not a claim of general vtable-based
+trait-object support. See [trait contracts](traits.md).
 
 ## Grades and linear resources
 
@@ -92,6 +98,10 @@ and remaining limits.
   `Completed` instead of dropping it; such task handles are linear and must be
   joined explicitly. Copyable must-use task results and forced cancellation
   unwinding remain out of scope. See `docs/linear-task-results.md`.
+
+The finite-algebra implementation currently leaks compiler metadata to keep
+`Grade` copyable. Compiler-owned table lifetimes still need fixing; generated
+program allocation counters do not measure this leak.
 
 ## Advanced types and effects
 
