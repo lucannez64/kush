@@ -16023,7 +16023,7 @@ impl Checker<'_, '_> {
                             "Box.new" => {
                                 c.require(ALLOC | PANIC, span)?;
                                 if arg.ty == Type::Never { return Err(Diagnostic::new(span, "Box.new cannot store a divergent value")); }
-                                if crate::runtime_types::has_borrow(c.types, arg.ty) && !arg.ty.is_ref() { return Err(Diagnostic::new(span, "Box.new can store a reference element or an ordinary value, but not a slice view, borrowed record, or text view; keep those in a lexical record")); }
+                                if crate::runtime_types::has_borrow(c.types, arg.ty) && !arg.ty.is_ref() && arg.ty != Type::Str { return Err(Diagnostic::new(span, "Box.new can store a reference element, a text view, or an ordinary value, but not a slice view or borrowed record; keep those in a lexical record")); }
                                 if crate::runtime_types::contains_task(c.types, arg.ty) { return Err(Diagnostic::new(span, "task handles cannot be stored in Box; join them in the scope that owns them")); }
                                 let pointee = match expected_inner {
                                     Some(inner) if matches!(inner, Type::Annotated(..)) => inner,
@@ -18610,7 +18610,7 @@ impl Checker<'_, '_> {
                     let (offset, ty) = self.record_offset(pointee, name, expr.span)?;
                     if self.owned_type(ty)
                         || self.linear_type(ty)
-                        || ty.is_view()
+                        || (ty.is_view() && ty.is_mut_slice())
                         || matches!(ty, Type::RefMut(_))
                         || ty.layout().is_some_and(|id| self.types.enums[id].borrowed)
                         || ty
@@ -18714,7 +18714,7 @@ impl Checker<'_, '_> {
             let (offset, ty) = self.record_offset(pointee, name, span)?;
             if self.owned_type(ty)
                 || self.linear_type(ty)
-                || ty.is_view()
+                || (ty.is_view() && ty.is_mut_slice())
                 || matches!(ty, Type::RefMut(_))
                 || ty.layout().is_some_and(|id| self.types.enums[id].borrowed)
                 || ty
@@ -21162,11 +21162,11 @@ impl Checker<'_, '_> {
         };
         if matches!(element, Type::RefMut(_) | Type::Never)
             || matches!(element, Type::Annotated(_, _) if matches!(self.unannotate(element), Type::RefMut(_)))
-            || element.is_view()
+            || (element.is_view() && element.is_mut_slice())
         {
             return Err(Diagnostic::new(
                 span,
-                "vectors cannot store exclusive references, slice views, or text views; a vector read copies its element, so an exclusive reference element is not admitted",
+                "vectors cannot store exclusive references or mutable slice views; a vector read copies its element, so an exclusive reference element is not admitted",
             ));
         }
         let ty = Type::Vec(self.types.pointer(element));
@@ -22436,11 +22436,11 @@ impl Checker<'_, '_> {
             };
             if matches!(element, Type::RefMut(_) | Type::Never)
                 || matches!(element, Type::Annotated(_, _) if matches!(self.unannotate(element), Type::RefMut(_)))
-                || element.is_view()
+                || (element.is_view() && element.is_mut_slice())
             {
                 return Err(Diagnostic::new(
                     span,
-                    "vectors cannot store exclusive references, slice views, or text views; a vector read copies its element, so an exclusive reference element is not admitted",
+                    "vectors cannot store exclusive references or mutable slice views; a vector read copies its element, so an exclusive reference element is not admitted",
                 ));
             }
             if crate::runtime_types::contains_task(self.types, element) {
@@ -23619,7 +23619,7 @@ impl Executable {
         })
     }
     pub(crate) fn width(&self, ty: Type) -> usize {
-        crate::runtime_types::width(&self.enums, &self.unions, &self.function_types, ty)
+        crate::runtime_types::width(&self.pointees, &self.enums, &self.unions, &self.function_types, ty)
     }
     pub(crate) fn owns(&self, ty: Type) -> bool {
         match ty {

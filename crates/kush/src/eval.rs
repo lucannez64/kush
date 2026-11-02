@@ -2715,6 +2715,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     value => (base.ty, value),
                 };
                 project(
+                    &self.program.pointees,
                     &self.program.enums,
                     &self.program.unions,
                     &self.program.function_types,
@@ -3239,6 +3240,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let ty = self.program.pointees[pointer];
                 let mut whole = cell.lock().unwrap();
                 if !assign_project(
+                    &self.program.pointees,
                     &self.program.enums,
                     &self.program.unions,
                     &self.program.function_types,
@@ -3671,6 +3673,7 @@ fn pattern_matches(pattern: &Pattern, value: &Value, locals: &mut [Value]) -> bo
 
 /// Copy the field at a word offset out of a record value.
 fn project(
+    pointees: &[Type],
     enums: &[crate::runtime_types::Enum],
     unions: &[crate::runtime_types::UnionType],
     functions: &[crate::runtime_types::FunctionType],
@@ -3687,7 +3690,7 @@ fn project(
         if at == offset {
             return field;
         }
-        at += crate::runtime_types::width(enums, unions, functions, *field_ty);
+        at += crate::runtime_types::width(pointees, enums, unions, functions, *field_ty);
     }
     unreachable!("checked field offset")
 }
@@ -3695,6 +3698,7 @@ fn project(
 /// word offset from the record tag; nested copyable record paths are handled by
 /// recursing instead of flattening or copying the whole owner.
 fn assign_project(
+    pointees: &[Type],
     enums: &[crate::runtime_types::Enum],
     unions: &[crate::runtime_types::UnionType],
     functions: &[crate::runtime_types::FunctionType],
@@ -3709,13 +3713,14 @@ fn assign_project(
     let id = ty.layout().unwrap();
     let mut at = 1;
     for (index, field_ty) in enums[id].variants[0].fields.iter().enumerate() {
-        let width = crate::runtime_types::width(enums, unions, functions, *field_ty);
+        let width = crate::runtime_types::width(pointees, enums, unions, functions, *field_ty);
         if at == offset {
             fields[index] = replacement;
             return true;
         }
         if offset >= at && offset < at + width {
             return assign_project(
+                pointees,
                 enums,
                 unions,
                 functions,

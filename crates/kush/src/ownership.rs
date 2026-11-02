@@ -402,7 +402,7 @@ fn path_prefix(prefix: &[usize], path: &[usize]) -> bool {
 fn container_carries_borrow(pointees: &[Type], ty: Type) -> bool {
     match ty {
         Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => match pointees[p] {
-            Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) => true,
+            Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) | Type::Str => true,
             inner => container_carries_borrow(pointees, inner),
         },
         _ => false,
@@ -509,6 +509,11 @@ fn leaves_of(
                 path: path.clone(),
                 lifetime: hint,
                 mutable: true,
+            }),
+            Type::Str => out.push(crate::runtime_types::BorrowLeaf {
+                path: path.clone(),
+                lifetime: hint,
+                mutable: false,
             }),
             Type::Ref(_) => out.push(crate::runtime_types::BorrowLeaf {
                 path: path.clone(),
@@ -908,7 +913,7 @@ impl Checker<'_> {
             if at == offset {
                 return Some(index);
             }
-            at += crate::runtime_types::width(self.enums, self.unions, self.functions, *field);
+            at += crate::runtime_types::width(self.pointees, self.enums, self.unions, self.functions, *field);
         }
         None
     }
@@ -1136,7 +1141,7 @@ impl Checker<'_> {
         let mut provenance = RecordProvenance::default();
         for (index, expr) in fields.iter().enumerate() {
             let field_ty = variant.fields[index];
-            if field_ty.is_slice() {
+            if field_ty.is_view() {
                 let declared = layout.field_lifetimes[index].clone();
                 let loan = self.view_loan(expr);
                 if loan.mutable != field_ty.is_mut_slice() {
@@ -1313,7 +1318,19 @@ impl Checker<'_> {
     /// reference expression carries its own loan; a nested borrowed record is
     /// not admitted as a container element.
     fn reference_element_loan(&self, expr: &Expr) -> Option<Loan> {
-        expr.ty.is_ref().then(|| self.view_loan(expr))
+        (expr.ty.is_ref() || expr.ty.is_view()).then(|| self.view_loan(expr))
+    }
+    /// Whether a container element itself carries borrowed storage. Container
+    /// provenance applies to reference elements and text views; shared slice
+    /// views and borrowed records remain outside the container subset.
+    fn element_carries_borrow(&self, ty: Type) -> bool {
+        match ty {
+            Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) | Type::Str => true,
+            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
+                self.element_carries_borrow(self.pointees[p])
+            }
+            _ => false,
+        }
     }
     /// Per-field provenance of any checked record expression.
     fn record_provenance(&self, expr: &Expr) -> RecordProvenance {
@@ -1980,7 +1997,7 @@ impl Checker<'_> {
     ) -> Result<()> {
         match pattern {
             Pattern::Bind(slot) => {
-                if ty.is_slice() {
+                if ty.is_view() {
                     let loan = provenance
                         .leaves
                         .get(&Vec::new())
@@ -2093,6 +2110,7 @@ impl Checker<'_> {
                     for field in &variant.fields {
                         field_types.push((word, *field));
                         word += crate::runtime_types::width(
+                            self.pointees,
                             self.enums,
                             self.unions,
                             self.functions,
@@ -2275,7 +2293,7 @@ impl Checker<'_> {
                 out.insert(*slot);
             }
             ExprKind::Slice { base, .. } => self.collect_view_origins(base, out),
-            ExprKind::Project(..) if expr.ty.is_slice() || expr.ty.is_ref() => {
+            ExprKind::Project(..) if expr.ty.is_view() || expr.ty.is_ref() => {
                 out.extend(self.view_loan(expr).origins.iter().copied());
             }
             ExprKind::Coerce { value, .. } => self.collect_view_origins(value, out),
@@ -3275,9 +3293,9 @@ impl Checker<'_> {
             self.expr(tail)?;
         }
         if let Some(tail) = &block.tail
-            && (tail.ty.is_slice() || tail.ty.is_ref() || self.is_carrier_type(tail.ty))
+            && (tail.ty.is_view() || tail.ty.is_ref() || self.is_carrier_type(tail.ty))
         {
-            let origins = if tail.ty.is_slice() || tail.ty.is_ref() {
+            let origins = if tail.ty.is_view() || tail.ty.is_ref() {
                 self.view_origins(tail)
             } else {
                 let provenance = self.record_provenance(tail);
@@ -3293,7 +3311,7 @@ impl Checker<'_> {
             {
                 return Err(Diagnostic::new(
                     tail.span,
-                    if tail.ty.is_slice() {
+                    if tail.ty.is_view() {
                         "slice view would outlive the lexical scope of its owner"
                     } else if tail.ty.is_ref() {
                         "reference escapes the lexical scope of the storage it borrows"
@@ -3539,7 +3557,7 @@ impl Checker<'_> {
             ExprKind::Unary(_, value) => self.expr(value)?,
             ExprKind::BoxTake(value) => {
                 self.expr(value)?;
-                if expr.ty.is_ref() {
+                if expr.ty.is_ref() || expr.ty.is_view() {
                     let loan = self
                         .container_provenance(value)
                         .leaves
@@ -3553,7 +3571,7 @@ impl Checker<'_> {
             }
             ExprKind::BoxNew(value) => {
                 self.expr(value)?;
-                if value.ty.is_ref() {
+                if value.ty.is_ref() || value.ty.is_view() {
                     let loan = self.view_loan(value);
                     let mut provenance = RecordProvenance::default();
                     provenance.leaves.insert(Vec::new(), loan);
@@ -3701,7 +3719,7 @@ impl Checker<'_> {
                 let loans = self.loans.clone();
                 self.expr(value)?;
                 self.loans = loans;
-                if expr.ty.is_ref() {
+                if expr.ty.is_ref() || expr.ty.is_view() {
                     let loan = self
                         .container_provenance(value)
                         .leaves
@@ -3901,12 +3919,7 @@ impl Checker<'_> {
                         | crate::executable::VecOp::TryReserve { .. } => {}
                         crate::executable::VecOp::Push | crate::executable::VecOp::Set => {
                             provenance = self.record_provenance(&args[0]);
-                            if crate::runtime_types::width(
-                                self.enums,
-                                self.unions,
-                                self.functions,
-                                element,
-                            ) == 1
+                            if self.element_carries_borrow(element)
                                 && let Some(loan) = self.reference_element_loan(
                                     &args[if *op == crate::executable::VecOp::Set {
                                         2
@@ -3928,7 +3941,7 @@ impl Checker<'_> {
                             provenance = self.record_provenance(&args[0]);
                         }
                         crate::executable::VecOp::Get | crate::executable::VecOp::At => {
-                            if expr.ty.is_ref() {
+                            if expr.ty.is_ref() || expr.ty.is_view() {
                                 let loan = self
                                     .container_provenance(&args[0])
                                     .leaves
@@ -4567,7 +4580,7 @@ impl Checker<'_> {
                             || arm.body.ty.is_ref()
                             || self.is_carrier_type(arm.body.ty)
                         {
-                            let origins = if arm.body.ty.is_slice() || arm.body.ty.is_ref() {
+                            let origins = if arm.body.ty.is_view() || arm.body.ty.is_ref() {
                                 self.view_origins(&arm.body)
                             } else {
                                 let provenance = self.record_provenance(&arm.body);
@@ -4583,7 +4596,7 @@ impl Checker<'_> {
                             {
                                 return Err(Diagnostic::new(
                                     arm.body.span,
-                                    if arm.body.ty.is_slice() {
+                                    if arm.body.ty.is_view() {
                                         "slice view would outlive the lexical scope of its owner"
                                     } else if arm.body.ty.is_ref() {
                                         "reference escapes the lexical scope of the storage it borrows"

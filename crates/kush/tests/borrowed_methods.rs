@@ -526,13 +526,28 @@ fn borrowing_a_linear_record_does_not_consume_or_launder_it() {
 
 #[test]
 fn borrowed_fields_and_temporary_reference_arguments_stay_rejected() {
-    rejects(
+    // A shared slice field is readable through `&Record`, retaining the
+    // field's owner loan.
+    agrees(
         r#"
         struct View<'a> { view: &'a [i64], note: i64 }
+        fn peek<'a>(v: &View<'a>) -> i64 ! {panic} { Slice.len(v.view) + v.note }
+        fn main() -> i64 ! {panic} {
+            let data: [i64; 3] = [1, 2, 3];
+            let v = View { view: &data[..], note: 1 };
+            peek(&v)
+        }
+        "#,
+        4,
+        "",
+    );
+    rejects(
+        r#"
+        struct View<'a> { view: &'a mut [i64], note: i64 }
         fn peek<'a>(v: &View<'a>) -> i64 ! {panic} { Slice.len(v.view) }
         fn main() -> Unit ! {panic} {}
         "#,
-        "contains a borrow",
+        "cannot be read through a record reference",
     );
     rejects(
         r#"
