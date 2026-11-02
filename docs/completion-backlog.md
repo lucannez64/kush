@@ -381,3 +381,39 @@ and vector-source fixes, and the declared-effect/structural/DynArray follow-up.
 Boat reused the persistent workspace marker after resume. Remaining unchecked
 items above are still outstanding; this gate does not establish completeness
 or constitute an independent review of the latest borrowing/effect changes.
+
+## Memory remainder checkpoint
+
+Compiler checkpoint `c78c444` implements the remaining executable memory-area
+gaps on top of `460ec58`:
+
+- `Arena.try_alloc` is fallible, returns the untouched payload on refusal, and
+  leaves region references, chunks, and bump state unchanged. Requests fitting
+  the current chunk spend no fallible attempt.
+- `Vec.map_in_place_grow` and `Vec.map_chain_in_place_grow` provide explicit
+  `{alloc, panic}` vector-element widening. They reuse retained physical
+  capacity when it fits, otherwise grow/move once; native relocation is
+  backwards for widening and forwards for narrowing, callbacks stay in forward
+  source order, owning elements are consumed once, and the final stride governs
+  later vector operations.
+- `Arena.with_strategy` stores a user-defined pure noncapturing
+  `fn(need, current) -> capacity` chunk-sizing policy as a code pointer.
+  This is an allocation policy, not a general allocator.
+- Growth-capable maps are excluded from automatic fusion.
+
+Local Linux x86-64 validation used `target/memory-c1616b8a` with debug
+information disabled and two Cargo jobs:
+
+- Full locked workspace suite: **893 passed, 0 failed** across 61 test binaries.
+- `cargo fmt --all -- --check`: passed.
+- All-targets Clippy with warnings denied: passed.
+- New tests cover fallible-arena success/refusal/region reuse, chunk-strategy
+  behavior and rejections, structured-payload preservation, vector widening
+  growth/reuse/order/drop/layout, chain widening, fusion exclusion, and
+  native/reference parity.
+
+The Boat gate for `c78c444` is parent-coordinated and was not run from this
+checkout. Arbitrary user alloc/dealloc callbacks, allocator traits, FFI, and
+container-owned general allocators remain absent; the custom-allocator backlog
+item stays unchecked, so this checkpoint does not claim that all memory work is
+complete.
