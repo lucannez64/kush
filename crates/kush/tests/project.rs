@@ -623,7 +623,7 @@ fn filtered_or_empty_tests_still_check_the_target() {
 #[test]
 fn entry_headers_keywords_and_custom_test_locations_are_checked() {
     let scratch = Scratch::new("names-and-headers");
-    for keyword in ["fn", "if", "struct", "true", "foreign"] {
+    for keyword in ["fn", "if", "struct", "true", "while"] {
         assert!(project::new::create(&scratch.join(keyword), Some(keyword)).is_err());
         assert!(!scratch.join(keyword).exists());
     }
