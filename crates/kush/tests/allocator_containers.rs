@@ -73,6 +73,43 @@ fn agrees(source: &str, expected: i64) {
     );
 }
 
+/// Task programs add scheduler bookkeeping allocations, so this helper checks
+/// the result, balanced cleanup, and native exit status without requiring the
+/// reference and native allocation counts to match byte-for-byte.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn agrees_task(source: &str, expected: i64) {
+    use std::process::Command;
+    let program = check(source).unwrap();
+    let (reference, stats) = program.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(reference, expected);
+    assert_eq!(stats.allocations, stats.deallocations);
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let binary = scratch.path().join("allocator-context-task-test");
+    kush::native::build_with_stats(&program, &binary, true).unwrap();
+    let output = Command::new(&binary).output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some((expected as u64 & 255) as i32),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stats_line = String::from_utf8(output.stderr)
+        .unwrap()
+        .lines()
+        .find(|line| line.starts_with("allocation-stats: "))
+        .unwrap()
+        .to_owned();
+    let field = |name: &str| -> usize {
+        stats_line
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(name)?.strip_prefix('='))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(field("allocations"), field("deallocations"), "{stats_line}");
+}
+
 const ALLOCATOR: &str = r#"
 fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
     Bytes.with_capacity(bytes)
@@ -715,6 +752,340 @@ fn realloc_callbacks_cannot_overwrite_typed_elements_or_owning_handles() {
             while j < 5 {owners = AllocVec.push(owners, Box.new(j)); j = j + 1;}
             let owners = AllocVec.clear(owners);
             drop(owners);
+            answer
+        }"#;
+    assert_eq!(value(source), 86);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 86);
+}
+
+const STATEFUL_ALLOCATOR: &str = r#"
+struct Counting {
+    calls: i64,
+    live: i64,
+    limit: i64,
+}
+impl AllocatorProtocol for Counting {
+    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} {
+        self.calls = self.calls + 1;
+        self.live = self.live + 1;
+        if self.limit > 0 && self.live > self.limit {
+            Bytes.with_capacity(0)
+        } else {
+            Bytes.with_capacity(bytes)
+        }
+    }
+    fn free(self: &mut Self, block: Bytes) -> Unit ! {} {
+        self.live = 0;
+        drop(block)
+    }
+    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+        self.calls = self.calls + 1;
+        let mut out = Bytes.with_capacity(bytes);
+        let mut i = 0;
+        while i < old_bytes {
+            out = Bytes.push(out, Bytes.get(&block, i));
+            i = i + 1;
+        }
+        drop(block);
+        out
+    }
+}
+"#;
+
+#[test]
+fn stateful_allocator_context_uses_its_own_instance_callbacks() {
+    let source = format!(
+        r#"{STATEFUL_ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let box = {{
+                let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
+                AllocBox.new(context, 41)
+            }};
+            AllocBox.take(box)
+        }}"#
+    );
+    assert_eq!(value(&source), 41);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 41);
+}
+
+#[test]
+fn stateful_alloc_vec_grows_through_the_instance_growth_hook() {
+    let source = format!(
+        r#"{STATEFUL_ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let mut vector: AllocVec<i64> =
+                AllocVec.with_capacity(AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }}), 1);
+            let mut i = 0;
+            while i < 5 {{
+                vector = AllocVec.push(vector, i + 41);
+                i = i + 1;
+            }}
+            AllocVec.len(&vector) + AllocVec.get(&vector, 4)
+        }}"#
+    );
+    assert_eq!(value(&source), 50);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 50);
+}
+
+#[test]
+fn shared_instance_context_outlives_its_binding_and_serves_several_containers() {
+    let source = format!(
+        r#"{STATEFUL_ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
+            let first = AllocBox.new(AllocatorContext.share(&context), 1);
+            let second = AllocBox.new(AllocatorContext.share(&context), 2);
+            drop(context);
+            AllocBox.take(first) * 10 + AllocBox.take(second)
+        }}"#
+    );
+    assert_eq!(value(&source), 12);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 12);
+}
+
+#[test]
+fn stateful_allocator_refusal_returns_the_untouched_vector_and_element() {
+    let source = format!(
+        r#"enum Result<T, E> {{ Ok(T), Err(E) }}
+        {STATEFUL_ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 1 }});
+            let mut vector: AllocVec<i64> = AllocVec.with_capacity(context, 1);
+            vector = AllocVec.push(vector, 1);
+            match AllocVec.try_push(vector, 2) {{
+                Ok(vector) => AllocVec.len(&vector) + 100,
+                Err(pair) => match pair {{
+                    (vector, refused) => AllocVec.len(&vector) * 10 + AllocVec.get(&vector, 0) + refused
+                }}
+            }}
+        }}"#
+    );
+    assert_eq!(value(&source), 13);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 13);
+}
+
+const OWNING_STATE_ALLOCATOR: &str = r#"
+struct OwnedCounting {
+    calls: i64,
+    live: i64,
+    limit: i64,
+    token: Box<i64>,
+}
+impl AllocatorProtocol for OwnedCounting {
+    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} {
+        self.calls = self.calls + 1;
+        self.live = self.live + 1;
+        if self.limit > 0 && self.live > self.limit {
+            Bytes.with_capacity(0)
+        } else {
+            Bytes.with_capacity(bytes)
+        }
+    }
+    fn free(self: &mut Self, block: Bytes) -> Unit ! {} {
+        self.live = 0;
+        drop(block)
+    }
+    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+        let mut out = Bytes.with_capacity(bytes);
+        let mut i = 0;
+        while i < old_bytes {
+            out = Bytes.push(out, Bytes.get(&block, i));
+            i = i + 1;
+        }
+        drop(block);
+        out
+    }
+}
+"#;
+
+#[test]
+fn stateful_allocator_refusal_preserves_the_owning_payload_and_destroys_state_once() {
+    let source = format!(
+        r#"enum Result<T, E> {{ Ok(T), Err(E) }}
+        {OWNING_STATE_ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let context = AllocatorContext.new(OwnedCounting {{
+                calls: 0, live: 0, limit: 1, token: Box.new(7),
+            }});
+            let first = AllocBox.new(AllocatorContext.share(&context), Box.new(41));
+            let second = match AllocBox.try_new(AllocatorContext.share(&context), Box.new(9)) {{
+                Ok(box) => 100 + Box.take(AllocBox.take(box)),
+                Err(payload) => Box.take(payload),
+            }};
+            let first = Box.take(AllocBox.take(first));
+            drop(context);
+            first + second
+        }}"#
+    );
+    let (result, stats) = evaluate(&source);
+    assert_eq!(result, 50);
+    assert_eq!(stats.allocations, stats.deallocations);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 50);
+}
+
+#[test]
+fn allocator_context_crosses_a_structured_task_boundary() {
+    let source = format!(
+        r#"use std.task.TaskExit;
+        {STATEFUL_ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic, suspend}} {{
+            let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
+            Task.scope(fn() -> i64 ! {{alloc, panic, suspend}} {{
+                let task: Task<i64> = Task.spawn(fn() -> i64 ! {{alloc, panic, suspend}} {{
+                    let box = AllocBox.new(context, 41);
+                    AllocBox.take(box)
+                }});
+                match Task.join(task) {{
+                    TaskExit.Completed(value) => value,
+                    TaskExit.Cancelled => -1,
+                }}
+            }})
+        }}"#
+    );
+    assert_eq!(value(&source), 41);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees_task(&source, 41);
+}
+
+#[test]
+fn hostile_allocator_context_shapes_are_rejected() {
+    // A context needs an owned record with no borrowed leaves.
+    rejects(
+        r#"
+        fn main() -> Unit ! {alloc} {
+            let context = AllocatorContext.new(5);
+        }"#,
+        "owned record instance",
+    );
+    rejects(
+        r#"
+        struct Borrowed<'a> { view: &'a [i64] }
+        impl AllocatorProtocol for Borrowed<'_> {
+            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+            fn free(self: &mut Self, block: Bytes) -> Unit ! {} { drop(block) }
+            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+                let _ = old_bytes; drop(block); Bytes.with_capacity(bytes)
+            }
+        }
+        fn main() -> Unit ! {alloc, panic} {
+            let view: [i64; 1] = [1];
+            let context = AllocatorContext.new(Borrowed { view: &view[..] });
+        }"#,
+        "borrowed",
+    );
+    // A closure capture is not silently converted into reusable callbacks.
+    rejects(
+        r#"
+        fn main() -> Unit ! {alloc, panic} {
+            let context = AllocatorContext.new(fn(bytes: i64) -> Bytes ! {alloc, panic} {
+                Bytes.with_capacity(bytes)
+            });
+        }"#,
+        "owned record instance",
+    );
+    // Missing or mismatched protocol methods are rejected by the ordinary
+    // exact trait-signature check.
+    rejects(
+        r#"
+        struct Bad { count: i64 }
+        impl AllocatorProtocol for Bad {
+            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+            fn free(self: &mut Self, block: Bytes) -> Unit ! {alloc, panic} { drop(block) }
+            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+                let _ = old_bytes; drop(block); Bytes.with_capacity(bytes)
+            }
+        }
+        fn main() -> Unit ! {alloc, panic} {
+            let context = AllocatorContext.new(Bad { count: 0 });
+        }"#,
+        "does not match the trait signature exactly",
+    );
+    rejects(
+        r#"
+        struct Bad { count: i64 }
+        impl AllocatorProtocol for Bad {
+            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+            fn free(self: &mut Self, block: Bytes) -> Unit ! {} { drop(block) }
+        }
+        fn main() -> Unit ! {alloc, panic} {
+            let context = AllocatorContext.new(Bad { count: 0 });
+        }"#,
+        "missing implementation of trait method",
+    );
+    // Contexts are affine: copying one would duplicate a retained state
+    // obligation without an explicit share.
+    rejects(
+        &format!(
+            r#"{STATEFUL_ALLOCATOR}
+            fn main() -> i64 ! {{alloc, panic}} {{
+                let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
+                let copy = context;
+                let again = context;
+                AllocBox.take(AllocBox.new(copy, 1)) + AllocBox.take(AllocBox.new(again, 2))
+            }}"#
+        ),
+        "move",
+    );
+}
+
+#[test]
+fn stateful_growth_hook_cannot_overwrite_typed_vector_elements_or_owners() {
+    let source = r#"
+        struct Zeroing {
+            calls: i64,
+        }
+        impl AllocatorProtocol for Zeroing {
+            fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} {
+                self.calls = self.calls + 1;
+                let mut block = Bytes.with_capacity(bytes);
+                let mut i = 0;
+                while i < bytes {
+                    block = Bytes.push_reserved(block, 255);
+                    i = i + 1;
+                }
+                block
+            }
+            fn free(self: &mut Self, block: Bytes) -> Unit ! {} { drop(block) }
+            fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+                self.calls = self.calls + 1;
+                if old_bytes > 0 && Bytes.get(&block, 0) != 0 {
+                    drop(block);
+                    return Bytes.with_capacity(0);
+                }
+                drop(block);
+                let mut fresh = Bytes.with_capacity(bytes);
+                let mut i = 0;
+                while i < bytes {
+                    fresh = Bytes.push_reserved(fresh, 0);
+                    i = i + 1;
+                }
+                fresh
+            }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let allocator = AllocatorContext.new(Zeroing { calls: 0 });
+            let mut values: AllocVec<i64> = AllocVec.new(AllocatorContext.share(&allocator));
+            let mut i = 0;
+            while i < 5 {
+                values = AllocVec.push(values, i + 41);
+                i = i + 1;
+            }
+            let answer = AllocVec.get(&values, 0) + AllocVec.get(&values, 4);
+            let mut owners: AllocVec<Box<i64>> = AllocVec.new(AllocatorContext.share(&allocator));
+            let mut j = 0;
+            while j < 5 {
+                owners = AllocVec.push(owners, Box.new(j));
+                j = j + 1;
+            }
+            let owners = AllocVec.clear(owners);
+            drop(owners);
+            drop(allocator);
             answer
         }"#;
     assert_eq!(value(source), 86);
