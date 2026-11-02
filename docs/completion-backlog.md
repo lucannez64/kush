@@ -528,3 +528,11 @@ defects, fixed in `7909e58` with regressions:
 Documented limits added: generic-only traits cannot be `dyn`, and temporary
 shared receivers of open objects are rejected. Full Boat gate: **911 tests**,
 formatting, and Clippy pass.
+
+## Merged gate with resumption, row subtraction, and proof joins
+
+Merge `a296e01` adds one-shot non-tail lexical resumption, finite effect-row
+subtraction, and branch/loop proof joins with proof-valued locals (`87de1ef`
+through `d3ab542`) on top of the dynamic-object review fixes. The full Boat
+gate passes **919 tests**, formatting, and Clippy. An independent review of
+this merge is pending.
