@@ -199,14 +199,18 @@ kush check
 kush run
 kush test
 kush fmt --check
+kush lsp
 ```
 
 Single-file commands are unchanged. See [project workflow, tests, formatting,
 and editor support](docs/projects.md) for the manifest and module layout,
 lockfile rules, `#[test]`/`std.test` assertions, `--locked`, program-argument
-forwarding after `--`, formatter limits, the grammar-only VS Code highlighting
-extension, and the validated-but-pending native bridge manifest fields. There is
-no language server or go-to-definition yet.
+forwarding after `--`, formatter limits, the VS Code extension, and the
+validated native bridge manifest fields. `kush lsp` is a stdio language server
+with project-aware diagnostics, lexical go-to-definition, and the existing
+whitespace-only formatter; see [language-server.md](docs/language-server.md) for
+its protocol surface and limits (no completion, hover, rename, references,
+semantic tokens, incremental sync, or type-directed method resolution).
 
 The standalone [project demo](examples/project-demo) exercises a local module, a
 local dependency, tests, and formatting.

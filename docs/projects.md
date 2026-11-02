@@ -18,11 +18,15 @@ Implemented:
   filtering, listing, captured output, and exit status;
 - process-argument forwarding after `--`;
 - syntax highlighting for editors and validated manifest extension points for
-  the native Rust/C bridge.
+  the native Rust/C bridge;
+- a stdio language server (`kush lsp`) with project-aware diagnostics,
+  go-to-definition, and the existing whitespace-only formatter, plus a VS Code
+  LSP client; see [language-server.md](language-server.md).
 
 Not implemented yet:
 
-- a language server, live editor diagnostics, or go-to-definition;
+- completion, hover, rename, find-references, semantic tokens, incremental
+  language-server sync, or type-directed method dispatch in go-to-definition;
 - package registries, remote dependencies, workspaces, or publish commands;
 - incremental compilation or a build cache;
 - a source-level `argv` API in the Kush runtime (arguments are delivered as
@@ -251,16 +255,21 @@ It is a whitespace hygiene pass, not a code-style reflow tool.
 
 ## Editor support
 
-`editors/vscode-kush` contains a grammar-only VS Code extension:
+`editors/vscode-kush` contains a VS Code extension:
 
 - `.kush` language registration;
 - TextMate syntax highlighting for keywords, types, attributes, strings,
   comments, lifetimes, numbers, functions, and module paths;
-- bracket/comment configuration.
+- bracket/comment configuration;
+- a `vscode-languageclient` client for `kush lsp`, with configurable binary
+  path and restart command.
 
-It does **not** provide an LSP server, live diagnostics, completion, or
-go-to-definition. Editor users should run `kush check` or `kush test` for
-compiler diagnostics. This is basic syntax support, not full editor tooling.
+The language server publishes diagnostics for unsaved open text, supports
+go-to-definition for the resolver's lexical bindings and project modules, and
+exposes the whitespace-only formatter through `textDocument/formatting`. It does
+**not** provide completion, hover, rename, references, semantic tokens, or
+incremental sync. See [language-server.md](language-server.md) for the protocol
+surface, UTF-16 handling, and the exact method/dynamic-dispatch limits.
 
 ## Native bridge extension points
 

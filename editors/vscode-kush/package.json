@@ -1,16 +1,23 @@
 {
   "name": "kush",
   "displayName": "Kush",
-  "description": "Syntax highlighting and bracket configuration for the Kush language.",
+  "description": "Kush language support: syntax highlighting and a standard LSP client for kush lsp.",
   "version": "0.1.0",
   "publisher": "kush-language",
   "private": true,
+  "main": "./extension.js",
   "engines": {
-    "vscode": "^1.80.0"
+    "vscode": "^1.82.0"
   },
   "categories": [
     "Programming Languages"
   ],
+  "activationEvents": [
+    "onLanguage:kush"
+  ],
+  "dependencies": {
+    "vscode-languageclient": "9.0.1"
+  },
   "contributes": {
     "languages": [
       {
@@ -31,6 +38,35 @@
         "scopeName": "source.kush",
         "path": "./syntaxes/kush.tmLanguage.json"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "kush.restartLanguageServer",
+        "title": "Kush: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "title": "Kush",
+      "properties": {
+        "kush.server.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the Kush language server for .kush files."
+        },
+        "kush.server.path": {
+          "type": "string",
+          "default": "kush",
+          "description": "Path to the kush executable. The extension runs it with the 'lsp' argument over stdio."
+        },
+        "kush.server.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments appended after 'kush lsp'."
+        }
+      }
+    }
   }
 }

@@ -28,6 +28,8 @@ Projects (Kush.toml):\n\
   kush run [--manifest-path <Kush.toml>] [--stats] [--locked] [-- <program args>...]\n\
   kush test [--manifest-path <Kush.toml>] [FILTER] [--exact] [--list] [--nocapture] [--locked]\n\
   kush fmt [--check] [--manifest-path <Kush.toml>] [FILE...]\n\n\
+Editors:\n\
+  kush lsp\n\n\
   kush --help\n\
   kush --version\n\n\
 Build/run use Cranelift on Linux x86-64 and require cc. Eval is the bounded reference interpreter.\n\
@@ -548,7 +550,23 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
 }
 
 fn main() -> ExitCode {
-    match run(env::args_os().skip(1).collect(), &mut io::stdout().lock()) {
+    let args = env::args_os().skip(1).collect::<Vec<_>>();
+    // The language server owns stdout as a framed JSON-RPC stream. Dispatch it
+    // before locking stdout for the ordinary command printer.
+    if args.first().is_some_and(|argument| argument == "lsp") {
+        if let Err(message) = kush::language_server::parse_stdio_args(&args[1..]) {
+            let _ = writeln!(io::stderr().lock(), "{message}");
+            return ExitCode::from(2);
+        }
+        return match kush::language_server::run_stdio() {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                let _ = writeln!(io::stderr().lock(), "kush lsp: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    match run(args, &mut io::stdout().lock()) {
         Ok(code) => ExitCode::from(code),
         Err((code, message)) => {
             let _ = writeln!(io::stderr().lock(), "{message}");
