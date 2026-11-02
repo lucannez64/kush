@@ -171,6 +171,7 @@ there is no process abort disguised as `Err`. They require the exact
 | `Vec.try_reserve(values, n)` | `Ok(Vec<T>)`, room for `len + n` | `Err(values)`: untouched elements, length, and capacity | `{alloc}` |
 | `Bytes.try_with_capacity(n)` | `Ok(Bytes)` with exact capacity `n` | `Err(n)`: the requested capacity | `{alloc}` |
 | `Arena.try_alloc(&arena, value)` | `Ok(ArenaBox<T>)`, one region reference | `Err(value)`: the untouched payload | `{alloc}` |
+| `AllocBox.try_new(allocator, value)` | `Ok(AllocBox<T>)` from an allocator block | `Err(value)`: the untouched payload | `{alloc, panic}` |
 
 - `Box.try_new` moves the payload into the box on success and returns the same
   owner unchanged in `Err`. Cleanup is therefore exact on both paths.
@@ -198,6 +199,13 @@ there is no process abort disguised as `Err`. They require the exact
   bump position exactly as they were, so the same arena remains usable. The
   success path adds one `ArenaBox` and one region reference; a later region
   release destroys the payload exactly once.
+- `AllocBox.try_new` asks a user allocator for a payload block. A callback that
+  returns a block with less than the requested capacity (including an empty
+  block) is a refusal: the block is released through the same allocator and the
+  untouched payload is returned in `Err`. A successful block becomes the only
+  payload storage, and the returned box records the allocator pair for a later
+  release. The allocator value is copyable, so nothing supplied by the caller is
+  lost on either branch.
 - The runtime uses `kush_try_alloc`/`kush_try_grow`, which report system
   allocator refusal instead of calling `kush_panic`. Ordinary `kush_alloc` and
   `kush_grow` still abort. The pool's logical counters change only on success.
@@ -234,11 +242,69 @@ Tests cover reference/native agreement on success, budget and fault-injected
 failure, an overflowing native request, payload/owner preservation on failure,
 and balanced cleanup on every path.
 
-## 4. Allocator ownership: the built-in `Arena`
+## 4. Allocator ownership: user-defined allocators and the built-in `Arena`
 
-The supported allocator abstraction is a built-in bump-allocation region. No
-FFI and no arbitrary user-defined allocator callback is implemented or
-claimed.
+Two allocator abstractions are supported: a checked user-defined allocator pair
+with allocator-owning containers, and the built-in bump-allocation region.
+Neither requires FFI.
+
+### 4.1 User-defined allocators
+
+```rust
+fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+    Bytes.with_capacity(bytes)
+}
+fn block_free(block: Bytes) -> Unit ! {} {
+    drop(block)
+}
+
+let allocator = Allocator.new(block_alloc, block_free);
+let box = AllocBox.new(allocator, 41);
+let vector: AllocVec<i64> = AllocVec.with_capacity(allocator, 4);
+```
+
+- `Allocator.new(alloc, free)` requires two **noncapturing** function values:
+  `fn(bytes: i64) -> Bytes` and `fn(block: Bytes) -> Unit`. The allocation
+  callback may declare only `alloc` and `panic`; the release callback must have
+  the empty effect row because it also runs during implicit drop. Graded
+  parameters/results, captures, and other signatures are rejected.
+- The allocator value is two code pointers. It owns nothing and is copyable, so
+  passing it to a container copies it. A container stores its own pair; moving
+  or dropping the allocator binding can never leave an allocation without its
+  release function, and release always selects the pair recorded in the
+  container, so a mismatched allocator is not a reachable operation.
+- The allocation callback supplies actual storage as an owned `Bytes` block
+  with at least the requested capacity. A smaller block is a refusal, and the
+  same release callback consumes that block before the refusal is reported, so
+  refusal leaks nothing. `AllocBox.new` panics on refusal;
+  `AllocBox.try_new` returns `Err(payload)`.
+- `AllocBox<T>` is one owning handle. Its payload lives in the allocator block.
+  `AllocBox.read(&box)` copies a copyable payload; `AllocBox.take(box)` moves the
+  payload out, releases the block through the recorded release callback, and
+  frees the fixed metadata header exactly once. Dropping a box destroys the
+  payload and then releases the block. The payload may own resources; it may not
+  contain borrows, task handles, or linear obligations.
+- `AllocVec<T>` owns metadata (length, capacity, element width, allocator pair,
+  block) plus one allocator-supplied element block. `AllocVec.new` starts empty;
+  `AllocVec.with_capacity(allocator, n)` requests `n` element slots.
+  `len`/`get` borrow; `push` grows by allocating one fresh block, copying the
+  live elements, and releasing the previous block through the same pair;
+  `set` drops the replaced element exactly once; `clear` drops every element in
+  reverse order and retains the block; dropping the vector drops live elements,
+  releases the block, and frees the metadata header. `get` is limited to
+  copyable, non-linear elements.
+- The blocks are real owned allocations and participate in the ordinary
+  allocation diagnostics. Growth increments `buffer-growths` once. The fixed
+  per-container metadata headers are runtime-owned bookkeeping, like the arena
+  descriptor, and are not supplied to the user allocator.
+- Tests exercise a dropped/moved allocator binding while boxes and vectors are
+  live, shared use of the copyable allocator value, refusal with payload
+  preservation, growth reuse-by-release, owning elements, balanced reference
+  and native counters, and hostile signature/duplication rejections.
+
+### 4.2 The built-in `Arena`
+
+The built-in bump-allocation region remains available. No FFI is required.
 
 ```rust
 let arena = Arena.new();
@@ -283,12 +349,12 @@ ArenaBox.take(first) + ArenaBox.take(second)
   allocator trait, free callback, or FFI interface.
 
 Limits: chunks are only freed when the whole region is released; there is no
-per-value `free`, no allocator trait, no user callback that supplies raw
-storage or deallocation, no `realloc` inside a region, and no claim that an
-arena is faster for every workload. Region allocation failure aborts through
-the ordinary `panic` path of `Arena.alloc`; `Arena.try_alloc` reports refusal
-instead. `Arena.with_strategy` controls chunk sizing only, so arbitrary
-user-defined allocator ownership remains outside the implemented contract.
+per-value `free`, no `realloc` inside a region, and no claim that an arena is
+faster for every workload. Region allocation failure aborts through the
+ordinary `panic` path of `Arena.alloc`; `Arena.try_alloc` reports refusal
+instead. `Arena.with_strategy` controls chunk sizing only. The user-defined
+allocator above is a separate abstraction: it supplies `Bytes` blocks rather
+than raw pointers.
 
 ## 5. Reproducible benchmark harness
 
@@ -326,6 +392,11 @@ or a proof obligation.
 
 ## Test map
 
+- `crates/kush/tests/allocator_containers.rs`: user-defined allocator
+  signatures and rejections, `AllocBox` read/take/try-refusal, `AllocVec`
+  growth/set/clear/owning-element cleanup, copyable/shared allocator values,
+  dropped allocator bindings with live allocations, and reference/native
+  allocation-counter parity.
 - `crates/kush/tests/memory_completion.rs`: fusion positives and rejections
   (I/O, panic, loops, recursion, indirect calls), explicit-chain non-fusion,
   widening reuse and owner obligations, vector widening reuse with callback
@@ -340,9 +411,10 @@ or a proof obligation.
 
 ## Explicitly still absent
 
-- arbitrary user-defined alloc/dealloc callbacks, an allocator trait, FFI, or
-  containers that own a general allocator value; `Arena.with_strategy` only
-  chooses chunk capacity for the built-in region;
+- an allocator trait, FFI, or raw-pointer callbacks; user allocators are the
+  record-of-two-noncapturing-functions form above and supply `Bytes` blocks;
+- allocator-owned per-container metadata headers, a general `realloc` hook, or
+  per-element free inside `AllocVec`/an arena;
 - per-value free or compaction inside an arena;
 - automatic fusion of effectful (`io`, `panic`, `suspend`), recursive, looping,
   or indirectly called callbacks;

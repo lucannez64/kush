@@ -1,7 +1,8 @@
 # Runtime-sized inline arrays
 
 Status: implemented for owned inline storage with a compile-time capacity and a
-runtime length, in the reference evaluator and the Cranelift backend.
+runtime length, contextual literals, and shared slice views over the live
+prefix, in the reference evaluator and the Cranelift backend.
 
 ```rust
 fn main() -> i64 ! {panic} {
@@ -35,10 +36,54 @@ length, increments the length, and returns the same inline storage. `set`
 checks `index < length` and overwrites one initialized copyable slot without
 changing the length. `pop` checks `length > 0`, clears the last slot, decrements
 the length, and returns the array together with the removed copyable value.
-`len` and `get` borrow the array for the duration of the call, so a view into
-the dynamic storage cannot escape the lexical scope of its owner. `get`, `set`,
-and `pop` copy copyable elements; owning, linear, and view elements are rejected
-instead of being copied or duplicated. There is no slice view or literal yet.
+`len` and `get` borrow the array for the duration of the call. `get`, `set`, and
+`pop` copy copyable elements; owning, linear, and view elements are rejected
+instead of being copied or duplicated.
+
+## Literals
+
+A contextual inline-array literal constructs a `DynArray` when the expected type
+is `DynArray<T, capacity>`:
+
+```rust
+let a: DynArray<i64, 4> = [10, 20, 30];
+let empty: DynArray<i64, 2> = [];
+```
+
+The literal's element count becomes the runtime length, and its static count
+must not exceed the capacity; a longer literal is a compile-time diagnostic.
+The literal is checked as the same construction sequence as `new` followed by
+one `push` per element. Because the count is statically bounded, every reused
+push guard is unreachable, so a literal does not require the `panic` effect and
+cannot overflow at run time. Owning elements are accepted and a partially
+constructed literal is destroyed as an owning prefix if element evaluation
+fails. Elements follow the same non-borrow, non-linear, non-task rule as
+`DynArray<T, capacity>` itself.
+
+## Slice views
+
+`&a[..]` and `&a[start..end]` produce the ordinary shared slice type `&[T]` over
+the live prefix. The owner must be a direct local binding (or another slice
+view); projecting a `DynArray` field and viewing it is not implemented:
+
+```rust
+let a: DynArray<i64, 4> = [10, 20, 30];
+let all: &[i64] = &a[..];
+let middle: &[i64] = &a[1..3];
+Slice.len(all) + Slice.get(middle, 0)
+```
+
+The descriptor's length is the runtime length word, not the capacity; native
+lowering points at the pinned inline storage and reads the live length. An
+explicit range is checked against the runtime length in both backends and
+requires `panic`; the unchecked `&a[..]` form always covers exactly the live
+prefix. Ownership treats the view like any other slice view: the owner cannot be
+moved, dropped, assigned, pushed, or popped while the view is live, and a view
+cannot escape the owner's lexical scope. Releasing the view at the end of its
+block restores the owner for later mutation. Views over owning or linear
+elements are rejected because element reads would copy an owner. A mutable
+`&mut [T]` view of a `DynArray` is not provided; use the checked `DynArray.set`
+write instead.
 
 ## Layout and lifetime contract
 
@@ -60,8 +105,9 @@ words 1 .. 1 + capacity: inline element slots
   item list. An owning prefix is released exactly once, as the allocation
   stats and native/reference tests show.
 - A `DynArray` value may be moved, assigned, passed, and returned. Because its
-  storage is inside the value, there is no escaping stack slot. Borrows are
-  limited to the `len`/`get` call and cannot be stored in data.
+  storage is inside the value, there is no escaping stack slot. Shared views
+  borrow the pinned inline storage and are limited to the owner's lexical
+  lifetime; they cannot be stored in data.
 - Pushing past `capacity` is a runtime panic in both backends. There is no
   silent growth and no fallback allocation.
 
@@ -69,11 +115,15 @@ words 1 .. 1 + capacity: inline element slots
 
 This is not `[T; n]` with a runtime `n`, not a dynamically sized stack allocation
 with a hidden layout descriptor, and not a general dependent array. The capacity
-is always a compile-time `Nat`; the length is a runtime word. There is no
-`DynArray` literal, pattern, equality, slice view, or element-wise owning move.
+is always a compile-time `Nat`; the length is a runtime word. Patterns over a
+`DynArray` are rejected explicitly: the runtime length is not a static variant
+tag, so use `DynArray.len` and `DynArray.get`. There is no `DynArray` equality,
+mutable view, or element-wise owning move beyond push/pop of owning values.
 `Vec<T>` remains the growable owning container and `&[T]` the borrow for
 arbitrary lengths.
 
 The implementation is checked by `crates/kush/tests/advanced_types_effects.rs`
-with positive push/get execution, native/reference agreement, owning-prefix
-cleanup, capacity overflow, out-of-bounds reads, and layout rejection.
+with positive push/get/literal/view execution, native/reference agreement,
+owning-prefix cleanup, capacity overflow, out-of-bounds reads, runtime view
+bounds, view/owner loan rejections, explicit pattern rejection, and layout
+rejection.

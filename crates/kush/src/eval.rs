@@ -555,6 +555,23 @@ struct ArenaState {
     /// noncapturing code pointer, so it cannot capture or dangle.
     strategy: Option<usize>,
 }
+/// Heap state of one `AllocBox<T>`. Boxed inside `Value` so the enum stays
+/// small: deeply recursive reference evaluation depends on a compact frame.
+#[derive(Debug, Clone)]
+struct AllocBoxState {
+    free: usize,
+    block: Value,
+    payload: Value,
+}
+/// Heap state of one `AllocVec<T>`. Boxed for the same reason.
+#[derive(Debug, Clone)]
+struct AllocVectorState {
+    items: Vec<Value>,
+    capacity: usize,
+    alloc: usize,
+    free: usize,
+    block: Option<Value>,
+}
 #[derive(Debug, Clone)]
 enum Value {
     Scalar(i64),
@@ -636,6 +653,21 @@ enum Value {
         items: Vec<Value>,
         capacity: usize,
     },
+    /// A checked user allocator value: the two noncapturing function handles
+    /// for allocation and release. It owns nothing and is copyable.
+    Allocator {
+        alloc: usize,
+        free: usize,
+    },
+    /// The heap state of one `AllocBox<T>`: the allocator pair, the `Bytes`
+    /// block that owns the payload storage, and the payload itself. The
+    /// reference evaluator models payload storage separately, but the block is
+    /// a real owned allocation released through the user callback exactly once.
+    AllocBox(Box<AllocBoxState>),
+    /// The heap state of one `AllocVec<T>`. `block` is the allocator-supplied
+    /// `Bytes` storage; `items` models the live elements. Growth allocates a
+    /// fresh block and releases the old one through the same allocator.
+    AllocVector(Box<AllocVectorState>),
     /// An opaque structured-task handle. The handle owns no heap cell; scope
     /// completion joins the child exactly once.
     Task(usize),
@@ -869,6 +901,147 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         self.heap
             .set_box_capacity(id, box_allocation_capacity(words * 8));
         value
+    }
+    /// Extract the two function handles of a checked allocator value.
+    fn allocator_pair(&self, value: &Value, span: Span) -> Result<(usize, usize)> {
+        if let Value::Allocator { alloc, free } = value {
+            Ok((*alloc, *free))
+        } else {
+            Err(Diagnostic::new(
+                span,
+                "internal error: expected a checked allocator value",
+            ))
+        }
+    }
+    /// Ask a user allocator for a block of `bytes` payload storage. `None`
+    /// means the callback returned a block that cannot hold the request; that
+    /// block is released through the same release callback before the refusal
+    /// is reported, so a refusal never leaks storage.
+    fn allocator_block(
+        &mut self,
+        alloc: usize,
+        free: usize,
+        bytes: usize,
+        span: Span,
+    ) -> Result<Option<Value>> {
+        let block = self.call(alloc, vec![Value::Scalar(bytes as i64)])?;
+        let capacity = match &block {
+            Value::Owned(id) => match self.heap.get(*id) {
+                Some(Value::Buffer { capacity, .. }) => capacity,
+                _ => {
+                    return Err(Diagnostic::new(
+                        span,
+                        "internal error: allocator callback did not return a Bytes block",
+                    ));
+                }
+            },
+            _ => {
+                return Err(Diagnostic::new(
+                    span,
+                    "internal error: allocator callback did not return an owned Bytes block",
+                ));
+            }
+        };
+        if capacity >= bytes {
+            Ok(Some(block))
+        } else {
+            self.allocator_release(free, block, span)?;
+            Ok(None)
+        }
+    }
+    /// Release one allocator-supplied block through its recorded release
+    /// function. The callback consumes the `Bytes` owner, so the underlying
+    /// allocation is freed exactly once.
+    fn allocator_release(&mut self, free: usize, block: Value, span: Span) -> Result<()> {
+        let _ = self.call(free, vec![block])?;
+        let _ = span;
+        Ok(())
+    }
+    /// Store an allocator pair and block as one owning metadata cell.
+    fn allocate_alloc_box(&mut self, free: usize, block: Value, payload: Value) -> Value {
+        self.allocate(Value::AllocBox(Box::new(AllocBoxState {
+            free,
+            block,
+            payload,
+        })))
+    }
+    /// Evaluate the post-argument part of `AllocBox.new`. Kept out of the
+    /// recursive evaluator match so the shared expression frame stays small;
+    /// deeply recursive programs rely on that headroom.
+    #[inline(never)]
+    fn eval_alloc_box_new(
+        &mut self,
+        allocator: Value,
+        payload: Value,
+        bytes: usize,
+        span: Span,
+    ) -> Result<Value> {
+        let (alloc, free) = self.allocator_pair(&allocator, span)?;
+        let block = self
+            .allocator_block(alloc, free, bytes, span)?
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    span,
+                    format!("panic: allocator refused a {bytes}-byte block"),
+                )
+            })?;
+        Ok(self.allocate_alloc_box(free, block, payload))
+    }
+    #[inline(never)]
+    fn eval_alloc_box_try_new(
+        &mut self,
+        allocator: Value,
+        payload: Value,
+        bytes: usize,
+        shape: ResultShape,
+        span: Span,
+    ) -> Result<Value> {
+        let (alloc, free) = self.allocator_pair(&allocator, span)?;
+        Ok(match self.allocator_block(alloc, free, bytes, span)? {
+            Some(block) => Value::Enum {
+                tag: shape.ok_tag,
+                fields: vec![self.allocate_alloc_box(free, block, payload)],
+            },
+            None => Value::Enum {
+                tag: shape.err_tag,
+                fields: vec![payload],
+            },
+        })
+    }
+    #[inline(never)]
+    fn eval_alloc_vec_new(
+        &mut self,
+        allocator: Value,
+        capacity: Option<usize>,
+        width: usize,
+        span: Span,
+    ) -> Result<Value> {
+        let (alloc, free) = self.allocator_pair(&allocator, span)?;
+        let capacity = capacity.unwrap_or(0);
+        let block = if capacity == 0 {
+            None
+        } else {
+            let bytes = capacity
+                .checked_mul(width)
+                .and_then(|words| words.checked_mul(8))
+                .ok_or_else(|| Diagnostic::new(span, "panic: AllocVec capacity overflow"))?;
+            Some(
+                self.allocator_block(alloc, free, bytes, span)?
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            span,
+                            format!("panic: allocator refused a {bytes}-byte block"),
+                        )
+                    })?,
+            )
+        };
+        Ok(self.allocate(Value::AllocVector(Box::new(AllocVectorState {
+            items: Vec::new(),
+            capacity,
+            alloc,
+            free,
+            block,
+        }))))
     }
     fn arena_new_value(&mut self, strategy: Option<usize>) -> Value {
         self.stats.allocation();
@@ -1307,6 +1480,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         match value {
             Value::Slice { len, .. } => Ok(*len),
             Value::Enum { fields, .. } => Ok(fields.len()),
+            Value::DynArray { items, .. } => Ok(items.len()),
+            Value::RecordRef(cell) => match &*cell.lock().unwrap() {
+                Value::DynArray { items, .. } => Ok(items.len()),
+                Value::Enum { fields, .. } => Ok(fields.len()),
+                _ => Err(Diagnostic::new(
+                    span,
+                    "internal error: invalid record slice source",
+                )),
+            },
             Value::Borrowed(id) => match self.heap.get(*id) {
                 Some(Value::Buffer { data, .. }) => Ok(data.len()),
                 Some(Value::Vector { items, .. }) => Ok(items.len()),
@@ -1342,6 +1524,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             let value = cell.lock().unwrap();
             return match &*value {
                 Value::Enum { fields, .. } => fields.get(position).cloned().ok_or_else(|| {
+                    Diagnostic::new(span, "internal error: slice array index out of bounds")
+                }),
+                Value::DynArray { items, .. } => items.get(position).cloned().ok_or_else(|| {
                     Diagnostic::new(span, "internal error: slice array index out of bounds")
                 }),
                 _ => Err(Diagnostic::new(
@@ -1629,6 +1814,141 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
                 self.slice_set(&args[0], index, args[2].clone(), span)?;
                 Ok(Value::Scalar(0))
+            }
+        }
+    }
+    /// Checked allocator-backed vector operations. Element storage always
+    /// comes from the allocator recorded in the vector itself; growth allocates
+    /// one fresh block and releases the previous block through the same pair,
+    /// so every allocation is released exactly once by its own allocator.
+    fn alloc_vec_call(
+        &mut self,
+        op: AllocVecOp,
+        element: Type,
+        mut args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value> {
+        let failure = |message: &str| Diagnostic::new(span, message.to_owned());
+        let width = self.program.width(element);
+        let index_of = |value: &Value, len: usize| {
+            usize::try_from(value.scalar())
+                .ok()
+                .filter(|i| *i < len)
+                .ok_or_else(|| failure("panic: AllocVec index out of bounds"))
+        };
+        match op {
+            AllocVecOp::Len | AllocVecOp::Get => {
+                let Value::Borrowed(id) = args[0] else {
+                    unreachable!("checked AllocVec borrow")
+                };
+                let Some(Value::AllocVector(state)) = self.heap.get(id) else {
+                    return Err(failure(
+                        "internal ownership error: dangling AllocVec borrow",
+                    ));
+                };
+                if op == AllocVecOp::Len {
+                    return Ok(Value::Scalar(state.items.len() as i64));
+                }
+                Ok(state.items[index_of(&args[1], state.items.len())?].clone())
+            }
+            AllocVecOp::Push | AllocVecOp::Set => {
+                let Value::Owned(id) = args.remove(0) else {
+                    unreachable!("checked owned AllocVec")
+                };
+                let (index, value) = if op == AllocVecOp::Set {
+                    (Some(args.remove(0)), args.remove(0))
+                } else {
+                    (None, args.remove(0))
+                };
+                let Some(Value::AllocVector(state)) = self.heap.take(id) else {
+                    return Err(failure("internal ownership error: moved AllocVec"));
+                };
+                let AllocVectorState {
+                    mut items,
+                    mut capacity,
+                    alloc,
+                    free,
+                    mut block,
+                } = *state;
+                if let Some(index) = index {
+                    let index = index_of(&index, items.len())?;
+                    let old = std::mem::replace(&mut items[index], value);
+                    self.heap.insert(
+                        id,
+                        Value::AllocVector(Box::new(AllocVectorState {
+                            items,
+                            capacity,
+                            alloc,
+                            free,
+                            block,
+                        })),
+                    );
+                    self.drop_value(old)?;
+                    return Ok(Value::Owned(id));
+                }
+                if items.len() == capacity {
+                    let next = if capacity == 0 {
+                        4
+                    } else {
+                        capacity.saturating_mul(2)
+                    };
+                    let bytes = next
+                        .checked_mul(width)
+                        .and_then(|words| words.checked_mul(8))
+                        .ok_or_else(|| failure("panic: AllocVec capacity overflow"))?;
+                    let fresh =
+                        self.allocator_block(alloc, free, bytes, span)?
+                            .ok_or_else(|| {
+                                failure(&format!("panic: allocator refused a {bytes}-byte block"))
+                            })?;
+                    if let Some(old) = block.take() {
+                        self.allocator_release(free, old, span)?;
+                    }
+                    block = Some(fresh);
+                    capacity = next;
+                    self.stats.growth();
+                }
+                items.push(value);
+                self.heap.insert(
+                    id,
+                    Value::AllocVector(Box::new(AllocVectorState {
+                        items,
+                        capacity,
+                        alloc,
+                        free,
+                        block,
+                    })),
+                );
+                Ok(Value::Owned(id))
+            }
+            AllocVecOp::Clear => {
+                let Value::Owned(id) = args.remove(0) else {
+                    unreachable!("checked owned AllocVec")
+                };
+                let Some(Value::AllocVector(state)) = self.heap.take(id) else {
+                    return Err(failure("internal ownership error: moved AllocVec"));
+                };
+                let AllocVectorState {
+                    mut items,
+                    capacity,
+                    alloc,
+                    free,
+                    block,
+                } = *state;
+                while let Some(item) = items.pop() {
+                    self.drop_value(item)?;
+                }
+                self.heap.insert(
+                    id,
+                    Value::AllocVector(Box::new(AllocVectorState {
+                        items,
+                        capacity,
+                        alloc,
+                        free,
+                        block,
+                    })),
+                );
+                Ok(Value::Owned(id))
             }
         }
     }
@@ -2225,6 +2545,19 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             Value::DynArray { items, .. } => {
                 for item in items.into_iter().rev() {
                     self.drop_value(item)?;
+                }
+            }
+            Value::Allocator { .. } => {}
+            Value::AllocBox(state) => {
+                self.drop_value(state.payload)?;
+                self.allocator_release(state.free, state.block, Span::default())?;
+            }
+            Value::AllocVector(state) => {
+                for item in state.items.into_iter().rev() {
+                    self.drop_value(item)?;
+                }
+                if let Some(block) = state.block {
+                    self.allocator_release(state.free, block, Span::default())?;
                 }
             }
             // A slice view borrows its base and owns nothing.
@@ -2919,6 +3252,27 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         };
                         Some(cell)
                     }
+                    // A shared DynArray view aliases the pinned record cell, so
+                    // later reads see the same live inline storage. The
+                    // ownership pass rejects push/pop/assignment while the view
+                    // is live, so this shared cell is never mutated behind it.
+                    ExprKind::Borrow(slot)
+                        if self.program.functions[frame.function].locals[*slot]
+                            .ty
+                            .layout()
+                            .is_some_and(|id| self.program.enums[id].dynamic_array.is_some()) =>
+                    {
+                        let current = frame.locals[*slot].clone();
+                        let cell = match current {
+                            Value::RecordCell(cell) => cell,
+                            value => {
+                                let cell = Arc::new(Mutex::new(value));
+                                frame.locals[*slot] = Value::RecordCell(cell.clone());
+                                cell
+                            }
+                        };
+                        Some(cell)
+                    }
                     _ => None,
                 };
                 let base_value = match &array {
@@ -3232,6 +3586,95 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.arena_release(&state)?;
                 payload
             }
+            ExprKind::AllocatorNew { alloc, free } => {
+                let alloc = value!(self.expr(alloc, frame));
+                let free = value!(self.expr(free, frame));
+                let Value::Function {
+                    function: alloc_function,
+                    environment: None,
+                } = alloc
+                else {
+                    unreachable!("checked allocator allocation callback")
+                };
+                let Value::Function {
+                    function: free_function,
+                    environment: None,
+                } = free
+                else {
+                    unreachable!("checked allocator release callback")
+                };
+                Value::Allocator {
+                    alloc: alloc_function,
+                    free: free_function,
+                }
+            }
+            ExprKind::AllocBoxNew { allocator, value } => {
+                let allocator = value!(self.expr(allocator, frame));
+                let payload = value!(self.expr(value, frame));
+                let bytes = self.program.width(value.ty) * 8;
+                self.consume(value, frame);
+                self.eval_alloc_box_new(allocator, payload, bytes, expr.span)?
+            }
+            ExprKind::AllocBoxTryNew {
+                allocator,
+                value: argument,
+                shape,
+            } => {
+                let allocator = value!(self.expr(allocator, frame));
+                let payload = value!(self.expr(argument, frame));
+                let bytes = self.program.width(argument.ty) * 8;
+                self.consume(argument, frame);
+                self.eval_alloc_box_try_new(allocator, payload, bytes, *shape, expr.span)?
+            }
+            ExprKind::AllocBoxRead(argument) => {
+                let Value::Borrowed(id) = value!(self.expr(argument, frame)) else {
+                    unreachable!("checked allocator box borrow")
+                };
+                let Some(Value::AllocBox(state)) = self.heap.get(id) else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal ownership error: dangling allocator box borrow",
+                    ));
+                };
+                state.payload
+            }
+            ExprKind::AllocBoxTake(argument) => {
+                let Value::Owned(id) = value!(self.expr(argument, frame)) else {
+                    unreachable!("checked allocator box take")
+                };
+                self.consume(argument, frame);
+                let Some(Value::AllocBox(state)) = self.heap.take(id) else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal ownership error: stale allocator box",
+                    ));
+                };
+                self.stats.deallocation();
+                self.allocator_release(state.free, state.block, expr.span)?;
+                state.payload
+            }
+            ExprKind::AllocVecNew {
+                allocator,
+                capacity,
+                element,
+            } => {
+                let allocator = value!(self.expr(allocator, frame));
+                let capacity = match capacity {
+                    Some(capacity) => {
+                        let requested = value!(self.expr(capacity, frame)).scalar();
+                        Some(usize::try_from(requested).map_err(|_| {
+                            Diagnostic::new(expr.span, "panic: negative AllocVec capacity")
+                        })?)
+                    }
+                    None => None,
+                };
+                self.eval_alloc_vec_new(
+                    allocator,
+                    capacity,
+                    self.program.width(*element),
+                    expr.span,
+                )?
+            }
             ExprKind::BoxTryNew {
                 value: argument,
                 shape,
@@ -3529,6 +3972,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Target::Slice(op, _) => self.slice_call(*op, values, expr.span)?,
                     Target::DynArray(op, element) => {
                         self.dyn_array_call(*op, *element, values, expr.span)?
+                    }
+                    Target::AllocVec(op, element) => {
+                        self.alloc_vec_call(*op, *element, values, expr.span)?
                     }
                     Target::Function(index)
                     | Target::ObjectFunction {

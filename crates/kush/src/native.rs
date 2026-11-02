@@ -7,8 +7,8 @@ use crate::int::IntKind;
 use crate::{
     Diagnostic, Span,
     executable::{
-        self as ex, BytesOp, Coercion, DynArrayOp, Executable, Expr, ExprKind, IoOp, Pattern,
-        ReceiverMode, SliceOp, StrOp, StringOp, Target, Type, VecOp,
+        self as ex, AllocVecOp, BytesOp, Coercion, DynArrayOp, Executable, Expr, ExprKind, IoOp,
+        Pattern, ReceiverMode, SliceOp, StrOp, StringOp, Target, Type, VecOp,
     },
     lexer::Kind,
 };
@@ -622,6 +622,120 @@ uint64_t kush_bytes_from(const unsigned char *source, int64_t length) {
     uint64_t handle = kush_bytes_with_capacity(length); KushBytes *b = (KushBytes *)(uintptr_t)handle;
     if (length != 0) memcpy(b->data, source, (size_t)length);
     b->length = (uint64_t)length; return handle;
+}
+/* ---- User-defined allocators ---------------------------------------------
+   A checked allocator value is a pair of noncapturing code pointers:
+   `alloc(bytes) -> Bytes` supplies a block with at least `bytes` capacity, and
+   `free(block) -> Unit` releases it. A smaller returned block is a refusal and
+   is released through the same pair. Containers store the pair themselves, so
+   dropping or moving the allocator binding cannot strand an allocation, and
+   release always uses the allocator that supplied the block. */
+typedef uint64_t (*KushAllocBlockFn)(uint64_t bytes);
+typedef void (*KushFreeBlockFn)(uint64_t block);
+unsigned char *kush_alloc_block_data(uint64_t block) {
+    return ((KushBytes *)(uintptr_t)block)->data;
+}
+static void kush_alloc_block_release(uint64_t release, uint64_t block) {
+    if (block == 0) return;
+    if (release == 0) kush_panic();
+    ((KushFreeBlockFn)(uintptr_t)release)(block);
+}
+uint64_t kush_alloc_block_try(uint64_t allocator, uint64_t release, uint64_t bytes) {
+    if (allocator == 0) kush_panic();
+    uint64_t block = ((KushAllocBlockFn)(uintptr_t)allocator)(bytes);
+    if (block == 0) return 0;
+    if (((KushBytes *)(uintptr_t)block)->capacity < bytes) {
+        kush_alloc_block_release(release, block);
+        return 0;
+    }
+    return block;
+}
+uint64_t kush_alloc_block(uint64_t allocator, uint64_t release, uint64_t bytes) {
+    uint64_t block = kush_alloc_block_try(allocator, release, bytes);
+    if (block == 0) kush_panic();
+    return block;
+}
+typedef struct { uint64_t allocator; uint64_t release; uint64_t block; } KushAllocBox;
+uint64_t kush_alloc_box_create(uint64_t allocator, uint64_t release, uint64_t block) {
+    KushAllocBox *box = (KushAllocBox *)(uintptr_t)kush_alloc(sizeof(KushAllocBox));
+    box->allocator = allocator; box->release = release; box->block = block;
+    return (uint64_t)(uintptr_t)box;
+}
+unsigned char *kush_alloc_box_payload(uint64_t handle) {
+    return kush_alloc_block_data(((KushAllocBox *)(uintptr_t)handle)->block);
+}
+void kush_alloc_box_release(uint64_t handle) {
+    KushAllocBox *box = (KushAllocBox *)(uintptr_t)handle;
+    kush_alloc_block_release(box->release, box->block);
+    kush_free(handle);
+}
+typedef struct {
+    uint64_t length; uint64_t capacity; uint64_t width;
+    uint64_t allocator; uint64_t release; uint64_t block;
+} KushAllocVec;
+static uint64_t kush_alloc_vec_block_bytes(uint64_t capacity, uint64_t width) {
+    if (width == 0 || capacity > ((uint64_t)INT64_MAX) / 8 / width) kush_panic();
+    return capacity * width * 8;
+}
+uint64_t kush_alloc_vec_create(uint64_t allocator, uint64_t release, int64_t capacity, int64_t width) {
+    if (capacity < 0 || width <= 0) kush_panic();
+    KushAllocVec *v = (KushAllocVec *)(uintptr_t)kush_alloc(sizeof(KushAllocVec));
+    v->length = 0; v->capacity = (uint64_t)capacity; v->width = (uint64_t)width;
+    v->allocator = allocator; v->release = release; v->block = 0;
+    if (capacity > 0) {
+        v->block = kush_alloc_block(allocator, release, kush_alloc_vec_block_bytes(v->capacity, v->width));
+    }
+    return (uint64_t)(uintptr_t)v;
+}
+static void kush_alloc_vec_grow(KushAllocVec *v, uint64_t next) {
+    uint64_t bytes = kush_alloc_vec_block_bytes(next, v->width);
+    uint64_t block = kush_alloc_block(v->allocator, v->release, bytes);
+    if (v->length != 0) {
+        memcpy(kush_alloc_block_data(block), kush_alloc_block_data(v->block),
+               (size_t)(v->length * v->width * 8));
+    }
+    kush_alloc_block_release(v->release, v->block);
+    v->block = block; v->capacity = next; ++kush_buffer_growths;
+}
+int64_t kush_alloc_vec_len(uint64_t handle) {
+    return (int64_t)((KushAllocVec *)(uintptr_t)handle)->length;
+}
+void kush_alloc_vec_get(uint64_t handle, int64_t index, uint64_t *out) {
+    KushAllocVec *v = (KushAllocVec *)(uintptr_t)handle;
+    if (index < 0 || (uint64_t)index >= v->length) kush_panic();
+    memcpy(out, kush_alloc_block_data(v->block) + (uint64_t)index * v->width * 8,
+           (size_t)(v->width * 8));
+}
+uint64_t kush_alloc_vec_push(uint64_t handle, const uint64_t *item) {
+    KushAllocVec *v = (KushAllocVec *)(uintptr_t)handle;
+    if (v->length == v->capacity) {
+        uint64_t next = v->capacity == 0 ? 4 : v->capacity * 2;
+        if (next <= v->capacity) kush_panic();
+        kush_alloc_vec_grow(v, next);
+    }
+    memcpy(kush_alloc_block_data(v->block) + v->length * v->width * 8, item,
+           (size_t)(v->width * 8));
+    v->length++;
+    return handle;
+}
+uint64_t kush_alloc_vec_set(uint64_t handle, int64_t index, const uint64_t *item, uint64_t *old) {
+    KushAllocVec *v = (KushAllocVec *)(uintptr_t)handle;
+    if (index < 0 || (uint64_t)index >= v->length) kush_panic();
+    unsigned char *slot = kush_alloc_block_data(v->block) + (uint64_t)index * v->width * 8;
+    memcpy(old, slot, (size_t)(v->width * 8));
+    memcpy(slot, item, (size_t)(v->width * 8));
+    return handle;
+}
+void kush_alloc_vec_clear(uint64_t handle) {
+    ((KushAllocVec *)(uintptr_t)handle)->length = 0;
+}
+unsigned char *kush_alloc_vec_data(uint64_t handle) {
+    return kush_alloc_block_data(((KushAllocVec *)(uintptr_t)handle)->block);
+}
+void kush_alloc_vec_release(uint64_t handle) {
+    KushAllocVec *v = (KushAllocVec *)(uintptr_t)handle;
+    kush_alloc_block_release(v->release, v->block);
+    kush_free(handle);
 }
 int64_t kush_bytes_len(uint64_t handle) { return (int64_t)((KushBytes *)(uintptr_t)handle)->length; }
 int64_t kush_bytes_capacity(uint64_t handle) { return (int64_t)((KushBytes *)(uintptr_t)handle)->capacity; }
@@ -1435,6 +1549,95 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let arena_box_release = module
         .declare_function("kush_arena_box_release", Linkage::Import, &free_sig)
         .map_err(error)?;
+    let mut alloc_block_sig = module.make_signature();
+    alloc_block_sig
+        .params
+        .extend((0..3).map(|_| AbiParam::new(I64)));
+    alloc_block_sig.returns.push(AbiParam::new(I64));
+    let alloc_block = module
+        .declare_function("kush_alloc_block", Linkage::Import, &alloc_block_sig)
+        .map_err(error)?;
+    let alloc_block_try = module
+        .declare_function("kush_alloc_block_try", Linkage::Import, &alloc_block_sig)
+        .map_err(error)?;
+    let mut alloc_unary_sig = module.make_signature();
+    alloc_unary_sig.params.push(AbiParam::new(I64));
+    alloc_unary_sig.returns.push(AbiParam::new(I64));
+    let alloc_block_data = module
+        .declare_function("kush_alloc_block_data", Linkage::Import, &alloc_unary_sig)
+        .map_err(error)?;
+    let alloc_box_create = module
+        .declare_function("kush_alloc_box_create", Linkage::Import, &alloc_block_sig)
+        .map_err(error)?;
+    let alloc_box_payload = module
+        .declare_function("kush_alloc_box_payload", Linkage::Import, &alloc_unary_sig)
+        .map_err(error)?;
+    let alloc_box_release = module
+        .declare_function("kush_alloc_box_release", Linkage::Import, &free_sig)
+        .map_err(error)?;
+    let mut alloc_vec_create_sig = module.make_signature();
+    alloc_vec_create_sig
+        .params
+        .extend((0..4).map(|_| AbiParam::new(I64)));
+    alloc_vec_create_sig.returns.push(AbiParam::new(I64));
+    let alloc_vec_create = module
+        .declare_function(
+            "kush_alloc_vec_create",
+            Linkage::Import,
+            &alloc_vec_create_sig,
+        )
+        .map_err(error)?;
+    let mut alloc_vec_push_sig = module.make_signature();
+    alloc_vec_push_sig
+        .params
+        .extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    alloc_vec_push_sig.returns.push(AbiParam::new(I64));
+    let alloc_vec_push = module
+        .declare_function("kush_alloc_vec_push", Linkage::Import, &alloc_vec_push_sig)
+        .map_err(error)?;
+    let alloc_vec_len = module
+        .declare_function("kush_alloc_vec_len", Linkage::Import, &alloc_unary_sig)
+        .map_err(error)?;
+    let mut alloc_vec_get_sig = module.make_signature();
+    alloc_vec_get_sig
+        .params
+        .extend((0..3).map(|_| AbiParam::new(I64)));
+    let alloc_vec_get = module
+        .declare_function("kush_alloc_vec_get", Linkage::Import, &alloc_vec_get_sig)
+        .map_err(error)?;
+    let mut alloc_vec_set_sig = module.make_signature();
+    alloc_vec_set_sig
+        .params
+        .extend((0..4).map(|_| AbiParam::new(I64)));
+    alloc_vec_set_sig.returns.push(AbiParam::new(I64));
+    let alloc_vec_set = module
+        .declare_function("kush_alloc_vec_set", Linkage::Import, &alloc_vec_set_sig)
+        .map_err(error)?;
+    let alloc_vec_clear = module
+        .declare_function("kush_alloc_vec_clear", Linkage::Import, &free_sig)
+        .map_err(error)?;
+    let alloc_vec_data = module
+        .declare_function("kush_alloc_vec_data", Linkage::Import, &alloc_unary_sig)
+        .map_err(error)?;
+    let alloc_vec_release = module
+        .declare_function("kush_alloc_vec_release", Linkage::Import, &free_sig)
+        .map_err(error)?;
+    let alloc_ops = AllocOps {
+        block: alloc_block,
+        block_try: alloc_block_try,
+        block_data: alloc_block_data,
+        box_create: alloc_box_create,
+        box_payload: alloc_box_payload,
+        box_release: alloc_box_release,
+        vec_create: alloc_vec_create,
+        vec_push: alloc_vec_push,
+        vec_len: alloc_vec_len,
+        vec_get: alloc_vec_get,
+        vec_set: alloc_vec_set,
+        vec_clear: alloc_vec_clear,
+        vec_data: alloc_vec_data,
+        vec_release: alloc_vec_release,
+    };
     let mut restride_sig = module.make_signature();
     restride_sig
         .params
@@ -1659,8 +1862,14 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
         module.define_data(id, &desc).map_err(error)?;
         literal_data.insert(start, id);
     }
-    let (drops, closure_drops) =
-        synthesize_drops(&mut module, program, free, arena_release, arena_box_release)?;
+    let (drops, closure_drops) = synthesize_drops(
+        &mut module,
+        program,
+        free,
+        arena_release,
+        arena_box_release,
+        &alloc_ops,
+    )?;
     let task_types = collect_task_types(program);
     let (task_wrappers, task_pointer_drops) =
         synthesize_task_wrappers(&mut module, program, &task_types, &drops)?;
@@ -1752,6 +1961,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             arena_alloc,
             arena_try_alloc,
             arena_box_release,
+            alloc_ops: &alloc_ops,
             vec_restride,
             note_reuse,
             drops: &drops,
@@ -2251,6 +2461,24 @@ fn collect_closure_types(program: &Executable) -> Vec<Vec<Type>> {
     all.dedup();
     all
 }
+/// Imported runtime helpers for checked user-allocator containers.
+#[derive(Clone, Copy)]
+struct AllocOps {
+    block: FuncId,
+    block_try: FuncId,
+    block_data: FuncId,
+    box_create: FuncId,
+    box_payload: FuncId,
+    box_release: FuncId,
+    vec_create: FuncId,
+    vec_push: FuncId,
+    vec_len: FuncId,
+    vec_get: FuncId,
+    vec_set: FuncId,
+    vec_clear: FuncId,
+    vec_data: FuncId,
+    vec_release: FuncId,
+}
 type DropTables = (BTreeMap<Type, FuncId>, BTreeMap<Vec<Type>, FuncId>);
 fn synthesize_drops(
     module: &mut ObjectModule,
@@ -2258,10 +2486,13 @@ fn synthesize_drops(
     free: FuncId,
     arena_release: FuncId,
     arena_box_release: FuncId,
+    alloc_ops: &AllocOps,
 ) -> Result<DropTables> {
     let mut types = (0..program.pointees.len())
         .map(Type::Box)
         .chain((0..program.pointees.len()).map(Type::ArenaBox))
+        .chain((0..program.pointees.len()).map(Type::AllocBox))
+        .chain((0..program.pointees.len()).map(Type::AllocVec))
         .chain((0..program.pointees.len()).map(Type::Vec))
         .chain((0..program.pointees.len()).map(Type::Task))
         .chain([Type::Arena])
@@ -2388,6 +2619,62 @@ fn synthesize_drops(
                 // No registered member can reach here, but release the
                 // payload allocation defensively rather than leaking it.
                 emit_drop(&mut builder, module, free, &[args[1]]);
+                builder.ins().return_(&[]);
+            }
+            Type::AllocBox(index) => {
+                let pointee = program.pointees[index];
+                let payload_function =
+                    module.declare_func_in_func(alloc_ops.box_payload, builder.func);
+                let payload_call = builder.ins().call(payload_function, &[args[0]]);
+                let data = builder.inst_results(payload_call)[0];
+                if program.owns(pointee) {
+                    let fields = (0..program.width(pointee))
+                        .map(|i| {
+                            builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), data, (i * 8) as i32)
+                        })
+                        .collect::<Vec<_>>();
+                    emit_drop(&mut builder, module, ids[&pointee.full()], &fields);
+                }
+                emit_drop(&mut builder, module, alloc_ops.box_release, &args);
+                builder.ins().return_(&[]);
+            }
+            Type::AllocVec(index) => {
+                let element = program.pointees[index];
+                if program.owns(element) {
+                    let width = program.width(element);
+                    let length = builder.ins().load(I64, ir::MemFlagsData::new(), args[0], 0);
+                    let data_function =
+                        module.declare_func_in_func(alloc_ops.vec_data, builder.func);
+                    let data_call = builder.ins().call(data_function, &[args[0]]);
+                    let data = builder.inst_results(data_call)[0];
+                    let head = builder.create_block();
+                    let body = builder.create_block();
+                    let done = builder.create_block();
+                    builder.append_block_param(head, I64);
+                    let zero = builder.ins().iconst(I64, 0);
+                    builder.ins().jump(head, &[zero.into()]);
+                    builder.switch_to_block(head);
+                    let i = builder.block_params(head)[0];
+                    let more = builder.ins().icmp(IntCC::UnsignedLessThan, i, length);
+                    builder.ins().brif(more, body, &[], done, &[]);
+                    builder.switch_to_block(body);
+                    let stride = builder.ins().imul_imm_s(i, (width * 8) as i64);
+                    let base = builder.ins().iadd(data, stride);
+                    let fields = (0..width)
+                        .map(|j| {
+                            builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), base, (j * 8) as i32)
+                        })
+                        .collect::<Vec<_>>();
+                    emit_drop(&mut builder, module, ids[&element.full()], &fields);
+                    let next = builder.ins().iadd_imm_s(i, 1);
+                    builder.ins().jump(head, &[next.into()]);
+                    builder.switch_to_block(done);
+                }
+                emit_drop(&mut builder, module, alloc_ops.vec_release, &args);
                 builder.ins().return_(&[]);
             }
             Type::Vec(index) => {
@@ -2898,6 +3185,7 @@ struct Generator<'a, 'b> {
     arena_alloc: FuncId,
     arena_try_alloc: FuncId,
     arena_box_release: FuncId,
+    alloc_ops: &'b AllocOps,
     vec_restride: FuncId,
     note_reuse: FuncId,
     drops: &'b BTreeMap<Type, FuncId>,
@@ -3858,6 +4146,172 @@ impl Generator<'_, '_> {
                 self.consume(value);
                 return Some(vec![self.constant(0)]);
             }
+            ExprKind::AllocatorNew { alloc, free } => {
+                let allocator = lower!(self.expr(alloc));
+                let release = lower!(self.expr(free));
+                return Some(vec![allocator[0], release[0]]);
+            }
+            ExprKind::AllocBoxNew { allocator, value } => {
+                let pair = lower!(self.expr(allocator));
+                let payload = lower!(self.expr(value));
+                let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
+                self.consume(value);
+                let block = self.runtime_call(self.alloc_ops.block, &[pair[0], pair[1], bytes]);
+                let data = self.runtime_call(self.alloc_ops.block_data, &[block]);
+                for (index, word) in payload.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        data,
+                        (index * 8) as i32,
+                    );
+                }
+                let handle =
+                    self.runtime_call(self.alloc_ops.box_create, &[pair[0], pair[1], block]);
+                return Some(vec![handle]);
+            }
+            ExprKind::AllocBoxTryNew {
+                allocator,
+                value,
+                shape,
+            } => {
+                let pair = lower!(self.expr(allocator));
+                let payload = lower!(self.expr(value));
+                self.consume(value);
+                let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
+                let block = self.runtime_call(self.alloc_ops.block_try, &[pair[0], pair[1], bytes]);
+                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, block, 0);
+                let ok = self.builder.create_block();
+                let error = self.builder.create_block();
+                let done = self.builder.create_block();
+                let result_width = self.program.width(expr.ty);
+                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    (result_width * 8).max(1) as u32,
+                    3,
+                ));
+                let destination = self.builder.ins().stack_addr(I64, slot, 0);
+                self.builder.ins().brif(failed, error, &[], ok, &[]);
+                self.builder.switch_to_block(ok);
+                let data = self.runtime_call(self.alloc_ops.block_data, &[block]);
+                for (index, word) in payload.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        data,
+                        (index * 8) as i32,
+                    );
+                }
+                let owner =
+                    self.runtime_call(self.alloc_ops.box_create, &[pair[0], pair[1], block]);
+                let tag = self.constant(shape.ok_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), owner, destination, 8);
+                let zero = self.constant(0);
+                for index in 2..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(error);
+                let tag = self.constant(shape.err_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                for (index, word) in payload.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        destination,
+                        ((index + 1) * 8) as i32,
+                    );
+                }
+                let zero = self.constant(0);
+                for index in (payload.len() + 1)..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(done);
+                return Some(
+                    (0..result_width)
+                        .map(|index| {
+                            self.builder.ins().load(
+                                I64,
+                                ir::MemFlagsData::new(),
+                                destination,
+                                (index * 8) as i32,
+                            )
+                        })
+                        .collect(),
+                );
+            }
+            ExprKind::AllocBoxRead(argument) => {
+                let reference = lower!(self.scalar(argument));
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                let data = self.runtime_call(self.alloc_ops.box_payload, &[handle]);
+                return Some(
+                    (0..self.program.width(expr.ty))
+                        .map(|index| {
+                            self.builder.ins().load(
+                                I64,
+                                ir::MemFlagsData::new(),
+                                data,
+                                (index * 8) as i32,
+                            )
+                        })
+                        .collect(),
+                );
+            }
+            ExprKind::AllocBoxTake(argument) => {
+                let handle = lower!(self.scalar(argument));
+                let data = self.runtime_call(self.alloc_ops.box_payload, &[handle]);
+                let payload = (0..self.program.width(expr.ty))
+                    .map(|index| {
+                        self.builder.ins().load(
+                            I64,
+                            ir::MemFlagsData::new(),
+                            data,
+                            (index * 8) as i32,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                self.consume(argument);
+                self.runtime_void(self.alloc_ops.box_release, &[handle]);
+                return Some(payload);
+            }
+            ExprKind::AllocVecNew {
+                allocator,
+                capacity,
+                element,
+            } => {
+                let pair = lower!(self.expr(allocator));
+                let capacity = match capacity {
+                    Some(capacity) => lower!(self.scalar(capacity)),
+                    None => self.constant(0),
+                };
+                let width = self.constant(self.program.width(*element) as i64);
+                let handle = self.runtime_call(
+                    self.alloc_ops.vec_create,
+                    &[pair[0], pair[1], capacity, width],
+                );
+                return Some(vec![handle]);
+            }
             ExprKind::BoxReuse { owner, payload } => {
                 let pointer = lower!(self.scalar(owner));
                 let old = match owner.ty {
@@ -4579,89 +5033,119 @@ impl Generator<'_, '_> {
                     }
                     _ => None,
                 };
-                let base_values = if array_location.is_some() {
+                // A checked DynArray view borrows the pinned record storage, so
+                // the descriptor points at the live inline slots. The length is
+                // the runtime length word, and the capacity is the static bound.
+                let dynamic_array_location = match &base.kind {
+                    ExprKind::Borrow(slot)
+                        if base
+                            .ty
+                            .ref_pointee()
+                            .and_then(|pointee| self.program.pointees.get(pointee).copied())
+                            .and_then(|pointee| pointee.layout())
+                            .is_some_and(|id| self.program.enums[id].dynamic_array.is_some()) =>
+                    {
+                        self.locations[*slot]
+                    }
+                    _ => None,
+                };
+                let base_values = if array_location.is_some() || dynamic_array_location.is_some() {
                     Vec::new()
                 } else {
                     lower!(self.expr(base))
                 };
-                let (pointer, length, stride, bytes) = if let Some(location) = array_location {
-                    let (_, length) = base
-                        .ty
-                        .layout()
-                        .and_then(|id| self.program.enums[id].array)
-                        .expect("checked array slice source");
-                    // Word 0 is the private array tag; elements follow it.
-                    let data = self.builder.ins().iadd_imm_s(location, 8);
-                    (
-                        data,
-                        self.constant(length as i64),
-                        self.constant((element_width * 8) as i64),
-                        self.constant(0),
-                    )
-                } else if let Some((_, length)) =
-                    base.ty.layout().and_then(|id| self.program.enums[id].array)
-                {
-                    let slot = self.stack_words(base_values.len());
-                    self.store_words(slot, &base_values);
-                    // Word 0 is the private array tag; elements follow it.
-                    let data = self.builder.ins().iadd_imm_s(slot, 8);
-                    (
-                        data,
-                        self.constant(length as i64),
-                        self.constant((element_width * 8) as i64),
-                        self.constant(0),
-                    )
-                } else {
-                    match base.ty {
-                        Type::Ref(p) => match self.program.pointees[p] {
-                            Type::Bytes => {
-                                let handle = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    base_values[0],
-                                    0,
-                                );
-                                let data = self.builder.ins().iadd_imm_s(handle, 16);
-                                let length = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    handle,
-                                    0,
-                                );
-                                (data, length, self.constant(1), self.constant(1))
-                            }
-                            Type::Vec(_) => {
-                                let handle = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    base_values[0],
-                                    0,
-                                );
-                                let data = self.builder.ins().iadd_imm_s(handle, 24);
-                                let length = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    handle,
-                                    0,
-                                );
-                                (
-                                    data,
-                                    length,
-                                    self.constant((element_width * 8) as i64),
-                                    self.constant(0),
-                                )
-                            }
+                let (pointer, length, stride, bytes) =
+                    if let Some(location) = dynamic_array_location {
+                        // Word 0 is the runtime length; elements follow it.
+                        let data = self.builder.ins().iadd_imm_s(location, 8);
+                        let length =
+                            self.builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), location, 0);
+                        (
+                            data,
+                            length,
+                            self.constant((element_width * 8) as i64),
+                            self.constant(0),
+                        )
+                    } else if let Some(location) = array_location {
+                        let (_, length) = base
+                            .ty
+                            .layout()
+                            .and_then(|id| self.program.enums[id].array)
+                            .expect("checked array slice source");
+                        // Word 0 is the private array tag; elements follow it.
+                        let data = self.builder.ins().iadd_imm_s(location, 8);
+                        (
+                            data,
+                            self.constant(length as i64),
+                            self.constant((element_width * 8) as i64),
+                            self.constant(0),
+                        )
+                    } else if let Some((_, length)) =
+                        base.ty.layout().and_then(|id| self.program.enums[id].array)
+                    {
+                        let slot = self.stack_words(base_values.len());
+                        self.store_words(slot, &base_values);
+                        // Word 0 is the private array tag; elements follow it.
+                        let data = self.builder.ins().iadd_imm_s(slot, 8);
+                        (
+                            data,
+                            self.constant(length as i64),
+                            self.constant((element_width * 8) as i64),
+                            self.constant(0),
+                        )
+                    } else {
+                        match base.ty {
+                            Type::Ref(p) => match self.program.pointees[p] {
+                                Type::Bytes => {
+                                    let handle = self.builder.ins().load(
+                                        I64,
+                                        ir::MemFlagsData::new(),
+                                        base_values[0],
+                                        0,
+                                    );
+                                    let data = self.builder.ins().iadd_imm_s(handle, 16);
+                                    let length = self.builder.ins().load(
+                                        I64,
+                                        ir::MemFlagsData::new(),
+                                        handle,
+                                        0,
+                                    );
+                                    (data, length, self.constant(1), self.constant(1))
+                                }
+                                Type::Vec(_) => {
+                                    let handle = self.builder.ins().load(
+                                        I64,
+                                        ir::MemFlagsData::new(),
+                                        base_values[0],
+                                        0,
+                                    );
+                                    let data = self.builder.ins().iadd_imm_s(handle, 24);
+                                    let length = self.builder.ins().load(
+                                        I64,
+                                        ir::MemFlagsData::new(),
+                                        handle,
+                                        0,
+                                    );
+                                    (
+                                        data,
+                                        length,
+                                        self.constant((element_width * 8) as i64),
+                                        self.constant(0),
+                                    )
+                                }
+                                _ => unreachable!("checked slice source"),
+                            },
+                            Type::Slice(_) | Type::SliceMut(_) => (
+                                base_values[0],
+                                base_values[1],
+                                base_values[2],
+                                base_values[3],
+                            ),
                             _ => unreachable!("checked slice source"),
-                        },
-                        Type::Slice(_) | Type::SliceMut(_) => (
-                            base_values[0],
-                            base_values[1],
-                            base_values[2],
-                            base_values[3],
-                        ),
-                        _ => unreachable!("checked slice source"),
-                    }
-                };
+                        }
+                    };
                 let start = match start {
                     Some(start) => lower!(self.scalar(start)),
                     None => self.constant(0),
@@ -5328,6 +5812,9 @@ impl Generator<'_, '_> {
                         return Some(self.union_borrow_call(*spec, values));
                     }
                     Target::Vec(op, element) => return Some(self.vec_call(*op, *element, values)),
+                    Target::AllocVec(op, element) => {
+                        return Some(self.alloc_vec_call(*op, *element, values));
+                    }
                     Target::Slice(op, element) => {
                         return Some(self.slice_call(*op, *element, values));
                     }
@@ -5890,6 +6377,75 @@ impl Generator<'_, '_> {
         self.jump(join, &loaded);
         self.builder.switch_to_block(join);
         self.builder.block_params(join).to_vec()
+    }
+    /// Lower allocator-backed vector operations. Metadata is one stable
+    /// handle; element storage is a user-allocator block reached through the
+    /// imported helpers, so growth and release always use the recorded pair.
+    fn alloc_vec_call(&mut self, op: AllocVecOp, element: Type, values: Words) -> Words {
+        let width = self.program.width(element);
+        match op {
+            AllocVecOp::Len => {
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                vec![self.runtime_call(self.alloc_ops.vec_len, &[handle])]
+            }
+            AllocVecOp::Get => {
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                let out = self.stack_words(width);
+                self.runtime_void(self.alloc_ops.vec_get, &[handle, values[1], out]);
+                self.load_words(out, 0, width)
+            }
+            AllocVecOp::Push => {
+                let item = self.stack_words(width);
+                self.store_words(item, &values[1..1 + width]);
+                let handle = self.runtime_call(self.alloc_ops.vec_push, &[values[0], item]);
+                vec![handle]
+            }
+            AllocVecOp::Set => {
+                let item = self.stack_words(width);
+                self.store_words(item, &values[2..2 + width]);
+                let old = self.stack_words(width);
+                let handle =
+                    self.runtime_call(self.alloc_ops.vec_set, &[values[0], values[1], item, old]);
+                let previous = self.load_words(old, 0, width);
+                self.drop_value(element, &previous);
+                vec![handle]
+            }
+            AllocVecOp::Clear => {
+                let handle = values[0];
+                if self.program.owns(element) {
+                    let length = self
+                        .builder
+                        .ins()
+                        .load(I64, ir::MemFlagsData::new(), handle, 0);
+                    let data = self.runtime_call(self.alloc_ops.vec_data, &[handle]);
+                    let head = self.builder.create_block();
+                    let body = self.builder.create_block();
+                    let done = self.builder.create_block();
+                    self.builder.append_block_param(head, I64);
+                    self.jump(head, &[length]);
+                    self.builder.switch_to_block(head);
+                    let index = self.builder.block_params(head)[0];
+                    let more = self.builder.ins().icmp_imm_s(IntCC::NotEqual, index, 0);
+                    self.builder.ins().brif(more, body, &[], done, &[]);
+                    self.builder.switch_to_block(body);
+                    let previous = self.builder.ins().iadd_imm_s(index, -1);
+                    let stride = self.builder.ins().imul_imm_s(previous, (width * 8) as i64);
+                    let slot = self.builder.ins().iadd(data, stride);
+                    let fields = self.load_words(slot, 0, width);
+                    self.drop_value(element, &fields);
+                    self.jump(head, &[previous]);
+                    self.builder.switch_to_block(done);
+                }
+                self.runtime_void(self.alloc_ops.vec_clear, &[handle]);
+                vec![handle]
+            }
+        }
     }
     fn vec_call(&mut self, op: VecOp, element: Type, values: Words) -> Words {
         let width = self.program.width(element);

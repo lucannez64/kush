@@ -96,6 +96,22 @@ pub(crate) enum Type {
     /// layout never enumerates the trait's members, so adding a generic or
     /// blanket impl instantiation does not change it. See `DynObjectType`.
     DynObj(usize),
+    /// A checked user-defined allocator value: two words, the code pointers of
+    /// a noncapturing `fn(i64) -> Bytes` allocation function and a
+    /// noncapturing `fn(Bytes) -> Unit` release function. It owns nothing, so
+    /// it is copyable; containers store their own copy and never borrow the
+    /// allocator binding.
+    Allocator,
+    /// An owning box whose storage was supplied by a user allocator. Three
+    /// words: the allocation code pointer, the release code pointer, and the
+    /// `Bytes` block that owns the payload storage. Dropping the box destroys
+    /// the payload and releases that block through the stored release
+    /// function exactly once.
+    AllocBox(usize),
+    /// A growable vector whose element storage is supplied and released by a
+    /// user allocator. One word: a handle to checked metadata that records the
+    /// allocator pair, the element block, length, and capacity.
+    AllocVec(usize),
 }
 impl Type {
     /// The admitted symbolic scalar carrier of a runtime type, if any. Only
@@ -346,6 +362,8 @@ pub(crate) enum Target {
     /// Runtime-sized inline array read: `(len, capacity?)` with the element
     /// type used to widen the loaded words.
     DynArray(DynArrayOp, Type),
+    /// User-allocator-backed vector operation with its element type.
+    AllocVec(AllocVecOp, Type),
     Function(usize),
     /// A synthesized borrowed object call reserves its source place while
     /// later arguments evaluate. Mutable calls also return it for write-back.
@@ -538,6 +556,19 @@ pub(crate) enum SliceOp {
     Set,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AllocVecOp {
+    /// Live element count.
+    Len,
+    /// Checked element read; copies a copyable element.
+    Get,
+    /// Append one element, growing the allocator-supplied block if needed.
+    Push,
+    /// Overwrite one live slot, dropping the previous element exactly once.
+    Set,
+    /// Drop every element and retain the block and metadata.
+    Clear,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum DynArrayOp {
     /// Runtime length stored in word zero.
     Len,
@@ -642,6 +673,40 @@ pub(crate) enum ExprKind {
         arena: Box<Expr>,
         value: Box<Expr>,
         shape: ResultShape,
+    },
+    /// Create a user-defined allocator value from two noncapturing functions:
+    /// `alloc(bytes) -> Bytes` supplies a block with at least that capacity, and
+    /// `free(block)` releases it. The value is copyable and owns nothing.
+    AllocatorNew {
+        alloc: Box<Expr>,
+        free: Box<Expr>,
+    },
+    /// Allocate `value` in a block supplied by the allocator. The box stores
+    /// the allocator pair so release always uses the same allocator, even if
+    /// the allocator binding is dropped or moved first.
+    AllocBoxNew {
+        allocator: Box<Expr>,
+        value: Box<Expr>,
+    },
+    /// Fallible user-allocator box construction. A block smaller than the
+    /// payload (including an empty block) is a refusal and returns the
+    /// untouched payload in `Err`.
+    AllocBoxTryNew {
+        allocator: Box<Expr>,
+        value: Box<Expr>,
+        shape: ResultShape,
+    },
+    /// Read a copyable payload through `&AllocBox<T>`.
+    AllocBoxRead(Box<Expr>),
+    /// Move a payload out of an owning `AllocBox<T>` and release its block
+    /// through the stored allocator.
+    AllocBoxTake(Box<Expr>),
+    /// Create an allocator-backed vector. `capacity` is absent for zero
+    /// initial capacity and present for `AllocVec.with_capacity`.
+    AllocVecNew {
+        allocator: Box<Expr>,
+        capacity: Option<Box<Expr>>,
+        element: Type,
     },
     /// Read a copyable payload through an `&ArenaBox<T>`.
     ArenaBoxRead(Box<Expr>),
@@ -1456,6 +1521,18 @@ fn fusion_expr_safe(
         | ExprKind::TaskCheckCancel
         | ExprKind::TaskCancel(_)
         | ExprKind::TaskJoin { .. } => false,
+        // Allocator construction only packages two code pointers, so it is
+        // inert; every container operation can invoke a user callback or
+        // allocate, so it is never fusion-safe.
+        ExprKind::AllocatorNew { alloc, free } => {
+            safe(alloc, signatures, bodies, memo, visiting)
+                && safe(free, signatures, bodies, memo, visiting)
+        }
+        ExprKind::AllocBoxNew { .. }
+        | ExprKind::AllocBoxTryNew { .. }
+        | ExprKind::AllocBoxRead(_)
+        | ExprKind::AllocBoxTake(_)
+        | ExprKind::AllocVecNew { .. } => false,
         ExprKind::FnValue { function, captures } => {
             captures
                 .iter()
@@ -1640,6 +1717,8 @@ fn fuse_expr(
         | ExprKind::BoxTryNew { value, .. }
         | ExprKind::ArenaBoxRead(value)
         | ExprKind::ArenaBoxTake(value)
+        | ExprKind::AllocBoxRead(value)
+        | ExprKind::AllocBoxTake(value)
         | ExprKind::BytesTryWithCapacity {
             capacity: value, ..
         }
@@ -1656,6 +1735,27 @@ fn fuse_expr(
         ExprKind::ArenaAlloc { arena, value } => {
             fuse_expr(arena, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
+        }
+        ExprKind::AllocatorNew { alloc, free } => {
+            fuse_expr(alloc, types, signatures, safety, fusions);
+            fuse_expr(free, types, signatures, safety, fusions);
+        }
+        ExprKind::AllocBoxNew { allocator, value }
+        | ExprKind::AllocBoxTryNew {
+            allocator, value, ..
+        } => {
+            fuse_expr(allocator, types, signatures, safety, fusions);
+            fuse_expr(value, types, signatures, safety, fusions);
+        }
+        ExprKind::AllocVecNew {
+            allocator,
+            capacity,
+            ..
+        } => {
+            fuse_expr(allocator, types, signatures, safety, fusions);
+            if let Some(capacity) = capacity {
+                fuse_expr(capacity, types, signatures, safety, fusions);
+            }
         }
         ExprKind::ArenaNewWith { strategy } => {
             fuse_expr(strategy, types, signatures, safety, fusions);
@@ -15860,6 +15960,55 @@ impl Checker<'_, '_> {
                             None => Ok(value),
                         };
                     }
+                    if let Some((element, capacity)) = expected
+                        .and_then(|ty| ty.layout())
+                        .and_then(|id| c.types.enums[id].dynamic_array)
+                    {
+                        // A contextual literal is the checked construction of
+                        // a runtime-sized inline array. Its static length is at
+                        // most the capacity, so the reused push guards are
+                        // unreachable; no runtime panic can occur and no
+                        // `panic` effect is required.
+                        if values.len() > capacity {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!(
+                                    "DynArray literal has {} elements but the capacity is {capacity}",
+                                    values.len()
+                                ),
+                            ));
+                        }
+                        let literal_ty = c.types.dynamic_array(element, capacity, span)?;
+                        let mut current = Expr {
+                            kind: ExprKind::DynArrayNew {
+                                element,
+                                capacity,
+                            },
+                            ty: literal_ty,
+                            span,
+                            resource: None,
+                        };
+                        for value in values {
+                            let value = c.expr_expected(value, Some(element))?;
+                            c.expect(value.ty, element, value.span)?;
+                            let ty = current.ty;
+                            current = Expr {
+                                kind: ExprKind::DynArrayPush {
+                                    array: Box::new(current),
+                                    value: Box::new(value),
+                                    element,
+                                    capacity,
+                                },
+                                ty,
+                                span,
+                                resource: None,
+                            };
+                        }
+                        return match expected {
+                            Some(expected) => c.coerce(current, expected, span),
+                            None => Ok(current),
+                        };
+                    }
                     return c.vec_literal(values, span, expected);
                 }
                 ast::ExprKind::Index { value, index } => {
@@ -16224,13 +16373,15 @@ impl Checker<'_, '_> {
                                 Type::Box(_)
                                     | Type::Arena
                                     | Type::ArenaBox(_)
+                                    | Type::AllocBox(_)
+                                    | Type::AllocVec(_)
                                     | Type::Bytes
                                     | Type::String
                                     | Type::Vec(_)
                             ) {
                                 return Err(Diagnostic::new(
                                     span,
-                                    "borrowing supports immutable &Box<T>, &Arena, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &Record, and &[T] slice views",
+                                    "borrowing supports immutable &Box<T>, &AllocBox<T>, &AllocVec<T>, &Arena, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &Record, and &[T] slice views",
                                 ));
                             }
                             (ExprKind::Borrow(slot), Type::Ref(c.types.pointer(ty)))
@@ -16608,6 +16759,82 @@ impl Checker<'_, '_> {
                     }
                     if c.functions.declared.contains_key(&id) {
                         return c.user_call(id, explicit, arguments, expected, span);
+                    }
+                    if binding.kind == BindingKind::Builtin
+                        && (binding.name.starts_with("Allocator.")
+                            || binding.name.starts_with("AllocBox.")
+                            || binding.name.starts_with("AllocVec."))
+                    {
+                        if explicit.is_some() {
+                            return Err(Diagnostic::new(
+                                span,
+                                "allocator operations take no explicit type arguments; annotate the binding instead",
+                            ));
+                        }
+                        let name = binding.name.clone();
+                        return match name.as_str() {
+                            "Allocator.new" => {
+                                if arguments.len() != 2 {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        "Allocator.new expects an allocation function and a release function",
+                                    ));
+                                }
+                                c.allocator_new(&arguments[0], &arguments[1], span)
+                            }
+                            "AllocBox.new" | "AllocBox.try_new" => {
+                                if arguments.len() != 2 {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        format!("{name} expects an allocator and one payload"),
+                                    ));
+                                }
+                                if name == "AllocBox.new" {
+                                    c.alloc_box_new(&arguments[0], &arguments[1], expected, span)
+                                } else {
+                                    c.alloc_box_try_new(&arguments[0], &arguments[1], expected, span)
+                                }
+                            }
+                            "AllocBox.read" | "AllocBox.take" => {
+                                if arguments.len() != 1 {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        format!("{name} takes exactly one argument"),
+                                    ));
+                                }
+                                if name == "AllocBox.read" {
+                                    c.alloc_box_read(&arguments[0], span)
+                                } else {
+                                    c.alloc_box_take(&arguments[0], span)
+                                }
+                            }
+                            "AllocVec.new" | "AllocVec.with_capacity" => {
+                                let wanted = if name == "AllocVec.new" { 1 } else { 2 };
+                                if arguments.len() != wanted {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        format!("{name} expects {wanted} argument(s)"),
+                                    ));
+                                }
+                                c.alloc_vec_new(
+                                    &arguments[0],
+                                    arguments.get(1),
+                                    expected,
+                                    span,
+                                )
+                            }
+                            "AllocVec.len"
+                            | "AllocVec.get"
+                            | "AllocVec.push"
+                            | "AllocVec.set"
+                            | "AllocVec.clear" => {
+                                c.alloc_vec_call(&name, arguments, expected, span)
+                            }
+                            _ => Err(Diagnostic::new(
+                                span,
+                                format!("unsupported allocator operation '{name}'"),
+                            )),
+                        };
                     }
                     if binding.kind == BindingKind::Builtin && binding.name.starts_with("Task.") {
                         return c.task_call(&binding.name.clone(), explicit, arguments, expected, span);
@@ -19297,6 +19524,424 @@ impl Checker<'_, '_> {
             span,
             resource: None,
         })
+    }
+    /// Check one allocator callback. Allocation must be a noncapturing
+    /// `fn(i64) -> Bytes` whose body may allocate or panic; release must be a
+    /// pure noncapturing `fn(Bytes) -> Unit`, because release also runs during
+    /// implicit drop and therefore cannot acquire effects the surrounding
+    /// scope did not declare.
+    fn allocator_callback(
+        &mut self,
+        value: &ast::Expr,
+        allocation: bool,
+        span: Span,
+    ) -> Result<Expr> {
+        let checked = self.expr(value)?;
+        let Type::Fn(id) = checked.ty else {
+            return Err(Diagnostic::new(
+                span,
+                if allocation {
+                    "Allocator.new requires a noncapturing 'fn(i64) -> Bytes' allocation function"
+                } else {
+                    "Allocator.new requires a noncapturing 'fn(Bytes) -> Unit' release function"
+                },
+            ));
+        };
+        let signature = self.types.function_types[id].clone();
+        let expected_parameters = if allocation {
+            vec![Type::I64]
+        } else {
+            vec![Type::Bytes]
+        };
+        let expected_result = if allocation { Type::Bytes } else { Type::Unit };
+        if signature.parameters != expected_parameters
+            || signature.result != expected_result
+            || signature.result_grade.is_some()
+            || signature
+                .parameter_grades
+                .iter()
+                .any(|grade| grade.is_some())
+        {
+            return Err(Diagnostic::new(
+                span,
+                if allocation {
+                    "Allocator.new expects an exact noncapturing 'fn(bytes: i64) -> Bytes' allocation function; graded parameters/results and other types are rejected"
+                } else {
+                    "Allocator.new expects an exact noncapturing 'fn(block: Bytes) -> Unit' release function; graded parameters/results and other types are rejected"
+                },
+            ));
+        }
+        let allowed = if allocation { ALLOC | PANIC } else { 0 };
+        if signature.effects & !allowed != 0 {
+            return Err(Diagnostic::new(
+                span,
+                if allocation {
+                    "Allocator.new allocation callbacks may only declare the 'alloc' and 'panic' effects"
+                } else {
+                    "Allocator.new release callbacks must have the empty effect row; release also runs during implicit drop, so it cannot allocate, perform I/O, suspend, or panic"
+                },
+            ));
+        }
+        Ok(checked)
+    }
+    /// Build a user-defined allocator value from an allocation function and a
+    /// release function. The result is copyable: containers store their own
+    /// copy of the pair, so moving or dropping the allocator binding can never
+    /// leave an allocation without its release function.
+    fn allocator_new(&mut self, alloc: &ast::Expr, free: &ast::Expr, span: Span) -> Result<Expr> {
+        let alloc = self.allocator_callback(alloc, true, span)?;
+        let free = self.allocator_callback(free, false, span)?;
+        Ok(Expr {
+            kind: ExprKind::AllocatorNew {
+                alloc: Box::new(alloc),
+                free: Box::new(free),
+            },
+            ty: Type::Allocator,
+            span,
+            resource: None,
+        })
+    }
+    /// Shared payload validation for allocator-backed storage. Linear values
+    /// are rejected because the container must destroy remaining contents
+    /// implicitly; borrowed values are rejected because the block is not a
+    /// provenance-representing record.
+    fn allocator_payload(
+        &mut self,
+        value: ast::Expr,
+        expected_inner: Option<Type>,
+        operation: &str,
+        span: Span,
+    ) -> Result<(Expr, Type)> {
+        let value = self.expr_expected(&value, expected_inner)?;
+        if value.ty == Type::Never {
+            let pointee = self.types.full(value.ty, span)?;
+            return Ok((value, pointee));
+        }
+        if crate::runtime_types::has_borrow(self.types, value.ty) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "{operation} cannot store a borrowed reference, slice view, or borrowed record (including &str text views)"
+                ),
+            ));
+        }
+        if crate::runtime_types::contains_task(self.types, value.ty) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "task handles cannot be stored in {operation}; join them in the scope that owns them"
+                ),
+            ));
+        }
+        let pointee = self.types.full(value.ty, span)?;
+        if self.linear_type(pointee) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "{operation} cannot place the linear value {} in storage that destroys its contents implicitly; consume it explicitly",
+                    self.types.name(pointee)
+                ),
+            ));
+        }
+        if self.value_moves_linear(&value) && self.owned_type(pointee) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "{operation} cannot store an owned payload that may carry a propagated linear obligation; consume it explicitly"
+                ),
+            ));
+        }
+        let value = self.coerce(value, pointee, span)?;
+        Ok((value, pointee))
+    }
+    /// Check `AllocBox.new(allocator, value)`.
+    fn alloc_box_new(
+        &mut self,
+        allocator: &ast::Expr,
+        value: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        self.require(ALLOC | PANIC, span)?;
+        let expected_inner = expected.and_then(|ty| {
+            if let Type::AllocBox(index) = ty {
+                Some(self.types.pointees[index])
+            } else {
+                None
+            }
+        });
+        let allocator = self.expr_expected(allocator, Some(Type::Allocator))?;
+        self.expect(allocator.ty, Type::Allocator, allocator.span)?;
+        let (value, pointee) =
+            self.allocator_payload(value.clone(), expected_inner, "AllocBox.new", span)?;
+        if value.ty == Type::Never {
+            return Ok(Expr {
+                kind: ExprKind::AllocBoxNew {
+                    allocator: Box::new(allocator),
+                    value: Box::new(value),
+                },
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        let ty = Type::AllocBox(self.types.pointer(pointee));
+        let expression = Expr {
+            kind: ExprKind::AllocBoxNew {
+                allocator: Box::new(allocator),
+                value: Box::new(value),
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(expression, expected, span),
+            None => Ok(expression),
+        }
+    }
+    /// Check `AllocBox.try_new(allocator, value)`. A refused block returns the
+    /// untouched payload in `Err`; the allocator value is copyable, so no part
+    /// of the supplied state is lost on either path.
+    fn alloc_box_try_new(
+        &mut self,
+        allocator: &ast::Expr,
+        value: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        self.require(ALLOC | PANIC, span)?;
+        let expected_shape = expected.and_then(|ty| self.types.result(ty, span).ok());
+        let expected_inner = expected_shape.and_then(|shape| match shape.ok {
+            Type::AllocBox(index) => Some(self.types.pointees[index]),
+            _ => None,
+        });
+        let allocator = self.expr_expected(allocator, Some(Type::Allocator))?;
+        self.expect(allocator.ty, Type::Allocator, allocator.span)?;
+        let (value, pointee) =
+            self.allocator_payload(value.clone(), expected_inner, "AllocBox.try_new", span)?;
+        if value.ty == Type::Never {
+            let shape = expected_shape.unwrap_or(ResultShape {
+                ok_tag: 0,
+                err_tag: 1,
+                ok: Type::Unit,
+                error: Type::Unit,
+            });
+            return Ok(Expr {
+                kind: ExprKind::AllocBoxTryNew {
+                    allocator: Box::new(allocator),
+                    value: Box::new(value),
+                    shape,
+                },
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        let ok = Type::AllocBox(self.types.pointer(pointee));
+        let (ty, shape) = self.types.result_type(ok, pointee, span)?;
+        let expression = Expr {
+            kind: ExprKind::AllocBoxTryNew {
+                allocator: Box::new(allocator),
+                value: Box::new(value),
+                shape,
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(expression, expected, span),
+            None => Ok(expression),
+        }
+    }
+    /// Read a copyable payload through `&AllocBox<T>`.
+    fn alloc_box_read(&mut self, value: &ast::Expr, span: Span) -> Result<Expr> {
+        let value = self.expr(value)?;
+        let Type::Ref(index) = value.ty else {
+            return Err(Diagnostic::new(
+                span,
+                "AllocBox.read requires an immutable &AllocBox<T>",
+            ));
+        };
+        let Type::AllocBox(inner) = self.types.pointees[index] else {
+            return Err(Diagnostic::new(
+                span,
+                "AllocBox.read requires an immutable &AllocBox<T>, not another borrow type",
+            ));
+        };
+        let ty = self.types.pointees[inner];
+        if self.owned_type(ty) || self.linear_type(ty) || ty.is_view() {
+            return Err(Diagnostic::new(
+                span,
+                "AllocBox.read copies its payload; owning, linear, and view payloads need AllocBox.take",
+            ));
+        }
+        Ok(Expr {
+            kind: ExprKind::AllocBoxRead(Box::new(value)),
+            ty,
+            span,
+            resource: None,
+        })
+    }
+    /// Move the payload out of an owning `AllocBox<T>`.
+    fn alloc_box_take(&mut self, value: &ast::Expr, span: Span) -> Result<Expr> {
+        let value = self.expr(value)?;
+        let Type::AllocBox(index) = value.ty else {
+            return Err(Diagnostic::new(
+                span,
+                "AllocBox.take requires an owned AllocBox<T>",
+            ));
+        };
+        let ty = self.types.pointees[index];
+        Ok(Expr {
+            kind: ExprKind::AllocBoxTake(Box::new(value)),
+            ty,
+            span,
+            resource: None,
+        })
+    }
+    /// Check allocator-backed vector construction. The element type comes from
+    /// the annotation, exactly like `Vec.new`/`Vec.with_capacity`.
+    fn alloc_vec_new(
+        &mut self,
+        allocator: &ast::Expr,
+        capacity: Option<&ast::Expr>,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        self.require(ALLOC | PANIC, span)?;
+        let element = expected.and_then(|ty| match ty {
+            Type::AllocVec(index) => Some(self.types.pointees[index]),
+            _ => None,
+        });
+        let Some(element) = element else {
+            return Err(Diagnostic::new(
+                span,
+                "cannot infer the AllocVec element type; annotate the binding as AllocVec<T>",
+            ));
+        };
+        let allocator = self.expr_expected(allocator, Some(Type::Allocator))?;
+        self.expect(allocator.ty, Type::Allocator, allocator.span)?;
+        let capacity = match capacity {
+            Some(capacity) => {
+                let capacity = self.expr_expected(capacity, Some(Type::I64))?;
+                self.expect(capacity.ty, Type::I64, capacity.span)?;
+                Some(Box::new(capacity))
+            }
+            None => None,
+        };
+        Ok(Expr {
+            kind: ExprKind::AllocVecNew {
+                allocator: Box::new(allocator),
+                capacity,
+                element,
+            },
+            ty: Type::AllocVec(self.types.pointer(element)),
+            span,
+            resource: None,
+        })
+    }
+    /// Check an `AllocVec` operation. `get`/`len` borrow; `push`/`set`/`clear`
+    /// consume the owning vector and return the same logical container.
+    fn alloc_vec_call(
+        &mut self,
+        name: &str,
+        arguments: &[ast::Expr],
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        let arity = match name {
+            "AllocVec.len" | "AllocVec.clear" => 1,
+            "AllocVec.get" | "AllocVec.push" => 2,
+            "AllocVec.set" => 3,
+            _ => 0,
+        };
+        if arguments.len() != arity {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "{name} expects {arity} argument(s), found {}",
+                    arguments.len()
+                ),
+            ));
+        }
+        let array = self.expr(&arguments[0])?;
+        let element = match (name, array.ty) {
+            ("AllocVec.len" | "AllocVec.get", Type::Ref(index)) => {
+                match self.types.pointees[index] {
+                    Type::AllocVec(pointer) => self.types.pointees[pointer],
+                    _ => {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!("{name} requires a '&AllocVec<T>' borrow"),
+                        ));
+                    }
+                }
+            }
+            ("AllocVec.clear" | "AllocVec.push" | "AllocVec.set", Type::AllocVec(pointer)) => {
+                self.types.pointees[pointer]
+            }
+            (_, ty) => {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "{name} requires an AllocVec<T> value, found {}",
+                        self.types.name(ty)
+                    ),
+                ));
+            }
+        };
+        let operation = match name {
+            "AllocVec.len" => AllocVecOp::Len,
+            "AllocVec.get" => AllocVecOp::Get,
+            "AllocVec.push" => AllocVecOp::Push,
+            "AllocVec.set" => AllocVecOp::Set,
+            _ => AllocVecOp::Clear,
+        };
+        if matches!(operation, AllocVecOp::Push | AllocVecOp::Clear) {
+            self.require(ALLOC | PANIC, span)?;
+        }
+        if matches!(operation, AllocVecOp::Get) {
+            if self.owned_type(element) || self.linear_type(element) || element.is_view() {
+                return Err(Diagnostic::new(
+                    span,
+                    "AllocVec.get copies its element; owning, linear, and view elements need an explicit consuming operation",
+                ));
+            }
+            self.require(PANIC, span)?;
+        }
+        let mut values = vec![array];
+        if matches!(operation, AllocVecOp::Get | AllocVecOp::Set) {
+            let index = self.expr_expected(&arguments[1], Some(Type::I64))?;
+            self.expect(index.ty, Type::I64, index.span)?;
+            values.push(index);
+        }
+        if matches!(operation, AllocVecOp::Push | AllocVecOp::Set) {
+            let value = self.expr_expected(
+                &arguments[2 - usize::from(operation == AllocVecOp::Push)],
+                Some(element),
+            )?;
+            self.expect(value.ty, element, value.span)?;
+            values.push(value);
+        }
+        let ty = match operation {
+            AllocVecOp::Len => Type::I64,
+            AllocVecOp::Get => element,
+            AllocVecOp::Push | AllocVecOp::Set | AllocVecOp::Clear => {
+                Type::AllocVec(self.types.pointer(element))
+            }
+        };
+        let value = Expr {
+            kind: ExprKind::Call(Target::AllocVec(operation, element), values),
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(value, expected, span),
+            None => Ok(value),
+        }
     }
     /// Strip the checker-only lifetime annotation from a container element.
     /// The annotation has no runtime representation and never reaches a
@@ -22167,6 +22812,30 @@ impl Checker<'_, '_> {
                     element,
                     Some(length),
                 )
+            } else if let Some((element, _capacity)) = ty
+                .layout()
+                .and_then(|id| self.types.enums[id].dynamic_array)
+            {
+                if mutable {
+                    return Err(Diagnostic::new(
+                        value.span,
+                        "a DynArray does not expose a mutable '&mut [T]' view; use DynArray.set for checked in-place writes",
+                    ));
+                }
+                // The view covers the live prefix: its length is the runtime
+                // length word, not the compile-time capacity. A reborrow via
+                // `Borrow` keeps the owner loaned for the view's lexical scope,
+                // so push/pop/assignment cannot run while the view is live.
+                (
+                    Expr {
+                        kind: ExprKind::Borrow(slot),
+                        ty: Type::Ref(self.types.pointer(ty)),
+                        span: value.span,
+                        resource: None,
+                    },
+                    element,
+                    None,
+                )
             } else if let Type::Vec(pointer) = ty {
                 let element = self.types.pointees[pointer];
                 let owner = self.types.pointer(ty);
@@ -24746,6 +25415,15 @@ impl Checker<'_, '_> {
                 });
             }
             if let ast::PatternKind::Slice(parts) = &pattern.kind {
+                if ty
+                    .layout()
+                    .is_some_and(|id| c.types.enums[id].dynamic_array.is_some())
+                {
+                    return Err(Diagnostic::new(
+                        pattern.span,
+                        "DynArray patterns are not supported: the runtime length is not a static variant tag; read DynArray.len and DynArray.get instead",
+                    ));
+                }
                 let Some((element, length)) = ty.layout().and_then(|id| c.types.enums[id].array)
                 else {
                     return Err(Diagnostic::new(
@@ -24891,6 +25569,8 @@ impl Executable {
             Type::Box(_)
             | Type::Arena
             | Type::ArenaBox(_)
+            | Type::AllocBox(_)
+            | Type::AllocVec(_)
             | Type::Bytes
             | Type::String
             | Type::Vec(_)
@@ -25024,6 +25704,8 @@ fn block_allocates(block: &Block) -> bool {
             | ExprKind::BoxRead(value)
             | ExprKind::ArenaBoxRead(value)
             | ExprKind::ArenaBoxTake(value)
+            | ExprKind::AllocBoxRead(value)
+            | ExprKind::AllocBoxTake(value)
             | ExprKind::Drop(value)
             | ExprKind::Project(value, _)
             | ExprKind::Coerce { value, .. }
@@ -25035,6 +25717,15 @@ fn block_allocates(block: &Block) -> bool {
             | ExprKind::ArenaAlloc {
                 arena: owner,
                 value: payload,
+            }
+            | ExprKind::AllocBoxNew {
+                allocator: owner,
+                value: payload,
+            }
+            | ExprKind::AllocBoxTryNew {
+                allocator: owner,
+                value: payload,
+                ..
             } => expr(owner) || expr(payload),
             ExprKind::ArenaNew
             | ExprKind::ArenaNewWith { .. }

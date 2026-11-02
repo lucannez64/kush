@@ -221,6 +221,9 @@ fn useful(
             Type::Box(_)
             | Type::Arena
             | Type::ArenaBox(_)
+            | Type::Allocator
+            | Type::AllocBox(_)
+            | Type::AllocVec(_)
             | Type::Ref(_)
             | Type::RefMut(_)
             | Type::Annotated(_, _)

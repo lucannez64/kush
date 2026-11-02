@@ -429,10 +429,12 @@ fn referent_of(pointees: &[Type], ty: Type) -> Option<Type> {
 /// element. Borrowed records are handled separately by their layout flag.
 fn container_carries_borrow(pointees: &[Type], ty: Type) -> bool {
     match ty {
-        Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => match pointees[p] {
-            Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) | Type::Str => true,
-            inner => container_carries_borrow(pointees, inner),
-        },
+        Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) | Type::AllocBox(p) | Type::AllocVec(p) => {
+            match pointees[p] {
+                Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) | Type::Str => true,
+                inner => container_carries_borrow(pointees, inner),
+            }
+        }
         _ => false,
     }
 }
@@ -561,9 +563,11 @@ fn leaves_of(
                     .cloned(),
                 mutable: matches!(pointees[p], Type::RefMut(_)),
             }),
-            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
-                go(enums, pointees, labels, pointees[p], None, path, out)
-            }
+            Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p) => go(enums, pointees, labels, pointees[p], None, path, out),
             Type::Enum(id) | Type::Variants(id, _)
                 if enums[id].record || enums[id].name == "TaskExit" =>
             {
@@ -629,6 +633,8 @@ fn owns(
         Type::Box(_)
         | Type::Arena
         | Type::ArenaBox(_)
+        | Type::AllocBox(_)
+        | Type::AllocVec(_)
         | Type::Bytes
         | Type::String
         | Type::Vec(_)
@@ -652,7 +658,7 @@ fn is_linear(
     dyn_linear: &[bool],
 ) -> bool {
     match ty {
-        Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
+        Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) | Type::AllocBox(p) | Type::AllocVec(p) => {
             is_linear(pointees[p], enums, unions, pointees, functions, dyn_linear)
         }
         Type::Enum(id) | Type::Variants(id, _) => enums[id],
@@ -1388,9 +1394,11 @@ impl Checker<'_> {
     fn element_carries_borrow(&self, ty: Type) -> bool {
         match ty {
             Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) | Type::Str => true,
-            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
-                self.element_carries_borrow(self.pointees[p])
-            }
+            Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p) => self.element_carries_borrow(self.pointees[p]),
             _ => false,
         }
     }
@@ -3846,6 +3854,39 @@ impl Checker<'_> {
                 self.loans = loans;
             }
             ExprKind::ArenaBoxTake(value) => self.expr(value)?,
+            ExprKind::AllocatorNew { alloc, free } => {
+                self.expr(alloc)?;
+                self.expr(free)?;
+            }
+            ExprKind::AllocBoxNew { allocator, value }
+            | ExprKind::AllocBoxTryNew {
+                allocator, value, ..
+            } => {
+                self.expr(allocator)?;
+                self.expr(value)?;
+            }
+            ExprKind::AllocBoxRead(value) => {
+                if self.moves(expr.ty) {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "AllocBox.read cannot copy an owned payload (or a linear one); consume it with AllocBox.take",
+                    ));
+                }
+                let loans = self.loans.clone();
+                self.expr(value)?;
+                self.loans = loans;
+            }
+            ExprKind::AllocBoxTake(value) => self.expr(value)?,
+            ExprKind::AllocVecNew {
+                allocator,
+                capacity,
+                ..
+            } => {
+                self.expr(allocator)?;
+                if let Some(capacity) = capacity {
+                    self.expr(capacity)?;
+                }
+            }
             ExprKind::VecMap {
                 vector, callbacks, ..
             } => {
@@ -5575,6 +5616,30 @@ fn expr_live(
         ExprKind::ArenaNew => {}
         ExprKind::ArenaNewWith { strategy } => {
             live = expr_live(strategy, live_after, views, heads, exits, out);
+        }
+        ExprKind::AllocatorNew { alloc, free } => {
+            live = expr_live(free, live_after, views, heads, exits, out);
+            live = expr_live(alloc, &live, views, heads, exits, out);
+        }
+        ExprKind::AllocBoxNew { allocator, value }
+        | ExprKind::AllocBoxTryNew {
+            allocator, value, ..
+        } => {
+            live = expr_live(value, live_after, views, heads, exits, out);
+            live = expr_live(allocator, &live, views, heads, exits, out);
+        }
+        ExprKind::AllocBoxRead(value) | ExprKind::AllocBoxTake(value) => {
+            live = expr_live(value, live_after, views, heads, exits, out);
+        }
+        ExprKind::AllocVecNew {
+            allocator,
+            capacity,
+            ..
+        } => {
+            if let Some(capacity) = capacity {
+                live = expr_live(capacity, live_after, views, heads, exits, out);
+            }
+            live = expr_live(allocator, &live, views, heads, exits, out);
         }
         ExprKind::DynArrayNew { .. } => {}
         ExprKind::DynArrayPush { array, value, .. } => {
