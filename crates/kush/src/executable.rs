@@ -4807,6 +4807,7 @@ fn validate_impl_pattern(
     types: &Types<'_>,
     pattern: &ast::Type,
     generics: &BTreeSet<BindingId>,
+    const_binders: &BTreeSet<BindingId>,
     what: &str,
 ) -> Result<()> {
     match &pattern.kind {
@@ -4857,24 +4858,31 @@ fn validate_impl_pattern(
                 }
             }
             for argument in arguments {
-                validate_impl_pattern(resolution, types, argument, generics, what)?;
+                validate_impl_pattern(resolution, types, argument, generics, const_binders, what)?;
             }
             Ok(())
         }
         ast::TypeKind::Tuple(items) => {
             for item in items {
-                validate_impl_pattern(resolution, types, item, generics, what)?;
+                validate_impl_pattern(resolution, types, item, generics, const_binders, what)?;
             }
             Ok(())
         }
         ast::TypeKind::Array(element, length) => {
-            validate_impl_pattern(resolution, types, element, generics, what)?;
-            if !matches!(length.kind, ast::TypeKind::Integer(_)) {
+            validate_impl_pattern(resolution, types, element, generics, const_binders, what)?;
+            // A header length may be a literal or a bare natural parameter.
+            // Arithmetic would make declaration-time coherence depend on an
+            // evaluator, so it is rejected here and must be written into the
+            // trait arguments or a concrete array length instead.
+            let simple = matches!(length.kind, ast::TypeKind::Integer(_))
+                || pattern_binder(resolution, length).is_some_and(|id| const_binders.contains(&id));
+            if !simple {
                 return Err(Diagnostic::new(
                     length.span,
-                    "a generic impl header array length must be an integer literal",
+                    "an impl header array length must be an integer literal or a natural parameter",
                 ));
             }
+            validate_length_template(resolution, length, const_binders)?;
             Ok(())
         }
         ast::TypeKind::Integer(_) | ast::TypeKind::Bool(_) => Ok(()),
@@ -4915,33 +4923,96 @@ fn pattern_binder(resolution: &Resolution, ty: &ast::Type) -> Option<BindingId> 
     let id = resolution.reference(ty.span)?;
     (resolution.bindings[id].kind == BindingKind::Generic).then_some(id)
 }
-/// Whether a pattern still contains a generic binder absent from `substitution`.
+/// Bindings produced by matching one impl header pattern. Type, natural,
+/// grade, and effect parameters are solved together because a single header may
+/// mention all four categories while its receiver and trait arguments must agree
+/// on each binding.
+#[derive(Debug, Clone, Default)]
+struct PatternBindings {
+    types: BTreeMap<BindingId, Type>,
+    consts: BTreeMap<BindingId, usize>,
+    grades: BTreeMap<BindingId, Grade>,
+    effects: BTreeMap<BindingId, u8>,
+}
+impl PatternBindings {
+    fn subst(&self) -> crate::runtime_types::Subst {
+        crate::runtime_types::Subst {
+            types: self.types.clone(),
+            consts: self.consts.clone(),
+            grades: self.grades.clone(),
+            effects: self.effects.clone(),
+            ..Default::default()
+        }
+    }
+}
+/// Whether a pattern still contains a generic binder absent from `bindings`.
 fn pattern_has_unbound(
     resolution: &Resolution,
     ty: &ast::Type,
-    substitution: &BTreeMap<BindingId, Type>,
+    bindings: &PatternBindings,
 ) -> bool {
     if let Some(id) = pattern_binder(resolution, ty) {
-        return !substitution.contains_key(&id);
+        return !bindings.types.contains_key(&id);
     }
     match &ty.kind {
         ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => arguments
             .iter()
-            .any(|argument| pattern_has_unbound(resolution, argument, substitution)),
+            .any(|argument| pattern_has_unbound(resolution, argument, bindings)),
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => {
-            pattern_has_unbound(resolution, inner, substitution)
+            pattern_has_unbound(resolution, inner, bindings)
         }
-        ast::TypeKind::Borrow { inner, .. } => pattern_has_unbound(resolution, inner, substitution),
+        ast::TypeKind::Borrow { inner, .. } => pattern_has_unbound(resolution, inner, bindings),
         ast::TypeKind::Array(inner, length) => {
-            pattern_has_unbound(resolution, inner, substitution)
-                || pattern_has_unbound(resolution, length, substitution)
+            pattern_has_unbound(resolution, inner, bindings)
+                || pattern_has_unbound(resolution, length, bindings)
         }
         ast::TypeKind::Binary { left, right, .. } => {
-            pattern_has_unbound(resolution, left, substitution)
-                || pattern_has_unbound(resolution, right, substitution)
+            pattern_has_unbound(resolution, left, bindings)
+                || pattern_has_unbound(resolution, right, bindings)
         }
         _ => false,
     }
+}
+/// Match one compile-time natural pattern (an array length or a `Nat` trait
+/// argument). A bare unbound natural binder captures `actual`; any other
+/// pattern must evaluate to that exact natural under the bindings already
+/// solved.
+fn match_const_pattern(
+    resolution: &Resolution,
+    logical: &crate::check::LogicalEnvironment,
+    pattern: &ast::Type,
+    actual: usize,
+    bindings: &mut PatternBindings,
+) -> Result<bool> {
+    if let Some(id) = pattern_binder(resolution, pattern) {
+        if let Some(existing) = bindings.consts.get(&id) {
+            return Ok(*existing == actual);
+        }
+        bindings.consts.insert(id, actual);
+        return Ok(true);
+    }
+    let subst = bindings.subst();
+    let expected = crate::length::eval_type(resolution, logical, &subst.consts, pattern)?;
+    Ok(expected == actual)
+}
+/// Match one grade pattern (a `Grade` trait argument). A bare unbound grade
+/// binder captures `actual`; any other pattern must evaluate to that grade under
+/// the bindings already solved.
+fn match_grade_pattern(
+    resolution: &Resolution,
+    pattern: &ast::Type,
+    actual: Grade,
+    bindings: &mut PatternBindings,
+) -> Result<bool> {
+    if let Some(id) = pattern_binder(resolution, pattern) {
+        if let Some(existing) = bindings.grades.get(&id) {
+            return Ok(*existing == actual);
+        }
+        bindings.grades.insert(id, actual);
+        return Ok(true);
+    }
+    let grades = crate::grades::evaluate(resolution, &bindings.grades, pattern)?;
+    Ok(grades == actual)
 }
 /// First-order match of an impl type pattern against a concrete runtime type.
 fn match_type_pattern(
@@ -4949,7 +5020,7 @@ fn match_type_pattern(
     types: &mut Types<'_>,
     pattern: &ast::Type,
     actual: Type,
-    substitution: &mut BTreeMap<BindingId, Type>,
+    bindings: &mut PatternBindings,
     depth: usize,
 ) -> Result<bool> {
     if depth >= 64 {
@@ -4959,7 +5030,7 @@ fn match_type_pattern(
         ));
     }
     if let Some(id) = pattern_binder(resolution, pattern) {
-        if let Some(existing) = substitution.get(&id) {
+        if let Some(existing) = bindings.types.get(&id) {
             return Ok(*existing == actual);
         }
         if actual == Type::Never
@@ -4968,14 +5039,11 @@ fn match_type_pattern(
         {
             return Ok(false);
         }
-        substitution.insert(id, actual.full());
+        bindings.types.insert(id, actual.full());
         return Ok(true);
     }
-    if !pattern_has_unbound(resolution, pattern, substitution) {
-        let subst = crate::runtime_types::Subst {
-            types: substitution.clone(),
-            ..Default::default()
-        };
+    if !pattern_has_unbound(resolution, pattern, bindings) {
+        let subst = bindings.subst();
         return Ok(types.ty_in(pattern, &subst)? == actual);
     }
     match &pattern.kind {
@@ -4995,7 +5063,7 @@ fn match_type_pattern(
                         types,
                         &arguments[0],
                         pointee,
-                        substitution,
+                        bindings,
                         depth + 1,
                     )
                 }
@@ -5012,17 +5080,13 @@ fn match_type_pattern(
                             let Some(value) = actual_consts.next() else {
                                 return Ok(false);
                             };
-                            let subst = crate::runtime_types::Subst {
-                                types: substitution.clone(),
-                                ..Default::default()
-                            };
-                            let expected = crate::length::eval_type(
+                            if !match_const_pattern(
                                 resolution,
                                 types.logical(),
-                                &subst.consts,
                                 argument,
-                            )?;
-                            if expected != *value {
+                                *value,
+                                bindings,
+                            )? {
                                 return Ok(false);
                             }
                         } else {
@@ -5034,7 +5098,7 @@ fn match_type_pattern(
                                 types,
                                 argument,
                                 *actual,
-                                substitution,
+                                bindings,
                                 depth + 1,
                             )? {
                                 return Ok(false);
@@ -5055,7 +5119,7 @@ fn match_type_pattern(
                 return Ok(false);
             }
             for (item, element) in items.iter().zip(elements) {
-                if !match_type_pattern(resolution, types, item, element, substitution, depth + 1)? {
+                if !match_type_pattern(resolution, types, item, element, bindings, depth + 1)? {
                     return Ok(false);
                 }
             }
@@ -5068,21 +5132,17 @@ fn match_type_pattern(
             let Some((actual_element, actual_length)) = types.enums[layout].array else {
                 return Ok(false);
             };
-            let subst = crate::runtime_types::Subst {
-                types: substitution.clone(),
-                ..Default::default()
-            };
-            let expected =
-                crate::length::eval_type(resolution, types.logical(), &subst.consts, length)?;
-            Ok(expected == actual_length
-                && match_type_pattern(
-                    resolution,
-                    types,
-                    element,
-                    actual_element,
-                    substitution,
-                    depth + 1,
-                )?)
+            Ok(
+                match_const_pattern(resolution, types.logical(), length, actual_length, bindings)?
+                    && match_type_pattern(
+                        resolution,
+                        types,
+                        element,
+                        actual_element,
+                        bindings,
+                        depth + 1,
+                    )?,
+            )
         }
         _ => Ok(false),
     }
@@ -5097,7 +5157,7 @@ fn match_trait_argument_patterns(
     generics: &[ast::Generic],
     patterns: &[ast::Type],
     required: &TraitArguments,
-    substitution: &mut BTreeMap<BindingId, Type>,
+    bindings: &mut PatternBindings,
 ) -> Result<bool> {
     if patterns.len() != generics.len() {
         return Ok(false);
@@ -5110,7 +5170,7 @@ fn match_trait_argument_patterns(
                     return Ok(false);
                 };
                 type_index += 1;
-                if !match_type_pattern(resolution, types, pattern, *actual, substitution, 0)? {
+                if !match_type_pattern(resolution, types, pattern, *actual, bindings, 0)? {
                     return Ok(false);
                 }
             }
@@ -5119,12 +5179,7 @@ fn match_trait_argument_patterns(
                     return Ok(false);
                 };
                 const_index += 1;
-                let subst = crate::runtime_types::Subst {
-                    types: substitution.clone(),
-                    ..Default::default()
-                };
-                if crate::length::eval_type(resolution, logical, &subst.consts, pattern)? != *actual
-                {
+                if !match_const_pattern(resolution, logical, pattern, *actual, bindings)? {
                     return Ok(false);
                 }
             }
@@ -5133,8 +5188,7 @@ fn match_trait_argument_patterns(
                     return Ok(false);
                 };
                 grade_index += 1;
-                let grades = crate::grades::evaluate(resolution, &BTreeMap::new(), pattern)?;
-                if grades != *actual {
+                if !match_grade_pattern(resolution, pattern, *actual, bindings)? {
                     return Ok(false);
                 }
             }
@@ -5143,10 +5197,20 @@ fn match_trait_argument_patterns(
                     return Ok(false);
                 };
                 effect_index += 1;
+                if let Some(id) = pattern_binder(resolution, pattern) {
+                    if let Some(existing) = bindings.effects.get(&id) {
+                        if *existing != *actual {
+                            return Ok(false);
+                        }
+                    } else {
+                        bindings.effects.insert(id, *actual);
+                    }
+                    continue;
+                }
                 let effects = crate::runtime_types::effect_bits_with(
                     resolution,
                     std::slice::from_ref(pattern),
-                    &BTreeMap::new(),
+                    &bindings.effects,
                 )?;
                 if effects != *actual {
                     return Ok(false);
@@ -5155,6 +5219,81 @@ fn match_trait_argument_patterns(
         }
     }
     Ok(true)
+}
+/// Pack solved header bindings into the category-ordered impl argument list.
+/// Missing type bindings cannot occur for a constrained header; a missing
+/// const/grade binding falls back to the category identity only so diagnostics
+/// stay deterministic instead of indexing out of bounds.
+fn solved_impl_arguments(
+    resolution: &Resolution,
+    generics: &[ast::Generic],
+    bindings: &PatternBindings,
+) -> ImplArguments {
+    let mut out = ImplArguments::default();
+    for generic in generics {
+        let binder = resolution.binder(generic.span).unwrap();
+        match generic_category(resolution, generic) {
+            GenericCategory::Type => out
+                .types
+                .push(bindings.types.get(&binder).copied().unwrap_or(Type::Unit)),
+            GenericCategory::Const => out
+                .consts
+                .push(bindings.consts.get(&binder).copied().unwrap_or(0)),
+            GenericCategory::Grade => out.grades.push(
+                bindings
+                    .grades
+                    .get(&binder)
+                    .copied()
+                    .unwrap_or(Grade::Finite(0)),
+            ),
+            GenericCategory::Effect => out
+                .effects
+                .push(bindings.effects.get(&binder).copied().unwrap_or(0)),
+        }
+    }
+    out
+}
+/// Build the full substitution of one solved impl header: type, natural, grade,
+/// and effect parameters in declaration order.
+fn impl_arguments_subst(
+    resolution: &Resolution,
+    generics: &[ast::Generic],
+    arguments: &ImplArguments,
+) -> crate::runtime_types::Subst {
+    let mut out = crate::runtime_types::Subst::default();
+    let (mut type_index, mut const_index, mut grade_index, mut effect_index) = (0, 0, 0, 0);
+    for generic in generics {
+        let Some(binder) = resolution.binder(generic.span) else {
+            continue;
+        };
+        match generic_category(resolution, generic) {
+            GenericCategory::Type => {
+                if let Some(ty) = arguments.types.get(type_index) {
+                    out.types.insert(binder, *ty);
+                }
+                type_index += 1;
+            }
+            GenericCategory::Const => {
+                if let Some(value) = arguments.consts.get(const_index) {
+                    out.consts.insert(binder, *value);
+                }
+                const_index += 1;
+            }
+            GenericCategory::Grade => {
+                if let Some(value) = arguments.grades.get(grade_index) {
+                    out.grades.insert(binder, *value);
+                }
+                grade_index += 1;
+            }
+            GenericCategory::Effect => {
+                if let Some(value) = arguments.effects.get(effect_index) {
+                    out.effects.insert(binder, *value);
+                }
+                effect_index += 1;
+            }
+        }
+    }
+    out
 }
 /// Replace a mapped binder and recursively expand its value.
 fn expand_pattern(
@@ -5425,31 +5564,15 @@ fn collect_generic_impl<'a>(
 ) -> Result<Vec<BindingId>> {
     let mut generic_ids = BTreeSet::new();
     for generic in generics {
-        match generic_category(resolution, generic) {
-            GenericCategory::Type => {}
-            GenericCategory::Const => {
-                return Err(Diagnostic::new(
-                    generic.span,
-                    "generic impl headers support type parameters only; const, grade, and effect parameters need a future coherence rule",
-                ));
-            }
-            GenericCategory::Grade => {
-                return Err(Diagnostic::new(
-                    generic.span,
-                    "generic impl headers support type parameters only; const, grade, and effect parameters need a future coherence rule",
-                ));
-            }
-            GenericCategory::Effect => {
-                return Err(Diagnostic::new(
-                    generic.span,
-                    "generic impl headers support type parameters only; const, grade, and effect parameters need a future coherence rule",
-                ));
-            }
-        }
+        // Every binder category is admitted. Dispatch solves a natural from an
+        // array length or `Nat` trait argument, a grade from a `Grade` trait
+        // argument, and an effect row from an effect argument; a parameter that
+        // no pattern determines is rejected by the constrained-parameter check
+        // below.
         if generic.excludes.is_some() {
             return Err(Diagnostic::new(
                 generic.span,
-                "effect-exclusion bounds are not supported on impl type parameters",
+                "effect-exclusion bounds are not supported on impl parameters",
             ));
         }
         let id = resolution
@@ -5463,10 +5586,35 @@ fn collect_generic_impl<'a>(
                     "impl parameter bound did not resolve",
                 ));
             };
-            if resolution.bindings[bound_id].kind != BindingKind::Trait {
+            let binding = &resolution.bindings[bound_id];
+            if binding.kind == BindingKind::Builtin {
+                let expected = match generic_category(resolution, generic) {
+                    GenericCategory::Type => "Type",
+                    GenericCategory::Const => "Nat",
+                    GenericCategory::Grade => "Grade",
+                    GenericCategory::Effect => "Effects",
+                };
+                if binding.name != expected {
+                    return Err(Diagnostic::new(
+                        bound.span,
+                        format!(
+                            "impl parameter '{}' must be bounded by '{expected}' for its category",
+                            generic.name
+                        ),
+                    ));
+                }
+                continue;
+            }
+            if binding.kind != BindingKind::Trait {
                 return Err(Diagnostic::new(
                     bound.span,
                     "impl type parameters may be bounded only by declared traits, as in 'impl<T: Show> Show for Box<T>'",
+                ));
+            }
+            if generic_category(resolution, generic) != GenericCategory::Type {
+                return Err(Diagnostic::new(
+                    bound.span,
+                    "only an ordinary type parameter may carry a trait bound on an impl header",
                 ));
             }
             let arguments = match &bound.kind {
@@ -5526,9 +5674,28 @@ fn collect_generic_impl<'a>(
             ));
         }
     }
-    validate_impl_pattern(resolution, types, self_ty, &generic_ids, "self type")?;
+    let const_binders = generics
+        .iter()
+        .filter(|generic| is_const_generic(resolution, generic))
+        .filter_map(|generic| resolution.binder(generic.span))
+        .collect::<BTreeSet<_>>();
+    validate_impl_pattern(
+        resolution,
+        types,
+        self_ty,
+        &generic_ids,
+        &const_binders,
+        "self type",
+    )?;
     for argument in &trait_argument_ast {
-        validate_impl_pattern(resolution, types, argument, &generic_ids, "trait argument")?;
+        validate_impl_pattern(
+            resolution,
+            types,
+            argument,
+            &generic_ids,
+            &const_binders,
+            "trait argument",
+        )?;
     }
     // Every declared parameter must be determined by the self type or the
     // trait arguments. An unconstrained parameter would make dispatch choose
@@ -6067,14 +6234,7 @@ impl<'a> Functions<'a> {
             return Ok(*index);
         }
         let definition = self.impl_headers[header].clone();
-        let mut type_map = BTreeMap::new();
-        for (generic, ty) in definition.generics.iter().zip(&arguments.types) {
-            type_map.insert(resolution.binder(generic.span).unwrap(), *ty);
-        }
-        let substitution = crate::runtime_types::Subst {
-            types: type_map.clone(),
-            ..Default::default()
-        };
+        let substitution = impl_arguments_subst(resolution, &definition.generics, &arguments);
         let self_type = types.ty_in(&definition.self_ty, &substitution)?;
         let trait_arguments = match definition.trait_id {
             Some(trait_id) => {
@@ -6151,13 +6311,13 @@ impl<'a> Functions<'a> {
             if header.trait_id != Some(trait_id) || header.concrete.is_some() {
                 continue;
             }
-            let mut substitution = BTreeMap::new();
+            let mut bindings = PatternBindings::default();
             if !match_type_pattern(
                 resolution,
                 types,
                 &header.self_ty,
                 self_ty,
-                &mut substitution,
+                &mut bindings,
                 0,
             )? {
                 continue;
@@ -6169,23 +6329,11 @@ impl<'a> Functions<'a> {
                 &definition.generics,
                 &header.trait_arguments,
                 required,
-                &mut substitution,
+                &mut bindings,
             )? {
                 continue;
             }
-            let solved = ImplArguments {
-                types: header
-                    .generics
-                    .iter()
-                    .map(|generic| {
-                        substitution
-                            .get(&resolution.binder(generic.span).unwrap())
-                            .copied()
-                            .unwrap_or(Type::Unit)
-                    })
-                    .collect(),
-                ..Default::default()
-            };
+            let solved = solved_impl_arguments(resolution, &header.generics, &bindings);
             let mut bounds_hold = true;
             for generic in &header.generics {
                 let Some(bound) = &generic.bound else {
@@ -6202,10 +6350,7 @@ impl<'a> Functions<'a> {
                     _ => Vec::new(),
                 };
                 let bound_generics = self.traits[&bound_trait].generics.clone();
-                let subst = crate::runtime_types::Subst {
-                    types: substitution.clone(),
-                    ..Default::default()
-                };
+                let subst = bindings.subst();
                 let required_bound = evaluate_trait_arguments(
                     types,
                     resolution,
@@ -6216,7 +6361,8 @@ impl<'a> Functions<'a> {
                     &resolution.bindings[bound_trait].name,
                     generic.span,
                 )?;
-                let actual = substitution
+                let actual = bindings
+                    .types
                     .get(&resolution.binder(generic.span).unwrap())
                     .copied()
                     .expect("matched header parameter is solved");
@@ -6256,30 +6402,34 @@ impl<'a> Functions<'a> {
         if header.concrete.is_some() {
             return Ok(None);
         }
-        let mut substitution = BTreeMap::new();
+        let mut bindings = PatternBindings::default();
         if !match_type_pattern(
             resolution,
             types,
             &header.self_ty,
             self_ty,
-            &mut substitution,
+            &mut bindings,
             0,
         )? {
             return Ok(None);
         }
-        let arguments = ImplArguments {
-            types: header
-                .generics
-                .iter()
-                .map(|generic| {
-                    substitution
-                        .get(&resolution.binder(generic.span).unwrap())
-                        .copied()
-                        .unwrap_or(Type::Unit)
-                })
-                .collect(),
-            ..Default::default()
-        };
+        // Unqualified dispatch sees only the receiver. A parameter determined
+        // solely by a trait argument cannot be solved here; returning `None`
+        // leaves the call to explicit qualification instead of instantiating an
+        // arbitrary representative.
+        for generic in &header.generics {
+            let binder = resolution.binder(generic.span).unwrap();
+            let solved = match generic_category(resolution, generic) {
+                GenericCategory::Type => bindings.types.contains_key(&binder),
+                GenericCategory::Const => bindings.consts.contains_key(&binder),
+                GenericCategory::Grade => bindings.grades.contains_key(&binder),
+                GenericCategory::Effect => bindings.effects.contains_key(&binder),
+            };
+            if !solved {
+                return Ok(None);
+            }
+        }
+        let arguments = solved_impl_arguments(resolution, &header.generics, &bindings);
         for generic in &header.generics {
             let Some(bound) = &generic.bound else {
                 continue;
@@ -6295,10 +6445,7 @@ impl<'a> Functions<'a> {
                 _ => Vec::new(),
             };
             let bound_generics = self.traits[&bound_trait].generics.clone();
-            let subst = crate::runtime_types::Subst {
-                types: substitution.clone(),
-                ..Default::default()
-            };
+            let subst = bindings.subst();
             let required = evaluate_trait_arguments(
                 types,
                 resolution,
@@ -6309,7 +6456,8 @@ impl<'a> Functions<'a> {
                 &resolution.bindings[bound_trait].name,
                 generic.span,
             )?;
-            let actual = substitution
+            let actual = bindings
+                .types
                 .get(&resolution.binder(generic.span).unwrap())
                 .copied()
                 .expect("matched header parameter is solved");
@@ -6347,14 +6495,9 @@ impl<'a> Functions<'a> {
         {
             return Ok(self.impl_instantiations[*index].trait_arguments.clone());
         }
-        let mut type_map = BTreeMap::new();
-        for (generic, ty) in header.generics.iter().zip(&arguments.types) {
-            type_map.insert(resolution.binder(generic.span).unwrap(), *ty);
-        }
-        let subst = crate::runtime_types::Subst {
-            types: type_map,
-            ..Default::default()
-        };
+        let subst = impl_arguments_subst(resolution, &header.generics, arguments);
+        // The trait arguments may themselves mention impl type parameters; the
+        // substitution above already covers every category.
         let generics = self.traits[&trait_id].generics.clone();
         evaluate_trait_arguments(
             types,

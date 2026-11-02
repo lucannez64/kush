@@ -557,6 +557,72 @@ fn associated_type_default_cycles_and_invalid_defaults_are_rejected() {
 }
 
 #[test]
+fn impl_headers_may_carry_natural_and_grade_parameters() {
+    agrees(
+        r#"
+        struct Buffer<N: Nat> { data: [i64; N] }
+        trait First { fn first(self: Self) -> i64 ! {panic}; }
+        impl<N: Nat> First for Buffer<N> {
+            fn first(self: Self) -> i64 ! {panic} { self.data[0] }
+        }
+        struct Point { x: i64 }
+        trait Weighted<G: Grade> { fn weighted(self: Self) -> i64 ! {panic}; }
+        impl<G: Grade> Weighted<G> for Point {
+            fn weighted(self: Self) -> i64 ! {panic} { self.x }
+        }
+        fn main() -> i64 ! {io, panic} {
+            let buffer: Buffer<3> = Buffer { data: [7, 8, 9] };
+            print_i64(buffer.first());
+            let point = Point { x: 5 };
+            print_i64(point.Weighted::<1>.weighted());
+            print_i64(point.Weighted::<2>.weighted());
+            0
+        }"#,
+        0,
+        "7\n5\n5\n",
+    );
+}
+
+#[test]
+fn impl_headers_solve_natural_trait_arguments_from_the_receiver() {
+    agrees(
+        r#"
+        struct Buffer<N: Nat> { data: [i64; N] }
+        trait At<N: Nat> { fn value(self: Self) -> i64 ! {panic}; }
+        impl<N: Nat> At<N> for Buffer<N> {
+            fn value(self: Self) -> i64 ! {panic} { self.data[0] }
+        }
+        fn main() -> i64 ! {io, panic} {
+            let buffer: Buffer<2> = Buffer { data: [11, 12] };
+            print_i64(buffer.At::<2>.value());
+            0
+        }"#,
+        0,
+        "11\n",
+    );
+}
+
+#[test]
+fn impl_parameter_categories_are_validated() {
+    rejects(
+        r#"
+        struct Buffer<N: Nat> { data: [i64; N] }
+        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        impl<N: Nat, M: Nat> Tag for Buffer<N> { fn tag(self: Self) -> i64 ! {panic} { 1 } }
+        fn main() -> i64 ! {} { 0 }"#,
+        "impl parameter 'M' is unconstrained",
+    );
+    rejects(
+        r#"
+        struct Point { x: i64 }
+        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        impl<N> Tag for Point { fn tag(self: Self) -> i64 ! {panic} { 1 } }
+        fn main() -> i64 ! {} { 0 }"#,
+        "unconstrained",
+    );
+}
+
+#[test]
 fn closed_world_trait_objects_dispatch_and_clean_up_ownership() {
     let stats = agrees(
         r#"
