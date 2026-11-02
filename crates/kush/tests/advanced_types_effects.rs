@@ -1133,6 +1133,71 @@ fn structural_borrowed_field_transfer_keeps_cleanup_balanced() {
 }
 
 #[test]
+fn structural_records_are_impl_receivers() {
+    // A concrete structural row is a first-class impl receiver. The nominal
+    // record is coerced once to the canonical structural row and dispatch then
+    // uses that row's type identity.
+    let source = r#"
+        impl struct { x: i64, y: i64 } {
+            fn sum(self: Self) -> i64 ! {panic} { self.x + self.y }
+        }
+        struct Point { x: i64, y: i64, tag: Bool }
+        fn main() -> i64 ! {panic} {
+            let p: struct { x: i64, y: i64 } = Point { x: 20, y: 22, tag: true };
+            p.sum()
+        }"#;
+    assert_eq!(value(source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // An inherent impl may take a borrowed receiver of the structural row.
+    let borrowed = r#"
+        impl struct { x: i64 } {
+            fn twice(self: &Self) -> i64 ! {panic} { self.x * 2 }
+        }
+        fn main() -> i64 ! {panic} {
+            let r: struct { x: i64 } = struct { x: 21 };
+            r.twice()
+        }"#;
+    assert_eq!(value(borrowed), 42);
+    // A generic structural header binds its parameter from the canonical row.
+    let generic = r#"
+        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        impl<T> Tag for struct { value: T } {
+            fn tag(self: Self) -> i64 ! {panic} { 42 }
+        }
+        fn main() -> i64 ! {panic} {
+            let r: struct { value: Bool } = struct { value: true };
+            r.tag()
+        }"#;
+    assert_eq!(value(generic), 42);
+    // Two headers for the same canonical row are not specializing: they
+    // overlap exactly and remain a duplicate-implementation error.
+    rejects(
+        r#"
+        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        impl Tag for struct { value: i64 } { fn tag(self: Self) -> i64 ! {panic} { 1 } }
+        impl Tag for struct { value: i64 } { fn tag(self: Self) -> i64 ! {panic} { 2 } }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "duplicate implementation",
+    );
+    // Structural and nominal impls of the same trait stay disjoint: a
+    // structural header never matches a nominal record implicitly.
+    let disjoint = r#"
+        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        struct Point { x: i64 }
+        impl Tag for Point { fn tag(self: Self) -> i64 ! {panic} { 40 } }
+        impl Tag for struct { x: i64 } { fn tag(self: Self) -> i64 ! {panic} { 42 } }
+        fn main() -> i64 ! {panic} {
+            let p = Point { x: 1 };
+            let s: struct { x: i64 } = struct { x: 2 };
+            let a = p.tag();
+            let b = s.tag();
+            if a == 40 { b } else { 0 }
+        }"#;
+    assert_eq!(value(disjoint), 42);
+}
+
+#[test]
 fn dynamically_resolved_perform_requires_panic() {
     // With no active handler the program aborts, so an empty row cannot
     // perform a declared operation outside a lexical handler.

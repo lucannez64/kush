@@ -5570,12 +5570,12 @@ fn validate_impl_pattern(
             Ok(())
         }
         ast::TypeKind::Integer(_) | ast::TypeKind::Bool(_) => Ok(()),
-        ast::TypeKind::Structural(_) => Err(Diagnostic::new(
-            pattern.span,
-            format!(
-                "an impl {what} may not be an anonymous structural record; declare a nominal record and use it in the impl header"
-            ),
-        )),
+        ast::TypeKind::Structural(fields) => {
+            for field in fields {
+                validate_impl_pattern(resolution, types, &field.ty, generics, const_binders, what)?;
+            }
+            Ok(())
+        }
         ast::TypeKind::Dyn(_) => Err(Diagnostic::new(
             pattern.span,
             format!("an impl {what} may not be a trait object; name the concrete receiver"),
@@ -5642,6 +5642,9 @@ fn pattern_has_unbound(
         ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => arguments
             .iter()
             .any(|argument| pattern_has_unbound(resolution, argument, bindings)),
+        ast::TypeKind::Structural(fields) => fields
+            .iter()
+            .any(|field| pattern_has_unbound(resolution, &field.ty, bindings)),
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => {
             pattern_has_unbound(resolution, inner, bindings)
         }
@@ -5804,6 +5807,34 @@ fn match_type_pattern(
             }
             for (item, element) in items.iter().zip(elements) {
                 if !match_type_pattern(resolution, types, item, element, bindings, depth + 1)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        ast::TypeKind::Structural(fields) => {
+            // Structural impl headers match an anonymous structural row
+            // exactly. Nominal records are deliberately not matched here:
+            // they keep their own identity, so a structural impl cannot
+            // silently overlap a nominal impl.
+            let Some(row) = types.structural_row(actual) else {
+                return Ok(false);
+            };
+            if row.len() != fields.len() {
+                return Ok(false);
+            }
+            for field in fields {
+                let Some((_, actual_ty)) = row.iter().find(|(name, _)| name == &field.name) else {
+                    return Ok(false);
+                };
+                if !match_type_pattern(
+                    resolution,
+                    types,
+                    &field.ty,
+                    *actual_ty,
+                    bindings,
+                    depth + 1,
+                )? {
                     return Ok(false);
                 }
             }
@@ -6092,6 +6123,27 @@ fn unify_ast_patterns(
             left.len() == right.len()
                 && left.iter().zip(right).all(|(left, right)| {
                     unify_ast_patterns(resolution, left, right, flexible, map, depth + 1)
+                })
+        }
+        (ast::TypeKind::Structural(left), ast::TypeKind::Structural(right)) => {
+            // Structural rows are canonical by field name. Two impl headers
+            // overlap only when their rows have exactly the same field names;
+            // each field type then unifies recursively.
+            left.len() == right.len()
+                && left.iter().all(|left_field| {
+                    right
+                        .iter()
+                        .find(|right_field| right_field.name == left_field.name)
+                        .is_some_and(|right_field| {
+                            unify_ast_patterns(
+                                resolution,
+                                &left_field.ty,
+                                &right_field.ty,
+                                flexible,
+                                map,
+                                depth + 1,
+                            )
+                        })
                 })
         }
         (
@@ -6796,6 +6848,7 @@ fn type_references_any_binder(
                 || arguments.iter().any(mentions)
         }
         ast::TypeKind::Tuple(items) => items.iter().any(mentions),
+        ast::TypeKind::Structural(fields) => fields.iter().any(|field| mentions(&field.ty)),
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => mentions(inner),
         ast::TypeKind::Borrow { inner, .. } => mentions(inner),
         ast::TypeKind::Array(inner, length) => mentions(inner) || mentions(length),
@@ -18871,6 +18924,9 @@ impl Checker<'_, '_> {
             ast::TypeKind::Tuple(items) => items
                 .iter()
                 .any(|a| self.mentions(a, type_vars, const_vars, effect_vars, subst)),
+            ast::TypeKind::Structural(fields) => fields
+                .iter()
+                .any(|field| self.mentions(&field.ty, type_vars, const_vars, effect_vars, subst)),
             ast::TypeKind::Function {
                 parameters,
                 result,
@@ -19355,6 +19411,26 @@ impl Checker<'_, '_> {
                         self.unify(
                             item,
                             element,
+                            type_vars,
+                            const_vars,
+                            effect_vars,
+                            subst,
+                            span,
+                        )?;
+                    }
+                }
+            }
+            ast::TypeKind::Structural(fields) => {
+                if let Some(layout) = actual.layout().filter(|id| self.types.enums[*id].record) {
+                    let variant = self.types.enums[layout].variants[0].clone();
+                    for field in fields {
+                        let Some(index) = variant.names.iter().position(|name| name == &field.name)
+                        else {
+                            continue;
+                        };
+                        self.unify(
+                            &field.ty,
+                            variant.fields[index],
                             type_vars,
                             const_vars,
                             effect_vars,
