@@ -249,3 +249,24 @@ Full Boat gate after corrections, source checkpoint `0b48a14`: **1119 workspace
 tests**, formatting, and Clippy pass. The sandbox stopped with its snapshot
 preserved. Log: `/tmp/kush-boat-bindgen-corrected-full.log` (machine-local).
 Host deadlines/persistence and independent LSP review remain outstanding.
+
+## Language-server review corrections
+
+An independent language-server review found a broken editor setting and several
+URI/protocol edges, corrected at `326a04b`: the unsupported extra-arguments
+setting was removed, open-document locations use the client's URI, old
+diagnostics under another alias are cleared, existing parent directories are
+canonicalized so unsaved paths stay stable through symlinked workspaces,
+unsaved entry-module headers receive package-name validation, and requests
+outside an initialized session or with malformed framing fail explicitly.
+
+The gate follow-up at `4d183b8` keeps the entry-header diagnostic valid even
+when the entry file has later syntax errors: the leading `module <path>;` header
+is derived from tokens when parsing fails, so a missing or mismatched header is
+reported instead of being lost to the parse error. The saved-module regression
+test uses explicit effect rows so the edit exercises resolution.
+
+Full Boat gate at `4d183b8`: **1123 workspace tests**, formatting, and Clippy
+pass. The sandbox stopped with its snapshot preserved.
+Log: `/tmp/kush-boat-lsp-review-gate.log` (machine-local). Host
+timeout/persistence work remains outstanding.
