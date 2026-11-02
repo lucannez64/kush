@@ -636,6 +636,11 @@ pub(crate) enum ExprKind {
     Local(usize),
     Move(usize),
     Borrow(usize),
+    /// A shared reference to a projected place, used only for read-only dynamic
+    /// dispatch on an owning field. The projection is evaluated in place; the
+    /// root owner stays live and is conservatively shared-borrowed while the
+    /// reference exists.
+    BorrowField(Box<Expr>),
     BoxNew(Box<Expr>),
     BoxTake(Box<Expr>),
     BoxRead(Box<Expr>),
@@ -974,6 +979,7 @@ impl Expr {
             | ExprKind::TaskJoin { task: value, .. }
             | ExprKind::DynArrayPop { array: value, .. }
             | ExprKind::Project(value, _)
+            | ExprKind::BorrowField(value)
             | ExprKind::Break(Some(value), _) => f(value),
             ExprKind::BoxWrite(a, b)
             | ExprKind::BoxReuse {
@@ -1702,6 +1708,7 @@ fn fusion_expr_safe(
         // A whole-value reference read/write is never fused: it depends on
         // aliasing storage and has no total, capture-free callback shape.
         ExprKind::RefRead(_) | ExprKind::RefWrite(_, _) | ExprKind::BoxWrite(_, _) => false,
+        ExprKind::BorrowField(_) => false,
         // No loop has a checked termination argument here.
         ExprKind::While(..) | ExprKind::Loop(_) => false,
         ExprKind::Call(Target::ObjectFunction { .. }, _) => false,
@@ -1936,6 +1943,7 @@ fn fuse_expr(
         | ExprKind::Assign(_, value)
         | ExprKind::Return(value)
         | ExprKind::Project(value, _)
+        | ExprKind::BorrowField(value)
         | ExprKind::RefRead(value) => fuse_expr(value, types, signatures, safety, fusions),
         ExprKind::RefWrite(reference, value) | ExprKind::BoxWrite(reference, value) => {
             fuse_expr(reference, types, signatures, safety, fusions);
@@ -10373,9 +10381,23 @@ impl Checker<'_, '_> {
         if receiver.ty == Type::Never {
             return Ok(receiver);
         }
-        // A projected owning field is still owned by its aggregate. Dispatch
-        // must not copy it into a consuming or mutable temporary receiver.
-        if matches!(receiver.kind, ExprKind::Project(..)) && self.owned_type(receiver.ty) {
+        // A projected owning field is still owned by its aggregate. Static
+        // consuming or mutable dispatch must not copy it into a temporary
+        // receiver. Dynamic shared dispatch is handled below by borrowing the
+        // field in place; owning and mutable projected receivers stay rejected.
+        let dynamic_object = matches!(receiver.ty, Type::DynObj(_))
+            || (matches!(receiver.ty, Type::Union(_))
+                && self.functions.object_traits.contains_key(&receiver.ty))
+            || receiver.ty.ref_pointee().is_some_and(|pointer| {
+                let pointee = self.types.pointees[pointer];
+                matches!(pointee, Type::DynObj(_))
+                    || (matches!(pointee, Type::Union(_))
+                        && self.functions.object_traits.contains_key(&pointee))
+            });
+        if matches!(receiver.kind, ExprKind::Project(..))
+            && self.owned_type(receiver.ty)
+            && !dynamic_object
+        {
             return Err(Diagnostic::new(
                 receiver.span,
                 "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
@@ -11288,6 +11310,12 @@ impl Checker<'_, '_> {
         } else {
             match contract.mode {
                 ReceiverMode::Owned => {
+                    if matches!(receiver.kind, ExprKind::Project(..)) {
+                        return Err(Diagnostic::new(
+                            receiver.span,
+                            "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
+                        ));
+                    }
                     if let ExprKind::Peek(slot) = &receiver.kind {
                         let slot = *slot;
                         let ty = receiver.ty;
@@ -11319,6 +11347,25 @@ impl Checker<'_, '_> {
                         Expr {
                             kind: ExprKind::Borrow(slot),
                             ty,
+                            span,
+                            resource: None,
+                        }
+                    } else if contract.mode == ReceiverMode::Shared
+                        && matches!(receiver.kind, ExprKind::Project(..))
+                    {
+                        // Read-only dispatch on an owning projected field
+                        // borrows that exact place in place; the aggregate is
+                        // never moved or copied.
+                        if crate::runtime_types::has_borrow(self.types, contract.result) {
+                            return Err(Diagnostic::new(
+                                span,
+                                "a borrowed dynamic result requires a direct object local or stored reference; a projected receiver is borrowed only for this call",
+                            ));
+                        }
+                        let pointee = self.types.pointer(object_ty);
+                        Expr {
+                            kind: ExprKind::BorrowField(Box::new(receiver)),
+                            ty: Type::Ref(pointee),
                             span,
                             resource: None,
                         }
@@ -11497,18 +11544,28 @@ impl Checker<'_, '_> {
                 )
             })?;
         let receiver_mode = trait_receiver_mode(method);
-        if receiver_mode == ReceiverMode::Mutable && matches!(receiver.kind, ExprKind::Project(..))
-        {
-            return Err(Diagnostic::new(
-                receiver.span,
-                "a mutable dynamic method receiver must be a direct local or reference binding; destructure the projected field first",
-            ));
+        if matches!(receiver.kind, ExprKind::Project(..)) {
+            if receiver_mode == ReceiverMode::Owned {
+                return Err(Diagnostic::new(
+                    receiver.span,
+                    "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
+                ));
+            }
+            if receiver_mode == ReceiverMode::Mutable {
+                return Err(Diagnostic::new(
+                    receiver.span,
+                    "a mutable dynamic method receiver must be a direct local or reference binding; destructure the projected field first",
+                ));
+            }
         }
         let direct_receiver_slot = match &receiver.kind {
             ExprKind::Peek(slot) | ExprKind::Local(slot) => Some(*slot),
             _ => None,
         };
+        let projected_shared =
+            receiver_mode == ReceiverMode::Shared && matches!(receiver.kind, ExprKind::Project(..));
         let in_place = borrowed_object.is_some()
+            || projected_shared
             || (matches!(receiver_mode, ReceiverMode::Shared | ReceiverMode::Mutable)
                 && direct_receiver_slot.is_some());
         if in_place {
@@ -11533,6 +11590,18 @@ impl Checker<'_, '_> {
                     _ => {}
                 }
                 (reference_ty, receiver)
+            } else if projected_shared {
+                let pointee = self.types.pointer(object_ty);
+                let ty = Type::Ref(pointee);
+                (
+                    ty,
+                    Expr {
+                        kind: ExprKind::BorrowField(Box::new(receiver)),
+                        ty,
+                        span,
+                        resource: None,
+                    },
+                )
             } else {
                 let slot = direct_receiver_slot.expect("in-place dispatch has a direct receiver");
                 if receiver_mode == ReceiverMode::Owned {

@@ -3422,6 +3422,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     }
                 }
             }
+            ExprKind::BorrowField(place) => {
+                let value = value!(self.expr(place, frame));
+                // A read-only view of an owning field. The cell holds an
+                // unowned alias; it is never dropped as a resource, so the
+                // field's owner keeps its single obligation.
+                Value::RecordRef(Arc::new(Mutex::new(value)))
+            }
             ExprKind::BoxNew(arg) => {
                 let value = value!(self.expr(arg, frame));
                 self.consume(arg, frame);

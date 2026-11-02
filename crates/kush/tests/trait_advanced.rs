@@ -1277,15 +1277,27 @@ fn projected_method_receivers_cannot_duplicate_owners_or_discard_mutations() {
         impl Eat for Other { fn eat(self: Self) -> i64 ! {panic} { self.count } }
         impl Text { fn consume(self: Text) -> i64 ! {panic} { self.count } }
     "#;
-    for body in [
-        "let mut pair: (dyn Bump, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.bump(5)",
-        "let pair: (dyn Eat, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.eat()",
-        "let pair = (Text {name: \"x\", count: 1}, 9); pair.0.consume()",
-        "let mut wrap: Wrap<dyn Bump> = Wrap {value: Text {name: \"x\", count: 1}}; wrap.value.bump(5)",
+    for (body, expected) in [
+        (
+            "let mut pair: (dyn Bump, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.bump(5)",
+            "direct local",
+        ),
+        (
+            "let pair: (dyn Eat, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.eat()",
+            "owned field",
+        ),
+        (
+            "let pair = (Text {name: \"x\", count: 1}, 9); pair.0.consume()",
+            "owned field",
+        ),
+        (
+            "let mut wrap: Wrap<dyn Bump> = Wrap {value: Text {name: \"x\", count: 1}}; wrap.value.bump(5)",
+            "direct local",
+        ),
     ] {
         rejects(
             &format!("{definitions} fn main() -> i64 ! {{alloc, panic}} {{{body}}}"),
-            "owned field",
+            expected,
         );
     }
     rejects(
@@ -1294,7 +1306,7 @@ fn projected_method_receivers_cannot_duplicate_owners_or_discard_mutations() {
         let pair: (dyn Bump, i64) = (Other {{count: 1}}, 9); pair.0.bump(5)
     }}"
         ),
-        "owned field",
+        "direct local",
     );
 }
 
@@ -2106,5 +2118,69 @@ fn generic_method_member_abi_disagreement_is_rejected() {
             0
         }"#,
         "does not match the trait signature",
+    );
+}
+
+#[test]
+fn shared_dispatch_borrows_owning_projected_receivers_in_place() {
+    let stats = agrees(
+        r#"
+        struct Text { name: String, count: i64 }
+        struct Plain { amount: i64 }
+        struct W<T> { value: T }
+        trait Counted { fn value(self: &Self) -> i64 ! {panic}; }
+        impl Counted for Text { fn value(self: &Self) -> i64 ! {panic} { self.count } }
+        impl Counted for Plain { fn value(self: &Self) -> i64 ! {panic} { self.amount } }
+        impl<T> Counted for W<T> { fn value(self: &Self) -> i64 ! {panic} { 7 } }
+        struct Holder { inner: dyn Counted }
+        fn read_holder(holder: Holder) -> i64 ! {panic} { holder.inner.value() }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let pair: (dyn Counted, i64) = (Text { name: "x", count: 5 }, 9);
+            print_i64(pair.0.value());
+            let holder = Holder { inner: Text { name: "y", count: 6 } };
+            print_i64(read_holder(holder));
+            let wrap = Holder { inner: W { value: true } };
+            print_i64(wrap.inner.value());
+            let plain: (dyn Counted, i64) = (Plain { amount: 11 }, 2);
+            print_i64(plain.0.value());
+            0
+        }"#,
+        0,
+        "5\n6\n7\n11\n",
+    );
+    // Two Text names, four object payloads; each is released exactly once.
+    assert_eq!(stats.allocations, 6, "{}", stats.allocations);
+}
+
+#[test]
+fn projected_shared_receivers_keep_their_owner_borrowed_through_arguments() {
+    let definitions = r#"
+        struct Text { name: String, count: i64 }
+        struct Other { count: i64 }
+        trait Read { fn inspect(self: &Self, extra: i64) -> i64 ! {panic}; }
+        impl Read for Text { fn inspect(self: &Self, extra: i64) -> i64 ! {panic} { self.count + extra } }
+        impl Read for Other { fn inspect(self: &Self, extra: i64) -> i64 ! {panic} { self.count + extra } }
+    "#;
+    rejects(
+        &format!(
+            "{definitions}
+            fn main() -> i64 ! {{alloc, panic}} {{
+                let mut pair: (dyn Read, i64) = (Text {{name: \"x\", count: 1}}, 9);
+                pair.0.inspect({{pair = (Other {{count: 10}}, 0); 0}})
+            }}"
+        ),
+        "borrow",
+    );
+    agrees(
+        &format!(
+            "{definitions}
+            fn main() -> i64 ! {{io, alloc, panic}} {{
+                let pair: (dyn Read, i64) = (Text {{name: \"x\", count: 1}}, 9);
+                print_i64(pair.0.inspect(pair.1));
+                0
+            }}"
+        ),
+        0,
+        "10\n",
     );
 }
