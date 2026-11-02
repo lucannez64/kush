@@ -1002,7 +1002,7 @@ fn callable_values_are_heterogeneous_union_alternatives() {
             let w: i64 | once fn(i64) -> i64 ! {panic} = f;
             42
          }",
-        "would change its callable representation",
+        "would change its representation",
     );
     // A callable alternative whose representation would change is not narrowed
     // by a type pattern without an adapter.

@@ -889,6 +889,185 @@ pub(crate) struct TaskExitShape {
     pub payload: Type,
     pub result: Type,
 }
+impl Expr {
+    /// Visit every direct child expression, expanding blocks into their
+    /// statements and tail. The match is exhaustive on purpose: a new
+    /// expression kind must decide here which children it has, so analyses
+    /// built on this walk cannot silently skip a position.
+    pub(crate) fn for_each_child<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
+        fn block<'a>(b: &'a Block, f: &mut dyn FnMut(&'a Expr)) {
+            for statement in &b.statements {
+                match statement {
+                    Statement::Let(_, value) | Statement::Expr(value) => f(value),
+                }
+            }
+            if let Some(tail) = &b.tail {
+                f(tail);
+            }
+        }
+        match &self.kind {
+            ExprKind::Constant(_)
+            | ExprKind::BytesLiteral(_)
+            | ExprKind::Erased(_)
+            | ExprKind::Local(_)
+            | ExprKind::Move(_)
+            | ExprKind::Borrow(_)
+            | ExprKind::Peek(_)
+            | ExprKind::ArenaNew
+            | ExprKind::TaskYield
+            | ExprKind::TaskCheckCancel
+            | ExprKind::DynArrayNew { .. }
+            | ExprKind::Break(None, _)
+            | ExprKind::Continue(_) => {}
+            ExprKind::Coerce { value, .. }
+            | ExprKind::Try { value, .. }
+            | ExprKind::BoxNew(value)
+            | ExprKind::BoxTake(value)
+            | ExprKind::BoxRead(value)
+            | ExprKind::BoxTryNew { value, .. }
+            | ExprKind::BytesTryWithCapacity {
+                capacity: value, ..
+            }
+            | ExprKind::ArenaNewWith { strategy: value }
+            | ExprKind::AllocBoxRead(value)
+            | ExprKind::AllocBoxTake(value)
+            | ExprKind::ArenaBoxRead(value)
+            | ExprKind::ArenaBoxTake(value)
+            | ExprKind::Drop(value)
+            | ExprKind::Unary(_, value)
+            | ExprKind::Assign(_, value)
+            | ExprKind::RefRead(value)
+            | ExprKind::Return(value)
+            | ExprKind::TaskSpawn { body: value, .. }
+            | ExprKind::TaskScope { body: value, .. }
+            | ExprKind::TaskCancel(value)
+            | ExprKind::TaskJoin { task: value, .. }
+            | ExprKind::DynArrayPop { array: value, .. }
+            | ExprKind::Project(value, _)
+            | ExprKind::Break(Some(value), _) => f(value),
+            ExprKind::BoxWrite(a, b)
+            | ExprKind::BoxReuse {
+                owner: a,
+                payload: b,
+            }
+            | ExprKind::BoxReuseGrow {
+                owner: a,
+                payload: b,
+            }
+            | ExprKind::BoxTryReuse {
+                owner: a,
+                payload: b,
+                ..
+            }
+            | ExprKind::ArenaAlloc { arena: a, value: b }
+            | ExprKind::ArenaTryAlloc {
+                arena: a, value: b, ..
+            }
+            | ExprKind::AllocatorNew { alloc: a, free: b }
+            | ExprKind::AllocBoxNew {
+                allocator: a,
+                value: b,
+            }
+            | ExprKind::AllocBoxTryNew {
+                allocator: a,
+                value: b,
+                ..
+            }
+            | ExprKind::Binary(_, a, b)
+            | ExprKind::RefAssign(a, _, b)
+            | ExprKind::RefWrite(a, b)
+            | ExprKind::DynamicPerform {
+                payload: a,
+                resume: b,
+                ..
+            }
+            | ExprKind::DynArrayPush {
+                array: a, value: b, ..
+            }
+            | ExprKind::BytesAt(a, b) => {
+                f(a);
+                f(b);
+            }
+            ExprKind::AllocVecNew {
+                allocator,
+                capacity,
+                ..
+            } => {
+                f(allocator);
+                if let Some(capacity) = capacity {
+                    f(capacity);
+                }
+            }
+            ExprKind::DynArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                f(array);
+                f(index);
+                f(value);
+            }
+            ExprKind::Construct { fields: items, .. }
+            | ExprKind::Call(_, items)
+            | ExprKind::FnValue {
+                captures: items, ..
+            } => {
+                for item in items {
+                    f(item);
+                }
+            }
+            ExprKind::CallIndirect { callee, arguments } => {
+                f(callee);
+                for argument in arguments {
+                    f(argument);
+                }
+            }
+            ExprKind::VecMap {
+                vector, callbacks, ..
+            } => {
+                f(vector);
+                for callback in callbacks {
+                    f(callback);
+                }
+            }
+            ExprKind::Block(b) | ExprKind::Loop(b) => block(b, f),
+            ExprKind::If(condition, yes, no) => {
+                f(condition);
+                block(yes, f);
+                block(no, f);
+            }
+            ExprKind::While(condition, body) => {
+                f(condition);
+                block(body, f);
+            }
+            ExprKind::Match(value, arms) => {
+                f(value);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        f(guard);
+                    }
+                    f(&arm.body);
+                }
+            }
+            ExprKind::HandlerPush { handler, body, .. } => {
+                f(handler);
+                block(body, f);
+            }
+            ExprKind::Slice {
+                base, start, end, ..
+            } => {
+                f(base);
+                if let Some(start) = start {
+                    f(start);
+                }
+                if let Some(end) = end {
+                    f(end);
+                }
+            }
+        }
+    }
+}
 /// Deterministic runtime conversion between equivalent value representations.
 #[derive(Debug, Clone)]
 pub(crate) enum Coercion {
@@ -8335,10 +8514,14 @@ impl<'a> Functions<'a> {
             // parameters that also describe some parameter's borrowed field.
             for leaf in crate::runtime_types::borrow_leaves(types, result) {
                 let Some(lifetime) = &leaf.lifetime else {
-                    return Err(Diagnostic::new(
-                        f.result.span,
-                        "internal error: borrowed record result leaf has no declared field lifetime",
-                    ));
+                    // Structural rows do not record field lifetime labels, so a
+                    // borrowed leaf there has no declared lifetime to check.
+                    let message = if types.is_structural(result) {
+                        "a structural record result cannot carry a borrowed field; return a nominal record with declared field lifetimes instead"
+                    } else {
+                        "internal error: borrowed record result leaf has no declared field lifetime"
+                    };
+                    return Err(Diagnostic::new(f.result.span, message));
                 };
                 if !declared_lifetimes.contains(lifetime) {
                     return Err(Diagnostic::new(
@@ -13084,7 +13267,7 @@ impl Checker<'_, '_> {
                         return Err(Diagnostic::new(
                             span,
                             format!(
-                                "repacking callable union alternative {} as {} would change its callable representation; bind it as an explicit 'once fn' value first",
+                                "repacking union alternative {} as {} would change its representation (a callable convention or a record layout); match and convert that alternative explicitly first",
                                 self.types.name(member),
                                 self.types.name(expected)
                             ),
@@ -13105,7 +13288,12 @@ impl Checker<'_, '_> {
         } else {
             let Some(tag) = target_members
                 .iter()
-                .position(|target| self.subtype(value.ty, *target))
+                .position(|target| *target == value.ty)
+                .or_else(|| {
+                    target_members
+                        .iter()
+                        .position(|target| self.subtype(value.ty, *target))
+                })
             else {
                 return Err(Diagnostic::new(
                     span,
@@ -13120,13 +13308,15 @@ impl Checker<'_, '_> {
             // `fn` used in a `once fn` alternative, which needs a null-env
             // thunk). Adapt before injecting; a raw payload copy would change
             // the indirect-call ABI.
+            // Convert the value to the selected member first: a callable may
+            // need its adapter, and a record may need a structural width/order
+            // conversion that drops erased fields. Injecting raw words would
+            // reinterpret fields and leak owners.
             let member = target_members[tag];
-            let value = if Self::function_parts(value.ty).is_some()
-                && Self::function_parts(member).is_some()
-            {
-                self.coerce_function(value, member, span)?
-            } else {
+            let value = if self.same_layout(value.ty, member) {
                 value
+            } else {
+                self.coerce(value, member, span)?
             };
             let ty = expected;
             return Ok(Expr {
@@ -13365,7 +13555,7 @@ impl Checker<'_, '_> {
                         return Err(Diagnostic::new(
                             span,
                             format!(
-                                "nested union field conversion from {} to {} would change a callable representation; adapt the field explicitly first",
+                                "nested union field conversion from {} to {} would change a member representation (a callable convention or a record layout); convert the field explicitly first",
                                 self.types.name(source),
                                 self.types.name(target)
                             ),
@@ -13397,13 +13587,11 @@ impl Checker<'_, '_> {
                 ),
             ));
         };
-        if Self::function_parts(source).is_some()
-            && !self.union_member_representation_compatible(source, target_members[tag])
-        {
+        if !self.union_member_representation_compatible(source, target_members[tag]) {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "a callable field cannot be injected into union alternative {} inside a structural coercion because its calling convention changes; adapt the field explicitly first",
+                    "a field cannot be injected into union alternative {} inside a structural coercion because its representation changes (a callable convention or a record layout); convert the field explicitly first",
                     self.types.name(target_members[tag])
                 ),
             ));
@@ -13422,7 +13610,10 @@ impl Checker<'_, '_> {
                     !self.arrow_rep_change(source, target)
                 }
             }
-            (None, None) => true,
+            // A non-callable payload is copied word for word, so it must
+            // already have the target member's layout; a structural width or
+            // order change needs a real conversion.
+            (None, None) => self.same_layout(source, target),
             _ => false,
         }
     }
@@ -20417,6 +20608,14 @@ impl Checker<'_, '_> {
         if variables.is_empty() || fixed.is_empty() {
             return Ok(false);
         }
+        // Assign in generic declaration order, not pattern operand order, so
+        // `A | B` and `B | A` (the same normalized union) infer the same way.
+        variables.sort_by_key(|(_, id)| {
+            type_vars
+                .iter()
+                .position(|candidate| candidate == id)
+                .unwrap_or(usize::MAX)
+        });
         let fixed_ty = {
             let mut types = Vec::with_capacity(fixed.len());
             for alternative in &fixed {

@@ -1875,3 +1875,105 @@ fn non_tail_continuations_reject_try_but_allow_local_loops_and_mut_results() {
         12
     );
 }
+
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn union_injection_converts_structural_members_and_drops_erased_fields() {
+    agrees(
+        r#"
+        struct Wide { a: i64, b: i64, c: i64 }
+        fn main() -> i64 ! {panic} {
+            let v: struct { c: i64 } | Bool = Wide { a: 11, b: 22, c: 33 };
+            match v { struct { c } => c, Bool @ _ => 0 }
+        }"#,
+        33,
+    );
+    agrees(
+        r#"
+        struct Wide { a: i64, b: Box<i64> }
+        fn pass(v: struct { a: i64, .. } | Bool) -> i64 ! {panic} {
+            match v { struct { a } => a, Bool @ _ => 0 }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            pass(Wide { a: 42, b: Box.new(1) })
+        }"#,
+        42,
+    );
+    agrees(
+        r#"
+        struct Wide { a: i64, b: i64, c: Box<i64> }
+        fn main() -> i64 ! {alloc, panic} {
+            let u: struct { c: Box<i64> } | Bool = Wide { a: 7, b: 8, c: Box.new(5) };
+            match u { struct { c } => Box.take(c), Bool @ _ => 0 }
+        }"#,
+        5,
+    );
+    rejects(
+        r#"
+        struct Wide { a: i64, b: i64, c: i64 }
+        fn main() -> i64 ! {panic} {
+            let u: Wide | Bool = Wide { a: 1, b: 2, c: 3 };
+            let v: struct { c: i64 } | Bool = u;
+            match v { struct { c } => c, Bool @ _ => 0 }
+        }"#,
+        "would change its representation",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let u: struct { inner: struct { a: i64, b: i64, c: i64 } | Bool } =
+                struct { inner: struct { a: 1, b: 2, c: 3 } };
+            let v: struct { inner: struct { c: i64 } | Bool } = u;
+            match v.inner { struct { c } => c, Bool @ _ => 0 }
+        }"#,
+        "would change a member representation",
+    );
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn callable_field_adapters_inside_dynarray_push_build_natively() {
+    agrees(
+        r#"
+        fn widen(value: i64 | Bool) -> i64 ! {panic} {
+            match value { i64 @ n => n, Bool @ _ => 0 }
+        }
+        struct Holder { f: fn(i64 | Bool) -> i64 ! {panic}, tag: Bool }
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<struct { f: once fn(i64) -> i64 ! {panic} }, 2> =
+                DynArray.new::<struct { f: once fn(i64) -> i64 ! {panic} }, 2>();
+            let a = DynArray.push(a, Holder { f: widen, tag: true });
+            42
+        }"#,
+        42,
+    );
+}
+
+#[test]
+fn structural_borrowed_results_are_a_clean_rejection() {
+    rejects(
+        r#"
+        struct W<'a> { n: i64, view: &'a [i64] }
+        fn ret<'a>(v: W<'a>) -> struct { view: &'a [i64] } ! {} {
+            let W { view, .. } = v;
+            struct { view: view }
+        }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "structural record result cannot carry a borrowed field",
+    );
+}
+
+#[test]
+fn union_partition_follows_declaration_order_not_operand_order() {
+    let source = |pattern: &str| {
+        format!(
+            "fn pick<A, B>(x: {pattern}, a: A) -> i64 ! {{panic}} {{ 0 }}
+            fn two(c: i64) -> Bool | Unit | i64 ! {{panic}} {{
+                if c == 0 {{ true }} else {{ if c == 1 {{ () }} else {{ 41 }} }}
+            }}
+            fn main() -> i64 ! {{panic}} {{ pick(two(0), true) }}"
+        )
+    };
+    assert_eq!(value(&source("A | B | i64")), 0);
+    assert_eq!(value(&source("B | A | i64")), 0);
+}

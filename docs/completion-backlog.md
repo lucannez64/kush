@@ -643,3 +643,25 @@ effects. It found five defects, now fixed with regressions:
   and `let mut x = perform ...` lost `mut` in the continuation. Both fixed.
 Full Boat gate after these fixes (`f44a221`): **946 tests**, formatting, and
 Clippy pass.
+
+## Structural review follow-up
+
+An independent review of `a6a99ac` confirmed callable-adapter
+capture/cleanup, borrow provenance through structural coercions, open-row
+erasure of linear/`dyn` fields, and structural impl coherence. It found four
+defects, fixed with regressions:
+
+- **High:** injecting a record into a union alternative with a different
+  structural row copied raw words instead of converting, reading wrong fields,
+  leaking erased owners, and (natively) passing a scalar as a `Box` pointer.
+  Injection now converts to the selected member first; union-to-union and
+  nested repacking require an unchanged member layout and otherwise ask for an
+  explicit conversion.
+- **High:** native closure-environment drop synthesis walked only some
+  expression kinds, so an adapter under `DynArray.push` (and similar) crashed
+  the native compiler. Analyses now use an exhaustive `Expr::for_each_child`
+  walk; byte-literal collection uses it too.
+- **Medium-low:** a structural record result with a borrowed field produced an
+  internal error; it is now a clean rejection.
+- **Low:** multi-variable union partitions followed pattern operand order;
+  they now follow generic declaration order as documented.

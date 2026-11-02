@@ -2157,123 +2157,10 @@ fn collect_literals<'a>(block: &'a ex::Block, out: &mut Vec<(usize, &'a [u8])>) 
     }
 }
 fn collect_expr_literals<'a>(expr: &'a Expr, out: &mut Vec<(usize, &'a [u8])>) {
-    match &expr.kind {
-        ExprKind::BytesLiteral(bytes) => out.push((expr.span.start, bytes)),
-        ExprKind::Block(b) => collect_literals(b, out),
-        ExprKind::Unary(_, v)
-        | ExprKind::Try { value: v, .. }
-        | ExprKind::Return(v)
-        | ExprKind::BoxNew(v)
-        | ExprKind::BoxTake(v)
-        | ExprKind::BoxRead(v)
-        | ExprKind::ArenaBoxRead(v)
-        | ExprKind::ArenaBoxTake(v)
-        | ExprKind::Drop(v)
-        | ExprKind::Project(v, _)
-        | ExprKind::Coerce { value: v, .. }
-        | ExprKind::Break(Some(v), _)
-        | ExprKind::Assign(_, v) => collect_expr_literals(v, out),
-        ExprKind::BoxWrite(reference, value) => {
-            collect_expr_literals(reference, out);
-            collect_expr_literals(value, out);
-        }
-        ExprKind::ArenaAlloc { arena, value } => {
-            collect_expr_literals(arena, out);
-            collect_expr_literals(value, out);
-        }
-        ExprKind::ArenaNewWith { strategy } => collect_expr_literals(strategy, out),
-        ExprKind::ArenaTryAlloc { arena, value, .. } => {
-            collect_expr_literals(arena, out);
-            collect_expr_literals(value, out);
-        }
-        ExprKind::ArenaNew => {}
-        ExprKind::RefAssign(reference, _, value) => {
-            collect_expr_literals(reference, out);
-            collect_expr_literals(value, out);
-        }
-        ExprKind::Loop(b) => collect_literals(b, out),
-        ExprKind::While(c, b) => {
-            collect_expr_literals(c, out);
-            collect_literals(b, out);
-        }
-        ExprKind::BoxReuse { owner, payload } => {
-            collect_expr_literals(owner, out);
-            collect_expr_literals(payload, out);
-        }
-        ExprKind::VecMap {
-            vector, callbacks, ..
-        } => {
-            collect_expr_literals(vector, out);
-            for callback in callbacks {
-                collect_expr_literals(callback, out);
-            }
-        }
-        ExprKind::BytesAt(a, b) => {
-            collect_expr_literals(a, out);
-            collect_expr_literals(b, out);
-        }
-        ExprKind::Slice {
-            base, start, end, ..
-        } => {
-            collect_expr_literals(base, out);
-            if let Some(start) = start {
-                collect_expr_literals(start, out);
-            }
-            if let Some(end) = end {
-                collect_expr_literals(end, out);
-            }
-        }
-        ExprKind::Binary(_, a, b) => {
-            collect_expr_literals(a, out);
-            collect_expr_literals(b, out);
-        }
-        ExprKind::Call(_, args) | ExprKind::Construct { fields: args, .. } => {
-            for arg in args {
-                collect_expr_literals(arg, out);
-            }
-        }
-        ExprKind::FnValue { captures, .. } => {
-            for capture in captures {
-                collect_expr_literals(capture, out);
-            }
-        }
-        ExprKind::CallIndirect { callee, arguments } => {
-            collect_expr_literals(callee, out);
-            for argument in arguments {
-                collect_expr_literals(argument, out);
-            }
-        }
-        ExprKind::HandlerPush { handler, body, .. } => {
-            collect_expr_literals(handler, out);
-            collect_literals(body, out);
-        }
-        ExprKind::DynamicPerform {
-            payload, resume, ..
-        } => {
-            collect_expr_literals(payload, out);
-            collect_expr_literals(resume, out);
-        }
-        ExprKind::TaskSpawn { body, .. } | ExprKind::TaskScope { body, .. } => {
-            collect_expr_literals(body, out);
-        }
-        ExprKind::TaskCancel(reference) => collect_expr_literals(reference, out),
-        ExprKind::TaskJoin { task, .. } => collect_expr_literals(task, out),
-        ExprKind::If(c, a, b) => {
-            collect_expr_literals(c, out);
-            collect_literals(a, out);
-            collect_literals(b, out);
-        }
-        ExprKind::Match(v, arms) => {
-            collect_expr_literals(v, out);
-            for arm in arms {
-                if let Some(g) = &arm.guard {
-                    collect_expr_literals(g, out);
-                }
-                collect_expr_literals(&arm.body, out);
-            }
-        }
-        _ => {}
+    if let ExprKind::BytesLiteral(bytes) = &expr.kind {
+        out.push((expr.span.start, bytes));
     }
+    expr.for_each_child(&mut |child| collect_expr_literals(child, out));
 }
 fn emit_drop(
     builder: &mut FunctionBuilder<'_>,
@@ -2305,157 +2192,34 @@ fn collect_coercion_captures(coercion: &ex::Coercion, out: &mut Vec<Vec<Type>>) 
     }
 }
 fn collect_closure_types(program: &Executable) -> Vec<Vec<Type>> {
-    fn walk(program: &Executable, node: &Expr, out: &mut Vec<Vec<Type>>) {
+    // Every expression position is visited through the exhaustive child walk,
+    // so a capturing closure or callable adapter nested anywhere gets its
+    // environment-drop function.
+    fn walk(node: &Expr, out: &mut Vec<Vec<Type>>) {
         match &node.kind {
-            ExprKind::FnValue { captures, .. } if !captures.is_empty() => {
-                out.push(
-                    captures
-                        .iter()
-                        .map(|capture| capture.ty.full())
-                        .collect::<Vec<_>>(),
-                );
-                for capture in captures {
-                    walk(program, capture, out);
-                }
-            }
-            ExprKind::Block(block) => walk_block(program, block, out),
-            ExprKind::HandlerPush { handler, body, .. } => {
-                walk(program, handler, out);
-                walk_block(program, body, out);
-            }
-            ExprKind::DynamicPerform {
-                payload, resume, ..
-            } => {
-                walk(program, payload, out);
-                walk(program, resume, out);
-            }
-            ExprKind::Coerce {
-                value, coercion, ..
-            } => {
-                // A callable field adapter owns its source callable in an
-                // environment. Record that capture type so the native backend
-                // synthesizes the matching environment drop function.
-                collect_coercion_captures(coercion, out);
-                walk(program, value, out);
-            }
-            ExprKind::Unary(_, value)
-            | ExprKind::Try { value, .. }
-            | ExprKind::Return(value)
-            | ExprKind::BoxNew(value)
-            | ExprKind::BoxTake(value)
-            | ExprKind::BoxRead(value)
-            | ExprKind::ArenaBoxRead(value)
-            | ExprKind::ArenaBoxTake(value)
-            | ExprKind::Drop(value)
-            | ExprKind::Project(value, _)
-            | ExprKind::Break(Some(value), _)
-            | ExprKind::Assign(_, value) => walk(program, value, out),
-            ExprKind::BoxWrite(reference, value) => {
-                walk(program, reference, out);
-                walk(program, value, out);
-            }
-            ExprKind::ArenaAlloc { arena, value } => {
-                walk(program, arena, out);
-                walk(program, value, out);
-            }
-            ExprKind::ArenaNewWith { strategy } => walk(program, strategy, out),
-            ExprKind::ArenaTryAlloc { arena, value, .. } => {
-                walk(program, arena, out);
-                walk(program, value, out);
-            }
-            ExprKind::ArenaNew => {}
-            ExprKind::RefAssign(reference, _, value) => {
-                walk(program, reference, out);
-                walk(program, value, out);
-            }
-            ExprKind::Loop(block) => walk_block(program, block, out),
-            ExprKind::While(condition, block) => {
-                walk(program, condition, out);
-                walk_block(program, block, out);
-            }
-            ExprKind::BoxReuse { owner, payload } => {
-                walk(program, owner, out);
-                walk(program, payload, out);
-            }
-            ExprKind::VecMap {
-                vector, callbacks, ..
-            } => {
-                walk(program, vector, out);
-                for callback in callbacks {
-                    walk(program, callback, out);
-                }
-            }
-            ExprKind::BytesAt(a, b) | ExprKind::Binary(_, a, b) => {
-                walk(program, a, out);
-                walk(program, b, out);
-            }
-            ExprKind::Slice {
-                base, start, end, ..
-            } => {
-                walk(program, base, out);
-                if let Some(start) = start {
-                    walk(program, start, out);
-                }
-                if let Some(end) = end {
-                    walk(program, end, out);
-                }
-            }
-            ExprKind::Call(_, arguments)
-            | ExprKind::Construct {
-                fields: arguments, ..
-            } => {
-                for argument in arguments {
-                    walk(program, argument, out);
-                }
-            }
-            ExprKind::CallIndirect { callee, arguments } => {
-                walk(program, callee, out);
-                for argument in arguments {
-                    walk(program, argument, out);
-                }
-            }
-            ExprKind::TaskSpawn { body, .. } | ExprKind::TaskScope { body, .. } => {
-                walk(program, body, out);
-            }
-            ExprKind::TaskCancel(reference) => walk(program, reference, out),
-            ExprKind::TaskJoin { task, .. } => walk(program, task, out),
-            ExprKind::If(condition, yes, no) => {
-                walk(program, condition, out);
-                walk_block(program, yes, out);
-                walk_block(program, no, out);
-            }
-            ExprKind::Match(value, arms) => {
-                walk(program, value, out);
-                for arm in arms {
-                    if let Some(guard) = &arm.guard {
-                        walk(program, guard, out);
-                    }
-                    walk(program, &arm.body, out);
-                }
-            }
-            ExprKind::FnValue { captures, .. } => {
-                for capture in captures {
-                    walk(program, capture, out);
-                }
-            }
+            ExprKind::FnValue { captures, .. } if !captures.is_empty() => out.push(
+                captures
+                    .iter()
+                    .map(|capture| capture.ty.full())
+                    .collect::<Vec<_>>(),
+            ),
+            // A callable field adapter owns its source callable in an
+            // environment; record that capture type too.
+            ExprKind::Coerce { coercion, .. } => collect_coercion_captures(coercion, out),
             _ => {}
         }
-    }
-    fn walk_block(program: &Executable, block: &ex::Block, out: &mut Vec<Vec<Type>>) {
-        for statement in &block.statements {
-            match statement {
-                ex::Statement::Let(_, value) | ex::Statement::Expr(value) => {
-                    walk(program, value, out)
-                }
-            }
-        }
-        if let Some(tail) = &block.tail {
-            walk(program, tail, out);
-        }
+        node.for_each_child(&mut |child| walk(child, out));
     }
     let mut all = Vec::new();
     for function in &program.functions {
-        walk_block(program, &function.body, &mut all);
+        for statement in &function.body.statements {
+            match statement {
+                ex::Statement::Let(_, value) | ex::Statement::Expr(value) => walk(value, &mut all),
+            }
+        }
+        if let Some(tail) = &function.body.tail {
+            walk(tail, &mut all);
+        }
     }
     all.sort();
     all.dedup();
