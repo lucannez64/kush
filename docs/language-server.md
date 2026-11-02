@@ -27,7 +27,10 @@ Implemented:
   `textDocumentSync: 1`), `textDocument/didClose`;
 - versioned `textDocument/publishDiagnostics`;
 - `textDocument/definition`;
-- `textDocument/formatting`.
+- `textDocument/formatting`;
+- `textDocument/hover`;
+- `textDocument/documentSymbol`;
+- `textDocument/semanticTokens/full`.
 
 Unknown requests receive JSON-RPC error `-32601`. Malformed JSON receives
 `-32700` with a null id and the stream continues. Malformed or oversized headers
@@ -100,8 +103,49 @@ This is lexical resolution, not a type-directed IDE index:
 - dynamic trait-object dispatch and builtin methods have no source definition;
 - imported constructors and fields are limited by the resolver's existing
   bindings;
-- completion, hover, rename, references, and semantic tokens are not
-  implemented.
+- completion, rename, references, call hierarchy, incremental sync, and
+  workspace-wide symbols are not implemented.
+
+## Hover
+
+Hover reuses the definition resolver internally, so what it shows is exactly
+"what binds at the cursor":
+
+- a builtin shows its surface name (`FS.write_exclusive` and friends);
+- a declaration binding shows a clipped header slice of the declaration (up to
+  the first `{` or `;`), rendered as `kush` markdown;
+- a local variable shows its owning `let` statement;
+- anything that does not resolve returns `null`.
+
+A cursor on a reference behaves like go-to-definition, so hovering a call site
+names the resolved function, but there is no type inference beyond the checked
+boundary.
+
+## Document symbols
+
+Top-level declarations map to LSP symbol kinds (module header `2`, functions
+`12`, enums and props `10` with `EnumMember` children, structs `23`, traits
+`11`, impls `5`, aliases/effects `26`); `use` and `#[test]` attributes produce
+no symbols. The selection range is the declaration's name token when the lexer
+can find it, otherwise the whole item span. Symbols come from the open
+document only; there is no workspace symbol index.
+
+## Semantic tokens
+
+`textDocument/semanticTokens/full` is a single-shot full token list built from
+the lexer token stream plus a scanner over the trivia gaps for `//` and nested
+`/* */` comments. The legend is fixed:
+
+```text
+keyword function type namespace enum enumMember string number comment operator variable
+```
+
+Names after `fn`/`enum`/`struct`/`type`/`trait`/`impl`, identification after
+`let`, dotted module headers and `use` paths, strings, characters, numbers,
+lifetimes, and comments are colored; ordinary identifiers, punctuation, and
+effect markers are left to the client's fallback. Tokens use relative
+`deltaLine`/`deltaStart` positions in UTF-16 units.
+
 
 ## Formatting
 
@@ -141,4 +185,6 @@ accepts only `kush lsp`. Open-document locations use the client's URI, and old
 published diagnostics under another URI alias are cleared. Canonicalization of
 existing parent directories keeps new unsaved paths stable when saved through
 a symlinked workspace. Unsaved entry module headers receive package-name
-validation, and named-import navigation selects the declaration name.
+validation even when the entry has later syntax errors, named-import navigation
+selects the declaration name, and hover/document symbols/semantic tokens were
+extracted from that same cursor probe.
