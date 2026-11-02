@@ -6266,9 +6266,9 @@ impl Generator<'_, '_> {
                 )
             }
             ExprKind::PlaceIndex { base, index } => {
+                let location = lower!(self.place_address(base));
                 let index = lower!(self.scalar(index));
                 if matches!(base.ty, Type::Vec(_)) {
-                    let location = lower!(self.place_address(base));
                     let handle = self.load_words(location, 0, 1)[0];
                     return Some(self.runtime_call(self.vec_element, &[handle, index]));
                 }
@@ -6277,7 +6277,6 @@ impl Generator<'_, '_> {
                     .layout()
                     .and_then(|id| self.program.enums[id].array)
                     .expect("checked array index place");
-                let location = lower!(self.place_address(base));
                 self.check_index(index, length as i64);
                 let stride = (self.program.width(element) * 8) as i64;
                 let offset = self.builder.ins().imul_imm_s(index, stride);

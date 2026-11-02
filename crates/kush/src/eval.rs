@@ -1762,6 +1762,20 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 Ok(PlaceFlow::Place(resolved))
             }
             ExprKind::PlaceIndex { base, index } => {
+                // Resolve the base before evaluating the index, matching checking.
+                let (base_value, base_place) = if matches!(base.ty, Type::Vec(_)) {
+                    let value = match self.expr(base, frame)? {
+                        Flow::Value(value) => value,
+                        flow => return Ok(flow.into()),
+                    };
+                    (Some(value), None)
+                } else {
+                    let place = match self.resolve_place(base, frame)? {
+                        PlaceFlow::Place(place) => place,
+                        flow => return Ok(flow),
+                    };
+                    (None, Some(place))
+                };
                 let index = match self.expr(index, frame)? {
                     Flow::Value(value) => value.scalar(),
                     flow => return Ok(flow.into()),
@@ -1771,11 +1785,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
                 let index = index as usize;
                 if let Type::Vec(_) = base.ty {
-                    let base_value = match self.expr(base, frame)? {
-                        Flow::Value(value) => value,
-                        flow => return Ok(flow.into()),
-                    };
-                    let Value::Owned(owner) = base_value else {
+                    let Some(Value::Owned(owner)) = base_value else {
                         return Err(Diagnostic::new(
                             place.span,
                             "internal error: checked vector place has no owned handle",
@@ -1814,10 +1824,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 if index >= length {
                     return Err(Diagnostic::new(place.span, "panic: index out of bounds"));
                 }
-                let mut resolved = match self.resolve_place(base, frame)? {
-                    PlaceFlow::Place(resolved) => resolved,
-                    flow => return Ok(flow),
-                };
+                let mut resolved = base_place.expect("checked array place");
                 let container = base.ty;
                 let offset = 1 + index * self.program.width(element);
                 match &mut resolved {

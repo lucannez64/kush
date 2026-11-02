@@ -1671,3 +1671,79 @@ fn loop_condition_temporary_owners_clean_up_on_continue_and_break() {
         "",
     );
 }
+
+#[test]
+fn temporary_places_keep_source_order_and_single_ownership() {
+    agrees(
+        r#"fn make_vec(b: &Box<i64>) -> Vec<i64> ! {alloc, panic} { [Box.read(b)] }
+fn steal(b: Box<i64>) -> i64 ! {alloc, panic} { Box.take(b); 0 }
+fn main() -> i64 ! {alloc, io, panic} {
+    let b = Box.new(3);
+    let r = &make_vec(&b)[steal(b)];
+    print_i64(*r);
+    0
+}
+"#,
+        0,
+        "3\n",
+    );
+    agrees(
+        r#"fn make() -> Vec<i64> ! {alloc, panic} { [7, 8] }
+fn main() -> i64 ! {alloc, panic} {
+    let r = &make()[0];
+    *r
+}
+"#,
+        7,
+        "",
+    );
+    agrees(
+        r#"struct H { b: Box<i64> }
+fn make() -> H ! {alloc, panic} { H { b: Box.new(5) } }
+fn main() -> i64 ! {alloc, panic} {
+    let r = &make().b;
+    Box.read(r)
+}
+"#,
+        5,
+        "",
+    );
+    agrees(
+        r#"struct H { b: Box<i64> }
+fn make() -> H ! {alloc, panic} { H { b: Box.new(5) } }
+fn main() -> i64 ! {alloc, panic} { Box.read(&(&make()).b) }
+"#,
+        5,
+        "",
+    );
+    agrees(
+        r#"struct P { lane: [i64; 2] }
+fn make() -> P ! {io, panic} { print_i64(2); P { lane: [7, 8] } }
+fn idx() -> i64 ! {io, panic} { print_i64(1); 1 }
+fn read(x: &i64) -> i64 ! {panic} { *x }
+fn main() -> i64 ! {io, panic} {
+    read(&make().lane[idx()])
+}
+"#,
+        8,
+        "2\n1\n",
+    );
+}
+
+#[test]
+fn leading_temporary_declaration_cannot_hide_block_escape() {
+    rejects(
+        r#"fn make(n: i64) -> Box<i64> ! {alloc, panic} { Box.new(n) }
+fn main() -> i64 ! {alloc, io, panic} {
+    let mut refs: Vec<&Box<i64>> = [];
+    if true {
+        let r = &make(7);
+        Vec.push(&mut refs, r);
+    };
+    print_i64(Box.read(Vec.get(&refs, 0)));
+    0
+}
+"#,
+        "borrow escapes",
+    );
+}

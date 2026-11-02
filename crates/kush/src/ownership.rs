@@ -630,7 +630,7 @@ fn is_internal_lifetime(name: &str) -> bool {
 }
 fn is_place_read(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::Peek(_) => true,
+        ExprKind::Peek(_) | ExprKind::InitOwner { .. } => true,
         ExprKind::Project(base, _) => is_place_read(base),
         _ => false,
     }
@@ -3971,7 +3971,7 @@ impl Checker<'_> {
             .first()
             .map(|statement| match statement {
                 Statement::Let(_, expr) | Statement::Expr(expr) => expr.span.start,
-                Statement::Declare(_) => 0,
+                Statement::Declare(slot) => self.locals[*slot].span.start,
             })
             .or_else(|| block.tail.as_ref().map(|tail| tail.span.start))
             .unwrap_or(0);
