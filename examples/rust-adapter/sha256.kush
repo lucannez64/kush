@@ -1,3 +1,4 @@
+module rust_adapter_example;
 // From this directory: kush run
 // Kush builds the Cargo staticlib configured in Kush.toml and links it.
 // You can also build this single file with explicit --link/--link-lib flags.

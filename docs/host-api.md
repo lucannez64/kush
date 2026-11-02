@@ -88,8 +88,10 @@ program.evaluate_with_host(&mut input, &mut output, &host)?;
 ```
 
 `evaluate`, `evaluate_with_io`, and their `_stats` forms keep using an empty
-host for deterministic existing tests. A CLI that runs the interpreter should
-use `Host::process()` if source code may call these builtins. Native project and
+host for deterministic existing tests. The `kush eval` CLI explicitly uses a
+process host with program argv (file path plus arguments after `--`).
+`Host::process().with_args(args)` also supports custom argv with the process
+environment. Native project and
 single-file `run` commands already reach the same process argv through the
 generated `main(argc, argv)`.
 

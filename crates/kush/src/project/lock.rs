@@ -46,7 +46,16 @@ pub fn expected_text(project: &Project) -> String {
 pub fn verify_or_write(project: &Project, locked: bool) -> Result<PathBuf, Failure> {
     let path = project.root.join(LOCK_NAME);
     let expected = expected_text(project);
-    let existing = fs::read_to_string(&path).ok();
+    let existing = match fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(Failure::new(format!(
+                "cannot read {}: {error}",
+                path.display()
+            )));
+        }
+    };
     if locked {
         match existing {
             None => {

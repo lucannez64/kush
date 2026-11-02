@@ -259,6 +259,21 @@ pub fn valid_ident(name: &str) -> bool {
         return false;
     }
     bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && crate::lexer::lex(name).is_ok_and(|tokens| {
+            matches!(
+                tokens.as_slice(),
+                [
+                    crate::lexer::Token {
+                        kind: crate::lexer::Kind::Ident(_),
+                        ..
+                    },
+                    crate::lexer::Token {
+                        kind: crate::lexer::Kind::Eof,
+                        ..
+                    }
+                ]
+            )
+        })
 }
 
 pub fn valid_module_component(component: &str) -> bool {

@@ -168,11 +168,12 @@ Everything after `--` is forwarded unchanged as process arguments:
 kush run -- first "two words" --flag
 ```
 
-The native runtime does not yet expose an `argv`/environment API to Kush source.
-The host-API worker owns that interface. The project layer already delivers the
-arguments at the process boundary, and `kush::project::runtime::ProgramInvocation`
-(`command()`, `arguments()`, `run()`) is the stable Rust-side integration point
-for wiring the runtime API later.
+Native programs expose arguments and environment through the `ENV` host APIs.
+`ENV.arg_count` includes argv[0]; application arguments begin at index 1.
+Single-file `kush eval file.kush -- args...` supplies equivalent program
+arguments plus the current process environment to an explicit `Host` context.
+Embedding APIs retain their deterministic empty-host defaults unless a host is
+supplied. See [host-api.md](host-api.md).
 
 ## Tests
 

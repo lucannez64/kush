@@ -70,9 +70,9 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
 
 fn is_project_invocation(rest: &[OsString]) -> bool {
     rest.is_empty()
-        || rest
-            .first()
-            .is_some_and(|argument| argument.to_string_lossy().starts_with('-'))
+        || rest.first().is_some_and(|argument| {
+            argument.to_string_lossy().starts_with('-') && !Path::new(argument).is_file()
+        })
 }
 
 fn project_command(
@@ -422,9 +422,7 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
         args.len() == 2 || ast
     } else if command == "build" {
         build
-    } else if command == "run" {
-        args.len() == 2 || run_file_valid
-    } else if command == "eval" {
+    } else if run_like {
         args.len() == 2 || run_file_valid
     } else {
         args.len() == 2

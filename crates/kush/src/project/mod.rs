@@ -168,7 +168,7 @@ pub fn load_manifest(path: &Path) -> Result<Project, Failure> {
     let mut all = Vec::with_capacity(dependencies.len() + 1);
     all.push(package.clone());
     all.extend(dependencies.iter().cloned());
-    let modules = modules::ModuleIndex::build(&all)?;
+    let mut modules = modules::ModuleIndex::build(&all)?;
 
     let test_target = match parsed.test {
         Some(relative) => {
@@ -188,6 +188,9 @@ pub fn load_manifest(path: &Path) -> Result<Project, Failure> {
         }
     };
 
+    if let Some(target) = &test_target {
+        modules.register_test(&package, target)?;
+    }
     Ok(Project {
         root: package.root.clone(),
         manifest_path: package.manifest_path.clone(),
@@ -594,6 +597,11 @@ pub fn test_project(
             total: tests.len(),
         });
     }
+    // A filter selects execution, not whether the target is valid.
+    let generated = test::synthesized_source(&source, &tests);
+    let program = project.load_program_source(&target.display().to_string(), &generated)?;
+    let _ = crate::executable::check_program(&program)
+        .map_err(|error| Failure::new(program.sources.render(&error)))?;
     writeln!(
         out,
         "running {} {} in {}",
@@ -607,7 +615,7 @@ pub fn test_project(
         || "tests".to_owned(),
         |stem| stem.to_string_lossy().into_owned(),
     );
-    let artifact_directory = project.root.join("target").join("kush").join("tests");
+    let artifact_directory = project.root.join("target").join("kush").join(".tests");
     fs::create_dir_all(&artifact_directory).map_err(|e| {
         Failure::new(format!(
             "cannot create test artifact directory {}: {e}",

@@ -589,3 +589,125 @@ fn project_commands_run_from_nested_directories_and_paths_with_spaces() {
     assert_eq!(summary.passed, 2);
     assert_eq!(summary.failed, 0);
 }
+
+#[test]
+fn package_named_tests_does_not_collide_with_test_artifacts() {
+    let scratch = Scratch::new("tests-package");
+    let root = scratch.join("tests");
+    project::new::create(&root, Some("tests")).unwrap();
+    assert_success(&run_in(&root, &["test"]));
+    assert_success(&run_in(&root, &["build"]));
+    assert!(root.join("target/kush/tests").is_file());
+    assert!(root.join("target/kush/.tests").is_dir());
+    assert_success(&run_in(&root, &["test"]));
+    assert_success(&run_in(&root, &["run"]));
+}
+
+#[test]
+fn filtered_or_empty_tests_still_check_the_target() {
+    let scratch = Scratch::new("filtered-invalid");
+    let root = scratch.join("app");
+    project::new::create(&root, Some("app")).unwrap();
+    for body in [
+        "module app.tests.main; #[test] fn real_test() -> Unit ! {panic} { missing_name(); }",
+        "module app.tests.main; fn broken_helper() -> Unit ! {panic} { missing_name(); }",
+    ] {
+        fs::write(root.join("tests/main.kush"), body).unwrap();
+        let output = run_in(&root, &["test", "absent_filter"]);
+        assert_failure(&output);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("missing_name"));
+        assert_success(&run_in(&root, &["test", "--list"]));
+    }
+}
+
+#[test]
+fn entry_headers_keywords_and_custom_test_locations_are_checked() {
+    let scratch = Scratch::new("names-and-headers");
+    for keyword in ["fn", "if", "struct", "true", "foreign"] {
+        assert!(project::new::create(&scratch.join(keyword), Some(keyword)).is_err());
+        assert!(!scratch.join(keyword).exists());
+    }
+    let root = scratch.join("app");
+    project::new::create(&root, Some("app")).unwrap();
+    for source in [
+        "module app.util; fn main() -> Unit ! {} {}",
+        "fn main() -> Unit ! {} {}",
+    ] {
+        fs::write(root.join("src/main.kush"), source).unwrap();
+        assert!(
+            project::load(&root)
+                .unwrap_err()
+                .message()
+                .contains("entry module")
+        );
+    }
+    fs::write(
+        root.join("src/main.kush"),
+        "module app; fn main() -> Unit ! {} {}",
+    )
+    .unwrap();
+    fs::write(
+        root.join("Kush.toml"),
+        "[package]\nname = \"app\"\ntest = \"check_me.kush\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("check_me.kush"),
+        "module app.check_me; #[test] fn works() -> Unit ! {} {}",
+    )
+    .unwrap();
+    assert_success(&run_in(&root, &["test"]));
+}
+
+#[test]
+fn unreadable_lock_and_dash_prefixed_single_file_are_handled() {
+    let scratch = Scratch::new("lock-and-dash");
+    let root = scratch.join("app");
+    project::new::create(&root, Some("app")).unwrap();
+    fs::create_dir(root.join("Kush.lock")).unwrap();
+    let output = run_in(&root, &["check", "--locked"]);
+    assert_failure(&output);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("cannot read"), "{error}");
+    assert!(!error.contains("is missing"));
+    scratch.write(
+        "-dash.kush",
+        "fn main() -> Unit ! {io, panic} { print_i64(1); }",
+    );
+    assert_success(&run_in(&scratch.path, &["check", "-dash.kush"]));
+    assert_success(&run_in(&scratch.path, &["run", "-dash.kush"]));
+    assert_success(&run_in(
+        &scratch.path,
+        &["build", "-dash.kush", "-o", "dash-bin"],
+    ));
+}
+
+#[test]
+fn source_symlinks_do_not_make_build_and_format_disagree() {
+    let scratch = Scratch::new("source-symlinks");
+    let root = scratch.join("app");
+    project::new::create(&root, Some("app")).unwrap();
+    scratch.write("external.kush", "module app; fn main() -> Unit ! {} {}");
+    fs::remove_file(root.join("src/main.kush")).unwrap();
+    std::os::unix::fs::symlink(scratch.join("external.kush"), root.join("src/main.kush")).unwrap();
+    assert!(
+        project::load(&root)
+            .unwrap_err()
+            .message()
+            .contains("symlinked source")
+    );
+    fs::remove_file(root.join("src/main.kush")).unwrap();
+    fs::remove_dir(root.join("src")).unwrap();
+    fs::create_dir(scratch.join("other-src")).unwrap();
+    scratch.write(
+        "other-src/main.kush",
+        "module app; fn main() -> Unit ! {} {}",
+    );
+    std::os::unix::fs::symlink(scratch.join("other-src"), root.join("src")).unwrap();
+    assert!(
+        project::load(&root)
+            .unwrap_err()
+            .message()
+            .contains("symlinked source")
+    );
+}

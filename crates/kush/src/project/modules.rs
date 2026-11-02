@@ -42,6 +42,20 @@ impl ModuleIndex {
                     entry.display()
                 )));
             }
+            require_regular_source(&entry)?;
+            let source = fs::read_to_string(&entry)
+                .map_err(|e| Failure::new(format!("cannot read {}: {e}", entry.display())))?;
+            let module = crate::parser::parse(&source)
+                .map_err(|e| Failure::new(e.render(&entry.display().to_string(), &source)))?;
+            if !matches!(module.items.first().map(|item| &item.item.kind),
+                Some(crate::ast::ItemKind::Module(parts)) if parts == &[package.name.clone()])
+            {
+                return Err(Failure::new(format!(
+                    "{}: entry module must be declared as 'module {};': header does not match the package",
+                    entry.display(),
+                    package.name
+                )));
+            }
             let skip = packages
                 .iter()
                 .filter(|other| other.name != package.name)
@@ -61,6 +75,12 @@ impl ModuleIndex {
                 (package.root.join("src"), false),
                 (package.root.join("tests"), true),
             ] {
+                if fs::symlink_metadata(&base).is_ok_and(|m| m.file_type().is_symlink()) {
+                    return Err(Failure::new(format!(
+                        "{}: symlinked source directories are not followed",
+                        base.display()
+                    )));
+                }
                 if base.is_dir() {
                     context.tests = tests;
                     index.walk(&mut context, &base, 0)?;
@@ -168,6 +188,27 @@ impl ModuleIndex {
         Ok(())
     }
 
+    pub fn register_test(&mut self, package: &Package, file: &Path) -> Result<(), Failure> {
+        require_regular_source(file)?;
+        if self.files.contains_key(file) {
+            return Ok(());
+        }
+        let relative = file
+            .strip_prefix(&package.root)
+            .map_err(|_| Failure::new("test target must be inside its package"))?;
+        let mut parts = vec![package.name.clone()];
+        for component in relative.components() {
+            let text = component.as_os_str().to_string_lossy();
+            let name = text.strip_suffix(".kush").unwrap_or(&text);
+            if !super::manifest::valid_module_component(name) {
+                return Err(Failure::new(format!(
+                    "invalid test module component '{name}'"
+                )));
+            }
+            parts.push(name.to_owned());
+        }
+        self.register(package, file, parts)
+    }
     pub fn module_for_file(&self, file: &Path) -> Option<&str> {
         self.files.get(file).map(String::as_str)
     }
@@ -183,6 +224,19 @@ impl ModuleIndex {
     pub fn is_empty(&self) -> bool {
         self.modules.is_empty()
     }
+}
+
+fn require_regular_source(path: &Path) -> Result<(), Failure> {
+    let resolved = path
+        .canonicalize()
+        .map_err(|e| Failure::new(format!("cannot resolve {}: {e}", path.display())))?;
+    if resolved != path {
+        return Err(Failure::new(format!(
+            "{}: symlinked source paths are not followed",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn module_for(file: &Path, package: &Package, tests: bool) -> Result<Vec<String>, Failure> {
