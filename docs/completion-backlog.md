@@ -613,3 +613,13 @@ Still explicit, tested rejections or documented limits: `DynArray` patterns,
 mutable `&mut [T]` DynArray views, runtime `[T; n]`, allocator traits, FFI/raw
 pointers, allocator-supplied container metadata, and a general `realloc` hook.
 The remote Boat gate for this checkpoint was not run from this checkout.
+
+## Merged gate with references/lifetimes and allocators/DynArray
+
+Merges `6d48059` (references and lifetime inference, `6dbc336` through
+`5ee82c0`) and `d111733` (user allocators and DynArray literals/views,
+`e19c470` through `d7a71fa`) are on `main`. Conflict resolution unified owner
+borrow discipline across records, trait objects, and owning handles, and
+extended dynamic-object and borrowed-element checks to `AllocBox`/`AllocVec`.
+The full Boat gate passes **943 tests**, formatting, and Clippy. Independent
+reviews of these two merges are pending.
