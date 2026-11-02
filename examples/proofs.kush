@@ -1,0 +1,35 @@
+module examples.proofs;
+
+// All generic arguments are explicit in this bootstrap logical subset.
+total fn identity<T: Type>(x: T) -> T ! {} {
+    x
+}
+
+type Same<T: Type, x: T> = Eq<T, x, x>;
+
+total fn reflexivity<T: Type>(x: T) -> Same<T, x> ! {} {
+    refl::<T>(x)
+}
+
+// Forward references are resolved and checked in dependency order.
+total fn answer() -> Nat ! {} {
+    identity::<Nat>(next(1))
+}
+
+total fn next(n: Nat) -> Nat ! {} {
+    Nat.succ(n)
+}
+
+total fn proof_of_answer() -> Eq<Nat, answer, 2> ! {} {
+    refl::<Nat>(2)
+}
+
+total fn with_local(n: Nat) -> Same<Nat, n> ! {} {
+    let value: Nat = identity::<Nat>(n);
+    reflexivity::<Nat>(value)
+}
+
+// Type : Type<1>, not Type : Type.
+total fn small_universe() -> Type<1> ! {} {
+    Type
+}

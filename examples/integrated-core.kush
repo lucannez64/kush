@@ -1,0 +1,30 @@
+module examples.integrated_core;
+
+type Input<T: Type, N: Nat> = [T; N];
+
+#[noalloc]
+fn identity<T: Type, N: Nat>(xs: Input<T, N>) -> Input<T, N> ! {} { xs }
+
+total fn reflexive(n: i64) -> Eq<i64, n, n> ! {} { refl::<i64>(n) }
+
+fn verified(n: i64, erased proof: Eq<i64, n, n>) -> i64 ! {} { n }
+fn twice(x: i64 @[2]) -> i64 ! {panic} { x + x }
+fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+
+fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {e} { f(x) }
+
+fn main() -> i64 ! {alloc, panic} {
+    let values = identity::<i64, 2>([20, 22]);
+    let view: &[i64] = &values[..];
+    if Slice.len(view) != 2 { return -1; }
+    let sum = Slice.at(view, 0, _) + Slice.at(view, 1, _);
+    let checked = verified(sum, reflexive(sum));
+    let callback: fn(i64) -> i64 ! {panic} | Bool = inc;
+    let answer = match callback {
+        fn(i64) -> i64 ! {panic} @ f => apply(f, checked - 1),
+        Bool @ _ => twice(21),
+    };
+    let owner: Box<i64> @[1] = Box.new(answer);
+    let finish: linear once fn() -> i64 ! {} = fn() -> i64 ! {} { Box.take(owner) };
+    finish()
+}

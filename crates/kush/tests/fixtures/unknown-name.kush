@@ -1,0 +1,3 @@
+total fn unresolved() -> Nat ! {} {
+    missing
+}

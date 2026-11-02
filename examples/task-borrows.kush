@@ -1,0 +1,36 @@
+// Child tasks borrowing slices from outside their scope. The scope joins every
+// child before it returns, so the borrowed storage outlives all of them.
+// Run with: cargo run -p kush -- run examples/task-borrows.kush
+// Prints 6 and 15, then exits with 21.
+use std.task.TaskExit;
+
+fn sum(values: &[i64]) -> i64 ! {panic} {
+    let mut i = 0;
+    let mut acc = 0;
+    while i < Slice.len(values) {
+        acc = acc + Slice.get(values, i);
+        i = i + 1;
+    }
+    acc
+}
+
+fn main() -> i64 ! {io, alloc, panic, suspend} {
+    let data: [i64; 6] = [1, 2, 3, 4, 5, 6];
+    let mut totals: [i64; 2] = [0, 0];
+    let input: &[i64] = &data[..];
+    let output: &mut [i64] = &mut totals[..];
+    Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
+        // Each child gets its own half of the output and reads the shared input.
+        let (first, second) = Slice.split_at_mut(output, 1);
+        Task.spawn(fn() -> Unit ! {panic, suspend} {
+            Task.yield();
+            Slice.set(first, 0, sum(&input[0..3]));
+        });
+        Task.spawn(fn() -> Unit ! {panic} {
+            Slice.set(second, 0, sum(&input[3..6]));
+        });
+    });
+    print_i64(totals[0]);
+    print_i64(totals[1]);
+    totals[0] + totals[1]
+}

@@ -1,0 +1,8 @@
+module std.ascii;
+
+pub fn is_digit(byte: i64) -> Bool ! {} { byte >= 48 && byte <= 57 }
+pub fn is_space(byte: i64) -> Bool ! {} { byte == 32 || byte == 9 || byte == 10 || byte == 13 }
+pub fn is_alpha(byte: i64) -> Bool ! {} {
+    (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || byte == 95
+}
+pub fn digit_value(byte: i64) -> i64 ! {panic} { byte - 48 }

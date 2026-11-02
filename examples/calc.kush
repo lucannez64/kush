@@ -1,0 +1,37 @@
+// A small calculator split across modules: `kush run examples/calc.kush`.
+// Modules live next to this file: calc/lexer.kush, calc/parser.kush, calc/eval.kush.
+module calc;
+
+use std.result.Result;
+use calc.lexer;
+use calc.parser;
+use calc.eval;
+
+fn report(code: i64) -> i64 ! {io, panic} {
+    print_i64(code);
+    1
+}
+
+fn run(source: Bytes) -> i64 ! {io, alloc, panic} {
+    let tokens = match lexer.tokenize(&source) {
+        Ok(tokens) => tokens,
+        Err(lexer.LexError.UnexpectedByte(at)) => { drop(source); return report(-100 - at); },
+    };
+    drop(source);
+    let tree = match parser.parse(&tokens) {
+        Ok(tree) => tree,
+        Err(error) => { drop(tokens); return report(-200 - parser.position(error)); },
+    };
+    drop(tokens);
+    match eval.evaluate(tree) {
+        Ok(value) => { print_i64(value); 0 },
+        Err(eval.EvalError.DivideByZero) => report(-300),
+    }
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    match IO.read_all(IO.stdin(), Bytes.with_capacity(4096)) {
+        Ok(source) => run(source),
+        Err(code) => report(-code),
+    }
+}

@@ -1,0 +1,55 @@
+use std.option.Option;
+
+// A borrowed text view is a shared four-word descriptor over a validated
+// String. It allocates nothing, never mutates its owner, and cannot outlive it.
+fn scalar_count(text: &str) -> i64 ! {} {
+    Str.scalar_len(text)
+}
+
+fn initial(text: &str) -> &str ! {panic} {
+    if Str.scalar_len(text) == 0 {
+        text
+    } else {
+        text[0..1]
+    }
+}
+
+fn shorten<'long: 'short, 'short>(text: &'long str) -> &'short str ! {} {
+    text
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let text = "héllo";
+    let view: &str = text.as_str();
+    print_i64(view.len()); // 6 UTF-8 bytes
+    print_i64(view.scalar_len()); // 5 Unicode scalars
+    print_i64(scalar_count(view)); // the same view through a helper
+
+    let middle: &str = view.substr(1, 3); // "é": both endpoints are boundaries
+    print_i64(middle.len()); // 2
+    print_i64(middle.scalar_len()); // 1
+    match middle.scalar_at(0) {
+        Option.Some(c) => print_int(c.code()), // 233
+        Option.None => print_i64(-1),
+    }
+    print_i64(middle.byte_at(0)); // 195, the first byte of 'é'
+    print_i64(middle.byte_at(1)); // 169, a continuation byte
+
+    let tail: &str = &view[3..6]; // "llo", a checked byte-range subview
+    print_i64(tail.len()); // 3
+    let owned: String = tail.to_string(); // explicit allocating copy
+    print_i64(owned.len()); // 3
+
+    let empty = "";
+    print_i64(empty.as_str().len()); // 0
+    let kappa = "kappa";
+    print_i64(initial(kappa.as_str()).len()); // 1
+
+    // The view's last use has passed, so the owner may move again.
+    let ascii = "abc";
+    let head: &str = shorten(ascii.as_str());
+    print_i64(head.len()); // 3
+    let raw = ascii.bytes();
+    print_i64(raw.len()); // 3
+    0
+}

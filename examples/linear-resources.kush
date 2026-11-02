@@ -1,0 +1,82 @@
+// Linear resources and explicit @[1] result contracts.
+//
+// Run with:
+//   cargo run -p kush -- check examples/linear-resources.kush
+//   cargo run -p kush -- eval examples/linear-resources.kush
+//   cargo run -p kush -- run examples/linear-resources.kush
+//
+// Both backends print 20, 21, 21, 7, and 42, then exit with status 0.
+//
+// `-> Box<i64> @[1]` is a static transfer contract: the caller acquires a
+// linear obligation for the returned owning value and must consume it exactly
+// once. The grade is compile-time metadata only; it adds no tag, allocation,
+// or ABI change. Inference, custom grade semirings, and grade-zero erasure are
+// not part of this subset.
+
+fn make(n: i64) -> Box<i64> @[1] ! {alloc, panic} {
+    Box.new(n)
+}
+
+/// An annotated identity moves its parameter obligation into the result.
+fn identity(b: Box<i64> @[1]) -> Box<i64> @[1] ! {} {
+    b
+}
+
+fn consume(b: Box<i64> @[1]) -> i64 ! {} {
+    Box.take(b)
+}
+
+struct Factory {
+    base: i64,
+}
+
+trait Produce {
+    fn produce(self: Self) -> Box<i64> @[1] ! {alloc, panic};
+}
+
+impl Factory {
+    fn create(self: Self) -> Box<i64> @[1] ! {alloc, panic} {
+        Box.new(self.base)
+    }
+}
+
+impl Produce for Factory {
+    fn produce(self: Self) -> Box<i64> @[1] ! {alloc, panic} {
+        Box.new(self.base)
+    }
+}
+
+/// A graded arrow keeps the transfer contract across a call through a value.
+fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc, panic}, n: i64) -> i64 ! {alloc, panic} {
+    consume(f(n))
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    print_i64(consume(identity(make(20))));
+
+    let factory = Factory { base: 21 };
+    print_i64(consume(factory.create()));
+    print_i64(consume(factory.produce()));
+
+    print_i64(apply(make, 7));
+
+    // A closure capturing a returned resource is linear-once and must be
+    // called exactly once, consuming the captured obligation.
+    let resource = make(41);
+    let closure: linear once fn() -> i64 ! {panic} =
+        fn() -> i64 ! {panic} { Box.take(resource) + 1 };
+    print_i64(closure());
+
+    // A loop may consume the current resource and install a fresh one before
+    // the back-edge, restoring the loop-head obligation.
+    let mut i = 0;
+    let mut current: Box<i64> @[1] = Box.new(0);
+    while i < 2 {
+        let old = current;
+        Box.take(old);
+        current = make(i);
+        i = i + 1;
+    }
+    Box.take(current);
+    0
+}

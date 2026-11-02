@@ -1,0 +1,56 @@
+module examples.async;
+
+use std.task.TaskExit;
+
+// Direct-style cooperative tasks. There is no async fn/await coloring:
+// suspending calls use ordinary syntax and declare the suspend effect.
+
+fn worker(name: i64) -> i64 ! {io, panic, suspend} {
+    print_i64(name * 10 + 1);
+    Task.yield();
+    print_i64(name * 10 + 2);
+    name
+}
+
+fn cancellable(owner: Box<i64>) -> i64 ! {io, panic, suspend} {
+    let value = Box.take(owner);
+    print_i64(value);
+    if Task.yield() {
+        // Normal lexical cleanup runs on this early return. The owned capture
+        // was already consumed, so no obligation is silently discarded.
+        return -1;
+    }
+    value + 1
+}
+
+fn main() -> Unit ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+        let a: Task<i64> = Task.spawn(fn() -> i64 ! {io, panic, suspend} {
+            worker(1)
+        });
+        let b: Task<i64> = Task.spawn(fn() -> i64 ! {io, panic, suspend} {
+            worker(2)
+        });
+        print_i64(0);
+        match Task.join(a) {
+            TaskExit.Completed(value) => print_i64(value),
+            TaskExit.Cancelled => print_i64(-100),
+        }
+        match Task.join(b) {
+            TaskExit.Completed(value) => print_i64(value),
+            TaskExit.Cancelled => print_i64(-200),
+        }
+    });
+
+    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+        let owned = Box.new(7);
+        let c: Task<i64> = Task.spawn(fn() -> i64 ! {io, panic, suspend} {
+            cancellable(owned)
+        });
+        Task.cancel(&c);
+        match Task.join(c) {
+            TaskExit.Completed(value) => print_i64(value),
+            TaskExit.Cancelled => print_i64(-300),
+        }
+    })
+}

@@ -1,0 +1,18 @@
+// Copy arbitrarily long stdin with one fixed-capacity allocation.
+use std.result.Result;
+#[noalloc]
+#[nosuspend]
+fn copy(input: Stdin, output: Stdout, buffer: Bytes) -> Result<Unit, i64> ! {io} {
+    let mut buffer = buffer;
+    loop {
+        buffer = IO.read_chunk(input, Bytes.clear(buffer))?;
+        if Bytes.len(&buffer) == 0 { break; }
+        IO.write(output, &buffer)?;
+    }
+    Ok(())
+}
+fn main() -> i64 ! {io, alloc, panic} {
+    match copy(IO.stdin(), IO.stdout(), Bytes.with_capacity(4096)) {
+        Ok(_) => 0, Err(_) => 1,
+    }
+}

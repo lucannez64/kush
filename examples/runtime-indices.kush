@@ -1,0 +1,68 @@
+// Runtime scalar indices in erased proofs.
+//
+// The executable functions keep immutable i64/Bool/Unit values as ordinary
+// runtime parameters. Erased proof parameters may name those values
+// symbolically: at each call site the frozen scalar value is substituted into
+// the proof type and the kernel checks the evidence.
+//
+//   cargo run -p kush -- check examples/runtime-indices.kush
+//   cargo run -p kush -- eval  examples/runtime-indices.kush   # exit status 42
+//   cargo run -p kush -- run   examples/runtime-indices.kush   # exit status 42
+//
+// The proofs and the logical predicates below are removed before reference
+// evaluation and native lowering; they allocate nothing and are not values.
+
+prop ZeroI<n: i64> {
+    Zero: ZeroI<0>,
+}
+
+prop IsTrue<b: Bool> {
+    Yes: IsTrue<true>,
+    Also: IsTrue<true>,   // proof irrelevance makes both proofs of IsTrue<true>
+}
+
+prop UnitTag<u: Unit> {
+    Mk: UnitTag<()>,
+}
+
+// Logical data may also be indexed by an admitted machine carrier.
+total enum Tag<n: i64> {
+    Mk: Tag<n>,
+}
+
+total fn zero_proof() -> ZeroI<0> ! {} { ZeroI.Zero::<0> }
+total fn true_proof() -> IsTrue<true> ! {} { IsTrue.Yes::<true> }
+total fn unit_proof() -> UnitTag<()> ! {} { UnitTag.Mk::<()> }
+
+// A total logical helper may mention a runtime scalar symbolically. It is
+// erased and is never called at run time.
+total fn same_i64(n: i64) -> Eq<i64, n, n> ! {} { refl::<i64>(n) }
+
+// The proof parameter's type depends on the earlier runtime parameter `n`.
+fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+fn keep_bool(b: Bool, erased same: Eq<Bool, b, b>) -> i64 ! {} {
+    if b { 1 } else { 0 }
+}
+fn keep_zero(n: i64, erased p: ZeroI<n>) -> i64 ! {} { n }
+fn keep_true(b: Bool, erased p: IsTrue<b>) -> i64 ! {} { 4 }
+fn keep_unit(u: Unit, erased p: UnitTag<u>) -> i64 ! {} { 2 }
+fn keep_tag(n: i64, erased p: Tag<n>) -> i64 ! {} { 11 }
+
+// The wrapper substitutes the symbolic local and proof through another erased
+// binder: the kernel still sees the same `n`.
+fn forward(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { keep(n, p) }
+
+fn main() -> i64 ! {panic} {
+    let five: i64 = 5;
+    let b: Bool = true;
+
+    keep(five, refl::<i64>(five))                 // 5
+        + forward(five, same_i64(five))           // 5
+        + keep(10, refl::<i64>(10))               // 10
+        + keep_bool(b, refl::<Bool>(b))           // 1
+        + keep_zero(0, zero_proof())              // 0
+        + keep_true(true, true_proof())           // 4
+        + keep_true(true, IsTrue.Also::<true>)    // 4, proof-irrelevant
+        + keep_unit((), unit_proof())             // 2
+        + keep_tag(0, Tag.Mk::<0>)                // 11
+}

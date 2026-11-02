@@ -1,0 +1,88 @@
+// Default trait method bodies.
+//
+// Run with:
+//   cargo run -p kush -- run examples/default-methods.kush
+//   cargo run -p kush -- eval examples/default-methods.kush
+// Both backends print 10, 312, 20, 9, and 42, then exit with status 0.
+//
+// A trait method written with a block is a default body. An impl that omits
+// the method inherits one specialization per impl target, with `Self` and the
+// trait's static arguments substituted. Overrides must still match the trait
+// signature exactly. There are no vtables, trait values, or runtime dispatch
+// tables.
+
+struct Point {
+    x: i64,
+}
+
+struct Other {
+    x: i64,
+}
+
+trait Scaled {
+    fn base(self: Self) -> i64 ! {panic};
+
+    /// Inherited defaults dispatch to the impl's override of `base`.
+    fn scaled(self: Self, factor: i64) -> i64 ! {panic} {
+        self.base() * factor
+    }
+
+    /// A default body may call another inherited default.
+    fn quadrupled(self: Self) -> i64 ! {panic} {
+        self.scaled(2) * 2
+    }
+}
+
+impl Scaled for Point {
+    fn base(self: Self) -> i64 ! {panic} {
+        self.x + 1
+    }
+}
+
+impl Scaled for Other {
+    fn base(self: Self) -> i64 ! {panic} {
+        self.x + 100
+    }
+}
+
+trait Choose {
+    /// `Self` is substituted with the concrete impl target in the parameters,
+    /// the result, and the body.
+    fn choose(self: Self, other: Self) -> Self ! {panic} {
+        if self.x >= other.x { self } else { other }
+    }
+}
+
+impl Choose for Point { }
+
+trait Wrap<T> {
+    fn value(self: Self) -> T ! {panic};
+
+    /// The trait's `T` is substituted into the default signature and body.
+    fn wrapped(self: Self) -> T ! {panic} {
+        self.value()
+    }
+}
+
+impl Wrap<i64> for Point {
+    fn value(self: Self) -> i64 ! {panic} {
+        self.x
+    }
+}
+
+fn main() -> i64 ! {io, panic} {
+    let point = Point { x: 4 };
+    let other = Other { x: 4 };
+    print_i64(point.scaled(2));
+    print_i64(other.scaled(3));
+    print_i64(point.quadrupled());
+
+    let low = Point { x: 2 };
+    let high = Point { x: 9 };
+    let chosen = low.choose(high);
+    print_i64(chosen.x);
+
+    let wrapped = Point { x: 42 };
+    print_i64(wrapped.Wrap::<i64>.wrapped());
+    0
+}

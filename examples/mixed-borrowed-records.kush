@@ -1,0 +1,40 @@
+// Mixed borrowed and owning record fields. The borrowed descriptor keeps the
+// caller's storage loaned; the owned Box/Bytes/Vec payload moves and is freed
+// exactly once. Reordered source fields are built in layout order.
+//   cargo run -p kush -- run examples/mixed-borrowed-records.kush
+
+struct BufferView<'a> {
+    view: &'a [i64],
+    token: Box<i64>,
+    start: i64
+}
+
+struct MutableView<'a> {
+    view: &'a mut [i64],
+    token: Bytes,
+    items: Vec<i64>
+}
+
+fn make<'a>(view: &'a [i64]) -> BufferView<'a> ! {alloc, panic} {
+    // Source order differs from the declared layout.
+    BufferView { token: Box.new(5), start: 3, view: view }
+}
+
+fn main() -> Unit ! {io, alloc, panic} {
+    let values: [i64; 3] = [10, 20, 30];
+    let record = make(&values[..]);
+    let BufferView { view, token, start } = record;
+    print_i64(Slice.get(view, 1) + Box.take(token) + start);
+
+    let mut mutable_values: [i64; 3] = [1, 2, 3];
+    let record = MutableView {
+        view: &mut mutable_values[..],
+        token: Bytes.from("A"),
+        items: [4, 5]
+    };
+    let MutableView { view, token, items } = record;
+    Slice.set(view, 0, 7);
+    print_i64(Slice.get(view, 0) + Bytes.get(&token, 0) + Vec.len(&items));
+    // The mutable field alias is dead, so the owner is usable again.
+    print_i64(mutable_values[0]);
+}

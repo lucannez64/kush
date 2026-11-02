@@ -1,0 +1,38 @@
+// IEEE-754 f32/f64 values: contextual literals, arithmetic, comparisons,
+// explicit conversions, and shortest round-trip printing.
+//
+// Run with:
+//   cargo run -p kush -- run examples/floats.kush
+//   cargo run -p kush -- eval examples/floats.kush
+// Both backends print the same seven lines and exit with status 0.
+use std.option.Option;
+
+fn classify(x: f64) -> i64 ! {} {
+    if x.is_nan() {
+        3
+    } else if x.is_infinite() {
+        2
+    } else if x < 0.0 {
+        1
+    } else {
+        0
+    }
+}
+
+fn main() -> i64 ! {io, panic} {
+    let ratio = 7.0 / 2.0;
+    let rounded: f32 = 0.1;
+    print_float(ratio);          // 3.5
+    print_float(rounded);       // 0.1
+    print_float(Float.sqrt(2.0));
+    print_float(1.0 / 0.0);     // inf
+    print_int(classify(0.0 / 0.0));
+    print_int(classify(-2.5));
+
+    // Explicit, checked conversions retain their policy at the boundaries.
+    match Float.try_to_int::<i64>(ratio) {
+        Option.Some(value) => print_int(value),
+        Option.None => print_int(0),
+    };
+    0
+}

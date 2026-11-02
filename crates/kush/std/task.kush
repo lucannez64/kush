@@ -1,0 +1,6 @@
+module std.task;
+
+/// The typed result of joining a structured task. `Completed` carries the
+/// task's normal result; `Cancelled` means the task observed a cancellation
+/// request and returned through its cleanup path.
+pub enum TaskExit<T> { Completed(T), Cancelled }

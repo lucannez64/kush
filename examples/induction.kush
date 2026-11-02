@@ -1,0 +1,54 @@
+module examples.induction;
+
+// Named binders in function types let later parameters/results depend on them.
+total fn induction(
+    P: fn(n: Nat) -> Type ! {},
+    zero: P<0>,
+    step: fn(n: Nat, hypothesis: P<n>) -> P<Nat.succ<n>> ! {},
+    n: Nat,
+) -> P<n> ! {} {
+    Nat.induct(P, zero, step, n)
+}
+
+type ConstantNat<n: Nat> = Nat;
+
+total fn add_step(n: Nat, accumulated: Nat) -> Nat ! {} {
+    Nat.succ(accumulated)
+}
+
+// Structural recursion through induction; no unchecked recursive global.
+total fn add(n: Nat, m: Nat) -> Nat ! {} {
+    Nat.induct(ConstantNat, m, add_step, n)
+}
+
+total fn addition_example() -> Eq<Nat, add<2, 3>, 5> ! {} {
+    refl::<Nat>(5)
+}
+
+// Equality substitution derives symmetry, rather than assuming it as an axiom.
+type Reverse<T: Type, left: T, right: T> = Eq<T, right, left>;
+
+total fn symmetry<T: Type>(x: T, y: T, proof: Eq<T, x, y>)
+    -> Eq<T, y, x> ! {} {
+    Eq.transport::<T>(x, y, Reverse::<T, x>, proof, refl::<T>(x))
+}
+
+type RightIdentity<n: Nat> = Eq<Nat, add<n, 0>, n>;
+type SuccessorEquality<left: Nat, right: Nat>
+    = Eq<Nat, Nat.succ<left>, Nat.succ<right>>;
+
+total fn right_identity_step(n: Nat, hypothesis: RightIdentity<n>)
+    -> RightIdentity<Nat.succ<n>> ! {} {
+    Eq.transport::<Nat>(
+        add(n, 0),
+        n,
+        SuccessorEquality::<add<n, 0>>,
+        hypothesis,
+        refl::<Nat>(Nat.succ(add(n, 0))),
+    )
+}
+
+// A proof for every natural n, not just a finite set of checked inputs.
+total fn right_identity(n: Nat) -> RightIdentity<n> ! {} {
+    induction(RightIdentity, refl::<Nat>(0), right_identity_step, n)
+}

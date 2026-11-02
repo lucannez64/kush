@@ -1,0 +1,5 @@
+module std.result;
+
+/// The conventional fallible result. `?` and the I/O builtins use this shape.
+pub enum Result<T, E> { Ok(T), Err(E) }
+

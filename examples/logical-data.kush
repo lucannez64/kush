@@ -1,0 +1,110 @@
+module examples.logical_data;
+
+// `total enum` declares positive indexed logical data. It is checked by the
+// kernel, erased before runtime lowering, and may appear in erased proof
+// parameters. Ordinary `enum` declarations remain runtime owning data and can
+// never be proof evidence.
+
+// Evenness as an inductive property.
+total enum Even {
+    EvenZero: Even,
+    EvenSucc(Even): Even,
+}
+
+type ConstantEven<n: Nat> = Even;
+
+total fn double_step(n: Nat, e: Even) -> Even ! {} {
+    EvenSucc(e)
+}
+
+// Every second natural is even. Nat.induct is checked by the kernel; `double`
+// is a logical computation, not a runtime loop.
+total fn double(n: Nat) -> Even ! {} {
+    Nat.induct(ConstantEven, EvenZero, double_step, n)
+}
+
+// A non-dependent elimination over Even: its height.
+type EvenHeight<e: Even> = Nat;
+
+total fn even_zero_height() -> Nat ! {} { 0 }
+
+total fn even_succ_height(e: Even, ih: Nat) -> Nat ! {} {
+    Nat.succ(ih)
+}
+
+// Data.elim::<Even>(motive, branches in declaration order, scrutinee).
+total fn even_height(e: Even) -> Nat ! {} {
+    Data.elim::<Even>(EvenHeight, even_zero_height, even_succ_height, e)
+}
+
+// A value-dependent motive: `EvenIsDouble<e>` is a proposition about `e`.
+type EvenIsDouble<e: Even> = Eq<Nat, even_height<e>, even_height<e>>;
+
+total fn zero_is_double()
+    -> Eq<Nat, even_height<EvenZero>, even_height<EvenZero>> ! {} {
+    refl::<Nat>(0)
+}
+
+total fn succ_is_double(e: Even, hypothesis: Eq<Nat, even_height<e>, even_height<e>>)
+    -> Eq<Nat, even_height<EvenSucc<e>>, even_height<EvenSucc<e>>> ! {} {
+    refl::<Nat>(even_height(EvenSucc(e)))
+}
+
+// Eliminating a value with a motive that mentions that value.
+total fn even_is_double(e: Even) -> EvenIsDouble<e> ! {} {
+    Data.elim::<Even>(EvenIsDouble, zero_is_double, succ_is_double, e)
+}
+
+total fn height_two() -> Eq<Nat, even_height<double<2>>, 2> ! {} {
+    refl::<Nat>(2)
+}
+
+// An indexed vector: the length is an index, so constructors refine it.
+total enum Vect<T: Type, N: Nat> {
+    Nil: Vect<T, 0>,
+    Cons(T, Vect<T, N>): Vect<T, Nat.succ<N>>,
+}
+
+// The motive takes the index telescope and then the eliminated value.
+type LengthMotive<T: Type, N: Nat, v: Vect<T, N>> = Nat;
+
+total fn nil_length<T: Type, N: Nat>() -> Nat ! {} { 0 }
+
+total fn cons_length<T: Type, N: Nat>(x: T, xs: Vect<T, N>, ih: Nat) -> Nat ! {} {
+    Nat.succ(ih)
+}
+
+total fn length<T: Type, N: Nat>(v: Vect<T, N>) -> Nat ! {} {
+    Data.elim::<Vect>(LengthMotive, nil_length, cons_length, v)
+}
+
+// Constructors are kernel globals with the family's index telescope.
+total fn two_items() -> Vect<Nat, 2> ! {} {
+    Vect.Cons::<Nat, 1>(1, Vect.Cons::<Nat, 0>(2, Vect.Nil::<Nat, 0>))
+}
+
+// The dependent index is preserved by conversion, not asserted.
+total fn length_is_two() -> Eq<Nat, length<Nat, 2, two_items>, 2> ! {} {
+    refl::<Nat>(2)
+}
+
+// General equality elimination (J) remains available for equality proofs.
+type Reverse<T: Type, x: T, y: T> = Eq<T, y, x>;
+
+total fn ReverseMotive<T: Type, x: T, y: T, proof: Eq<T, x, y>>() -> Type ! {} {
+    Reverse::<T, x, y>
+}
+
+total fn symmetry<T: Type>(x: T, y: T, proof: Eq<T, x, y>) -> Eq<T, y, x> ! {} {
+    Eq.elim::<T>(x, y, ReverseMotive::<T, x>, refl::<T>(x), proof)
+}
+
+// Erased evidence consumed by an executable function. `proof_required` has no
+// runtime parameter for the vector; `two_items()` is checked as a proof term.
+fn proof_required(erased v: Vect<Nat, 2>) -> i64 ! {} {
+    42
+}
+
+fn main() -> i64 ! {panic} {
+    proof_required(two_items())
+}

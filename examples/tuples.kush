@@ -1,0 +1,15 @@
+// Anonymous tuples are inline records with positional fields 0..15.
+fn swap<T, U>(pair: (T, U)) -> (U, T) ! {} { (pair.1, pair.0) }
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let pair = (1, 2);
+    let nested = ((3, 4), 5);
+    let swapped = swap(pair);
+    print_i64(pair.0 + pair.1);
+    print_i64(nested.0.1 + nested.1);
+    print_i64(swapped.0 * 10 + swapped.1);
+    let owned: (String, i64) = ("hé", 7);
+    let (text, n) = owned;
+    print_i64(String.len(&text) + String.scalar_len(&text) + n);
+    0
+}

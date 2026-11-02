@@ -1,0 +1,32 @@
+module examples.large_naturals;
+
+// 2^128: already larger than any unsigned 128-bit machine integer.
+total fn large() -> Nat ! {} {
+    340282366920938463463374607431768211456
+}
+
+total fn successor_proof()
+    -> Eq<Nat, Nat.succ<large>, 340282366920938463463374607431768211457> ! {} {
+    refl::<Nat>(340282366920938463463374607431768211457)
+}
+
+total fn canonical_digits() -> Eq<Nat, 000_033, 33> ! {} {
+    refl::<Nat>(33)
+}
+
+type ConstantNat<n: Nat> = Nat;
+
+total fn predecessor_step(n: Nat, previous: Nat) -> Nat ! {} {
+    n
+}
+
+total fn predecessor(n: Nat) -> Nat ! {} {
+    Nat.induct(ConstantNat, 0, predecessor_step, n)
+}
+
+// The step ignores its induction hypothesis. Proof normalization needs just
+// one induction equation, rather than visiting every smaller natural number.
+total fn predecessor_proof()
+    -> Eq<Nat, predecessor<large>, 340282366920938463463374607431768211455> ! {} {
+    refl::<Nat>(340282366920938463463374607431768211455)
+}

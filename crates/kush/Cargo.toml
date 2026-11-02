@@ -1,0 +1,16 @@
+[package]
+name = "kush"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cranelift-codegen = "=0.135.0"
+cranelift-frontend = "=0.135.0"
+cranelift-module = "=0.135.0"
+cranelift-native = "=0.135.0"
+cranelift-object = "=0.135.0"

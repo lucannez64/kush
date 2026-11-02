@@ -1,0 +1,17 @@
+module examples.stdio;
+
+enum Result<T,E> { Ok(T), Err(E) }
+
+#[noalloc]
+#[nosuspend]
+fn copy(input: Stdin, output: Stdout, buffer: Bytes) -> Result<Unit,i64> ! {io} {
+    let bytes = IO.read_all(input, buffer)?;
+    IO.write(output, &bytes)
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    match copy(IO.stdin(), IO.stdout(), Bytes.with_capacity(4096)) {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
+}

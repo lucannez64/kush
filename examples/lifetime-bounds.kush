@@ -1,0 +1,79 @@
+// Explicit outlives bounds. `'long: 'short` says storage named by `'long`
+// outlives storage named by `'short`, so a signature may return a borrow under
+// the shorter name while the checker keeps every source owner borrowed. Run:
+//   cargo run -p kush -- run examples/lifetime-bounds.kush
+
+#[noalloc]
+fn shorten<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} {
+    view
+}
+
+#[noalloc]
+fn shorten_mut<'long: 'short, 'short>(
+    view: &'long mut [i64],
+) -> &'short mut [i64] ! {panic} {
+    view
+}
+
+// Outlives is transitive: 'long outlives 'middle, which outlives 'short.
+#[noalloc]
+fn transit<'long: 'middle, 'middle: 'short, 'short>(
+    view: &'long [i64],
+) -> &'short [i64] ! {panic} {
+    view
+}
+
+struct Window<'a> {
+    view: &'a [i64],
+    start: i64,
+}
+
+#[noalloc]
+fn window<'long: 'short, 'short>(view: &'long [i64]) -> Window<'short> ! {} {
+    Window { view: view, start: 5 }
+}
+
+#[noalloc]
+fn first<'a>(w: Window<'a>) -> &'a [i64] ! {} {
+    let Window { view, .. } = w;
+    view
+}
+
+// A call-site constraint: the caller must establish 'long: 'short for the
+// actual borrows it supplies.
+#[noalloc]
+fn pair<'long: 'short, 'short>(
+    long: &'long [i64],
+    short: &'short [i64],
+) -> i64 ! {panic} {
+    Slice.get(long, 0) + Slice.get(short, 1)
+}
+
+// A helper may pass on the shorter name; the result keeps the caller's owner.
+#[noalloc]
+fn relay<'long: 'short, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} {
+    shorten(view)
+}
+
+fn main() -> Unit ! {io, panic} {
+    let mut values: [i64; 4] = [10, 20, 30, 40];
+
+    let short = shorten(&values[..]);
+    print_i64(Slice.get(short, 1));
+
+    let deep = transit(&values[..]);
+    print_i64(Slice.get(deep, 2));
+
+    let relayed = relay(&values[..]);
+    print_i64(Slice.get(relayed, 0));
+
+    let framed = window(&values[..]);
+    print_i64(Slice.get(first(framed), 3));
+
+    print_i64(pair(&values[..], &values[..]));
+
+    let mut numbers: [i64; 3] = [1, 2, 3];
+    let writable = shorten_mut(&mut numbers[..]);
+    Slice.set(writable, 0, 7);
+    print_i64(numbers[0]);
+}

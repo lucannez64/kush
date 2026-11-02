@@ -1,0 +1,7 @@
+module examples.arrays;
+#[noalloc]
+fn pair() -> [i64; 2] ! {} { [20, 22] }
+fn main() -> Unit ! {io, panic} {
+    let values = pair();
+    print_i64(values[0] + values[1]);
+}

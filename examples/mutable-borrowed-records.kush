@@ -1,0 +1,33 @@
+// Mutable borrowed record fields. A record containing an exclusive view is
+// affine and move-only; destructure it before using or reborrowing the field.
+// The caller's array stays suspended until every field alias is dead.
+//   cargo run -p kush -- run examples/mutable-borrowed-records.kush
+
+struct Window<'a, T> {
+    view: &'a mut [T],
+    start: i64
+}
+
+fn window<'a>(view: &'a mut [i64]) -> Window<'a, i64> ! {} {
+    Window { view: view, start: 2 }
+}
+
+fn tail<'a>(window: Window<'a, i64>) -> Window<'a, i64> ! {panic} {
+    let Window { view, start } = window;
+    let child = &mut view[1..];
+    Window { view: child, start: start + 1 }
+}
+
+fn main() -> Unit ! {io, panic} {
+    let mut values: [i64; 4] = [1, 2, 3, 4];
+    let window = tail(window(&mut values[..]));
+    let Window { view, start } = window;
+    Slice.set(view, 0, 10);
+    Slice.set(view, 1, 20);
+    print_i64(Slice.get(view, 0));
+    print_i64(Slice.get(view, 1));
+    // The field view has reached its last use, so the owner is restored.
+    print_i64(values[1]);
+    print_i64(values[2]);
+    print_i64(start);
+}

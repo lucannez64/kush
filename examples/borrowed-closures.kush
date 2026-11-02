@@ -1,0 +1,43 @@
+// Scoped `once fn` closures that capture borrowed slice views. Captures point
+// at the original owner storage; a call or the end of the lexical scope
+// releases the loan. Run with:
+//   cargo run -p kush -- run examples/borrowed-closures.kush
+
+fn main() -> Unit ! {io, alloc, panic} {
+    // Shared capture: the closure reads through the original view.
+    let mut values: [i64; 4] = [1, 2, 3, 4];
+    let shared: &[i64] = &values[..];
+    let ends = fn() -> i64 ! {panic} { Slice.get(shared, 0) + Slice.get(shared, 3) };
+    print_i64(ends());
+
+    // Mutable capture moves the view capability into the closure. The call
+    // consumes the closure and releases the owner for later access.
+    let view: &mut [i64] = &mut values[..];
+    let bump = fn(at: i64, by: i64) -> Unit ! {panic} {
+        Slice.set(view, at, Slice.get(view, at) + by);
+    };
+    bump(0, 10);
+    print_i64(values[0]);
+
+    // Opposite sides of one checked split may be captured by two closures.
+    let (left, right) = Slice.split_at_mut(&mut values[..], 2);
+    let add_left = fn() -> Unit ! {panic} { Slice.set(left, 0, Slice.get(left, 0) + 1); };
+    let add_right = fn() -> Unit ! {panic} { Slice.set(right, 0, Slice.get(right, 0) + 100); };
+    add_left();
+    add_right();
+    print_i64(values[0]);
+    print_i64(values[2]);
+
+    // A closure can be rebuilt and called on every loop iteration.
+    let mut counts: [i64; 2] = [0, 0];
+    let mut index = 0;
+    while index < 2 {
+        let counts_view: &mut [i64] = &mut counts[..];
+        let step = fn() -> Unit ! {panic} {
+            Slice.set(counts_view, index, Slice.get(counts_view, index) + index + 1);
+        };
+        step();
+        index = index + 1;
+    }
+    print_i64(counts[0] + counts[1]);
+}

@@ -1,0 +1,33 @@
+struct Window<'a, T> {
+    view: &'a [T],
+    start: i64
+}
+
+struct Pair<'a, 'b> {
+    first: &'a [i64],
+    second: &'b [i64]
+}
+
+fn window<'a>(view: &'a [i64]) -> Window<'a, i64> ! {} {
+    Window { view: view, start: 0 }
+}
+
+fn first<'a>(window: Window<'a, i64>) -> &'a [i64] ! {} {
+    window.view
+}
+
+fn at<'a>(window: Window<'a, i64>, index: i64) -> i64 ! {panic} {
+    Slice.get(window.view, index) + window.start
+}
+
+fn main() -> Unit ! {io, panic} {
+    let values: [i64; 3] = [10, 20, 30];
+    let window = window(&values[..]);
+    print_i64(Slice.get(first(window), 0));
+    print_i64(at(window, 1));
+
+    let left: [i64; 2] = [1, 2];
+    let right: [i64; 2] = [3, 4];
+    let pair = Pair { first: &left[..], second: &right[..] };
+    print_i64(Slice.get(pair.first, 1) + Slice.get(pair.second, 0));
+}

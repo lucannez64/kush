@@ -1,0 +1,80 @@
+module calc.parser;
+
+use std.result.Result;
+use calc.lexer.Token;
+
+pub enum Op { Add, Sub, Mul, Div }
+pub enum Expr { Number(i64), Negate(Box<Expr>), Binary(Op, Box<Expr>, Box<Expr>) }
+pub enum ParseError { Expected(i64), Trailing(i64) }
+
+/// A parsed subtree and the index of the next token.
+struct Parsed { tree: Expr, next: i64 }
+
+pub fn position(error: ParseError) -> i64 ! {} {
+    match error { ParseError.Expected(at) | ParseError.Trailing(at) => at }
+}
+
+fn peek(tokens: &Vec<Token>, at: i64) -> Token ! {panic} {
+    if at >= 0 && at < Vec.len(tokens) { Vec.at(tokens, at, _) } else { Token.Close }
+}
+
+fn primary(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc, panic} {
+    if at >= Vec.len(tokens) { return Err(ParseError.Expected(at)); }
+    match peek(tokens, at) {
+        Token.Number(n) => Ok(Parsed { tree: Expr.Number(n), next: at + 1 }),
+        Token.Minus => {
+            let Parsed { tree: inner, next: next } = primary(tokens, at + 1)?;
+            Ok(Parsed { tree: Expr.Negate(Box.new(inner)), next: next })
+        },
+        Token.Open => {
+            let Parsed { tree: inner, next: next } = sum(tokens, at + 1)?;
+            match peek(tokens, next) {
+                Token.Close if next < Vec.len(tokens) => Ok(Parsed { tree: inner, next: next + 1 }),
+                _ => { drop(inner); Err(ParseError.Expected(next)) },
+            }
+        },
+        _ => Err(ParseError.Expected(at)),
+    }
+}
+
+/// Binary levels share one loop; `level` 0 is +/-, 1 is * and /.
+fn operator(token: Token, level: i64) -> Option ! {} {
+    match token {
+        Token.Plus if level == 0 => Option.Some(Op.Add),
+        Token.Minus if level == 0 => Option.Some(Op.Sub),
+        Token.Star if level == 1 => Option.Some(Op.Mul),
+        Token.Slash if level == 1 => Option.Some(Op.Div),
+        _ => Option.None,
+    }
+}
+enum Option { None, Some(Op) }
+
+fn operand(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError> ! {alloc, panic} {
+    if level == 0 { product(tokens, at) } else { primary(tokens, at) }
+}
+
+fn chain(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError> ! {alloc, panic} {
+    let Parsed { tree: first, next: start } = operand(tokens, at, level)?;
+    let mut tree = first;
+    let mut next = start;
+    loop {
+        match operator(peek(tokens, next), level) {
+            Option.None => { break; },
+            Option.Some(op) => {
+                let Parsed { tree: right, next: after } = operand(tokens, next + 1, level)?;
+                tree = Expr.Binary(op, Box.new(tree), Box.new(right));
+                next = after;
+            },
+        }
+    }
+    Ok(Parsed { tree: tree, next: next })
+}
+
+fn product(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc, panic} { chain(tokens, at, 1) }
+fn sum(tokens: &Vec<Token>, at: i64) -> Result<Parsed, ParseError> ! {alloc, panic} { chain(tokens, at, 0) }
+
+pub fn parse(tokens: &Vec<Token>) -> Result<Expr, ParseError> ! {alloc, panic} {
+    let Parsed { tree: tree, next: next } = sum(tokens, 0)?;
+    if next != Vec.len(tokens) { drop(tree); return Err(ParseError.Trailing(next)); }
+    Ok(tree)
+}

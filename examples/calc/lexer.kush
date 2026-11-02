@@ -1,0 +1,55 @@
+module calc.lexer;
+
+use std.result.Result;
+use std.ascii;
+
+pub enum Token { Number(i64), Plus, Minus, Star, Slash, Open, Close }
+pub enum LexError { UnexpectedByte(i64) }
+
+/// A number literal and the index just after it.
+struct Scanned { value: i64, next: i64 }
+
+/// `start` is proved non-negative by every caller; `Bytes.at` needs no
+/// runtime bounds check because the loop condition establishes the bound.
+fn number(source: &Bytes, start: i64, erased in_range: { 0 <= start }) -> Scanned ! {panic} {
+    let mut index = start;
+    let mut value = 0;
+    while index >= 0 && index < Bytes.len(source) && ascii.is_digit(Bytes.at(source, index, _)) {
+        value = value * 10 + ascii.digit_value(Bytes.at(source, index, _));
+        index = index + 1;
+    }
+    Scanned { value: value, next: index }
+}
+
+fn symbol(byte: i64) -> Token.Plus | Token.Minus | Token.Star | Token.Slash | Token.Open | Token.Close | Token.Number ! {} {
+    match byte {
+        43 => Token.Plus,
+        45 => Token.Minus,
+        42 => Token.Star,
+        47 => Token.Slash,
+        40 => Token.Open,
+        41 => Token.Close,
+        _ => Token.Number(-1),
+    }
+}
+
+pub fn tokenize(source: &Bytes) -> Result<Vec<Token>, LexError> ! {alloc, panic} {
+    let mut tokens: Vec<Token> = Vec.new();
+    let mut index = 0;
+    while index >= 0 && index < Bytes.len(source) {
+        let byte = Bytes.at(source, index, _);
+        if ascii.is_space(byte) {
+            index = index + 1;
+        } else if ascii.is_digit(byte) {
+            let Scanned { value: value, next: next } = number(source, index, _);
+            tokens = Vec.push(tokens, Token.Number(value));
+            index = next;
+        } else {
+            match symbol(byte) {
+                Token.Number(_) => { drop(tokens); return Err(LexError.UnexpectedByte(index)); },
+                token => { tokens = Vec.push(tokens, token); index = index + 1; },
+            }
+        }
+    }
+    Ok(tokens)
+}

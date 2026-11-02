@@ -1,0 +1,3 @@
+total fn impossible() -> Eq<Nat, 0, 1> ! {} {
+    refl::<Nat>(0)
+}

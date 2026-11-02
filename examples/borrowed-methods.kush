@@ -1,0 +1,50 @@
+// Call-scoped borrowed record receivers and ordinary record-reference helpers.
+// Run in the reference evaluator or the native backend:
+//   cargo run -p kush -- run examples/borrowed-methods.kush
+// Prints 3, 12, 9, 6 on separate lines and exits with status 11.
+
+struct Point { x: i64, y: i64 }
+
+impl Point {
+    fn sum(self: &Self) -> i64 ! {panic} {
+        self.x + self.y
+    }
+
+    fn shift(&mut self, by: i64) -> Unit ! {panic} {
+        self.x = self.x + by;
+        self.y = self.y + by;
+    }
+}
+
+trait Describe {
+    fn describe(self: &Self) -> i64 ! {panic};
+}
+
+impl Describe for Point {
+    fn describe(self: &Self) -> i64 ! {panic} {
+        self.x * 10 + self.y
+    }
+}
+
+#[noalloc]
+#[nosuspend]
+fn peek(point: &Point) -> i64 ! {panic} {
+    point.x
+}
+
+#[noalloc]
+#[nosuspend]
+fn shift_via(point: &mut Point, by: i64) -> Unit ! {panic} {
+    point.x = point.x + by;
+}
+
+fn main() -> i64 ! {io, panic} {
+    let mut point = Point { x: 1, y: 2 };
+    print_i64(point.sum());
+    print_i64(point.describe());
+    point.shift(3);
+    print_i64(point.sum());
+    shift_via(&mut point, 2);
+    print_i64(peek(&point));
+    point.x + point.y
+}

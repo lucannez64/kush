@@ -1,0 +1,28 @@
+module examples.first;
+
+fn digit(code: i64) -> i64 ! {panic} {
+    if code >= 48 && code <= 57 { code - 48 } else { -1 }
+}
+
+// A small parser for two ASCII digit codes. Invalid input returns -1.
+fn parse_two_digits(first: i64, second: i64) -> i64 ! {panic} {
+    let a = digit(first);
+    let b = digit(second);
+    if a < 0 || b < 0 { -1 } else { a * 10 + b }
+}
+
+fn factorial(n: i64) -> i64 ! {panic} {
+    match n {
+        0 | 1 => 1,
+        value if value > 1 => value * factorial(value - 1),
+        _ => panic(),
+    }
+}
+
+fn main() -> Unit ! {io, panic} {
+    print_i64(parse_two_digits(52, 50));
+    print_i64(factorial(6));
+    let mut answer = 0;
+    if digit(52) == 4 { answer = 42; } else { answer = -1; }
+    print_i64(answer);
+}

@@ -1,0 +1,53 @@
+// Dependent array lengths, compile-time indices, and transparent aliases.
+//
+// Run with:
+//   cargo run -p kush -- run examples/dependent-arrays.kush
+// The process exits with status 42.
+
+type Constant<n: Nat> = Nat;
+total fn step(n: Nat, acc: Nat) -> Nat ! {} { Nat.succ(acc) }
+total fn add(n: Nat, m: Nat) -> Nat ! {} { Nat.induct(Constant, m, step, n) }
+
+type Value = i64 | Bool;
+type Pair<T> = [T; 2];
+type ReadOnly = Pair<i64>;
+
+struct Buffer<N: Nat> { data: [i64; N] }
+
+#[noalloc]
+fn identity<T: Type, N: Nat>(xs: [T; N]) -> [T; N] ! {} { xs }
+
+#[noalloc]
+fn last<T: Type, N: Nat>(xs: [T; N]) -> T ! {panic} { xs[N - 1] }
+
+#[noalloc]
+fn second(xs: [i64; add<1, 1>]) -> i64 ! {panic} { xs[add(0, 1)] }
+
+#[noalloc]
+fn head<N: Nat>(b: Buffer<N>) -> i64 ! {panic} { b.data[0] }
+
+#[noalloc]
+fn describe(v: Value) -> i64 ! {panic} {
+    match v {
+        i64 @ n => n,
+        Bool @ b => if b { 1 } else { 0 },
+    }
+}
+
+fn main() -> i64 ! {panic} {
+    let values: [i64; 4] = [0, 20, 20, 2];
+    let same = identity(values);
+    let inferred = identity([12, 1]);
+    let pair: ReadOnly = [3, 1];
+    let buffer: Buffer<3> = Buffer { data: [0, 20, 21] };
+    let flags: [Bool; 3] = [true, false, true];
+
+    head(buffer)
+        + second([0, 22])
+        + last(same)
+        + inferred[0]
+        + pair[0]
+        + describe(true)
+        + describe(1)
+        + if flags[0] { 1 } else { 0 }
+}

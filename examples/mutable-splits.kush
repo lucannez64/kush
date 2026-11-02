@@ -1,0 +1,38 @@
+// Checked disjoint mutable sibling views from Slice.split_at_mut. The split
+// proves the two ranges meet at one checked midpoint; the parent is suspended
+// until both children and their descendants reach their last use.
+//   cargo run -p kush -- run examples/mutable-splits.kush
+
+#[noalloc]
+fn bump<'a>(left: &'a mut [i64], right: &'a mut [i64]) -> Unit ! {panic} {
+    Slice.set(left, 0, Slice.get(left, 0) + 1);
+    Slice.set(right, 0, Slice.get(right, 0) + 10);
+}
+
+#[noalloc]
+fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+    &mut view[1..]
+}
+
+fn main() -> Unit ! {io, alloc, panic} {
+    let mut values: [i64; 5] = [1, 2, 3, 4, 5];
+    let parent = &mut values[..];
+    let (left, right) = Slice.split_at_mut(parent, 2);
+    Slice.set(left, 0, 10);
+    Slice.set(right, 0, 20);
+    bump(&mut left[..], &mut right[..]);
+    print_i64(Slice.get(left, 0));
+    print_i64(Slice.get(right, 0));
+
+    // Both sides can be split again. Descendants of the left side remain
+    // disjoint from descendants of the right side.
+    let (left_inner, left_edge) = Slice.split_at_mut(left, 1);
+    let right_tail = tail_mut(right);
+    Slice.set(left_inner, 0, 30);
+    Slice.set(left_edge, 0, 40);
+    Slice.set(right_tail, 0, 50);
+    print_i64(Slice.get(parent, 1));
+    print_i64(values[0]);
+    print_i64(values[1]);
+    print_i64(values[3]);
+}

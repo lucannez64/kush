@@ -1,0 +1,377 @@
+module std.json;
+use std.result.Result;
+
+// Owned JSON tree. Lists preserve array order, object order and duplicate keys.
+pub enum Value {
+    Null, Bool(Bool), Number(Bytes), String(Bytes),
+    Array(Box<Items>), Object(Box<Members>),
+}
+pub enum Items { End, More(Value, Box<Items>) }
+pub enum Members { End, More(Bytes, Value, Box<Members>) }
+pub enum Error {
+    Unexpected(i64), InvalidNumber(i64), InvalidEscape(i64),
+    InvalidUnicode(i64), Trailing(i64), Limit(i64),
+}
+struct Parsed { value: Value, next: i64 }
+struct Text { text: Bytes, next: i64 }
+
+pub fn position(error: Error) -> i64 ! {} {
+    match error {
+        Error.Unexpected(at) | Error.InvalidNumber(at) | Error.InvalidEscape(at)
+        | Error.InvalidUnicode(at) | Error.Trailing(at) | Error.Limit(at) => at,
+    }
+}
+pub fn message(error: Error) -> Bytes ! {alloc, panic} {
+    match error {
+        Error.Unexpected(_) => Bytes.from("unexpected byte or end of input"),
+        Error.InvalidNumber(_) => Bytes.from("invalid JSON number"),
+        Error.InvalidEscape(_) => Bytes.from("invalid string escape"),
+        Error.InvalidUnicode(_) => Bytes.from("invalid UTF-8 or Unicode escape"),
+        Error.Trailing(_) => Bytes.from("trailing input after JSON value"),
+        Error.Limit(_) => Bytes.from("JSON size, nesting or container limit exceeded"),
+    }
+}
+#[noalloc] #[nosuspend]
+fn digit(byte: i64) -> Bool ! {} { byte >= 48 && byte <= 57 }
+#[noalloc] #[nosuspend]
+fn skip(source: &[i64], start: i64) -> i64 ! {panic} {
+    let mut at = start;
+    while at < Slice.len(source) {
+        let b = Slice.get(source, at);
+        if b != 32 && b != 9 && b != 10 && b != 13 { break; }
+        at = at + 1;
+    }
+    at
+}
+#[noalloc] #[nosuspend]
+fn hex(byte: i64) -> i64 ! {panic} {
+    if digit(byte) { byte - 48 }
+    else { if byte >= 65 && byte <= 70 { byte - 55 }
+    else { if byte >= 97 && byte <= 102 { byte - 87 } else { -1 } } }
+}
+#[noalloc] #[nosuspend]
+fn hex4(source: &[i64], at: i64) -> Result<i64, Error> ! {panic} {
+    if at + 4 > Slice.len(source) { return Err(Error.InvalidUnicode(at)); }
+    let mut code = 0;
+    let mut i = 0;
+    while i < 4 {
+        let n = hex(Slice.get(source, at + i));
+        if n < 0 { return Err(Error.InvalidUnicode(at + i)); }
+        code = code * 16 + n;
+        i = i + 1;
+    }
+    Ok(code)
+}
+// Validate one raw UTF-8 scalar, rejecting overlongs, surrogates and > U+10FFFF.
+#[noalloc] #[nosuspend]
+fn utf8(source: &[i64], at: i64) -> Result<i64, Error> ! {panic} {
+    let lead = Slice.get(source, at);
+    let mut width = 0;
+    if lead >= 194 && lead <= 223 { width = 2; }
+    if lead >= 224 && lead <= 239 { width = 3; }
+    if lead >= 240 && lead <= 244 { width = 4; }
+    if width == 0 || at + width > Slice.len(source) { return Err(Error.InvalidUnicode(at)); }
+    let second = Slice.get(source, at + 1);
+    if (lead == 224 && second < 160) || (lead == 237 && second >= 160)
+        || (lead == 240 && second < 144) || (lead == 244 && second >= 144) {
+        return Err(Error.InvalidUnicode(at));
+    }
+    let mut i = 1;
+    while i < width {
+        let byte = Slice.get(source, at + i);
+        if byte < 128 || byte > 191 { return Err(Error.InvalidUnicode(at + i)); }
+        i = i + 1;
+    }
+    Ok(width)
+}
+fn encode(out: Bytes, code: i64) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    if code < 128 { out = Bytes.push(out, code); }
+    else { if code < 2048 {
+        out = Bytes.push(out, 192 + code / 64);
+        out = Bytes.push(out, 128 + code % 64);
+    } else { if code < 65536 {
+        out = Bytes.push(out, 224 + code / 4096);
+        out = Bytes.push(out, 128 + code / 64 % 64);
+        out = Bytes.push(out, 128 + code % 64);
+    } else {
+        out = Bytes.push(out, 240 + code / 262144);
+        out = Bytes.push(out, 128 + code / 4096 % 64);
+        out = Bytes.push(out, 128 + code / 64 % 64);
+        out = Bytes.push(out, 128 + code % 64);
+    } } }
+    out
+}
+fn string(source: &[i64], start: i64) -> Result<Text, Error> ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(16);
+    let mut at = start + 1;
+    while at < Slice.len(source) {
+        let byte = Slice.get(source, at);
+        if byte == 34 { return Ok(Text { text: out, next: at + 1 }); }
+        if byte < 32 { return Err(Error.Unexpected(at)); }
+        if byte == 92 {
+            at = at + 1;
+            if at == Slice.len(source) { return Err(Error.InvalidEscape(at)); }
+            let escape = Slice.get(source, at);
+            if escape == 117 {
+                let mut code = hex4(source, at + 1)?;
+                at = at + 5;
+                if code >= 55296 && code <= 56319 {
+                    if at + 6 > Slice.len(source) { return Err(Error.InvalidUnicode(at)); }
+                    if Slice.get(source, at) != 92 || Slice.get(source, at + 1) != 117 {
+                        return Err(Error.InvalidUnicode(at));
+                    }
+                    let low = hex4(source, at + 2)?;
+                    if low < 56320 || low > 57343 { return Err(Error.InvalidUnicode(at + 2)); }
+                    code = 65536 + (code - 55296) * 1024 + low - 56320;
+                    at = at + 6;
+                } else { if code >= 56320 && code <= 57343 { return Err(Error.InvalidUnicode(at - 4)); } }
+                out = encode(out, code);
+            } else {
+                let decoded = match escape {
+                    34 => 34, 92 => 92, 47 => 47, 98 => 8, 102 => 12,
+                    110 => 10, 114 => 13, 116 => 9,
+                    _ => { return Err(Error.InvalidEscape(at)); },
+                };
+                out = Bytes.push(out, decoded);
+                at = at + 1;
+            }
+        } else { if byte < 128 {
+            out = Bytes.push(out, byte);
+            at = at + 1;
+        } else {
+            let width = utf8(source, at)?;
+            let mut i = 0;
+            while i < width { out = Bytes.push(out, Slice.get(source, at + i)); i = i + 1; }
+            at = at + width;
+        } }
+    }
+    Err(Error.Unexpected(at))
+}
+#[noalloc] #[nosuspend]
+fn number_end(source: &[i64], start: i64) -> Result<i64, Error> ! {panic} {
+    let mut at = start;
+    if at < Slice.len(source) && Slice.get(source, at) == 45 { at = at + 1; }
+    if at == Slice.len(source) || !digit(Slice.get(source, at)) { return Err(Error.InvalidNumber(at)); }
+    if Slice.get(source, at) == 48 { at = at + 1; }
+    else { while at < Slice.len(source) && digit(Slice.get(source, at)) { at = at + 1; } }
+    if at < Slice.len(source) && Slice.get(source, at) == 46 {
+        at = at + 1;
+        let first = at;
+        while at < Slice.len(source) && digit(Slice.get(source, at)) { at = at + 1; }
+        if at == first { return Err(Error.InvalidNumber(at)); }
+    }
+    if at < Slice.len(source) && (Slice.get(source, at) == 101 || Slice.get(source, at) == 69) {
+        at = at + 1;
+        if at < Slice.len(source) && (Slice.get(source, at) == 43 || Slice.get(source, at) == 45) { at = at + 1; }
+        let first = at;
+        while at < Slice.len(source) && digit(Slice.get(source, at)) { at = at + 1; }
+        if at == first { return Err(Error.InvalidNumber(at)); }
+    }
+    Ok(at)
+}
+fn copy(source: &[i64], start: i64, end: i64) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(end - start);
+    let mut at = start;
+    while at < end { out = Bytes.push_reserved(out, Slice.get(source, at)); at = at + 1; }
+    out
+}
+#[noalloc] #[nosuspend]
+fn keyword(source: &[i64], at: i64, word: &Bytes) -> Result<i64, Error> ! {panic} {
+    let mut i = 0;
+    while i < Bytes.len(word) {
+        if at + i >= Slice.len(source) || Slice.get(source, at + i) != Bytes.get(word, i) {
+            return Err(Error.Unexpected(at + i));
+        }
+        i = i + 1;
+    }
+    Ok(at + i)
+}
+fn reverse_items(list: Items) -> Items ! {alloc, panic} {
+    let mut list = list;
+    let mut out = Items.End;
+    loop { match list {
+        Items.End => { break; },
+        Items.More(value, next) => { out = Items.More(value, Box.new(out)); list = Box.take(next); },
+    } }
+    out
+}
+fn reverse_members(list: Members) -> Members ! {alloc, panic} {
+    let mut list = list;
+    let mut out = Members.End;
+    loop { match list {
+        Members.End => { break; },
+        Members.More(key, value, next) => { out = Members.More(key, value, Box.new(out)); list = Box.take(next); },
+    } }
+    out
+}
+fn array(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {alloc, panic} {
+    let mut at = skip(source, start + 1);
+    let mut list = Items.End;
+    let mut count = 0;
+    if at < Slice.len(source) && Slice.get(source, at) == 93 {
+        return Ok(Parsed { value: Value.Array(Box.new(list)), next: at + 1 });
+    }
+    loop {
+        if count == 256 { return Err(Error.Limit(at)); }
+        let Parsed { value: value, next: next } = value(source, at, depth + 1)?;
+        list = Items.More(value, Box.new(list));
+        count = count + 1;
+        at = skip(source, next);
+        if at == Slice.len(source) { return Err(Error.Unexpected(at)); }
+        if Slice.get(source, at) == 93 { break; }
+        if Slice.get(source, at) != 44 { return Err(Error.Unexpected(at)); }
+        at = skip(source, at + 1);
+    }
+    Ok(Parsed { value: Value.Array(Box.new(reverse_items(list))), next: at + 1 })
+}
+fn object(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {alloc, panic} {
+    let mut at = skip(source, start + 1);
+    let mut list = Members.End;
+    let mut count = 0;
+    if at < Slice.len(source) && Slice.get(source, at) == 125 {
+        return Ok(Parsed { value: Value.Object(Box.new(list)), next: at + 1 });
+    }
+    loop {
+        if count == 256 { return Err(Error.Limit(at)); }
+        if at == Slice.len(source) || Slice.get(source, at) != 34 { return Err(Error.Unexpected(at)); }
+        let Text { text: key, next: next } = string(source, at)?;
+        at = skip(source, next);
+        if at == Slice.len(source) || Slice.get(source, at) != 58 { return Err(Error.Unexpected(at)); }
+        let Parsed { value: value, next: next } = value(source, at + 1, depth + 1)?;
+        list = Members.More(key, value, Box.new(list));
+        count = count + 1;
+        at = skip(source, next);
+        if at == Slice.len(source) { return Err(Error.Unexpected(at)); }
+        if Slice.get(source, at) == 125 { break; }
+        if Slice.get(source, at) != 44 { return Err(Error.Unexpected(at)); }
+        at = skip(source, at + 1);
+    }
+    Ok(Parsed { value: Value.Object(Box.new(reverse_members(list))), next: at + 1 })
+}
+fn value(source: &[i64], start: i64, depth: i64) -> Result<Parsed, Error> ! {alloc, panic} {
+    let at = skip(source, start);
+    if depth > 8 { return Err(Error.Limit(at)); }
+    if at == Slice.len(source) { return Err(Error.Unexpected(at)); }
+    let byte = Slice.get(source, at);
+    if depth == 8 && (byte == 91 || byte == 123) { return Err(Error.Limit(at)); }
+    if byte == 91 { return array(source, at, depth); }
+    if byte == 123 { return object(source, at, depth); }
+    if byte == 34 {
+        let Text { text: text, next: next } = string(source, at)?;
+        return Ok(Parsed { value: Value.String(text), next: next });
+    }
+    if byte == 45 || digit(byte) {
+        let next = number_end(source, at)?;
+        return Ok(Parsed { value: Value.Number(copy(source, at, next)), next: next });
+    }
+    if byte == 110 {
+        let word = Bytes.from("null"); let next = keyword(source, at, &word)?;
+        return Ok(Parsed { value: Value.Null, next: next });
+    }
+    if byte == 116 {
+        let word = Bytes.from("true"); let next = keyword(source, at, &word)?;
+        return Ok(Parsed { value: Value.Bool(true), next: next });
+    }
+    if byte == 102 {
+        let word = Bytes.from("false"); let next = keyword(source, at, &word)?;
+        return Ok(Parsed { value: Value.Bool(false), next: next });
+    }
+    Err(Error.Unexpected(at))
+}
+
+/// Parse one complete UTF-8 JSON text. Numbers retain their exact lexical bytes.
+#[nosuspend]
+pub fn parse(source: &[i64]) -> Result<Value, Error> ! {alloc, panic} {
+    if Slice.len(source) > 65536 { return Err(Error.Limit(65536)); }
+    let Parsed { value: value, next: next } = value(source, 0, 0)?;
+    let next = skip(source, next);
+    if next != Slice.len(source) { return Err(Error.Trailing(next)); }
+    Ok(value)
+}
+
+fn append(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut at = 0;
+    while at < Bytes.len(text) { out = Bytes.push(out, Bytes.get(text, at)); at = at + 1; }
+    out
+}
+fn quoted(text: Bytes, out: Bytes) -> Result<Bytes, Error> ! {alloc, panic} {
+    let mut out = Bytes.push(out, 34);
+    let mut at = 0;
+    while at < Bytes.len(&text) {
+        let byte = Bytes.get(&text, at);
+        if byte < 32 {
+            out = Bytes.push(out, 92); out = Bytes.push(out, 117);
+            out = Bytes.push(out, 48); out = Bytes.push(out, 48);
+            let high = byte / 16; let low = byte % 16;
+            out = Bytes.push(out, if high < 10 { 48 + high } else { 87 + high });
+            out = Bytes.push(out, if low < 10 { 48 + low } else { 87 + low });
+            at = at + 1;
+        } else { if byte == 34 || byte == 92 {
+            out = Bytes.push(out, 92); out = Bytes.push(out, byte); at = at + 1;
+        } else { if byte < 128 {
+            out = Bytes.push(out, byte); at = at + 1;
+        } else {
+            let width = utf8(&text[..], at)?;
+            let mut i = 0;
+            while i < width { out = Bytes.push(out, Bytes.get(&text, at + i)); i = i + 1; }
+            at = at + width;
+        } } }
+    }
+    Ok(Bytes.push(out, 34))
+}
+fn emit(value: Value, out: Bytes, depth: i64) -> Result<Bytes, Error> ! {alloc, panic} {
+    if depth > 8 { return Err(Error.Limit(0)); }
+    match value {
+        Value.Null => { let text = Bytes.from("null"); Ok(append(out, &text)) },
+        Value.Bool(b) => { let text = if b { Bytes.from("true") } else { Bytes.from("false") }; Ok(append(out, &text)) },
+        Value.Number(text) => {
+            let end = number_end(&text[..], 0)?;
+            if end != Bytes.len(&text) { return Err(Error.InvalidNumber(end)); }
+            Ok(append(out, &text))
+        },
+        Value.String(text) => quoted(text, out),
+        Value.Array(list) => {
+            if depth == 8 { return Err(Error.Limit(0)); }
+            let mut list = Box.take(list);
+            let mut out = Bytes.push(out, 91);
+            let mut count = 0;
+            loop { match list {
+                Items.End => { break; },
+                Items.More(value, next) => {
+                    if count == 256 { return Err(Error.Limit(0)); }
+                    if count != 0 { out = Bytes.push(out, 44); }
+                    out = emit(value, out, depth + 1)?;
+                    count = count + 1;
+                    list = Box.take(next);
+                },
+            } }
+            Ok(Bytes.push(out, 93))
+        },
+        Value.Object(list) => {
+            if depth == 8 { return Err(Error.Limit(0)); }
+            let mut list = Box.take(list);
+            let mut out = Bytes.push(out, 123);
+            let mut count = 0;
+            loop { match list {
+                Members.End => { break; },
+                Members.More(key, value, next) => {
+                    if count == 256 { return Err(Error.Limit(0)); }
+                    if count != 0 { out = Bytes.push(out, 44); }
+                    out = quoted(key, out)?;
+                    out = Bytes.push(out, 58);
+                    out = emit(value, out, depth + 1)?;
+                    count = count + 1;
+                    list = Box.take(next);
+                },
+            } }
+            Ok(Bytes.push(out, 125))
+        },
+    }
+}
+/// Consume an owned tree and write compact JSON, validating user-built leaves.
+#[nosuspend]
+pub fn stringify(value: Value) -> Result<Bytes, Error> ! {alloc, panic} {
+    emit(value, Bytes.with_capacity(256), 0)
+}

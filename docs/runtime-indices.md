@@ -1,0 +1,229 @@
+# Runtime scalar indices in erased proofs
+
+Status: implemented restricted fragment. An executable function may have an
+erased logical parameter whose type depends on an earlier immutable runtime
+parameter or local of an admitted machine carrier (`i64`, `Bool`, or `Unit`).
+The runtime value is a symbolic kernel index, not a proof: the kernel checks the
+proposition, and the proof is still erased before reference evaluation and
+native lowering.
+
+```sh
+cargo run -p kush -- check examples/runtime-indices.kush
+cargo run -p kush -- eval  examples/runtime-indices.kush   # exit status 42
+cargo run -p kush -- run   examples/runtime-indices.kush   # native exit status 42
+cargo test --offline --test runtime_indices
+cargo test --offline --test kernel
+```
+
+This extends the closed/open erased-proof boundary documented in
+[propositions](propositions.md), [logical data](logical-data.md), and
+[dependent indices](dependent-indices.md). It is an independently checking
+implementation, not a mechanized soundness proof.
+
+## 1. The shape
+
+```rust
+total fn truth() -> Eq<i64, 0, 0> ! {} { refl::<i64>(0) }
+
+fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+
+fn main() -> i64 ! {panic} {
+    let five: i64 = 5;
+    keep(five, refl::<i64>(five))       // symbolic local
+        + keep(10, refl::<i64>(10))     // literal frozen at the call site
+        + keep(0, truth())              // checked logical definition
+}
+```
+
+`n` remains an ordinary runtime parameter. It is absent from the proof's runtime
+representation only because `same` is erased; `n` itself is still passed and
+returned normally. At the call site the callee's erased type becomes
+`Eq<i64, a, a>` for the frozen actual `a`, and the kernel checks `refl(i64, a)`
+against it.
+
+User-defined predicates and logical data may be indexed by the same carriers, so
+this is not an equality-only special case:
+
+```rust
+prop ZeroI<n: i64> { Zero: ZeroI<0> }
+prop IsTrue<b: Bool> { Yes: IsTrue<true>, Also: IsTrue<true> }
+prop UnitTag<u: Unit> { Mk: UnitTag<()> }
+total enum Tag<n: i64> { Mk: Tag<n> }
+
+fn keep_zero(n: i64, erased p: ZeroI<n>) -> i64 ! {} { n }
+fn keep_true(b: Bool, erased p: IsTrue<b>) -> i64 ! {} { 4 }
+```
+
+The payload-less constructor results use type-directed machine literals:
+`ZeroI<0>` reads `0` as `i64`, while `IsTrue<true>` and `UnitTag<()>` use the
+`Bool` and `Unit` carriers. Without that expected carrier, an integer in a type
+position remains the mathematical `Nat` literal it has always been.
+
+## 2. Kernel model
+
+The kernel has three new carrier **types** and their canonical literals:
+
+```text
+i64 : Universe(0)       n : i64   =>   n : i64
+Bool : Universe(0)      true, false : Bool
+Unit : Universe(0)      () : Unit
+```
+
+A literal stores its checked host value (`i64` stores an `i64`, `Bool` a bool,
+`Unit` the unique value). There is no separate source-level literal form that
+can produce an out-of-range kernel value: surface elaboration parses through the
+host range check before constructing a term.
+
+The kernel deliberately provides:
+
+- **no machine arithmetic, casts, comparisons, or eliminator** for these
+  carriers. A runtime function call is never reduced or treated as a total
+  operation, and `n + 1` is not a kernel index;
+- **no `Nat` conversion**. `Eq<i64, n, n>` and `Eq<Nat, n, n>` are different
+  propositions; the latter is rejected when `n` is a machine scalar. Machine
+  arithmetic is not assumed to be mathematical unbounded arithmetic;
+- **no proof status**. `Eq<i64, x, y>` is Type-valued exactly like other
+  equality, and `n : i64` is never a proof of a proposition. `proof_open` is
+  false for a machine scalar;
+- **no reduction budget escape**. Literal inference/normalization is charged to
+  the same kernel budget, and invalid or ill-typed literals fail checking.
+
+Machine carrier types and literals are ordinary kernel terms, so `Eq`, `refl`,
+transport, equality elimination, user `total enum`/`prop` families, and their
+checked eliminators all work over them. There is no axiom and no unchecked
+global.
+
+## 3. Open contexts and call-site substitution
+
+An erased logical parameter is elaborated in the callee's open kernel context.
+That context now contains, in source order:
+
+1. earlier erased logical binders (their proposition or logical type);
+2. earlier immutable runtime scalar parameters (`i64`, `Bool`, `Unit` as
+   hypothesis *types*).
+
+Later parameter types may mention both. Every entry is validated as a type
+relative to the earlier entries. At a call:
+
+1. runtime scalar actuals are translated to kernel terms in the caller context;
+2. earlier proof actuals are elaborated and kernel-checked;
+3. both are substituted for the callee's kernel binders, and the current
+   evidence is checked against the resulting type in the caller's context.
+
+Runtime type generics, grades, compile-time `Nat` parameters, owning values,
+borrows, containers, and mutable locals are never added to this context. A proof
+type that mentions one fails elaboration instead of approximating it.
+
+Aliases are transparent on both sides. A logical alias such as
+`type MyInt = i64;` or `type Same<T: Type, x: T> = Eq<T, x, x>;` works as an
+index carrier or proof type. A structured runtime alias is still not a logical
+definition and cannot enter a proof.
+
+## 4. Freezing and mutation
+
+The central soundness rule is:
+
+> A proof index is frozen at its source evaluation point. It is never
+> reinterpreted from the final value of a mutable binding.
+
+Implemented consequences:
+
+- Only **immutable** runtime locals and function/lambda parameters are admitted
+  as symbolic indices. `let mut n = 3; keep(n, refl::<i64>(n))` is rejected,
+  including after an `if` assignment or a loop.
+- An actual argument to a scalar-indexed parameter must be a canonical literal
+  or the **name** of an admitted immutable scalar. An arbitrary evaluated
+  expression such as `keep(make(3), refl::<i64>(3))` is rejected with a request
+  to bind an immutable local first. The compiler does not execute user code to
+  decide an index.
+- Immutable locals are copied into a closure when captured; a capture of an
+  immutable scalar is therefore frozen and may index the lambda body's proofs.
+  A capture of a mutable binding stays conservatively rejected. Lambda
+  parameters are admitted for the body and scoped to it.
+- Block scopes truncate symbolic binders, so a proof cannot mention a local
+  after its scope. Local shadowing resolves to the innermost binder.
+- A proof parameter cannot be stored in a runtime value, returned as a runtime
+  value, captured as evidence, or read in a runtime branch, so there is no
+  runtime location that can retain an old-value proof across mutation. Runtime
+  scalar values may appear **inside proof terms** (for example as `refl`'s
+  value) but a bare runtime scalar is rejected as erased evidence of a
+  proposition.
+
+This is deliberately conservative. It rejects some frozen expressions that a
+more elaborate def-use analysis could prove stable, but it never accepts a
+proof about an older value after assignment, a branch join, a loop, or a later
+argument mutation.
+
+## 5. Erasure, grades, ownership, and `Prop`
+
+- Runtime scalars are ordinary copyable runtime values. Using one in an erased
+  proof type adds no runtime observation, allocation, or branch. The parameter
+  is still subject to its normal usage grade; a `@[0]` scalar named only by an
+  erased proof type remains accepted and produces no runtime use.
+- Proofs, `total fn` definitions, `prop` declarations, and machine-indexed
+  logical data are erased before reference evaluation and native lowering. They
+  are not stored, allocated, returned, or inspected at runtime.
+- Proof irrelevance still applies only to `Prop` inhabitants. It can identify
+  two proofs of `IsTrue<true>` regardless of constructor, but it cannot
+  fabricate a runtime value, turn a scalar into a proof, or make
+  `IsTrue<true>` equal `IsTrue<false>`.
+- Only copyable machine scalars are indices. An owning enum, `Vec`, `Box`,
+  borrow, slice, record, or linear capability still cannot enter an erased type.
+  A proof cannot launder ownership or consume an owner.
+- Ordinary calls, I/O, general recursion, and effectful code are never run
+  during logical normalization. A `total fn` may depend only on checked logical
+  definitions.
+
+## 6. Diagnostics
+
+Representative rejected forms:
+
+```text
+let mut n = 3; keep(n, refl::<i64>(n))
+  -> a mutable runtime value cannot index an erased proof
+
+keep(make(3), refl::<i64>(3))
+  -> a symbolic proof index must be a literal or the name of an immutable scalar local
+
+fn f(n: i64, erased p: Eq<Nat, n, n>)
+  -> type mismatch: expected Nat, inferred Scalar(I64)
+
+keep(false, refl::<Bool>(true))
+  -> proof does not establish the erased proposition
+
+fn consume(erased p: Eq<i64, 0, 0>); consume(n)
+  -> a runtime scalar is a symbolic index, not erased evidence
+```
+
+## 7. Deliberate limits
+
+- Only `i64`, `Bool`, and `Unit` are admitted machine carriers. `i8`/`u32`/
+  `usize`/floats/`Char` and machine vectors are not kernel carriers yet. Float
+  values are executable scalars but are deliberately rejected in erased proof
+  indices; their bits are never reinterpreted as integers.
+- There is no machine arithmetic, comparison, cast, or literal expression in
+  the kernel. A constraint such as `n > 0` must use the separate erased
+  arithmetic `{ ... }` fragment or an explicit logical predicate over a
+  symbolic value, not machine evaluation.
+- There is no implicit `i64`/`Nat` conversion and no implicit `Nat`→machine
+  truncation. `Nat` stays unbounded and separate.
+- Runtime `Unit` is a singleton. An admitted `Unit` hypothesis/actual is
+  encoded by the canonical unit literal, so `let u: Unit = (); keep_unit(u,
+  unit_proof())` works without an extra equality proof. This is a checked
+  encoding for `Unit` only; there is no general singleton elimination for other
+  types.
+- Only simple immutable `let` names, function/lambda parameters, and immutable
+  closure captures are symbolic. Destructured pattern bindings and temporary
+  compiler slots are conservatively not admitted.
+- An admitted immutable local is a symbolic kernel value, not its source
+  initializer. `let n = 0; keep_zero(n, zero_proof())` does not by itself
+  identify `n` with the literal `0`; pass the literal directly or supply an
+  explicit logical equality proof. This conservative choice keeps freezing
+  simple and avoids reusing an initializer after arbitrary control flow.
+- Runtime scalar values cannot size inline arrays. `[T; n]` still requires a
+  compile-time `Nat` length; use `Vec<T>` or `&[T]` for runtime lengths.
+- There is no proof search, implicit argument, tactic, arithmetic solver, or
+  user-supplied axiom. Evidence must be a checked logical term.
+
+These are implementation budget and fragment limits, not claims that the full
+[v0.1 dependent design](spec-v0.1.md) is complete.

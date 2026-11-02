@@ -1,0 +1,93 @@
+// Heterogeneous algebraic subtyping over the executable value fragment.
+//
+//   cargo run -p kush -- eval examples/subtyping.kush
+//   cargo run -p kush -- run examples/subtyping.kush
+//
+// The program prints: 21, 20, 4, 39, 3, 21, 4, 42.
+
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+enum Shape {
+    Dot,
+    Line(i64),
+}
+
+fn scalar(flag: Bool) -> i64 | Bool ! {} {
+    if flag { 21 } else { true }
+}
+
+fn scalar_value(value: i64 | Bool) -> i64 ! {panic} {
+    match value {
+        i64 @ n => n,
+        Bool @ flag => if flag { 22 } else { 0 },
+    }
+}
+
+fn shape_value(value: Point | Shape | i64) -> i64 ! {panic} {
+    match value {
+        Point @ p => p.x + p.y,
+        Shape @ s => match s {
+            Shape.Dot => 0,
+            Shape.Line(n) => n,
+        },
+        i64 @ n => n,
+    }
+}
+
+fn owning(flag: Bool) -> Box<i64> | Bytes ! {alloc, panic} {
+    if flag { Box.new(20) } else { Bytes.from("kush") }
+}
+
+// A subtype union is repacked into the wider union at this return.
+fn widen(flag: Bool) -> i64 | Bool | Bytes ! {alloc, panic} {
+    if flag {
+        let small: i64 | Bool = scalar(flag);
+        small
+    } else {
+        Bytes.from("kush")
+    }
+}
+
+fn guarded(value: i64 | Bool) -> i64 ! {panic} {
+    match value {
+        i64 @ n if n > 0 => n,
+        i64 @ _ => 0,
+        Bool @ flag => if flag { 1 } else { 0 },
+    }
+}
+
+fn main() -> Unit ! {io, alloc, panic} {
+    print_i64(scalar_value(scalar(true)));
+
+    let boxed = owning(true);
+    let bytes = owning(false);
+    print_i64(match boxed {
+        Box<i64> @ b => Box.take(b),
+        Bytes @ _ => 0,
+    });
+    print_i64(match bytes {
+        Box<i64> @ _ => 0,
+        Bytes @ b => Bytes.len(&b),
+    });
+
+    print_i64(shape_value(Point { x: 19, y: 20 }));
+    print_i64(shape_value(Shape.Line(3)));
+
+    print_i64(match widen(true) {
+        i64 @ n => n,
+        Bool @ _ => 0,
+        Bytes @ _ => 0,
+    });
+    print_i64(match widen(false) {
+        i64 @ _ => 0,
+        Bool @ _ => 0,
+        Bytes @ b => Bytes.len(&b),
+    });
+
+    // `(i64 | Bool) & i64` normalizes to `i64`; the false alternatives vanish.
+    let same: (i64 | Bool) & i64 = 42;
+    print_i64(same + guarded(0));
+}

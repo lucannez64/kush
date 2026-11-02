@@ -1,0 +1,169 @@
+// Enter-driven terminal todo board. No host-language UI or runtime dependency.
+use std.result.Result;
+
+// 32 slots, each [state, title length, 96 title bytes]. State 0=free, 1=open, 2=done.
+#[noalloc]
+#[nosuspend]
+fn cell(slot: i64) -> i64 ! {panic} { slot * 98 }
+
+fn append_ref(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < Bytes.len(text) {
+        out = Bytes.push(out, Bytes.get(text, i));
+        i = i + 1;
+    }
+    out
+}
+
+fn append(out: Bytes, text: Bytes) -> Bytes ! {alloc, panic} {
+    append_ref(out, &text)
+}
+
+fn number(out: Bytes, n: i64) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    if n >= 10 { out = Bytes.push(out, 48 + n / 10); }
+    Bytes.push(out, 48 + n % 10)
+}
+
+fn screen(items: &[i64], filter: i64, message: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(4096);
+    // ANSI home + clear. No raw mode, alternate screen or hidden cursor to restore.
+    out = Bytes.push(out, 27);
+    out = append(out, Bytes.from("[H"));
+    out = Bytes.push(out, 27);
+    out = append(out, Bytes.from("[2JKUSH TODO\n=========\n"));
+    out = append(out, Bytes.from("a <title>  add     t <id>  toggle     d <id>  delete\n"));
+    out = append(out, Bytes.from("f all | f open | f done     q  quit     (press Enter)\n\n"));
+    let mut slot = 0;
+    let mut open = 0;
+    let mut done = 0;
+    let mut shown = 0;
+    while slot < 32 {
+        let base = cell(slot);
+        let state = Slice.get(items, base);
+        if state == 1 { open = open + 1; }
+        if state == 2 { done = done + 1; }
+        if state != 0 && (filter == 0 || filter == state) {
+            shown = shown + 1;
+            out = append(out, Bytes.from("  "));
+            out = number(out, slot + 1);
+            if state == 1 { out = append(out, Bytes.from("  [ ] ")); }
+            else { out = append(out, Bytes.from("  [x] ")); }
+            let mut i = 0;
+            while i < Slice.get(items, base + 1) {
+                out = Bytes.push(out, Slice.get(items, base + 2 + i));
+                i = i + 1;
+            }
+            out = Bytes.push(out, 10);
+        }
+        slot = slot + 1;
+    }
+    if shown == 0 { out = append(out, Bytes.from("  No tasks in this view.\n")); }
+    out = append(out, Bytes.from("\n"));
+    out = number(out, open);
+    out = append(out, Bytes.from(" open / "));
+    out = number(out, done);
+    out = append(out, Bytes.from(" done   |   view: "));
+    if filter == 0 { out = append(out, Bytes.from("all")); }
+    else { if filter == 1 { out = append(out, Bytes.from("open")); }
+           else { out = append(out, Bytes.from("done")); } }
+    out = append(out, Bytes.from("\n\n"));
+    out = append_ref(out, message);
+    append(out, Bytes.from("\n> "))
+}
+
+#[noalloc]
+#[nosuspend]
+fn equals(line: &[i64], text: Bytes) -> Bool ! {panic} {
+    if Slice.len(line) != Bytes.len(&text) { return false; }
+    let mut i = 0;
+    while i < Slice.len(line) {
+        if Slice.get(line, i) != Bytes.get(&text, i) { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+// Validate all input before changing state. Titles cannot inject terminal escapes.
+fn change(items: &mut [i64], line: &[i64]) -> Bytes ! {alloc, panic} {
+    let len = Slice.len(line);
+    if len < 3 || Slice.get(line, 1) != 32 {
+        return Bytes.from("Use a <title>, t <id>, d <id>, f all/open/done, or q.");
+    }
+    let command = Slice.get(line, 0);
+    if command == 97 {
+        if len > 98 { return Bytes.from("Title too long: maximum 96 ASCII characters."); }
+        let mut i = 2;
+        let mut nonspace = false;
+        while i < len {
+            let byte = Slice.get(line, i);
+            if byte < 32 || byte > 126 { return Bytes.from("Titles must use printable ASCII characters."); }
+            if byte != 32 { nonspace = true; }
+            i = i + 1;
+        }
+        if !nonspace { return Bytes.from("A title cannot be blank."); }
+        let mut slot = 0;
+        while slot < 32 {
+            let base = cell(slot);
+            if Slice.get(items, base) == 0 {
+                Slice.set(items, base, 1);
+                Slice.set(items, base + 1, len - 2);
+                let mut i = 2;
+                while i < len {
+                    Slice.set(items, base + i, Slice.get(line, i));
+                    i = i + 1;
+                }
+                return Bytes.from("Task added.");
+            }
+            slot = slot + 1;
+        }
+        return Bytes.from("Board full (32 tasks). Delete a task to free a slot.");
+    }
+    if command != 116 && command != 100 { return Bytes.from("Unknown command. See the commands above."); }
+    if len > 4 { return Bytes.from("Use a task ID between 1 and 32."); }
+    let mut id = 0;
+    let mut i = 2;
+    while i < len {
+        let byte = Slice.get(line, i);
+        if byte < 48 || byte > 57 { return Bytes.from("Use a task ID between 1 and 32."); }
+        id = id * 10 + byte - 48;
+        i = i + 1;
+    }
+    if id < 1 || id > 32 { return Bytes.from("Use a task ID between 1 and 32."); }
+    let base = cell(id - 1);
+    let state = Slice.get(items, base);
+    if state == 0 { return Bytes.from("No task with that ID."); }
+    if command == 100 { Slice.set(items, base, 0); return Bytes.from("Task deleted."); }
+    Slice.set(items, base, 3 - state);
+    Bytes.from("Task toggled.")
+}
+
+fn run() -> Result<Unit, i64> ! {io, alloc, panic} {
+    let mut items: Vec<i64> = Vec.with_capacity(3136);
+    let mut i = 0;
+    while i < 3136 { items = Vec.push(items, 0); i = i + 1; }
+    let mut filter = 0;
+    let mut message = Bytes.from("Session only: tasks are not saved to disk. Add your first task.");
+    loop {
+        let frame = screen(&items[..], filter, &message);
+        IO.write(IO.stdout(), &frame)?;
+        let input = IO.read_line(IO.stdin(), Bytes.with_capacity(1024))?;
+        if Bytes.len(&input) == 0 { break; }
+        let mut end = Bytes.len(&input);
+        if Bytes.get(&input, end - 1) == 10 { end = end - 1; }
+        if end > 0 && Bytes.get(&input, end - 1) == 13 { end = end - 1; }
+        let line = &input[..end];
+        if equals(line, Bytes.from("q")) { break; }
+        if equals(line, Bytes.from("f all")) { filter = 0; message = Bytes.from("Showing all tasks."); }
+        else { if equals(line, Bytes.from("f open")) { filter = 1; message = Bytes.from("Showing open tasks."); }
+        else { if equals(line, Bytes.from("f done")) { filter = 2; message = Bytes.from("Showing completed tasks."); }
+        else { message = change(&mut items[..], line); } } }
+    }
+    let goodbye = Bytes.from("\nGoodbye. Session discarded.\n");
+    IO.write(IO.stdout(), &goodbye)
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    match run() { Ok(_) => 0, Err(_) => 1 }
+}

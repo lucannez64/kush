@@ -1,0 +1,167 @@
+module examples.finite_proofs;
+
+// Finite indices and checked propositions.
+//
+// `Fin` needs a constructor-local binder: `FZero<n>` and `FSucc<n>(pred)`
+// produce `Fin (succ n)`, so the predecessor index varies independently of the
+// family parameter. Constructor-local binders are written on the constructor
+// itself and are distinct from the family's uniform/index parameters.
+total enum Fin<N: Nat> {
+    FZero<n: Nat>: Fin<Nat.succ<n>>,
+    FSucc<n: Nat>(pred: Fin<n>): Fin<Nat.succ<n>>,
+}
+
+// All generic and constructor-local arguments are explicit. These wrappers
+// keep construction readable; each call is still fully checked by the kernel.
+total fn fzero<n: Nat>() -> Fin<Nat.succ<n>> ! {} {
+    Fin.FZero::<Nat.succ<n>, n>
+}
+
+total fn fsucc<n: Nat>(pred: Fin<n>) -> Fin<Nat.succ<n>> ! {} {
+    Fin.FSucc::<Nat.succ<n>, n>(pred)
+}
+
+// The three finite values of Fin<3>: 0, 1, and 2.
+total fn three() -> Fin<3> ! {} {
+    fsucc::<2>(fsucc::<1>(fzero::<0>))
+}
+
+// A dependent eliminator: the motive takes the family index and the value.
+type FinMotive<N: Nat, f: Fin<N>> = Nat;
+
+total fn fzero_branch<N: Nat, n: Nat>() -> Nat ! {} { 0 }
+
+total fn fsucc_branch<N: Nat, n: Nat>(pred: Fin<n>, ih: Nat) -> Nat ! {} {
+    Nat.succ(ih)
+}
+
+total fn fin_count<N: Nat>(f: Fin<N>) -> Nat ! {} {
+    Data.elim::<Fin>(FinMotive, fzero_branch, fsucc_branch, f)
+}
+
+// Normalization through the eliminator proves the concrete result; no runtime
+// execution is involved.
+total fn count_three() -> Eq<Nat, fin_count<3, three>, 2> ! {} {
+    refl::<Nat>(2)
+}
+
+// A genuinely dependent motive: every Fin<N> still has index N.
+type FinTotal<N: Nat, f: Fin<N>> = Eq<Nat, N, N>;
+
+total fn fzero_total<N: Nat, n: Nat>() -> Eq<Nat, Nat.succ<n>, Nat.succ<n>> ! {} {
+    refl::<Nat>(Nat.succ(n))
+}
+
+total fn fsucc_total<N: Nat, n: Nat>(pred: Fin<n>, ih: Eq<Nat, n, n>)
+    -> Eq<Nat, Nat.succ<n>, Nat.succ<n>> ! {} {
+    refl::<Nat>(Nat.succ(n))
+}
+
+total fn fin_total<N: Nat>(f: Fin<N>) -> FinTotal<N, f> ! {} {
+    Data.elim::<Fin>(FinTotal, fzero_total, fsucc_total, f)
+}
+
+total fn total_three() -> Eq<Nat, 3, 3> ! {} {
+    fin_total::<3>(three)
+}
+
+// Named fields bind in later fields and result indices.
+total enum Tagged<N: Nat> {
+    Tag(value: Nat): Tagged<value>,
+}
+
+total fn tag_three() -> Tagged<3> ! {} {
+    Tagged.Tag::<3>(3)
+}
+
+type TaggedMotive<N: Nat, t: Tagged<N>> = Nat;
+
+total fn tag_branch<N: Nat, value: Nat>() -> Nat ! {} {
+    Nat.succ(value)
+}
+
+total fn tag_value<N: Nat>(t: Tagged<N>) -> Nat ! {} {
+    Data.elim::<Tagged>(TaggedMotive, tag_branch, t)
+}
+
+total fn tagged_value() -> Eq<Nat, tag_value<3, tag_three>, 4> ! {} {
+    refl::<Nat>(4)
+}
+
+// Standard indexed vectors also accept named fields; the result index is the
+// predecessor's successor.
+total enum Vect<T: Type, N: Nat> {
+    Nil: Vect<T, 0>,
+    Cons(head: T, tail: Vect<T, N>): Vect<T, Nat.succ<N>>,
+}
+
+total fn two_items() -> Vect<Nat, 2> ! {} {
+    Vect.Cons::<Nat, 1>(1, Vect.Cons::<Nat, 0>(2, Vect.Nil::<Nat, 0>))
+}
+
+// `prop` declares a positive inductive proposition. It lives in Prop, is
+// erased, and is eliminated only into propositions (proof irrelevance).
+prop True {
+    Trivial: True,
+}
+
+prop False {}
+
+prop And<P: Prop, Q: Prop> {
+    Both(left: P, right: Q): And<P, Q>,
+}
+
+// A proposition with an index: only `IsZero<0>` is inhabited.
+prop IsZero<n: Nat> {
+    ZeroIsZero: IsZero<0>,
+}
+
+total fn true_intro() -> True ! {} { Trivial }
+
+total fn and_intro() -> And<True, IsZero<0>> ! {} {
+    And.Both::<True, IsZero<0>>(Trivial, IsZero.ZeroIsZero::<0>)
+}
+
+// Prop elimination into a proposition is allowed. Large elimination into a
+// Type such as Nat is rejected by the kernel.
+type ExFalso<P: Prop, f: False> = P;
+
+total fn false_elim<P: Prop>(f: False) -> P ! {} {
+    Data.elim::<False>(ExFalso::<P>, f)
+}
+
+type IsZeroMotive<n: Nat, p: IsZero<n>> = True;
+
+total fn zero_branch<N: Nat>() -> True ! {} { Trivial }
+
+total fn true_from_zero<n: Nat>(p: IsZero<n>) -> True ! {} {
+    Data.elim::<IsZero>(IsZeroMotive, zero_branch, p)
+}
+
+// Proof irrelevance is confined to Prop inhabitants. This Type-valued family
+// is indexed by a proof, so two proofs of the same proposition are convertible.
+prop Two {
+    First: Two,
+    Second: Two,
+}
+
+total enum TaggedBy<p: Two> {
+    Mark: TaggedBy<p>,
+}
+
+total fn proof_irrelevance() -> TaggedBy<Second> ! {} {
+    TaggedBy.Mark::<First>
+}
+
+// A partial or effectful definition is never proof evidence, and logical data
+// may not mention owning runtime data.
+
+// Erased executable evidence: the finite value and the proposition proof have
+// no runtime representation. Their types and proofs are checked at the call.
+fn consume(erased f: Fin<3>, erased p: IsZero<0>) -> i64 ! {} {
+    42
+}
+
+fn main() -> i64 ! {panic} {
+    consume(three(), IsZero.ZeroIsZero::<0>)
+}

@@ -1,0 +1,32 @@
+module calc.eval;
+
+use std.result.Result;
+use calc.parser.Expr;
+use calc.parser.Op;
+
+pub enum EvalError { DivideByZero }
+
+/// Only multiplicative operators reach here: the parameter type is the
+/// variant subset `Op.Mul | Op.Div`, so the match needs no other arms.
+fn multiplicative(op: Op.Mul | Op.Div, left: i64, right: i64) -> Result<i64, EvalError> ! {panic} {
+    match op {
+        Op.Mul => Ok(left * right),
+        Op.Div => if right == 0 { Err(EvalError.DivideByZero) } else { Ok(left / right) },
+    }
+}
+
+pub fn evaluate(tree: Expr) -> Result<i64, EvalError> ! {panic} {
+    match tree {
+        Expr.Number(n) => Ok(n),
+        Expr.Negate(inner) => Ok(-evaluate(Box.take(inner))?),
+        Expr.Binary(op, left, right) => {
+            let l = evaluate(Box.take(left))?;
+            let r = evaluate(Box.take(right))?;
+            match op {
+                Op.Add => Ok(l + r),
+                Op.Sub => Ok(l - r),
+                other => multiplicative(other, l, r),
+            }
+        },
+    }
+}

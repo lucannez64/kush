@@ -1,0 +1,58 @@
+// Mutate a byte buffer in disjoint passes without copying the buffer.
+// The scoped borrowed callee stays alive while its argument joins a task.
+use std.task.TaskExit;
+
+#[noalloc]
+#[nosuspend]
+fn after_prefix(bytes: &mut [i64]) -> &mut [i64] ! {panic} {
+    &mut bytes[1..]
+}
+
+#[noalloc]
+#[nosuspend]
+fn advance_digits(bytes: &mut [i64], by: i64) -> Unit ! {panic} {
+    let mut index = 0;
+    while index < Slice.len(bytes) {
+        let byte = Slice.get(bytes, index);
+        if byte >= 48 && byte <= 57 {
+            Slice.set(bytes, index, 48 + (byte - 48 + by) % 10);
+        }
+        index = index + 1;
+    }
+}
+
+#[noalloc]
+#[nosuspend]
+fn digit_sum(bytes: &[i64]) -> i64 ! {panic} {
+    let mut result = 0;
+    let mut index = 0;
+    while index < Slice.len(bytes) {
+        let byte = Slice.get(bytes, index);
+        if byte >= 48 && byte <= 57 { result = result + byte - 48; }
+        index = index + 1;
+    }
+    result
+}
+
+fn main() -> Unit ! {io, alloc, panic, suspend} {
+    Task.scope(fn() -> Unit ! {io, alloc, panic, suspend} {
+        let mut source = Bytes.from("x12:y34");
+        let body = after_prefix(&mut source[..]);
+        let (left, right) = Slice.split_at_mut(body, 3);
+        let pass_left = fn(by: i64) -> Unit ! {panic} { advance_digits(left, by); };
+        let pass_right = fn(by: i64) -> Unit ! {panic} { advance_digits(right, by); };
+        let task: Task<i64> = Task.spawn(fn() -> i64 ! {suspend} {
+            Task.yield();
+            2
+        });
+        pass_left(match Task.join(task) {
+            TaskExit.Completed(by) => by,
+            TaskExit.Cancelled => 0,
+        });
+        pass_right(3);
+        // The buffer is now x34:y67. Both closure calls have ended their loans.
+        print_i64(digit_sum(&source[..]));
+        print_i64(Bytes.get(&source, 0));
+        print_i64(Bytes.len(&source));
+    })
+}

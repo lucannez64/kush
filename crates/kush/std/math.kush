@@ -1,0 +1,5 @@
+module std.math;
+
+pub fn min(a: i64, b: i64) -> i64 ! {} { if a < b { a } else { b } }
+pub fn max(a: i64, b: i64) -> i64 ! {} { if a < b { b } else { a } }
+pub fn abs(a: i64) -> i64 ! {panic} { if a < 0 { -a } else { a } }

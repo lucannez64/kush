@@ -1,0 +1,66 @@
+// Static traits and user-defined methods.
+//
+// Run with:
+//   cargo run -p kush -- run examples/traits.kush
+//   cargo run -p kush -- eval examples/traits.kush
+// Both backends print 6, 18, 42, 71, and 3, then exit with status 0.
+//
+// Methods take an explicit owned receiver named `self`. Trait bounds are
+// discharged when a generic function is specialized to a concrete type. There
+// are no vtables, trait values, or runtime dispatch tables.
+
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+trait Describe {
+    fn describe(self: Self) -> i64 ! {panic};
+}
+
+trait ByteCount {
+    fn byte_count(self: Self) -> i64 ! {};
+}
+
+impl Point {
+    /// Inherent methods are available on the nominal record itself.
+    fn sum(self: Point) -> i64 ! {panic} {
+        self.x + self.y
+    }
+
+    fn scale(self: Point, factor: i64) -> Point ! {panic} {
+        Point { x: self.x * factor, y: self.y * factor }
+    }
+}
+
+impl Describe for Point {
+    fn describe(self: Self) -> i64 ! {panic} {
+        self.x * 10 + self.y
+    }
+}
+
+impl ByteCount for Bytes {
+    fn byte_count(self: Self) -> i64 ! {} {
+        self.len()
+    }
+}
+
+/// A bounded helper calls the trait method on its concrete specialization.
+fn describe_via<T: Describe>(value: T) -> i64 ! {panic} {
+    value.describe()
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let point = Point { x: 4, y: 2 };
+    print_i64(point.sum());
+
+    let scaled = point.scale(3);
+    print_i64(scaled.sum());
+
+    print_i64(point.describe());
+    print_i64(describe_via(Point { x: 7, y: 1 }));
+
+    let text = Bytes.from("hé");
+    print_i64(text.byte_count());
+    0
+}

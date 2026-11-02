@@ -1,0 +1,8 @@
+module std.option;
+
+pub enum Option<T> { None, Some(T) }
+
+/// Returns the payload or `default`; whichever value is not returned is dropped.
+pub fn unwrap_or<T>(option: Option<T>, default: T) -> T ! {} {
+    match option { Option.Some(value) => value, Option.None => default }
+}

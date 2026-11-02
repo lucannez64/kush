@@ -1,0 +1,22 @@
+module examples.bytes;
+
+#[noalloc]
+fn append_digit(buffer: Bytes, digit: i64) -> Bytes ! {panic} {
+    Bytes.push_reserved(buffer, digit)
+}
+
+fn main() -> Unit ! {io, alloc, panic} {
+    let text = Bytes.from("42");
+    print_i64(Bytes.len(&text));
+    print_i64(Bytes.get(&text, 0));
+    let copy = Bytes.copy(&text);
+    drop(text);
+    print_i64(Bytes.get(&copy, 1));
+
+    let mut built = Bytes.with_capacity(2);
+    built = append_digit(built, 52);
+    built = append_digit(built, 50);
+    built = Bytes.push(built, 33);
+    print_i64(Bytes.len(&built));
+    print_i64(Bytes.capacity(&built));
+}

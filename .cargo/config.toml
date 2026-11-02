@@ -1,0 +1,5 @@
+[env]
+# Parser recursion tests deliberately build deeply nested syntax. The test
+# harness runs each test on a worker thread whose default stack is too small for
+# a debug build at the documented 128-frame budget.
+RUST_MIN_STACK = "8388608"

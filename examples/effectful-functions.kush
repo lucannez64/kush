@@ -1,0 +1,67 @@
+module examples.effectful_functions;
+
+// Effect-polymorphic higher-order functions, effect-row inference from a
+// callable argument, a transparent effect-polymorphic function type alias,
+// callable union alternatives, and a linear-once closure.
+
+fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+
+fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+
+// `e` is a row variable. Its instantiation is part of the call's effect row,
+// so the row propagates transitively to every caller.
+fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+    f(x)
+}
+
+type Mapper<e: Effects> = fn(i64) -> i64 ! {e};
+
+fn map_one<e: Effects>(f: Mapper<e>, x: i64) -> i64 ! {panic, e} {
+    f(x)
+}
+
+fn twice<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64) -> i64 ! {panic, e} {
+    f(f(x))
+}
+
+fn answer() -> i64 ! {panic} { 42 }
+
+fn main() -> Unit ! {io, alloc, panic} {
+    // Inferred effect rows: e = {panic} for inc, e = {io} for io_inc.
+    print_i64(apply(inc, 41));             // 42
+    print_i64(apply(io_inc, 41));          // 42
+    // Explicit effect specialization, separate from type/grade/const args.
+    print_i64(apply::<io | panic>(io_inc, 41));    // 42
+    print_i64(map_one(io_inc, 41));        // 42
+    print_i64(twice(inc, 40));             // 42
+
+    // Distinct callable signatures remain heterogeneous union alternatives and
+    // are narrowed by checked type patterns without a function-pointer cast.
+    let f: fn(i64) -> i64 ! {panic} | fn() -> i64 ! {panic} = inc;
+    let g: fn(i64) -> i64 ! {panic} | fn() -> i64 ! {panic} = answer;
+    print_i64(match f {
+        fn(i64) -> i64 ! {panic} @ h => h(41),
+        fn() -> i64 ! {panic} @ h => h(),
+    });                                    // 42
+    print_i64(match g {
+        fn(i64) -> i64 ! {panic} @ h => h(41),
+        fn() -> i64 ! {panic} @ h => h(),
+    });                                    // 42
+
+    // An owning once closure is an active union payload; its environment is
+    // released by the call (or by active-alternative cleanup when uncalled).
+    let base = Box.new(20);
+    let c: i64 | once fn(i64) -> i64 ! {panic} =
+        fn(x: i64) -> i64 ! {panic} { Box.take(base) + x + 1 };
+    print_i64(match c {
+        i64 @ v => v,
+        once fn(i64) -> i64 ! {panic} @ h => h(21),
+    });                                    // 42
+
+    // A linear-once closure transfers a @[1] capture obligation: it must be
+    // called exactly once and consumes the owner from its environment.
+    let n: Box<i64> @[1] = Box.new(20);
+    let linear: linear once fn(i64) -> i64 ! {panic} =
+        fn(x: i64) -> i64 ! {panic} { Box.take(n) + x + 1 };
+    print_i64(linear(21));                 // 42
+}

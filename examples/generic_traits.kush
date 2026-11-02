@@ -1,0 +1,77 @@
+// Generic static traits and generic methods.
+//
+// Run with:
+//   cargo run -p kush -- run examples/generic_traits.kush
+//   cargo run -p kush -- eval examples/generic_traits.kush
+// Both backends print 42, 1, 23, 5, and 3, then exit with status 0.
+//
+// A trait's type parameters are part of its static identity, so Point can
+// implement Convert<i64> and Convert<Bool> independently. Generic methods are
+// monomorphized like generic functions. There are no vtables, trait values, or
+// runtime dispatch tables.
+
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+trait Convert<T> {
+    fn render(self: Self) -> T ! {panic};
+}
+
+trait Merge<T> {
+    fn merge(self: Self, other: Self, extra: T) -> Self ! {panic};
+}
+
+impl Convert<i64> for Point {
+    fn render(self: Self) -> i64 ! {panic} {
+        self.x * 10 + self.y
+    }
+}
+
+impl Convert<Bool> for Point {
+    fn render(self: Self) -> Bool ! {panic} {
+        self.x == 0
+    }
+}
+
+impl Merge<i64> for Point {
+    fn merge(self: Point, other: Point, extra: i64) -> Point ! {panic} {
+        Point { x: self.x + other.x + extra, y: self.y + other.y }
+    }
+}
+
+impl Point {
+    /// A generic inherent method: `U` is inferred from the argument, or can be
+    /// written explicitly as `point.pair::<Bool>(true)`.
+    fn pair<U>(self: Point, value: U) -> (i64, U) ! {panic} {
+        (self.x, value)
+    }
+}
+
+/// The bounded helper discharges `Convert<i64>` when specialized. The explicit
+/// `Convert::<i64>` selector is needed because Point also implements
+/// `Convert<Bool>`.
+fn convert_point<T: Convert<i64>>(value: T) -> i64 ! {panic} {
+    value.Convert::<i64>.render()
+}
+
+fn main() -> i64 ! {io, panic} {
+    let point = Point { x: 4, y: 2 };
+    print_i64(point.Convert::<i64>.render());
+
+    if point.Convert::<Bool>.render() {
+        print_i64(0);
+    } else {
+        print_i64(1);
+    }
+
+    print_i64(convert_point(Point { x: 2, y: 3 }));
+
+    let pair = point.pair(5);
+    print_i64(pair.1);
+
+    let merged = point.Merge::<i64>.merge(Point { x: 1, y: 1 }, 1);
+    print_i64(merged.y);
+    0
+}

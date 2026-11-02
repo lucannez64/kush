@@ -1,0 +1,53 @@
+module examples.parser;
+
+// An initial syntax fixture for the future parser/compiler application.
+pub struct Span {
+    start: usize,
+    end: usize,
+}
+
+pub enum Token {
+    Integer(i64),
+    Identifier(Span),
+    Plus,
+    End,
+}
+
+pub enum Option<T> { None, Some(T) }
+pub enum Result<T, E> { Ok(T), Err(E) }
+
+enum Expr<T: Type> {
+    Integer(i64): Expr<i64>,
+    Boolean(Bool): Expr<Bool>,
+    Add(Box<Expr<i64>>, Box<Expr<i64>>): Expr<i64>,
+}
+
+type LoadError = IoError | ParseError;
+type ReadableNamed = Readable & Named;
+
+#[nosuspend]
+pub fn classify(token: &Token) -> i64 ! {} {
+    match token {
+        Token.Integer(0) => 0,
+        Token.Integer(n) if n > 0 => 1,
+        Token.Identifier(_) => 2,
+        Token.Integer(_) | Token.Plus | Token.End => -1,
+    }
+}
+
+fn precedence(x: i64, y: i64) -> i64 ! {panic} {
+    let mut result: i64 = x + y * 2;
+    result = result - 1;
+    if result > 0 { result } else { 0 }
+}
+
+fn checked_get<T: Type, n: Nat>(xs: &Array<T, n>, i: usize)
+    -> Option<&T> ! {};
+
+fn parse(tokens: &[Token], arena: &mut Arena<AstNode>)
+    -> Result<NodeId, ParseError> ! {alloc, panic};
+
+fn load(path: &Path) -> Result<Bytes, LoadError> ! {io, alloc, suspend} {
+    let bytes = fs.read(path)?;
+    Ok(bytes)
+}

@@ -1,0 +1,30 @@
+module examples.ownership;
+
+enum List { Nil, Cons(i64, Box<List>) }
+
+#[noalloc]
+#[nosuspend]
+fn sum(list: List) -> i64 ! {panic} {
+    match list {
+        List.Nil => 0,
+        List.Cons(head, tail) => head + sum(Box.take(tail)),
+    }
+}
+
+#[noalloc]
+fn inspect(value: &Box<i64>) -> i64 ! {} {
+    Box.read(value)
+}
+
+fn main() -> Unit ! {io, alloc, panic} {
+    let value = Box.new(42);
+    print_i64(inspect(&value));
+    let moved = value;
+    print_i64(Box.take(moved));
+
+    let list = List.Cons(1, Box.new(List.Cons(2, Box.new(List.Cons(3, Box.new(List.Nil))))));
+    print_i64(sum(list));
+
+    // The remaining list is reclaimed automatically on scope exit.
+    let unused = List.Cons(7, Box.new(List.Cons(8, Box.new(List.Nil))));
+}

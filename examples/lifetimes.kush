@@ -1,0 +1,82 @@
+// Explicit and conservatively elided lifetimes, checked shared and mutable
+// borrowed returns, capability ancestry with parent suspension/restoration,
+// last-use release, and exclusive mutable slice views. Run with:
+//   cargo run -p kush -- run examples/lifetimes.kush
+
+#[noalloc]
+fn tail(view: &[i64]) -> &[i64] ! {panic} {
+    view[1..]
+}
+
+#[noalloc]
+fn pick<'a>(left: &'a [i64], right: &'a [i64], flag: Bool) -> &'a [i64] ! {panic} {
+    if flag { left } else { right }
+}
+
+#[noalloc]
+fn sum(view: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut index = 0;
+    while index < Slice.len(view) {
+        acc = acc + Slice.get(view, index);
+        index = index + 1;
+    }
+    acc
+}
+
+#[noalloc]
+fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+    &mut view[1..]
+}
+
+#[noalloc]
+fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {panic} {
+    let mut index = 0;
+    while index < Slice.len(view) {
+        Slice.set(view, index, value);
+        index = index + 1;
+    }
+}
+
+fn main() -> Unit ! {io, alloc, panic} {
+    let mut values: Vec<i64> = Vec.new();
+    values = Vec.push(values, 10);
+    values = Vec.push(values, 20);
+    values = Vec.push(values, 30);
+
+    let middle: &[i64] = tail(&values[..]);
+    print_i64(Slice.len(middle));
+    print_i64(Slice.get(middle, 0));
+    // `middle` is no longer used, so its loan ends here, not at the block end.
+    values = Vec.push(values, 40);
+
+    let chosen = pick(&values[..], &values[..], false);
+    print_i64(Slice.get(chosen, 2));
+    print_i64(sum(chosen[..2]));
+    values = Vec.push(values, 50);
+
+    let mut array: [i64; 3] = [1, 2, 3];
+    fill(&mut array[..], 7);
+    print_i64(array[0]);
+    print_i64(array[2]);
+
+    let mut bytes = Bytes.from("abc");
+    fill(&mut bytes[..], 65);
+    print_i64(Bytes.get(&bytes, 1));
+
+    print_i64(sum(&values[..]));
+
+    // A mutable child view suspends its parent. Nested children alias the same
+    // inline-array storage, and each ancestor becomes usable again after its
+    // child's last use.
+    let mut window: [i64; 4] = [1, 2, 3, 4];
+    let child = tail_mut(&mut window[..]);
+    let grandchild = tail_mut(&mut child[..]);
+    Slice.set(grandchild, 0, 99);
+    print_i64(Slice.get(grandchild, 0));
+    print_i64(Slice.get(child, 0));
+    print_i64(window[2]);
+    let viewed = &mut window[1..];
+    Slice.set(viewed, 0, 7);
+    print_i64(window[1]);
+}

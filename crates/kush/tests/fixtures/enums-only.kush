@@ -1,0 +1,2 @@
+enum Option<T> { None, Some(T) }
+enum Flag { Enabled, Disabled }

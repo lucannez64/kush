@@ -1,0 +1,54 @@
+// Exclusive mutable slice views over arrays, vectors, and byte buffers,
+// including nested sub-views and a borrowed mutable return. Run with:
+//   cargo run -p kush -- run examples/mutable-slices.kush
+
+#[noalloc]
+fn fill<'a>(view: &'a mut [i64], value: i64) -> Unit ! {panic} {
+    let mut index = 0;
+    while index < Slice.len(view) {
+        Slice.set(view, index, value);
+        index = index + 1;
+    }
+}
+
+#[noalloc]
+fn tail_mut<'a>(view: &'a mut [i64]) -> &'a mut [i64] ! {panic} {
+    &mut view[1..]
+}
+
+#[noalloc]
+fn add_one<'a>(view: &'a mut [i64]) -> Unit ! {panic} {
+    let mut index = 0;
+    while index < Slice.len(view) {
+        Slice.set(view, index, Slice.get(view, index) + 1);
+        index = index + 1;
+    }
+}
+
+fn main() -> Unit ! {io, alloc, panic} {
+    let mut numbers: [i64; 4] = [0, 0, 0, 0];
+    fill(&mut numbers[..], 3);
+    add_one(&mut numbers[..]);
+    print_i64(numbers[0]);
+    print_i64(numbers[3]);
+
+    let mut values: Vec<i64> = Vec.new();
+    values = Vec.push(values, 1);
+    values = Vec.push(values, 2);
+    fill(&mut values[..], 9);
+    print_i64(Vec.get(&values, 0));
+    print_i64(Vec.get(&values, 1));
+
+    let mut bytes = Bytes.from("abc");
+    fill(&mut bytes[..], 66);
+    print_i64(Bytes.get(&bytes, 0));
+    print_i64(Bytes.get(&bytes, 2));
+
+    // A borrowed mutable subview is tied to its input lifetime. The parent is
+    // suspended until the child's last use, then becomes usable again.
+    let mut window: [i64; 4] = [1, 2, 3, 4];
+    let child = tail_mut(&mut window[..]);
+    Slice.set(child, 0, 6);
+    print_i64(Slice.get(child, 0));
+    print_i64(window[1]);
+}

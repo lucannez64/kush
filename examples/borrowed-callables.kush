@@ -1,0 +1,38 @@
+// Function values that borrow slices: arrow types with their own lifetimes.
+// Run with: cargo run -p kush -- run examples/borrowed-callables.kush
+// Prints 42, 2, 40, then exits with 0.
+
+fn sum(values: &[i64]) -> i64 ! {panic} {
+    let mut i = 0;
+    let mut acc = 0;
+    while i < Slice.len(values) {
+        acc = acc + Slice.get(values, i);
+        i = i + 1;
+    }
+    acc
+}
+
+// The callback borrows the slice only for the duration of the call.
+fn measure(values: &[i64], f: fn(&[i64]) -> i64 ! {panic}) -> i64 ! {panic} {
+    f(values)
+}
+
+fn tail<'a>(values: &'a [i64]) -> &'a [i64] ! {panic} { &values[1..] }
+
+// The callback's result borrows from its argument, so the helper can return
+// it under the caller's lifetime.
+fn apply<'x>(
+    f: fn<'a>(&'a [i64]) -> &'a [i64] ! {panic},
+    values: &'x [i64],
+) -> &'x [i64] ! {panic} {
+    f(values)
+}
+
+fn main() -> i64 ! {io, panic} {
+    let data: [i64; 3] = [10, 20, 12];
+    print_i64(measure(&data[..], sum));
+    print_i64(measure(&data[..], fn(v: &[i64]) -> i64 ! {panic} { Slice.len(v) - 1 }));
+    let rest = apply(tail, &data[..]);
+    print_i64(Slice.get(rest, 0) + Slice.get(rest, 1) + 8);
+    0
+}

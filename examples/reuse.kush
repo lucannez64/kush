@@ -1,0 +1,47 @@
+module examples.reuse;
+
+// Checked allocation reuse and allocation-preserving in-place transforms.
+//
+// The loop updates one Box<i64> 100 times with Box.reuse. It performs one
+// allocation in total because the allocation is retained and its scalar
+// payload is replaced. Box.reuse has no alloc effect: the surrounding
+// `#[noalloc]` contract is checked from the source operation, not from an
+// optimization pass.
+
+#[noalloc]
+fn bump(owner: Box<i64>) -> Box<i64> ! {panic} {
+    let current = Box.read(&owner);
+    Box.reuse(owner, current + 1)
+}
+
+fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+
+fn unwrap(owner: Box<i64>) -> i64 ! {} { Box.take(owner) }
+
+fn main() -> Unit ! {io, alloc, panic} {
+    let mut owner = Box.new(0);
+    let mut i = 0;
+    while i < 100 {
+        owner = bump(owner);
+        i = i + 1;
+    }
+    print_i64(Box.take(owner));                  // 100
+
+    let mut values: Vec<i64> = Vec.new();
+    let mut i = 0;
+    while i < 4 {
+        values = Vec.push(values, i);
+        i = i + 1;
+    }
+    let values = Vec.map_in_place(values, inc);
+    print_i64(Vec.get(&values, 3));              // 4
+
+    // Owning elements are moved into the callback, not copied. The callback
+    // returns a narrower scalar, so the vector's storage is retained and its
+    // element width is compacted in place.
+    let mut owned: Vec<Box<i64>> = Vec.new();
+    owned = Vec.push(owned, Box.new(1));
+    owned = Vec.push(owned, Box.new(2));
+    let sums: Vec<i64> = Vec.map_in_place(owned, unwrap);
+    print_i64(Vec.get(&sums, 0) + Vec.get(&sums, 1)); // 3
+}
