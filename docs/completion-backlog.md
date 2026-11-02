@@ -1337,3 +1337,5 @@ provenance, and bounded replay. It found four defects, fixed with regressions:
   bindings are now used only when no argument binds the variable.
 - **Low:** the borrowed-record-result diagnostic no longer says "internal
   error".
+Full Boat gate after these fixes (`50c5e50`): **1046 tests**, formatting, and
+Clippy pass.
