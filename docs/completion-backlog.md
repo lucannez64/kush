@@ -9,7 +9,7 @@ changing a diagnostic or deleting an explicit rejection is not completion.
 
 ## Borrowing
 
-Implemented in the expanded-borrowing branch; see
+Integrated on `main` in `401662d` and `342537d`; see
 [expanded borrowing contracts](borrowing-extensions.md) for the exact contract
 and remaining limits.
 
@@ -27,8 +27,8 @@ and remaining limits.
 - [x] Borrowed records in callable parameters/results/captures. Arrows carry
   per-field leaves, indirect calls freshen record lifetimes, and scoped
   closures may capture and return record fields.
-- [x] Borrowed records in structured tasks with checked scope ownership. Scope
-  bodies and child tasks may capture records from scope-external storage;
+- [ ] Borrowed records in structured tasks with checked scope ownership.
+  **Partial:** scope bodies and child tasks may capture records from scope-external storage;
   scope-owned storage is rejected. Borrowed-record task results remain
   rejected explicitly.
 - [x] Nested record-field borrows and disjoint-field loans. Direct nested
