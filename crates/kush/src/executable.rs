@@ -1212,6 +1212,7 @@ fn fusion_expr_safe(
     };
     match &expr.kind {
         ExprKind::Constant(_)
+        | ExprKind::Erased(_)
         | ExprKind::BytesLiteral(_)
         | ExprKind::Local(_)
         | ExprKind::Move(_)
@@ -1573,6 +1574,7 @@ fn fuse_expr(
             *vector = cursor;
         }
         ExprKind::Constant(_)
+        | ExprKind::Erased(_)
         | ExprKind::BytesLiteral(_)
         | ExprKind::Local(_)
         | ExprKind::Move(_)

@@ -1430,7 +1430,10 @@ impl<'a> Checker<'a> {
     fn expr(&mut self, expr: &Expr, multiplier: Grade) -> Result<bool> {
         self.tick(expr.span)?;
         match &expr.kind {
-            ExprKind::Constant(_) | ExprKind::BytesLiteral(_) | ExprKind::Erased(_) | ExprKind::DynArrayNew { .. } => {}
+            ExprKind::Constant(_)
+            | ExprKind::BytesLiteral(_)
+            | ExprKind::Erased(_)
+            | ExprKind::DynArrayNew { .. } => {}
             ExprKind::DynArrayPush { array, value, .. } => {
                 if !self.expr(array, multiplier)? {
                     return Ok(false);
