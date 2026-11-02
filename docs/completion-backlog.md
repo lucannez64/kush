@@ -80,6 +80,8 @@ and remaining limits.
   non-copyable borrowed objects, owning-through-borrowed calls,
   mutable-through-shared calls, generic methods, and nominal fields mentioning
   `dyn` (directly or through `Box`/`Vec`/tuples) are implemented and tested.
+  Generic fields instantiated with `dyn Trait` later are supported; owning
+  projected receivers must be destructured into locals before method dispatch.
   Open/generic member sets and borrowed objects with owning/linear members
   remain outside the subset.
 - [x] Specialization with an explicit deterministic coherence contract. Unique
@@ -88,7 +90,7 @@ and remaining limits.
   `default fn`, negative impls, and arbitrary overlap remain rejected.
 
 Open trait work still includes open/generic object member sets, `dyn Trait`
-anywhere inside a nominal field, borrowed objects with owning/linear members,
+explicitly written inside a nominal field, borrowed objects with owning/linear members,
 object methods with lifetime or exact-use contracts, owning or `String`
 associated constants, associated constants depending on an impl type
 parameter, and lifetime/effect impl parameters. The implemented closed-world union dispatch is
@@ -350,3 +352,12 @@ container results through named/indirect calls, and exclusive boxed reference
 returns. Twelve new reference test cases pass locally, together with the
 existing borrowing-safety, memory, and advanced-trait suites. The combined gate
 with the latest borrowing changes is pending.
+
+The independent vector/trait review confirmed vector reserve parity and found a
+projected owning method-receiver double-free. Method dispatch now rejects an
+owning field projection before it can copy an owner, including static owned
+methods and dynamic owned/mutable calls. Mutable projected copyable objects
+are also rejected instead of silently losing updates. Regressions cover tuple
+fields, generic wrappers, and legal destructuring before mutable dispatch.
+The previous 857-test gate predates these fixes and the latest borrowing/effect
+integration; the new full gate is pending.

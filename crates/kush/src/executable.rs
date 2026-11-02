@@ -9465,6 +9465,14 @@ impl Checker<'_, '_> {
         if receiver.ty == Type::Never {
             return Ok(receiver);
         }
+        // A projected owning field is still owned by its aggregate. Dispatch
+        // must not copy it into a consuming or mutable temporary receiver.
+        if matches!(receiver.kind, ExprKind::Project(..)) && self.owned_type(receiver.ty) {
+            return Err(Diagnostic::new(
+                receiver.span,
+                "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
+            ));
+        }
         if let Some(pointer) = receiver.ty.ref_pointee() {
             let pointee = self.types.pointees[pointer];
             if matches!(pointee, Type::Union(_))
@@ -9802,6 +9810,13 @@ impl Checker<'_, '_> {
                 )
             })?;
         let receiver_mode = trait_receiver_mode(method);
+        if receiver_mode == ReceiverMode::Mutable && matches!(receiver.kind, ExprKind::Project(..))
+        {
+            return Err(Diagnostic::new(
+                receiver.span,
+                "a mutable dynamic method receiver must be a direct local or reference binding; destructure the projected field first",
+            ));
+        }
         let (dispatcher, method_result) =
             self.dynamic_dispatcher(trait_id, &trait_arguments, name, receiver_mode, span)?;
         let signature = self.functions.signatures[dispatcher].clone();

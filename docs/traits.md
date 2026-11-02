@@ -544,8 +544,15 @@ reference locals and can be passed to functions taking `&dyn Trait` or
 Nominal record and enum declarations are laid out before impl collection. A
 declared nominal field whose type mentions `dyn Trait` is therefore rejected,
 including a field spelled `Box<dyn Trait>`, `Vec<dyn Trait>`, or a tuple/array
-containing an object. The same type is supported inside function signatures,
+containing an object. A generic field written as `T` can be instantiated later
+with an object type, so `Wrap<dyn Trait>` and `Bag<dyn Trait>` with a `Vec<T>`
+field are supported. The same object type also works inside function signatures,
 local `Box`/`Vec`/tuple/array values, and object parameters/results.
+
+Method receivers must not move an owning field out of its aggregate. Destructure
+an owning tuple or generic wrapper into a local before dispatching. Mutable
+dynamic calls on projected fields are rejected even when the object is copyable;
+they cannot silently mutate a temporary copy and discard the update.
 
 Object safety is checked at every `dyn` use:
 
@@ -701,7 +708,7 @@ The following remain intentionally outside the implemented subset:
 
 - vtables, fat pointers, and open-world trait objects; the represented member
   set must still be finite and closed at compile time;
-- `dyn Trait` anywhere inside a declared nominal record or enum field
+- fields explicitly spelling `dyn Trait` in a declared nominal record or enum
   (including `Box<dyn Trait>`/`Vec<dyn Trait>`), because layout happens before
   impl collection; keep the object in a function-local container or a
   function parameter/result instead;

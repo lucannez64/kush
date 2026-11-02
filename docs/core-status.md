@@ -293,7 +293,7 @@ owning/linear members remain usable through owned objects or `Box<dyn Trait>`.
 Two traits with identical member sets share one representation; an unqualified
 name that both declare is ambiguous and requires `object.Trait.method(...)`.
 
-Open/generic object member sets, `dyn Trait` anywhere inside a nominal field
+Open/generic object member sets, explicit `dyn Trait` syntax inside a nominal field
 (including `Box<dyn Trait>`), borrowed
 objects with owning/linear members, object methods with lifetime or exact-use
 contracts, owning or `String` associated constants, associated constants that
@@ -301,7 +301,9 @@ depend on an impl type parameter, effect/lifetime impl parameters, `default fn`,
 arbitrary-overlap specialization remain outside this subset. Nominal record/enum
 declarations are laid out before impl collection, so `dyn Trait` is supported in
 function signatures and local `Box`/`Vec`/tuple/array values but not anywhere
-inside a declared nominal field. See [static traits](traits.md) and the focused
+inside a directly declared nominal field. Generic fields instantiated later
+with `dyn Trait` are supported; destructure owning fields into locals before
+method dispatch. See [static traits](traits.md) and the focused
 `crates/kush/tests/trait_advanced.rs` regression file.
 
 The advanced-trait changes were validated locally on Linux x86-64 with the

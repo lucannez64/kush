@@ -1289,3 +1289,70 @@ fn mutable_dynamic_dispatch_preserves_erased_argument_effects_and_writeback() {
         "1\n2\n3\n",
     );
 }
+
+#[test]
+fn projected_method_receivers_cannot_duplicate_owners_or_discard_mutations() {
+    let definitions = r#"
+        struct Text { name: String, count: i64 }
+        struct Other { count: i64 }
+        struct Wrap<T> { value: T }
+        trait Bump { fn bump(self: &mut Self, by: i64) -> i64 ! {panic}; }
+        impl Bump for Text { fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count } }
+        impl Bump for Other { fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count } }
+        trait Eat { fn eat(self: Self) -> i64 ! {panic}; }
+        impl Eat for Text { fn eat(self: Self) -> i64 ! {panic} { self.count } }
+        impl Eat for Other { fn eat(self: Self) -> i64 ! {panic} { self.count } }
+        impl Text { fn consume(self: Text) -> i64 ! {panic} { self.count } }
+    "#;
+    for body in [
+        "let mut pair: (dyn Bump, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.bump(5)",
+        "let pair: (dyn Eat, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.eat()",
+        "let pair = (Text {name: \"x\", count: 1}, 9); pair.0.consume()",
+        "let mut wrap: Wrap<dyn Bump> = Wrap {value: Text {name: \"x\", count: 1}}; wrap.value.bump(5)",
+    ] {
+        rejects(
+            &format!("{definitions} fn main() -> i64 ! {{alloc, panic}} {{{body}}}"),
+            "owned field",
+        );
+    }
+    rejects(
+        &format!(
+            "{definitions} fn main() -> i64 ! {{alloc, panic}} {{
+        let pair: (dyn Bump, i64) = (Other {{count: 1}}, 9); pair.0.bump(5)
+    }}"
+        ),
+        "owned field",
+    );
+}
+
+#[test]
+fn projected_copyable_dynamic_mutation_is_rejected_but_destructuring_owners_works() {
+    rejects(
+        r#"struct Counter { count: i64 }
+        struct Other { count: i64 }
+        trait Bump { fn bump(self: &mut Self) -> Unit ! {panic}; }
+        impl Bump for Counter { fn bump(self: &mut Self) -> Unit ! {panic} { self.count = self.count + 1; } }
+        impl Bump for Other { fn bump(self: &mut Self) -> Unit ! {panic} { self.count = self.count + 1; } }
+        fn main() -> i64 ! {panic} {
+            let pair: (dyn Bump, i64) = (Counter {count: 1}, 9);
+            pair.0.bump(); 0
+        }"#,
+        "direct local",
+    );
+    agrees(
+        r#"struct Text { name: String, count: i64 }
+        struct Other { count: i64 }
+        struct Wrap<T> { value: T }
+        trait Bump { fn bump(self: &mut Self, by: i64) -> i64 ! {panic}; }
+        impl Bump for Text { fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count } }
+        impl Bump for Other { fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count } }
+        fn main() -> i64 ! {alloc, panic} {
+            let wrapper: Wrap<dyn Bump> = Wrap {value: Text {name: "x", count: 37}};
+            let Wrap {value} = wrapper;
+            let mut object = value;
+            object.bump(5)
+        }"#,
+        42,
+        "",
+    );
+}
