@@ -1,0 +1,20 @@
+[package]
+name = "kush-rust-adapter-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "kush_rust_adapter_example"
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+sha2 = "0.10"
+
+# The example is a standalone Cargo project, not a member of the compiler
+# workspace, so `cargo build` here never pulls compiler dependencies.
+[workspace]
+
+[profile.release]
+panic = "unwind"

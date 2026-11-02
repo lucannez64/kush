@@ -29,8 +29,8 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
         let (old_owned, old_linear, old_dyn) = (owned.clone(), linear.clone(), dyn_linear.clone());
         for (index, layout) in program.enums.iter().enumerate() {
             let fields = || layout.variants.iter().flat_map(|v| v.fields.iter());
-            owned[index] =
-                fields().any(|ty| owns(*ty, &old_owned, &program.unions, &program.pointees));
+            owned[index] = layout.foreign.is_some()
+                || fields().any(|ty| owns(*ty, &old_owned, &program.unions, &program.pointees));
             linear[index] |= fields().any(|ty| {
                 is_linear(
                     *ty,
@@ -224,7 +224,17 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             })
         })
         .collect::<Vec<_>>();
+    let foreign_functions = program.foreign_functions.clone();
     for (function_index, function) in program.functions.iter_mut().enumerate() {
+        // A foreign declaration has a checked inert body but no source
+        // operations. Its parameters are consumed by the trusted C contract;
+        // Kush still checks every call site's ownership.
+        if foreign_functions
+            .get(function_index)
+            .is_some_and(Option::is_some)
+        {
+            continue;
+        }
         let mut checker = Checker {
             enums: &program.enums,
             owned: &program.owned_enums,

@@ -349,16 +349,38 @@ impl Project {
         })
     }
 
-    fn ensure_native_bridge_absent(&self) -> Result<(), Failure> {
+    fn native_links(&self) -> Result<crate::native::LinkSpec, Failure> {
+        let mut links = crate::native::LinkSpec::default();
         for package in self.all_packages() {
-            if !package.native.is_empty() {
-                return Err(Failure::new(format!(
-                    "{}: [native] entries are validated but cannot be linked yet; the Rust/C native bridge is pending (see docs/projects.md)",
-                    package.manifest_path.display()
-                )));
+            let spec = crate::native::LinkSpec::from_project_native(
+                &package.root,
+                &package.native.libraries,
+                &package.native.library_paths,
+                &package.native.cargo_manifests,
+            )
+            .map_err(|error| Failure::new(error.message))?;
+            for item in spec.objects {
+                if !links.objects.contains(&item) {
+                    links.objects.push(item);
+                }
+            }
+            for item in spec.libraries {
+                if !links.libraries.contains(&item) {
+                    links.libraries.push(item);
+                }
+            }
+            for item in spec.library_dirs {
+                if !links.library_dirs.contains(&item) {
+                    links.library_dirs.push(item);
+                }
+            }
+            for item in spec.system_libraries {
+                if !links.system_libraries.contains(&item) {
+                    links.system_libraries.push(item);
+                }
             }
         }
-        Ok(())
+        Ok(links)
     }
 }
 
@@ -378,7 +400,6 @@ pub struct BuildOutcome {
 
 pub fn build(project: &Project, options: &BuildOptions) -> Result<BuildOutcome, Failure> {
     lock::verify_or_write(project, options.locked)?;
-    project.ensure_native_bridge_absent()?;
     let entry = project.package.entry_path();
     let program = project.load_program(&entry)?;
     let checked = crate::executable::check_program(&program)
@@ -407,7 +428,8 @@ pub fn build(project: &Project, options: &BuildOptions) -> Result<BuildOutcome, 
             ))
         })?;
     }
-    crate::native::build_with_stats(&checked, &output, options.stats)
+    let links = project.native_links()?;
+    crate::native::build_with_options(&checked, &output, options.stats, &links)
         .map_err(|error| Failure::new(program.sources.render(&error)))?;
     Ok(BuildOutcome {
         output,
@@ -537,7 +559,6 @@ pub fn test_project(
     out: &mut dyn Write,
 ) -> Result<TestSummary, Failure> {
     lock::verify_or_write(project, options.locked)?;
-    project.ensure_native_bridge_absent()?;
     let target = project.test_target.clone().ok_or_else(|| {
         Failure::new(format!(
             "{}: no test target configured; add `test = \"tests/main.kush\"` to [package] or create tests/main.kush",
@@ -593,6 +614,11 @@ pub fn test_project(
             artifact_directory.display()
         ))
     })?;
+    let links = if selected.is_empty() {
+        crate::native::LinkSpec::default()
+    } else {
+        project.native_links()?
+    };
     let mut passed = 0;
     let mut failures = Vec::new();
     for (index, test) in selected.iter().enumerate() {
@@ -603,7 +629,7 @@ pub fn test_project(
             .map_err(|error| Failure::new(program.sources.render(&error)))?;
         let artifact =
             artifact_directory.join(format!("{target_stem}__{:02}_{}", index + 1, test.name));
-        crate::native::build(&checked, &artifact)
+        crate::native::build_with_options(&checked, &artifact, false, &links)
             .map_err(|error| Failure::new(program.sources.render(&error)))?;
         let invocation =
             runtime::ProgramInvocation::new(&artifact, std::iter::empty::<std::ffi::OsString>());

@@ -57,7 +57,7 @@ fn write_files(directory: &Path, name: &str) -> Result<(), Failure> {
              # [dependencies]\n\
              # helper = {{ path = \"../helper\" }}\n\
              \n\
-             # Reserved for the native bridge (validated, not linked yet):\n\
+             # Native libraries and Rust staticlib adapters:\n\
              # [native]\n\
              # libraries = [\"m\"]\n\
              # library-paths = [\"native/lib\"]\n\

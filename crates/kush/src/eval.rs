@@ -4555,6 +4555,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         }
                         self.call(*index, physical)?
                     }
+                    Target::Foreign(index) => {
+                        let function = &self.program.foreign_functions[*index]
+                            .as_ref()
+                            .expect("checked foreign target");
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            format!(
+                                "foreign C function '{}' can only be executed by the native backend (kush build/run); the bounded reference interpreter rejects host FFI instead of guessing its behavior",
+                                function.symbol
+                            ),
+                        ));
+                    }
                     Target::DynCall { spec, .. } => {
                         let spec = self.program.dyn_calls[*spec].clone();
                         let first = values.remove(0);

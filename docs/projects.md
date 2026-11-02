@@ -18,7 +18,7 @@ Implemented:
   filtering, listing, captured output, and exit status;
 - process-argument forwarding after `--`;
 - syntax highlighting for editors and validated manifest extension points for
-  the pending native bridge.
+  the native Rust/C bridge.
 
 Not implemented yet:
 
@@ -276,12 +276,16 @@ does not require another manifest format change:
 - `[native] cargo-manifests` — validated Cargo manifests for generated Rust
   adapters.
 
-Expected integration: the native builder consumes these resolved paths and
-feeds link/adapter inputs into `native::build_with_stats`, with its own ownership,
-error, and panic-boundary rules. Until that lands, project `build`, `run`, and
-`test` fail with a clear "cannot be linked yet" diagnostic instead of silently
-ignoring the entries. `kush check` still succeeds because checking does not
-link.
+The native builder now consumes these inputs for project build/run/test, using
+`native::build_with_options`. Cargo manifests build Rust `staticlib` adapters;
+archives and search paths are linked without a shell. Dependencies' native
+inputs are included too. Adapter builds use their own target directories and
+are performed once per project test invocation, not once per test function.
+Cargo resolves Rust dependencies according to each adapter's Cargo manifest and
+lockfile; `CARGO_NET_OFFLINE=true` can enforce offline builds. Kush.lock records
+the Kush path dependency graph, not a replacement for Cargo.lock.
+`kush check` checks types without invoking Cargo or linking. See
+[native-interop.md](native-interop.md) for ABI and trusted-foreign-code contracts.
 
 ## Verification
 
@@ -301,4 +305,4 @@ local dependencies, deterministic lockfiles, invalid/missing/cyclic dependency
 diagnostics, name collisions, filtering and failure exit status, source
 diagnostics, comment/string-preserving formatting, paths with spaces, nested
 directory discovery, single-file command compatibility, argument forwarding,
-and the validated-but-pending native extension points.
+and native adapter linking.

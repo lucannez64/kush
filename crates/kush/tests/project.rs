@@ -510,7 +510,7 @@ fn lockfile_orders_packages_and_dependency_edges_deterministically() {
 }
 
 #[test]
-fn native_extension_points_are_validated_but_not_linked_yet() {
+fn native_extension_points_build_and_test_rust_adapters() {
     let scratch = Scratch::new("native");
     scratch.write(
         "bad/Kush.toml",
@@ -526,7 +526,11 @@ fn native_extension_points_are_validated_but_not_linked_yet() {
     scratch.write("good/native/lib/.keep", "");
     scratch.write(
         "good/adapters/bridge/Cargo.toml",
-        "[package]\nname = \"bridge\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        "[package]\nname = \"bridge\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[lib]\ncrate-type = [\"staticlib\"]\n",
+    );
+    scratch.write(
+        "good/adapters/bridge/src/lib.rs",
+        r#"#[unsafe(no_mangle)] pub extern "C" fn project_add_two(x: i64) -> i64 { x + 2 }"#,
     );
     scratch.write(
         "good/Kush.toml",
@@ -540,8 +544,22 @@ fn native_extension_points_are_validated_but_not_linked_yet() {
     assert_eq!(project.package.native.libraries, vec!["m".to_owned()]);
     assert_eq!(project.package.native.library_paths.len(), 1);
     assert_eq!(project.package.native.cargo_manifests.len(), 1);
-    let error = project::build(&project, &BuildOptions::default()).unwrap_err();
-    assert!(error.message().contains("cannot be linked yet"), "{error}");
+    let built = project::build(&project, &BuildOptions::default()).unwrap();
+    assert!(Command::new(built.output).status().unwrap().success());
+    scratch.write(
+        "good/tests/main.kush",
+        r#"module good.tests.main;
+        use std.test;
+        foreign "project_add_two" fn add_two(x: i64) -> i64 ! {io};
+        #[test] fn rust_adapter_works() -> Unit ! {io, panic} {
+            test.equal_i64(add_two(40), 42);
+        }"#,
+    );
+    let project = project::load(&scratch.join("good")).unwrap();
+    let summary =
+        project::test_project(&project, &TestOptions::default(), &mut Vec::new()).unwrap();
+    assert_eq!(summary.passed, 1);
+    assert_eq!(summary.failed, 0);
 }
 
 #[test]

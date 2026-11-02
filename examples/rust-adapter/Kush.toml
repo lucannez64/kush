@@ -1,0 +1,7 @@
+[package]
+name = "rust_adapter_example"
+version = "0.1.0"
+entry = "sha256.kush"
+
+[native]
+cargo-manifests = ["Cargo.toml"]
