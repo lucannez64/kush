@@ -10648,6 +10648,39 @@ impl Checker<'_, '_> {
         }
         Ok(None)
     }
+    /// Whether a temporary shared receiver may return this method's result.
+    /// A receiver-tied view would dangle when the hidden temporary is dropped,
+    /// but a view explicitly tied only to another (caller-owned) argument is
+    /// safe. Elided borrowed results are conservatively receiver-tied.
+    fn temporary_receiver_may_return_view(&self, trait_id: BindingId, name: &str) -> bool {
+        let Some(method) = self.functions.traits[&trait_id]
+            .methods
+            .get(name)
+            .map(|method| method.function)
+        else {
+            return true;
+        };
+        let mut receiver_lifetimes = BTreeSet::new();
+        if let Some(receiver) = method.parameters.first() {
+            type_lifetimes(&receiver.ty, &mut receiver_lifetimes);
+        }
+        let mut result_lifetimes = BTreeSet::new();
+        type_lifetimes(&method.result, &mut result_lifetimes);
+        let result_borrows = !result_lifetimes.is_empty()
+            || matches!(
+                &method.result.kind,
+                ast::TypeKind::Borrow { .. } | ast::TypeKind::Slice(_)
+            )
+            || matches!(
+                &method.result.kind,
+                ast::TypeKind::Named { path, .. }
+                    if path.len() == 1 && path[0] == "str"
+            );
+        if !result_borrows {
+            return true;
+        }
+        !result_lifetimes.is_empty() && result_lifetimes.is_disjoint(&receiver_lifetimes)
+    }
     /// Lower the checked contract of one object method: trait-argument and
     /// `Self` substitution, associated projection normalization, usage grades,
     /// result contract, and the declared effect row.
@@ -11375,7 +11408,7 @@ impl Checker<'_, '_> {
                         // that place; the block drops it after the call, so the
                         // payload is released exactly once. A borrowed result
                         // could outlive this drop and remains rejected.
-                        if crate::runtime_types::has_borrow(self.types, contract.result) {
+                        if !self.temporary_receiver_may_return_view(info.trait_id, name) {
                             return Err(Diagnostic::new(
                                 span,
                                 "a borrowed dynamic result requires a direct object local or stored reference; a temporary receiver would be dropped before the result is used",
@@ -11708,7 +11741,7 @@ impl Checker<'_, '_> {
         }
         self.require(signature.effects, span)?;
         if receiver_mode != ReceiverMode::Owned
-            && crate::runtime_types::has_borrow(self.types, signature.result)
+            && !self.temporary_receiver_may_return_view(trait_id, name)
         {
             return Err(Diagnostic::new(
                 span,

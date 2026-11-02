@@ -1626,12 +1626,12 @@ fn open_object_methods_may_return_a_view_of_a_caller_argument() {
     agrees(
         r#"
         trait Pick {
-            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
         }
         struct A { tag: i64 }
         struct W<T> { value: T }
-        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl<T> Pick for W<T> { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl<T> Pick for W<T> { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
         fn main() -> i64 ! {io, alloc, panic} {
             let object: dyn Pick = W { value: A { tag: 1 } };
             let values = [5, 6, 7];
@@ -1649,12 +1649,12 @@ fn borrowed_object_results_require_a_stable_receiver_and_borrowed_receiver() {
     rejects(
         r#"
         trait Pick {
-            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
         }
         struct A { tag: i64 }
         struct B { tag: i64 }
-        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl Pick for B { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl Pick for B { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
         fn make() -> dyn Pick ! {panic} { A { tag: 1 } }
         fn main() -> i64 ! {alloc, panic} {
             let values = [1, 2];
@@ -1997,12 +1997,12 @@ fn temporary_shared_receivers_still_reject_borrowed_results() {
     rejects(
         r#"
         trait Pick {
-            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
         }
         struct A { tag: i64 }
         struct W<T> { value: T }
-        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl<T> Pick for W<T> { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl<T> Pick for W<T> { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
         fn make() -> dyn Pick ! {alloc, panic} { W { value: A { tag: 1 } } }
         fn main() -> i64 ! {alloc, alloc, panic} {
             let values = [1, 2];
@@ -2200,5 +2200,27 @@ fn multi_trait_trait_objects_are_an_explicit_language_rejection() {
             0
         }"#,
         "multi-trait trait objects",
+    );
+}
+
+#[test]
+fn temporary_shared_receivers_may_return_views_of_caller_arguments() {
+    agrees(
+        r#"
+        trait Pick {
+            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+        }
+        struct A { tag: i64 }
+        struct W<T> { value: T }
+        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl<T> Pick for W<T> { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        fn make() -> dyn Pick ! {alloc, panic} { W { value: A { tag: 1 } } }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let values = [5, 6, 7];
+            print_i64(make().pick(&values[..])[1]);
+            0
+        }"#,
+        0,
+        "6\n",
     );
 }
