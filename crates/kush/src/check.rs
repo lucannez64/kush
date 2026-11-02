@@ -797,6 +797,7 @@ fn check_selected(
             constructors: &constructors,
             constructor_counts: &constructor_counts,
             nullary: &nullary,
+            aliases: &EMPTY_ALIASES,
             locals: Vec::new(),
             local_types: Vec::new(),
             depth: 0,
@@ -936,6 +937,11 @@ struct Elaborator<'a> {
     constructor_counts: &'a BTreeMap<BindingId, usize>,
     nullary: &'a BTreeMap<BindingId, usize>,
     locals: Vec<Option<BindingId>>,
+    /// Symbolic scalar bindings introduced as by-value aliases of an earlier
+    /// binder. The value is the absolute outer-to-inner position in `locals`,
+    /// so `let m = n` denotes the same frozen occurrence even after a later
+    /// assignment appends a newer binder for `n`.
+    aliases: &'a BTreeMap<BindingId, usize>,
     /// Kernel type of every binder in `locals`, in the same order. These are
     /// hypothesis types, so a symbolic runtime scalar `n : i64` contributes
     /// `Scalar(I64)` and an erased proof contributes its proposition.
@@ -989,6 +995,24 @@ impl Elaborator<'_> {
                 "dependent member projection is not supported by logical checking yet",
             )
         })?;
+        if let Some(position) = self.aliases.get(&id).copied()
+            && position < self.local_types.len()
+        {
+            let index = self.local_types.len() - 1 - position;
+            if matches!(
+                self.local_types.get(position),
+                Some(Term::Scalar(Scalar::Unit))
+            ) || self.local_types.get(position).and_then(|ty| {
+                self.kernel
+                    .scalar_open(ty, &self.local_types[..position])
+                    .ok()
+                    .flatten()
+            }) == Some(Scalar::Unit)
+            {
+                return Ok(Term::unit());
+            }
+            return Ok(Term::Var(index));
+        }
         if let Some(index) = self
             .locals
             .iter()
@@ -1115,6 +1139,12 @@ impl Elaborator<'_> {
                 return Err(Diagnostic::new(
                     excludes.span,
                     "logical declarations cannot carry effect-exclusion constraints; bind '<e: Effects - alloc>' only on an executable function or method effect row",
+                ));
+            }
+            if let Some(includes) = &generic.includes {
+                return Err(Diagnostic::new(
+                    includes.span,
+                    "logical declarations cannot carry effect-row inclusion bounds; bind '<e: Effects + io>' only on an executable function or method effect row",
                 ));
             }
             let domain = match &generic.bound {
@@ -1656,6 +1686,9 @@ impl Elaborator<'_> {
 
 /// Elaborate a logical type. `locals` pairs each erased or symbolic runtime
 /// binder with its kernel hypothesis type, outermost first.
+static EMPTY_ALIASES: std::sync::LazyLock<BTreeMap<BindingId, usize>> =
+    std::sync::LazyLock::new(BTreeMap::new);
+
 pub(crate) fn elaborate_type(
     resolution: &Resolution,
     environment: &LogicalEnvironment,
@@ -1671,6 +1704,7 @@ pub(crate) fn elaborate_type(
         constructor_counts: &environment.constructor_counts,
         nullary: &environment.nullary,
         locals: locals.iter().map(|(id, _)| Some(*id)).collect(),
+        aliases: &EMPTY_ALIASES,
         local_types: locals.iter().map(|(_, ty)| ty.clone()).collect(),
         depth: 0,
     };
@@ -1678,12 +1712,15 @@ pub(crate) fn elaborate_type(
 }
 
 /// Elaborate a logical proof/value expression. Runtime bindings are absent from
-/// `locals`, so references to them fail relevance checking.
-pub(crate) fn elaborate_value(
+/// `locals`, so references to them fail relevance checking. An alias resolves
+/// to the frozen binder copied by `let alias = scalar`; it is not a fresh
+/// unconstrained index.
+pub(crate) fn elaborate_value_with_aliases(
     resolution: &Resolution,
     environment: &LogicalEnvironment,
     locals: &[(BindingId, Term)],
     expr: &Expr,
+    aliases: &BTreeMap<BindingId, usize>,
 ) -> Result<Term> {
     let mut elaborator = Elaborator {
         resolution,
@@ -1694,6 +1731,7 @@ pub(crate) fn elaborate_value(
         constructor_counts: &environment.constructor_counts,
         nullary: &environment.nullary,
         locals: locals.iter().map(|(id, _)| Some(*id)).collect(),
+        aliases,
         local_types: locals.iter().map(|(_, ty)| ty.clone()).collect(),
         depth: 0,
     };

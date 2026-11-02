@@ -102,6 +102,61 @@ fn contextual_union_inference_accumulates_literal_constraints() {
 }
 
 #[test]
+fn union_patterns_infer_the_residual_type_variable() {
+    let source = r#"
+        fn pick<T>(x: T | i64) -> i64 ! {panic} {
+            match x {
+                i64 @ n => n,
+                _ => 0,
+            }
+        }
+        fn three(c: i64) -> i64 | Bool | Unit ! {panic} {
+            if c == 0 { 1 } else { if c == 1 { true } else { () } }
+        }
+        fn main() -> i64 ! {panic} {
+            pick(three(0)) + pick(true)
+        }"#;
+    assert_eq!(value(source), 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 1);
+    rejects(
+        r#"
+        fn pick<T>(x: T | i64) -> i64 ! {panic} { match x { i64 @ n => n, _ => 0 } }
+        fn main() -> i64 ! {panic} { pick(1) }"#,
+        "residual binding is not unique",
+    );
+    rejects(
+        r#"
+        fn pick<T, U>(x: T | U | i64) -> i64 ! {panic} { 0 }
+        fn main() -> i64 ! {panic} { pick(true) }"#,
+        "cannot infer type parameter",
+    );
+}
+
+#[test]
+fn structural_literals_accumulate_contextual_union_candidates() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let v: struct { x: i64 } | struct { x: Bool } = struct { x: 40 };
+            match v {
+                struct { x: i64 } @ struct { x: n } => n + 2,
+                struct { x: Bool } @ struct { x: _ } => 0,
+            }
+        }"#;
+    assert_eq!(value(source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // The contextual hint is not just cosmetic: the same literal text would
+    // default to i64 without the expected Bool alternative.
+    let hinted = r#"
+        fn main() -> i64 ! {panic} {
+            let v: struct { x: Bool } = struct { x: true };
+            match v { struct { x } => if x { 42 } else { 0 } }
+        }"#;
+    assert_eq!(value(hinted), 42);
+}
+
+#[test]
 fn generic_inference_across_union_alternatives_reports_conflicts() {
     rejects(
         r#"
@@ -154,6 +209,56 @@ fn separate_row_variables_get_their_own_evidence() {
         ) -> i64 ! {panic, e1, e2} { g(f(1)) }
         fn main() -> i64 ! {io, panic} { both(inc, io_inc) }"#;
     assert_eq!(value(source), 3);
+}
+
+#[test]
+fn row_constraints_support_required_effects_and_combined_bounds() {
+    // A lower bound requires `io` even though both callable arguments are
+    // pure. The inferred specialization is therefore `{io}` and the caller
+    // must declare it; `panic` still comes from the callable actuals.
+    let inferred = r#"
+        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn apply<e: Effects + io>(f: fn(i64) -> i64 ! {e}, x: i64)
+            -> i64 ! {panic, e} { f(x) }
+        fn main() -> i64 ! {io, panic} { apply(inc, 41) }"#;
+    assert_eq!(value(inferred), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(inferred, 42);
+    let explicit = r#"
+        fn inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn apply<e: Effects + (io | alloc) - suspend>(f: fn(i64) -> i64 ! {e}, x: i64)
+            -> i64 ! {panic, e} { f(x) }
+        fn main() -> i64 ! {io, alloc, panic} { apply::<io | alloc | panic>(inc, 41) }"#;
+    assert_eq!(value(explicit), 42);
+    rejects(
+        r#"
+        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn apply<e: Effects + io>(f: fn(i64) -> i64 ! {e}, x: i64)
+            -> i64 ! {panic, e} { f(x) }
+        fn main() -> i64 ! {panic} { apply(inc, 1) }"#,
+        "requires effects {io}",
+    );
+    rejects(
+        r#"
+        fn inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn apply<e: Effects + alloc>(f: fn(i64) -> i64 ! {e}, x: i64)
+            -> i64 ! {panic, e} { f(x) }
+        fn main() -> i64 ! {io, alloc, panic} { apply::<io | panic>(inc, 1) }"#,
+        "required by '<e: Effects + alloc>'",
+    );
+    rejects(
+        r#"
+        fn apply<e: Effects + io - io>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "both includes and excludes",
+    );
+    rejects(
+        r#"
+        #[noalloc]
+        fn apply<e: Effects + alloc>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e} { f(1) }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "noalloc",
+    );
 }
 
 #[test]
@@ -414,6 +519,51 @@ fn an_old_value_proof_cannot_be_reused_after_a_write() {
 }
 
 #[test]
+fn scalar_aliases_keep_the_copied_kernel_index_and_freeze_before_mutation() {
+    let source = r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let n: i64 = 5;
+            let m = n;
+            keep(n, refl::<i64>(m)) + keep(m, refl::<i64>(n))
+        }"#;
+    assert_eq!(value(source), 10);
+    let frozen = r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n: i64 = 5;
+            let m = n;
+            n = 6;
+            keep(m, refl::<i64>(m)) + n
+        }"#;
+    assert_eq!(value(frozen), 11);
+    // The alias froze at the old version, so it cannot prove a proposition
+    // about the newly assigned source value.
+    rejects(
+        r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n: i64 = 5;
+            let m = n;
+            n = 6;
+            keep(n, refl::<i64>(m))
+        }"#,
+        "proof does not establish",
+    );
+    // Chained aliases resolve to the original binder rather than stacking
+    // fresh unconstrained indices.
+    let chained = r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let n: i64 = 4;
+            let a = n;
+            let b = a;
+            keep(n, refl::<i64>(b))
+        }"#;
+    assert_eq!(value(chained), 4);
+}
+
+#[test]
 fn proof_parameters_survive_unrelated_versioned_binders() {
     let source = r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
@@ -501,6 +651,64 @@ fn runtime_sized_arrays_check_capacity_and_bounds_at_runtime() {
             DynArray.get(&a, 1)
         }"#;
     let program = check(bounds).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(error.message.contains("index out of bounds"), "{error:?}");
+}
+
+#[test]
+fn runtime_sized_arrays_set_and_pop_copyable_slots() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = DynArray.new::<i64, 4>();
+            let a = DynArray.push(a, 1);
+            let a = DynArray.push(a, 2);
+            let a = DynArray.push(a, 3);
+            let a = DynArray.set(a, 1, 40);
+            let (a, last) = DynArray.pop(a);
+            DynArray.len(&a) + DynArray.get(&a, 0) + DynArray.get(&a, 1) + last
+        }"#;
+    assert_eq!(value(source), 46);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 46);
+    // Popping back to empty is checked, not a sentinel value.
+    let drained = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 2> = DynArray.new::<i64, 2>();
+            let a = DynArray.push(a, 7);
+            let (a, x) = DynArray.pop(a);
+            let (a, y) = DynArray.pop(a);
+            DynArray.len(&a) + x + y
+        }"#;
+    let program = check(drained).unwrap();
+    assert!(program.evaluate(&mut Vec::new()).is_err());
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 2> = DynArray.new();
+            let a = DynArray.push(a, Box.new(1));
+            let (a, _) = DynArray.pop(a);
+            DynArray.len(&a)
+        }"#,
+        "owning, linear, and view elements",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 2> = DynArray.new();
+            let a = DynArray.push(a, Box.new(1));
+            let a = DynArray.set(a, 0, Box.new(2));
+            DynArray.len(&a)
+        }"#,
+        "owning, linear, and view elements",
+    );
+    let out_of_bounds = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 2> = DynArray.new::<i64, 2>();
+            let a = DynArray.push(a, 1);
+            let a = DynArray.set(a, 1, 2);
+            DynArray.len(&a)
+        }"#;
+    let program = check(out_of_bounds).unwrap();
     let error = program.evaluate(&mut Vec::new()).unwrap_err();
     assert!(error.message.contains("index out of bounds"), "{error:?}");
 }
@@ -616,13 +824,75 @@ fn structural_nested_width_and_field_union_injection_coerce() {
     assert_eq!(stats.deallocations, 1);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 42);
-    rejects(
-        r#"
+    let nested_union = r#"
         struct Inner { v: i64 | Bool }
         struct Outer { inner: Inner }
-        fn read(v: struct { inner: struct { v: i64 | Bool | Unit } }) -> i64 ! {panic} { 0 }
-        fn main() -> i64 ! {panic} { read(Outer { inner: Inner { v: 1 } }) }"#,
-        "nested union repack",
+        fn read(v: struct { inner: struct { v: i64 | Bool | Unit } }) -> i64 ! {panic} {
+            match v.inner.v {
+                i64 @ n => n,
+                Bool @ _ => 0,
+                Unit @ _ => 0,
+            }
+        }
+        fn main() -> i64 ! {panic} { read(Outer { inner: Inner { v: 40 } }) + 2 }"#;
+    assert_eq!(value(nested_union), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(nested_union, 42);
+}
+
+#[test]
+fn structural_record_literals_and_generic_patterns_share_the_canonical_row() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let r = struct { b: 2, a: 40 };
+            let n = match r {
+                struct { a, b } => a + b,
+            };
+            let s: struct { b: i64, a: i64 } = struct { a: n, b: 0 };
+            match s {
+                struct { a, .. } => a,
+            }
+        }"#;
+    assert_eq!(value(source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // A literal is a real source row: width coercion drops extra fields and a
+    // retained atom may still be injected into a union field.
+    let coercing = r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let wide = struct { extra: Box.new(1), a: 41, tag: true };
+            let narrow: struct { a: i64 | Bool } = wide;
+            match narrow.a {
+                i64 @ n => n + 1,
+                Bool @ _ => 0,
+            }
+        }"#;
+    let (result, stats) = evaluate(coercing);
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(coercing, 42);
+    // A structural pattern may narrow a union when exactly one alternative has
+    // all named fields.
+    let narrowed = r#"
+        struct A { left: i64, right: i64 }
+        struct B { flag: Bool }
+        fn main() -> i64 ! {panic} {
+            let value: A | B = A { left: 20, right: 22 };
+            match value {
+                struct { left, right } => left + right,
+                B { flag } => if flag { 1 } else { 0 },
+            }
+        }"#;
+    assert_eq!(value(narrowed), 42);
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let r = struct { a: 1 };
+            match r { struct { missing } => missing }
+        }"#,
+        "no field 'missing'",
     );
 }
 

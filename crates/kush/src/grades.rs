@@ -1463,6 +1463,27 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
+            ExprKind::DynArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                if !self.expr(array, multiplier)? {
+                    return Ok(false);
+                }
+                if !self.expr(index, Grade::ONE)? {
+                    return Ok(false);
+                }
+                if !self.expr(value, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::DynArrayPop { array, .. } => {
+                if !self.expr(array, multiplier)? {
+                    return Ok(false);
+                }
+            }
             ExprKind::Local(slot) => {
                 let amount = if self.moves(self.function.locals[*slot].ty) {
                     Grade::ONE

@@ -1385,10 +1385,24 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 tag: *tag,
                 value: Box::new(value),
             }),
-            Coercion::Repack { .. } => Err(Diagnostic::new(
-                span,
-                "internal error: nested union repacking should be rejected by the checker",
-            )),
+            Coercion::Repack { map } => {
+                let Value::Union { tag, value } = value else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "internal error: nested union repacking received a non-union value",
+                    ));
+                };
+                let Some(target) = map.get(tag) else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "internal error: nested union repacking has no alternative mapping",
+                    ));
+                };
+                Ok(Value::Union {
+                    tag: *target,
+                    value,
+                })
+            }
             Coercion::Struct { kept, drops, .. } => {
                 self.apply_struct_coercion(value, kept, drops, span)
             }
@@ -2357,6 +2371,68 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
                 items.push(value);
                 array
+            }
+            ExprKind::DynArraySet {
+                array: array_expr,
+                index: index_expr,
+                value: value_expr,
+                capacity,
+                ..
+            } => {
+                let mut array = value!(self.expr(array_expr, frame));
+                let index = value!(self.expr(index_expr, frame));
+                let value = value!(self.expr(value_expr, frame));
+                self.consume(array_expr, frame);
+                self.consume(index_expr, frame);
+                self.consume(value_expr, frame);
+                let Value::DynArray {
+                    items,
+                    capacity: actual,
+                } = &mut array
+                else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: DynArray.set received a non-array value",
+                    ));
+                };
+                debug_assert_eq!(actual, capacity);
+                let position = usize::try_from(index.scalar()).map_err(|_| {
+                    Diagnostic::new(expr.span, "panic: DynArray index out of bounds")
+                })?;
+                let Some(slot) = items.get_mut(position) else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "panic: DynArray index out of bounds",
+                    ));
+                };
+                *slot = value;
+                array
+            }
+            ExprKind::DynArrayPop {
+                array: array_expr,
+                capacity,
+                ..
+            } => {
+                let mut array = value!(self.expr(array_expr, frame));
+                self.consume(array_expr, frame);
+                let Value::DynArray {
+                    items,
+                    capacity: actual,
+                } = &mut array
+                else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: DynArray.pop received a non-array value",
+                    ));
+                };
+                debug_assert_eq!(actual, capacity);
+                let Some(item) = items.pop() else {
+                    return Err(Diagnostic::new(expr.span, "panic: DynArray is empty"));
+                };
+                Value::Enum {
+                    tag: 0,
+                    fields: vec![array, item],
+                }
             }
             ExprKind::Local(slot) | ExprKind::Peek(slot) => {
                 self.materialize(frame.locals[*slot].clone())

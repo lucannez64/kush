@@ -2710,6 +2710,17 @@ impl Checker<'_> {
             ExprKind::DynArrayPush { array, value, .. } => {
                 self.value_moves_linear(array) || self.value_moves_linear(value)
             }
+            ExprKind::DynArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                self.value_moves_linear(array)
+                    || self.value_moves_linear(index)
+                    || self.value_moves_linear(value)
+            }
+            ExprKind::DynArrayPop { array, .. } => self.value_moves_linear(array),
             ExprKind::FnValue { captures, .. } => captures
                 .iter()
                 .any(|capture| self.value_moves_linear(capture)),
@@ -4224,6 +4235,17 @@ impl Checker<'_> {
                 self.expr(array)?;
                 self.expr(value)?;
             }
+            ExprKind::DynArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                self.expr(array)?;
+                self.expr(index)?;
+                self.expr(value)?;
+            }
+            ExprKind::DynArrayPop { array, .. } => self.expr(array)?,
             ExprKind::Construct {
                 enum_id,
                 fields,
@@ -4710,6 +4732,17 @@ pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
                 walk(array, out);
                 walk(value, out);
             }
+            ExprKind::DynArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                walk(array, out);
+                walk(index, out);
+                walk(value, out);
+            }
+            ExprKind::DynArrayPop { array, .. } => walk(array, out),
             ExprKind::FnValue { captures, .. } => {
                 for capture in captures {
                     walk(capture, out);
@@ -4921,6 +4954,19 @@ fn expr_live(
         ExprKind::DynArrayPush { array, value, .. } => {
             live = expr_live(value, live_after, views, heads, exits, out);
             live = expr_live(array, &live, views, heads, exits, out);
+        }
+        ExprKind::DynArraySet {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            live = expr_live(value, live_after, views, heads, exits, out);
+            live = expr_live(index, &live, views, heads, exits, out);
+            live = expr_live(array, &live, views, heads, exits, out);
+        }
+        ExprKind::DynArrayPop { array, .. } => {
+            live = expr_live(array, live_after, views, heads, exits, out);
         }
         ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
             live = expr_live(right, live_after, views, heads, exits, out);

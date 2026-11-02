@@ -338,6 +338,8 @@ impl Resolver {
             "DynArray.push",
             "DynArray.len",
             "DynArray.get",
+            "DynArray.set",
+            "DynArray.pop",
             "Box",
             "Box.new",
             "Box.take",
@@ -880,6 +882,27 @@ impl Resolver {
                         && self.result.bindings[id].name == "Effects"
                 });
             }
+            if let Some(includes) = &generic.includes {
+                if let GenericContext::Unsupported(what) = context {
+                    return Err(Diagnostic::new(
+                        generic.span,
+                        format!(
+                            "effect-row inclusion bounds are only supported on executable function and method effect binders; {what} cannot constrain an effect row"
+                        ),
+                    ));
+                }
+                if !effect {
+                    return Err(Diagnostic::new(
+                        generic.span,
+                        format!(
+                            "effect-row inclusion bounds require an effect-row binder such as '<{}: Effects + io>'; the bound here is not 'Effects'",
+                            generic.name
+                        ),
+                    ));
+                }
+                self.ty(includes)?;
+                self.effect_exclusions(includes)?;
+            }
             if let Some(excludes) = &generic.excludes {
                 if let GenericContext::Unsupported(what) = context {
                     return Err(Diagnostic::new(
@@ -900,6 +923,22 @@ impl Resolver {
                 }
                 self.ty(excludes)?;
                 self.effect_exclusions(excludes)?;
+            }
+            if generic.includes.is_some() && generic.excludes.is_some() {
+                let included =
+                    crate::runtime_types::effect_includes(&self.result, generic)?.unwrap_or(0);
+                let excluded =
+                    crate::runtime_types::effect_excludes(&self.result, generic)?.unwrap_or(0);
+                let overlap = included & excluded;
+                if overlap != 0 {
+                    return Err(Diagnostic::new(
+                        generic.span,
+                        format!(
+                            "effect-row bound on '{}' both includes and excludes the same effects; an effect cannot be required and forbidden in one binder",
+                            generic.name
+                        ),
+                    ));
+                }
             }
             let id = self.local(&generic.name, BindingKind::Generic, generic.span, false)?;
             if effect {
@@ -1206,6 +1245,18 @@ impl Resolver {
                             return Err(Diagnostic::new(
                                 value.span,
                                 format!("duplicate record field '{name}'"),
+                            ));
+                        }
+                        r.expr(value)?;
+                    }
+                }
+                ExprKind::StructuralLiteral(fields) => {
+                    let mut seen = BTreeSet::new();
+                    for (name, value) in fields {
+                        if !seen.insert(name) {
+                            return Err(Diagnostic::new(
+                                value.span,
+                                format!("duplicate structural record field '{name}'"),
                             ));
                         }
                         r.expr(value)?;
@@ -1540,6 +1591,18 @@ impl Resolver {
                             }
                         }
                         _ => {}
+                    }
+                }
+                PatternKind::Structural { fields, .. } => {
+                    let mut seen = BTreeSet::new();
+                    for (field, p) in fields {
+                        if !seen.insert(field) {
+                            return Err(Diagnostic::new(
+                                p.span,
+                                format!("duplicate structural pattern field '{field}'"),
+                            ));
+                        }
+                        r.pattern(p, names)?;
                     }
                 }
                 PatternKind::Tuple(patterns) | PatternKind::Slice(patterns) => {

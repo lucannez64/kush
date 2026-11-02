@@ -646,6 +646,22 @@ pub(crate) enum ExprKind {
         element: Type,
         capacity: usize,
     },
+    /// Overwrite one initialized slot in place. Copyable elements only; the
+    /// inline storage and runtime length are preserved.
+    DynArraySet {
+        array: Box<Expr>,
+        index: Box<Expr>,
+        value: Box<Expr>,
+        element: Type,
+        capacity: usize,
+    },
+    /// Remove and return the last initialized slot as `(array, element)`.
+    /// Copyable elements only, so the removed value cannot duplicate an owner.
+    DynArrayPop {
+        array: Box<Expr>,
+        element: Type,
+        capacity: usize,
+    },
     /// Read a local without moving it (only to project copyable fields).
     Peek(usize),
     /// Copy the field at a word offset out of a record value.
@@ -1070,6 +1086,11 @@ fn collect_body_returns<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
                 collect_body_returns(item, out);
             }
         }
+        ast::ExprKind::StructuralLiteral(fields) => {
+            for (_, value) in fields {
+                collect_body_returns(value, out);
+            }
+        }
         ast::ExprKind::Block(block) => collect_block_returns(block, out),
         ast::ExprKind::Unary { operand, .. }
         | ast::ExprKind::Try(operand)
@@ -1310,6 +1331,17 @@ fn fusion_expr_safe(
             safe(array, signatures, bodies, memo, visiting)
                 && safe(value, signatures, bodies, memo, visiting)
         }
+        ExprKind::DynArraySet {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            safe(array, signatures, bodies, memo, visiting)
+                && safe(index, signatures, bodies, memo, visiting)
+                && safe(value, signatures, bodies, memo, visiting)
+        }
+        ExprKind::DynArrayPop { array, .. } => safe(array, signatures, bodies, memo, visiting),
         ExprKind::BoxReuse { owner, payload }
         | ExprKind::BoxReuseGrow { owner, payload }
         | ExprKind::BoxTryReuse { owner, payload, .. } => {
@@ -1458,6 +1490,19 @@ fn fuse_expr(
         ExprKind::DynArrayPush { array, value, .. } => {
             fuse_expr(array, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
+        }
+        ExprKind::DynArraySet {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            fuse_expr(array, types, signatures, safety, fusions);
+            fuse_expr(index, types, signatures, safety, fusions);
+            fuse_expr(value, types, signatures, safety, fusions);
+        }
+        ExprKind::DynArrayPop { array, .. } => {
+            fuse_expr(array, types, signatures, safety, fusions);
         }
         ExprKind::BoxReuse { owner, payload }
         | ExprKind::BoxReuseGrow { owner, payload }
@@ -1967,15 +2012,23 @@ fn first_unexcluded_effect_variable(
     effect: u8,
 ) -> Result<Option<BindingId>> {
     for variable in variables {
-        let excluded = function
+        let generic = function
             .generics
             .iter()
-            .find(|generic| resolution.binder(generic.span) == Some(*variable))
+            .find(|generic| resolution.binder(generic.span) == Some(*variable));
+        let excluded = generic
             .map(|generic| crate::runtime_types::effect_excludes(resolution, generic))
             .transpose()?
             .flatten()
             .unwrap_or(0);
-        if excluded & effect == 0 {
+        // A lower bound `+ effect` guarantees the forbidden effect is present,
+        // so it is never a valid `#[noalloc]`/`#[nosuspend]` specialization.
+        let included = generic
+            .map(|generic| crate::runtime_types::effect_includes(resolution, generic))
+            .transpose()?
+            .flatten()
+            .unwrap_or(0);
+        if excluded & effect == 0 || included & effect != 0 {
             return Ok(Some(*variable));
         }
     }
@@ -2868,6 +2921,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             field_place: false,
             binding: sig.binding,
             scalar_epochs: BTreeMap::new(),
+            kernel_aliases: BTreeMap::new(),
             handlers: Vec::new(),
             effect_constraints: Vec::new(),
         };
@@ -3071,6 +3125,7 @@ fn expr_key(expr: &ast::Expr) -> String {
         | E::If { .. }
         | E::Match { .. }
         | E::Record { .. }
+        | E::StructuralLiteral(_)
         | E::While { .. }
         | E::Loop(_) => format!("{expr:?}"),
     }
@@ -3409,6 +3464,9 @@ fn method_contract_key(
         // Compare the canonical concrete set, so a trait and impl that spell
         // the same union in a different order remain alpha-equivalent while a
         // stricter or looser implementation still differs.
+        if let Some(included) = crate::runtime_types::effect_includes(resolution, generic)? {
+            generics.push_str(&format!(" + {included:#b}"));
+        }
         if let Some(excluded) = crate::runtime_types::effect_excludes(resolution, generic)? {
             generics.push_str(&format!(" - {excluded:#b}"));
         }
@@ -5837,10 +5895,10 @@ fn collect_generic_impl<'a>(
         // argument, and an effect row from an effect argument; a parameter that
         // no pattern determines is rejected by the constrained-parameter check
         // below.
-        if generic.excludes.is_some() {
+        if generic.excludes.is_some() || generic.includes.is_some() {
             return Err(Diagnostic::new(
                 generic.span,
-                "effect-exclusion bounds are not supported on impl parameters",
+                "effect-row bounds are not supported on impl parameters",
             ));
         }
         let id = resolution
@@ -6905,12 +6963,11 @@ impl<'a> Functions<'a> {
         // Every explicit, inferred, or forwarded effect argument reaches this
         // single specialization point, including arguments for methods and
         // materialized trait defaults. A bounded binder `<e: Effects - ...>`
-        // restricts which concrete rows are valid; it never hides or subtracts
-        // an effect from the declaration's own row.
+        // restricts which concrete rows are valid, and `<e: Effects + ...>`
+        // requires bits in every specialization; neither hides or subtracts an
+        // effect from the declaration's own row.
         for (generic, effects) in effect_generics.iter().zip(&key.4) {
-            let Some(excluded) = crate::runtime_types::effect_excludes(resolution, generic)? else {
-                continue;
-            };
+            let excluded = crate::runtime_types::effect_excludes(resolution, generic)?.unwrap_or(0);
             let illegal = effects & excluded;
             if illegal != 0 {
                 return Err(Diagnostic::new(
@@ -6922,6 +6979,21 @@ impl<'a> Functions<'a> {
                         effect_names(illegal),
                         generic.name,
                         effect_names(excluded)
+                    ),
+                ));
+            }
+            let included = crate::runtime_types::effect_includes(resolution, generic)?.unwrap_or(0);
+            let missing = included & !effects;
+            if missing != 0 {
+                return Err(Diagnostic::new(
+                    origin.unwrap_or(generic.span),
+                    format!(
+                        "effect argument {{{}}} for '{}' omits {}, which is required by '<{}: Effects + {}>'",
+                        effect_names(*effects),
+                        generic.name,
+                        effect_names(missing),
+                        generic.name,
+                        effect_names(included)
                     ),
                 ));
             }
@@ -8214,6 +8286,11 @@ struct Checker<'a, 't> {
     /// old hypothesis. A mutable capture is still rejected because a closure
     /// environment would observe an unsynchronized runtime location.
     scalar_epochs: BTreeMap<BindingId, u32>,
+    /// Snapshot positions in `kernel_locals` for scalar aliases introduced by
+    /// `let alias = scalar_name`. The position is absolute, so a later
+    /// assignment to the source appends a new binder and leaves the alias
+    /// denoting the value copied at binding time.
+    kernel_aliases: BTreeMap<BindingId, usize>,
     /// Lexically active effect handlers, innermost last. A handler is visible
     /// only to direct `perform` expressions in the same function body.
     handlers: Vec<HandlerScope>,
@@ -11846,15 +11923,39 @@ impl Checker<'_, '_> {
             ));
         };
         let target_members = self.types.unions[target_id].members.clone();
-        if let Type::Union(_) = source {
-            return Err(Diagnostic::new(
-                span,
-                format!(
-                    "structural field needs a nested union repack from {} to {}; bind and convert the field explicitly before the structural coercion",
-                    self.types.name(source),
-                    self.types.name(target)
-                ),
-            ));
+        if let Type::Union(source_id) = source {
+            let source_members = self.types.unions[source_id].members.clone();
+            let mut map = Vec::with_capacity(source_members.len());
+            for member in source_members {
+                let Some(tag) = target_members.iter().position(|target| {
+                    self.subtype(member, *target)
+                        && self.union_member_representation_compatible(member, *target)
+                }) else {
+                    if target_members
+                        .iter()
+                        .any(|target| self.subtype(member, *target))
+                    {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "nested union field conversion from {} to {} would change a callable representation; adapt the field explicitly first",
+                                self.types.name(source),
+                                self.types.name(target)
+                            ),
+                        ));
+                    }
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "internal error: nested union member {} has no target alternative in {}",
+                            self.types.name(member),
+                            self.types.name(target)
+                        ),
+                    ));
+                };
+                map.push(tag);
+            }
+            return Ok(Some(Coercion::Repack { map }));
         }
         let Some(tag) = target_members
             .iter()
@@ -12589,6 +12690,15 @@ impl Checker<'_, '_> {
             .map(|id| self.kernel_types[id].clone())
             .collect()
     }
+    /// Alias bindings in the form the evidence elaborator uses: an alias name
+    /// resolves to the binder that was copied at its binding site.
+    fn kernel_alias_sources(&self) -> BTreeMap<BindingId, usize> {
+        self.kernel_aliases
+            .iter()
+            .filter(|(_, position)| **position < self.kernel_locals.len())
+            .map(|(alias, position)| (*alias, *position))
+            .collect()
+    }
     /// Admit a runtime scalar binding as a symbolic kernel index. Mutable
     /// bindings are admitted at their current version; [`Self::renew_scalar_index`]
     /// appends a fresh binder on assignment. The mutable local itself is never
@@ -12621,15 +12731,34 @@ impl Checker<'_, '_> {
             return Ok(());
         };
         let _ = self.locals[slot].span;
+        self.kernel_aliases.remove(&id);
         self.kernel_types.insert(id, Term::Scalar(carrier));
         self.kernel_locals.push(id);
         *self.scalar_epochs.entry(id).or_insert(0) += 1;
         Ok(())
     }
+    /// The current absolute position of a symbolic scalar binder. An alias
+    /// resolves to the position that was copied at its binding site.
+    fn kernel_position(&self, id: BindingId) -> Option<usize> {
+        if let Some(position) = self.kernel_aliases.get(&id) {
+            return Some(*position);
+        }
+        self.kernel_locals.iter().rposition(|local| *local == id)
+    }
+    /// Record that `id` is a by-value scalar copy of the current version of
+    /// `source`. The alias keeps the source's evaluation-point binder instead
+    /// of introducing a fresh unconstrained index.
+    fn alias_scalar_index(&mut self, id: BindingId, source: BindingId) -> bool {
+        let Some(position) = self.kernel_position(source) else {
+            return false;
+        };
+        self.kernel_aliases.insert(id, position);
+        true
+    }
     /// The de Bruijn term for an in-scope symbolic runtime scalar local. The
     /// innermost binder wins, matching lexical shadowing and captures.
     fn kernel_local_term(&self, id: BindingId) -> Option<Term> {
-        let position = self.kernel_locals.iter().rposition(|local| *local == id)?;
+        let position = self.kernel_position(id)?;
         let index = self.kernel_locals.len().checked_sub(1 + position)?;
         Some(Term::Var(index))
     }
@@ -12763,11 +12892,12 @@ impl Checker<'_, '_> {
                     format!("internal error: dependent erased substitution failed: {e}"),
                 )
             })?;
-        let term = crate::check::elaborate_value(
+        let term = crate::check::elaborate_value_with_aliases(
             self.resolution,
             self.logical,
             &self.kernel_bindings(),
             evidence,
+            &self.kernel_alias_sources(),
         )
         .map_err(|e| {
             Diagnostic::new(
@@ -13184,7 +13314,25 @@ impl Checker<'_, '_> {
                     // appends a new binder instead of reinterpreting an old
                     // proof at the final value.
                     let id = self.resolution.binder(pattern.span).unwrap();
+                    // `let alias = scalar` is a by-value copy. Keeping the
+                    // source's current kernel binder lets proofs about the
+                    // source value apply to the alias, while a later assignment
+                    // to the source appends a new binder and leaves the alias
+                    // frozen at the copied version.
+                    let alias_source = match &value.kind {
+                        ExprKind::Local(source_slot) => {
+                            self.slots.iter().find_map(|(candidate, slot)| {
+                                (*slot == *source_slot).then_some(*candidate)
+                            })
+                        }
+                        _ => None,
+                    };
                     self.admit_scalar_index(id, ty, pattern.span)?;
+                    if let Some(source) = alias_source
+                        && ty.scalar_carrier().is_some()
+                    {
+                        self.alias_scalar_index(id, source);
+                    }
                     self.facts.define(slot, &value);
                     let must_use = self.copyable_result_grade(&value);
                     if let Some(required) = must_use
@@ -13463,6 +13611,17 @@ impl Checker<'_, '_> {
             ExprKind::DynArrayPush { array, value, .. } => {
                 self.value_moves_linear(array) || self.value_moves_linear(value)
             }
+            ExprKind::DynArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                self.value_moves_linear(array)
+                    || self.value_moves_linear(index)
+                    || self.value_moves_linear(value)
+            }
+            ExprKind::DynArrayPop { array, .. } => self.value_moves_linear(array),
             // A task/scope whose result carries an owning or linear obligation
             // transfers it to the handle (or to the joined TaskExit).
             ExprKind::TaskSpawn { obligation, .. }
@@ -13551,6 +13710,15 @@ impl Checker<'_, '_> {
                 ExprKind::DynArrayPush { array, value, .. } => {
                     find(checker, array).or_else(|| find(checker, value))
                 }
+                ExprKind::DynArraySet {
+                    array,
+                    index,
+                    value,
+                    ..
+                } => find(checker, array)
+                    .or_else(|| find(checker, index))
+                    .or_else(|| find(checker, value)),
+                ExprKind::DynArrayPop { array, .. } => find(checker, array),
                 ExprKind::DynArrayNew { .. } => None,
                 ExprKind::VecMap {
                     vector, callbacks, ..
@@ -13950,6 +14118,9 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::Record { ty, fields } => {
                     return c.record(ty, fields, span, expected);
+                }
+                ast::ExprKind::StructuralLiteral(fields) => {
+                    return c.structural_literal(fields, expected, span);
                 }
                 ast::ExprKind::Array(values) => {
                     let candidates = c.expected_array(expected, values.len());
@@ -17567,6 +17738,128 @@ impl Checker<'_, '_> {
             _ => false,
         }
     }
+    /// Solve a declared union pattern with exactly one bare type variable and
+    /// a concrete fixed part, such as `T | i64`. The residual actual
+    /// alternatives that are not covered by the fixed part determine `T`.
+    ///
+    /// This is deliberately a decidable residual-union rule, not row
+    /// subtraction: the fixed alternatives must not mention any inference
+    /// variable, and a second variable alternative is left to the ordinary
+    /// error path instead of being partitioned arbitrarily. If every actual
+    /// alternative is already covered by the fixed part, `T` has no unique
+    /// residual binding (it could be `Never`, the fixed type itself, or a
+    /// wider union), so the call is rejected rather than defaulting.
+    #[allow(clippy::too_many_arguments)]
+    fn unify_union_pattern(
+        &mut self,
+        pattern: &ast::Type,
+        actual: Type,
+        type_vars: &[BindingId],
+        const_vars: &[BindingId],
+        effect_vars: &[BindingId],
+        subst: &mut crate::runtime_types::Subst,
+        span: Span,
+    ) -> Result<bool> {
+        fn flatten<'a>(pattern: &'a ast::Type, out: &mut Vec<&'a ast::Type>) {
+            match &pattern.kind {
+                ast::TypeKind::Binary {
+                    op: crate::lexer::Kind::Pipe,
+                    left,
+                    right,
+                } => {
+                    flatten(left, out);
+                    flatten(right, out);
+                }
+                _ => out.push(pattern),
+            }
+        }
+        let mut alternatives = Vec::new();
+        flatten(pattern, &mut alternatives);
+        let mut variable: Option<&ast::Type> = None;
+        let mut fixed = Vec::new();
+        for alternative in alternatives {
+            let is_variable = matches!(
+                &alternative.kind,
+                ast::TypeKind::Named { path, arguments }
+                    if arguments.is_empty()
+                        && path.len() == 1
+                        && self
+                            .resolution
+                            .reference(alternative.span)
+                            .is_some_and(|id| type_vars.contains(&id))
+            );
+            if is_variable {
+                if variable.is_some() {
+                    return Ok(false);
+                }
+                variable = Some(alternative);
+            } else if self.mentions(alternative, type_vars, const_vars, effect_vars, subst) {
+                // A non-bare variable alternative needs real backtracking over
+                // its shape. Leave that to the ordinary inference path.
+                return Ok(false);
+            } else {
+                fixed.push(alternative);
+            }
+        }
+        let Some(variable) = variable else {
+            return Ok(false);
+        };
+        if fixed.is_empty() {
+            return Ok(false);
+        }
+        let fixed_ty = {
+            let mut types = Vec::with_capacity(fixed.len());
+            for alternative in &fixed {
+                types.push(self.types.ty_in(alternative, subst)?);
+            }
+            self.types.union(types, span)?
+        };
+        let mut residual = Vec::new();
+        for member in self.types.union_members(actual) {
+            if !self.subtype(member, fixed_ty) {
+                residual.push(member);
+            }
+        }
+        let variable_id = self
+            .resolution
+            .reference(variable.span)
+            .expect("checked union-pattern variable reference");
+        let residual = self.types.union(residual, span)?;
+        if residual == Type::Never {
+            if let Some(bound) = subst.types.get(&variable_id).copied() {
+                let covered = self.types.union(vec![bound, fixed_ty], span)?;
+                if !self.subtype(actual, covered) {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "union pattern '{}' does not cover the actual type {} for the inferred type parameter",
+                            self.types.name(covered),
+                            self.types.name(actual)
+                        ),
+                    ));
+                }
+                return Ok(true);
+            }
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "cannot infer type parameter '{}' from the union pattern: every actual alternative of {} is already covered by the fixed part, so the residual binding is not unique. Specialize it explicitly with '::<...>'",
+                    self.resolution.bindings[variable_id].name,
+                    self.types.name(actual)
+                ),
+            ));
+        }
+        self.unify(
+            variable,
+            residual,
+            type_vars,
+            const_vars,
+            effect_vars,
+            subst,
+            span,
+        )?;
+        Ok(true)
+    }
     /// First-order matching of a declared type against an actual type.
     #[allow(clippy::too_many_arguments)]
     fn unify(
@@ -17593,6 +17886,23 @@ impl Checker<'_, '_> {
                     && self.resolution.reference(pattern.span).is_some_and(|id| type_vars.contains(&id))
                     && path.len() == 1
         );
+        if matches!(
+            &pattern.kind,
+            ast::TypeKind::Binary {
+                op: crate::lexer::Kind::Pipe,
+                ..
+            }
+        ) && self.unify_union_pattern(
+            pattern,
+            actual,
+            type_vars,
+            const_vars,
+            effect_vars,
+            subst,
+            span,
+        )? {
+            return Ok(());
+        }
         if let Type::Union(id) = actual
             && !bare_variable
         {
@@ -17995,11 +18305,15 @@ impl Checker<'_, '_> {
         }
         let constraints = self.effect_constraints.split_off(mark);
         let mut allowed: BTreeMap<BindingId, u8> = BTreeMap::new();
+        let mut required: BTreeMap<BindingId, u8> = BTreeMap::new();
         for generic in effect_generics {
             let binder = self.resolution.binder(generic.span).unwrap();
             let excluded =
                 crate::runtime_types::effect_excludes(self.resolution, generic)?.unwrap_or(0);
+            let included =
+                crate::runtime_types::effect_includes(self.resolution, generic)?.unwrap_or(0);
             allowed.insert(binder, EFFECT_BITS & !excluded);
+            required.insert(binder, included);
         }
         let mut mentioned = BTreeSet::new();
         for constraint in &constraints {
@@ -18025,6 +18339,26 @@ impl Checker<'_, '_> {
             }
         }
         if unbound.is_empty() {
+            for generic in effect_generics {
+                let binder = self.resolution.binder(generic.span).unwrap();
+                let included =
+                    crate::runtime_types::effect_includes(self.resolution, generic)?.unwrap_or(0);
+                if let Some(bits) = subst.effects.get(&binder) {
+                    let missing = included & !*bits;
+                    if missing != 0 {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "specialized effect row for '{}' omits {}, which is required by '<{}: Effects + {}>'",
+                                generic.name,
+                                effect_names(missing),
+                                generic.name,
+                                effect_names(included)
+                            ),
+                        ));
+                    }
+                }
+            }
             for constraint in constraints {
                 let covered = constraint.fixed
                     | constraint
@@ -18055,10 +18389,11 @@ impl Checker<'_, '_> {
         let mut solutions: Vec<BTreeMap<BindingId, u8>> = vec![BTreeMap::new()];
         for variable in &unbound {
             let maximum = allowed.get(variable).copied().unwrap_or(EFFECT_BITS);
+            let minimum = required.get(variable).copied().unwrap_or(0);
             let mut next = Vec::new();
             for solution in &solutions {
                 for bits in 0..=EFFECT_BITS {
-                    if bits & !maximum != 0 {
+                    if bits & !maximum != 0 || bits & minimum != minimum {
                         continue;
                     }
                     let mut candidate = solution.clone();
@@ -19307,6 +19642,170 @@ impl Checker<'_, '_> {
             None => Ok(construct),
         }
     }
+    /// Check an anonymous structural record literal. Fields are evaluated in
+    /// source order (effects and ownership stay left-to-right) and the value is
+    /// built in the canonical name-sorted row. An expected structural row is a
+    /// field-type hint, and the ordinary subtype coercion then performs any
+    /// width or nested representation change.
+    fn structural_literal(
+        &mut self,
+        fields: &[(String, ast::Expr)],
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        // An expected union of structural rows is treated as a finite set of
+        // candidates. Each candidate supplies field-type hints; the literal
+        // must be accepted by exactly one. Committing to the first alternative
+        // would silently choose a representation.
+        let mut candidates = Vec::new();
+        match expected {
+            Some(expected) if self.types.is_structural(expected) => {
+                if let Some(row) = self.types.structural_row(expected) {
+                    candidates.push((expected, row));
+                }
+            }
+            Some(Type::Union(id)) => {
+                for member in self.types.unions[id].members.clone() {
+                    if let Some(row) = self.types.structural_row(member) {
+                        candidates.push((member, row));
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut accepted = Vec::new();
+        let mut first_error = None;
+        if candidates.len() > 1 {
+            for (member, row) in &candidates {
+                match self.structural_literal_fields(fields, Some(row), span) {
+                    Ok((value, source)) if self.subtype(source, *member) => accepted.push(value),
+                    Ok(_) => {}
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+            }
+        }
+        let construct = match accepted.len() {
+            0 if candidates.len() > 1 => {
+                // Report the first candidate's real field-type error rather
+                // than an opaque union mismatch.
+                if let Some(error) = first_error {
+                    return Err(error);
+                }
+                let (_, row) = &candidates[0];
+                self.structural_literal_fields(fields, Some(row), span)?.0
+            }
+            1 => accepted.pop().expect("one accepted literal"),
+            _ if accepted.len() > 1 => {
+                return Err(Diagnostic::new(
+                    span,
+                    "this structural record literal fits several union alternatives; add an explicit annotation",
+                ));
+            }
+            _ => {
+                let row = candidates.first().map(|(_, row)| row);
+                self.structural_literal_fields(fields, row, span)?.0
+            }
+        };
+        match expected {
+            Some(expected) => self.coerce(construct, expected, span),
+            None => Ok(construct),
+        }
+    }
+    /// Build one structural literal with an optional candidate-row hint.
+    fn structural_literal_fields(
+        &mut self,
+        fields: &[(String, ast::Expr)],
+        target_row: Option<&Vec<(String, Type)>>,
+        span: Span,
+    ) -> Result<(Expr, Type)> {
+        let mut values = Vec::with_capacity(fields.len());
+        let mut diverges = false;
+        for (name, value) in fields {
+            let hint = target_row
+                .and_then(|row| row.iter().find(|(field, _)| field == name))
+                .map(|(_, ty)| *ty);
+            let value = self.expr_expected(value, hint)?;
+            diverges |= value.ty == Type::Never;
+            values.push((name.clone(), value));
+        }
+        let source_row = values
+            .iter()
+            .map(|(name, value)| (name.clone(), value.ty))
+            .collect::<Vec<_>>();
+        let ty = self.types.structural(source_row, span)?;
+        let canonical = self
+            .types
+            .structural_row(ty)
+            .expect("a checked structural literal has a structural row");
+        let source = ty;
+        let construct = if values
+            .iter()
+            .map(|(name, _)| name)
+            .eq(canonical.iter().map(|(name, _)| name))
+        {
+            Expr {
+                kind: ExprKind::Construct {
+                    enum_id: ty.layout().expect("structural layout"),
+                    tag: 0,
+                    fields: values.into_iter().map(|(_, value)| value).collect(),
+                },
+                ty,
+                span,
+                resource: None,
+            }
+        } else {
+            let mut statements = Vec::with_capacity(values.len());
+            let mut by_name = BTreeMap::new();
+            for (name, value) in values {
+                let field_ty = value.ty;
+                let slot = self.temp(field_ty, value.span)?;
+                self.locals[slot].linear = self.value_moves_linear(&value);
+                statements.push(Statement::Let(slot, value));
+                by_name.insert(name, slot);
+            }
+            let fields = canonical
+                .iter()
+                .map(|(name, field_ty)| Expr {
+                    kind: ExprKind::Local(by_name[name]),
+                    ty: *field_ty,
+                    span,
+                    resource: None,
+                })
+                .collect();
+            let tail = Expr {
+                kind: ExprKind::Construct {
+                    enum_id: ty.layout().expect("structural layout"),
+                    tag: 0,
+                    fields,
+                },
+                ty,
+                span,
+                resource: None,
+            };
+            Expr {
+                kind: ExprKind::Block(Block {
+                    statements,
+                    tail: Some(Box::new(tail)),
+                    ty,
+                }),
+                ty,
+                span,
+                resource: None,
+            }
+        };
+        let type_out = if diverges { Type::Never } else { ty };
+        Ok((
+            Expr {
+                ty: type_out,
+                ..construct
+            },
+            source,
+        ))
+    }
     fn record_pattern(
         &mut self,
         pattern: &ast::Pattern,
@@ -20441,6 +20940,90 @@ impl Checker<'_, '_> {
                     None => Ok(value),
                 }
             }
+            "DynArray.set" | "DynArray.pop" => {
+                if explicit.is_some() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("{name} takes no type arguments"),
+                    ));
+                }
+                let wanted = if name == "DynArray.set" { 3 } else { 1 };
+                if arguments.len() != wanted {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("{name} takes {wanted} argument(s)"),
+                    ));
+                }
+                let array = if let Some(expected) = expected {
+                    // `pop` returns a tuple, so its array position cannot use
+                    // the whole expected type as a hint; only `set` can.
+                    if name == "DynArray.set" {
+                        self.expr_expected(&arguments[0], Some(expected))?
+                    } else {
+                        self.expr(&arguments[0])?
+                    }
+                } else {
+                    self.expr(&arguments[0])?
+                };
+                let Some((element, capacity)) = array
+                    .ty
+                    .layout()
+                    .and_then(|id| self.types.enums[id].dynamic_array)
+                else {
+                    return Err(Diagnostic::new(
+                        arguments[0].span,
+                        format!("{name} requires a runtime-sized inline array"),
+                    ));
+                };
+                if self.owned_type(element) || self.linear_type(element) || element.is_view() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "{name} moves or copies its element; owning, linear, and view elements need an explicit consuming operation"
+                        ),
+                    ));
+                }
+                if name == "DynArray.set" {
+                    let index = self.expr_expected(&arguments[1], Some(Type::I64))?;
+                    self.expect(index.ty, Type::I64, arguments[1].span)?;
+                    let value = self.expr_expected(&arguments[2], Some(element))?;
+                    self.expect(value.ty, element, arguments[2].span)?;
+                    self.require(PANIC, span)?;
+                    let ty = array.ty;
+                    let value = Expr {
+                        kind: ExprKind::DynArraySet {
+                            array: Box::new(array),
+                            index: Box::new(index),
+                            value: Box::new(value),
+                            element,
+                            capacity,
+                        },
+                        ty,
+                        span,
+                        resource: None,
+                    };
+                    return match expected {
+                        Some(expected) => self.coerce(value, expected, span),
+                        None => Ok(value),
+                    };
+                }
+                self.require(PANIC, span)?;
+                let ty = self.types.tuple(vec![array.ty, element], span)?;
+                let value = Expr {
+                    kind: ExprKind::DynArrayPop {
+                        array: Box::new(array),
+                        element,
+                        capacity,
+                    },
+                    ty,
+                    span,
+                    resource: None,
+                };
+                match expected {
+                    Some(expected) => self.coerce(value, expected, span),
+                    None => Ok(value),
+                }
+            }
             "DynArray.len" | "DynArray.get" => {
                 if explicit.is_some() {
                     return Err(Diagnostic::new(
@@ -21401,6 +21984,92 @@ impl Checker<'_, '_> {
                     inner: Box::new(inner),
                 });
             }
+            if let ast::PatternKind::Structural { fields, rest: _ } = &pattern.kind {
+                let record_layout = |c: &Checker, ty: Type| {
+                    ty.layout()
+                        .filter(|layout| c.types.enums[*layout].record)
+                };
+                let (member, narrowed) = if let Type::Union(id) = ty {
+                    let members = c.types.unions[id].members.clone();
+                    let mut matches = Vec::new();
+                    for (tag, member) in members.into_iter().enumerate() {
+                        let Some(layout) = record_layout(c, member) else {
+                            continue;
+                        };
+                        let variant = &c.types.enums[layout].variants[0];
+                        if fields.iter().all(|(name, _)| variant.names.contains(name)) {
+                            matches.push((tag, member));
+                        }
+                    }
+                    match matches.as_slice() {
+                        [] => {
+                            return Err(Diagnostic::new(
+                                pattern.span,
+                                format!(
+                                    "structural pattern does not match any record alternative of {}",
+                                    c.types.name(ty)
+                                ),
+                            ));
+                        }
+                        [one] => (one.1, true),
+                        _ => {
+                            return Err(Diagnostic::new(
+                                pattern.span,
+                                "this structural pattern matches several union alternatives; narrow with 'Type @ pattern' first",
+                            ));
+                        }
+                    }
+                } else {
+                    (ty, false)
+                };
+                let Some(layout) = record_layout(c, member) else {
+                    return Err(Diagnostic::new(
+                        pattern.span,
+                        format!(
+                            "a structural pattern matches a record value, found {}",
+                            c.types.name(member)
+                        ),
+                    ));
+                };
+                let variant = c.types.enums[layout].variants[0].clone();
+                let mut checked = Vec::new();
+                let mut offset = 1;
+                for (index, field_ty) in variant.fields.iter().enumerate() {
+                    let sub = fields.iter().find(|(n, _)| *n == variant.names[index]);
+                    let p = match sub {
+                        Some((_, p)) => c.pattern(p, *field_ty, bindings)?,
+                        None => Pattern::Any,
+                    };
+                    checked.push((offset, p));
+                    offset += c.types.width(*field_ty);
+                }
+                if let Some((name, p)) = fields.iter().find(|(n, _)| !variant.names.contains(n)) {
+                    return Err(Diagnostic::new(
+                        p.span,
+                        format!("record has no field '{name}'"),
+                    ));
+                }
+                let inner = Pattern::Variant {
+                    tag: 0,
+                    fields: checked,
+                };
+                if narrowed {
+                    let tag = match ty {
+                        Type::Union(id) => c.types.unions[id]
+                            .members
+                            .iter()
+                            .position(|candidate| *candidate == member)
+                            .expect("narrowed member is in the union"),
+                        _ => unreachable!("only a union can be narrowed here"),
+                    };
+                    return Ok(Pattern::Type {
+                        tag,
+                        member,
+                        inner: Box::new(inner),
+                    });
+                }
+                return Ok(inner);
+            }
             // Constructor, record, and array/variant patterns can narrow a
             // union directly when exactly one alternative has the right shape.
             if let Type::Union(id) = ty {
@@ -21915,6 +22584,11 @@ fn collect_expr_refs(resolution: &Resolution, expr: &ast::Expr, out: &mut BTreeS
         | ast::ExprKind::Continue => {}
         ast::ExprKind::Tuple(values) | ast::ExprKind::Array(values) => {
             for value in values {
+                collect_expr_refs(resolution, value, out);
+            }
+        }
+        ast::ExprKind::StructuralLiteral(fields) => {
+            for (_, value) in fields {
                 collect_expr_refs(resolution, value, out);
             }
         }

@@ -251,15 +251,20 @@ impl Parser {
         }
         self.separated(Kind::Gt, |p| p.generic_binder())
     }
-    /// One ordinary generic binder: `T`, `N: Nat`, `G: Grade`, `e: Effects`, or
-    /// the bounded effect form `e: Effects - alloc`. The `-` list is parsed here
-    /// because `-` is not part of the ordinary type grammar; the resolver
-    /// validates that it is attached to a direct `Effects` binder and names
-    /// only concrete effects.
+    /// One ordinary generic binder: `T`, `N: Nat`, `G: Grade`, `e: Effects`,
+    /// or a bounded effect form such as `e: Effects + io - alloc`. The `+` and
+    /// `-` lists are parsed here because neither is part of the ordinary type
+    /// grammar; the resolver validates that they are attached to a direct
+    /// `Effects` binder and name only concrete effects.
     fn generic_binder(&mut self) -> Result<Generic> {
         let start = self.current().span;
         let name = self.ident()?;
         let bound = if self.eat(&Kind::Colon) {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        let includes = if self.eat(&Kind::Plus) {
             Some(self.ty()?)
         } else {
             None
@@ -273,6 +278,7 @@ impl Parser {
             name,
             bound,
             excludes,
+            includes,
             span: self.since(start),
         })
     }
@@ -1499,6 +1505,30 @@ impl Parser {
                 self.bump();
                 ExprKind::Array(self.separated(Kind::RBracket, |p| p.expr())?)
             }
+            Kind::Struct => {
+                self.bump();
+                self.expect(
+                    &Kind::LBrace,
+                    "'{' after 'struct' in a structural record literal",
+                )?;
+                let mut fields = Vec::new();
+                while !self.eat(&Kind::RBrace) {
+                    let name = self.ident()?;
+                    self.expect(&Kind::Colon, "':' after a structural record field name")?;
+                    fields.push((name, self.expr()?));
+                    if self.eat(&Kind::RBrace) {
+                        break;
+                    }
+                    self.expect(&Kind::Comma, "',' between structural record fields")?;
+                }
+                if fields.is_empty() {
+                    return Err(Diagnostic::new(
+                        self.since(start),
+                        "a structural record literal needs at least one field",
+                    ));
+                }
+                ExprKind::StructuralLiteral(fields)
+            }
             Kind::LBrace => ExprKind::Block(self.block()?),
             Kind::Handle => {
                 self.bump();
@@ -1738,6 +1768,33 @@ impl Parser {
                     ));
                 }
                 PatternKind::Slice(elements)
+            }
+            Kind::Struct => {
+                self.bump();
+                self.expect(&Kind::LBrace, "'{' after 'struct' in a structural pattern")?;
+                let mut fields = Vec::new();
+                let mut rest = false;
+                while !self.eat(&Kind::RBrace) {
+                    if self.eat(&Kind::DotDot) {
+                        rest = true;
+                        self.eat(&Kind::Comma);
+                        self.expect(&Kind::RBrace, "'}' after structural rest pattern")?;
+                        break;
+                    }
+                    let field_span = self.current().span;
+                    let name = self.ident()?;
+                    let value = if self.eat(&Kind::Colon) {
+                        self.pattern()?
+                    } else {
+                        Node::new(PatternKind::Name(vec![name.clone()]), field_span)
+                    };
+                    fields.push((name, value));
+                    if self.eat(&Kind::RBrace) {
+                        break;
+                    }
+                    self.expect(&Kind::Comma, "',' between structural pattern fields")?;
+                }
+                PatternKind::Structural { fields, rest }
             }
             Kind::Ident(_) => {
                 let path = self.path()?;

@@ -161,6 +161,14 @@ pub struct Generic {
     /// rejected, and the body may still perform every effect its row declares.
     /// Only executable function and method effect binders accept it.
     pub excludes: Option<Type>,
+    /// Concrete effects this binder must always be specialized with, written
+    /// `<e: Effects + io>` or `<e: Effects + (io | alloc)>`.
+    ///
+    /// This is a lower bound on valid specialization: a solution whose row
+    /// omits an included effect is rejected. It is not row subtraction and it
+    /// does not make the body perform the effect; the declared function row
+    /// still determines observability.
+    pub includes: Option<Type>,
     pub span: Span,
 }
 /// A `grade algebra` declaration. The finite carrier and both operations are
@@ -362,6 +370,10 @@ pub enum ExprKind {
     Bool(bool),
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
+    /// Anonymous structural record literal: `struct { a: value, b: value }`.
+    /// The checked value has the canonical (name-sorted) structural row built
+    /// from the field expressions.
+    StructuralLiteral(Vec<(String, Expr)>),
     Block(Block),
     Unary {
         op: Kind,
@@ -484,6 +496,13 @@ pub enum PatternKind {
     Record {
         path: Vec<String>,
         fields: Vec<(String, Pattern)>,
+    },
+    /// Anonymous structural pattern `struct { a, b: p, .. }`. It matches any
+    /// record value that has the named fields; omitted and `..` fields are
+    /// ignored (and dropped by the ordinary pattern cleanup rules).
+    Structural {
+        fields: Vec<(String, Pattern)>,
+        rest: bool,
     },
     /// `Type @ pattern`: narrow one heterogeneous-union alternative.
     Type {

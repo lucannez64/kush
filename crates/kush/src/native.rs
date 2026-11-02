@@ -3701,6 +3701,70 @@ impl Generator<'_, '_> {
                 }
                 return Some(out);
             }
+            ExprKind::DynArraySet {
+                array,
+                index,
+                value,
+                element,
+                capacity,
+            } => {
+                let mut values = lower!(self.expr(array));
+                self.consume(array);
+                let position = lower!(self.scalar(index));
+                self.consume(index);
+                let item = lower!(self.expr(value));
+                self.consume(value);
+                let length = values[0];
+                let bad =
+                    self.builder
+                        .ins()
+                        .icmp(IntCC::UnsignedGreaterThanOrEqual, position, length);
+                self.guard(bad);
+                let element_width = self.program.width(*element);
+                for slot in 0..*capacity {
+                    let active = self
+                        .builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, position, slot as i64);
+                    for (word, value) in item.iter().take(element_width).enumerate() {
+                        let index = 1 + slot * element_width + word;
+                        values[index] = self.builder.ins().select(active, *value, values[index]);
+                    }
+                }
+                return Some(values);
+            }
+            ExprKind::DynArrayPop {
+                array,
+                element,
+                capacity,
+            } => {
+                let mut values = lower!(self.expr(array));
+                self.consume(array);
+                let length = values[0];
+                let empty = self.builder.ins().icmp_imm_s(IntCC::Equal, length, 0);
+                self.guard(empty);
+                let next = self.builder.ins().iadd_imm_s(length, -1);
+                let zero = self.constant(0);
+                // The result type is the checked tuple layout, whose first
+                // word is the single (always zero) constructor tag.
+                values.insert(0, zero);
+                values[1] = next;
+                let element_width = self.program.width(*element);
+                let mut item = vec![zero; element_width];
+                for slot in 0..*capacity {
+                    let active = self
+                        .builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, next, slot as i64);
+                    for word in 0..element_width {
+                        let index = 2 + slot * element_width + word;
+                        item[word] = self.builder.ins().select(active, values[index], item[word]);
+                        values[index] = self.builder.ins().select(active, zero, values[index]);
+                    }
+                }
+                values.extend(item);
+                return Some(values);
+            }
             ExprKind::Project(base, offset) => {
                 let values = lower!(self.expr(base));
                 let width = self.program.width(expr.ty);
@@ -4778,9 +4842,29 @@ impl Generator<'_, '_> {
                 }
                 out
             }
-            Coercion::Repack { .. } => {
-                debug_assert!(false, "nested union repacking is rejected by the checker");
-                values.to_vec()
+            Coercion::Repack { map } => {
+                let exit = self.join(to).expect("nested repack target is not Never");
+                for (source_tag, target_tag) in map.iter().enumerate() {
+                    let hit = self.builder.create_block();
+                    let next = self.builder.create_block();
+                    let condition =
+                        self.builder
+                            .ins()
+                            .icmp_imm_s(IntCC::Equal, values[0], source_tag as i64);
+                    self.builder.ins().brif(condition, hit, &[], next, &[]);
+                    self.builder.switch_to_block(hit);
+                    let mut out = Vec::with_capacity(width);
+                    out.push(self.constant(*target_tag as i64));
+                    out.extend(values.iter().copied().skip(1).take(width.saturating_sub(1)));
+                    while out.len() < width {
+                        out.push(self.constant(0));
+                    }
+                    self.jump(exit, &out);
+                    self.builder.switch_to_block(next);
+                }
+                self.builder.ins().trap(TrapCode::unwrap_user(2));
+                self.builder.switch_to_block(exit);
+                self.builder.block_params(exit).to_vec()
             }
         }
     }

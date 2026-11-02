@@ -3923,6 +3923,18 @@ pub(crate) fn effect_excludes(
     effect_exclusion_part(resolution, excludes, &mut bits)?;
     Ok(Some(bits))
 }
+/// Concrete effects required by a `<e: Effects + io>` lower bound.
+pub(crate) fn effect_includes(
+    resolution: &Resolution,
+    generic: &ast::Generic,
+) -> Result<Option<u8>> {
+    let Some(includes) = &generic.includes else {
+        return Ok(None);
+    };
+    let mut bits = 0u8;
+    effect_exclusion_part(resolution, includes, &mut bits)?;
+    Ok(Some(bits))
+}
 fn effect_exclusion_part(resolution: &Resolution, ty: &ast::Type, bits: &mut u8) -> Result<()> {
     match &ty.kind {
         ast::TypeKind::Binary {
