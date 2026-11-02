@@ -196,13 +196,18 @@ outstanding implementation item.
   snapshot. Proof-valued runtime locals, mutable captures as a live view, branch
   or loop join inference, and arithmetic proof search remain absent. See
   [runtime-indices.md](runtime-indices.md#4-freezing-and-mutation).
-- [ ] Runtime-sized inline arrays with checked lifetime/storage layout.
-  **Partial:** `DynArray<T, capacity>` has compile-time capacity, runtime
-  length, inline storage, checked push overflow, checked reads, `set`, `pop`,
-  owning-prefix drop, and native/reference agreement. `set`/`pop` are copyable
-  element operations and check the live runtime length. There is no literal,
-  pattern, slice view, or runtime `[T; n]`; capacity remains a compile-time
-  bound. See [dynamic-arrays.md](dynamic-arrays.md).
+- [x] Runtime-sized inline arrays with checked lifetime/storage layout.
+  **Implemented for the documented fragment:** `DynArray<T, capacity>` has
+  compile-time capacity, runtime length, inline storage, checked push overflow,
+  checked reads, `set`, `pop`, owning-prefix drop, contextual literals, and
+  shared `&[T]` views over the live prefix with owner-loan tracking. Literals
+  are statically bounded by the capacity and use the checked push sequence, so
+  their overflow guards are unreachable and no `panic` effect is added. Views
+  read the runtime length word, use the same slice operations as arrays, and
+  reject owner moves/drops/push/pop while live; a view cannot escape its
+  owner's lexical scope. Patterns over a `DynArray` and mutable `&mut [T]`
+  views are explicit, tested rejections. Capacity remains a compile-time
+  `Nat`; this is not runtime `[T; n]`. See [dynamic-arrays.md](dynamic-arrays.md).
 
 ## Memory and optimization
 
@@ -227,19 +232,35 @@ outstanding implementation item.
   callback order, drop behavior, and final stride. `#[noalloc]` rejects all
   three; plain `Box.reuse` and the non-growing map operations keep their
   no-allocating-fallback contracts.
-- [ ] Custom allocators and lifetime-safe allocator ownership. **Partial, with
-  a documented built-in allocator strategy:** `Arena`/`ArenaBox` with
+- [x] Custom allocators and lifetime-safe allocator ownership.
+  **Implemented with a documented boundary:** `Allocator.new(alloc, free)`
+  packages two noncapturing callbacks, `fn(i64) -> Bytes` and
+  `fn(Bytes) -> Unit`, and is a copyable two-code-pointer value that owns
+  nothing. `AllocBox<T>` and `AllocVec<T>` store their own copy of the pair and
+  therefore keep the allocator alive with every allocation: dropping or moving
+  the allocator binding while containers are live is defined and safe, release
+  always uses the pair recorded in the container, and both containers are
+  affine so each block is released exactly once. Allocation callbacks may
+  declare only `alloc`/`panic`; release callbacks must be pure because they
+  also run during implicit drop. A returned `Bytes` block with less than the
+  requested capacity is a refusal: `AllocBox.new` panics, `AllocBox.try_new`
+  returns the untouched payload, and the refusal block is released through the
+  same allocator. `AllocVec` grows by allocating a fresh block, copying live
+  elements, and releasing the old block through the same pair; it drops owning
+  elements and the block exactly once. `Arena`/`ArenaBox` with
   reference-retained regions, deterministic drop, function/task escape, and
-  checked provenance. `Arena.with_strategy` adds a user-defined, noncapturing
-  pure chunk-sizing policy stored as a code pointer in the region.
-  Arbitrary user-defined alloc/dealloc callbacks, an allocator trait, FFI, and
-  containers that own a general allocator value are deliberately not
-  implemented and are not claimed.
+  `Arena.with_strategy` remain available. Explicit limits: no allocator trait,
+  no FFI or raw-pointer callbacks, no user-supplied per-container metadata
+  allocation (fixed headers are runtime-owned bookkeeping), and no general
+  `realloc` hook. See [memory-completion.md](memory-completion.md#41-user-defined-allocators).
 - [x] Fallible allocation/reuse with exact cleanup on all failure paths.
   **Implemented:** `Box.try_new`, growth-capable `Box.try_reuse`,
-  `Bytes.try_with_capacity`, `Vec.try_reserve`, and `Arena.try_alloc` return
-  the conventional checked `Result`; failures preserve the old owner, the
-  supplied payload, and (for arena/vector) the original region or vector state.
+  `Bytes.try_with_capacity`, `Vec.try_reserve`, `Arena.try_alloc`, and
+  user-allocator `AllocBox.try_new` return the conventional checked `Result`;
+  failures preserve the old owner, the supplied payload, and (for
+  arena/vector/allocator) the original region, vector, or allocator state. An
+  allocator callback that returns an undersized block is a refusal, not a
+  partial success, and the refusal block is released by the same allocator.
   Real native malloc refusal and a reference allocation budget are both
   exercised; no process abort is disguised as `Err`. Vector refusal retains
   every element, length, capacity, and owner obligation; physical-capacity and
@@ -495,3 +516,32 @@ lifetime-parameterized object methods, per-member `Nat` impl substitution) on
 top of `7f372cf`. The full Boat gate passes **908 tests**, formatting, and
 all-targets Clippy. This work has not yet had an independent review.
 Remaining boundaries are listed in [traits.md](traits.md).
+
+## Allocator and DynArray completion checkpoint
+
+The user-allocator and runtime-sized-array remainder is implemented on top of
+`a87f77b` in three commits:
+
+- `e19c470` adds checked `Allocator`, `AllocBox<T>`, and `AllocVec<T>` values,
+  their reference/native lowering and drops, the fallible
+  `AllocBox.try_new` path, and `crates/kush/tests/allocator_containers.rs`.
+- `7f99701` adds contextual `DynArray` literals, shared live-prefix `&[T]`
+  views with owner-loan tracking, and explicit pattern/mutable-view rejections
+  in `crates/kush/tests/advanced_types_effects.rs`.
+- `0c8681b` boxes the new evaluator heap states so the recursive reference
+  evaluator keeps its previous stack frame headroom; this restores the JSON
+  recursion/limit test that the larger `Value` enum had pushed past the default
+  test-thread stack.
+
+Local Linux x86-64 validation used
+`CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/alloc-dynarray` with debug
+information disabled and two Cargo jobs:
+
+- Full `cargo test -p kush --offline -j 2` passed with 921 tests, 0 failed.
+- `cargo fmt --all -- --check` passed.
+- `cargo clippy -p kush --all-targets --offline -j 2 -- -D warnings` passed.
+
+Still explicit, tested rejections or documented limits: `DynArray` patterns,
+mutable `&mut [T]` DynArray views, runtime `[T; n]`, allocator traits, FFI/raw
+pointers, allocator-supplied container metadata, and a general `realloc` hook.
+The remote Boat gate for this checkpoint was not run from this checkout.

@@ -266,6 +266,18 @@ fn hostile_allocator_shapes_are_rejected() {
         }"#,
         "owning, linear, and view elements",
     );
+    rejects(
+        r#"
+        fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+        fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
+        fn main() -> Unit ! {alloc, panic} {
+            let allocator = Allocator.new(block_alloc, block_free);
+            let vector: AllocVec<i64> = AllocVec.new(allocator);
+            let first = AllocVec.push(vector, 1);
+            let second = AllocVec.push(vector, 2);
+        }"#,
+        "move",
+    );
 }
 
 #[test]
@@ -281,4 +293,54 @@ fn allocator_bytes_are_not_dyn_array_or_slice_elements() {
         }"#,
         "cannot slice",
     );
+}
+
+#[test]
+fn alloc_box_try_new_preserves_an_owning_payload_on_refusal() {
+    let source = r#"
+        enum Result<T, E> { Ok(T), Err(E) }
+        fn refuse_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+            if bytes > 0 { Bytes.with_capacity(0) } else { Bytes.with_capacity(bytes) }
+        }
+        fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
+        fn main() -> i64 ! {alloc, panic} {
+            match AllocBox.try_new(Allocator.new(refuse_alloc, block_free), Box.new(41)) {
+                Ok(box) => Box.take(AllocBox.take(box)),
+                Err(payload) => Box.take(payload)
+            }
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 41);
+    // The supplied payload box plus the empty refusal block; the refusal block
+    // is released through the same allocator, so no owner or block leaks.
+    assert_eq!(stats.allocations, 2);
+    assert_eq!(stats.deallocations, 2);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 41);
+}
+
+#[test]
+fn alloc_vec_growth_releases_the_previous_owning_block() {
+    let source = format!(
+        r#"{ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let allocator = Allocator.new(block_alloc, block_free);
+            let vector: AllocVec<Box<i64>> = AllocVec.new(allocator);
+            let mut i = 0;
+            let mut vector = vector;
+            while i < 5 {{
+                vector = AllocVec.push(vector, Box.new(i));
+                i = i + 1;
+            }}
+            AllocVec.len(&vector)
+        }}"#
+    );
+    let (result, stats) = evaluate(&source);
+    assert_eq!(result, 5);
+    // Five payload boxes, one metadata allocation, and the two blocks the
+    // growth sequence allocated; the first block is released on growth.
+    assert_eq!(stats.allocations, 8);
+    assert_eq!(stats.deallocations, 8);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 5);
 }

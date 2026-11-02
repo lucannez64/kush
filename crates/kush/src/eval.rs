@@ -1866,7 +1866,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     return Ok(Value::Owned(id));
                 }
                 if items.len() == capacity {
-                    let next = if capacity == 0 { 4 } else { capacity * 2 };
+                    let next = if capacity == 0 {
+                        4
+                    } else {
+                        capacity.saturating_mul(2)
+                    };
                     let bytes = next
                         .checked_mul(width)
                         .and_then(|words| words.checked_mul(8))
