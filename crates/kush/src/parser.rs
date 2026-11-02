@@ -1063,6 +1063,12 @@ impl Parser {
             }
             if path == ["dyn"] {
                 let trait_path = self.ty()?;
+                if self.at(&Kind::Plus) {
+                    return Err(Diagnostic::new(
+                        self.current().span,
+                        "multi-trait trait objects such as 'dyn A + B' are not supported; a closed-world dyn object already exposes every trait whose concrete member set coincides (qualify a shared method name as 'receiver.Trait.method(...)'), while an open dynamic object represents exactly one trait specialization",
+                    ));
+                }
                 if !matches!(&trait_path.kind, TypeKind::Named { .. }) {
                     return Err(Diagnostic::new(
                         trait_path.span,

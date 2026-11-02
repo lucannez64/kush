@@ -3452,7 +3452,7 @@ impl Generator<'_, '_> {
             );
             let function = *entry
                 .methods
-                .get(&spec.method)
+                .get(&spec.key)
                 .expect("checked dynamic member registers every object-safe trait method");
             let out = self.function_call(function, arguments);
             if let Some(join) = join {
@@ -3929,6 +3929,9 @@ impl Generator<'_, '_> {
                     .ins()
                     .store(ir::MemFlagsData::new(), variable, pointer, 0);
                 pointer
+            }
+            ExprKind::BorrowField(place) => {
+                return Some(vec![self.place_address(place)]);
             }
             ExprKind::BoxNew(arg) => {
                 let values = lower!(self.expr(arg));
@@ -5817,6 +5820,41 @@ impl Generator<'_, '_> {
             3,
         ));
         self.builder.ins().stack_addr(I64, slot, 0)
+    }
+    /// Address of a checked place expression: a pinned local or a chain of
+    /// aggregate field projections over one. Only read-only projected dispatch
+    /// uses this, so no relocation or ownership transfer happens here.
+    fn place_address(&mut self, expr: &Expr) -> Value {
+        match &expr.kind {
+            ExprKind::Local(slot) | ExprKind::Peek(slot) => {
+                if let Some(pointer) = self.locations[*slot] {
+                    return pointer;
+                }
+                let variable = self.builder.use_var(self.variables[*slot][0]);
+                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    (self.variables[*slot].len().max(1) * 8) as u32,
+                    3,
+                ));
+                let pointer = self.builder.ins().stack_addr(I64, slot, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), variable, pointer, 0);
+                pointer
+            }
+            ExprKind::Project(base, offset) => {
+                let base_pointer = if base.ty.is_ref() {
+                    let values = self.expr(base).expect("checked reference base");
+                    values[0]
+                } else {
+                    self.place_address(base)
+                };
+                self.builder
+                    .ins()
+                    .iadd_imm_s(base_pointer, (*offset * 8) as i64)
+            }
+            _ => unreachable!("checked projected borrow has a place expression"),
+        }
     }
     fn store_words(&mut self, pointer: Value, values: &[Value]) {
         for (i, v) in values.iter().enumerate() {

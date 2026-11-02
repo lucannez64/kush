@@ -307,7 +307,25 @@ pub(crate) struct Expr {
 #[derive(Debug, Clone)]
 pub(crate) struct DynMember {
     pub member: Type,
-    pub methods: BTreeMap<String, usize>,
+    pub methods: BTreeMap<DynMethodKey, usize>,
+}
+/// The monomorphized type, grade, natural, and effect arguments of one generic
+/// method instance. A non-generic method uses an empty key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DynMethodKey {
+    pub name: String,
+    pub types: Vec<Type>,
+    pub consts: Vec<usize>,
+    pub grades: Vec<Grade>,
+    pub effects: Vec<u16>,
+}
+impl DynMethodKey {
+    pub(crate) fn plain(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            ..Default::default()
+        }
+    }
 }
 /// A checked call site on a dynamically dispatched trait object. The native
 /// and reference backends resolve the member identifier carried by the object
@@ -317,6 +335,8 @@ pub(crate) struct DynCallSpec {
     pub object: usize,
     pub trait_name: String,
     pub method: String,
+    /// Monomorphized generic-method arguments selecting the member-table entry.
+    pub key: DynMethodKey,
     pub mode: ReceiverMode,
     /// Usage grade of each non-receiver argument, used by the grade checker.
     pub parameter_grades: Vec<Option<Grade>>,
@@ -347,6 +367,16 @@ struct DynMethodContract {
     effects: u16,
     /// The expression type observed by the caller; a `@[0]` result is erased.
     value_type: Type,
+}
+/// Concrete method type/grade/natural/effect arguments selected at one dynamic
+/// call site. Vectors are in declaration order among parameters of each
+/// category, exactly like a function instance key.
+#[derive(Debug, Clone, Default)]
+struct MethodArguments {
+    types: Vec<Type>,
+    consts: Vec<usize>,
+    grades: Vec<Grade>,
+    effects: Vec<u16>,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Target {
@@ -607,6 +637,11 @@ pub(crate) enum ExprKind {
     Local(usize),
     Move(usize),
     Borrow(usize),
+    /// A shared reference to a projected place, used only for read-only dynamic
+    /// dispatch on an owning field. The projection is evaluated in place; the
+    /// root owner stays live and is conservatively shared-borrowed while the
+    /// reference exists.
+    BorrowField(Box<Expr>),
     BoxNew(Box<Expr>),
     BoxTake(Box<Expr>),
     BoxRead(Box<Expr>),
@@ -953,6 +988,7 @@ impl Expr {
             | ExprKind::TaskJoin { task: value, .. }
             | ExprKind::DynArrayPop { array: value, .. }
             | ExprKind::Project(value, _)
+            | ExprKind::BorrowField(value)
             | ExprKind::Break(Some(value), _) => f(value),
             ExprKind::BoxWrite(a, b)
             | ExprKind::BoxReuse {
@@ -1685,6 +1721,7 @@ fn fusion_expr_safe(
         // A whole-value reference read/write is never fused: it depends on
         // aliasing storage and has no total, capture-free callback shape.
         ExprKind::RefRead(_) | ExprKind::RefWrite(_, _) | ExprKind::BoxWrite(_, _) => false,
+        ExprKind::BorrowField(_) => false,
         // No loop has a checked termination argument here.
         ExprKind::While(..) | ExprKind::Loop(_) => false,
         ExprKind::Call(Target::ObjectFunction { .. }, _) => false,
@@ -1921,6 +1958,7 @@ fn fuse_expr(
         | ExprKind::Assign(_, value)
         | ExprKind::Return(value)
         | ExprKind::Project(value, _)
+        | ExprKind::BorrowField(value)
         | ExprKind::RefRead(value) => fuse_expr(value, types, signatures, safety, fusions),
         ExprKind::RefWrite(reference, value) | ExprKind::BoxWrite(reference, value) => {
             fuse_expr(reference, types, signatures, safety, fusions);
@@ -3413,6 +3451,13 @@ type TraitMethodTable = BTreeMap<String, Vec<(BindingId, TraitArguments, MethodD
 type GenericArguments = (Vec<Type>, Vec<Grade>, Vec<usize>, Vec<u16>);
 /// Generic arguments and checked values produced by inference.
 type Inferred = (Vec<Type>, Vec<Grade>, Vec<usize>, Vec<u16>, Vec<Expr>);
+/// Lifetime metadata copied from the first member method into a synthesized
+/// closed-world dispatcher: parameter lifetimes, result lifetime, and bounds.
+type WitnessLifetimes = (
+    Vec<Option<String>>,
+    Option<String>,
+    BTreeSet<(String, String)>,
+);
 /// Function instances. A monomorphic function has one instance; a generic
 /// function gets one per distinct list of type arguments that is used.
 struct Functions<'a> {
@@ -3478,6 +3523,9 @@ struct Functions<'a> {
     /// Registered members of each dynamically dispatched object specialization.
     /// Indexed by `Type::DynObj`. A member identifier is its position here.
     dyn_members: Vec<Vec<DynMember>>,
+    /// Monomorphized generic-method contracts per dynamic object. A member
+    /// registered after a call site instantiates every recorded contract.
+    dyn_methods: BTreeMap<usize, BTreeMap<DynMethodKey, DynMethodContract>>,
     /// Checked call sites on dynamically dispatched trait objects.
     dyn_calls: Vec<DynCallSpec>,
     /// Checked borrowed call sites on closed-world union objects.
@@ -3565,6 +3613,18 @@ fn dynamic_trait_set(module: &ast::Module, resolution: &Resolution) -> BTreeSet<
                     scan(&field.ty, resolution, &mut out);
                 }
             }
+            ast::ItemKind::Trait { methods, .. }
+                if methods
+                    .iter()
+                    .any(|method| !method.function.generics.is_empty()) =>
+            {
+                // A generic method needs per-call monomorphization, which the
+                // fixed-layout dynamic representation provides; keep the trait
+                // out of the closed-world union path.
+                if let Some(id) = resolution.declarations.get(&declaration.item.span.start) {
+                    out.insert(*id);
+                }
+            }
             ast::ItemKind::Enum { variants, .. } => {
                 for variant in variants {
                     match &variant.payload {
@@ -3641,6 +3701,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         object_traits: BTreeMap::new(),
         dynamic_dispatch: BTreeMap::new(),
         dyn_members: Vec::new(),
+        dyn_methods: BTreeMap::new(),
         dyn_calls: Vec::new(),
         union_calls: Vec::new(),
         object_associated: BTreeMap::new(),
@@ -4539,7 +4600,7 @@ fn method_contract_key(
 /// mirrors function instance keys. Trait arguments are static identity, never
 /// runtime values.
 #[allow(clippy::too_many_arguments)]
-fn evaluate_trait_arguments(
+pub(crate) fn evaluate_trait_arguments(
     types: &mut Types<'_>,
     resolution: &Resolution,
     logical: &crate::check::LogicalEnvironment,
@@ -4642,7 +4703,7 @@ fn insert_trait_arguments(
     }
 }
 /// Render one trait specialization for diagnostics, in declared parameter order.
-fn trait_specialization_name(
+pub(crate) fn trait_specialization_name(
     resolution: &Resolution,
     types: &Types<'_>,
     generics: &[ast::Generic],
@@ -5946,15 +6007,10 @@ fn prepare_trait_objects<'a>(
         let trait_name = resolution.bindings[trait_id].name.clone();
         let dynamic = types.dynamic_traits.contains(&trait_id);
         let mut reason: Option<String> = None;
-        for generic in &definition.generics {
-            if generic_category(resolution, generic) != GenericCategory::Type {
-                reason = Some(format!(
-                    "trait parameter '{}' is not an ordinary type; dyn objects support type parameters only",
-                    generic.name
-                ));
-                break;
-            }
-        }
+        // Trait parameters may be type, natural, grade, or effect arguments.
+        // The dynamic representation stores the checked specialization, so a
+        // non-type argument is identity like a type argument; it never changes
+        // the two-word object layout.
         let associated_type_names = definition
             .associated
             .iter()
@@ -5987,35 +6043,16 @@ fn prepare_trait_objects<'a>(
                         break;
                     }
                 }
-                if !f.generics.is_empty() {
+                if !f.generics.is_empty() && !dynamic {
                     reason = Some(format!(
-                        "method '{name}' is generic; a generic method cannot be dispatched through a dyn object without runtime type arguments"
+                        "method '{name}' is generic; a generic method cannot be dispatched through a closed-world union object"
                     ));
                     break;
                 }
-                // A borrowed result must be tied to caller-owned storage. The
-                // borrowed-receiver modes dispatch through a reference and can
-                // return a view of the receiver or another argument; an owned
-                // receiver frees its payload during dispatch, so a result that
-                // borrows from it would dangle.
-                let mut used = BTreeSet::new();
-                type_lifetimes(&f.result, &mut used);
-                let result_borrows = !used.is_empty()
-                    || matches!(
-                        &f.result.kind,
-                        ast::TypeKind::Borrow { .. } | ast::TypeKind::Slice(_)
-                    )
-                    || matches!(
-                        &f.result.kind,
-                        ast::TypeKind::Named { path, .. }
-                            if path.len() == 1 && path[0] == "str"
-                    );
-                if result_borrows && trait_receiver_mode(f) == ReceiverMode::Owned {
-                    reason = Some(format!(
-                        "method '{name}' returns a borrowed value through an owned receiver; dynamic dispatch consumes the payload, so the result would dangle. Use '&self'/'&mut self' or return an owned value"
-                    ));
-                    break;
-                }
+                // A borrowed result is checked against the selected member's
+                // lifetime contract at each call site. An owned receiver has no
+                // receiver lifetime, so a result can only borrow caller-owned
+                // storage (another argument) and remains valid after dispatch.
                 if let Some(parameter) = f.parameters[1..].iter().find(|parameter| {
                     parameter.erased
                         || type_mentions_self_outside_assoc(&parameter.ty, &associated_type_names)
@@ -6064,7 +6101,12 @@ fn prepare_trait_objects<'a>(
             }
             if reason.is_none() {
                 if concrete.is_empty() {
-                    reason = Some(format!("trait '{trait_name}' has no concrete impls"));
+                    // An open dynamic object may have no concrete impl at
+                    // declaration time: every member can come from a generic
+                    // or blanket impl and is registered at its coercion site.
+                    if !dynamic {
+                        reason = Some(format!("trait '{trait_name}' has no concrete impls"));
+                    }
                 } else {
                     let mut associated_consts: BTreeMap<
                         TraitArguments,
@@ -10818,9 +10860,23 @@ impl Checker<'_, '_> {
         if receiver.ty == Type::Never {
             return Ok(receiver);
         }
-        // A projected owning field is still owned by its aggregate. Dispatch
-        // must not copy it into a consuming or mutable temporary receiver.
-        if matches!(receiver.kind, ExprKind::Project(..)) && self.owned_type(receiver.ty) {
+        // A projected owning field is still owned by its aggregate. Static
+        // consuming or mutable dispatch must not copy it into a temporary
+        // receiver. Dynamic shared dispatch is handled below by borrowing the
+        // field in place; owning and mutable projected receivers stay rejected.
+        let dynamic_object = matches!(receiver.ty, Type::DynObj(_))
+            || (matches!(receiver.ty, Type::Union(_))
+                && self.functions.object_traits.contains_key(&receiver.ty))
+            || receiver.ty.ref_pointee().is_some_and(|pointer| {
+                let pointee = self.types.pointees[pointer];
+                matches!(pointee, Type::DynObj(_))
+                    || (matches!(pointee, Type::Union(_))
+                        && self.functions.object_traits.contains_key(&pointee))
+            });
+        if matches!(receiver.kind, ExprKind::Project(..))
+            && self.owned_type(receiver.ty)
+            && !dynamic_object
+        {
             return Err(Diagnostic::new(
                 receiver.span,
                 "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
@@ -10833,6 +10889,7 @@ impl Checker<'_, '_> {
                     receiver,
                     name,
                     trait_selection.clone(),
+                    explicit,
                     arguments,
                     expected,
                     span,
@@ -10856,6 +10913,7 @@ impl Checker<'_, '_> {
                 receiver,
                 name,
                 trait_selection.clone(),
+                explicit,
                 arguments,
                 expected,
                 span,
@@ -11069,6 +11127,39 @@ impl Checker<'_, '_> {
         }
         Ok(None)
     }
+    /// Whether a temporary shared receiver may return this method's result.
+    /// A receiver-tied view would dangle when the hidden temporary is dropped,
+    /// but a view explicitly tied only to another (caller-owned) argument is
+    /// safe. Elided borrowed results are conservatively receiver-tied.
+    fn temporary_receiver_may_return_view(&self, trait_id: BindingId, name: &str) -> bool {
+        let Some(method) = self.functions.traits[&trait_id]
+            .methods
+            .get(name)
+            .map(|method| method.function)
+        else {
+            return true;
+        };
+        let mut receiver_lifetimes = BTreeSet::new();
+        if let Some(receiver) = method.parameters.first() {
+            type_lifetimes(&receiver.ty, &mut receiver_lifetimes);
+        }
+        let mut result_lifetimes = BTreeSet::new();
+        type_lifetimes(&method.result, &mut result_lifetimes);
+        let result_borrows = !result_lifetimes.is_empty()
+            || matches!(
+                &method.result.kind,
+                ast::TypeKind::Borrow { .. } | ast::TypeKind::Slice(_)
+            )
+            || matches!(
+                &method.result.kind,
+                ast::TypeKind::Named { path, .. }
+                    if path.len() == 1 && path[0] == "str"
+            );
+        if !result_borrows {
+            return true;
+        }
+        !result_lifetimes.is_empty() && result_lifetimes.is_disjoint(&receiver_lifetimes)
+    }
     /// Lower the checked contract of one object method: trait-argument and
     /// `Self` substitution, associated projection normalization, usage grades,
     /// result contract, and the declared effect row.
@@ -11077,6 +11168,7 @@ impl Checker<'_, '_> {
         trait_id: BindingId,
         trait_arguments: &TraitArguments,
         name: &str,
+        method_arguments: Option<&MethodArguments>,
         span: Span,
     ) -> Result<DynMethodContract> {
         let definition = self.functions.traits[&trait_id].clone();
@@ -11110,6 +11202,45 @@ impl Checker<'_, '_> {
         substitution.consts = consts;
         substitution.grades = grades;
         substitution.effects = effects;
+        // Method type/grade/natural/effect parameters are monomorphized at this
+        // call site, exactly like a static generic call.
+        if let Some(arguments) = method_arguments {
+            let mut type_index = 0;
+            let mut const_index = 0;
+            let mut grade_index = 0;
+            let mut effect_index = 0;
+            for generic in &method.generics {
+                let Some(binder) = self.resolution.binder(generic.span) else {
+                    continue;
+                };
+                match generic_category(self.resolution, generic) {
+                    GenericCategory::Type => {
+                        if let Some(ty) = arguments.types.get(type_index) {
+                            substitution.types.insert(binder, *ty);
+                        }
+                        type_index += 1;
+                    }
+                    GenericCategory::Const => {
+                        if let Some(value) = arguments.consts.get(const_index) {
+                            substitution.consts.insert(binder, *value);
+                        }
+                        const_index += 1;
+                    }
+                    GenericCategory::Grade => {
+                        if let Some(grade) = arguments.grades.get(grade_index) {
+                            substitution.grades.insert(binder, *grade);
+                        }
+                        grade_index += 1;
+                    }
+                    GenericCategory::Effect => {
+                        if let Some(bits) = arguments.effects.get(effect_index) {
+                            substitution.effects.insert(binder, *bits);
+                        }
+                        effect_index += 1;
+                    }
+                }
+            }
+        }
         substitution.self_projections = self
             .functions
             .object_associated
@@ -11176,7 +11307,7 @@ impl Checker<'_, '_> {
                 )
             })?;
         let members = self.types.union_members(object);
-        let contract = self.dyn_method_contract(trait_id, trait_arguments, name, span)?;
+        let contract = self.dyn_method_contract(trait_id, trait_arguments, name, None, span)?;
         let mut out = Vec::with_capacity(members.len());
         for (tag, member) in members.into_iter().enumerate() {
             let impl_methods = self
@@ -11233,6 +11364,90 @@ impl Checker<'_, '_> {
         }
         Ok(out)
     }
+    /// Associated-type values supplied by the impl selected for one concrete
+    /// member, lowered with that impl's parameters. The dynamic representation
+    /// has one fixed ABI per object specialization, so the first registered
+    /// member fixes these projections and every later member must agree.
+    fn member_associated_projections(
+        &mut self,
+        member: Type,
+        selected: MethodDefinition,
+        trait_id: BindingId,
+        trait_arguments: &TraitArguments,
+        span: Span,
+    ) -> Result<BTreeMap<String, Type>> {
+        let Some(index) = selected.impl_arguments else {
+            return Ok(BTreeMap::new());
+        };
+        let declared = self.functions.declared[&selected.binding];
+        let Some(associated_index) = declared.impl_associated else {
+            return Ok(BTreeMap::new());
+        };
+        let associated = self.functions.impl_associated[associated_index].clone();
+        let instantiation = self.functions.impl_instantiations[index].clone();
+        let header = self.functions.impl_headers[instantiation.header].clone();
+        let mut substitution = crate::runtime_types::Subst {
+            self_type: Some(member),
+            associated_types: associated.types.clone(),
+            ..Default::default()
+        };
+        let mut consts = BTreeMap::new();
+        let mut grades = BTreeMap::new();
+        let mut effects = BTreeMap::new();
+        let mut type_index = 0;
+        let mut const_index = 0;
+        let mut grade_index = 0;
+        let mut effect_index = 0;
+        for generic in &header.generics {
+            let binder = self.resolution.binder(generic.span).unwrap();
+            match generic_category(self.resolution, generic) {
+                GenericCategory::Type => {
+                    substitution
+                        .types
+                        .insert(binder, instantiation.arguments.types[type_index]);
+                    type_index += 1;
+                }
+                GenericCategory::Const => {
+                    consts.insert(binder, instantiation.arguments.consts[const_index]);
+                    const_index += 1;
+                }
+                GenericCategory::Grade => {
+                    grades.insert(binder, instantiation.arguments.grades[grade_index]);
+                    grade_index += 1;
+                }
+                GenericCategory::Effect => {
+                    effects.insert(binder, instantiation.arguments.effects[effect_index]);
+                    effect_index += 1;
+                }
+            }
+        }
+        substitution.consts = consts;
+        substitution.grades = grades;
+        substitution.effects = effects;
+        let definition = self.functions.traits[&trait_id].clone();
+        let mut trait_consts = BTreeMap::new();
+        let mut trait_grades = BTreeMap::new();
+        let mut trait_effects = BTreeMap::new();
+        insert_trait_arguments(
+            self.resolution,
+            &definition.generics,
+            trait_arguments,
+            &mut substitution,
+            &mut trait_consts,
+            &mut trait_grades,
+            &mut trait_effects,
+        );
+        substitution.consts.extend(trait_consts);
+        substitution.grades.extend(trait_grades);
+        substitution.effects.extend(trait_effects);
+        let mut out = BTreeMap::new();
+        for (name, value) in &associated.types {
+            let lowered = self.types.ty_in(value, &substitution)?;
+            out.insert(name.clone(), lowered);
+        }
+        let _ = span;
+        Ok(out)
+    }
     /// Register the concrete member `member` in the dynamic vtable of
     /// `object`. Every object-safe trait method is selected and instantiated
     /// for this member, including generic/blanket impls and inherited
@@ -11278,8 +11493,50 @@ impl Checker<'_, '_> {
             methods: BTreeMap::new(),
         });
         let definition = self.functions.traits[&info.trait_id].clone();
+        if let Some(first_name) = definition.methods.keys().next().cloned() {
+            let selected = self.lookup_method(
+                member,
+                &first_name,
+                Some((info.trait_id, info.arguments.clone())),
+                span,
+            )?;
+            let projections = self.member_associated_projections(
+                member,
+                selected,
+                info.trait_id,
+                &info.arguments,
+                span,
+            )?;
+            let entry = self
+                .functions
+                .object_associated
+                .entry((info.trait_id, info.arguments.clone()))
+                .or_default();
+            for (name, lowered) in projections {
+                if let Some(previous) = entry.get(&name)
+                    && *previous != lowered
+                {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "concrete member '{}' projects associated type '{name}' as {}, but this object specialization already fixed it as {}; a dyn object has one fixed ABI",
+                            self.types.name(member),
+                            self.types.name(lowered),
+                            self.types.name(*previous)
+                        ),
+                    ));
+                }
+                entry.insert(name, lowered);
+            }
+        }
         let mut methods = BTreeMap::new();
-        for name in definition.methods.keys() {
+        for (name, method) in &definition.methods {
+            // Generic methods are monomorphized per call-site argument list and
+            // registered on demand; eager registration only covers the
+            // non-generic fixed entries.
+            if !method.function.generics.is_empty() {
+                continue;
+            }
             let selected = self.lookup_method(
                 member,
                 name,
@@ -11297,7 +11554,8 @@ impl Checker<'_, '_> {
                 selected.impl_arguments,
                 Some(span),
             )?;
-            let contract = self.dyn_method_contract(info.trait_id, &info.arguments, name, span)?;
+            let contract =
+                self.dyn_method_contract(info.trait_id, &info.arguments, name, None, span)?;
             let signature = self.functions.signatures[function].clone();
             if signature.parameters.len() != contract.parameters.len() + 1
                 || signature.parameters[1..] != contract.parameters[..]
@@ -11314,10 +11572,96 @@ impl Checker<'_, '_> {
                     ),
                 ));
             }
-            methods.insert(name.clone(), function);
+            methods.insert(DynMethodKey::plain(name), function);
         }
         self.functions.dyn_members[object][index].methods = methods;
+        // A call site may already have recorded a generic-method instance
+        // before this member was coerced. Instantiate every recorded contract
+        // for the new member now.
+        if let Some(contracts) = self.functions.dyn_methods.get(&object).cloned() {
+            for (key, contract) in contracts {
+                self.register_dyn_method_for_member(object, index, &key, &contract, span)?;
+            }
+        }
         Ok(index)
+    }
+    /// Instantiate one monomorphized generic method for one registered member
+    /// and insert it into that member's dispatch table.
+    fn register_dyn_method_for_member(
+        &mut self,
+        object: usize,
+        member_index: usize,
+        key: &DynMethodKey,
+        contract: &DynMethodContract,
+        span: Span,
+    ) -> Result<()> {
+        if self.functions.dyn_members[object][member_index]
+            .methods
+            .contains_key(key)
+        {
+            return Ok(());
+        }
+        let member = self.functions.dyn_members[object][member_index].member;
+        let info = self.types.objects[object].clone();
+        let selected = self.lookup_method(
+            member,
+            &key.name,
+            Some((info.trait_id, info.arguments.clone())),
+            span,
+        )?;
+        let function = self.functions.instance(
+            self.types,
+            self.resolution,
+            selected.binding,
+            key.types.clone(),
+            key.grades.clone(),
+            key.consts.clone(),
+            key.effects.clone(),
+            selected.impl_arguments,
+            Some(span),
+        )?;
+        let signature = self.functions.signatures[function].clone();
+        if signature.parameters.len() != contract.parameters.len() + 1
+            || signature.parameters[1..] != contract.parameters[..]
+            || signature.parameter_grades[1..] != contract.parameter_grades[..]
+            || signature.result != contract.result
+            || signature.result_grade != contract.result_grade
+            || signature.effects != contract.effects
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "concrete member '{}' has a different ABI for generic object method '{}'; dynamically dispatched methods must agree on every non-receiver parameter, result, usage grade, and effect for the same method arguments",
+                    self.types.name(member),
+                    key.name
+                ),
+            ));
+        }
+        self.functions.dyn_members[object][member_index]
+            .methods
+            .insert(key.clone(), function);
+        Ok(())
+    }
+    /// Record the contract of a monomorphized generic method for one dynamic
+    /// object and instantiate it for every member registered so far.
+    fn ensure_dyn_method(
+        &mut self,
+        object: usize,
+        key: &DynMethodKey,
+        contract: &DynMethodContract,
+        span: Span,
+    ) -> Result<()> {
+        self.functions
+            .dyn_methods
+            .entry(object)
+            .or_default()
+            .entry(key.clone())
+            .or_insert_with(|| contract.clone());
+        let count = self.functions.dyn_members.get(object).map_or(0, Vec::len);
+        for member_index in 0..count {
+            self.register_dyn_method_for_member(object, member_index, key, contract, span)?;
+        }
+        Ok(())
     }
     /// Dynamic dispatch on an open/generic trait object. The value carries a
     /// checked member identifier; the backends resolve it against the
@@ -11328,6 +11672,7 @@ impl Checker<'_, '_> {
         receiver: Expr,
         name: &str,
         trait_selection: Option<(BindingId, TraitArguments)>,
+        explicit: Option<&[ast::Type]>,
         arguments: &[ast::Expr],
         expected: Option<Type>,
         span: Span,
@@ -11362,19 +11707,76 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
-        if !self.functions.traits[&info.trait_id]
+        let method = self.functions.traits[&info.trait_id]
             .methods
-            .contains_key(name)
-        {
+            .get(name)
+            .map(|method| method.function)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    span,
+                    format!(
+                        "trait '{}' has no method '{name}'",
+                        self.resolution.bindings[info.trait_id].name
+                    ),
+                )
+            })?;
+        if explicit.is_some() && method.generics.is_empty() {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "trait '{}' has no method '{name}'",
-                    self.resolution.bindings[info.trait_id].name
+                    "method '{name}' is not generic: non-generic methods take no explicit type arguments"
                 ),
             ));
         }
-        let contract = self.dyn_method_contract(info.trait_id, &info.arguments, name, span)?;
+        let mut method_arguments = MethodArguments::default();
+        let mut prechecked: Option<Vec<Expr>> = None;
+        if !method.generics.is_empty() {
+            let pairs = method.parameters[1..]
+                .iter()
+                .zip(arguments)
+                .filter(|(parameter, _)| !parameter.erased)
+                .map(|(parameter, argument)| (&parameter.ty, argument))
+                .collect::<Vec<_>>();
+            let what = format!("method '{name}'");
+            let hint = match expected {
+                Some(expected) => Some((self.result_type_hint(&method.result)?, expected)),
+                None => None,
+            };
+            let (types, grades, consts, effects, values) = self.infer(
+                &method.generics,
+                explicit,
+                &pairs,
+                hint.as_ref()
+                    .map(|(declared, expected)| (declared, *expected)),
+                true,
+                None,
+                None,
+                &what,
+                span,
+            )?;
+            method_arguments = MethodArguments {
+                types,
+                consts,
+                grades,
+                effects,
+            };
+            prechecked = Some(values);
+        }
+        let method_arguments_ref = (!method.generics.is_empty()).then_some(&method_arguments);
+        let contract = self.dyn_method_contract(
+            info.trait_id,
+            &info.arguments,
+            name,
+            method_arguments_ref,
+            span,
+        )?;
+        let key = DynMethodKey {
+            name: name.to_owned(),
+            types: method_arguments.types.clone(),
+            consts: method_arguments.consts.clone(),
+            grades: method_arguments.grades.clone(),
+            effects: method_arguments.effects.clone(),
+        };
         if arguments.len() != contract.parameters.len() {
             return Err(Diagnostic::new(
                 span,
@@ -11399,6 +11801,7 @@ impl Checker<'_, '_> {
             ExprKind::Peek(slot) | ExprKind::Local(slot) => Some(*slot),
             _ => None,
         };
+        let mut temporary_receiver = None;
         let receiver = if let Some((_, reference_ty)) = borrowed_object {
             match (contract.mode, reference_ty) {
                 (ReceiverMode::Owned, _) => {
@@ -11419,6 +11822,12 @@ impl Checker<'_, '_> {
         } else {
             match contract.mode {
                 ReceiverMode::Owned => {
+                    if matches!(receiver.kind, ExprKind::Project(..)) {
+                        return Err(Diagnostic::new(
+                            receiver.span,
+                            "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
+                        ));
+                    }
                     if let ExprKind::Peek(slot) = &receiver.kind {
                         let slot = *slot;
                         let ty = receiver.ty;
@@ -11434,43 +11843,92 @@ impl Checker<'_, '_> {
                     }
                 }
                 ReceiverMode::Shared | ReceiverMode::Mutable => {
-                    let Some(slot) = reference_slot else {
+                    if let Some(slot) = reference_slot {
+                        if contract.mode == ReceiverMode::Mutable && !self.locals[slot].mutable {
+                            return Err(Diagnostic::new(
+                                span,
+                                "a mutable dynamic method requires a mutable object binding; declare it with 'let mut'",
+                            ));
+                        }
+                        let pointee = self.types.pointer(object_ty);
+                        let ty = if contract.mode == ReceiverMode::Mutable {
+                            Type::RefMut(pointee)
+                        } else {
+                            Type::Ref(pointee)
+                        };
+                        Expr {
+                            kind: ExprKind::Borrow(slot),
+                            ty,
+                            span,
+                            resource: None,
+                        }
+                    } else if contract.mode == ReceiverMode::Shared
+                        && matches!(receiver.kind, ExprKind::Project(..))
+                    {
+                        // Read-only dispatch on an owning projected field
+                        // borrows that exact place in place; the aggregate is
+                        // never moved or copied.
+                        if crate::runtime_types::has_borrow(self.types, contract.result) {
+                            return Err(Diagnostic::new(
+                                span,
+                                "a borrowed dynamic result requires a direct object local or stored reference; a projected receiver is borrowed only for this call",
+                            ));
+                        }
+                        let pointee = self.types.pointer(object_ty);
+                        Expr {
+                            kind: ExprKind::BorrowField(Box::new(receiver)),
+                            ty: Type::Ref(pointee),
+                            span,
+                            resource: None,
+                        }
+                    } else if contract.mode == ReceiverMode::Shared {
+                        // A temporary shared receiver owns its payload just
+                        // like a local. Bind it to one hidden local and borrow
+                        // that place; the block drops it after the call, so the
+                        // payload is released exactly once. A borrowed result
+                        // could outlive this drop and remains rejected.
+                        if !self.temporary_receiver_may_return_view(info.trait_id, name) {
+                            return Err(Diagnostic::new(
+                                span,
+                                "a borrowed dynamic result requires a direct object local or stored reference; a temporary receiver would be dropped before the result is used",
+                            ));
+                        }
+                        let temp = self.temp(object_ty, span)?;
+                        let pointee = self.types.pointer(object_ty);
+                        temporary_receiver = Some((temp, receiver));
+                        Expr {
+                            kind: ExprKind::Borrow(temp),
+                            ty: Type::Ref(pointee),
+                            span,
+                            resource: None,
+                        }
+                    } else {
                         return Err(Diagnostic::new(
                             span,
                             "a borrowed dynamic method receiver must be a direct local binding or a stored '&dyn'/'&mut dyn' reference",
                         ));
-                    };
-                    if contract.mode == ReceiverMode::Mutable && !self.locals[slot].mutable {
-                        return Err(Diagnostic::new(
-                            span,
-                            "a mutable dynamic method requires a mutable object binding; declare it with 'let mut'",
-                        ));
-                    }
-                    let pointee = self.types.pointer(object_ty);
-                    let ty = if contract.mode == ReceiverMode::Mutable {
-                        Type::RefMut(pointee)
-                    } else {
-                        Type::Ref(pointee)
-                    };
-                    Expr {
-                        kind: ExprKind::Borrow(slot),
-                        ty,
-                        span,
-                        resource: None,
                     }
                 }
             }
         };
         let mut values = vec![receiver];
-        for (argument, ty) in arguments.iter().zip(&contract.parameters) {
-            let value = self.expr_expected(argument, Some(*ty))?;
-            values.push(self.coerce(value, *ty, span)?);
+        if let Some(prechecked) = prechecked {
+            for (value, ty) in prechecked.into_iter().zip(&contract.parameters) {
+                values.push(self.coerce(value, *ty, span)?);
+            }
+        } else {
+            for (argument, ty) in arguments.iter().zip(&contract.parameters) {
+                let value = self.expr_expected(argument, Some(*ty))?;
+                values.push(self.coerce(value, *ty, span)?);
+            }
         }
+        self.ensure_dyn_method(object, &key, &contract, span)?;
         let spec = self.functions.dyn_calls.len();
         self.functions.dyn_calls.push(DynCallSpec {
             object,
             trait_name: self.resolution.bindings[info.trait_id].name.clone(),
             method: name.to_owned(),
+            key,
             mode: contract.mode,
             parameter_grades: contract.parameter_grades.clone(),
             result: contract.result,
@@ -11481,6 +11939,19 @@ impl Checker<'_, '_> {
             ty: contract.value_type,
             span,
             resource: None,
+        };
+        let value = match temporary_receiver {
+            Some((temp, original)) => Expr {
+                kind: ExprKind::Block(Block {
+                    statements: vec![Statement::Let(temp, original)],
+                    tail: Some(Box::new(value)),
+                    ty: contract.value_type,
+                }),
+                ty: contract.value_type,
+                span,
+                resource: None,
+            },
+            None => value,
         };
         match expected {
             Some(expected) => self.coerce(value, expected, span),
@@ -11585,18 +12056,28 @@ impl Checker<'_, '_> {
                 )
             })?;
         let receiver_mode = trait_receiver_mode(method);
-        if receiver_mode == ReceiverMode::Mutable && matches!(receiver.kind, ExprKind::Project(..))
-        {
-            return Err(Diagnostic::new(
-                receiver.span,
-                "a mutable dynamic method receiver must be a direct local or reference binding; destructure the projected field first",
-            ));
+        if matches!(receiver.kind, ExprKind::Project(..)) {
+            if receiver_mode == ReceiverMode::Owned {
+                return Err(Diagnostic::new(
+                    receiver.span,
+                    "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
+                ));
+            }
+            if receiver_mode == ReceiverMode::Mutable {
+                return Err(Diagnostic::new(
+                    receiver.span,
+                    "a mutable dynamic method receiver must be a direct local or reference binding; destructure the projected field first",
+                ));
+            }
         }
         let direct_receiver_slot = match &receiver.kind {
             ExprKind::Peek(slot) | ExprKind::Local(slot) => Some(*slot),
             _ => None,
         };
+        let projected_shared =
+            receiver_mode == ReceiverMode::Shared && matches!(receiver.kind, ExprKind::Project(..));
         let in_place = borrowed_object.is_some()
+            || projected_shared
             || (matches!(receiver_mode, ReceiverMode::Shared | ReceiverMode::Mutable)
                 && direct_receiver_slot.is_some());
         if in_place {
@@ -11621,6 +12102,18 @@ impl Checker<'_, '_> {
                     _ => {}
                 }
                 (reference_ty, receiver)
+            } else if projected_shared {
+                let pointee = self.types.pointer(object_ty);
+                let ty = Type::Ref(pointee);
+                (
+                    ty,
+                    Expr {
+                        kind: ExprKind::BorrowField(Box::new(receiver)),
+                        ty,
+                        span,
+                        resource: None,
+                    },
+                )
             } else {
                 let slot = direct_receiver_slot.expect("in-place dispatch has a direct receiver");
                 if receiver_mode == ReceiverMode::Owned {
@@ -11652,7 +12145,8 @@ impl Checker<'_, '_> {
                 )
             };
             let _ = reference_ty;
-            let contract = self.dyn_method_contract(trait_id, &trait_arguments, name, span)?;
+            let contract =
+                self.dyn_method_contract(trait_id, &trait_arguments, name, None, span)?;
             if arguments.len() != contract.parameters.len() {
                 return Err(Diagnostic::new(
                     span,
@@ -11725,7 +12219,9 @@ impl Checker<'_, '_> {
             ));
         }
         self.require(signature.effects, span)?;
-        if crate::runtime_types::has_borrow(self.types, signature.result) {
+        if receiver_mode != ReceiverMode::Owned
+            && !self.temporary_receiver_may_return_view(trait_id, name)
+        {
             return Err(Diagnostic::new(
                 span,
                 "a borrowed dynamic result requires a direct object local or stored reference; a temporary receiver would be dropped before the result is used",
@@ -12089,6 +12585,7 @@ impl Checker<'_, '_> {
             .collect::<Vec<_>>();
         let mut total_effects = 0u16;
         let mut signatures = Vec::new();
+        let mut witness_lifetimes: Option<WitnessLifetimes> = None;
         for member in &members {
             let Some(impl_methods) =
                 self.functions
@@ -12139,6 +12636,13 @@ impl Checker<'_, '_> {
                 ));
             }
             total_effects |= signature.effects;
+            if witness_lifetimes.is_none() {
+                witness_lifetimes = Some((
+                    signature.parameter_lifetimes.clone(),
+                    signature.result_lifetime.clone(),
+                    signature.lifetime_bounds.clone(),
+                ));
+            }
             signatures.push((index, *member));
         }
         let mut arms = Vec::new();
@@ -12287,6 +12791,9 @@ impl Checker<'_, '_> {
             })),
             ty: function_result,
         };
+        let (witness_parameter_lifetimes, witness_result_lifetime, witness_bounds) =
+            witness_lifetimes
+                .unwrap_or_else(|| (vec![None; parameters.len()], None, BTreeSet::new()));
         let function = Function {
             name: format!(
                 "<dyn {}::{}>",
@@ -12302,9 +12809,9 @@ impl Checker<'_, '_> {
             local_resources: vec![],
             parameter_grades: parameter_grades.clone(),
             result_grade: if mutable_receiver { None } else { result_grade },
-            parameter_lifetimes: vec![None; parameters.len()],
-            result_lifetime: None,
-            lifetime_bounds: BTreeSet::new(),
+            parameter_lifetimes: witness_parameter_lifetimes.clone(),
+            result_lifetime: witness_result_lifetime.clone(),
+            lifetime_bounds: witness_bounds.clone(),
         };
         let signature = Signature {
             binding: usize::MAX,
@@ -12320,9 +12827,9 @@ impl Checker<'_, '_> {
             origin: None,
             parameter_grades,
             result_grade: if mutable_receiver { None } else { result_grade },
-            parameter_lifetimes: vec![None; function.parameters],
-            result_lifetime: None,
-            lifetime_bounds: BTreeSet::new(),
+            parameter_lifetimes: witness_parameter_lifetimes,
+            result_lifetime: witness_result_lifetime,
+            lifetime_bounds: witness_bounds,
             self_type: None,
             default_trait: None,
             associated_consts: BTreeMap::new(),

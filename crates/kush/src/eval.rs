@@ -2765,7 +2765,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ),
                 )
             })?;
-        let function = *entry.methods.get(&spec.method).ok_or_else(|| {
+        let function = *entry.methods.get(&spec.key).ok_or_else(|| {
             Diagnostic::new(
                 span,
                 format!(
@@ -4123,6 +4123,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         _ => unreachable!("checked borrow of an owned handle"),
                     }
                 }
+            }
+            ExprKind::BorrowField(place) => {
+                let value = value!(self.expr(place, frame));
+                // A read-only view of an owning field. The cell holds an
+                // unowned alias; it is never dropped as a resource, so the
+                // field's owner keeps its single obligation.
+                Value::RecordRef(Arc::new(Mutex::new(value)))
             }
             ExprKind::BoxNew(..)
             | ExprKind::BoxTake(..)

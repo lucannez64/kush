@@ -978,18 +978,20 @@ fn object_safety_rejections_are_explicit() {
         }"#,
         "needs copyable members",
     );
+    // A `Self`-dependent non-receiver parameter would have a different ABI per
+    // member and cannot cross a dynamic boundary.
     rejects(
         r#"
         struct A { x: i64 }
         struct B { y: i64 }
-        trait Convert { fn make<U>(self: Self, value: U) -> i64 ! {panic}; }
-        impl Convert for A { fn make<U>(self: Self, value: U) -> i64 ! {panic} { self.x } }
-        impl Convert for B { fn make<U>(self: Self, value: U) -> i64 ! {panic} { self.y } }
+        trait Convert { fn make(self: Self, value: [Self; 2]) -> i64 ! {panic}; }
+        impl Convert for A { fn make(self: Self, value: [Self; 2]) -> i64 ! {panic} { self.x } }
+        impl Convert for B { fn make(self: Self, value: [Self; 2]) -> i64 ! {panic} { self.y } }
         fn main() -> i64 ! {panic} {
             let object: dyn Convert = A { x: 1 };
             0
         }"#,
-        "generic method",
+        "mentions 'Self' in a non-receiver parameter",
     );
     rejects(
         r#"
@@ -1275,15 +1277,27 @@ fn projected_method_receivers_cannot_duplicate_owners_or_discard_mutations() {
         impl Eat for Other { fn eat(self: Self) -> i64 ! {panic} { self.count } }
         impl Text { fn consume(self: Text) -> i64 ! {panic} { self.count } }
     "#;
-    for body in [
-        "let mut pair: (dyn Bump, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.bump(5)",
-        "let pair: (dyn Eat, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.eat()",
-        "let pair = (Text {name: \"x\", count: 1}, 9); pair.0.consume()",
-        "let mut wrap: Wrap<dyn Bump> = Wrap {value: Text {name: \"x\", count: 1}}; wrap.value.bump(5)",
+    for (body, expected) in [
+        (
+            "let mut pair: (dyn Bump, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.bump(5)",
+            "direct local",
+        ),
+        (
+            "let pair: (dyn Eat, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.eat()",
+            "owned field",
+        ),
+        (
+            "let pair = (Text {name: \"x\", count: 1}, 9); pair.0.consume()",
+            "owned field",
+        ),
+        (
+            "let mut wrap: Wrap<dyn Bump> = Wrap {value: Text {name: \"x\", count: 1}}; wrap.value.bump(5)",
+            "direct local",
+        ),
     ] {
         rejects(
             &format!("{definitions} fn main() -> i64 ! {{alloc, panic}} {{{body}}}"),
-            "owned field",
+            expected,
         );
     }
     rejects(
@@ -1292,7 +1306,7 @@ fn projected_method_receivers_cannot_duplicate_owners_or_discard_mutations() {
         let pair: (dyn Bump, i64) = (Other {{count: 1}}, 9); pair.0.bump(5)
     }}"
         ),
-        "owned field",
+        "direct local",
     );
 }
 
@@ -1612,12 +1626,12 @@ fn open_object_methods_may_return_a_view_of_a_caller_argument() {
     agrees(
         r#"
         trait Pick {
-            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
         }
         struct A { tag: i64 }
         struct W<T> { value: T }
-        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl<T> Pick for W<T> { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl<T> Pick for W<T> { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
         fn main() -> i64 ! {io, alloc, panic} {
             let object: dyn Pick = W { value: A { tag: 1 } };
             let values = [5, 6, 7];
@@ -1635,12 +1649,12 @@ fn borrowed_object_results_require_a_stable_receiver_and_borrowed_receiver() {
     rejects(
         r#"
         trait Pick {
-            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
         }
         struct A { tag: i64 }
         struct B { tag: i64 }
-        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        impl Pick for B { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl Pick for B { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
         fn make() -> dyn Pick ! {panic} { A { tag: 1 } }
         fn main() -> i64 ! {alloc, panic} {
             let values = [1, 2];
@@ -1648,7 +1662,7 @@ fn borrowed_object_results_require_a_stable_receiver_and_borrowed_receiver() {
         }"#,
         "temporary receiver would be dropped",
     );
-    rejects(
+    agrees(
         r#"
         trait Owned {
             fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic};
@@ -1657,12 +1671,15 @@ fn borrowed_object_results_require_a_stable_receiver_and_borrowed_receiver() {
         struct B { tag: i64 }
         impl Owned for A { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
         impl Owned for B { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {io, alloc, panic} {
             let object: dyn Owned = A { tag: 1 };
-            let values = [1, 2];
-            object.grab(&values[..])[0]
+            let values = [3, 4];
+            print_i64(object.grab(&values[..])[1]);
+            print_i64(B { tag: 2 }.grab(&values[..])[0]);
+            0
         }"#,
-        "borrowed value through an owned receiver",
+        0,
+        "4\n3\n",
     );
 }
 
@@ -1850,5 +1867,360 @@ fn single_impl_objects_dispatch_through_stored_references() {
         }"#,
         3,
         "3\n",
+    );
+}
+
+#[test]
+fn traits_whose_only_impls_are_generic_are_usable_as_dyn() {
+    let stats = agrees(
+        r#"
+        struct W<T> { value: T }
+        struct Boxed<T> { value: Box<T> }
+        trait Size { fn size(self: &Self) -> i64 ! {panic}; }
+        impl<T> Size for W<T> { fn size(self: &Self) -> i64 ! {panic} { 4 } }
+        impl<T> Size for Boxed<T> { fn size(self: &Self) -> i64 ! {panic} { 9 } }
+        fn read(object: &dyn Size) -> i64 ! {panic} { object.size() }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let a: dyn Size = W { value: true };
+            let b: dyn Size = Boxed { value: Box.new(3) };
+            print_i64(read(&a));
+            print_i64(read(&b));
+            print_i64(a.size());
+            0
+        }"#,
+        0,
+        "4\n9\n4\n",
+    );
+    // One payload allocation per coercion; the boxed payload is released once.
+    assert_eq!(stats.allocations, 3, "{}", stats.allocations);
+
+    rejects(
+        r#"
+        struct W<T> { value: T }
+        trait Size { fn size(self: Self) -> i64 ! {panic}; }
+        impl<T> Size for W<T> { fn size(self: Self) -> i64 ! {panic} { 4 } }
+        fn main() -> i64 ! {alloc, panic} {
+            let object: dyn Size = 7;
+            object.size()
+        }"#,
+        "does not implement trait",
+    );
+}
+
+#[test]
+fn parameter_dependent_generic_associated_projection_is_fixed_by_the_member() {
+    let stats = agrees(
+        r#"
+        struct W<T> { value: T }
+        trait Show { type Out; fn show(self: &Self) -> Self.Out ! {panic}; }
+        impl<T> Show for W<T> { type Out = T; fn show(self: &Self) -> T ! {panic} { self.value } }
+        fn read(object: &dyn Show) -> i64 ! {panic} { object.show() }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let object: dyn Show = W { value: 5 };
+            print_i64(read(&object));
+            print_i64(object.show());
+            0
+        }"#,
+        0,
+        "5\n5\n",
+    );
+    assert_eq!(stats.allocations, 1, "{}", stats.allocations);
+
+    rejects(
+        r#"
+        struct W<T> { value: T }
+        trait Show { type Out; fn show(self: &Self) -> Self.Out ! {panic}; }
+        impl<T> Show for W<T> { type Out = T; fn show(self: &Self) -> T ! {panic} { self.value } }
+        fn main() -> i64 ! {alloc, panic} {
+            let a: dyn Show = W { value: 5 };
+            let b: dyn Show = W { value: true };
+            print_i64(a.show());
+            0
+        }"#,
+        "already fixed it as i64",
+    );
+}
+
+#[test]
+fn non_type_trait_arguments_dispatch_through_dyn() {
+    agrees(
+        r#"
+        struct Buffer<N: Nat> { data: [i64; N] }
+        trait First<N: Nat> { fn first(self: Self) -> i64 ! {panic}; }
+        impl<N: Nat> First<N> for Buffer<N> {
+            fn first(self: Self) -> i64 ! {panic} { self.data[0] }
+        }
+        struct Point { x: i64 }
+        trait Weighted<G: Grade> { fn weighted(self: Self) -> i64 ! {panic}; }
+        impl<G: Grade> Weighted<G> for Point {
+            fn weighted(self: Self) -> i64 ! {panic} { self.x }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let buffer: dyn First<3> = Buffer { data: [7, 8, 9] };
+            print_i64(buffer.first());
+            let point: dyn Weighted<1> = Point { x: 6 };
+            print_i64(point.weighted());
+            0
+        }"#,
+        0,
+        "7\n6\n",
+    );
+}
+
+#[test]
+fn temporary_shared_receivers_of_open_objects_bind_to_a_hidden_place() {
+    let stats = agrees(
+        r#"
+        struct Text { name: String, count: i64 }
+        struct W<T> { value: T }
+        trait Counted { fn value(self: &Self) -> i64 ! {panic}; }
+        impl Counted for Text { fn value(self: &Self) -> i64 ! {panic} { self.count } }
+        impl<T> Counted for W<T> { fn value(self: &Self) -> i64 ! {panic} { 7 } }
+        fn make_text() -> dyn Counted ! {alloc, panic} { Text { name: "x", count: 5 } }
+        fn make_wrap() -> dyn Counted ! {alloc, panic} {
+            W { value: Text { name: "y", count: 9 } }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            print_i64(make_text().value());
+            print_i64(make_wrap().value());
+            0
+        }"#,
+        0,
+        "5\n7\n",
+    );
+    // Two object payloads plus the two member Strings, each released once.
+    assert_eq!(stats.allocations, 4, "{}", stats.allocations);
+}
+
+#[test]
+fn temporary_shared_receivers_still_reject_borrowed_results() {
+    rejects(
+        r#"
+        trait Pick {
+            fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+        }
+        struct A { tag: i64 }
+        struct W<T> { value: T }
+        impl Pick for A { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl<T> Pick for W<T> { fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        fn make() -> dyn Pick ! {alloc, panic} { W { value: A { tag: 1 } } }
+        fn main() -> i64 ! {alloc, alloc, panic} {
+            let values = [1, 2];
+            make().pick(&values[..])[0]
+        }"#,
+        "temporary receiver would be dropped",
+    );
+}
+
+#[test]
+fn owned_receivers_may_return_views_of_caller_arguments_through_open_objects() {
+    agrees(
+        r#"
+        trait Owned {
+            fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+        }
+        struct A { tag: i64 }
+        struct W<T> { value: T }
+        impl Owned for A { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl<T> Owned for W<T> { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let object: dyn Owned = W { value: A { tag: 1 } };
+            let values = [3, 4];
+            print_i64(object.grab(&values[..])[1]);
+            print_i64(A { tag: 2 }.grab(&values[..])[0]);
+            0
+        }"#,
+        0,
+        "4\n3\n",
+    );
+}
+
+#[test]
+fn generic_methods_dispatch_through_dyn_with_per_call_monomorphization() {
+    let stats = agrees(
+        r#"
+        struct A { x: i64 }
+        struct B { y: i64 }
+        trait Pairing {
+            fn pair<U>(self: Self, value: U) -> (i64, U) ! {};
+            fn combine<U>(self: &Self, left: U, right: U) -> U ! {panic};
+        }
+        impl Pairing for A {
+            fn pair<U>(self: Self, value: U) -> (i64, U) ! {} { (self.x, value) }
+            fn combine<U>(self: &Self, left: U, right: U) -> U ! {panic} { left }
+        }
+        impl Pairing for B {
+            fn pair<U>(self: Self, value: U) -> (i64, U) ! {} { (self.y, value) }
+            fn combine<U>(self: &Self, left: U, right: U) -> U ! {panic} { right }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let a: dyn Pairing = A { x: 5 };
+            let pair = a.pair(true);
+            print_i64(pair.0);
+            if pair.1 { print_i64(1); } else { print_i64(0); }
+            let b: dyn Pairing = B { y: 9 };
+            print_i64(b.pair::<i64>(7).1);
+            let c: dyn Pairing = A { x: 1 };
+            print_i64(c.combine(3, 4));
+            let d: dyn Pairing = B { y: 2 };
+            print_i64(d.combine::<i64>(3, 4));
+            0
+        }"#,
+        0,
+        "5\n1\n7\n3\n4\n",
+    );
+    assert_eq!(stats.allocations, 4, "{}", stats.allocations);
+}
+
+#[test]
+fn generic_methods_may_take_natural_parameters_through_dyn() {
+    agrees(
+        r#"
+        struct A { x: i64 }
+        struct B { y: i64 }
+        trait Sizer {
+            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {panic};
+        }
+        impl Sizer for A {
+            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {panic} { self.x + data[0] }
+        }
+        impl Sizer for B {
+            fn gather<N: Nat>(self: Self, data: [i64; N]) -> i64 ! {panic} { self.y + data[N - 1] }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let a: dyn Sizer = A { x: 5 };
+            print_i64(a.gather([1, 2]));
+            let b: dyn Sizer = B { y: 9 };
+            print_i64(b.gather([3, 4, 10]));
+            0
+        }"#,
+        0,
+        "6\n19\n",
+    );
+}
+
+#[test]
+fn generic_method_member_abi_disagreement_is_rejected() {
+    rejects(
+        r#"
+        struct A { x: i64 }
+        struct B { y: i64 }
+        trait Pairing { fn pair<U>(self: Self, value: U) -> (i64, U) ! {}; }
+        impl Pairing for A {
+            fn pair<U>(self: Self, value: U) -> (i64, U) ! {} { (self.x, value) }
+        }
+        impl Pairing for B {
+            fn pair<U>(self: Self, value: U) -> (U, U) ! {} { (value, value) }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let b: dyn Pairing = B { y: 9 };
+            print_i64(b.pair(7).0);
+            0
+        }"#,
+        "does not match the trait signature",
+    );
+}
+
+#[test]
+fn shared_dispatch_borrows_owning_projected_receivers_in_place() {
+    let stats = agrees(
+        r#"
+        struct Text { name: String, count: i64 }
+        struct Plain { amount: i64 }
+        struct W<T> { value: T }
+        trait Counted { fn value(self: &Self) -> i64 ! {panic}; }
+        impl Counted for Text { fn value(self: &Self) -> i64 ! {panic} { self.count } }
+        impl Counted for Plain { fn value(self: &Self) -> i64 ! {panic} { self.amount } }
+        impl<T> Counted for W<T> { fn value(self: &Self) -> i64 ! {panic} { 7 } }
+        struct Holder { inner: dyn Counted }
+        fn read_holder(holder: Holder) -> i64 ! {panic} { holder.inner.value() }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let pair: (dyn Counted, i64) = (Text { name: "x", count: 5 }, 9);
+            print_i64(pair.0.value());
+            let holder = Holder { inner: Text { name: "y", count: 6 } };
+            print_i64(read_holder(holder));
+            let wrap = Holder { inner: W { value: true } };
+            print_i64(wrap.inner.value());
+            let plain: (dyn Counted, i64) = (Plain { amount: 11 }, 2);
+            print_i64(plain.0.value());
+            0
+        }"#,
+        0,
+        "5\n6\n7\n11\n",
+    );
+    // Two Text names, four object payloads; each is released exactly once.
+    assert_eq!(stats.allocations, 6, "{}", stats.allocations);
+}
+
+#[test]
+fn projected_shared_receivers_keep_their_owner_borrowed_through_arguments() {
+    let definitions = r#"
+        struct Text { name: String, count: i64 }
+        struct Other { count: i64 }
+        trait Read { fn inspect(self: &Self, extra: i64) -> i64 ! {panic}; }
+        impl Read for Text { fn inspect(self: &Self, extra: i64) -> i64 ! {panic} { self.count + extra } }
+        impl Read for Other { fn inspect(self: &Self, extra: i64) -> i64 ! {panic} { self.count + extra } }
+    "#;
+    rejects(
+        &format!(
+            "{definitions}
+            fn main() -> i64 ! {{alloc, panic}} {{
+                let mut pair: (dyn Read, i64) = (Text {{name: \"x\", count: 1}}, 9);
+                pair.0.inspect({{pair = (Other {{count: 10}}, 0); 0}})
+            }}"
+        ),
+        "borrow",
+    );
+    agrees(
+        &format!(
+            "{definitions}
+            fn main() -> i64 ! {{io, alloc, panic}} {{
+                let pair: (dyn Read, i64) = (Text {{name: \"x\", count: 1}}, 9);
+                print_i64(pair.0.inspect(pair.1));
+                0
+            }}"
+        ),
+        0,
+        "10\n",
+    );
+}
+
+#[test]
+fn multi_trait_trait_objects_are_an_explicit_language_rejection() {
+    rejects(
+        r#"
+        struct Point { x: i64 }
+        trait A { fn a(self: Self) -> i64 ! {panic}; }
+        trait B { fn b(self: Self) -> i64 ! {panic}; }
+        impl A for Point { fn a(self: Self) -> i64 ! {panic} { self.x } }
+        impl B for Point { fn b(self: Self) -> i64 ! {panic} { self.x + 1 } }
+        fn main() -> i64 ! {io, panic} {
+            let object: dyn A + B = Point { x: 5 };
+            print_i64(object.a());
+            0
+        }"#,
+        "multi-trait trait objects",
+    );
+}
+
+#[test]
+fn temporary_shared_receivers_may_return_views_of_caller_arguments() {
+    agrees(
+        r#"
+        trait Pick {
+            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+        }
+        struct A { tag: i64 }
+        struct W<T> { value: T }
+        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl<T> Pick for W<T> { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        fn make() -> dyn Pick ! {alloc, panic} { W { value: A { tag: 1 } } }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let values = [5, 6, 7];
+            print_i64(make().pick(&values[..])[1]);
+            0
+        }"#,
+        0,
+        "6\n",
     );
 }

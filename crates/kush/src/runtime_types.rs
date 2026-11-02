@@ -529,6 +529,9 @@ pub(crate) struct Types<'a> {
     /// decided before layouts are built so a field can hold a fixed-size fat
     /// object without knowing the member set.
     pub dynamic_traits: BTreeSet<BindingId>,
+    /// Declared generic parameters of every trait, used to classify `dyn`
+    /// arguments as type, natural, grade, or effect arguments.
+    trait_generics: BTreeMap<BindingId, Vec<ast::Generic>>,
     /// Traits that cannot be used as `dyn` objects, with the checked reason.
     pub dyn_errors: BTreeMap<BindingId, String>,
     /// Monotonic source of compiler-internal lifetime identities for inferred
@@ -751,10 +754,17 @@ impl<'a> Types<'a> {
             objects: Vec::new(),
             object_cache: BTreeMap::new(),
             dynamic_traits,
+            trait_generics: BTreeMap::new(),
             dyn_errors: BTreeMap::new(),
             inferred_lifetimes: 0,
             reference_labels: vec![String::new()],
         };
+        for declaration in &module.items {
+            if let ast::ItemKind::Trait { generics, .. } = &declaration.item.kind {
+                let id = resolution.declarations[&declaration.item.span.start];
+                result.trait_generics.insert(id, generics.clone());
+            }
+        }
         let monomorphic = result
             .definitions
             .iter()
@@ -2122,7 +2132,6 @@ impl<'a> Types<'a> {
                     ),
                 ));
             }
-            let mut type_arguments = Vec::new();
             for argument in arguments {
                 if matches!(argument.kind, ast::TypeKind::Lifetime(_)) {
                     return Err(Diagnostic::new(
@@ -2130,15 +2139,26 @@ impl<'a> Types<'a> {
                         "trait objects do not take lifetime arguments in this subset; object values own their payload and cannot store borrows",
                     ));
                 }
-                type_arguments.push(self.lower(argument, substitution, depth + 1)?);
             }
-            let key = (
-                trait_id,
-                TraitArguments {
-                    types: type_arguments,
-                    ..Default::default()
-                },
-            );
+            let generics = self
+                .trait_generics
+                .get(&trait_id)
+                .cloned()
+                .unwrap_or_default();
+            // Trait parameters are classified by category, so `dyn Trait<3>`
+            // supplies a natural and `dyn Trait<1>` a grade rather than being
+            // lowered as an ordinary machine type.
+            let arguments = crate::executable::evaluate_trait_arguments(
+                self,
+                self.resolution,
+                self.logical,
+                &generics,
+                arguments,
+                substitution,
+                &self.resolution.bindings[trait_id].name,
+                ty.span,
+            )?;
+            let key = (trait_id, arguments);
             if let Some(reason) = self.dyn_errors.get(&trait_id) {
                 return Err(Diagnostic::new(
                     ty.span,
@@ -2159,16 +2179,14 @@ impl<'a> Types<'a> {
                     ));
                 }
                 let mut name = self.resolution.bindings[trait_id].name.clone();
-                if !key.1.types.is_empty() {
+                if !generics.is_empty() {
                     name.push('<');
-                    name.push_str(
-                        &key.1
-                            .types
-                            .iter()
-                            .map(|argument| self.name(*argument))
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    );
+                    name.push_str(&crate::executable::trait_specialization_name(
+                        self.resolution,
+                        self,
+                        &generics,
+                        &key.1,
+                    ));
                     name.push('>');
                 }
                 let id = self.objects.len();
