@@ -149,17 +149,28 @@ fn union_patterns_partition_multiple_variables_deterministically() {
     assert_eq!(value(source), 42);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 42);
-    // There is no cross-parameter backtracking: the canonical partition from
-    // the first parameter is committed before the later parameter is checked.
-    // Another partition would fit, but this call stays an explicit boundary.
+    // Cross-parameter backtracking: the first canonical partition is
+    // T=Bool, U=Unit, but the second parameter requires T=Unit. The bounded
+    // replay reruns the whole constraint group and selects T=Unit, U=Bool.
+    let replayed = r#"
+        fn pick<T, U>(x: T | U | i64, first: T) -> i64 ! {panic} { 0 }
+        fn two(c: i64) -> Bool | Unit ! {panic} {
+            if c == 0 { true } else { () }
+        }
+        fn main() -> i64 ! {panic} { pick(two(0), ()) }"#;
+    assert_eq!(value(replayed), 0);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(replayed, 0);
+    // No partition can satisfy both parameters here: the residual can only
+    // bind T to Bool or Unit, never to i64.
     rejects(
         r#"
         fn pick<T, U>(x: T | U | i64, first: T) -> i64 ! {panic} { 0 }
         fn two(c: i64) -> Bool | Unit ! {panic} {
             if c == 0 { true } else { () }
         }
-        fn main() -> i64 ! {panic} { pick(two(0), ()) }"#,
-        "type mismatch",
+        fn main() -> i64 ! {panic} { pick(two(0), 1) }"#,
+        "no partition",
     );
     // A single residual alternative cannot bind two unbound variables.
     rejects(
@@ -2001,5 +2012,276 @@ fn dynarray_pop_waits_for_live_views() {
         }"#
         ),
         4
+    );
+}
+
+#[test]
+fn row_variables_preserve_unmentioned_fields() {
+    // The row variable is monomorphized to the argument's residual canonical
+    // row, so `extra: Box<i64>` and `flag: Bool` survive the call and the
+    // returned value can read them. The retained box is dropped exactly once.
+    let source = r#"
+        struct Wide { flag: Bool, x: i64, extra: Box<i64> }
+        fn keep<r>(v: struct { x: i64, ..r }) -> struct { x: i64, ..r } ! {panic} { v }
+        fn main() -> i64 ! {alloc, panic} {
+            let w = Wide { flag: true, x: 40, extra: Box.new(1) };
+            let r = keep(w);
+            if r.flag { r.x + 2 } else { 0 }
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // Row unification recurses through nested structural fields.
+    let nested = r#"
+        fn keep<r>(v: struct { inner: struct { a: i64, ..r } })
+            -> struct { inner: struct { a: i64, ..r } } ! {panic} { v }
+        fn main() -> i64 ! {panic} {
+            let out = keep(struct { inner: struct { a: 40, extra: true } });
+            if out.inner.extra { out.inner.a + 2 } else { 0 }
+        }"#;
+    assert_eq!(value(nested), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(nested, 42);
+    // A linear residual field travels through the row and is consumed once by
+    // the exact-row consumer.
+    let linear = r#"
+        #[linear]
+        struct Token { id: i64 }
+        fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {panic} { v }
+        fn consume(v: struct { n: i64, token: Token }) -> i64 ! {panic} {
+            let struct { n, token } = v;
+            let Token { id } = token;
+            n + id
+        }
+        fn main() -> i64 ! {panic} {
+            let out = keep(struct { n: 1, token: Token { id: 41 } });
+            consume(out)
+        }"#;
+    assert_eq!(value(linear), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(linear, 42);
+    // A borrowed residual field stays live for the call and is dropped with
+    // the consumed row, so replacing the owner afterwards is legal.
+    let borrowed = r#"
+        fn first<r>(v: struct { view: &[i64], ..r }) -> i64 ! {alloc, panic} {
+            let out = Slice.get(v.view, 1);
+            drop(v);
+            out
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut data: Vec<i64> = [1, 41];
+            let n = first(struct { view: &data[..], flag: true });
+            data = [9, 9];
+            n + 1
+        }"#;
+    assert_eq!(value(borrowed), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(borrowed, 42);
+}
+
+#[test]
+fn row_variables_reject_erased_linear_and_borrowed_escapes() {
+    // Closing a row that still carries a linear field would drop it without a
+    // consumer, exactly like ordinary width erasure.
+    rejects(
+        r#"
+        #[linear]
+        struct Token { id: i64 }
+        fn erase<r>(v: struct { n: i64, ..r }) -> struct { n: i64 } ! {panic} { v }
+        fn main() -> i64 ! {panic} {
+            let t = Token { id: 1 };
+            let out = erase(struct { n: 1, token: t });
+            out.n
+        }"#,
+        "linear obligation",
+    );
+    // The preserved view keeps its loan through the row-variable parameter, so
+    // an exclusive borrow of the same owner while the row is live is rejected.
+    rejects(
+        r#"fn keep<r>(v: struct { view: &[i64], ..r }, values: &mut Vec<i64>)
+            -> i64 ! {alloc, panic} {
+            Vec.clear(values);
+            Slice.get(v.view, 0)
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut data: Vec<i64> = [1, 2];
+            keep(struct { view: &data[..], n: 1 }, &mut data)
+        }"#,
+        "exclusive '&mut Record'",
+    );
+    // A returned structural row with a borrowed field is still an explicit
+    // boundary: structural rows carry no declared field lifetime labels.
+    rejects(
+        r#"fn keep<r>(v: struct { view: &[i64], ..r })
+            -> struct { view: &[i64], ..r } ! {panic} { v }
+        fn main() -> i64 ! {alloc, panic} {
+            let data: Vec<i64> = [1, 2];
+            let out = keep(struct { view: &data[..], n: 1 });
+            Slice.get(out.view, 0)
+        }"#,
+        "structural record result cannot carry a borrowed field",
+    );
+    // One row variable must receive the same residual row from every
+    // parameter; otherwise the specialization is not determined.
+    rejects(
+        r#"fn pair<r>(a: struct { x: i64, ..r }, b: struct { x: i64, ..r })
+            -> i64 ! {panic} { 0 }
+        fn main() -> i64 ! {panic} {
+            pair(struct { x: 1, left: true }, struct { x: 2, right: true })
+        }"#,
+        "residual row",
+    );
+}
+
+#[test]
+fn structural_cast_renames_fields_explicitly() {
+    // `from` names the source field of one target field. Unmentioned fields
+    // are dropped with ordinary cleanup, including an owning `extra`.
+    let source = r#"
+        struct Wide { a: i64, extra: Box<i64>, flag: Bool }
+        fn main() -> i64 ! {alloc, panic} {
+            let w = Wide { a: 40, extra: Box.new(1), flag: true };
+            let r = w as struct { b: i64 from a, flag: Bool };
+            if r.flag { r.b + 2 } else { 0 }
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    rejects(
+        r#"struct Wide { a: i64, b: i64 }
+        fn main() -> i64 ! {panic} {
+            let w = Wide { a: 1, b: 2 };
+            let r = w as struct { x: i64 from a, y: i64 from a };
+            r.x
+        }"#,
+        "more than one target field",
+    );
+    rejects(
+        r#"struct Wide { a: i64 }
+        fn main() -> i64 ! {panic} {
+            let w = Wide { a: 1 };
+            let r = w as struct { x: i64 from missing };
+            r.x
+        }"#,
+        "no field 'missing'",
+    );
+    rejects(
+        r#"#[linear]
+        struct Token { id: i64 }
+        struct Wide { a: i64, token: Token }
+        fn main() -> i64 ! {panic} {
+            let w = Wide { a: 1, token: Token { id: 2 } };
+            let r = w as struct { b: i64 from a };
+            r.b
+        }"#,
+        "linear obligation",
+    );
+    // Renaming metadata is only meaningful in the explicit cast, never in a
+    // general structural type.
+    rejects(
+        r#"fn read(v: struct { b: i64 from a }) -> i64 ! {panic} { v.b }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "field renaming",
+    );
+}
+
+#[test]
+fn structural_equality_compares_every_canonical_field() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let a = struct { x: 1, y: true, z: struct { q: 3, r: 4 } };
+            let b = struct { z: struct { r: 4, q: 3 }, y: true, x: 1 };
+            let c = struct { x: 1, y: true, z: struct { q: 3, r: 5 } };
+            if a == b && a != c { 42 } else { 0 }
+        }"#;
+    assert_eq!(value(source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // Owning, borrowed, floating-point, union, nominal, and callable leaves
+    // are not comparable without an explicit field match.
+    rejects(
+        r#"fn main() -> i64 ! {alloc, panic} {
+            let a = struct { b: Box.new(1) };
+            let b = struct { b: Box.new(1) };
+            if a == b { 1 } else { 0 }
+        }"#,
+        "structural equality requires",
+    );
+    rejects(
+        r#"fn main() -> i64 ! {panic} {
+            let a = struct { x: 1.0 };
+            let b = struct { x: 1.0 };
+            if a == b { 1 } else { 0 }
+        }"#,
+        "structural equality requires",
+    );
+    rejects(
+        r#"fn main() -> i64 ! {panic} {
+            let a: struct { x: i64 | Bool } = struct { x: 1 };
+            let b: struct { x: i64 | Bool } = struct { x: true };
+            if a == b { 1 } else { 0 }
+        }"#,
+        "structural equality requires",
+    );
+}
+
+#[test]
+fn open_row_impl_headers_monomorphize_per_receiver() {
+    // A trait impl header may leave a named row tail. Dispatch binds the
+    // residual row and instantiates the checked method once per receiver row.
+    let source = r#"
+        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        impl<r> Tag for struct { x: i64, ..r } {
+            fn tag(self: Self) -> i64 ! {panic} { self.x }
+        }
+        impl<r> struct { n: i64, ..r } {
+            fn double(self: Self) -> i64 ! {panic} { self.n * 2 }
+        }
+        fn main() -> i64 ! {panic} {
+            let s = struct { x: 40, extra: true };
+            let t = struct { n: 1, flag: false };
+            s.tag() + t.double()
+        }"#;
+    assert_eq!(value(source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // Open-row impls remain structural-only: a nominal record has its own
+    // identity and must be coerced explicitly first.
+    rejects(
+        r#"trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        impl<r> Tag for struct { x: i64, ..r } {
+            fn tag(self: Self) -> i64 ! {panic} { self.x }
+        }
+        struct Point { x: i64 }
+        fn main() -> i64 ! {panic} { Point { x: 1 }.tag() }"#,
+        "no method 'tag'",
+    );
+    // Two incomparable open-row headers for one trait can both match a wider
+    // row; coherence rejects that ambiguity instead of choosing one.
+    rejects(
+        r#"trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        impl<r> Tag for struct { x: i64, ..r } {
+            fn tag(self: Self) -> i64 ! {panic} { self.x }
+        }
+        impl<r> Tag for struct { y: i64, ..r } {
+            fn tag(self: Self) -> i64 ! {panic} { self.y }
+        }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "duplicate implementation",
+    );
+    // A bare `..` has no parameter to bind the residual row, so it stays an
+    // explicit rejection rather than an unconstrained blanket impl.
+    rejects(
+        r#"impl struct { x: i64, .. } {
+            fn read_x(self: Self) -> i64 ! {panic} { self.x }
+        }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "open row",
     );
 }
