@@ -851,7 +851,10 @@ impl<'a> Types<'a> {
                 "DynArray elements must be concrete non-borrowed values; a view cannot escape the inline storage",
             ));
         }
-        if contains_task(self, element) || contains_linear(self, element) {
+        if contains_task(self, element)
+            || contains_linear(self, element)
+            || contains_dyn_object(self, element)
+        {
             return Err(Diagnostic::new(
                 span,
                 "DynArray elements cannot be task handles or carry linear obligations; use an explicit record/vector for owned linear payloads",
@@ -2747,6 +2750,30 @@ impl<'a> Types<'a> {
             }
         }
     }
+    /// The closed-world representation of a trait object. Unlike `union`, a
+    /// single member stays a one-alternative union so the object keeps its
+    /// identity: dispatch through a stored `&dyn`/`&mut dyn` must see an
+    /// object, not the concrete member type.
+    pub fn object_union(&mut self, members: Vec<Type>, span: Span) -> Result<Type> {
+        let ty = self.union(members, span)?;
+        if matches!(ty, Type::Union(_) | Type::Never) {
+            return Ok(ty);
+        }
+        let key = vec![ty];
+        if let Some(id) = self.union_cache.get(&key) {
+            return Ok(Type::Union(*id));
+        }
+        if self.unions.len() >= 256 {
+            return Err(Diagnostic::new(span, "union layout budget exhausted (256)"));
+        }
+        self.check_union_member(ty, span)?;
+        let id = self.unions.len();
+        self.unions.push(UnionType {
+            members: key.clone(),
+        });
+        self.union_cache.insert(key, id);
+        Ok(Type::Union(id))
+    }
     /// Normalize an intersection by distribution over unions. Because the
     /// supported atoms have no structural refinement other than enum variant
     /// masks, every nonempty atom intersection is either the same atom or a
@@ -2981,7 +3008,9 @@ impl<'a> Types<'a> {
             if target_variant.names.contains(index) {
                 continue;
             }
-            if contains_linear(self, *source_ty) {
+            // A dynamic object's members are registered later, so it may
+            // still turn out linear; never erase one.
+            if contains_linear(self, *source_ty) || contains_dyn_object(self, *source_ty) {
                 return false;
             }
         }
@@ -4480,6 +4509,32 @@ pub(crate) fn has_mutable_borrow(types: &Types<'_>, ty: Type) -> bool {
 /// Whether a type transitively carries an intrinsic linear obligation. Such a
 /// value cannot be hidden in a mixed borrowed record, where it could be
 /// dropped or copied without the explicit linear protocol.
+/// Whether a type transitively stores a dynamic trait object. Object
+/// linearity depends on members registered later in checking, so contexts
+/// that decide linearity at type construction treat objects conservatively.
+pub(crate) fn contains_dyn_object(types: &Types<'_>, ty: Type) -> bool {
+    fn go(types: &Types<'_>, ty: Type, seen: &mut BTreeSet<Type>) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        match ty {
+            Type::DynObj(_) => true,
+            Type::Annotated(p, _) => go(types, types.pointees[p], seen),
+            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
+            Type::Enum(id) | Type::Variants(id, _) => types.enums[id]
+                .variants
+                .iter()
+                .flat_map(|variant| variant.fields.iter())
+                .any(|field| go(types, *field, seen)),
+            Type::Union(id) => types.unions[id]
+                .members
+                .iter()
+                .any(|member| go(types, *member, seen)),
+            _ => false,
+        }
+    }
+    go(types, ty, &mut BTreeSet::new())
+}
 pub(crate) fn contains_linear(types: &Types<'_>, ty: Type) -> bool {
     fn go(types: &Types<'_>, ty: Type, seen: &mut BTreeSet<Type>) -> bool {
         if !seen.insert(ty) {

@@ -5421,7 +5421,7 @@ fn prepare_trait_objects<'a>(
             }
             members.sort();
             members.dedup();
-            let object = match types.union(members, resolution.bindings[trait_id].span) {
+            let object = match types.object_union(members, resolution.bindings[trait_id].span) {
                 Ok(object) => object,
                 Err(error) => {
                     // A trait with many impls that is never used as `dyn` must
@@ -12819,7 +12819,7 @@ impl Checker<'_, '_> {
                 continue;
             }
             if crate::runtime_types::contains_linear(self.types, *source_ty)
-                || matches!(source_ty, Type::DynObj(_))
+                || crate::runtime_types::contains_dyn_object(self.types, *source_ty)
             {
                 return Err(Diagnostic::new(
                     span,

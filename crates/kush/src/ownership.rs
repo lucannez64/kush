@@ -18,8 +18,12 @@ type Result<T> = std::result::Result<T, Diagnostic>;
 pub(crate) fn check(program: &mut Executable) -> Result<()> {
     let mut owned = vec![false; program.enums.len()];
     let mut linear = program.enums.iter().map(|e| e.linear).collect::<Vec<_>>();
+    // Layout and dynamic-object linearity feed each other: a record may hold
+    // a dynamic object whose member is linear, and a member may be a record
+    // holding another object. Solve both in one fixed point.
+    let mut dyn_linear = vec![false; program.dyn_members.len()];
     loop {
-        let (old_owned, old_linear) = (owned.clone(), linear.clone());
+        let (old_owned, old_linear, old_dyn) = (owned.clone(), linear.clone(), dyn_linear.clone());
         for (index, layout) in program.enums.iter().enumerate() {
             let fields = || layout.variants.iter().flat_map(|v| v.fields.iter());
             owned[index] =
@@ -31,33 +35,23 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                     &program.unions,
                     &program.pointees,
                     &program.function_types,
-                    &[],
+                    &old_dyn,
                 )
             });
         }
-        if owned == old_owned && linear == old_linear {
-            break;
-        }
-    }
-    // A dynamic object is linear when any registered member carries a linear
-    // obligation. Members cannot themselves be dynamic objects, but a record
-    // member may contain one, so iterate to a fixed point.
-    let mut dyn_linear = vec![false; program.dyn_members.len()];
-    loop {
-        let previous = dyn_linear.clone();
         for (index, members) in program.dyn_members.iter().enumerate() {
-            dyn_linear[index] = members.iter().any(|member| {
+            dyn_linear[index] |= members.iter().any(|member| {
                 is_linear(
                     member.member,
-                    &linear,
+                    &old_linear,
                     &program.unions,
                     &program.pointees,
                     &program.function_types,
-                    &previous,
+                    &old_dyn,
                 )
             });
         }
-        if dyn_linear == previous {
+        if owned == old_owned && linear == old_linear && dyn_linear == old_dyn {
             break;
         }
     }
@@ -3454,10 +3448,12 @@ impl Checker<'_> {
                     ));
                 }
                 self.check_owner_access(*slot, expr_ptr, expr.span, "borrow")?;
-                let record = self.locals[*slot]
-                    .ty
-                    .layout()
-                    .is_some_and(|id| self.enums[id].record);
+                // Records and trait objects (open or closed-union) are
+                // borrowed in place, so shared and exclusive borrows of the
+                // same owner must exclude each other.
+                let owner_ty = self.locals[*slot].ty;
+                let record = owner_ty.layout().is_some_and(|id| self.enums[id].record)
+                    || matches!(owner_ty, Type::DynObj(_) | Type::Union(_));
                 if record {
                     if matches!(expr.ty, Type::RefMut(_)) {
                         if self.loans.contains(slot)
@@ -3467,7 +3463,7 @@ impl Checker<'_> {
                         {
                             return Err(Diagnostic::new(
                                 expr.span,
-                                "cannot create an exclusive '&mut Record' borrow while another borrow or view of the same owner is live",
+                                "cannot create an exclusive '&mut Record' (or '&mut dyn') borrow while another borrow or view of the same owner is live",
                             )
                             .with_note(self.locals[*slot].span, "owner declared here"));
                         }
@@ -3477,7 +3473,7 @@ impl Checker<'_> {
                         if self.exclusive_loaned_at(*slot, expr_ptr) {
                             return Err(Diagnostic::new(
                                 expr.span,
-                                "cannot create a shared '&Record' borrow while an exclusive borrow of the same owner is live",
+                                "cannot create a shared '&Record' (or '&dyn') borrow while an exclusive borrow of the same owner is live",
                             )
                             .with_note(self.locals[*slot].span, "owner declared here"));
                         }

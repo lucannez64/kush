@@ -728,6 +728,17 @@ its module exactly when the trait declaration is `pub`, and there is no
 separate `pub` on the inherited method. A private trait therefore keeps its
 inherited defaults private to the module that declares the trait.
 
+## Linearity and aliasing of objects
+
+An object is linear when any registered member is, and that linearity
+propagates into every record, enum, tuple, and inline array holding the object
+(one joint fixed point over layouts and objects), so a linear object stored in
+a field must still be consumed. Shared and exclusive borrows of an object
+owner exclude each other exactly as for records: a live `&dyn` blocks a later
+`&mut dyn` or mutable dispatch on the owner. A trait with one concrete impl is
+still represented as a one-alternative object rather than collapsing to the
+member type, so stored `&dyn`/`&mut dyn` dispatch works for it too.
+
 ## Limits
 
 The following remain intentionally outside the implemented subset:
@@ -745,6 +756,13 @@ The following remain intentionally outside the implemented subset:
 - associated `Nat`/grade/effect values, owning or `String` associated
   constants, and associated constants that depend on an impl type parameter;
 - effect parameters on impl headers and lifetime-parameterized impl headers;
+- a trait whose only impls are generic/blanket impls cannot be used as `dyn`
+  ("has no concrete impls"), even with the dynamic representation;
+- a temporary shared receiver of a dynamic (open) object, even when copyable;
+  bind the object to a local or a stored reference first;
+- `DynArray` elements and fields erased by structural width subtyping may not
+  contain a dynamic object, since object linearity is only known after every
+  member is registered;
 - negative impls, `default fn`, and arbitrary-overlap specialization;
 - trait bounds on trait parameters themselves;
 - borrowed receivers for enums, borrowed-record metadata, stored references to

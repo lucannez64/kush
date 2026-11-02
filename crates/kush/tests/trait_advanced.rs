@@ -1700,3 +1700,155 @@ fn open_objects_clean_up_fields_and_affine_owning_results() {
     );
     assert_eq!(stats.allocations, 5, "{}", stats.allocations);
 }
+
+const LINEAR_TICKET: &str = r#"
+#[linear]
+enum Ticket { Live }
+trait Consume { fn consume(self: Self) -> i64 ! {panic}; }
+impl Consume for Ticket {
+    fn consume(self: Self) -> i64 ! {panic} { match self { Ticket.Live => 9 } }
+}
+"#;
+
+#[test]
+fn linear_dynamic_objects_stay_linear_inside_layouts() {
+    let unconsumed = "linear value is not consumed";
+    rejects(
+        &format!(
+            "{LINEAR_TICKET}struct Holder {{ object: dyn Consume }}
+            fn main() -> i64 ! {{io, alloc, panic}} {{
+                let holder = Holder {{ object: Ticket.Live }};
+                0
+            }}"
+        ),
+        unconsumed,
+    );
+    rejects(
+        &format!(
+            "{LINEAR_TICKET}fn main() -> i64 ! {{io, alloc, panic}} {{
+                let a: [dyn Consume; 1] = [Ticket.Live];
+                0
+            }}"
+        ),
+        unconsumed,
+    );
+    rejects(
+        &format!(
+            "{LINEAR_TICKET}struct Holder {{ object: dyn Consume }}
+            fn main() -> i64 ! {{io, alloc, panic}} {{
+                let holder = Holder {{ object: Ticket.Live }};
+                let mut items: Vec<Holder> = Vec.new();
+                items = Vec.push(items, holder);
+                items = Vec.clear(items);
+                0
+            }}"
+        ),
+        "",
+    );
+    rejects(
+        &format!(
+            "{LINEAR_TICKET}fn main() -> i64 ! {{io, alloc, panic}} {{
+                let a: DynArray<dyn Consume, 1> = DynArray.new::<dyn Consume, 1>();
+                let a = DynArray.push(a, Ticket.Live);
+                DynArray.len(&a)
+            }}"
+        ),
+        "DynArray elements cannot",
+    );
+    agrees(
+        &format!(
+            "{LINEAR_TICKET}struct Holder {{ object: dyn Consume }}
+            fn main() -> i64 ! {{io, alloc, panic}} {{
+                let holder = Holder {{ object: Ticket.Live }};
+                match holder {{ Holder {{ object }} => object.consume() }}
+            }}"
+        ),
+        9,
+        "",
+    );
+}
+
+const BUMP_TEXT: &str = r#"
+struct Text { name: String, count: i64 }
+struct Wrap<T> { value: T }
+trait Bump {
+    fn bump(self: &mut Self) -> Unit ! {panic};
+    fn current(self: &Self) -> i64 ! {panic};
+}
+impl Bump for Text {
+    fn bump(self: &mut Self) -> Unit ! {panic} { self.count = self.count + 1; }
+    fn current(self: &Self) -> i64 ! {panic} { self.count }
+}
+impl<T> Bump for Wrap<T> {
+    fn bump(self: &mut Self) -> Unit ! {panic} { }
+    fn current(self: &Self) -> i64 ! {panic} { 7 }
+}
+"#;
+
+#[test]
+fn a_live_shared_object_reference_blocks_exclusive_access() {
+    rejects(
+        &format!(
+            "{BUMP_TEXT}fn main() -> i64 ! {{io, alloc, panic}} {{
+                let mut object: dyn Bump = Text {{ name: \"aaaaaaaa\", count: 1 }};
+                let shared: &dyn Bump = &object;
+                let exclusive: &mut dyn Bump = &mut object;
+                exclusive.bump();
+                print_i64(shared.current());
+                0
+            }}"
+        ),
+        "cannot create an exclusive",
+    );
+    rejects(
+        &format!(
+            "{BUMP_TEXT}fn main() -> i64 ! {{io, alloc, panic}} {{
+                let mut object: dyn Bump = Text {{ name: \"aaaaaaaa\", count: 1 }};
+                let shared: &dyn Bump = &object;
+                object.bump();
+                print_i64(shared.current());
+                0
+            }}"
+        ),
+        "cannot create an exclusive",
+    );
+    agrees(
+        &format!(
+            "{BUMP_TEXT}fn main() -> i64 ! {{io, alloc, panic}} {{
+                let mut object: dyn Bump = Text {{ name: \"aaaaaaaa\", count: 1 }};
+                let exclusive: &mut dyn Bump = &mut object;
+                exclusive.bump();
+                let shared: &dyn Bump = &object;
+                print_i64(shared.current());
+                0
+            }}"
+        ),
+        0,
+        "2\n",
+    );
+}
+
+#[test]
+fn single_impl_objects_dispatch_through_stored_references() {
+    agrees(
+        r#"struct Counter { value: i64 }
+        trait Bump {
+            fn bump(self: &mut Self, by: i64) -> Unit ! {panic};
+            fn current(self: &Self) -> i64 ! {panic};
+        }
+        impl Bump for Counter {
+            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by; }
+            fn current(self: &Self) -> i64 ! {panic} { self.value }
+        }
+        fn main() -> i64 ! {io, panic} {
+            let mut object: dyn Bump = Counter { value: 1 };
+            let reference: &mut dyn Bump = &mut object;
+            reference.bump(2);
+            let shared: &dyn Bump = &object;
+            print_i64(shared.current());
+            object.current()
+        }"#,
+        3,
+        "3\n",
+    );
+}
