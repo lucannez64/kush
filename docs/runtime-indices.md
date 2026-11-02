@@ -172,7 +172,9 @@ Implemented consequences:
 - A closure capture of a scalar is a **copy made when the closure is
   constructed**. That copy is an independent immutable snapshot: it may index
   proofs in the lambda body even if the outer binding is later assigned. The
-  lambda observes the captured value, never the final mutable value.
+  lambda observes the captured value, never the final mutable value. This is the
+  sound snapshot contract; a *live* mutable capture would need a closure borrow
+  lifetime and is not implemented (see the deliberate limits below).
 - Block scopes truncate symbolic binders, so a proof cannot mention a local
   after its scope. Local shadowing resolves to the innermost binder.
 - A proof parameter cannot be stored in a runtime value, returned as a runtime
@@ -191,6 +193,48 @@ implementation is tested by `crates/kush/tests/advanced_types_effects.rs` with
 current-value proofs, old-literal rejection, unrelated versioned binders,
 branch/loop join agreement and disagreement, proof-valued locals, and a frozen
 closure snapshot.
+
+## 4a. Arithmetic proof search
+
+The separate erased arithmetic fragment `{ ... }` is discharged by a bounded
+linear-integer decision procedure. Propositions are conjunctions of comparisons
+between linear expressions:
+
+```text
+linear  = integer | parameter | len(buffer)
+        | linear ("+" | "-") linear
+        | integer "*" linear | linear "*" integer
+        | "-" linear
+atom    = linear ("<" | "<=" | ">" | ">=" | "==") linear
+```
+
+Comparisons become inequalities `sum coefficient * term <= bound`. Branch
+conditions, guards, loop conditions, early exits, and erased arithmetic
+parameters all contribute facts. An obligation is proved by Fourier–Motzkin
+elimination over exact rational coefficients; elimination combines positive and
+negative bounds of one variable with strictly positive weights and drops the
+variable existentially. The search returns a refutation of the hypotheses
+together with the **integer negation** of the goal, and records the non-negative
+multiplier of every hypothesis and of that negation. `facts::verify` checks the
+combination independently of the search: the scaled coefficients must cancel
+exactly and the scaled bounds must sum to a negative value.
+
+Because the negation is the integer negation `not (c*x <= d) == c*x >= d+1`,
+integer strictness is respected without pretending every fact is real-valued.
+The fragment is still deliberately bounded and is not a full Presburger
+decision procedure:
+
+- division, modulo, nonlinear products, floats, and casts are not linear terms;
+- a system whose real relaxation is feasible but whose integer restriction is
+  infeasible (for example `2*x == 1`) is not detected as contradictory, because
+  there is no cutting-plane or branch-and-bound step;
+- the search has explicit limits of 64 distinct terms, 4096 rows, and 200000
+  bound pairs. Exceeding a limit means "not established", never a guessed proof;
+- coefficient overflow aborts the search and leaves the obligation rejected.
+
+See `crates/kush/tests/arithmetic_proofs.rs` for coefficient scaling,
+multi-variable elimination, branch facts, integer strictness, native/reference
+agreement, and the explicit nonlinear and stale-version rejections.
 
 ## 5. Erasure, grades, ownership, and `Prop`
 
@@ -272,8 +316,14 @@ fn consume(erased p: Eq<i64, 0, 0>); consume(n)
   arbitrary control flow.
 - Runtime scalar values cannot size inline arrays. `[T; n]` still requires a
   compile-time `Nat` length; use `Vec<T>` or `&[T]` for runtime lengths.
-- There is no proof search, implicit argument, tactic, arithmetic solver, or
-  user-supplied axiom. Evidence must be a checked logical term.
+- Kernel evidence always comes from a checked logical term; there is no
+  implicit argument, tactic, or user-supplied axiom. The *separate* arithmetic
+  `{ ... }` fragment has the bounded linear proof search described in 4a, but it
+  never fabricates kernel evidence and never applies to a symbolic `Eq`/`prop`.
+- A closure capture of a mutable scalar is still a snapshot, not a live view.
+  Supporting a live view requires a checked closure borrow lifetime so the
+  environment cannot outlive the captured location; until that exists, the
+  snapshot contract above is the only accepted mutation interaction.
 
 These are implementation budget and fragment limits, not claims that the full
 [v0.1 dependent design](spec-v0.1.md) is complete.

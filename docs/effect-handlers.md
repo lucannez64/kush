@@ -110,8 +110,8 @@ behavior.
 
 The reference evaluator and the native runtime both implement the same stack.
 The native stack is per structured task (task 0 is the root) and is restored by
-the function epilogue. At `Task.spawn` a child inherits the longest bottom
-prefix of **copyable noncapturing** frames; a capturing or one-shot frame is a
+the function epilogue. At `Task.spawn` a child inherits the innermost contiguous
+suffix of **copyable noncapturing** frames; a capturing or one-shot frame is a
 task boundary because its environment is owned by the parent's dynamic extent.
 A child's later pushes and pops are isolated from the parent. `effect`
 declarations reject borrowed payload/result types because a stack frame has no

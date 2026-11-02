@@ -2665,7 +2665,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     /// shared or duplicated.
     fn inheritable_handlers(&self) -> Vec<(usize, usize)> {
         let mut inherited = Vec::new();
-        for frame in &self.dynamic_handlers {
+        for frame in self.dynamic_handlers.iter().rev() {
             if frame.consume {
                 break;
             }
@@ -2678,6 +2678,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             };
             inherited.push((frame.operation, *function));
         }
+        inherited.reverse();
         inherited
     }
     fn task_comm(&mut self) -> Result<&mut TaskComm> {

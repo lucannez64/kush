@@ -2252,6 +2252,15 @@ impl<'a> Types<'a> {
             }
             let id = self.resolution.reference(ty.span).unwrap();
             let b = &self.resolution.bindings[id];
+            if b.kind == BindingKind::EffectRow {
+                return Err(Diagnostic::new(
+                    ty.span,
+                    format!(
+                        "effect row alias '{}' is not a runtime type; use it only inside an effect row such as '! {{ {} }}'",
+                        b.name, b.name
+                    ),
+                ));
+            }
             let (lifetime_arguments, arguments) =
                 split_lifetime_arguments(arguments, substitution, ty.span)?;
             if b.kind == BindingKind::Alias {
@@ -4130,22 +4139,30 @@ pub(crate) fn effect_bits_partial(
     Ok(effect_row_term(resolution, effects)?.partial())
 }
 fn effect_row_expr(resolution: &Resolution, effect: &ast::Type) -> Result<EffectRowTerm> {
+    let mut visiting = BTreeSet::new();
+    effect_row_expr_inner(resolution, effect, &mut visiting)
+}
+fn effect_row_expr_inner(
+    resolution: &Resolution,
+    effect: &ast::Type,
+    visiting: &mut BTreeSet<BindingId>,
+) -> Result<EffectRowTerm> {
     match &effect.kind {
         ast::TypeKind::Binary {
             op: crate::lexer::Kind::Pipe,
             left,
             right,
         } => Ok(EffectRowTerm::Union(
-            Box::new(effect_row_expr(resolution, left)?),
-            Box::new(effect_row_expr(resolution, right)?),
+            Box::new(effect_row_expr_inner(resolution, left, visiting)?),
+            Box::new(effect_row_expr_inner(resolution, right, visiting)?),
         )),
         ast::TypeKind::Binary {
             op: crate::lexer::Kind::Minus,
             left,
             right,
         } => Ok(EffectRowTerm::Difference(
-            Box::new(effect_row_expr(resolution, left)?),
-            Box::new(effect_row_expr(resolution, right)?),
+            Box::new(effect_row_expr_inner(resolution, left, visiting)?),
+            Box::new(effect_row_expr_inner(resolution, right, visiting)?),
         )),
         ast::TypeKind::Named { arguments, .. } => {
             let Some(id) = resolution.reference(effect.span) else {
@@ -4155,6 +4172,44 @@ fn effect_row_expr(resolution: &Resolution, effect: &ast::Type) -> Result<Effect
                 ));
             };
             let binding = &resolution.bindings[id];
+            if binding.kind == BindingKind::EffectRow {
+                if !arguments.is_empty() {
+                    return Err(Diagnostic::new(
+                        effect.span,
+                        format!(
+                            "effect row alias '{}' does not take arguments",
+                            binding.name
+                        ),
+                    ));
+                }
+                if !visiting.insert(id) {
+                    return Err(Diagnostic::new(
+                        effect.span,
+                        format!(
+                            "effect row alias '{}' is recursive; row aliases must expand to a finite row",
+                            binding.name
+                        ),
+                    ));
+                }
+                let Some(effects) = resolution.effect_rows.get(&id) else {
+                    return Err(Diagnostic::new(
+                        effect.span,
+                        format!(
+                            "internal error: effect row alias '{}' has no recorded body",
+                            binding.name
+                        ),
+                    ));
+                };
+                let mut term = EffectRowTerm::Constant(0);
+                for inner in effects {
+                    term = EffectRowTerm::Union(
+                        Box::new(term),
+                        Box::new(effect_row_expr_inner(resolution, inner, visiting)?),
+                    );
+                }
+                visiting.remove(&id);
+                return Ok(term);
+            }
             if binding.kind == BindingKind::Generic && is_effect_generic_binding(resolution, id) {
                 if !arguments.is_empty() {
                     return Err(Diagnostic::new(
@@ -4185,7 +4240,7 @@ fn effect_row_expr(resolution: &Resolution, effect: &ast::Type) -> Result<Effect
                 _ => {
                     return Err(Diagnostic::new(
                         effect.span,
-                        "only io, alloc, suspend, and panic effects, declared 'effect' operations, and '<e: Effects>' row variables are supported in an executable effect row",
+                        "expected a builtin effect, a declared effect operation, an Effects row variable, or an effect row alias",
                     ));
                 }
             };

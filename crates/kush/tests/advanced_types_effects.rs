@@ -2599,3 +2599,69 @@ fn open_row_impl_headers_monomorphize_per_receiver() {
         "open row",
     );
 }
+
+#[test]
+fn task_handler_barriers_do_not_expose_shadowed_outer_frames() {
+    let source = r#"
+        use std.task.TaskExit;
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {Op, panic} { perform Op(0) }
+        fn main() -> i64 ! {suspend, alloc, panic} {
+            handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { resume(100) } {
+                let n = 7;
+                handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { resume(n) } {
+                    Task.scope(fn() -> i64 ! {suspend, alloc, Op, panic} {
+                        let t: Task<i64> = Task.spawn(fn() -> i64 ! {Op, panic} { deep() });
+                        match Task.join(t) { TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 }
+                    })
+                }
+            }
+        }"#;
+    let program = check(source).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("no dynamically active handler"),
+        "{error:?}"
+    );
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("handler-barrier");
+        kush::native::build(&program, &binary).unwrap();
+        let output = std::process::Command::new(binary)
+            .current_dir(scratch.path())
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "a shadowed outer handler became visible"
+        );
+    }
+}
+
+#[test]
+fn tasks_inherit_copyable_handler_suffix_above_an_owned_barrier() {
+    let source = r#"
+        use std.task.TaskExit;
+        effect Op: i64 -> i64;
+        fn deep() -> i64 ! {Op, panic} { perform Op(0) }
+        fn run_child() -> i64 ! {Op, suspend, alloc, panic} {
+            Task.scope(fn() -> i64 ! {suspend, alloc, Op, panic} {
+                let task: Task<i64> = Task.spawn(fn() -> i64 ! {Op, panic} {deep()});
+                match Task.join(task) {TaskExit.Completed(v) => v, TaskExit.Cancelled => 0}
+            })
+        }
+        fn main() -> i64 ! {suspend, alloc, panic} {
+            handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {resume(100)} {
+                let n = 7;
+                handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {resume(n)} {
+                    handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {resume(9)} {
+                        run_child()
+                    }
+                }
+            }
+        }"#;
+    assert_eq!(value(source), 9);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 9);
+}

@@ -1049,12 +1049,11 @@ static int kush_initialized = 0;
 static int kush_ready[KUSH_MAX_TASKS];
 static int kush_ready_head = 0, kush_ready_tail = 0, kush_ready_count = 0;
 /* ---- Dynamic one-shot effect handlers -----------------------------------
-   Declared effect operations use a small per-task stack of copyable,
-   noncapturing handler code pointers. A lexical handle pushes one entry for
+   Declared effect operations use a small per-task stack of handler code
+   pointers and optional owned one-shot environments. A lexical handle pushes one entry for
    the duration of its body; a `perform` in a called function resolves the
-   innermost matching entry. Entries carry no owning environment: the checker
-   rejects consuming/capturing handlers here, and the ordinary lexical path
-   still consumes those values. */
+   innermost matching entry. A one-shot entry transfers its environment on
+   lookup, or drops it when popped without being consumed. */
 #define KUSH_HANDLER_MAX 64
 typedef struct {
     int64_t operation;
@@ -1217,15 +1216,18 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
     /* Inherit the parent's copyable noncapturing dynamic handler frames.
        A capturing or one-shot frame is a task boundary: its environment is
        owned by the parent's dynamic extent, so only the longest inheritable
-       bottom prefix crosses. */
+       innermost contiguous suffix crosses. Frames below a barrier must not
+       become visible to a child merely because their shadowing frame cannot
+       be inherited. */
     {
         kush_handler_context *parent = kush_handlers();
         kush_handler_context *child = &kush_handler_contexts[id];
         child->depth = 0;
-        for (int i = 0; i < parent->depth; ++i) {
-            if (parent->frames[i].environment != 0 || parent->frames[i].once)
-                break;
-            child->frames[i] = parent->frames[i];
+        int start = parent->depth;
+        while (start > 0 && parent->frames[start - 1].environment == 0 &&
+               !parent->frames[start - 1].once) --start;
+        for (int i = start; i < parent->depth; ++i) {
+            child->frames[child->depth] = parent->frames[i];
             child->depth += 1;
         }
     }

@@ -19,6 +19,7 @@ pub(crate) const IO: u16 = 2;
 pub(crate) const ALLOC: u16 = 4;
 pub(crate) const SUSPEND: u16 = 8;
 pub(crate) const EFFECT_BITS: u16 = PANIC | IO | ALLOC | SUSPEND;
+pub(crate) const MAX_EFFECT_ROW_VARIABLES: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Type {
     I64,
@@ -812,7 +813,7 @@ pub(crate) enum ExprKind {
         element: Type,
         capacity: usize,
     },
-    /// Push a copyable handler value on the dynamic one-shot handler stack for
+    /// Push a handler value on the dynamic one-shot handler stack for
     /// the duration of `body`. Direct lexical `perform` lowering is unchanged;
     /// the stack entry lets a called function resolve the same operation.
     HandlerPush {
@@ -821,8 +822,8 @@ pub(crate) enum ExprKind {
         body: Box<Block>,
     },
     /// `perform` resolved through the dynamic handler stack. The handler
-    /// contract is a pure `fn(P, linear once fn(R) -> R) -> R`, so no owning
-    /// environment crosses the stack entry.
+    /// contract is pure; a copyable function is reusable, while a capturing
+    /// once handler transfers its owned environment on the first lookup.
     DynamicPerform {
         operation: usize,
         payload: Box<Expr>,
@@ -3467,6 +3468,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             | ast::ItemKind::Impl { .. }
             | ast::ItemKind::GradeAlgebra(_)
             | ast::ItemKind::Effect { .. }
+            | ast::ItemKind::EffectRow { .. }
             | ast::ItemKind::Use(_) => continue,
             ast::ItemKind::Alias { .. } => continue,
             ast::ItemKind::Function(f) => f,
@@ -4400,10 +4402,7 @@ fn trait_specialization_name(
             GenericCategory::Effect => {
                 let row = arguments.effects[effect_index];
                 effect_index += 1;
-                let names = [(1u16, "io"), (2, "alloc"), (4, "panic"), (8, "suspend")]
-                    .into_iter()
-                    .filter_map(|(bit, name)| (row & bit != 0).then_some(name))
-                    .collect::<Vec<_>>();
+                let names = crate::runtime_types::effect_name_list(resolution, row);
                 if names.is_empty() {
                     "{}".to_owned()
                 } else {
@@ -8816,7 +8815,7 @@ pub(crate) fn proposition_of(
     let unsupported = |span| {
         Diagnostic::new(
             span,
-            "propositions support integer comparisons of earlier parameters, constants, 'x + c', and Bytes.len/Vec.len/Slice.len, joined by '&&'",
+            "propositions support linear integer comparisons over earlier parameters, constants, 'x + c', 'c * x', and Bytes.len/Vec.len/Slice.len, joined by '&&'",
         )
     };
     fn text(e: &ast::Expr) -> String {
@@ -8838,6 +8837,7 @@ pub(crate) fn proposition_of(
                     Kind::EqEq => "==",
                     Kind::Plus => "+",
                     Kind::Minus => "-",
+                    Kind::Star => "*",
                     Kind::AmpAmp => "&&",
                     _ => "?",
                 };
@@ -8846,29 +8846,29 @@ pub(crate) fn proposition_of(
             _ => "?".into(),
         }
     }
-    let linear = |e: &ast::Expr| -> Result<(ParamTerm, i128)> {
+    let linear = |e: &ast::Expr| -> Result<crate::facts::ParamLinear> {
+        use crate::facts::ParamLinear;
         fn go(
             e: &ast::Expr,
             resolution: &Resolution,
             params: &BTreeMap<BindingId, usize>,
             unsupported: &dyn Fn(Span) -> Diagnostic,
-        ) -> Result<(ParamTerm, i128)> {
+        ) -> Result<ParamLinear> {
             match &e.kind {
-                ast::ExprKind::Integer(n) => {
-                    Ok((ParamTerm::Zero, n.parse().map_err(|_| unsupported(e.span))?))
-                }
+                ast::ExprKind::Integer(n) => Ok(ParamLinear::constant(
+                    n.parse().map_err(|_| unsupported(e.span))?,
+                )),
                 ast::ExprKind::Unary {
                     op: Kind::Minus,
                     operand,
                     ..
-                } => match go(operand, resolution, params, unsupported)? {
-                    (ParamTerm::Zero, n) => Ok((ParamTerm::Zero, -n)),
-                    _ => Err(unsupported(e.span)),
-                },
+                } => go(operand, resolution, params, unsupported)?
+                    .negate()
+                    .ok_or_else(|| unsupported(e.span)),
                 ast::ExprKind::Name(_) => resolution
                     .reference(e.span)
                     .and_then(|id| params.get(&id))
-                    .map(|i| (ParamTerm::Param(*i), 0))
+                    .map(|i| ParamLinear::variable(ParamTerm::Param(*i), 1))
                     .ok_or_else(|| {
                         Diagnostic::new(
                             e.span,
@@ -8882,12 +8882,28 @@ pub(crate) fn proposition_of(
                 } => {
                     let l = go(left, resolution, params, unsupported)?;
                     let r = go(right, resolution, params, unsupported)?;
-                    let sign = if *op == Kind::Plus { 1 } else { -1 };
-                    match (l, r) {
-                        ((t, a), (ParamTerm::Zero, b)) => Ok((t, a + sign * b)),
-                        ((ParamTerm::Zero, a), (t, b)) if sign == 1 => Ok((t, a + b)),
-                        _ => Err(unsupported(e.span)),
+                    if *op == Kind::Plus {
+                        l.add(&r)
+                    } else {
+                        l.sub(&r)
                     }
+                    .ok_or_else(|| unsupported(e.span))
+                }
+                ast::ExprKind::Binary {
+                    op: Kind::Star,
+                    left,
+                    right,
+                } => {
+                    let l = go(left, resolution, params, unsupported)?;
+                    let r = go(right, resolution, params, unsupported)?;
+                    if l.coefficients.is_empty() {
+                        r.scale(l.constant)
+                    } else if r.coefficients.is_empty() {
+                        l.scale(r.constant)
+                    } else {
+                        None
+                    }
+                    .ok_or_else(|| unsupported(e.span))
                 }
                 ast::ExprKind::Call { callee, arguments } if arguments.len() == 1 => {
                     let builtin = resolution.reference(callee.span).is_some_and(|id| {
@@ -8896,7 +8912,18 @@ pub(crate) fn proposition_of(
                             && matches!(b.name.as_str(), "Bytes.len" | "Vec.len" | "Slice.len")
                     });
                     match (builtin, go(&arguments[0], resolution, params, unsupported)?) {
-                        (true, (ParamTerm::Param(i), 0)) => Ok((ParamTerm::Len(i), 0)),
+                        (true, argument)
+                            if argument.coefficients.len() == 1
+                                && argument.constant == 0
+                                && argument.coefficients.values().all(|c| *c == 1) =>
+                        {
+                            let ParamTerm::Param(index) =
+                                *argument.coefficients.keys().next().unwrap()
+                            else {
+                                return Err(unsupported(e.span));
+                            };
+                            Ok(ParamLinear::variable(ParamTerm::Len(index), 1))
+                        }
                         _ => Err(unsupported(e.span)),
                     }
                 }
@@ -8922,9 +8949,9 @@ pub(crate) fn proposition_of(
                 left,
                 right,
             } => {
-                let (l, lc) = linear(left)?;
-                let (r, rc) = linear(right)?;
-                atoms.push((l, lc, op.clone(), r, rc));
+                let l = linear(left)?;
+                let r = linear(right)?;
+                atoms.push((l, op.clone(), r));
             }
             _ => return Err(unsupported(e.span)),
         }
@@ -14505,16 +14532,24 @@ impl Checker<'_, '_> {
         let proposition = self.functions.proposition(self.resolution, parameter)?;
         let mut constraints = Vec::new();
         let params = self.parameter_slots();
-        for (l, lc, op, r, rc) in &proposition.atoms {
-            let term = |t: &crate::facts::ParamTerm, c: i128| {
+        for (l, op, r) in &proposition.atoms {
+            let term = |linear: &crate::facts::ParamLinear| -> Option<crate::facts::Linear> {
                 use crate::facts::{Linear, ParamTerm, Term};
-                match t {
-                    ParamTerm::Zero => Linear(Term::Zero, c),
-                    ParamTerm::Param(i) => Linear(Term::Var(params[*i], 0), c),
-                    ParamTerm::Len(i) => Linear(Term::Len(params[*i], 0), c),
+                let mut expression = Linear::constant(linear.constant);
+                for (base, coefficient) in &linear.coefficients {
+                    let part = match base {
+                        ParamTerm::Zero => Linear::constant(1),
+                        ParamTerm::Param(i) => Linear::variable(Term::Var(params[*i], 0)),
+                        ParamTerm::Len(i) => Linear::variable(Term::Len(params[*i], 0)),
+                    };
+                    expression = expression.add_scaled(&part, *coefficient)?;
                 }
+                Some(expression)
             };
-            crate::facts::compare(term(l, *lc), op, term(r, *rc), &mut constraints);
+            let (Some(left), Some(right)) = (term(l), term(r)) else {
+                continue;
+            };
+            crate::facts::compare(left, op, right, &mut constraints);
         }
         self.facts.add(constraints);
         self.proofs.insert(id, proposition);
@@ -14532,7 +14567,7 @@ impl Checker<'_, '_> {
         evidence: &ast::Expr,
         span: Span,
     ) -> Result<()> {
-        use crate::facts::{Constraint, Linear, ParamTerm, Term};
+        use crate::facts::{Constraint, Linear, ParamLinear, ParamTerm, Term};
         match &evidence.kind {
             ast::ExprKind::Name(name) if name == "_" => {}
             ast::ExprKind::Name(_)
@@ -14548,35 +14583,45 @@ impl Checker<'_, '_> {
             }
         }
         let mut goals: Vec<Constraint> = Vec::new();
-        for (l, lc, op, r, rc) in &proposition.atoms {
-            let term = |t: &ParamTerm, c: i128| -> Result<Linear> {
-                Ok(match t {
-                    ParamTerm::Zero => Linear(Term::Zero, c),
-                    ParamTerm::Param(i) => {
-                        let Linear(t, k) = self.facts.linear(&arguments[*i]).ok_or_else(|| {
-                            Diagnostic::new(
-                                arguments[*i].span,
-                                "this argument appears in a proof obligation; use a local, a constant, or 'local + constant'",
-                            )
-                        })?;
-                        Linear(t, k + c)
-                    }
-                    ParamTerm::Len(i) => {
-                        let slot = crate::facts::owner_slot(&arguments[*i]).ok_or_else(|| {
-                            Diagnostic::new(
-                                arguments[*i].span,
-                                "pass a named buffer here so its length can appear in a proof obligation",
-                            )
-                        })?;
-                        Linear(Term::Len(slot, self.facts.version(slot)), c)
-                    }
-                })
+        for (l, op, r) in &proposition.atoms {
+            let term = |linear: &ParamLinear| -> Result<Linear> {
+                let mut expression = Linear::constant(linear.constant);
+                for (base, coefficient) in &linear.coefficients {
+                    let part = match base {
+                        ParamTerm::Zero => Linear::constant(1),
+                        ParamTerm::Param(i) => {
+                            self.facts.linear(&arguments[*i]).ok_or_else(|| {
+                                Diagnostic::new(
+                                    arguments[*i].span,
+                                    "this argument appears in a proof obligation; use a linear expression such as a local, a constant, 'local + constant', or 'constant * local'",
+                                )
+                            })?
+                        }
+                        ParamTerm::Len(i) => {
+                            let slot =
+                                crate::facts::owner_slot(&arguments[*i]).ok_or_else(|| {
+                                    Diagnostic::new(
+                                        arguments[*i].span,
+                                        "pass a named buffer here so its length can appear in a proof obligation",
+                                    )
+                                })?;
+                            Linear::variable(Term::Len(slot, self.facts.version(slot)))
+                        }
+                    };
+                    expression = expression.add_scaled(&part, *coefficient).ok_or_else(|| {
+                        Diagnostic::new(
+                            span,
+                            "proof obligation coefficients overflow the bounded linear solver",
+                        )
+                    })?;
+                }
+                Ok(expression)
             };
-            crate::facts::compare(term(l, *lc)?, op, term(r, *rc)?, &mut goals);
+            crate::facts::compare(term(l)?, op, term(r)?, &mut goals);
         }
         for goal in goals {
-            let Some(steps) = self.facts.prove(goal) else {
-                let known = self.facts.snapshot(goal);
+            let Some(proof) = self.facts.prove(&goal) else {
+                let known = self.facts.snapshot(&goal);
                 let names = (0..self.locals.len())
                     .map(|s| self.local_name(s))
                     .collect::<Vec<_>>();
@@ -14587,12 +14632,15 @@ impl Checker<'_, '_> {
                     &|slot| names[slot].clone(),
                 ));
             };
-            let hypotheses = self.facts.snapshot(goal);
+            let hypotheses = self.facts.snapshot(&goal);
             self.functions.certificates.push(crate::facts::Certificate {
                 span,
                 obligation: proposition.text.clone(),
                 goal,
-                steps,
+                steps: proof.steps,
+                multipliers: proof.multipliers,
+                denominator: proof.denominator,
+                negation: proof.negation,
                 hypotheses,
             });
         }
@@ -21608,18 +21656,30 @@ impl Checker<'_, '_> {
             ),
         )
     }
-    /// Solve accumulated row constraints by finite enumeration.
+    /// Solve accumulated row constraints with a per-bit Boolean solver.
     ///
-    /// The effect universe has four concrete bits. For `n` unbound row
-    /// variables the solver considers at most `16^n` assignments; the budget is
-    /// 4096 assignments, so up to three variables are always exhaustive and a
-    /// larger group is rejected with an explicit request for specialization.
-    /// A solver result must be *unique componentwise-minimal*: every variable
-    /// assignment is a subset of every other valid assignment. If several
-    /// incomparable minimal solutions exist, the call is ambiguous and the
-    /// diagnostic asks for explicit `::<...>` arguments. A variable that no
-    /// constraint mentions is also rejected instead of defaulting to `{}`,
-    /// because doing so could hide an effect promised by the caller.
+    /// The effect universe is sixteen independent concrete bits and every row
+    /// operation (union, subtraction, inclusion) is bitwise, so each bit can be
+    /// solved on its own. For `n` unbound row variables one bit therefore has
+    /// at most `2^n` assignments instead of the previous `16^n` whole-row
+    /// enumeration. The documented bound is [`MAX_EFFECT_ROW_VARIABLES`]
+    /// variables per call group; a larger group is rejected with an explicit
+    /// request for specialization.
+    ///
+    /// A solver result must be *unique componentwise-minimal*: one variable
+    /// assignment is a subset of every other valid assignment. For one bit the
+    /// bitwise AND of every valid assignment is the unique minimal assignment
+    /// exactly when it is itself valid; if it is not, several incomparable
+    /// minimal assignments exist and the call is ambiguous. The same check is
+    /// applied independently to every effect bit.
+    ///
+    /// A variable that no constraint mentions is solved from its domain alone:
+    /// an unconstrained open row defaults to `{}` (the principal, least row),
+    /// and a `<e: Effects + io>` lower bound defaults to exactly the required
+    /// bits. This is sound because every row equation is an inclusion and the
+    /// function body is rechecked against the chosen specialization; a body
+    /// that performs an effect outside its declared row is rejected before the
+    /// call can hide it.
     fn solve_effect_constraints(
         &mut self,
         mark: usize,
@@ -21627,9 +21687,6 @@ impl Checker<'_, '_> {
         subst: &mut crate::runtime_types::Subst,
         span: Span,
     ) -> Result<()> {
-        if mark >= self.effect_constraints.len() {
-            return Ok(());
-        }
         let constraints = self.effect_constraints.split_off(mark);
         let mut allowed: BTreeMap<BindingId, u16> = BTreeMap::new();
         let mut required: BTreeMap<BindingId, u16> = BTreeMap::new();
@@ -21641,22 +21698,6 @@ impl Checker<'_, '_> {
                 crate::runtime_types::effect_includes(self.resolution, generic)?.unwrap_or(0);
             allowed.insert(binder, self.all_effects() & !excluded);
             required.insert(binder, included);
-        }
-        let mut mentioned = BTreeSet::new();
-        for constraint in &constraints {
-            mentioned.extend(constraint.row.variables());
-        }
-        for generic in effect_generics {
-            let binder = self.resolution.binder(generic.span).unwrap();
-            if !subst.effects.contains_key(&binder) && !mentioned.contains(&binder) {
-                return Err(Diagnostic::new(
-                    span,
-                    format!(
-                        "cannot infer effect row parameter '{}' of this call: no callable argument mentions it. Pass a callable whose effects constrain the row, or specialize it explicitly with '::<...>'",
-                        generic.name
-                    ),
-                ));
-            }
         }
         let mut unbound = Vec::new();
         for generic in effect_generics {
@@ -21703,168 +21744,200 @@ impl Checker<'_, '_> {
             }
             return Ok(());
         }
-        // Only effects that some constraint actually needs can appear in a
-        // *minimal* solution: adding any other bit only widens the row without
-        // helping cover an argument. Enumerating this relevant subset keeps the
-        // solver finite even when the declared-effect vocabulary is large.
-        let mut relevant = 0u16;
-        for constraint in &constraints {
-            relevant |= constraint.actual;
-        }
-        for bits in required.values() {
-            relevant |= *bits;
-        }
-        let mut assignments: u128 = 1;
-        for variable in &unbound {
-            let maximum = allowed.get(variable).copied().unwrap_or(EFFECT_BITS);
-            let choices = (relevant & maximum).count_ones();
-            if choices >= 63 {
-                return Err(Diagnostic::new(
-                    span,
-                    "effect-row constraint group exceeds the finite solver budget; specialize the effect rows explicitly with '::<...>'",
-                ));
-            }
-            assignments *= 1u128 << choices;
-        }
-        if assignments > 4096 {
+        if unbound.len() > MAX_EFFECT_ROW_VARIABLES {
             return Err(Diagnostic::new(
                 span,
-                "effect-row constraint group exceeds the finite solver budget (4096 assignments); specialize the effect rows explicitly with '::<...>'",
+                format!(
+                    "effect-row constraint group has {} unbound row variables, exceeding the per-bit solver bound of {MAX_EFFECT_ROW_VARIABLES}; specialize some rows explicitly with '::<...>'",
+                    unbound.len()
+                ),
             ));
         }
-        let mut solutions: Vec<BTreeMap<BindingId, u16>> = vec![BTreeMap::new()];
-        for variable in &unbound {
-            let maximum = allowed.get(variable).copied().unwrap_or(EFFECT_BITS);
-            let minimum = required.get(variable).copied().unwrap_or(0);
-            let candidates = relevant & maximum;
-            let mut next = Vec::new();
-            for solution in &solutions {
-                let mut bits = candidates;
-                loop {
-                    if bits & minimum == minimum {
-                        let mut candidate = solution.clone();
-                        candidate.insert(*variable, bits);
-                        next.push(candidate);
-                    }
-                    if bits == 0 {
+        let positions = unbound
+            .iter()
+            .enumerate()
+            .map(|(position, variable)| (*variable, position))
+            .collect::<BTreeMap<_, _>>();
+        // Solve each of the four concrete effects independently. A row term is
+        // built only from bitwise union/subtraction, so the bit at position `b`
+        // of every constraint depends solely on the same bit of each variable.
+        let mut chosen: BTreeMap<BindingId, u16> =
+            unbound.iter().map(|variable| (*variable, 0u16)).collect();
+        for bit_index in 0..16u16 {
+            let bit = 1u16 << bit_index;
+            let limit = 1u32 << unbound.len();
+            let mut valid_masks = Vec::new();
+            let mut and_all: Option<u32> = None;
+            for mask in 0..limit {
+                let mut in_domain = true;
+                for (position, variable) in unbound.iter().enumerate() {
+                    let allowed_bits = allowed.get(variable).copied().unwrap_or(self.all_effects());
+                    let required_bits = required.get(variable).copied().unwrap_or(0);
+                    if mask & (1 << position) != 0 {
+                        if allowed_bits & bit == 0 {
+                            in_domain = false;
+                            break;
+                        }
+                    } else if required_bits & bit != 0 {
+                        in_domain = false;
                         break;
                     }
-                    bits = (bits - 1) & candidates;
                 }
-            }
-            solutions = next;
-        }
-        let valid = solutions
-            .into_iter()
-            .filter(|solution| {
-                constraints.iter().all(|constraint| {
-                    let Some(covered) = constraint.row.evaluate(solution) else {
-                        return false;
+                if !in_domain {
+                    continue;
+                }
+                let mut covers = true;
+                for constraint in &constraints {
+                    if constraint.actual & bit == 0 {
+                        continue;
+                    }
+                    let covered = constraint.row.evaluate_with(&mut |variable| {
+                        if let Some(bits) = subst.effects.get(&variable) {
+                            return Some(*bits);
+                        }
+                        let position = positions.get(&variable)?;
+                        Some(if mask & (1 << *position) != 0 { bit } else { 0 })
+                    });
+                    let Some(covered) = covered else {
+                        covers = false;
+                        break;
                     };
-                    constraint.actual & !covered == 0
-                })
-            })
-            .collect::<Vec<_>>();
-        if valid.is_empty() {
-            let first = &constraints[0];
-            let reachable = first
-                .row
-                .evaluate_with(&mut |variable| {
-                    subst
-                        .effects
-                        .get(&variable)
-                        .copied()
-                        .or_else(|| allowed.get(&variable).copied())
-                })
-                .unwrap_or(0);
-            let excluded = first.actual & !reachable;
-            if excluded != 0 {
-                let names = crate::runtime_types::effect_name_list(self.resolution, excluded);
-                fn effect_spelling(ty: &ast::Type) -> String {
-                    match &ty.kind {
-                        ast::TypeKind::Named { path, .. } => path.join("."),
-                        ast::TypeKind::Binary {
-                            op: crate::lexer::Kind::Pipe,
-                            left,
-                            right,
-                        } => format!("{} | {}", effect_spelling(left), effect_spelling(right)),
-                        ast::TypeKind::Binary {
-                            op: crate::lexer::Kind::Minus,
-                            left,
-                            right,
-                        } => format!("{} - {}", effect_spelling(left), effect_spelling(right)),
-                        _ => "concrete effects".to_owned(),
+                    if covered & bit == 0 {
+                        covers = false;
+                        break;
                     }
                 }
-                let variables = first
+                if !covers {
+                    continue;
+                }
+                valid_masks.push(mask);
+                and_all = Some(and_all.map_or(mask, |known| known & mask));
+            }
+            if valid_masks.is_empty() {
+                let Some(first) = constraints.first() else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "no specialization of the effect row parameters satisfies their declared bounds",
+                    ));
+                };
+                let reachable = first
                     .row
-                    .variables()
+                    .evaluate_with(&mut |variable| {
+                        subst
+                            .effects
+                            .get(&variable)
+                            .copied()
+                            .or_else(|| allowed.get(&variable).copied())
+                    })
+                    .unwrap_or(0);
+                let excluded = first.actual & !reachable;
+                if excluded != 0 {
+                    let names = crate::runtime_types::effect_name_list(self.resolution, excluded);
+                    fn effect_spelling(ty: &ast::Type) -> String {
+                        match &ty.kind {
+                            ast::TypeKind::Named { path, .. } => path.join("."),
+                            ast::TypeKind::Binary {
+                                op: crate::lexer::Kind::Pipe,
+                                left,
+                                right,
+                            } => format!("{} | {}", effect_spelling(left), effect_spelling(right)),
+                            ast::TypeKind::Binary {
+                                op: crate::lexer::Kind::Minus,
+                                left,
+                                right,
+                            } => {
+                                format!("{} - {}", effect_spelling(left), effect_spelling(right))
+                            }
+                            _ => "concrete effects".to_owned(),
+                        }
+                    }
+                    let variables = first
+                        .row
+                        .variables()
+                        .iter()
+                        .map(|variable| format!("'{}'", self.resolution.bindings[*variable].name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let bound = first.row.variables().first().and_then(|variable| {
+                        effect_generics
+                            .iter()
+                            .find(|generic| {
+                                self.resolution.binder(generic.span).as_ref() == Some(variable)
+                            })
+                            .and_then(|generic| generic.excludes.as_ref())
+                            .map(|excludes| {
+                                format!(
+                                    "<{}: Effects - {}>",
+                                    self.resolution.bindings[*variable].name,
+                                    effect_spelling(excludes)
+                                )
+                            })
+                    });
+                    let bound = bound.unwrap_or_else(|| format!("the bound on {variables}"));
+                    return Err(Diagnostic::new(
+                        first.span,
+                        format!(
+                            "effect {} is excluded by '{bound}', but the callable argument requires it",
+                            names
+                                .iter()
+                                .map(|name| format!("'{name}'"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
+                return Err(Diagnostic::new(
+                    first.span,
+                    format!(
+                        "no specialization of the effect row parameters satisfies every callable argument; the actual row {:#06b} conflicts with another argument",
+                        first.actual
+                    ),
+                ));
+            }
+            // The bitwise AND of every valid assignment is the unique
+            // componentwise-minimal solution exactly when it is itself valid.
+            // If it is not, at least two incomparable minimal rows exist.
+            let and_all = and_all.expect("at least one valid assignment");
+            let minimal_valid = constraints.iter().all(|constraint| {
+                if constraint.actual & bit == 0 {
+                    return true;
+                }
+                constraint
+                    .row
+                    .evaluate_with(&mut |variable| {
+                        if let Some(bits) = subst.effects.get(&variable) {
+                            return Some(*bits);
+                        }
+                        let position = positions.get(&variable)?;
+                        Some(if and_all & (1 << *position) != 0 {
+                            bit
+                        } else {
+                            0
+                        })
+                    })
+                    .is_some_and(|covered| covered & bit != 0)
+            });
+            if !minimal_valid {
+                let names = unbound
                     .iter()
                     .map(|variable| format!("'{}'", self.resolution.bindings[*variable].name))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let bound = first.row.variables().first().and_then(|variable| {
-                    effect_generics
-                        .iter()
-                        .find(|generic| {
-                            self.resolution.binder(generic.span).as_ref() == Some(variable)
-                        })
-                        .and_then(|generic| generic.excludes.as_ref())
-                        .map(|excludes| {
-                            format!(
-                                "<{}: Effects - {}>",
-                                self.resolution.bindings[*variable].name,
-                                effect_spelling(excludes)
-                            )
-                        })
-                });
-                let bound = bound.unwrap_or_else(|| format!("the bound on {variables}"));
                 return Err(Diagnostic::new(
-                    first.span,
+                    span,
                     format!(
-                        "effect {} is excluded by '{bound}', but the callable argument requires it",
-                        names
-                            .iter()
-                            .map(|name| format!("'{name}'"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        "effect row parameters {names} have several incomparable minimal solutions; the callable arguments do not identify one row. Specialize them explicitly with '::<...>'"
                     ),
                 ));
             }
-            return Err(Diagnostic::new(
-                first.span,
-                format!(
-                    "no specialization of the effect row parameters satisfies every callable argument; the actual row {:#06b} conflicts with another argument",
-                    first.actual
-                ),
-            ));
+            for (position, variable) in unbound.iter().enumerate() {
+                if and_all & (1 << position) != 0 {
+                    *chosen.get_mut(variable).unwrap() |= bit;
+                }
+            }
         }
-        let minimal = valid
-            .iter()
-            .filter(|candidate| {
-                !valid.iter().any(|other| {
-                    other != *candidate
-                        && other.iter().all(|(variable, bits)| {
-                            bits & !candidate.get(variable).copied().unwrap_or(0) == 0
-                        })
-                })
-            })
-            .collect::<Vec<_>>();
-        if minimal.len() != 1 {
-            let names = unbound
-                .iter()
-                .map(|variable| format!("'{}'", self.resolution.bindings[*variable].name))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(Diagnostic::new(
-                span,
-                format!(
-                    "effect row parameters {names} have several incomparable minimal solutions; the callable arguments do not identify one row. Specialize them explicitly with '::<...>'"
-                ),
-            ));
-        }
-        for (variable, bits) in minimal[0] {
-            subst.effects.insert(*variable, *bits);
+        for (variable, bits) in chosen {
+            subst.effects.insert(variable, bits);
         }
         Ok(())
     }
@@ -24080,11 +24153,19 @@ impl Checker<'_, '_> {
         if name == "Slice.get" {
             self.require(PANIC, span)?;
         } else {
-            use crate::facts::{ParamTerm, Proposition};
+            use crate::facts::{ParamLinear, ParamTerm, Proposition};
             let proposition = Proposition {
                 atoms: vec![
-                    (ParamTerm::Zero, 0, Kind::Le, ParamTerm::Param(1), 0),
-                    (ParamTerm::Param(1), 0, Kind::Lt, ParamTerm::Len(0), 0),
+                    (
+                        ParamLinear::constant(0),
+                        Kind::Le,
+                        ParamLinear::variable(ParamTerm::Param(1), 1),
+                    ),
+                    (
+                        ParamLinear::variable(ParamTerm::Param(1), 1),
+                        Kind::Lt,
+                        ParamLinear::variable(ParamTerm::Len(0), 1),
+                    ),
                 ],
                 text: "0 <= index && index < Slice.len(slice)".to_owned(),
             };
@@ -25413,11 +25494,19 @@ impl Checker<'_, '_> {
             ));
         }
         if op == VecOp::At {
-            use crate::facts::{ParamTerm, Proposition};
+            use crate::facts::{ParamLinear, ParamTerm, Proposition};
             let proposition = Proposition {
                 atoms: vec![
-                    (ParamTerm::Zero, 0, Kind::Le, ParamTerm::Param(1), 0),
-                    (ParamTerm::Param(1), 0, Kind::Lt, ParamTerm::Len(0), 0),
+                    (
+                        ParamLinear::constant(0),
+                        Kind::Le,
+                        ParamLinear::variable(ParamTerm::Param(1), 1),
+                    ),
+                    (
+                        ParamLinear::variable(ParamTerm::Param(1), 1),
+                        Kind::Lt,
+                        ParamLinear::variable(ParamTerm::Len(0), 1),
+                    ),
                 ],
                 text: format!(
                     "0 <= index && index < {}.len(buffer)",

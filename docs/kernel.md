@@ -543,9 +543,11 @@ The boundary is deliberately narrow:
   one. The proof term is elaborated without runtime bindings and checked by
   `Kernel::check_open` against the proposition, with in-scope erased parameter
   types as validated hypotheses. Earlier erased actual proof terms are
-  substituted into a dependent parameter's type before that check. Proof search
-  and implicit arguments are not provided. Proofs are first-class logical terms,
-  but they have no runtime representation.
+  substituted into a dependent parameter's type before that check. Logical
+  proof search and implicit arguments are not provided; the separate arithmetic
+  `{ ... }` fragment uses the bounded linear search described in
+  [runtime indices](runtime-indices.md#4a-arithmetic-proof-search). Proofs are
+  first-class logical terms, but they have no runtime representation.
 - Runtime scalar values may occur inside an erased proposition only as frozen
   symbolic indices (see [runtime indices](runtime-indices.md)); a bare runtime
   value is never evidence of a proposition. Proof parameters are absent from the

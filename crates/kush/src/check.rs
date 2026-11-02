@@ -85,6 +85,7 @@ pub(crate) fn check_program(
             | ItemKind::Impl { .. }
             | ItemKind::GradeAlgebra(_)
             | ItemKind::Effect { .. }
+            | ItemKind::EffectRow { .. }
             | ItemKind::Enum { total: false, .. } => continue,
             ItemKind::Function(f) if !f.total => continue,
             ItemKind::Function(_)
@@ -1129,7 +1130,8 @@ impl Elaborator<'_> {
             | BindingKind::Local
             | BindingKind::Trait
             | BindingKind::GradeAlgebra
-            | BindingKind::Effect => Err(Diagnostic::new(
+            | BindingKind::Effect
+            | BindingKind::EffectRow => Err(Diagnostic::new(
                 span,
                 format!(
                     "runtime or generic binding '{}' cannot appear in an erased logical term; only checked logical definitions and erased logical parameters are relevant",
