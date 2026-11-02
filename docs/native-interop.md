@@ -194,7 +194,10 @@ support helper symbols are reserved.
 
 Generated files start with a marker. `kush bindgen` refuses to replace an
 existing file without that marker and refuses output symlinks. Writes use a
-temporary file in the destination directory followed by a rename. `--check`
+temporary file created exclusively in the destination directory followed by a
+rename. Existing output permissions are preserved; new outputs are private to
+the current user on Unix. Writes are atomic per output file, rather than one
+transaction across both generated files. `--check`
 writes nothing; it reports each missing or changed output and exits non-zero
 when the generated files are stale. Outputs are deterministic for the same
 configuration. Paths and arguments are passed as filesystem paths, never
