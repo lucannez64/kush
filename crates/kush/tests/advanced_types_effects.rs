@@ -2597,7 +2597,7 @@ fn structural_borrowed_results_are_a_clean_rejection() {
             struct { view: view }
         }
         fn main() -> i64 ! {panic} { 0 }"#,
-        "structural record result cannot carry a borrowed field",
+        "cannot carry a borrowed field without a declared lifetime",
     );
 }
 
@@ -2749,7 +2749,7 @@ fn row_variables_reject_erased_linear_and_borrowed_escapes() {
             let out = keep(struct { view: &data[..], n: 1 });
             Slice.get(out.view, 0)
         }"#,
-        "structural record result cannot carry a borrowed field",
+        "cannot carry a borrowed field without a declared lifetime",
     );
     // One row variable must receive the same residual row from every
     // parameter; otherwise the specialization is not determined.
@@ -2900,7 +2900,7 @@ fn open_row_impl_headers_monomorphize_per_receiver() {
             fn tag(self: Self) -> i64 ! {panic} { self.y }
         }
         fn main() -> i64 ! {panic} { 0 }"#,
-        "duplicate implementation",
+        "incomparable",
     );
     // A bare `..` has no parameter to bind the residual row, so it stays an
     // explicit rejection rather than an unconstrained blanket impl.
@@ -2977,4 +2977,93 @@ fn tasks_inherit_copyable_handler_suffix_above_an_owned_barrier() {
     assert_eq!(value(source), 9);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 9);
+}
+
+#[test]
+fn structural_equality_operands_are_ownership_checked() {
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let v: Vec<i64> = [1, 2];
+            let a = struct { x: 1 };
+            let b = struct { x: 1 };
+            let same = a == { drop(v); b };
+            if same { Vec.len(&v) } else { 0 }
+        }"#,
+        "moved owner",
+    );
+    rejects(
+        r#"
+        #[linear]
+        enum Token { Live }
+        fn take(t: Token) -> i64 ! {} { match t { Token.Live => 1 } }
+        fn main() -> i64 ! {panic} {
+            let t = Token.Live;
+            let a = struct { x: 1 };
+            let same = a == struct { x: take(t) };
+            take(t)
+        }"#,
+        "use after move",
+    );
+    assert_eq!(
+        value(
+            r#"
+        fn main() -> i64 ! {panic} {
+            let a = struct { x: 1, y: 2 };
+            let b = struct { y: 2, x: 1 };
+            if a == b { if a != struct { x: 1, y: 3 } { 7 } else { 0 } } else { 0 }
+        }"#
+        ),
+        7
+    );
+}
+
+#[test]
+fn open_row_impls_specialize_by_field_set() {
+    let impls = |second: &str| {
+        format!(
+            "trait Tag {{ fn tag(self: Self) -> i64 ! {{panic}}; }}
+            impl<r> Tag for struct {{ x: i64, ..r }} {{ fn tag(self: Self) -> i64 ! {{panic}} {{ 1 }} }}
+            {second}
+            fn main() -> i64 ! {{panic}} {{
+                let a = struct {{ x: 1, y: 2 }};
+                let b = struct {{ x: 1, z: true }};
+                a.tag() * 10 + b.tag()
+            }}"
+        )
+    };
+    for second in [
+        "impl<r> Tag for struct { x: i64, y: i64, ..r } { fn tag(self: Self) -> i64 ! {panic} { 2 } }",
+        "impl Tag for struct { x: i64, y: i64 } { fn tag(self: Self) -> i64 ! {panic} { 2 } }",
+    ] {
+        assert_eq!(value(&impls(second)), 21);
+    }
+    rejects(
+        &impls(
+            "impl<s> Tag for struct { x: i64, ..s } { fn tag(self: Self) -> i64 ! {panic} { 2 } }",
+        ),
+        "duplicate implementation",
+    );
+    rejects(
+        &impls(
+            "impl<r> Tag for struct { y: i64, ..r } { fn tag(self: Self) -> i64 ! {panic} { 2 } }",
+        ),
+        "incomparable",
+    );
+}
+
+#[test]
+fn a_result_hint_cannot_fix_a_row_variable_before_the_arguments() {
+    assert_eq!(
+        value(
+            r#"
+        fn keep<r>(v: struct { x: i64, ..r }) -> struct { x: i64, ..r } ! {panic} { v }
+        fn main() -> i64 ! {panic} {
+            let w = struct { x: 40, junk: true };
+            let narrow: struct { x: i64 } = keep(w);
+            narrow.x + 2
+        }"#
+        ),
+        42
+    );
 }

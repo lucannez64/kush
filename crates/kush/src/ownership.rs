@@ -4734,6 +4734,15 @@ impl Checker<'_> {
                 self.expr(b)?;
                 self.loans = loans;
             }
+            // Equality operands are arbitrary expressions: they can move,
+            // drop, or borrow owners, so they take the full ownership walk.
+            ExprKind::StructEq { left, right, .. }
+            | ExprKind::DynArrayEqual { left, right, .. } => {
+                let loans = self.loans.clone();
+                self.expr(left)?;
+                self.expr(right)?;
+                self.loans = loans;
+            }
             ExprKind::Call(target, args) => {
                 let func = match target {
                     crate::executable::Target::Function(index)
@@ -5858,7 +5867,14 @@ impl Checker<'_> {
                     self.expr(end)?;
                 }
             }
-            _ => {}
+            // Leaves. `Move` is only created by this pass from a `Local`, so
+            // it has already been accounted for. There is deliberately no
+            // wildcard: a new expression kind must decide here how ownership
+            // treats it, or the build fails.
+            ExprKind::Constant(_)
+            | ExprKind::BytesLiteral(_)
+            | ExprKind::Erased(_)
+            | ExprKind::Move(_) => {}
         }
         self.temporary_shared = temporary_shared;
         self.temporary_exclusive = temporary_exclusive;

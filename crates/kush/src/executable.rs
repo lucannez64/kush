@@ -7251,7 +7251,16 @@ fn unify_ast_patterns(
             // unify; a row tail can absorb every field the other header names.
             // With two named rows their tails are left flexible, which is
             // exactly the overlap relation needed for coherence.
-            let absorbable = |holder: &Option<Box<ast::Type>>| holder.is_some();
+            // A row tail absorbs fields only when its variable is flexible: the
+            // general header's tail may stand for fields of the specific one,
+            // but a rigid (specific) tail cannot invent fields the general
+            // header names. Without this, `{x, y}` would "subsume" `{x, ..r}`
+            // and genuine specializations were reported as duplicates.
+            let absorbable = |holder: &Option<Box<ast::Type>>| {
+                holder.as_deref().is_some_and(|row| {
+                    pattern_binder(resolution, row).is_some_and(|id| flexible.contains(&id))
+                })
+            };
             for left_field in left {
                 match right
                     .iter()
@@ -9254,11 +9263,9 @@ impl<'a> Functions<'a> {
                 let Some(lifetime) = &leaf.lifetime else {
                     // Structural rows do not record field lifetime labels, so a
                     // borrowed leaf there has no declared lifetime to check.
-                    let message = if types.is_structural(result) {
-                        "a structural record result cannot carry a borrowed field; return a nominal record with declared field lifetimes instead"
-                    } else {
-                        "internal error: borrowed record result leaf has no declared field lifetime"
-                    };
+                    // Structural rows (also when nested inside a nominal
+                    // record) carry no declared field-lifetime labels.
+                    let message = "a returned record cannot carry a borrowed field without a declared lifetime; anonymous 'struct { ... }' rows have none, so return a nominal record with declared field lifetimes instead";
                     return Err(Diagnostic::new(f.result.span, message));
                 };
                 if !declared_lifetimes.contains(lifetime) {
@@ -24022,6 +24029,7 @@ impl Checker<'_, '_> {
         // bounded cross-parameter replay to try another partition.
         let mut constraints: Vec<(&ast::Type, Type)> = Vec::new();
         let mut unify_error: Option<Diagnostic> = None;
+        let mut hint_rows: Vec<(BindingId, Type)> = Vec::new();
         self.partition_bound.clear();
         self.row_bound.clear();
         let mut grade_arguments = Vec::new();
@@ -24088,6 +24096,16 @@ impl Checker<'_, '_> {
                     subst = before;
                     unify_error.get_or_insert(error);
                 }
+                // The expected result type may be *wider-closed* than the
+                // call's real result (`let n: struct { x: i64 } = keep(w)`
+                // drops fields afterwards). It must not fix a row variable
+                // before the arguments do, so set those bindings aside and
+                // use them only for variables no argument binds.
+                for binder in std::mem::take(&mut self.row_bound) {
+                    if let Some(bound) = subst.types.remove(&binder) {
+                        hint_rows.push((binder, bound));
+                    }
+                }
             }
         }
         let parameter_grade_exprs = pairs
@@ -24152,6 +24170,9 @@ impl Checker<'_, '_> {
                 unify_error.get_or_insert(error);
             }
             values.push(value);
+        }
+        for (binder, bound) in hint_rows {
+            subst.types.entry(binder).or_insert(bound);
         }
         if let Some(error) = unify_error {
             if explicit.is_some() {

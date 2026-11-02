@@ -1313,3 +1313,27 @@ shared context during early return and a moved context nested in another state
 record; the allocator suite passes **34 tests** locally in both backends. The
 review also checked `?`, breaks, refusal paths, and multiple move/share shapes.
 This focused follow-up does not replace the earlier full Boat gate at `77182b1`.
+
+## Row-variable review follow-up
+
+An independent review of `3ccf04a` (row variables, renaming, structural
+equality, cross-parameter inference) confirmed correct field offsets,
+per-residual monomorphization, linear/owning residual handling, renaming
+provenance, and bounded replay. It found four defects, fixed with regressions:
+
+- **Critical:** `Checker::expr` in `ownership.rs` ended in a catch-all, and
+  `StructEq` (and `DynArrayEqual`) had no arm, so equality operands were
+  invisible to move/drop/borrow/linearity checking: a program could free a
+  vector inside an operand and read it afterwards, or consume a linear value
+  twice. Both nodes now walk their operands, and the catch-all is gone: only
+  `Constant`, `BytesLiteral`, `Erased`, and pass-created `Move` are listed as
+  leaves, so a new expression kind fails to compile until ownership handles it.
+- **Medium:** open-row impl specialization was reported as a duplicate because
+  a rigid (specific) row tail was allowed to absorb the general header's
+  fields. Only flexible tails absorb now; `{x, ..r}` vs `{x, y, ..r}` or
+  `{x, y}` specializes, while identical or incomparable headers stay rejected.
+- **Medium-low:** the expected result type bound a row variable before the
+  arguments, so `let n: struct { x: i64 } = keep(w)` was rejected. Hint
+  bindings are now used only when no argument binds the variable.
+- **Low:** the borrowed-record-result diagnostic no longer says "internal
+  error".
