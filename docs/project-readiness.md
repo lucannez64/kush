@@ -231,5 +231,18 @@ Full Boat gate after integration: **1102 workspace tests**, formatting, and
 Clippy pass. The sandbox was stopped with its snapshot preserved. Compiler
 source matches `21c566d`; later commits only document output protection and
 validation. Log: `/tmp/kush-boat-bindgen-full.log` (machine-local).
-Independent bindgen review remains pending, along with the host deadline,
-persistence, and integrated LSP validation above.
+Independent bindgen review found five low-severity validation/code-generation
+issues, corrected at `0b48a14`: helper shadowing, Kush builtin/resource/function
+name collisions, ambiguous flattened helper namespaces, output-directory prefix
+conflicts, and an unused fallible-Unit binding. Module-derived helpers now use
+length-prefixed components, so `a.b` and `a_b` remain distinct. The generated
+example files were updated together.
+
+Boat correction validation passes **35 focused workspace tests** (bindgen 11,
+FFI 15, resolver 9), formatting, and workspace/all-targets Clippy. Generated-file
+drift checks and the Rust adapter project's **two app tests** pass. New tests
+reject invalid configs before any output writes and compile colliding-path
+namespaces and fallible Unit shims with warnings denied.
+Log: `/tmp/kush-boat-bindgen-review-fixes.log` (machine-local). Full workspace
+validation after these corrections is pending. Host deadlines/persistence and
+independent LSP review remain outstanding.
