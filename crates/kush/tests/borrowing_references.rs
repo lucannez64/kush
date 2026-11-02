@@ -68,6 +68,134 @@ fn reference_annotations_do_not_change_the_caller_visible_type() {
 }
 
 #[test]
+fn mutable_owner_references_update_the_callers_container() {
+    agrees(
+        r#"fn grow(values: &mut Vec<i64>, value: i64) -> i64 ! {alloc, panic} {
+            Vec.push(values, value);
+            Vec.len(values)
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut values: Vec<i64> = [1, 2];
+            let length = grow(&mut values, 40);
+            Vec.reserve(&mut values, 1);
+            Vec.set(&mut values, 0, 40);
+            let answer = Vec.get(&values, 0);
+            Vec.clear(&mut values);
+            answer + length + Vec.len(&values)
+        }"#,
+        43,
+        "",
+    );
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        fn replace<'a>(b: &mut Box<&'a Point>, p: &'a Point) -> i64 ! {panic} {
+            Box.set(b, p);
+            Box.read(b).x
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let first = Point { x: 1, y: 1 };
+            let second = Point { x: 40, y: 2 };
+            let mut boxed: Box<&Point> = Box.new(&first);
+            replace(&mut boxed, &second) + second.y
+        }"#,
+        42,
+        "",
+    );
+    agrees(
+        r#"fn read_bytes(bytes: &mut Bytes) -> i64 ! {panic} { Bytes.get(bytes, 0) }
+        fn read_text(text: &mut String) -> i64 ! {panic} { String.len(text) }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut bytes = Bytes.from("abcd");
+            let mut text = "wxyz";
+            print_i64(read_bytes(&mut bytes));
+            print_i64(read_text(&mut text));
+            0
+        }"#,
+        0,
+        "97\n4\n",
+    );
+}
+
+#[test]
+fn mutable_container_writes_keep_written_owners_loaned() {
+    // A reference stored through `&mut Vec<&Point>` keeps its owner loaned
+    // after the call returns.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn add<'a>(values: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc, panic} {
+            Vec.push(values, p);
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let first = Point { x: 40, y: 2 };
+            let mut second = Point { x: 1, y: 1 };
+            let mut values: Vec<&Point> = [];
+            add(&mut values, &second);
+            second = Point { x: 9, y: 9 };
+            Vec.get(&values, 0).x
+        }"#,
+        "cannot replace an owner",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn replace<'a>(b: &mut Box<&'a Point>, p: &'a Point) -> Unit ! {panic} {
+            Box.set(b, p);
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let first = Point { x: 40, y: 2 };
+            let mut second = Point { x: 1, y: 1 };
+            let mut boxed: Box<&Point> = Box.new(&first);
+            replace(&mut boxed, &second);
+            second = Point { x: 9, y: 9 };
+            Box.read(&boxed).x
+        }"#,
+        "cannot replace an owner",
+    );
+    // A block-local owner cannot be written into a longer-lived container.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn add<'a>(values: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc, panic} {
+            Vec.push(values, p);
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut values: Vec<&Point> = [];
+            {
+                let local = Point { x: 1, y: 1 };
+                add(&mut values, &local);
+            }
+            Vec.get(&values, 0).x
+        }"#,
+        "borrow escapes the lexical scope",
+    );
+    // The written source must outlive the declared element lifetime.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn add<'a, 'b>(values: &mut Vec<&'a Point>, p: &'b Point) -> Unit ! {alloc, panic} {
+            Vec.push(values, p);
+        }
+        fn main() -> Unit ! {alloc, panic} { }"#,
+        "does not outlive its declared element lifetime",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn replace<'a, 'b>(b: &mut Box<&'a Point>, p: &'b Point) -> Unit ! {panic} {
+            Box.set(b, p);
+        }
+        fn main() -> Unit ! {alloc, panic} { }"#,
+        "does not outlive its declared element lifetime",
+    );
+    // An exclusive owner borrow still excludes shared aliases.
+    rejects(
+        r#"fn main() -> Unit ! {alloc, panic} {
+            let mut values: Vec<i64> = [1, 2];
+            let alias = &values;
+            Vec.push(&mut values, 3);
+            Vec.len(alias);
+        }"#,
+        "borrow",
+    );
+}
+
+#[test]
 fn reference_fields_carry_declared_lifetimes_and_read() {
     agrees(
         r#"struct Point { x: i64, y: i64 }

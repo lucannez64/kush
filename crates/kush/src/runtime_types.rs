@@ -1632,18 +1632,34 @@ impl<'a> Types<'a> {
                 });
             }
             if *mutable {
-                return Err(Diagnostic::new(
-                    ty.span,
-                    "mutable owner borrows are not supported; borrowing supports immutable &Box<T>, &Bytes, &Vec<T>, &Record, and slice views (use '&mut [T]' for a mutable slice view or '&mut Record' for a nominal record)",
-                ));
+                if !matches!(
+                    inner,
+                    Type::Box(_)
+                        | Type::Arena
+                        | Type::ArenaBox(_)
+                        | Type::Bytes
+                        | Type::String
+                        | Type::Vec(_)
+                ) {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "mutable owner borrows support Box<T>, Arena, ArenaBox<T>, Bytes, String, Vec<T>, records, and mutable slice views",
+                    ));
+                }
+                return Ok(Type::RefMut(self.pointer(inner)));
             }
             if !matches!(
                 inner,
-                Type::Box(_) | Type::Arena | Type::Bytes | Type::String | Type::Vec(_)
+                Type::Box(_)
+                    | Type::Arena
+                    | Type::ArenaBox(_)
+                    | Type::Bytes
+                    | Type::String
+                    | Type::Vec(_)
             ) {
                 return Err(Diagnostic::new(
                     ty.span,
-                    "borrowing supports immutable &Box<T>, &Bytes, &Vec<T>, &Record, and &[T] slice views",
+                    "borrowing supports immutable &Box<T>, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &Record, and &[T] slice views",
                 ));
             }
             return Ok(Type::Ref(self.pointer(inner)));

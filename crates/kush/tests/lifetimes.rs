@@ -1134,18 +1134,18 @@ fn elided_result_lifetimes_use_body_origins_and_reject_ambiguity() {
         fn main() -> Unit ! {} {}"#,
         "outlive",
     );
-    // Explicit output lifetimes still must name an explicitly annotated
-    // input; an anonymous input keeps its own fresh identity.
-    rejects(
+    // An explicit output lifetime is related to the returned input's
+    // lifetime by an inferred outlives bound.
+    check(
         "fn bad<'a>(view: &[i64]) -> &'a [i64] ! {panic} { view }
          fn main() -> Unit ! {} {}",
-        "does not appear on any parameter",
-    );
-    rejects(
+    )
+    .unwrap();
+    check(
         "fn bad<'a, 'b>(view: &'a [i64]) -> &'b [i64] ! {panic} { view }
          fn main() -> Unit ! {} {}",
-        "does not appear on any parameter",
-    );
+    )
+    .unwrap();
     // A mutable result still requires an exclusive input.
     rejects(
         "fn bad(view: &[i64]) -> &mut [i64] ! {panic} { panic() }
@@ -1164,6 +1164,84 @@ fn elided_result_lifetimes_use_body_origins_and_reject_ambiguity() {
          fn bad(view: &[i64]) -> Borrowed ! {panic} { view }
          fn main() -> Unit ! {} {}",
         "cannot be returned without an explicit lifetime",
+    );
+}
+
+#[test]
+fn helper_calls_and_explicit_results_infer_lifetime_bounds() {
+    // A body that delegates to a helper follows the helper's result source.
+    let stats = agrees(
+        r#"
+        fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
+        fn alias(a: &[i64], b: &[i64]) -> &[i64] ! {panic} { tail(a) }
+        fn main() -> i64 ! {io, panic} {
+            let x: [i64; 3] = [40, 1, 2];
+            let y: [i64; 2] = [7, 8];
+            print_i64(Slice.get(alias(&x[..], &y[..]), 0));
+            0
+        }
+        "#,
+        0,
+        "1\n",
+    );
+    assert_eq!(stats.allocations, stats.deallocations, "{stats:?}");
+    // An explicit result lifetime gets the missing outlives bound inferred
+    // from the returned source.
+    agrees(
+        r#"
+        fn shorten<'long, 'short>(view: &'long [i64]) -> &'short [i64] ! {panic} { view }
+        fn main() -> i64 ! {panic} {
+            let values: [i64; 2] = [40, 1];
+            Slice.get(shorten(&values[..]), 0)
+        }
+        "#,
+        40,
+        "",
+    );
+    agrees(
+        r#"
+        fn shorten<'long, 'short>(view: &'long mut [i64]) -> &'short mut [i64] ! {panic} {
+            &mut view[..]
+        }
+        fn main() -> i64 ! {panic} {
+            let mut values: [i64; 2] = [1, 40];
+            Slice.set(shorten(&mut values[..]), 0, 9);
+            values[0] * 4 + values[1]
+        }
+        "#,
+        76,
+        "",
+    );
+    // A result lifetime longer than the returned source cannot be inferred.
+    rejects(
+        r#"fn widen<'long: 'short, 'short>(view: &'short [i64]) -> &'long [i64] ! {panic} { view }
+        fn main() -> Unit ! {} {}"#,
+        "cannot infer an outlives bound",
+    );
+    // The helper source follows the argument that supplies it, not merely the
+    // first one.
+    agrees(
+        r#"
+        fn tail<'a>(view: &'a [i64]) -> &'a [i64] ! {panic} { view[1..] }
+        fn alias(a: &[i64], b: &[i64]) -> &[i64] ! {panic} { tail(b) }
+        fn main() -> i64 ! {panic} {
+            let x: [i64; 3] = [40, 1, 2];
+            let y: [i64; 2] = [7, 8];
+            Slice.get(alias(&x[..], &y[..]), 0)
+        }
+        "#,
+        8,
+        "",
+    );
+    rejects(
+        r#"
+        fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
+        fn alias(a: &[i64], b: &[i64]) -> &[i64] ! {panic} {
+            if true { tail(a) } else { tail(b) }
+        }
+        fn main() -> Unit ! {} {}
+        "#,
+        "distinct parameter lifetimes",
     );
 }
 
@@ -1247,16 +1325,18 @@ fn borrowed_returns_reject_dangling_storage_and_unrelated_lifetimes() {
         fn main() -> Unit ! {} {}"#,
         "outlive",
     );
-    rejects(
+    // An explicit result lifetime that the body never directly names is
+    // related to the returned source by an inferred outlives bound.
+    check(
         r#"fn f<'a, 'b>(x: &'a [i64]) -> &'b [i64] ! {} { x }
         fn main() -> Unit ! {} {}"#,
-        "does not appear on any parameter",
-    );
-    rejects(
+    )
+    .unwrap();
+    check(
         r#"fn f<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> &'a [i64] ! {} { y }
         fn main() -> Unit ! {} {}"#,
-        "not a slice parameter with the declared result lifetime",
-    );
+    )
+    .unwrap();
     // Unused lifetimes are rejected as relationships that cannot be satisfied,
     // while the declared lifetime must still be syntactically present.
     rejects(
@@ -1798,11 +1878,11 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
         fn main() -> Unit ! {} {}"#,
         "outlive",
     );
-    rejects(
+    check(
         r#"fn bad<'a, 'b>(s: &'a mut [i64]) -> &'b mut [i64] ! {} { s }
         fn main() -> Unit ! {} {}"#,
-        "does not appear on any parameter",
-    );
+    )
+    .unwrap();
     rejects(
         r#"fn bad<'a, 'b>(
             a: &'a mut [i64],
@@ -2260,6 +2340,9 @@ fn split_children_can_be_returned_only_through_matching_parameter_lifetimes() {
         0,
         "1\n2\n30\n",
     );
+    // The result is returned through a local destructuring binding rather
+    // than directly from the parameter, so the body-origin inference cannot
+    // relate it to `'a`; the explicit-bound requirement still applies.
     rejects(
         r#"fn bad<'a, 'b>(view: &'a mut [i64]) -> &'b mut [i64] ! {panic} {
             let (left, right) = Slice.split_at_mut(view, 1);
@@ -2821,12 +2904,12 @@ fn outlives_bounds_reject_wrong_way_shortening_and_mutability_upgrades() {
     rejects(
         r#"fn widen<'long: 'short, 'short>(view: &'short [i64]) -> &'long [i64] ! {panic} { view }
         fn main() -> Unit ! {} {}"#,
-        "does not appear on any parameter",
+        "cannot infer an outlives bound",
     );
     rejects(
         r#"fn widen_mut<'long: 'short, 'short>(view: &'short mut [i64]) -> &'long mut [i64] ! {panic} { view }
         fn main() -> Unit ! {} {}"#,
-        "does not appear on any parameter",
+        "cannot infer an outlives bound",
     );
     rejects(
         r#"fn upgrade<'long: 'short, 'short>(view: &'long [i64]) -> &'short mut [i64] ! {panic} { panic() }

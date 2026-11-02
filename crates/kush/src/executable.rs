@@ -512,6 +512,13 @@ pub(crate) enum VecOp {
     At,
     Push,
     Set,
+    /// The same mutations through an exclusive `&mut Vec<T>` receiver. The
+    /// caller keeps ownership; a growth updates the handle in the caller's
+    /// slot, and the call evaluates to Unit.
+    PushBorrowed,
+    SetBorrowed,
+    ClearBorrowed,
+    ReserveBorrowed,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SliceOp {
@@ -571,6 +578,10 @@ pub(crate) enum ExprKind {
     BoxNew(Box<Expr>),
     BoxTake(Box<Expr>),
     BoxRead(Box<Expr>),
+    /// Write a non-owning payload through an exclusive `&mut Box<T>` receiver.
+    /// The allocation and its capacity are retained; the old payload is a
+    /// reference or copyable scalar, so no owner is dropped.
+    BoxWrite(Box<Expr>, Box<Expr>),
     /// Consume an owned box, drop its affine payload exactly once after both
     /// arguments are evaluated, and store `payload` in the same allocation.
     /// Checked to require a non-linear old payload and a non-wider new layout.
@@ -1117,6 +1128,27 @@ fn call_result_type(signature: &Signature) -> Type {
     }
 }
 /// Outer lifetime annotation of a borrow type, if any.
+/// Reflexive-transitive closure of declared or inferred outlives edges.
+fn close_lifetime_bounds(mut closure: BTreeSet<(String, String)>) -> BTreeSet<(String, String)> {
+    loop {
+        let mut added = Vec::new();
+        for (long, short) in &closure {
+            for (other_long, other_short) in &closure {
+                if short == other_long {
+                    let edge = (long.clone(), other_short.clone());
+                    if !closure.contains(&edge) {
+                        added.push(edge);
+                    }
+                }
+            }
+        }
+        if added.is_empty() {
+            break;
+        }
+        closure.extend(added);
+    }
+    closure
+}
 fn borrow_lifetime(ty: &ast::Type) -> Option<String> {
     match &ty.kind {
         ast::TypeKind::Borrow { lifetime, .. } => lifetime.clone(),
@@ -1383,7 +1415,7 @@ fn fusion_expr_safe(
         | ExprKind::DynArrayNew { .. } => true,
         // A whole-value reference read/write is never fused: it depends on
         // aliasing storage and has no total, capture-free callback shape.
-        ExprKind::RefRead(_) | ExprKind::RefWrite(_, _) => false,
+        ExprKind::RefRead(_) | ExprKind::RefWrite(_, _) | ExprKind::BoxWrite(_, _) => false,
         // No loop has a checked termination argument here.
         ExprKind::While(..) | ExprKind::Loop(_) => false,
         ExprKind::Call(Target::ObjectFunction { .. }, _) => false,
@@ -1605,7 +1637,7 @@ fn fuse_expr(
         | ExprKind::Return(value)
         | ExprKind::Project(value, _)
         | ExprKind::RefRead(value) => fuse_expr(value, types, signatures, safety, fusions),
-        ExprKind::RefWrite(reference, value) => {
+        ExprKind::RefWrite(reference, value) | ExprKind::BoxWrite(reference, value) => {
             fuse_expr(reference, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
         }
@@ -1893,8 +1925,9 @@ fn placeholder_expr(span: Span) -> Box<Expr> {
 /// the ownership pass still checks every returned origin against the chosen
 /// lifetime, so a missed path becomes a checked dangling-borrow error rather
 /// than an unsound widening.
-fn value_lifetime_candidates(
+fn value_lifetime_candidates<'a>(
     resolution: &Resolution,
+    declared: &BTreeMap<BindingId, Declared<'a>>,
     expr: &ast::Expr,
     parameter_lifetimes: &BTreeMap<BindingId, String>,
     parameter_field_lifetimes: &BTreeMap<BindingId, BTreeMap<String, String>>,
@@ -1921,6 +1954,7 @@ fn value_lifetime_candidates(
             }
             value_lifetime_candidates(
                 resolution,
+                declared,
                 value,
                 parameter_lifetimes,
                 parameter_field_lifetimes,
@@ -1930,6 +1964,7 @@ fn value_lifetime_candidates(
         ast::ExprKind::Unary { operand: value, .. } | ast::ExprKind::Try(value) => {
             value_lifetime_candidates(
                 resolution,
+                declared,
                 value,
                 parameter_lifetimes,
                 parameter_field_lifetimes,
@@ -1944,6 +1979,7 @@ fn value_lifetime_candidates(
             let _ = (start, end);
             value_lifetime_candidates(
                 resolution,
+                declared,
                 value,
                 parameter_lifetimes,
                 parameter_field_lifetimes,
@@ -1953,6 +1989,7 @@ fn value_lifetime_candidates(
         ast::ExprKind::Block(block) => {
             block_value_lifetime_candidates(
                 resolution,
+                declared,
                 block,
                 parameter_lifetimes,
                 parameter_field_lifetimes,
@@ -1964,6 +2001,7 @@ fn value_lifetime_candidates(
         } => {
             block_value_lifetime_candidates(
                 resolution,
+                declared,
                 then,
                 parameter_lifetimes,
                 parameter_field_lifetimes,
@@ -1972,6 +2010,7 @@ fn value_lifetime_candidates(
             if let Some(otherwise) = otherwise {
                 value_lifetime_candidates(
                     resolution,
+                    declared,
                     otherwise,
                     parameter_lifetimes,
                     parameter_field_lifetimes,
@@ -1983,6 +2022,7 @@ fn value_lifetime_candidates(
             for arm in arms {
                 value_lifetime_candidates(
                     resolution,
+                    declared,
                     &arm.body,
                     parameter_lifetimes,
                     parameter_field_lifetimes,
@@ -1990,11 +2030,87 @@ fn value_lifetime_candidates(
                 );
             }
         }
+        ast::ExprKind::Call { callee, arguments } => {
+            // Follow a helper's declared result source through the matching
+            // argument. This keeps elided multi-input results inferable when
+            // the body delegates to a checked helper (`fn alias(a, b) { tail(a) }`).
+            for index in helper_result_parameters(resolution, declared, callee) {
+                if let Some(argument) = arguments.get(index) {
+                    value_lifetime_candidates(
+                        resolution,
+                        declared,
+                        argument,
+                        parameter_lifetimes,
+                        parameter_field_lifetimes,
+                        out,
+                    );
+                }
+            }
+        }
         _ => {}
     }
 }
-fn block_value_lifetime_candidates(
+/// Parameter indices of `callee` whose written borrow lifetime supplies its
+/// result. An explicit result lifetime selects every parameter that mentions
+/// it; an elided borrowed result selects the single input lifetime, if any.
+fn helper_result_parameters<'a>(
     resolution: &Resolution,
+    declared: &BTreeMap<BindingId, Declared<'a>>,
+    callee: &ast::Expr,
+) -> Vec<usize> {
+    let name = match &callee.kind {
+        ast::ExprKind::Name(_) => callee,
+        ast::ExprKind::Specialize { callee, .. } => callee,
+        _ => return Vec::new(),
+    };
+    let Some(id) = resolution.reference(name.span) else {
+        return Vec::new();
+    };
+    let Some(entry) = declared.get(&id) else {
+        return Vec::new();
+    };
+    let function = entry.ast;
+    let result = crate::grades::split(&function.result).0;
+    if !matches!(
+        result.kind,
+        ast::TypeKind::Borrow { .. } | ast::TypeKind::Slice(_)
+    ) {
+        return Vec::new();
+    }
+    let explicit = borrow_lifetime(result);
+    let mut inputs: Vec<(usize, Option<String>)> = Vec::new();
+    for (index, parameter) in function
+        .parameters
+        .iter()
+        .filter(|parameter| !parameter.erased)
+        .enumerate()
+    {
+        let ty = crate::grades::split(&parameter.ty).0;
+        if matches!(ty.kind, ast::TypeKind::Borrow { .. }) {
+            inputs.push((index, borrow_lifetime(ty)));
+        }
+    }
+    let Some(explicit) = explicit else {
+        // Elided result: only an unambiguous single input borrow can tell us
+        // which argument supplies it.
+        let distinct = inputs
+            .iter()
+            .map(|(index, name)| name.clone().unwrap_or_else(|| format!("#{index}")))
+            .collect::<BTreeSet<_>>();
+        if distinct.len() == 1 {
+            return inputs.iter().map(|(index, _)| *index).collect();
+        }
+        return Vec::new();
+    };
+    inputs
+        .iter()
+        .filter(|(_, name)| name.as_deref() == Some(explicit.as_str()))
+        .map(|(index, _)| *index)
+        .collect()
+}
+fn block_value_lifetime_candidates<'a>(
+    resolution: &Resolution,
+    declared: &BTreeMap<BindingId, Declared<'a>>,
     block: &ast::Block,
     parameter_lifetimes: &BTreeMap<BindingId, String>,
     parameter_field_lifetimes: &BTreeMap<BindingId, BTreeMap<String, String>>,
@@ -2005,6 +2121,7 @@ fn block_value_lifetime_candidates(
     for returned in returns {
         value_lifetime_candidates(
             resolution,
+            declared,
             returned,
             parameter_lifetimes,
             parameter_field_lifetimes,
@@ -2014,6 +2131,7 @@ fn block_value_lifetime_candidates(
     if let Some(tail) = &block.tail {
         value_lifetime_candidates(
             resolution,
+            declared,
             tail,
             parameter_lifetimes,
             parameter_field_lifetimes,
@@ -7606,7 +7724,7 @@ impl<'a> Functions<'a> {
                 ));
             }
         }
-        let lifetime_bounds = build_lifetime_bounds(&f.lifetimes)?;
+        let mut lifetime_bounds = build_lifetime_bounds(&f.lifetimes)?;
         for p in f.parameters.iter().filter(|p| !p.erased) {
             let (ty, grade) = split_grade(&p.ty);
             parameters.push(types.ty_in(ty, &substitution)?);
@@ -7711,6 +7829,7 @@ impl<'a> Functions<'a> {
         // and are already split above.
         let written_result = split_grade(&f.result).0;
         let explicit_result_lifetime = borrow_lifetime(written_result);
+        let result_was_explicit = explicit_result_lifetime.is_some();
         let result_lifetime = match explicit_result_lifetime {
             Some(lifetime) => Some(lifetime),
             None if (result.is_view() || result.is_ref())
@@ -7745,6 +7864,7 @@ impl<'a> Functions<'a> {
                         for value in returned {
                             value_lifetime_candidates(
                                 resolution,
+                                &self.declared,
                                 value,
                                 &parameter_binder_lifetimes,
                                 &parameter_field_lifetimes,
@@ -7790,6 +7910,52 @@ impl<'a> Functions<'a> {
             }
             None => None,
         };
+        // An explicit result lifetime need not repeat the caller's declared
+        // outlives bounds: when the body returns a parameter borrow that does
+        // not already outlive the result, infer that relation. Every returned
+        // source contributes, which is conservative when a function can return
+        // more than one parameter borrow. The inferred edges are closed
+        // transitively and used by the same call-site validation as explicit
+        // bounds.
+        if result_was_explicit
+            && (result.is_view() || result.is_ref())
+            && let Some(result_lifetime) = &result_lifetime
+            && let Some(body) = &f.body
+        {
+            let mut returned = Vec::new();
+            collect_block_returns(body, &mut returned);
+            if let Some(tail) = &body.tail {
+                returned.push(tail);
+            }
+            let mut sources = BTreeSet::new();
+            for value in returned {
+                value_lifetime_candidates(
+                    resolution,
+                    &self.declared,
+                    value,
+                    &parameter_binder_lifetimes,
+                    &parameter_field_lifetimes,
+                    &mut sources,
+                );
+            }
+            for source in sources {
+                if source == *result_lifetime
+                    || outlives(&lifetime_bounds, &source, result_lifetime)
+                {
+                    continue;
+                }
+                if outlives(&lifetime_bounds, result_lifetime, &source) {
+                    return Err(Diagnostic::new(
+                        f.result.span,
+                        format!(
+                            "cannot infer an outlives bound for result lifetime '{result_lifetime}': the returned value has the longer lifetime '{source}'; use one shared lifetime instead"
+                        ),
+                    ));
+                }
+                lifetime_bounds.insert((source, result_lifetime.clone()));
+            }
+            lifetime_bounds = close_lifetime_bounds(lifetime_bounds);
+        }
         if result.is_view() {
             let Some(lifetime) = &result_lifetime else {
                 return Err(Diagnostic::new(
@@ -8998,7 +9164,7 @@ impl Checker<'_, '_> {
     /// matching the existing borrow rules. A value that is already a reference
     /// is passed through unchanged.
     fn method_borrow(&mut self, first: Expr) -> Result<Expr> {
-        if matches!(first.ty, Type::Ref(_)) {
+        if matches!(first.ty, Type::Ref(_) | Type::RefMut(_)) {
             return Ok(first);
         }
         if !matches!(
@@ -12207,12 +12373,12 @@ impl Checker<'_, '_> {
             return Ok(first);
         } else if borrowed {
             match first.ty {
-                Type::Ref(p) if self.types.pointees[p] == Type::String => first,
+                Type::Ref(p) | Type::RefMut(p) if self.types.pointees[p] == Type::String => first,
                 _ => {
                     return Err(Diagnostic::new(
                         first.span,
                         format!(
-                            "{name} expects an immutable &String, found {}; borrow an owned local with &name",
+                            "{name} expects a &String or &mut String, found {}; borrow an owned local with &name",
                             self.types.name(first.ty)
                         ),
                     ));
@@ -14680,7 +14846,8 @@ impl Checker<'_, '_> {
                 ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
                     find(checker, left).or_else(|| find(checker, right))
                 }
-                ExprKind::RefAssign(reference, _, value) => {
+                ExprKind::RefAssign(reference, _, value)
+                | ExprKind::BoxWrite(reference, value) => {
                     find(checker, reference).or_else(|| find(checker, value))
                 }
                 ExprKind::BoxReuse { owner, payload }
@@ -15497,26 +15664,44 @@ impl Checker<'_, '_> {
                         }
                     } else {
                         if *mutable {
-                            return Err(Diagnostic::new(
-                                span,
-                                "mutable owner borrows are not supported; borrow records with '&mut name', or use '&mut name[..]' for a mutable slice view",
-                            ));
+                            if !c.locals[slot].mutable {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    "cannot mutably borrow an immutable binding; declare it with let mut",
+                                ));
+                            }
+                            if !matches!(
+                                ty,
+                                Type::Box(_)
+                                    | Type::Arena
+                                    | Type::ArenaBox(_)
+                                    | Type::Bytes
+                                    | Type::String
+                                    | Type::Vec(_)
+                            ) {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    "mutable owner borrows support Box<T>, Arena, ArenaBox<T>, Bytes, String, and Vec<T>; borrow records with '&mut name', or use '&mut name[..]' for a mutable slice view",
+                                ));
+                            }
+                            (ExprKind::Borrow(slot), Type::RefMut(c.types.pointer(ty)))
+                        } else {
+                            if !matches!(
+                                ty,
+                                Type::Box(_)
+                                    | Type::Arena
+                                    | Type::ArenaBox(_)
+                                    | Type::Bytes
+                                    | Type::String
+                                    | Type::Vec(_)
+                            ) {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    "borrowing supports immutable &Box<T>, &Arena, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &Record, and &[T] slice views",
+                                ));
+                            }
+                            (ExprKind::Borrow(slot), Type::Ref(c.types.pointer(ty)))
                         }
-                        if !matches!(
-                            ty,
-                            Type::Box(_)
-                                | Type::Arena
-                                | Type::ArenaBox(_)
-                                | Type::Bytes
-                                | Type::String
-                                | Type::Vec(_)
-                        ) {
-                            return Err(Diagnostic::new(
-                                span,
-                                "borrowing supports immutable &Box<T>, &Arena, &Bytes, &String, &Vec<T>, &Record, and &[T] slice views",
-                            ));
-                        }
-                        (ExprKind::Borrow(slot), Type::Ref(c.types.pointer(ty)))
                     }
                 }
                 ast::ExprKind::Unary { op, operand, .. } => {
@@ -16006,9 +16191,9 @@ impl Checker<'_, '_> {
                         }
                         return Err(Diagnostic::new(span, "Bytes.from requires exactly one string literal; general runtime strings are deferred"));
                     }
-                    if binding.kind == BindingKind::Builtin && matches!(binding.name.as_str(), "Box.new" | "Box.take" | "Box.read" | "Box.reuse" | "Box.reuse_grow" | "Box.try_new" | "Box.try_reuse" | "drop") {
+                    if binding.kind == BindingKind::Builtin && matches!(binding.name.as_str(), "Box.new" | "Box.take" | "Box.read" | "Box.set" | "Box.reuse" | "Box.reuse_grow" | "Box.try_new" | "Box.try_reuse" | "drop") {
                         let name = binding.name.as_str();
-                        let arity = if matches!(name, "Box.reuse" | "Box.reuse_grow" | "Box.try_reuse") { 2 } else { 1 };
+                        let arity = if matches!(name, "Box.reuse" | "Box.reuse_grow" | "Box.try_reuse" | "Box.set") { 2 } else { 1 };
                         if arguments.len() != arity { return Err(Diagnostic::new(span, format!("{name} requires exactly {arity} argument(s)"))); }
                         match name {
                             "Box.reuse" => return c.box_reuse(&arguments[0], &arguments[1], expected, span),
@@ -16032,7 +16217,20 @@ impl Checker<'_, '_> {
                                 let ty = Type::Box(c.types.pointer(pointee)); (ExprKind::BoxNew(Box::new(arg)), ty)
                             }
                             "Box.take" => { let Type::Box(index) = arg.ty else { return Err(Diagnostic::new(span, "Box.take requires an owned Box<T>")); }; let ty = c.unannotate(c.types.pointees[index]); (ExprKind::BoxTake(Box::new(arg)), ty) }
-                            "Box.read" => { let Type::Ref(index) = arg.ty else { return Err(Diagnostic::new(span, "Box.read requires an immutable &Box<T>")); }; let Type::Box(inner) = c.types.pointees[index] else { return Err(Diagnostic::new(span, "Box.read requires an immutable &Box<T>, not another borrow type")); }; let payload = c.types.pointees[inner]; if matches!(c.unannotate(payload), Type::RefMut(_)) { return Err(Diagnostic::new(span, "Box.read cannot copy an exclusive reference element; move it out with Box.take")); } let ty = c.unannotate(payload); (ExprKind::BoxRead(Box::new(arg)), ty) }
+                            "Box.read" => { let (Type::Ref(index) | Type::RefMut(index)) = arg.ty else { return Err(Diagnostic::new(span, "Box.read requires a &Box<T> or &mut Box<T>")); }; let Type::Box(inner) = c.types.pointees[index] else { return Err(Diagnostic::new(span, "Box.read requires a &Box<T> or &mut Box<T>, not another borrow type")); }; let payload = c.types.pointees[inner]; if matches!(c.unannotate(payload), Type::RefMut(_)) { return Err(Diagnostic::new(span, "Box.read cannot copy an exclusive reference element; move it out with Box.take")); } let ty = c.unannotate(payload); (ExprKind::BoxRead(Box::new(arg)), ty) }
+                            "Box.set" => {
+                                let Type::RefMut(index) = arg.ty else { return Err(Diagnostic::new(span, "Box.set requires an exclusive &mut Box<T>")); };
+                                let Type::Box(inner) = c.types.pointees[index] else { return Err(Diagnostic::new(span, "Box.set requires an exclusive &mut Box<T>")); };
+                                let payload = c.unannotate(c.types.pointees[inner]);
+                                let value = c.expr_expected(&arguments[1], Some(payload))?;
+                                if value.ty != Type::Never {
+                                    c.expect(value.ty, payload, value.span)?;
+                                }
+                                if c.owned_type(value.ty) || c.linear_type(value.ty) {
+                                    return Err(Diagnostic::new(value.span, "Box.set can replace a reference or copyable payload, but not an owning value; replace an owning Box with Box.reuse"));
+                                }
+                                (ExprKind::BoxWrite(Box::new(arg), Box::new(value)), Type::Unit)
+                            }
                             _ => { if matches!(arg.ty, Type::Ref(_) | Type::RefMut(_)) { return Err(Diagnostic::new(span, "drop consumes owned/copy values, not borrowed handles")); } (ExprKind::Drop(Box::new(arg)), Type::Unit) }
                         };
                         let value = Expr { kind, ty, span, resource: None };
@@ -22504,9 +22702,14 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
+        let mut borrowed_mutation = false;
         let buffer = match (name, first.ty) {
-            ("Bytes.at", Type::Ref(p)) if self.types.pointees[p] == Type::Bytes => Type::Bytes,
-            ("Vec.len" | "Vec.get" | "Vec.at", Type::Ref(p))
+            ("Bytes.at", Type::Ref(p) | Type::RefMut(p))
+                if self.types.pointees[p] == Type::Bytes =>
+            {
+                Type::Bytes
+            }
+            ("Vec.len" | "Vec.get" | "Vec.at", Type::Ref(p) | Type::RefMut(p))
                 if matches!(self.types.pointees[p], Type::Vec(_)) =>
             {
                 self.types.pointees[p]
@@ -22515,12 +22718,19 @@ impl Checker<'_, '_> {
                 "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" | "Vec.try_reserve",
                 Type::Vec(_),
             ) => first.ty,
+            (
+                "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve",
+                Type::RefMut(p),
+            ) if matches!(self.types.pointees[p], Type::Vec(_)) => {
+                borrowed_mutation = true;
+                self.types.pointees[p]
+            }
             (_, Type::Never) => return Ok(first),
             _ => {
                 let wanted = match name {
                     "Bytes.at" => "&Bytes",
                     "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" | "Vec.try_reserve" => {
-                        "an owned Vec<T> (it is consumed and returned)"
+                        "an owned Vec<T> (it is consumed and returned), or an exclusive '&mut Vec<T>' for an in-place update"
                     }
                     _ => "&Vec<T>",
                 };
@@ -22571,7 +22781,11 @@ impl Checker<'_, '_> {
         }
         let (op, effects, ty) = match name {
             "Vec.len" => (VecOp::Len, 0, Type::I64),
+            "Vec.clear" if borrowed_mutation => (VecOp::ClearBorrowed, 0, Type::Unit),
             "Vec.clear" => (VecOp::Clear, 0, buffer),
+            "Vec.reserve" if borrowed_mutation => {
+                (VecOp::ReserveBorrowed, ALLOC | PANIC, Type::Unit)
+            }
             "Vec.reserve" => (VecOp::Reserve, ALLOC | PANIC, buffer),
             "Vec.try_reserve" => {
                 let (result, shape) = self.types.result_type(buffer, buffer, span)?;
@@ -22586,7 +22800,9 @@ impl Checker<'_, '_> {
             }
             "Vec.get" => (VecOp::Get, PANIC, self.unannotate(element)),
             "Vec.at" | "Bytes.at" => (VecOp::At, 0, self.unannotate(element)),
+            "Vec.push" if borrowed_mutation => (VecOp::PushBorrowed, ALLOC | PANIC, Type::Unit),
             "Vec.push" => (VecOp::Push, ALLOC | PANIC, buffer),
+            "Vec.set" if borrowed_mutation => (VecOp::SetBorrowed, PANIC, Type::Unit),
             _ => (VecOp::Set, PANIC, buffer),
         };
         self.require(effects, span)?;
@@ -23763,6 +23979,7 @@ fn block_allocates(block: &Block) -> bool {
             | ExprKind::Coerce { value, .. }
             | ExprKind::Break(Some(value), _)
             | ExprKind::Assign(_, value) => expr(value),
+            ExprKind::BoxWrite(reference, value) => expr(reference) || expr(value),
             ExprKind::BoxReuseGrow { owner, payload }
             | ExprKind::BoxTryReuse { owner, payload, .. }
             | ExprKind::ArenaAlloc {

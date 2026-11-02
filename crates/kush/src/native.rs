@@ -1529,6 +1529,9 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
         (VecOp::Get, "kush_vec_get", 3, false),
         (VecOp::Push, "kush_vec_push", 2, true),
         (VecOp::Set, "kush_vec_set", 4, true),
+        (VecOp::PushBorrowed, "kush_vec_push", 2, true),
+        (VecOp::SetBorrowed, "kush_vec_set", 4, true),
+        (VecOp::ReserveBorrowed, "kush_vec_reserve", 2, true),
     ] {
         let mut sig = module.make_signature();
         sig.params.extend((0..params).map(|_| AbiParam::new(I64)));
@@ -1812,7 +1815,19 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             // pinning rule.
             let record = local.ty.layout().is_some_and(|id| program.enums[id].record);
             let object = matches!(local.ty, Type::Union(_) | Type::DynObj(_));
-            if array || record || object {
+            // Owning handles are pinned too so an exclusive `&mut Box`/`&mut
+            // Vec` can update the caller's slot in place, including after a
+            // vector growth moves the allocation.
+            let owner_handle = matches!(
+                local.ty,
+                Type::Box(_)
+                    | Type::ArenaBox(_)
+                    | Type::Arena
+                    | Type::Bytes
+                    | Type::String
+                    | Type::Vec(_)
+            );
+            if array || record || object || owner_handle {
                 let width = program.width(local.ty);
                 let slot = g.builder.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
@@ -1849,6 +1864,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
                 active,
                 words,
                 ty: *ty,
+                location: None,
             });
         }
         let mut offset = 0;
@@ -1947,6 +1963,10 @@ fn collect_expr_literals<'a>(expr: &'a Expr, out: &mut Vec<(usize, &'a [u8])>) {
         | ExprKind::Coerce { value: v, .. }
         | ExprKind::Break(Some(v), _)
         | ExprKind::Assign(_, v) => collect_expr_literals(v, out),
+        ExprKind::BoxWrite(reference, value) => {
+            collect_expr_literals(reference, out);
+            collect_expr_literals(value, out);
+        }
         ExprKind::ArenaAlloc { arena, value } => {
             collect_expr_literals(arena, out);
             collect_expr_literals(value, out);
@@ -2092,6 +2112,10 @@ fn collect_closure_types(program: &Executable) -> Vec<Vec<Type>> {
             | ExprKind::Coerce { value, .. }
             | ExprKind::Break(Some(value), _)
             | ExprKind::Assign(_, value) => walk(program, value, out),
+            ExprKind::BoxWrite(reference, value) => {
+                walk(program, reference, out);
+                walk(program, value, out);
+            }
             ExprKind::ArenaAlloc { arena, value } => {
                 walk(program, arena, out);
                 walk(program, value, out);
@@ -2566,6 +2590,10 @@ fn collect_task_types(program: &Executable) -> Vec<usize> {
             | ExprKind::Coerce { value, .. }
             | ExprKind::Break(Some(value), _)
             | ExprKind::Assign(_, value) => walk(value, out),
+            ExprKind::BoxWrite(reference, value) => {
+                walk(reference, out);
+                walk(value, out);
+            }
             ExprKind::ArenaAlloc { arena, value } => {
                 walk(arena, out);
                 walk(value, out);
@@ -2785,6 +2813,10 @@ struct Tracked {
     active: Variable,
     words: Vec<Variable>,
     ty: Type,
+    /// Stack storage for a pinned owning local. Reads of the tracked value at
+    /// cleanup go through this location so an in-place `&mut` mutation is
+    /// observed exactly once.
+    location: Option<Value>,
 }
 type Words = Vec<Value>;
 struct Generator<'a, 'b> {
@@ -2899,14 +2931,21 @@ impl Generator<'_, '_> {
             .is_some_and(Grade::is_zero)
     }
     fn activate_local(&mut self, slot: usize) {
-        let values = self.variables[slot]
-            .iter()
-            .map(|v| self.builder.use_var(*v))
-            .collect::<Vec<_>>();
-        self.track(
-            self.program.functions[self.function_index].local_resources[slot],
-            &values,
-        );
+        let location = self.locations[slot];
+        let values = if let Some(pointer) = location {
+            let width = self.variables[slot].len();
+            self.load_words(pointer, 0, width)
+        } else {
+            self.variables[slot]
+                .iter()
+                .map(|v| self.builder.use_var(*v))
+                .collect::<Vec<_>>()
+        };
+        let id = self.program.functions[self.function_index].local_resources[slot];
+        self.track(id, &values);
+        if let Some(id) = id {
+            self.tracked[id].location = location;
+        }
     }
     fn drop_value(&mut self, ty: Type, values: &[Value]) {
         if self.program.owns(ty) {
@@ -2926,11 +2965,16 @@ impl Generator<'_, '_> {
             self.builder.ins().brif(active, yes, &[], no, &[]);
             self.builder.switch_to_block(yes);
             self.deactivate(Some(id));
-            let values = self.tracked[id]
-                .words
-                .iter()
-                .map(|v| self.builder.use_var(*v))
-                .collect::<Vec<_>>();
+            let values = if let Some(pointer) = self.tracked[id].location {
+                let width = self.program.width(self.tracked[id].ty);
+                self.load_words(pointer, 0, width)
+            } else {
+                self.tracked[id]
+                    .words
+                    .iter()
+                    .map(|v| self.builder.use_var(*v))
+                    .collect::<Vec<_>>()
+            };
             self.drop_value(self.tracked[id].ty, &values);
             self.jump(no, &[]);
             self.builder.switch_to_block(no);
@@ -3693,6 +3737,19 @@ impl Generator<'_, '_> {
                         .expect("checked inline object borrow is pinned to stack storage");
                     return Some(vec![pointer]);
                 }
+                if matches!(
+                    local.ty,
+                    Type::Box(_)
+                        | Type::ArenaBox(_)
+                        | Type::Arena
+                        | Type::Bytes
+                        | Type::String
+                        | Type::Vec(_)
+                ) {
+                    let pointer = self.locations[*slot]
+                        .expect("checked owner borrow is pinned to stack storage");
+                    return Some(vec![pointer]);
+                }
                 let variable = self.builder.use_var(self.variables[*slot][0]);
                 let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
@@ -3754,6 +3811,24 @@ impl Generator<'_, '_> {
                         })
                         .collect(),
                 );
+            }
+            ExprKind::BoxWrite(reference, value) => {
+                let reference = lower!(self.scalar(reference));
+                let pointer = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                let words = lower!(self.expr(value));
+                for (index, word) in words.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        pointer,
+                        (index * 8) as i32,
+                    );
+                }
+                self.consume(value);
+                return Some(vec![self.constant(0)]);
             }
             ExprKind::BoxReuse { owner, payload } => {
                 let pointer = lower!(self.scalar(owner));
@@ -5779,6 +5854,85 @@ impl Generator<'_, '_> {
                 let tag = self.builder.ins().select(failed, error, ok);
                 let owner = self.builder.ins().select(failed, values[0], grown);
                 vec![tag, owner]
+            }
+            VecOp::ClearBorrowed => {
+                let reference = values[0];
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                if self.program.owns(element) {
+                    let length = self
+                        .builder
+                        .ins()
+                        .load(I64, ir::MemFlagsData::new(), handle, 0);
+                    let head = self.builder.create_block();
+                    let body = self.builder.create_block();
+                    let done = self.builder.create_block();
+                    self.builder.append_block_param(head, I64);
+                    self.jump(head, &[length]);
+                    self.builder.switch_to_block(head);
+                    let index = self.builder.block_params(head)[0];
+                    let more = self.builder.ins().icmp_imm_s(IntCC::NotEqual, index, 0);
+                    self.builder.ins().brif(more, body, &[], done, &[]);
+                    self.builder.switch_to_block(body);
+                    let previous = self.builder.ins().iadd_imm_s(index, -1);
+                    let stride = self.builder.ins().imul_imm_s(previous, (width * 8) as i64);
+                    let slot = self.builder.ins().iadd(handle, stride);
+                    let fields = self.load_words(slot, 24, width);
+                    self.drop_value(element, &fields);
+                    self.jump(head, &[previous]);
+                    self.builder.switch_to_block(done);
+                }
+                let zero = self.constant(0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), zero, handle, 0);
+                return vec![self.constant(0)];
+            }
+            VecOp::ReserveBorrowed => {
+                let reference = values[0];
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                let grown = call(self, VecOp::Reserve, &[handle, values[1]])[0];
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), grown, reference, 0);
+                return vec![self.constant(0)];
+            }
+            VecOp::PushBorrowed => {
+                let reference = values[0];
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                let item = self.stack_words(width);
+                self.store_words(item, &values[1..1 + width]);
+                let grown = call(self, VecOp::Push, &[handle, item])[0];
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), grown, reference, 0);
+                return vec![self.constant(0)];
+            }
+            VecOp::SetBorrowed => {
+                let reference = values[0];
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                let item = self.stack_words(width);
+                self.store_words(item, &values[2..2 + width]);
+                let old = self.stack_words(width);
+                call(
+                    self,
+                    VecOp::Set,
+                    &[handle, values[1], item, old],
+                );
+                let previous = self.load_words(old, 0, width);
+                self.drop_value(element, &previous);
+                return vec![self.constant(0)];
             }
             VecOp::Clear => {
                 let handle = values[0];
