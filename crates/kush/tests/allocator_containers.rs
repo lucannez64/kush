@@ -391,3 +391,250 @@ fn alloc_containers_reject_borrowed_and_linear_elements() {
         "linear",
     );
 }
+
+const GROWING_ALLOCATOR: &str = r#"
+fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+    Bytes.with_capacity(bytes)
+}
+fn block_free(block: Bytes) -> Unit ! {} {
+    drop(block)
+}
+fn block_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(bytes);
+    let mut i = 0;
+    while i < old_bytes {
+        out = Bytes.push(out, Bytes.get(&block, i));
+        i = i + 1;
+    }
+    drop(block);
+    out
+}
+"#;
+
+#[test]
+fn alloc_vec_growth_uses_a_realloc_hook_and_preserves_elements() {
+    let source = format!(
+        r#"{GROWING_ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let allocator = Allocator.with_realloc(block_alloc, block_free, block_grow);
+            let vector: AllocVec<i64> = AllocVec.new(allocator);
+            let vector = AllocVec.push(vector, 1);
+            let vector = AllocVec.push(vector, 2);
+            let vector = AllocVec.push(vector, 3);
+            let vector = AllocVec.push(vector, 4);
+            let vector = AllocVec.push(vector, 5);
+            AllocVec.len(&vector) + AllocVec.get(&vector, 0) + AllocVec.get(&vector, 4)
+        }}"#
+    );
+    let (result, stats) = evaluate(&source);
+    assert_eq!(result, 11);
+    // The growth hook allocates through the same allocator, so every block is
+    // still released through the recorded release callback exactly once.
+    assert_eq!(stats.allocations, stats.deallocations);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 11);
+}
+
+#[test]
+fn alloc_vec_try_push_reports_refusal_and_preserves_state() {
+    let source = r#"
+        enum Result<T, E> { Ok(T), Err(E) }
+        fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
+        fn refuse_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+            if bytes > 32 { Bytes.with_capacity(0) } else { Bytes.with_capacity(bytes) }
+        }
+        fn push_ok(v: AllocVec<i64>, x: i64) -> AllocVec<i64> ! {alloc, panic} {
+            match AllocVec.try_push(v, x) {
+                Ok(vector) => vector,
+                Err(pair) => match pair { (vector, _) => vector }
+            }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let allocator = Allocator.new(refuse_alloc, block_free);
+            let v: AllocVec<i64> = AllocVec.new(allocator);
+            let v = push_ok(v, 1);
+            let v = push_ok(v, 2);
+            let v = push_ok(v, 3);
+            let v = push_ok(v, 4);
+            match AllocVec.try_push(v, 5) {
+                Ok(vector) => 100 + AllocVec.len(&vector),
+                Err(pair) => match pair {
+                    (vector, refused) =>
+                        AllocVec.len(&vector) * 10 + AllocVec.get(&vector, 0) + refused
+                }
+            }
+        }"#;
+    let (result, stats) = evaluate(source);
+    // Four elements survive, the fifth is returned untouched, and the refused
+    // empty block is released through the same allocator.
+    assert_eq!(result, 40 + 1 + 5);
+    assert_eq!(stats.allocations, stats.deallocations);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 46);
+}
+
+#[test]
+fn alloc_vec_try_push_returns_the_owning_element_on_refusal() {
+    let source = r#"
+        enum Result<T, E> { Ok(T), Err(E) }
+        fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
+        fn refuse_alloc(bytes: i64) -> Bytes ! {alloc, panic} {
+            if bytes > 8 { Bytes.with_capacity(0) } else { Bytes.with_capacity(bytes) }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let allocator = Allocator.new(refuse_alloc, block_free);
+            let v: AllocVec<Box<i64>> = AllocVec.new(allocator);
+            let v = match AllocVec.try_push(v, Box.new(1)) {
+                Ok(vector) => vector,
+                Err(_) => {
+                    let empty: AllocVec<Box<i64>> = AllocVec.with_capacity(allocator, 1);
+                    empty
+                }
+            };
+            let v = AllocVec.push(v, Box.new(2));
+            match AllocVec.try_push(v, Box.new(41)) {
+                Ok(vector) => AllocVec.len(&vector),
+                Err(pair) => match pair { (vector, box) => Box.take(box) + AllocVec.len(&vector) }
+            }
+        }"#;
+    let (result, stats) = evaluate(source);
+    // Two payload boxes are live through the vector and one through the
+    // refused element; every payload and block is released exactly once.
+    assert_eq!(result, 41 + 1);
+    assert_eq!(stats.allocations, stats.deallocations);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+}
+
+#[test]
+fn alloc_vec_pop_returns_the_last_copyable_element() {
+    let source = format!(
+        r#"{ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let allocator = Allocator.new(block_alloc, block_free);
+            let vector: AllocVec<i64> = AllocVec.with_capacity(allocator, 2);
+            let vector = AllocVec.push(vector, 10);
+            let vector = AllocVec.push(vector, 20);
+            let (vector, last) = AllocVec.pop(vector);
+            let (vector, first) = AllocVec.pop(vector);
+            AllocVec.len(&vector) + first + last
+        }}"#
+    );
+    let (result, stats) = evaluate(&source);
+    assert_eq!(result, 30);
+    assert_eq!(stats.allocations, stats.deallocations);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 30);
+    let empty = format!(
+        r#"{ALLOCATOR}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let allocator = Allocator.new(block_alloc, block_free);
+            let vector: AllocVec<i64> = AllocVec.new(allocator);
+            let (vector, _) = AllocVec.pop(vector);
+            AllocVec.len(&vector)
+        }}"#
+    );
+    let program = check(&empty).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(error.message.contains("AllocVec is empty"), "{error:?}");
+}
+
+#[test]
+fn allocator_growth_hook_contracts_are_checked() {
+    rejects(
+        r#"
+        fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+        fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
+        fn bad_grow(block: Bytes) -> Bytes ! {alloc, panic} { block }
+        fn main() -> Unit ! {alloc, panic} {
+            let allocator = Allocator.with_realloc(block_alloc, block_free, bad_grow);
+        }"#,
+        "growth function",
+    );
+    rejects(
+        r#"
+        fn block_alloc(bytes: i64) -> Bytes ! {alloc, panic} { Bytes.with_capacity(bytes) }
+        fn block_free(block: Bytes) -> Unit ! {} { drop(block) }
+        fn impure_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic, io} {
+            let _ = block;
+            let _ = old_bytes;
+            Bytes.with_capacity(bytes)
+        }
+        fn main() -> Unit ! {alloc, panic, io} {
+            let allocator = Allocator.with_realloc(block_alloc, block_free, impure_grow);
+        }"#,
+        "growth callbacks may only declare",
+    );
+    // A growth hook that returns a block smaller than the request is a panic,
+    // never a partially moved vector.
+    let short = format!(
+        r#"{ALLOCATOR}
+        fn short_grow(block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {{alloc, panic}} {{
+            let _ = old_bytes;
+            drop(block);
+            Bytes.with_capacity(0)
+        }}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let allocator = Allocator.with_realloc(block_alloc, block_free, short_grow);
+            let vector: AllocVec<i64> = AllocVec.new(allocator);
+            let vector = AllocVec.push(vector, 1);
+            let vector = AllocVec.push(vector, 2);
+            let vector = AllocVec.push(vector, 3);
+            let vector = AllocVec.push(vector, 4);
+            let vector = AllocVec.push(vector, 5);
+            AllocVec.len(&vector)
+        }}"#
+    );
+    let program = check(&short).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(error.message.contains("smaller than"), "{error:?}");
+    // The fallible append ignores the growth hook by design, so a refusal can
+    // preserve the vector even when a hook exists.
+    let fallible = format!(
+        r#"enum Result<T, E> {{ Ok(T), Err(E) }}
+        {GROWING_ALLOCATOR}
+        fn refuse_alloc(bytes: i64) -> Bytes ! {{alloc, panic}} {{
+            if bytes > 8 {{ Bytes.with_capacity(0) }} else {{ Bytes.with_capacity(bytes) }}
+        }}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let allocator =
+                Allocator.with_realloc(refuse_alloc, block_free, block_grow);
+            let vector: AllocVec<i64> = AllocVec.with_capacity(allocator, 1);
+            let vector = AllocVec.push(vector, 1);
+            match AllocVec.try_push(vector, 2) {{
+                Ok(vector) => AllocVec.len(&vector),
+                Err(pair) => match pair {{ (vector, x) => x + AllocVec.len(&vector) }}
+            }}
+        }}"#
+    );
+    let (result, stats) = evaluate(&fallible);
+    assert_eq!(result, 3);
+    assert_eq!(stats.allocations, stats.deallocations);
+    // The allocation callback may panic, so a fallible append still requires
+    // the caller to declare `panic` as well as `alloc`.
+    rejects(
+        r#"
+        enum Result<T, E> { Ok(T), Err(E) }
+        fn push(v: AllocVec<i64>) -> i64 ! {alloc} {
+            match AllocVec.try_push(v, 1) {
+                Ok(vector) => AllocVec.len(&vector),
+                Err(pair) => match pair { (vector, _) => AllocVec.len(&vector) }
+            }
+        }
+        fn main() -> Unit ! {} {}"#,
+        "requires effects {panic}",
+    );
+    // Pop copies its element, so owning elements must be consumed explicitly.
+    rejects(
+        &format!(
+            r#"{ALLOCATOR}
+            fn main() -> i64 ! {{alloc, panic}} {{
+                let allocator = Allocator.new(block_alloc, block_free);
+                let vector: AllocVec<Box<i64>> = AllocVec.new(allocator);
+                let (vector, _) = AllocVec.pop(vector);
+                AllocVec.len(&vector)
+            }}"#
+        ),
+        "copies its element",
+    );
+}
