@@ -382,7 +382,7 @@ with `Nat` parameters substitute per registered member. Local Linux x86-64
 validation used `target/dyn-traits` with debug information disabled and two
 Cargo jobs:
 
-- Full locked workspace suite: **889 passed, 0 failed**.
+- Full locked workspace suite: **890 passed, 0 failed**.
 - `cargo fmt --all -- --check`: passed.
 - All-targets Clippy: passed.
 

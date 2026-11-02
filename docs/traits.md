@@ -802,7 +802,7 @@ borrowed receivers with generic scalars, loan retention into later arguments,
 natural trait parameters, cross-module visibility, and the runnable
 `examples/generic_traits.kush` example.
 
-`trait_advanced.rs` adds fifty-three tests for associated type/constant
+`trait_advanced.rs` adds fifty-four tests for associated type/constant
 projection and substitution, `T.Out` in bounded generic results, inherited
 constant defaults, tuple/array aggregate constants with aliases and length diagnostics, checked constant arithmetic and range/division diagnostics,
 associated type defaults (trait-argument substitution, chained `Self::Other`

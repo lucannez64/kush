@@ -1665,3 +1665,38 @@ fn borrowed_object_results_require_a_stable_receiver_and_borrowed_receiver() {
         "borrowed value through an owned receiver",
     );
 }
+
+#[test]
+fn open_objects_clean_up_fields_and_affine_owning_results() {
+    let stats = agrees(
+        r#"
+        struct Text { name: String, count: i64 }
+        struct W<T> { value: T }
+        trait Make {
+            fn value(self: &Self) -> i64 ! {panic};
+            fn make(self: Self) -> Box<i64> ! {alloc, panic};
+        }
+        struct Holder { object: dyn Make }
+        impl Make for Text {
+            fn value(self: &Self) -> i64 ! {panic} { self.count }
+            fn make(self: Self) -> Box<i64> ! {alloc, panic} { Box.new(self.count) }
+        }
+        impl<T> Make for W<T> {
+            fn value(self: &Self) -> i64 ! {panic} { 7 }
+            fn make(self: Self) -> Box<i64> ! {alloc, panic} { Box.new(9) }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let holder = Holder { object: Text { name: "x", count: 4 } };
+            let Holder { object } = holder;
+            print_i64(object.value());
+            print_i64(Box.take(object.make()));
+            let dropped = Holder { object: Text { name: "y", count: 5 } };
+            let Holder { object: unused } = dropped;
+            print_i64(unused.value());
+            0
+        }"#,
+        0,
+        "4\n4\n5\n",
+    );
+    assert_eq!(stats.allocations, 5, "{}", stats.allocations);
+}
