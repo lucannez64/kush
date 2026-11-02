@@ -106,32 +106,127 @@ type FunctionKey = (
 pub(crate) struct BorrowSig {
     pub parameters: Vec<Option<String>>,
     pub result: Option<String>,
+    /// Borrowed record leaves of each runtime parameter, aligned with
+    /// `parameters`. Slice parameters stay in `parameters` and contribute an
+    /// empty entry here, so one runtime parameter index always has one slot.
+    pub parameter_leaves: Vec<Vec<BorrowLeafSig>>,
+    /// Borrowed record leaves of a record result, at the same field paths as
+    /// `runtime_types::borrow_leaves`.
+    pub result_leaves: Vec<BorrowLeafSig>,
+    /// A scoped closure result borrowed from a captured view or captured
+    /// record field. The environment is not part of the arrow's visible
+    /// parameter contract, so the source capture index travels here; a closure
+    /// carrying this contract may only be called through its exact local
+    /// binding, never coerced to another callable value.
+    pub capture_result: Option<CaptureResultSig>,
     pub bounds: BTreeSet<(String, String)>,
 }
+/// Which capture supplies a closure's borrowed result. Capture indices are
+/// positions in the synthesized closure function's leading parameter list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct CaptureResultSig {
+    pub slice: Option<CaptureSliceSig>,
+    pub leaves: Vec<CaptureLeafSig>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct CaptureSliceSig {
+    pub capture: usize,
+    /// The record-field path inside the capture when the result borrows a field
+    /// of a captured borrowed record rather than the captured slice itself.
+    pub path: Option<Vec<usize>>,
+    pub mutable: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct CaptureLeafSig {
+    pub path: Vec<usize>,
+    pub capture: usize,
+    pub mutable: bool,
+}
+/// One borrowed record leaf in a callable contract. Lifetimes are canonical
+/// (`#0`, `#1`, ...) just like `BorrowSig::parameters`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct BorrowLeafSig {
+    pub path: Vec<usize>,
+    pub lifetime: Option<String>,
+    pub mutable: bool,
+}
 impl BorrowSig {
-    /// Rename lifetimes to canonical names. Bounds over names that no
-    /// parameter or the result mentions constrain nothing and are dropped.
-    pub fn canonical(
+    /// Canonicalize slice parameters, a slice result, and borrowed record
+    /// leaves together. Names are numbered in one order so a lifetime shared by
+    /// a slice parameter and a record field keeps a single identity.
+    pub fn canonical_with_leaves(
         parameters: &[Option<String>],
         result: Option<&String>,
+        parameter_leaves: &[Vec<BorrowLeaf>],
+        result_leaves: &[BorrowLeaf],
         bounds: &BTreeSet<(String, String)>,
     ) -> Self {
-        let mut names: BTreeMap<String, String> = BTreeMap::new();
-        for name in parameters.iter().flatten().chain(result) {
-            if !names.contains_key(name) {
-                let canonical = format!("#{}", names.len());
-                names.insert(name.clone(), canonical);
+        let mut order: Vec<String> = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut push = |name: &String| {
+            if seen.insert(name.clone()) {
+                order.push(name.clone());
+            }
+        };
+        for name in parameters.iter().flatten() {
+            push(name);
+        }
+        if let Some(name) = result {
+            push(name);
+        }
+        for leaves in parameter_leaves {
+            for leaf in leaves {
+                if let Some(name) = &leaf.lifetime {
+                    push(name);
+                }
             }
         }
-        if names.is_empty() {
+        for leaf in result_leaves {
+            if let Some(name) = &leaf.lifetime {
+                push(name);
+            }
+        }
+        if order.is_empty() {
             return Self::default();
         }
+        let names = order
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.clone(), format!("#{index}")))
+            .collect::<BTreeMap<_, _>>();
+        let canonical = |name: &String| names[name].clone();
+        let parameters = parameters
+            .iter()
+            .map(|name| name.as_ref().map(canonical))
+            .collect::<Vec<_>>();
+        let result = result.map(canonical);
+        let parameter_leaves = parameter_leaves
+            .iter()
+            .map(|leaves| {
+                leaves
+                    .iter()
+                    .map(|leaf| BorrowLeafSig {
+                        path: leaf.path.clone(),
+                        lifetime: leaf.lifetime.as_ref().map(canonical),
+                        mutable: leaf.mutable,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let result_leaves = result_leaves
+            .iter()
+            .map(|leaf| BorrowLeafSig {
+                path: leaf.path.clone(),
+                lifetime: leaf.lifetime.as_ref().map(canonical),
+                mutable: leaf.mutable,
+            })
+            .collect::<Vec<_>>();
         Self {
-            parameters: parameters
-                .iter()
-                .map(|name| name.as_ref().map(|name| names[name].clone()))
-                .collect(),
-            result: result.map(|name| names[name].clone()),
+            parameters,
+            result,
+            parameter_leaves,
+            result_leaves,
+            capture_result: None,
             bounds: bounds
                 .iter()
                 .filter_map(|(long, short)| {
@@ -151,26 +246,79 @@ impl BorrowSig {
     /// into the source result must map to target lifetimes outliving the
     /// target result, so the target's call-site provenance covers it.
     pub fn usable_as(&self, target: &BorrowSig) -> bool {
-        let arity = self.parameters.len().max(target.parameters.len());
+        // A closure result borrowed from its environment is not expressible by
+        // an ordinary arrow. Only an identical contract may be used in the
+        // same position; a representation-changing coercion would lose it.
+        if self.capture_result != target.capture_result {
+            return false;
+        }
+        let arity = self
+            .parameters
+            .len()
+            .max(target.parameters.len())
+            .max(self.parameter_leaves.len())
+            .max(target.parameter_leaves.len());
         let at = |sig: &BorrowSig, i: usize| sig.parameters.get(i).cloned().flatten();
-        let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // One source lifetime maps to every target lifetime that occupies the
+        // same position. Record leaves add positions beyond the slice
+        // parameters; a leaf may only map to a leaf at the same path.
+        let mut pairs: Vec<(String, String)> = Vec::new();
         for i in 0..arity {
             match (at(self, i), at(target, i)) {
-                (Some(source), Some(target)) => {
-                    map.entry(source).or_default().insert(target);
+                (Some(source), Some(target)) => pairs.push((source, target)),
+                (None, None) => {}
+                _ => return false,
+            }
+            let source_leaves = self
+                .parameter_leaves
+                .get(i)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let target_leaves = target
+                .parameter_leaves
+                .get(i)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if source_leaves.len() != target_leaves.len() {
+                return false;
+            }
+            for source in source_leaves {
+                let Some(target_leaf) = target_leaves.iter().find(|leaf| leaf.path == source.path)
+                else {
+                    return false;
+                };
+                match (&source.lifetime, &target_leaf.lifetime) {
+                    (Some(source), Some(target)) => pairs.push((source.clone(), target.clone())),
+                    (None, None) => {}
+                    _ => return false,
                 }
+            }
+        }
+        match (&self.result, &target.result) {
+            (Some(source), Some(target)) => pairs.push((source.clone(), target.clone())),
+            (None, None) => {}
+            _ => return false,
+        }
+        if self.result_leaves.len() != target.result_leaves.len() {
+            return false;
+        }
+        for source in &self.result_leaves {
+            let Some(target_leaf) = target
+                .result_leaves
+                .iter()
+                .find(|leaf| leaf.path == source.path)
+            else {
+                return false;
+            };
+            match (&source.lifetime, &target_leaf.lifetime) {
+                (Some(source), Some(target)) => pairs.push((source.clone(), target.clone())),
                 (None, None) => {}
                 _ => return false,
             }
         }
-        match (&self.result, &target.result) {
-            (Some(source), Some(target)) => {
-                map.entry(source.clone())
-                    .or_default()
-                    .insert(target.clone());
-            }
-            (None, None) => {}
-            _ => return false,
+        let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (source, target) in pairs {
+            map.entry(source).or_default().insert(target);
         }
         for (long, short) in &self.bounds {
             let (Some(longs), Some(shorts)) = (map.get(long), map.get(short)) else {
@@ -189,6 +337,50 @@ impl BorrowSig {
                     continue;
                 };
                 if self.outlives(&source, source_result) && !target.outlives(&mapped, target_result)
+                {
+                    return false;
+                }
+            }
+        }
+        for i in 0..arity {
+            let source_leaves = self
+                .parameter_leaves
+                .get(i)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let target_leaves = target
+                .parameter_leaves
+                .get(i)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            for source in source_leaves {
+                let Some(target_leaf) = target_leaves.iter().find(|leaf| leaf.path == source.path)
+                else {
+                    return false;
+                };
+                let (Some(source_lifetime), Some(mapped)) =
+                    (&source.lifetime, &target_leaf.lifetime)
+                else {
+                    continue;
+                };
+                let Some(source_result) = self
+                    .result_leaves
+                    .iter()
+                    .find(|leaf| leaf.path == source.path)
+                else {
+                    continue;
+                };
+                let Some(target_result) = target
+                    .result_leaves
+                    .iter()
+                    .find(|leaf| leaf.path == source.path)
+                else {
+                    return false;
+                };
+                if let (Some(source_result), Some(target_result)) =
+                    (&source_result.lifetime, &target_result.lifetime)
+                    && self.outlives(source_lifetime, source_result)
+                    && !target.outlives(mapped, target_result)
                 {
                     return false;
                 }
@@ -1124,6 +1316,7 @@ impl<'a> Types<'a> {
             let bounds = crate::executable::build_lifetime_bounds(lifetimes)?;
             let mut parameter_lifetimes: Vec<Option<String>> = Vec::new();
             let mut parameter_mutable: Vec<bool> = Vec::new();
+            let mut parameter_leaves: Vec<Vec<BorrowLeaf>> = Vec::new();
             if *call_linear && !*call_once {
                 return Err(Diagnostic::new(
                     ty.span,
@@ -1147,6 +1340,7 @@ impl<'a> Types<'a> {
                         "a function value parameter cannot have type Never",
                     ));
                 }
+                let mut leaves = Vec::new();
                 let lifetime = if ty.is_slice() {
                     Some(arrow_lifetime(
                         inner,
@@ -1154,16 +1348,45 @@ impl<'a> Types<'a> {
                         parameter_lifetimes.len(),
                         parameter.ty.span,
                     )?)
+                } else if ty
+                    .layout()
+                    .is_some_and(|id| self.enums[id].record && self.enums[id].borrowed)
+                {
+                    // A by-value borrowed record parameter carries one erased
+                    // lifetime per borrowed field. Every field lifetime must be
+                    // bound by the arrow itself, and the leaves travel in the
+                    // callable contract so indirect calls keep the argument's
+                    // owner loaned exactly like a direct call.
+                    leaves = borrow_leaves(self, ty);
+                    for leaf in &leaves {
+                        let Some(name) = &leaf.lifetime else {
+                            return Err(Diagnostic::new(
+                                parameter.ty.span,
+                                "internal error: borrowed record arrow parameter leaf has no lifetime",
+                            ));
+                        };
+                        if !declared.contains(name) {
+                            return Err(Diagnostic::new(
+                                parameter.ty.span,
+                                format!(
+                                    "lifetime '{name}' in a function arrow type must be bound by the arrow itself, as in fn<'{0}>(Window<'{0}>) -> ...; an arrow cannot borrow for an outer lifetime",
+                                    name.trim_start_matches('\'')
+                                ),
+                            ));
+                        }
+                    }
+                    None
                 } else if has_borrow(self, ty) {
                     return Err(Diagnostic::new(
                         parameter.ty.span,
-                        "function arrow types may borrow slice views ('&'a [T]', '&'a mut [T]') but not borrowed records, owner references, or &str text views; pass a text view to a named function instead",
+                        "function arrow types may borrow slice views ('&'a [T]', '&'a mut [T]') and records with borrowed slice fields, but not owner references or &str text views; pass a text view to a named function instead",
                     ));
                 } else {
                     None
                 };
                 parameter_mutable.push(ty.is_mut_slice());
                 parameter_lifetimes.push(lifetime);
+                parameter_leaves.push(leaves);
                 grades.push(
                     grade
                         .map(|grade| {
@@ -1197,32 +1420,38 @@ impl<'a> Types<'a> {
                 }
             }
             let mut result_lifetime = None;
+            let mut result_leaves: Vec<BorrowLeaf> = Vec::new();
+            // Every input lifetime that can supply a borrowed slice result:
+            // explicit slice parameters and borrowed record field leaves.
+            let mut input_candidates = parameter_lifetimes
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            for leaves in &parameter_leaves {
+                input_candidates.extend(leaves.iter().filter_map(|leaf| leaf.lifetime.clone()));
+            }
+            input_candidates.sort();
+            input_candidates.dedup();
             if result.is_slice() {
                 let (inner, _) = crate::grades::split(&result_ast);
                 let lifetime = match arrow_explicit_lifetime(inner, &declared)? {
                     Some(name) => name,
-                    None => {
-                        // Conservative elision, as for named functions: only
-                        // when the inputs name exactly one distinct lifetime.
-                        let mut distinct = parameter_lifetimes.iter().flatten().collect::<Vec<_>>();
-                        distinct.sort();
-                        distinct.dedup();
-                        match distinct.as_slice() {
-                            [only] => (*only).clone(),
-                            [] => {
-                                return Err(Diagnostic::new(
-                                    result_ast.span,
-                                    "this arrow type returns a borrowed slice but takes no slice parameter it could borrow from",
-                                ));
-                            }
-                            _ => {
-                                return Err(Diagnostic::new(
-                                    result_ast.span,
-                                    "cannot infer this arrow result's lifetime from several slice parameters; name them, as in fn<'a, 'b>(&'a [T], &'b [T]) -> &'a [T]",
-                                ));
-                            }
+                    None => match input_candidates.as_slice() {
+                        [only] => only.clone(),
+                        [] => {
+                            return Err(Diagnostic::new(
+                                result_ast.span,
+                                "this arrow type returns a borrowed slice but takes no borrowed parameter or record field it could borrow from",
+                            ));
                         }
-                    }
+                        _ => {
+                            return Err(Diagnostic::new(
+                                result_ast.span,
+                                "cannot infer this arrow result's lifetime from several borrowed inputs; name them, as in fn<'a, 'b>(&'a [T], &'b [T]) -> &'a [T]",
+                            ));
+                        }
+                    },
                 };
                 let sources = parameter_lifetimes
                     .iter()
@@ -1232,29 +1461,93 @@ impl<'a> Types<'a> {
                             .is_some_and(|p| crate::executable::outlives(&bounds, p, &lifetime))
                     })
                     .collect::<Vec<_>>();
-                if sources.is_empty() {
+                let record_sources = parameter_leaves
+                    .iter()
+                    .flat_map(|leaves| leaves.iter())
+                    .filter(|leaf| {
+                        leaf.lifetime.as_ref().is_some_and(|name| {
+                            crate::executable::outlives(&bounds, name, &lifetime)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if sources.is_empty() && record_sources.is_empty() {
                     return Err(Diagnostic::new(
                         result_ast.span,
                         format!(
-                            "the arrow result lifetime '{lifetime}' is not outlived by any slice parameter, so no call could produce it"
+                            "the arrow result lifetime '{lifetime}' is not outlived by any slice parameter or borrowed record field, so no call could produce it"
                         ),
                     ));
                 }
-                if result.is_mut_slice() && !sources.iter().any(|(_, mutable)| **mutable) {
+                if result.is_mut_slice()
+                    && !sources.iter().any(|(_, mutable)| **mutable)
+                    && !record_sources.iter().any(|leaf| leaf.mutable)
+                {
                     return Err(Diagnostic::new(
                         result_ast.span,
-                        "an exclusive '&mut [T]' arrow result needs an exclusive slice parameter whose lifetime outlives it",
+                        "an exclusive '&mut [T]' arrow result needs an exclusive slice parameter or exclusive record field whose lifetime outlives it",
                     ));
                 }
                 result_lifetime = Some(lifetime);
+            } else if result
+                .layout()
+                .is_some_and(|id| self.enums[id].record && self.enums[id].borrowed)
+            {
+                result_leaves = borrow_leaves(self, result);
+                for leaf in &result_leaves {
+                    let Some(name) = &leaf.lifetime else {
+                        return Err(Diagnostic::new(
+                            result_ast.span,
+                            "internal error: borrowed record arrow result leaf has no lifetime",
+                        ));
+                    };
+                    if !declared.contains(name) {
+                        return Err(Diagnostic::new(
+                            result_ast.span,
+                            format!(
+                                "lifetime '{name}' in a function arrow result must be bound by the arrow itself; an arrow cannot return a borrow for an outer lifetime"
+                            ),
+                        ));
+                    }
+                    let mut source = parameter_leaves
+                        .iter()
+                        .flat_map(|leaves| leaves.iter())
+                        .filter(|input| {
+                            input.lifetime.as_ref().is_some_and(|input| {
+                                crate::executable::outlives(&bounds, input, name)
+                            })
+                        });
+                    let Some(first) = source.next() else {
+                        return Err(Diagnostic::new(
+                            result_ast.span,
+                            format!(
+                                "the arrow result field lifetime '{name}' is not outlived by any borrowed parameter field, so no call could produce it"
+                            ),
+                        ));
+                    };
+                    if leaf.mutable
+                        && !std::iter::once(first)
+                            .chain(source)
+                            .any(|input| input.mutable)
+                    {
+                        return Err(Diagnostic::new(
+                            result_ast.span,
+                            "an exclusive '&mut [T]' arrow result field needs an exclusive borrowed parameter field whose lifetime outlives it",
+                        ));
+                    }
+                }
             } else if matches!(result, Type::Ref(_)) || has_borrow(self, result) {
                 return Err(Diagnostic::new(
                     ty.span,
-                    "function arrow types may return slice views but not borrowed references or borrowed records",
+                    "function arrow types may return slice views and records with borrowed slice fields, but not borrowed owner references or &str text views",
                 ));
             }
-            let borrows =
-                BorrowSig::canonical(&parameter_lifetimes, result_lifetime.as_ref(), &bounds);
+            let borrows = BorrowSig::canonical_with_leaves(
+                &parameter_lifetimes,
+                result_lifetime.as_ref(),
+                &parameter_leaves,
+                &result_leaves,
+                &bounds,
+            );
             if contains_task(self, result) {
                 return Err(Diagnostic::new(
                     ty.span,
@@ -3434,6 +3727,12 @@ pub(crate) struct BorrowLeaf {
     pub lifetime: Option<String>,
     pub mutable: bool,
 }
+/// Whether `ty` is a nominal record with at least one borrowed slice field.
+pub(crate) fn is_borrowed_record(types: &Types<'_>, ty: Type) -> bool {
+    ty.layout()
+        .is_some_and(|id| types.enums[id].record && types.enums[id].borrowed)
+}
+
 pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {
     fn go(types: &Types<'_>, ty: Type, path: &mut Vec<usize>, out: &mut Vec<BorrowLeaf>) {
         match ty {

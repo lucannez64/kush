@@ -1394,6 +1394,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             self_type: sig.self_type,
             default_trait: sig.default_trait.clone(),
             unit: resolution.unit_of.get(&sig.binding).copied().unwrap_or(0),
+            field_place: false,
         };
         let body = (|| {
             let mut runtime = sig.parameters.iter().zip(&sig.parameter_grades);
@@ -2979,6 +2980,23 @@ impl<'a> Functions<'a> {
                 input_lifetimes.push((name.clone(), p.ty.span, explicit_lifetime));
             }
             parameter_lifetimes.push(lifetime);
+            // A by-value borrowed record contributes one candidate per field
+            // lifetime, so elided slice results can be inferred from a single
+            // record source exactly as from a single slice parameter.
+            if crate::runtime_types::is_borrowed_record(types, parameters.last().copied().unwrap())
+            {
+                for leaf in
+                    crate::runtime_types::borrow_leaves(types, parameters.last().copied().unwrap())
+                {
+                    if let Some(name) = leaf.lifetime
+                        && !input_lifetimes
+                            .iter()
+                            .any(|(existing, _, _)| existing == &name)
+                    {
+                        input_lifetimes.push((name.clone(), p.ty.span, Some(name)));
+                    }
+                }
+            }
         }
         let (result_ty, result_grade) =
             result_contract(resolution, types, &grade_substitution, &f.result)?;
@@ -3006,7 +3024,9 @@ impl<'a> Functions<'a> {
         let explicit_result_lifetime = borrow_lifetime(&f.result);
         let result_lifetime = match explicit_result_lifetime {
             Some(lifetime) => Some(lifetime),
-            None if result.is_view() && matches!(&f.result.kind, ast::TypeKind::Borrow { .. }) => {
+            None if (result.is_view() || result.is_ref())
+                && matches!(&f.result.kind, ast::TypeKind::Borrow { .. }) =>
+            {
                 // Conservative elision: infer only when the input side names
                 // exactly one distinct borrow lifetime. Independent anonymous
                 // inputs stay independent, so their result is ambiguous.
@@ -3102,11 +3122,48 @@ impl<'a> Functions<'a> {
                     ),
                 ));
             }
-        } else if matches!(result, Type::Ref(_) | Type::RefMut(_)) {
-            return Err(Diagnostic::new(
-                f.result.span,
-                "borrowed references (&Box/&Bytes/&Vec/&Record/&mut Record) cannot be returned in this call-scoped borrowing subset; return an owning value or slice view instead",
-            ));
+        } else if result.is_ref() {
+            let pointee = result.ref_pointee().expect("reference pointee");
+            if types.pointees[pointee].layout().is_none() {
+                return Err(Diagnostic::new(
+                    f.result.span,
+                    "owner references (&Box/&Bytes/&Vec/&String) cannot be returned; only nominal-record references ('&Record'/'&mut Record') have stable caller-owned storage",
+                ));
+            }
+            let Some(lifetime) = &result_lifetime else {
+                return Err(Diagnostic::new(
+                    f.result.span,
+                    "a borrowed reference result requires a declared result lifetime, as in '-> &'a Record' or '-> &'a mut Record'",
+                ));
+            };
+            let matching = parameter_lifetimes
+                .iter()
+                .zip(parameters.iter())
+                .filter(|(parameter, ty)| {
+                    ty.is_ref()
+                        && parameter
+                            .as_ref()
+                            .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
+                })
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                return Err(Diagnostic::new(
+                    f.result.span,
+                    format!(
+                        "reference result lifetime '{lifetime}' does not appear on any '&{lifetime} Record' parameter that outlives it; a returned reference must borrow caller-owned storage"
+                    ),
+                ));
+            }
+            if matches!(result, Type::RefMut(_))
+                && !matching.iter().any(|(_, ty)| matches!(ty, Type::RefMut(_)))
+            {
+                return Err(Diagnostic::new(
+                    f.result.span,
+                    format!(
+                        "an exclusive '&mut Record' result lifetime '{lifetime}' must appear on an exclusive '&mut Record' parameter that outlives it; shared storage cannot be returned mutably"
+                    ),
+                ));
+            }
         } else if result
             .layout()
             .is_some_and(|layout| types.enums[layout].borrowed)
@@ -3759,6 +3816,9 @@ struct Checker<'a, 't> {
     default_trait: Option<(BindingId, TraitArguments)>,
     /// Module unit of the function being checked, for method visibility.
     unit: usize,
+    /// The current field expression is a place used to derive a subview
+    /// (`&mut record.field[..]`), not a copied field value.
+    field_place: bool,
 }
 impl Checker<'_, '_> {
     fn nested<T>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
@@ -8972,7 +9032,9 @@ impl Checker<'_, '_> {
             )
             .with_note(self.locals[*slot].span, "text view declared here"));
         }
-        let borrowed_capture = captures.iter().any(|slot| self.locals[*slot].ty.is_slice());
+        let borrowed_capture = captures.iter().any(|slot| {
+            self.locals[*slot].ty.is_slice() || self.carrier_type(self.locals[*slot].ty)
+        });
         for slot in &captures {
             let local = self.locals[*slot];
             let ty = local.ty;
@@ -8989,13 +9051,6 @@ impl Checker<'_, '_> {
                     "a lambda cannot capture a task handle; join it in the scope that owns it",
                 )
                 .with_note(self.locals[*slot].span, "task handle declared here"));
-            }
-            if self.carrier_type(ty) {
-                return Err(Diagnostic::new(
-                    span,
-                    "a lambda or task cannot capture a borrowed record; borrowed fields are lexical and cannot escape through a callable",
-                )
-                .with_note(self.locals[*slot].span, "borrowed record declared here"));
             }
             if matches!(local.grade, Some(Grade::Finite(0))) {
                 return Err(Diagnostic::new(
@@ -9046,12 +9101,16 @@ impl Checker<'_, '_> {
                 .map(|grade| grades::evaluate(self.resolution, &self.grades, grade))
                 .transpose()?;
             let ty = self.ty(inner)?;
-            // Slice parameters have independent lifetimes. A noncapturing
-            // lambda may return a view of its single slice input (below).
-            if !ty.is_slice() && crate::runtime_types::has_borrow(self.types, ty) {
+            // Slice parameters have independent lifetimes. A lambda may also
+            // take a record with borrowed slice fields by value; its per-field
+            // contract travels in the callable's borrow signature.
+            if !ty.is_slice()
+                && !crate::runtime_types::is_borrowed_record(self.types, ty)
+                && crate::runtime_types::has_borrow(self.types, ty)
+            {
                 return Err(Diagnostic::new(
                     parameter.ty.span,
-                    "a function value cannot take a borrowed record or &str text-view parameter; only slice views may be borrowed by a callable",
+                    "a function value cannot take an owner reference or &str text-view parameter; slice views and records with borrowed slice fields are supported",
                 ));
             }
             self.validate_grade(grade, ty, parameter.ty.span)?;
@@ -9069,11 +9128,10 @@ impl Checker<'_, '_> {
         )?;
         if matches!(result, Type::Ref(_) | Type::RefMut(_))
             || (result.is_view() && !result.is_slice())
-            || self.carrier_type(result)
         {
             return Err(Diagnostic::new(
                 lambda.result.span,
-                "a lambda cannot return a borrowed reference, slice view, &str text view, or borrowed record yet; use a named function with explicit lifetimes as the function value",
+                "a lambda cannot return a borrowed owner reference or &str text view; use a named function, a slice view, or a record with borrowed slice fields",
             ));
         }
         if crate::runtime_types::contains_task(self.types, result) {
@@ -9092,35 +9150,286 @@ impl Checker<'_, '_> {
             .enumerate()
             .map(|(index, ty)| ty.is_slice().then(|| format!("<lambda {index}>")))
             .collect::<Vec<_>>();
-        let lambda_result_lifetime = if result.is_slice() {
-            if once || parameters.iter().filter(|ty| ty.is_slice()).count() != 1 {
-                return Err(Diagnostic::new(
-                    lambda.result.span,
-                    "a slice-returning lambda must be noncapturing and have exactly one slice parameter; use a named function with explicit lifetimes otherwise",
-                ));
+        let capture_lifetimes = captures
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                self.locals[*slot]
+                    .ty
+                    .is_slice()
+                    .then(|| format!("<lambda capture {index}>"))
+            })
+            .collect::<Vec<_>>();
+        let parameter_leaves = parameters
+            .iter()
+            .map(|ty| {
+                if crate::runtime_types::is_borrowed_record(self.types, *ty) {
+                    crate::runtime_types::borrow_leaves(self.types, *ty)
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect::<Vec<_>>();
+        // Labels available from call parameters and from the closure
+        // environment. Ambiguity between these origins is rejected: a scoped
+        // capture result is only expressible when exactly one capture supplies
+        // it, and a parameter result must stay on the parameter contract.
+        let parameter_slice_mutability = lambda_lifetimes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, label)| {
+                label
+                    .as_ref()
+                    .map(|label| (label.clone(), parameters[index].is_mut_slice()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut parameter_leaf_labels: BTreeMap<String, bool> = BTreeMap::new();
+        for leaves in &parameter_leaves {
+            for leaf in leaves {
+                if let Some(label) = &leaf.lifetime {
+                    parameter_leaf_labels
+                        .entry(label.clone())
+                        .and_modify(|mutable| *mutable |= leaf.mutable)
+                        .or_insert(leaf.mutable);
+                }
             }
-            if borrow_lifetime(&lambda.result).is_some()
-                || lambda
-                    .parameters
-                    .iter()
-                    .any(|parameter| borrow_lifetime(&parameter.ty).is_some())
+        }
+        let capture_slice_labels = capture_lifetimes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, label)| {
+                label.as_ref().and_then(|label| {
+                    self.locals[captures[index]]
+                        .ty
+                        .is_slice()
+                        .then(|| (label.clone(), index))
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut capture_leaf_labels: BTreeMap<String, Vec<(usize, Vec<usize>, bool)>> =
+            BTreeMap::new();
+        for (index, slot) in captures.iter().enumerate() {
+            let ty = self.locals[*slot].ty;
+            if !crate::runtime_types::is_borrowed_record(self.types, ty) {
+                continue;
+            }
+            for leaf in crate::runtime_types::borrow_leaves(self.types, ty) {
+                if let Some(label) = &leaf.lifetime {
+                    capture_leaf_labels.entry(label.clone()).or_default().push((
+                        index,
+                        leaf.path,
+                        leaf.mutable,
+                    ));
+                }
+            }
+        }
+        let mut candidates = Vec::new();
+        candidates.extend(parameter_slice_mutability.keys().cloned());
+        candidates.extend(parameter_leaf_labels.keys().cloned());
+        candidates.extend(capture_slice_labels.keys().cloned());
+        candidates.extend(capture_leaf_labels.keys().cloned());
+        candidates.sort();
+        candidates.dedup();
+        let mut lambda_result_lifetime = None;
+        let mut borrow_result_lifetime = None;
+        let mut borrow_result_leaves: Vec<crate::runtime_types::BorrowLeaf> = Vec::new();
+        let mut capture_result = crate::runtime_types::CaptureResultSig::default();
+        let mut capture_result_used = false;
+        if result.is_slice() {
+            let explicit = borrow_lifetime(&lambda.result);
+            if !once
+                && (explicit.is_some()
+                    || lambda
+                        .parameters
+                        .iter()
+                        .any(|parameter| borrow_lifetime(&parameter.ty).is_some()))
             {
                 return Err(Diagnostic::new(
                     lambda.result.span,
                     "slice-returning lambdas use lifetime elision; use a named function for explicit lifetime binders",
                 ));
             }
-            let index = parameters.iter().position(|ty| ty.is_slice()).unwrap();
-            if result.is_mut_slice() && !parameters[index].is_mut_slice() {
+            let lifetime = match explicit {
+                Some(name) => {
+                    if !candidates.contains(&name) {
+                        return Err(Diagnostic::new(
+                            lambda.result.span,
+                            format!(
+                                "the lambda result lifetime '{name}' does not appear on a borrowed parameter, captured view, or captured record field; a lambda cannot return a borrow for an outer lifetime it does not receive"
+                            ),
+                        ));
+                    }
+                    name
+                }
+                None => match candidates.as_slice() {
+                    [only] => only.clone(),
+                    [] => {
+                        return Err(Diagnostic::new(
+                            lambda.result.span,
+                            "a slice-returning lambda needs exactly one borrowed parameter, captured view, or captured record field to borrow from",
+                        ));
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            lambda.result.span,
+                            "cannot infer this lambda result's lifetime from several borrowed parameters or captures; a scoped callable result must have exactly one possible origin",
+                        ));
+                    }
+                },
+            };
+            let mut parameter_sources = Vec::new();
+            if let Some(mutable) = parameter_slice_mutability.get(&lifetime) {
+                parameter_sources.push(*mutable);
+            }
+            if let Some(mutable) = parameter_leaf_labels.get(&lifetime) {
+                parameter_sources.push(*mutable);
+            }
+            let mut capture_sources = Vec::new();
+            if let Some(index) = capture_slice_labels.get(&lifetime) {
+                let mutable = self.locals[captures[*index]].ty.is_mut_slice();
+                capture_sources.push((*index, None, mutable));
+            }
+            if let Some(leaves) = capture_leaf_labels.get(&lifetime) {
+                capture_sources.extend(
+                    leaves
+                        .iter()
+                        .map(|(capture, path, mutable)| (*capture, Some(path.clone()), *mutable)),
+                );
+            }
+            if !parameter_sources.is_empty() && !capture_sources.is_empty() {
                 return Err(Diagnostic::new(
                     lambda.result.span,
-                    "an exclusive slice result requires an exclusive slice parameter",
+                    "this lambda result borrows from both a call parameter and a captured view; a scoped capture result and a parameter result cannot be mixed or unified",
                 ));
             }
-            lambda_lifetimes[index].clone()
-        } else {
-            None
-        };
+            if capture_sources.is_empty() {
+                if parameter_sources.is_empty() {
+                    return Err(Diagnostic::new(
+                        lambda.result.span,
+                        format!(
+                            "the lambda result lifetime '{lifetime}' is not outlived by any borrowed parameter, so no call could produce it"
+                        ),
+                    ));
+                }
+                if result.is_mut_slice() && !parameter_sources.iter().any(|mutable| *mutable) {
+                    return Err(Diagnostic::new(
+                        lambda.result.span,
+                        "an exclusive slice result requires an exclusive slice parameter or exclusive record field",
+                    ));
+                }
+                lambda_result_lifetime = Some(lifetime.clone());
+                borrow_result_lifetime = Some(lifetime);
+            } else {
+                let [(capture, path, mutable)] = capture_sources.as_slice() else {
+                    return Err(Diagnostic::new(
+                        lambda.result.span,
+                        "cannot infer this lambda result's capture origin: several captured views or record fields carry the same lifetime",
+                    ));
+                };
+                if result.is_mut_slice() && !*mutable {
+                    return Err(Diagnostic::new(
+                        lambda.result.span,
+                        "an exclusive slice result cannot be borrowed from a shared captured view or shared captured record field",
+                    ));
+                }
+                capture_result.slice = Some(crate::runtime_types::CaptureSliceSig {
+                    capture: *capture,
+                    path: path.clone(),
+                    mutable: *mutable,
+                });
+                capture_result_used = true;
+                // The child function still needs the declared result lifetime
+                // for its own return check; the callable's visible result
+                // lifetime stays empty because the environment is the source.
+                lambda_result_lifetime = Some(lifetime);
+            }
+        } else if crate::runtime_types::is_borrowed_record(self.types, result) {
+            let leaves = crate::runtime_types::borrow_leaves(self.types, result);
+            let mut parameter_leaves = Vec::new();
+            let mut capture_leaves = Vec::new();
+            for leaf in leaves {
+                let Some(label) = &leaf.lifetime else {
+                    return Err(Diagnostic::new(
+                        lambda.result.span,
+                        "internal error: borrowed lambda result leaf has no lifetime",
+                    ));
+                };
+                let parameter_source = parameter_leaf_labels.get(label).copied();
+                let capture_sources = capture_leaf_labels.get(label);
+                if parameter_source.is_some() && capture_sources.is_some() {
+                    return Err(Diagnostic::new(
+                        lambda.result.span,
+                        format!(
+                            "the lambda result field lifetime '{label}' has both a call-parameter and a captured-record origin; the two cannot be unified"
+                        ),
+                    ));
+                }
+                if let Some(mutable) = parameter_source {
+                    if leaf.mutable && !mutable {
+                        return Err(Diagnostic::new(
+                            lambda.result.span,
+                            "an exclusive result field requires an exclusive borrowed parameter field",
+                        ));
+                    }
+                    parameter_leaves.push(leaf);
+                    continue;
+                }
+                let Some(sources) = capture_sources else {
+                    return Err(Diagnostic::new(
+                        lambda.result.span,
+                        format!(
+                            "the lambda result field lifetime '{label}' is not outlived by any borrowed parameter or captured record field"
+                        ),
+                    ));
+                };
+                let matching = sources
+                    .iter()
+                    .filter(|(_, path, _)| *path == leaf.path)
+                    .collect::<Vec<_>>();
+                let [(capture, _, mutable)] = matching.as_slice() else {
+                    return Err(Diagnostic::new(
+                        lambda.result.span,
+                        format!(
+                            "cannot infer this lambda result field's capture origin: field path {:?} is not supplied by exactly one captured record",
+                            leaf.path
+                        ),
+                    ));
+                };
+                if leaf.mutable && !*mutable {
+                    return Err(Diagnostic::new(
+                        lambda.result.span,
+                        "an exclusive result field cannot be borrowed from a shared captured record field",
+                    ));
+                }
+                capture_leaves.push(crate::runtime_types::CaptureLeafSig {
+                    path: leaf.path,
+                    capture: *capture,
+                    mutable: *mutable,
+                });
+            }
+            if !capture_leaves.is_empty() && !parameter_leaves.is_empty() {
+                return Err(Diagnostic::new(
+                    lambda.result.span,
+                    "this lambda returns a record mixing captured and call-parameter borrows; split the record or return one origin at a time",
+                ));
+            }
+            if capture_leaves.is_empty() {
+                borrow_result_leaves = parameter_leaves;
+            } else {
+                capture_result.leaves = capture_leaves;
+                capture_result_used = true;
+            }
+        }
+        let mut borrows = crate::runtime_types::BorrowSig::canonical_with_leaves(
+            &lambda_lifetimes,
+            borrow_result_lifetime.as_ref(),
+            &parameter_leaves,
+            &borrow_result_leaves,
+            &BTreeSet::new(),
+        );
+        if capture_result_used {
+            borrows.capture_result = Some(capture_result);
+        }
         let function_type = self.types.function_type_with(
             parameters.clone(),
             result,
@@ -9129,11 +9438,7 @@ impl Checker<'_, '_> {
             result_grade,
             once,
             linear,
-            crate::runtime_types::BorrowSig::canonical(
-                &lambda_lifetimes,
-                lambda_result_lifetime.as_ref(),
-                &BTreeSet::new(),
-            ),
+            borrows,
         );
         let capture_types = captures
             .iter()
@@ -9295,7 +9600,7 @@ impl Checker<'_, '_> {
             parameter_grades: grades,
             result_grade,
             parameter_lifetimes: {
-                let mut lifetimes = vec![None; captures.len()];
+                let mut lifetimes = capture_lifetimes.clone();
                 lifetimes.extend(lambda_lifetimes);
                 lifetimes
             },
@@ -9429,18 +9734,22 @@ impl Checker<'_, '_> {
             Some(span),
         )?;
         let signature = self.functions.signatures[index].clone();
-        // Slice parameters and results carry their lifetime contract in the
-        // callable type. Borrowed records keep per-field provenance that an
-        // arrow cannot express, so they stay direct-call only.
+        // Slice parameters/results and borrowed record fields carry their
+        // lifetime contract in the callable type. Owner references and text
+        // views remain direct-call only.
         if signature
             .parameters
             .iter()
             .chain([&signature.result])
-            .any(|ty| !ty.is_slice() && crate::runtime_types::has_borrow(self.types, *ty))
+            .any(|ty| {
+                !ty.is_slice()
+                    && !crate::runtime_types::is_borrowed_record(self.types, *ty)
+                    && crate::runtime_types::has_borrow(self.types, *ty)
+            })
         {
             return Err(Diagnostic::new(
                 span,
-                "a function value cannot carry a borrowed record or &str text view in its parameter or result type; only slice views may be borrowed by a callable",
+                "a function value cannot carry an owner reference or &str text view in its parameter or result type; use slice views or records with borrowed slice fields",
             ));
         }
         let parameter_lifetimes = signature
@@ -9458,11 +9767,28 @@ impl Checker<'_, '_> {
                 })
             })
             .collect::<Vec<_>>();
+        let parameter_leaves = signature
+            .parameters
+            .iter()
+            .map(|ty| {
+                if crate::runtime_types::is_borrowed_record(self.types, *ty) {
+                    crate::runtime_types::borrow_leaves(self.types, *ty)
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect::<Vec<_>>();
         let result_lifetime = signature
             .result
             .is_slice()
             .then(|| signature.result_lifetime.clone())
             .flatten();
+        let result_leaves =
+            if crate::runtime_types::is_borrowed_record(self.types, signature.result) {
+                crate::runtime_types::borrow_leaves(self.types, signature.result)
+            } else {
+                Vec::new()
+            };
         let function_type = self.types.function_type_with(
             signature.parameters.clone(),
             signature.result,
@@ -9471,9 +9797,11 @@ impl Checker<'_, '_> {
             signature.result_grade,
             false,
             false,
-            crate::runtime_types::BorrowSig::canonical(
+            crate::runtime_types::BorrowSig::canonical_with_leaves(
                 &parameter_lifetimes,
                 result_lifetime.as_ref(),
+                &parameter_leaves,
+                &result_leaves,
                 &signature.lifetime_bounds,
             ),
         );
@@ -9737,7 +10065,12 @@ impl Checker<'_, '_> {
         let mut diverges = false;
         let mut values = Vec::with_capacity(arguments.len());
         for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
-            let value = self.expr_expected(argument, Some(*parameter))?;
+            // An arrow's record lifetimes are instantiated afresh at each
+            // call, exactly like a direct call. The argument constructs a
+            // record with its own inferred labels; the call boundary relates
+            // those labels to the arrow's declared ones.
+            let wanted = self.types.freshen_borrows(*parameter, argument.span)?;
+            let value = self.expr_expected(argument, Some(wanted))?;
             diverges |= value.ty == Type::Never;
             values.push(self.coerce(value, *parameter, argument.span)?);
         }
@@ -10091,17 +10424,18 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
     ) -> Result<Expr> {
         let (offset, ty) = self.field_offset(&base, name, span)?;
-        if ty.is_mut_slice() {
+        if ty.is_mut_slice() && !self.field_place {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "cannot project exclusive field '{name}' out of a record; destructure the record first, as in 'let R {{ {name}, .. }} = value;', then use the bound view"
+                    "cannot project exclusive field '{name}' out of a record; destructure the record first, as in 'let R {{ {name}, .. }} = value;', or derive a subview with '&mut value.{name}[..]'"
                 ),
             ));
         }
-        if ty
-            .layout()
-            .is_some_and(|id| self.types.enums[id].mutable_borrow)
+        if !self.field_place
+            && ty
+                .layout()
+                .is_some_and(|id| self.types.enums[id].mutable_borrow)
         {
             return Err(Diagnostic::new(
                 span,
@@ -11820,11 +12154,36 @@ impl Checker<'_, '_> {
                 unreachable!("slice construction has slice type")
             };
             (base, self.types.pointees[pointer], None)
+        } else if matches!(value.kind, ast::ExprKind::Field { .. }) {
+            // A nested record-field borrow: `outer.inner.view[..]`. The root is
+            // still a direct local owner; the projection is checked by the
+            // ownership pass, which keeps the field path and its owner loaned.
+            let old_place = self.field_place;
+            self.field_place = true;
+            let checked = self.expr(value);
+            self.field_place = old_place;
+            let base = checked?;
+            let Some(pointer) = base.ty.slice_element() else {
+                return Err(Diagnostic::new(
+                    value.span,
+                    format!(
+                        "only a borrowed slice field can be sub-sliced through a record projection, found {}",
+                        self.types.name(base.ty)
+                    ),
+                ));
+            };
+            if mutable && !base.ty.is_mut_slice() {
+                return Err(Diagnostic::new(
+                    value.span,
+                    "cannot create an exclusive '&mut [T]' view from a shared record field; shared storage cannot be upgraded",
+                ));
+            }
+            (base, self.types.pointees[pointer], None)
         } else {
             let slot = self.slot(value.span).map_err(|_| {
                 Diagnostic::new(
                     value.span,
-                    "a slice or text view must borrow a local array, Vec, Bytes, String, or view; bind the owner to a local first",
+                    "a slice or text view must borrow a local array, Vec, Bytes, String, view, or record field; bind the owner to a local first",
                 )
             })?;
             let ty = self.locals[slot].ty;

@@ -194,7 +194,7 @@ fn arrow_lifetimes_are_bound_and_results_must_have_a_source() {
             let f = fn(v: &[i64], w: &[i64]) -> &[i64] ! {panic} { v };
             0
         }"#,
-        "exactly one slice parameter",
+        "cannot infer this lambda result's lifetime",
     );
     rejects(
         r#"fn g(f: fn<T>(T) -> i64 ! {}) -> i64 ! {} { 0 }
@@ -276,7 +276,7 @@ fn slice_returning_lambdas_reject_dangling_and_invalidated_results() {
             let captured = fn(v: &[i64]) -> &[i64] ! {panic} { &owner[..] };
             0
         }"#,
-        "noncapturing",
+        "dangle",
     );
 }
 

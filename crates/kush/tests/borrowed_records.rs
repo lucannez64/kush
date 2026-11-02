@@ -606,47 +606,28 @@ fn borrowed_record_rejects_unsafe_storage_generic_and_callable_escapes() {
     );
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
-        fn run<'a>(view: &'a [i64]) -> i64 ! {panic} {
+        fn run<'a>(view: &'a [i64]) -> Unit ! {alloc, panic} {
             let window = Window { view: view };
             let read = fn() -> i64 ! {panic} { Slice.get(window.view, 0) };
-            read()
+            let command: once fn() -> i64 ! {panic} = read;
+            let _ = command;
         }
         fn main() -> Unit ! {} {}"#,
-        "borrowed record",
+        "scoped",
     );
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
         fn run<'a>(view: &'a [i64]) -> Unit ! {alloc, panic, suspend} {
-            let window = Window { view: view };
             Task.scope(fn() -> Unit ! {alloc, panic, suspend} {
-                Task.spawn(fn() -> Unit ! {suspend} {
+                let local: [i64; 1] = [5];
+                let window = Window { view: &local[..] };
+                Task.spawn(fn() -> Unit ! {panic, suspend} {
                     Slice.get(window.view, 0); Task.yield();
                 });
             });
         }
         fn main() -> Unit ! {} {}"#,
-        "borrowed record",
-    );
-    rejects(
-        r#"struct Window<'a> { view: &'a [i64] }
-        fn identity<'a>(window: Window<'a>) -> Window<'a> ! {} { window }
-        fn take<'a>(view: &'a [i64]) -> Unit ! {} {
-            let callable = identity;
-            let _ = callable;
-        }
-        fn main() -> Unit ! {} {}"#,
-        "function value cannot carry",
-    );
-    rejects(
-        r#"struct Window<'a> { view: &'a [i64] }
-        fn take<'a>(view: &'a [i64]) -> Unit ! {panic} {
-            let callable = fn(window: Window<'a>) -> i64 ! {panic} {
-                Slice.get(window.view, 0)
-            };
-            let _ = callable;
-        }
-        fn main() -> Unit ! {} {}"#,
-        "function value cannot take",
+        "captured from outside",
     );
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
@@ -654,7 +635,7 @@ fn borrowed_record_rejects_unsafe_storage_generic_and_callable_escapes() {
             Task.scope(fn() -> Window<'a> ! {panic} { Window { view: view } });
         }
         fn main() -> Unit ! {} {}"#,
-        "borrowed record",
+        "not outlived by any borrowed parameter or captured record field",
     );
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }

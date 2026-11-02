@@ -68,6 +68,12 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                         lifetime: function.parameter_lifetimes.get(index).cloned().flatten(),
                         mutable: local.ty.is_mut_slice(),
                     }]);
+                } else if local.ty.is_ref() {
+                    parameters.push(vec![crate::runtime_types::BorrowLeaf {
+                        path: vec![],
+                        lifetime: function.parameter_lifetimes.get(index).cloned().flatten(),
+                        mutable: matches!(local.ty, Type::RefMut(_)),
+                    }]);
                 } else {
                     parameters.push(leaves_of(&program.enums, local.ty));
                 }
@@ -76,6 +82,11 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                 CallResult::Slice {
                     lifetime: function.result_lifetime.clone(),
                     mutable: function.result.is_mut_slice(),
+                }
+            } else if function.result.is_ref() {
+                CallResult::Reference {
+                    lifetime: function.result_lifetime.clone(),
+                    mutable: matches!(function.result, Type::RefMut(_)),
                 }
             } else if function
                 .result
@@ -133,7 +144,11 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             view_roots: vec![None; function.locals.len()],
             view_mut: vec![false; function.locals.len()],
             view_lifetimes: vec![None; function.locals.len()],
+            reference_lifetimes: vec![None; function.locals.len()],
             view_splits: vec![SplitLabels::default(); function.locals.len()],
+            view_fields: vec![None; function.locals.len()],
+            in_field_subview: false,
+            field_target: None,
             record_sources: vec![None; function.locals.len()],
             call_views: BTreeMap::new(),
             call_records: BTreeMap::new(),
@@ -169,6 +184,12 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                 checker.view_mut[index] = local.ty.is_mut_slice();
                 checker.view_lifetimes[index] =
                     function.parameter_lifetimes.get(index).cloned().flatten();
+            } else if index < function.parameters && local.ty.is_ref() {
+                // A reference parameter borrows caller-owned storage for a
+                // declared lifetime. It is not a local capability that can be
+                // re-anchored, but a returned reference may name it.
+                checker.reference_lifetimes[index] =
+                    function.parameter_lifetimes.get(index).cloned().flatten();
             } else if index < function.parameters && checker.is_carrier_type(local.ty) {
                 // A borrowed-record parameter is an aggregate of external
                 // field views. Each leaf is rooted at this parameter and
@@ -195,6 +216,24 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                     &origins,
                     lifetime.as_deref(),
                     function.body.ty.is_mut_slice(),
+                    function.span,
+                )?;
+            } else if function.body.ty.is_ref() {
+                let origins = function
+                    .body
+                    .tail
+                    .as_ref()
+                    .map(|tail| checker.view_origins(tail))
+                    .unwrap_or_default();
+                let lifetime = function
+                    .body
+                    .tail
+                    .as_ref()
+                    .and_then(|tail| checker.view_loan(tail).lifetime);
+                checker.check_return_reference(
+                    &origins,
+                    lifetime.as_deref(),
+                    matches!(function.body.ty, Type::RefMut(_)),
                     function.span,
                 )?;
             } else if checker.is_carrier_type(function.body.ty) {
@@ -226,6 +265,31 @@ struct Loan {
     mutable: bool,
     splits: SplitLabels,
     lifetime: Option<String>,
+    /// The record field this loan was derived from, when it is a direct
+    /// projection of a local record. Two views of structurally disjoint fields
+    /// of one record are separate capabilities; the record itself stays
+    /// suspended for moves and whole-value access.
+    field: Option<FieldBorrow>,
+}
+/// A borrowed record-field place: the local record root and the field index
+/// path from its tag. The path is a checker-only identity, not a runtime value.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FieldBorrow {
+    root: usize,
+    path: Vec<usize>,
+}
+impl FieldBorrow {
+    /// Two field places are disjoint when neither path is a prefix of the
+    /// other. Paths under different roots are never considered disjoint here;
+    /// ordinary root-intersection rules decide those.
+    fn disjoint(&self, other: &Self) -> bool {
+        self.root == other.root
+            && !path_prefix(&self.path, &other.path)
+            && !path_prefix(&other.path, &self.path)
+    }
+}
+fn path_prefix(prefix: &[usize], path: &[usize]) -> bool {
+    path.len() >= prefix.len() && path[..prefix.len()] == *prefix
 }
 /// Per-leaf provenance of a record value. Paths are field indices from the
 /// record root; a slice field is a leaf, and a nested borrowed record extends
@@ -290,6 +354,13 @@ struct CallLifetime {
 enum CallResult {
     None,
     Slice {
+        lifetime: Option<String>,
+        mutable: bool,
+    },
+    /// A returned `&Record`/`&mut Record`. The caller receives a one-word
+    /// pointer into caller-owned storage; the loan is tracked until the
+    /// reference's checked last use in the enclosing expression.
+    Reference {
         lifetime: Option<String>,
         mutable: bool,
     },
@@ -436,6 +507,7 @@ struct RetainedView {
     roots: BTreeSet<usize>,
     mutable: bool,
     splits: SplitLabels,
+    field: Option<FieldBorrow>,
 }
 struct LoopState {
     pending_linear_start: usize,
@@ -459,6 +531,11 @@ struct BorrowedCapture {
     origins: BTreeSet<usize>,
     mutable: bool,
     splits: SplitLabels,
+    /// A slice result borrowed from one capture, resolved to the capture's
+    /// outer provenance when the closure value is constructed.
+    result_slice: Option<Loan>,
+    /// A record result whose borrowed leaves come from captured records.
+    result_record: Option<RecordProvenance>,
 }
 struct Checker<'a> {
     enums: &'a [crate::runtime_types::Enum],
@@ -514,8 +591,22 @@ struct Checker<'a> {
     view_mut: Vec<bool>,
     /// Erased static lifetime label of each local slice view.
     view_lifetimes: Vec<Option<String>>,
+    /// Erased static lifetime label of each reference parameter. Reference
+    /// locals are not storable, so only parameters carry this label.
+    reference_lifetimes: Vec<Option<String>>,
     /// Checked split-side assumptions for each local slice view.
     view_splits: Vec<SplitLabels>,
+    /// For a view derived directly from a record field, the field place that
+    /// identifies it. Disjoint field places of one record may be loaned at the
+    /// same time; the whole record still cannot be moved or accessed.
+    view_fields: Vec<Option<FieldBorrow>>,
+    /// The projection currently being used as a subview base. It is a place,
+    /// not a copied ready-made view, and does not add a second retained loan.
+    in_field_subview: bool,
+    /// The record field currently being projected. Reading the record to
+    /// reach this place is allowed while every live child view of that record
+    /// is a structurally disjoint field.
+    field_target: Option<FieldBorrow>,
     /// Per-field provenance of each local borrowed-record value. Ordinary
     /// records have no entry.
     record_sources: Vec<Option<RecordProvenance>>,
@@ -595,6 +686,10 @@ impl Checker<'_> {
     fn parameter_record_provenance(&self, slot: usize, ty: Type) -> RecordProvenance {
         let mut provenance = RecordProvenance::default();
         for leaf in leaves_of(self.enums, ty) {
+            let field = FieldBorrow {
+                root: slot,
+                path: leaf.path.clone(),
+            };
             provenance.leaves.insert(
                 leaf.path,
                 Loan {
@@ -602,6 +697,7 @@ impl Checker<'_> {
                     mutable: leaf.mutable,
                     splits: SplitLabels::default(),
                     lifetime: leaf.lifetime,
+                    field: Some(field),
                 },
             );
         }
@@ -619,6 +715,30 @@ impl Checker<'_> {
         }
         None
     }
+    /// The checked record-field place of a projection rooted at a direct local
+    /// record. Nested projections extend the path; coercion wrappers are
+    /// transparent. Anything rooted at a temporary, view, or call has no
+    /// stable field identity.
+    fn projection_field(&self, expr: &Expr) -> Option<FieldBorrow> {
+        let mut path = Vec::new();
+        let mut current = expr;
+        loop {
+            match &current.kind {
+                ExprKind::Project(base, offset) => {
+                    path.push(self.field_index(base.ty, *offset)?);
+                    current = base;
+                }
+                ExprKind::Coerce { value, .. } => current = value,
+                ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot)
+                    if current.ty.layout().is_some_and(|id| self.enums[id].record) =>
+                {
+                    path.reverse();
+                    return Some(FieldBorrow { root: *slot, path });
+                }
+                _ => return None,
+            }
+        }
+    }
     /// Static lifetime label and capability provenance of a checked slice
     /// expression, including fields projected from borrowed records.
     fn view_loan(&self, expr: &Expr) -> Loan {
@@ -627,6 +747,24 @@ impl Checker<'_> {
             return loan.clone();
         }
         match &expr.kind {
+            ExprKind::Borrow(slot) if expr.ty.is_ref() => Loan {
+                origins: BTreeSet::from([*slot]),
+                mutable: matches!(expr.ty, Type::RefMut(_)),
+                splits: SplitLabels::default(),
+                lifetime: None,
+                field: self.projection_field(expr),
+            },
+            ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot)
+                if expr.ty.is_ref() =>
+            {
+                Loan {
+                    origins: BTreeSet::from([*slot]),
+                    mutable: matches!(expr.ty, Type::RefMut(_)),
+                    splits: SplitLabels::default(),
+                    lifetime: self.reference_lifetimes[*slot].clone(),
+                    field: None,
+                }
+            }
             ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot) => {
                 if self.locals[*slot].ty.is_view() {
                     Loan {
@@ -634,6 +772,7 @@ impl Checker<'_> {
                         mutable: self.view_mut[*slot],
                         splits: self.view_splits[*slot].clone(),
                         lifetime: self.view_lifetimes[*slot].clone(),
+                        field: self.view_fields[*slot].clone(),
                     }
                 } else {
                     Loan::default()
@@ -648,16 +787,33 @@ impl Checker<'_> {
                 } else {
                     None
                 },
+                field: match &base.kind {
+                    ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot)
+                        if base.ty.is_view() =>
+                    {
+                        self.view_fields[*slot].clone()
+                    }
+                    _ => self.projection_field(base),
+                },
             },
             ExprKind::Project(base, offset) => {
                 let Some(index) = self.field_index(base.ty, *offset) else {
                     return Loan::default();
                 };
-                self.record_provenance(base)
+                let mut loan = self
+                    .record_provenance(base)
                     .leaves
                     .get(&vec![index])
                     .cloned()
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                loan.field = self.projection_field(expr);
+                if let Some(field) = &loan.field {
+                    // The record binding is an ancestor capability: a field
+                    // subview suspends it for moves and whole-value access,
+                    // while structurally disjoint field subviews coexist.
+                    loan.origins.insert(field.root);
+                }
+                loan
             }
             ExprKind::Coerce { value, .. } => self.view_loan(value),
             ExprKind::Block(block) => block
@@ -690,6 +846,7 @@ impl Checker<'_> {
             mutable: false,
             splits: loans[0].splits.clone(),
             lifetime: loans[0].lifetime.clone(),
+            field: loans[0].field.clone(),
         };
         for loan in &loans {
             merged.origins.extend(loan.origins.iter().copied());
@@ -697,6 +854,9 @@ impl Checker<'_> {
             merged.splits = intersect_splits(&merged.splits, &loan.splits);
             if loan.lifetime != merged.lifetime {
                 merged.lifetime = None;
+            }
+            if loan.field != merged.field {
+                merged.field = None;
             }
         }
         merged
@@ -876,6 +1036,12 @@ impl Checker<'_> {
         if !self.is_carrier_type(expr.ty) {
             return Ok(());
         }
+        // A record place being projected into a field subview is an ancestor,
+        // not a second retained aggregate capability; the Slice expression
+        // retains exactly the selected field.
+        if self.in_field_subview {
+            return Ok(());
+        }
         let provenance = self.record_provenance(expr);
         for loan in provenance.leaves.values() {
             if loan.origins.is_empty() {
@@ -903,6 +1069,7 @@ impl Checker<'_> {
                 roots,
                 mutable: loan.mutable,
                 splits: loan.splits.clone(),
+                field: loan.field.clone(),
             });
             self.loans.extend(loan.origins.iter().copied());
             if loan.mutable {
@@ -942,6 +1109,7 @@ impl Checker<'_> {
             roots,
             mutable: loan.mutable,
             splits: loan.splits,
+            field: loan.field,
         });
         self.loans.extend(loan.origins.iter().copied());
         if loan.mutable {
@@ -1151,6 +1319,7 @@ impl Checker<'_> {
                 let mut origins = BTreeSet::new();
                 let mut mutable_parameters = 0;
                 let mut splits: Option<SplitLabels> = None;
+                let mut field_candidates = Vec::new();
                 for (leaves, argument) in parameters.iter().zip(args.iter()) {
                     for leaf in leaves {
                         let Some(parameter_lifetime) = &leaf.lifetime else {
@@ -1185,6 +1354,7 @@ impl Checker<'_> {
                             Some(current) => intersect_splits(&current, &loan.splits),
                             None => loan.splits,
                         });
+                        field_candidates.push(self.argument_leaf_field(argument, &leaf.path));
                     }
                 }
                 if origins.is_empty() {
@@ -1200,6 +1370,16 @@ impl Checker<'_> {
                     ));
                 }
                 let lifetime = self.instantiate_result_lifetime(&mapping, &bounds, &lifetime);
+                let field = match field_candidates.first() {
+                    Some(Some(first))
+                        if field_candidates
+                            .iter()
+                            .all(|candidate| candidate.as_ref() == Some(first)) =>
+                    {
+                        Some(first.clone())
+                    }
+                    _ => None,
+                };
                 self.call_views.insert(
                     expr_ptr,
                     Loan {
@@ -1207,11 +1387,75 @@ impl Checker<'_> {
                         mutable,
                         splits: splits.clone().unwrap_or_default(),
                         lifetime,
+                        field,
                     },
                 );
                 self.call_origins.insert(expr_ptr, origins);
                 self.call_splits
                     .insert(expr_ptr, splits.unwrap_or_default());
+            }
+            CallResult::Reference { lifetime, mutable } => {
+                let Some(lifetime) = lifetime else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "internal error: borrowed reference return without a declared lifetime",
+                    ));
+                };
+                let mut origins = BTreeSet::new();
+                let mut mutable_parameters = 0;
+                for (leaves, argument) in parameters.iter().zip(args.iter()) {
+                    for leaf in leaves {
+                        let Some(parameter_lifetime) = &leaf.lifetime else {
+                            continue;
+                        };
+                        if !Self::callee_flows(&bounds, parameter_lifetime, &lifetime) {
+                            continue;
+                        }
+                        if mutable && !leaf.mutable {
+                            return Err(Diagnostic::new(
+                                span,
+                                "an exclusive '&mut Record' call result must derive only from exclusive '&mut Record' parameters whose lifetime outlives the declared result lifetime",
+                            )
+                            .with_note(argument.span, "shared argument that can flow into the mutable result"));
+                        }
+                        if leaf.mutable {
+                            mutable_parameters += 1;
+                        }
+                        let loan = self.argument_leaf_loan(argument, &leaf.path).ok_or_else(
+                            || {
+                                Diagnostic::new(
+                                    argument.span,
+                                    "internal error: borrowed reference argument has no provenance",
+                                )
+                            },
+                        )?;
+                        origins.extend(loan.origins.iter().copied());
+                    }
+                }
+                if origins.is_empty() {
+                    return Err(Diagnostic::new(
+                        span,
+                        "internal error: borrowed reference call result has no loan provenance",
+                    ));
+                }
+                if mutable && mutable_parameters == 0 {
+                    return Err(Diagnostic::new(
+                        span,
+                        "internal error: exclusive reference call result has no exclusive parameter",
+                    ));
+                }
+                let lifetime = self.instantiate_result_lifetime(&mapping, &bounds, &lifetime);
+                self.call_views.insert(
+                    expr_ptr,
+                    Loan {
+                        origins: origins.clone(),
+                        mutable,
+                        splits: SplitLabels::default(),
+                        lifetime,
+                        field: None,
+                    },
+                );
+                self.call_origins.insert(expr_ptr, origins);
             }
             CallResult::Record(leaves) => {
                 let mut provenance = RecordProvenance::default();
@@ -1276,6 +1520,7 @@ impl Checker<'_> {
                             mutable: leaf.mutable,
                             splits: splits.unwrap_or_default(),
                             lifetime: self.instantiate_result_lifetime(&mapping, &bounds, declared),
+                            field: None,
                         },
                     );
                 }
@@ -1321,7 +1566,7 @@ impl Checker<'_> {
         crate::executable::outlives(bounds, parameter, result)
     }
     fn argument_leaf_loan(&self, argument: &Expr, path: &[usize]) -> Option<Loan> {
-        if path.is_empty() && argument.ty.is_view() {
+        if path.is_empty() && (argument.ty.is_view() || argument.ty.is_ref()) {
             return Some(self.view_loan(argument));
         }
         if self.is_carrier_type(argument.ty) {
@@ -1329,18 +1574,58 @@ impl Checker<'_> {
         }
         None
     }
-    fn acquire_record(&mut self, slot: usize, provenance: RecordProvenance, splits: SplitLabels) {
+    /// Stable record-field identity of a borrowed call argument leaf. A slice
+    /// leaf is either a view with its own identity or a direct field
+    /// projection; a record leaf is read from a direct local record argument.
+    fn argument_leaf_field(&self, argument: &Expr, path: &[usize]) -> Option<FieldBorrow> {
+        if path.is_empty() {
+            if argument.ty.is_view() {
+                return match &argument.kind {
+                    ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
+                        self.view_fields[*slot].clone()
+                    }
+                    _ => None,
+                };
+            }
+            return self.projection_field(argument);
+        }
+        if !self.is_carrier_type(argument.ty) {
+            return None;
+        }
+        match &argument.kind {
+            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
+                Some(FieldBorrow {
+                    root: *slot,
+                    path: path.to_vec(),
+                })
+            }
+            _ => None,
+        }
+    }
+    fn acquire_record(
+        &mut self,
+        slot: usize,
+        mut provenance: RecordProvenance,
+        splits: SplitLabels,
+    ) {
         let mut origins = BTreeSet::new();
         let mut mutable = false;
-        for loan in provenance.leaves.values() {
+        for (path, loan) in &mut provenance.leaves {
             origins.extend(loan.origins.iter().copied());
             mutable |= loan.mutable;
+            // Re-anchor each leaf's field identity to the binding that now
+            // holds the record. Two views of disjoint fields of this binding
+            // stay distinct even after a helper returned the record.
+            loan.field = Some(FieldBorrow {
+                root: slot,
+                path: path.clone(),
+            });
         }
         self.record_sources[slot] = Some(provenance);
         // The aggregate record is a capability holder. Treat it as exclusive
         // when any leaf is exclusive so every owner behind a live mutable-field
         // record stays suspended until the record and its aliases are dead.
-        self.acquire_view(slot, mutable, origins, splits, None);
+        self.acquire_view(slot, mutable, origins, splits, None, None);
     }
     /// Propagate checked record-field provenance into destructuring bindings.
     fn bind_pattern_provenance(
@@ -1357,12 +1642,14 @@ impl Checker<'_> {
                         .get(&Vec::new())
                         .cloned()
                         .unwrap_or_default();
+                    let field = loan.field.clone();
                     self.acquire_view(
                         *slot,
                         ty.is_mut_slice(),
                         loan.origins,
                         loan.splits,
                         loan.lifetime,
+                        field,
                     );
                 } else if self.is_carrier_type(ty) {
                     let splits = provenance
@@ -1481,6 +1768,16 @@ impl Checker<'_> {
                 .with_note(self.locals[slot].span, "view declared here"));
             }
         } else if self.exclusive_loaned_at(slot, ptr) {
+            if let Some(target) = &self.field_target
+                && target.root == slot
+                && self.is_carrier_type(self.locals[slot].ty)
+                && self.field_access_isolated(slot, target, ptr)
+            {
+                // Reading the record only to reach a field whose live child
+                // views are all structurally disjoint from that field does not
+                // alias any exclusive field capability.
+                return Ok(());
+            }
             return Err(Diagnostic::new(
                 span,
                 format!("cannot {what} an owner while an exclusive '&mut [T]' view of it is live"),
@@ -1488,6 +1785,20 @@ impl Checker<'_> {
             .with_note(self.locals[slot].span, "owner declared here"));
         }
         Ok(())
+    }
+    /// No retained loan and every live descendant view of `record` is a
+    /// structurally disjoint field from `target`.
+    fn field_access_isolated(&self, record: usize, target: &FieldBorrow, ptr: usize) -> bool {
+        if self.temporary_loan_at(record) || self.exclusive_loans.contains(&record) {
+            return false;
+        }
+        self.live_views_at(ptr).iter().all(|view| {
+            !self.available[*view]
+                || !self.derives_from(*view, record)
+                || self.view_fields[*view]
+                    .as_ref()
+                    .is_some_and(|field| field.disjoint(target))
+        })
     }
     /// Capability ancestry a slice-view expression exposes: the view slot
     /// itself plus every view and storage root it derives from.
@@ -1517,7 +1828,10 @@ impl Checker<'_> {
                     out.extend(origins.iter().copied());
                 }
             }
-            ExprKind::Peek(slot) | ExprKind::Borrow(slot) | ExprKind::Local(slot) => {
+            ExprKind::Peek(slot)
+            | ExprKind::Borrow(slot)
+            | ExprKind::Local(slot)
+            | ExprKind::Move(slot) => {
                 out.insert(*slot);
             }
             ExprKind::Slice { base, .. } => self.collect_view_origins(base, out),
@@ -1636,6 +1950,7 @@ impl Checker<'_> {
         origins: BTreeSet<usize>,
         splits: SplitLabels,
         lifetime: Option<String>,
+        field: Option<FieldBorrow>,
     ) {
         let roots = self.origins_roots(&origins);
         self.view_mut[slot] = mutable;
@@ -1643,6 +1958,7 @@ impl Checker<'_> {
         self.view_roots[slot] = Some(roots);
         self.view_splits[slot] = splits;
         self.view_lifetimes[slot] = lifetime;
+        self.view_fields[slot] = field;
     }
     /// Check that a view may be created from `origins` with `mutable`
     /// mutability, or reject an ancestor/sibling/root conflict.
@@ -1651,6 +1967,7 @@ impl Checker<'_> {
         origins: &BTreeSet<usize>,
         mutable: bool,
         splits: &SplitLabels,
+        field: Option<&FieldBorrow>,
         ptr: usize,
         span: Span,
     ) -> Result<()> {
@@ -1680,7 +1997,10 @@ impl Checker<'_> {
         for retained in &self.temporary_regions {
             let overlaps = origins.iter().any(|slot| retained.origins.contains(slot))
                 || roots.iter().any(|root| retained.roots.contains(root));
-            if !overlaps || splits.disjoint(&retained.splits) {
+            let fields_disjoint = field
+                .zip(retained.field.as_ref())
+                .is_some_and(|(new, old)| new.disjoint(old));
+            if !overlaps || splits.disjoint(&retained.splits) || fields_disjoint {
                 continue;
             }
             if retained.mutable {
@@ -1720,8 +2040,17 @@ impl Checker<'_> {
                 continue;
             }
             if splits.disjoint(&self.view_splits[*view]) {
-                // The only sibling exemption: both views descend from opposite
+                // The only split exemption: both views descend from opposite
                 // sides of the same checked Slice.split_at_mut group.
+                continue;
+            }
+            if field
+                .zip(self.view_fields[*view].as_ref())
+                .is_some_and(|(new, old)| new.disjoint(old))
+            {
+                // Structurally disjoint fields of one local record are
+                // separate loan capabilities. Neither can reach the other's
+                // storage, and the record itself stays suspended for moves.
                 continue;
             }
             if mutable || self.view_mut[*view] {
@@ -1801,6 +2130,59 @@ impl Checker<'_> {
         }
         Ok(())
     }
+    /// Check a returned `&Record`/`&mut Record` against the declared result
+    /// lifetime. The reference must derive from a matching reference parameter;
+    /// a local owner's address cannot escape the callee frame.
+    fn check_return_reference(
+        &self,
+        origins: &BTreeSet<usize>,
+        view_lifetime: Option<&str>,
+        mutable: bool,
+        span: Span,
+    ) -> Result<()> {
+        let Some(lifetime) = &self.result_lifetime else {
+            return Err(Diagnostic::new(
+                span,
+                "a returned borrowed reference requires a declared result lifetime",
+            ));
+        };
+        if !view_lifetime.is_some_and(|view| self.actual_outlives(view, lifetime)) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "returned reference would dangle: its borrow is not a reference parameter with the declared result lifetime '{lifetime}' or a lifetime that outlives it (it has lifetime {})",
+                    view_lifetime.unwrap_or("a temporary or local owner")
+                ),
+            ));
+        }
+        if origins.is_empty() {
+            return Err(Diagnostic::new(
+                span,
+                "a returned reference must derive from a reference parameter, not a temporary",
+            ));
+        }
+        for origin in origins {
+            if *origin >= self.parameter_count || !self.locals[*origin].ty.is_ref() {
+                return Err(Diagnostic::new(
+                    span,
+                    "returned reference would dangle: it borrows a stack local, a record value, or another non-reference place",
+                )
+                .with_note(self.locals[*origin].span, "borrowed storage declared here"));
+            }
+            if !self.parameter_carries_lifetime(*origin, lifetime, mutable) {
+                return Err(Diagnostic::new(
+                    span,
+                    if mutable {
+                        "an exclusive '&mut Record' return must derive from an exclusive '&mut Record' parameter with the declared result lifetime"
+                    } else {
+                        "returned reference would dangle: the parameter does not carry the declared result lifetime"
+                    },
+                )
+                .with_note(self.locals[*origin].span, "reference parameter declared here"));
+            }
+        }
+        Ok(())
+    }
     /// Check a returned borrowed record field by field against the function's
     /// declared result type. Every declared borrow leaf must be present with
     /// exactly the declared lifetime, and every origin must be a parameter
@@ -1862,6 +2244,14 @@ impl Checker<'_> {
     /// an exclusive record-field leaf; a shared result may narrow either.
     fn parameter_carries_lifetime(&self, slot: usize, lifetime: &str, mutable: bool) -> bool {
         let local = &self.locals[slot];
+        if local.ty.is_ref() {
+            return self
+                .reference_lifetimes
+                .get(slot)
+                .and_then(|name| name.as_ref())
+                .is_some_and(|name| self.actual_outlives(name, lifetime))
+                && (!mutable || matches!(local.ty, Type::RefMut(_)));
+        }
         if local.ty.is_view() {
             return self
                 .parameter_lifetimes
@@ -2026,7 +2416,23 @@ impl Checker<'_> {
     /// Retain a slice result through the rest of its enclosing expression,
     /// including later call arguments. This is separate from local liveness.
     fn hold_view(&mut self, expr: &Expr) -> Result<()> {
-        if !expr.ty.is_view() {
+        if !(expr.ty.is_view() || expr.ty.is_ref()) {
+            return Ok(());
+        }
+        // A field projection used as a subview base is a place, not a
+        // ready-made view; the Slice expression retains the child capability.
+        if self.in_field_subview && matches!(expr.kind, ExprKind::Project(..)) {
+            return Ok(());
+        }
+        // Reading an existing reference is not creating a new capability; its
+        // loan was established by the caller. Retaining it per read would make
+        // `p.x = p.x + 1` conflict with itself.
+        if expr.ty.is_ref()
+            && matches!(
+                expr.kind,
+                ExprKind::Local(_) | ExprKind::Peek(_) | ExprKind::Move(_) | ExprKind::Borrow(_)
+            )
+        {
             return Ok(());
         }
         // A nested builtin may reborrow the same retained receiver: argument
@@ -2042,11 +2448,16 @@ impl Checker<'_> {
         let origins = self.view_origins(expr);
         let roots = self.origins_roots(&origins);
         let splits = self.split_labels(expr);
-        let mutable = expr.ty.is_mut_slice();
+        let mutable = expr.ty.is_mut_slice() || matches!(expr.ty, Type::RefMut(_));
+        let field = self.view_loan(expr).field;
         for retained in &self.temporary_regions {
             let overlaps = origins.iter().any(|slot| retained.origins.contains(slot))
                 || roots.iter().any(|root| retained.roots.contains(root));
-            if !overlaps || splits.disjoint(&retained.splits) {
+            let fields_disjoint = field
+                .as_ref()
+                .zip(retained.field.as_ref())
+                .is_some_and(|(new, old)| new.disjoint(old));
+            if !overlaps || splits.disjoint(&retained.splits) || fields_disjoint {
                 continue;
             }
             if retained.mutable || mutable {
@@ -2064,6 +2475,7 @@ impl Checker<'_> {
             roots,
             mutable,
             splits,
+            field,
         });
         self.loans.extend(origins.iter().copied());
         if mutable {
@@ -2192,8 +2604,10 @@ impl Checker<'_> {
                         let origins = self.view_origins(expr);
                         let mutable = self.locals[slot].ty.is_mut_slice();
                         let splits = self.split_labels(expr);
-                        let lifetime = self.view_loan(expr).lifetime;
-                        self.acquire_view(slot, mutable, origins, splits, lifetime);
+                        let loan = self.view_loan(expr);
+                        let lifetime = loan.lifetime;
+                        let field = loan.field;
+                        self.acquire_view(slot, mutable, origins, splits, lifetime, field);
                     } else if self.is_carrier_type(self.locals[slot].ty) {
                         let provenance = self.record_provenance(expr);
                         let splits = provenance
@@ -2213,6 +2627,7 @@ impl Checker<'_> {
                             capture.mutable,
                             capture.origins.clone(),
                             capture.splits.clone(),
+                            None,
                             None,
                         );
                         self.borrowed_closures.insert(slot, capture);
@@ -2357,6 +2772,9 @@ impl Checker<'_> {
         let reborrowed_views = self.reborrowed_views.clone();
         let bound_receivers = self.bound_receivers.clone();
         let expr_ptr = expr as *const Expr as usize;
+        let expr_field = matches!(expr.kind, ExprKind::Project(..))
+            .then(|| self.projection_field(expr))
+            .flatten();
         match &mut expr.kind {
             ExprKind::Local(slot) if self.moves(expr.ty) || self.locals[*slot].linear => {
                 let slot = *slot;
@@ -2415,19 +2833,23 @@ impl Checker<'_> {
                 self.check_owner_access(*slot, expr_ptr, expr.span, "read")?;
             }
             ExprKind::Project(base, _) => {
-                self.expr(base)?;
+                let old_target = std::mem::replace(&mut self.field_target, expr_field.clone());
+                let checked = self.expr(base);
+                self.field_target = old_target;
+                checked?;
                 if expr.ty.is_slice() {
                     let loan = self.view_loan(expr);
-                    if loan.mutable {
+                    if loan.mutable && !self.in_field_subview {
                         return Err(Diagnostic::new(
                             expr.span,
-                            "an exclusive '&mut [T]' record field cannot be projected directly; destructure the record first, as in 'let Window { view, .. } = window;', then use the bound view",
+                            "an exclusive '&mut [T]' record field cannot be projected directly; destructure the record first, as in 'let Window { view, .. } = window;', or derive a subview with '&mut record.view[..]'",
                         ));
                     }
                     self.check_view_creation(
                         &loan.origins,
                         loan.mutable,
                         &loan.splits,
+                        loan.field.as_ref(),
                         expr_ptr,
                         expr.span,
                     )?;
@@ -2532,6 +2954,15 @@ impl Checker<'_> {
                         value.ty.is_mut_slice(),
                         expr.span,
                     )?;
+                } else if value.ty.is_ref() {
+                    let origins = self.view_origins(value);
+                    let lifetime = self.view_loan(value).lifetime;
+                    self.check_return_reference(
+                        &origins,
+                        lifetime.as_deref(),
+                        matches!(value.ty, Type::RefMut(_)),
+                        expr.span,
+                    )?;
                 } else if self.is_carrier_type(value.ty) {
                     let provenance = self.record_provenance(value);
                     self.check_return_record(&provenance, expr.span)?;
@@ -2554,7 +2985,8 @@ impl Checker<'_> {
                         "linear values cannot be dropped; consume them by matching or passing them on",
                     ));
                 }
-                if let ExprKind::Local(slot) | ExprKind::Peek(slot) = &value.kind
+                if let ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) =
+                    &value.kind
                     && (self.shared_record_loans.contains(slot)
                         || self.exclusive_loans.contains(slot)
                         || self.any_loan_at(*slot, expr_ptr)
@@ -2609,8 +3041,10 @@ impl Checker<'_> {
                     let origins = self.view_origins(value);
                     let mutable = self.locals[slot].ty.is_mut_slice();
                     let splits = self.split_labels(value);
-                    let lifetime = self.view_loan(value).lifetime;
-                    self.acquire_view(slot, mutable, origins, splits, lifetime);
+                    let loan = self.view_loan(value);
+                    let lifetime = loan.lifetime;
+                    let field = loan.field;
+                    self.acquire_view(slot, mutable, origins, splits, lifetime, field);
                 } else if self.is_carrier_type(self.locals[slot].ty) {
                     let provenance = self.record_provenance(value);
                     let splits = provenance
@@ -2727,50 +3161,91 @@ impl Checker<'_> {
                 // their captured views through all later argument evaluation.
                 // Local liveness alone ends at the callee's move, before the
                 // runtime actually calls it. Re-establish those loans here.
-                if let Some(info) = capture_site
+                let capture_info = capture_site
                     .and_then(|site| self.borrowed_values.get(&site))
                     .cloned()
-                    .or(local_capture)
-                {
+                    .or(local_capture);
+                if let Some(info) = &capture_info {
                     let roots = self.origins_roots(&info.origins);
                     self.temporary_regions.push(RetainedView {
                         origins: info.origins.clone(),
                         roots,
                         mutable: info.mutable,
-                        splits: info.splits,
+                        splits: info.splits.clone(),
+                        field: None,
                     });
                     self.loans.extend(info.origins.iter().copied());
                     if info.mutable {
-                        self.temporary_exclusive.extend(info.origins);
+                        self.temporary_exclusive
+                            .extend(info.origins.iter().copied());
                     } else {
-                        self.temporary_shared.extend(info.origins);
+                        self.temporary_shared.extend(info.origins.iter().copied());
                     }
                 }
                 for argument in arguments.iter_mut() {
                     self.expr(argument)?;
                 }
                 self.loans = loans;
-                // A callable type with slice parameters or a slice result
-                // carries a borrow contract; apply it exactly as for a direct
-                // call. Its inhabitants never return their own captures.
+                // A scoped closure may return a view or record borrowed from
+                // its environment. The capture contract names the capture
+                // position; resolve it to the capture's outer provenance now,
+                // exactly as an argument-derived result is resolved below.
+                if let Some(info) = &capture_info {
+                    if let Some(loan) = &info.result_slice {
+                        if !expr.ty.is_slice() || loan.mutable != expr.ty.is_mut_slice() {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal error: scoped closure result provenance disagrees with the callable result type",
+                            ));
+                        }
+                        self.call_views.insert(expr_ptr, loan.clone());
+                        self.call_origins.insert(expr_ptr, loan.origins.clone());
+                        self.call_splits.insert(expr_ptr, loan.splits.clone());
+                    }
+                    if let Some(provenance) = &info.result_record {
+                        if !self.is_carrier_type(expr.ty) {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal error: scoped closure record result provenance disagrees with the callable result type",
+                            ));
+                        }
+                        self.call_records.insert(expr_ptr, provenance.clone());
+                    }
+                }
+                // A callable type with borrowed parameters or results carries
+                // a borrow contract; apply it exactly as for a direct call.
                 if let Type::Fn(id) | Type::Once(id) = callee.ty {
                     let signature = &self.functions[id];
                     let borrows = &signature.borrows;
-                    if !borrows.parameters.is_empty() || borrows.result.is_some() {
+                    if !borrows.parameters.is_empty()
+                        || !borrows.parameter_leaves.is_empty()
+                        || borrows.result.is_some()
+                        || !borrows.result_leaves.is_empty()
+                    {
                         let parameters = signature
                             .parameters
                             .iter()
                             .enumerate()
                             .map(|(i, ty)| {
-                                if ty.is_slice() {
+                                let mut leaves = if ty.is_slice() {
                                     vec![crate::runtime_types::BorrowLeaf {
                                         path: vec![],
                                         lifetime: borrows.parameters.get(i).cloned().flatten(),
                                         mutable: ty.is_mut_slice(),
                                     }]
                                 } else {
-                                    vec![]
+                                    Vec::new()
+                                };
+                                if let Some(record_leaves) = borrows.parameter_leaves.get(i) {
+                                    leaves.extend(record_leaves.iter().map(|leaf| {
+                                        crate::runtime_types::BorrowLeaf {
+                                            path: leaf.path.clone(),
+                                            lifetime: leaf.lifetime.clone(),
+                                            mutable: leaf.mutable,
+                                        }
+                                    }));
                                 }
+                                leaves
                             })
                             .collect::<Vec<_>>();
                         let result = if signature.result.is_slice() {
@@ -2778,6 +3253,18 @@ impl Checker<'_> {
                                 lifetime: borrows.result.clone(),
                                 mutable: signature.result.is_mut_slice(),
                             }
+                        } else if self.is_carrier_type(signature.result) {
+                            CallResult::Record(
+                                borrows
+                                    .result_leaves
+                                    .iter()
+                                    .map(|leaf| crate::runtime_types::BorrowLeaf {
+                                        path: leaf.path.clone(),
+                                        lifetime: leaf.lifetime.clone(),
+                                        mutable: leaf.mutable,
+                                    })
+                                    .collect(),
+                            )
                         } else {
                             CallResult::None
                         };
@@ -2808,22 +3295,31 @@ impl Checker<'_> {
                 let site = through_coerce(body);
                 let site_ptr = site as *const Expr as usize;
                 let lambda = matches!(site.kind, ExprKind::FnValue { .. });
-                // One loan per captured view, keeping its own split side, so
-                // disjoint halves lent to different children stay disjoint.
-                let lent = match &site.kind {
-                    ExprKind::FnValue { captures, .. } => captures
-                        .iter()
-                        .filter(|capture| capture.ty.is_slice())
-                        .map(|capture| {
-                            (
+                // One loan per captured view or borrowed record leaf, keeping
+                // each split side, so disjoint halves lent to different
+                // children stay disjoint.
+                let mut lent = Vec::new();
+                if let ExprKind::FnValue { captures, .. } = &site.kind {
+                    for capture in captures {
+                        if capture.ty.is_slice() {
+                            lent.push((
                                 self.view_origins(capture),
                                 capture.ty.is_mut_slice(),
                                 self.split_labels(capture),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                    _ => Vec::new(),
-                };
+                                self.view_loan(capture).field,
+                            ));
+                        } else if self.is_carrier_type(capture.ty) {
+                            for loan in self.record_provenance(capture).leaves.values() {
+                                lent.push((
+                                    loan.origins.clone(),
+                                    loan.mutable,
+                                    loan.splits.clone(),
+                                    loan.field.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
                 let old_capture_site = self.capture_site;
                 self.capture_site = lambda.then_some(site_ptr);
                 let checked = self.expr(body);
@@ -2832,27 +3328,31 @@ impl Checker<'_> {
                 self.loans = loans;
                 if let Some(info) = self.borrowed_values.get(&site_ptr).cloned() {
                     // Spawn is legal only lexically in a scope body, so this
-                    // function is that body. Its slice parameters are views it
-                    // captured from outside the scope; their storage outlives
-                    // the scope's final join. Its own locals and owned captures
-                    // die before that join and cannot be lent to a child.
+                    // function is that body. Its slice and borrowed-record
+                    // parameters are values it captured from outside the
+                    // scope; their storage outlives the scope's final join.
+                    // Its own locals and owned captures die before that join
+                    // and cannot be lent to a child.
                     let roots = self.origins_roots(&info.origins);
                     if let Some(root) = roots.iter().find(|root| {
-                        **root >= self.parameter_count || !self.locals[**root].ty.is_slice()
+                        **root >= self.parameter_count
+                            || !(self.locals[**root].ty.is_slice()
+                                || self.is_carrier_type(self.locals[**root].ty))
                     }) {
                         return Err(Diagnostic::new(
                             expr.span,
-                            "a spawned task may borrow only slice views that the scope body captured from outside the scope; this storage belongs to the scope body and is freed before the scope joins its children",
+                            "a spawned task may borrow only slice views or borrowed records that the scope body captured from outside the scope; this storage belongs to the scope body and is freed before the scope joins its children",
                         )
                         .with_note(self.locals[*root].span, "storage owned by the scope body"));
                     }
-                    for (origins, mutable, splits) in lent {
+                    for (origins, mutable, splits, field) in lent {
                         let roots = self.origins_roots(&origins);
                         self.task_regions.push(RetainedView {
                             origins,
                             roots,
                             mutable,
                             splits,
+                            field,
                         });
                     }
                     self.apply_task_regions();
@@ -2870,28 +3370,25 @@ impl Checker<'_> {
                 self.loans = loans;
             }
             ExprKind::FnValue { captures, .. } => {
-                if captures
-                    .iter()
-                    .any(|capture| self.is_carrier_type(capture.ty))
-                {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "a closure or task cannot capture a borrowed record; borrowed record views are lexical and cannot escape through a callable",
-                    ));
-                }
                 // A borrowed-capture closure is a scoped lexical capability.
                 // It is legal only as a direct `let` initializer or as the
                 // immediate callee of an indirect call; both positions are
-                // marked by the enclosing statement.
+                // marked by the enclosing statement. Captured slice views and
+                // borrowed records are both inert descriptors: the environment
+                // never owns the storage behind them.
                 let borrowed = captures
                     .iter()
                     .filter(|capture| capture.ty.is_slice())
                     .collect::<Vec<_>>();
-                if !borrowed.is_empty() {
+                let records = captures
+                    .iter()
+                    .filter(|capture| self.is_carrier_type(capture.ty))
+                    .collect::<Vec<_>>();
+                if !borrowed.is_empty() || !records.is_empty() {
                     if self.capture_site != Some(expr_ptr) {
                         return Err(Diagnostic::new(
                             expr.span,
-                            "a lambda with borrowed slice captures must be called immediately or bound directly to a local; it cannot escape through a return, aggregate, box, union, generic call, adapter, or task",
+                            "a lambda with borrowed captures must be called immediately or bound directly to a local; it cannot escape through a return, aggregate, box, union, generic call, adapter, or task",
                         ));
                     }
                     let mut origins = BTreeSet::new();
@@ -2901,10 +3398,12 @@ impl Checker<'_> {
                         let capture_origins = self.view_origins(capture);
                         let labels = self.split_labels(capture);
                         let capture_mut = capture.ty.is_mut_slice();
+                        let capture_field = self.view_loan(capture).field;
                         self.check_view_creation(
                             &capture_origins,
                             capture_mut,
                             &labels,
+                            capture_field.as_ref(),
                             expr_ptr,
                             capture.span,
                         )?;
@@ -2923,11 +3422,79 @@ impl Checker<'_> {
                             None => labels,
                         });
                     }
-                    let info = BorrowedCapture {
+                    for capture in &records {
+                        let provenance = self.record_provenance(capture);
+                        for loan in provenance.leaves.values() {
+                            mutable |= loan.mutable;
+                            origins.extend(loan.origins.iter().copied());
+                            splits = Some(match splits {
+                                Some(current) => intersect_splits(&current, &loan.splits),
+                                None => loan.splits.clone(),
+                            });
+                        }
+                    }
+                    let mut info = BorrowedCapture {
                         origins,
                         mutable,
                         splits: splits.unwrap_or_default(),
+                        result_slice: None,
+                        result_record: None,
                     };
+                    let capture_result = match expr.ty {
+                        Type::Fn(id) | Type::Once(id) => {
+                            self.functions[id].borrows.capture_result.clone()
+                        }
+                        _ => None,
+                    };
+                    if let Some(result) = capture_result {
+                        if let Some(slice) = result.slice {
+                            let capture = &captures[slice.capture];
+                            let loan = match &slice.path {
+                                Some(path) => {
+                                    self.record_provenance(capture).leaves.get(path).cloned()
+                                }
+                                None => Some(self.view_loan(capture)),
+                            };
+                            let Some(loan) = loan else {
+                                return Err(Diagnostic::new(
+                                    expr.span,
+                                    "internal error: scoped closure result capture has no borrowed provenance",
+                                ));
+                            };
+                            if loan.mutable != slice.mutable {
+                                return Err(Diagnostic::new(
+                                    expr.span,
+                                    "internal error: scoped closure result capture mutability disagrees with its contract",
+                                ));
+                            }
+                            info.result_slice = Some(loan);
+                        }
+                        let mut provenance = RecordProvenance::default();
+                        for leaf in &result.leaves {
+                            let capture = &captures[leaf.capture];
+                            let Some(loan) = self
+                                .record_provenance(capture)
+                                .leaves
+                                .get(&leaf.path)
+                                .cloned()
+                            else {
+                                return Err(Diagnostic::new(
+                                    expr.span,
+                                    "internal error: scoped closure result field has no captured provenance",
+                                ));
+                            };
+                            if loan.mutable != leaf.mutable {
+                                return Err(Diagnostic::new(
+                                    expr.span,
+                                    "internal error: scoped closure result field mutability disagrees with its captured record",
+                                ));
+                            }
+                            provenance.leaves.insert(leaf.path.clone(), loan);
+                        }
+                        if !provenance.leaves.is_empty() {
+                            info.result_record = Some(provenance);
+                        }
+                    }
                     self.borrowed_values.insert(expr_ptr, info);
                 }
                 if captures.iter().any(|c| self.value_moves_linear(c))
@@ -3174,7 +3741,22 @@ impl Checker<'_> {
                     Some((group, left)) => base_splits.with(*group, *left),
                     None => base_splits,
                 };
-                self.check_view_creation(&origins, mutable, &splits, expr_ptr, expr.span)?;
+                let base_field = match &base.kind {
+                    ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot)
+                        if base.ty.is_view() =>
+                    {
+                        self.view_fields[*slot].clone()
+                    }
+                    _ => self.projection_field(base),
+                };
+                self.check_view_creation(
+                    &origins,
+                    mutable,
+                    &splits,
+                    base_field.as_ref(),
+                    expr_ptr,
+                    expr.span,
+                )?;
                 let view_base = match &base.kind {
                     ExprKind::Local(slot) if self.locals[*slot].ty.is_view() => Some(*slot),
                     _ => None,
@@ -3202,9 +3784,17 @@ impl Checker<'_> {
                         roots,
                         mutable,
                         splits: reservation_splits,
+                        field: base_field,
                     });
                 } else {
-                    self.expr(base)?;
+                    // A record-field projection is a place used to derive the
+                    // child capability. It must not retain a second, competing
+                    // view; the Slice expression below retains the child.
+                    let old = self.in_field_subview;
+                    self.in_field_subview = matches!(base.kind, ExprKind::Project(..));
+                    let checked = self.expr(base);
+                    self.in_field_subview = old;
+                    checked?;
                     // A view of an inline array needs stable storage while the
                     // bounds are evaluated and the view is used.
                     if let ExprKind::Peek(slot) = &base.kind

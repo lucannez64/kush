@@ -522,7 +522,7 @@ fn borrowed_text_escape_positions_are_rejected() {
     rejects(
         "fn first(text: &str) -> i64 ! {panic} { Str.len(text) }
         fn main() -> Unit ! {} { let f = first; }",
-        "a function value cannot carry a borrowed record or &str text view",
+        "a function value cannot carry an owner reference or &str text view",
     );
     rejects(
         "fn main() -> Unit ! {alloc, panic} { let view = String.as_str(&\"abc\"); }",

@@ -294,10 +294,13 @@ fn references_reject_temporaries_fields_storage_returns_and_owned_writes() {
     rejects(
         r#"
         struct P { x: i64 }
-        fn escape(p: &P) -> &P ! {panic} { p }
+        fn escape<'a>(p: &'a P) -> &'a P ! {panic} {
+            let local = P { x: 1 };
+            &local
+        }
         fn main() -> Unit ! {panic} {}
         "#,
-        "cannot be returned",
+        "escapes",
     );
     rejects(
         r#"
