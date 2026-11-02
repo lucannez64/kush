@@ -266,6 +266,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             view_splits: vec![SplitLabels::default(); function.locals.len()],
             view_fields: vec![None; function.locals.len()],
             in_field_subview: false,
+            place_borrow: false,
             field_target: None,
             record_sources: vec![None; function.locals.len()],
             call_views: BTreeMap::new(),
@@ -416,6 +417,11 @@ impl FieldBorrow {
             && !path_prefix(&other.path, &self.path)
     }
 }
+/// Marker bit that distinguishes an element-index step from a record-field
+/// index in a structural place path. Constant indices therefore prove
+/// disjointness of distinct array/vector elements; a runtime index uses the
+/// all-ones payload, so all dynamic indices of one base conflict.
+const INDEX_PATH_MARK: usize = 1 << (usize::BITS - 8);
 fn path_prefix(prefix: &[usize], path: &[usize]) -> bool {
     path.len() >= prefix.len() && path[..prefix.len()] == *prefix
 }
@@ -824,6 +830,10 @@ struct Checker<'a> {
     /// The projection currently being used as a subview base. It is a place,
     /// not a copied ready-made view, and does not add a second retained loan.
     in_field_subview: bool,
+    /// One checked place borrow is being formed. Ancestor reads of the root
+    /// are permitted here; `check_view_creation` rejects an overlapping field
+    /// or whole-owner capability with a place-specific diagnostic.
+    place_borrow: bool,
     /// The record field currently being projected. Reading the record to
     /// reach this place is allowed while every live child view of that record
     /// is a structurally disjoint field.
@@ -998,6 +1008,66 @@ impl Checker<'_> {
             }
         }
     }
+    /// Root binding and record-field path of a checked place. Index places
+    /// keep the base field path: two different element indices of one vector
+    /// conservatively conflict. A place through a stored reference roots the
+    /// reference binding itself; its underlying owners come from `view_loan`.
+    fn place_ident(&self, expr: &Expr) -> Option<(usize, Vec<usize>)> {
+        match &expr.kind {
+            ExprKind::Project(base, offset) => {
+                if base.ty.is_ref() {
+                    let root = match &base.kind {
+                        ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
+                            *slot
+                        }
+                        _ => return None,
+                    };
+                    return Some((root, Vec::new()));
+                }
+                let (root, mut path) = self.place_ident(base)?;
+                path.push(self.field_index(base.ty, *offset)?);
+                Some((root, path))
+            }
+            ExprKind::PlaceIndex { base, index } => {
+                let (root, mut path) = self.place_ident(base)?;
+                let position = match &index.kind {
+                    ExprKind::Constant(position) => *position as usize,
+                    _ => usize::MAX,
+                };
+                path.push(INDEX_PATH_MARK | position);
+                Some((root, path))
+            }
+            ExprKind::Coerce { value, .. } => self.place_ident(value),
+            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
+                Some((*slot, Vec::new()))
+            }
+            _ => None,
+        }
+    }
+    /// Provenance of a checked place borrow. Borrowed leaves (reference and
+    /// slice fields) keep their owner ancestry; scalar/array/owning places add
+    /// the root binding as an ancestor capability and retain a structural
+    /// field identity for disjoint-field exemption.
+    fn place_loan(&self, place: &Expr) -> Loan {
+        let leaf = self.view_loan(place);
+        if !leaf.origins.is_empty() && !matches!(place.kind, ExprKind::PlaceIndex { .. }) {
+            let mut loan = leaf;
+            if let Some((root, path)) = self.place_ident(place) {
+                loan.field.get_or_insert(FieldBorrow { root, path });
+            }
+            return loan;
+        }
+        let Some((root, path)) = self.place_ident(place) else {
+            return Loan::default();
+        };
+        Loan {
+            origins: BTreeSet::from([root]),
+            mutable: false,
+            splits: SplitLabels::default(),
+            lifetime: None,
+            field: Some(FieldBorrow { root, path }),
+        }
+    }
     /// Static lifetime label and capability provenance of a checked slice
     /// expression, including fields projected from borrowed records.
     fn view_loan(&self, expr: &Expr) -> Loan {
@@ -1128,6 +1198,11 @@ impl Checker<'_> {
                     // while structurally disjoint field subviews coexist.
                     loan.origins.insert(field.root);
                 }
+                loan
+            }
+            ExprKind::BorrowPlace(place) => {
+                let mut loan = self.place_loan(place);
+                loan.mutable = matches!(expr.ty, Type::RefMut(_));
                 loan
             }
             ExprKind::Coerce { value, .. } => self.view_loan(value),
@@ -2480,9 +2555,18 @@ impl Checker<'_> {
                 .with_note(self.locals[slot].span, "view declared here"));
             }
         } else if self.exclusive_loaned_at(slot, ptr) {
+            if self.place_borrow {
+                // The enclosing place borrow checks the exact field against
+                // every retained/live child capability afterwards.
+                return Ok(());
+            }
             if let Some(target) = &self.field_target
                 && target.root == slot
-                && self.is_carrier_type(self.locals[slot].ty)
+                && (self.is_carrier_type(self.locals[slot].ty)
+                    || self.locals[slot]
+                        .ty
+                        .layout()
+                        .is_some_and(|id| self.enums[id].record))
                 && self.field_access_isolated(slot, target, ptr)
             {
                 // Reading the record only to reach a field whose live child
@@ -2501,8 +2585,20 @@ impl Checker<'_> {
     /// No retained loan and every live descendant view of `record` is a
     /// structurally disjoint field from `target`.
     fn field_access_isolated(&self, record: usize, target: &FieldBorrow, ptr: usize) -> bool {
-        if self.temporary_loan_at(record) || self.exclusive_loans.contains(&record) {
+        if self.exclusive_loans.contains(&record) {
             return false;
+        }
+        // A sibling field borrow retained by the same expression is isolated
+        // only when its structural place is disjoint from this one.
+        for retained in &self.temporary_regions {
+            if (retained.origins.contains(&record) || retained.roots.contains(&record))
+                && !retained
+                    .field
+                    .as_ref()
+                    .is_some_and(|field| field.disjoint(target))
+            {
+                return false;
+            }
         }
         self.live_views_at(ptr).iter().all(|view| {
             !self.available[*view]
@@ -2577,6 +2673,9 @@ impl Checker<'_> {
             {
                 out.extend(self.view_loan(expr).origins.iter().copied());
             }
+            ExprKind::BorrowPlace(place) => {
+                out.extend(self.place_loan(place).origins.iter().copied());
+            }
             ExprKind::Coerce { value, .. } => self.collect_view_origins(value, out),
             ExprKind::Block(block) => {
                 if let Some(tail) = &block.tail {
@@ -2629,6 +2728,7 @@ impl Checker<'_> {
                 SplitLabels::default()
             }
             ExprKind::Project(..) if expr.ty.is_slice() => self.view_loan(expr).splits,
+            ExprKind::BorrowPlace(place) => self.place_loan(place).splits,
             ExprKind::Coerce { value, .. } => self.split_labels(value),
             ExprKind::Block(block) => block
                 .tail
@@ -3635,13 +3735,14 @@ impl Checker<'_> {
                             .clone()
                             .or_else(|| Some(self.anonymous_lifetime(&origins)));
                         let mutable = matches!(self.locals[slot].ty, Type::RefMut(_));
+                        let field = loan.field.clone();
                         self.acquire_view(
                             slot,
                             mutable,
                             origins,
                             SplitLabels::default(),
                             lifetime.clone(),
-                            None,
+                            field,
                         );
                         self.reference_lifetimes[slot] = lifetime;
                         if self.referent(self.locals[slot].ty).is_some_and(|referent| {
@@ -4051,6 +4152,90 @@ impl Checker<'_> {
                     self.shared_record_loans.insert(root);
                 }
                 self.loans.insert(root);
+            }
+            ExprKind::BorrowPlace(place) => {
+                let old_place_borrow = self.place_borrow;
+                self.place_borrow = true;
+                let checked = self.expr(place);
+                self.place_borrow = old_place_borrow;
+                checked?;
+                let mutable = matches!(expr.ty, Type::RefMut(_));
+                let loan = self.place_loan(place);
+                if loan.origins.is_empty() {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: place borrow has no capability provenance",
+                    ));
+                }
+                for origin in &loan.origins {
+                    if *origin >= self.available.len() {
+                        continue;
+                    }
+                    if !self.available[*origin] {
+                        return Err(self.use_after_move(
+                            *origin,
+                            expr.span,
+                            "cannot borrow a field of a moved owner",
+                        ));
+                    }
+                }
+                if self
+                    .check_view_creation(
+                        &loan.origins,
+                        mutable,
+                        &loan.splits,
+                        loan.field.as_ref(),
+                        expr_ptr,
+                        expr.span,
+                    )
+                    .is_err()
+                {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        if mutable {
+                            "cannot create an exclusive place borrow while an overlapping borrow or view of the same owner is live; use structurally disjoint fields or wait until the previous loan's last use"
+                        } else {
+                            "cannot create a shared place borrow while an exclusive borrow of the same owner is live; use a structurally disjoint field or wait until the exclusive loan's last use"
+                        },
+                    ));
+                }
+                if mutable {
+                    for origin in &loan.origins {
+                        self.temporary_exclusive.insert(*origin);
+                    }
+                } else {
+                    for origin in &loan.origins {
+                        self.temporary_shared.insert(*origin);
+                        if self.locals[*origin]
+                            .ty
+                            .layout()
+                            .is_some_and(|id| self.enums[id].record)
+                        {
+                            self.shared_record_loans.insert(*origin);
+                        }
+                    }
+                }
+                self.loans.extend(loan.origins.iter().copied());
+            }
+            ExprKind::PlaceIndex { base, index } => {
+                self.expr(base)?;
+                self.expr(index)?;
+            }
+            ExprKind::DerefWrite(reference, value) => {
+                if !matches!(reference.ty, Type::RefMut(_)) {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: dereference write requires an exclusive reference",
+                    ));
+                }
+                if self.value_moves_linear(value) {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "cannot replace a borrowed place with a linear value whose obligation would be laundered",
+                    ));
+                }
+                self.expr(reference)?;
+                self.expr(value)?;
             }
             ExprKind::Block(block) => self.block(block)?,
             ExprKind::Coerce { value, .. } => self.expr(value)?,
@@ -6004,6 +6189,7 @@ fn expr_live(
         }
         ExprKind::RefAssign(reference, _, value)
         | ExprKind::RefWrite(reference, value)
+        | ExprKind::DerefWrite(reference, value)
         | ExprKind::BoxWrite(reference, value) => {
             live = expr_live(reference, &live, views, heads, exits, out);
             live = expr_live(value, &live, views, heads, exits, out);
@@ -6025,8 +6211,13 @@ fn expr_live(
         | ExprKind::Return(value)
         | ExprKind::Project(value, _)
         | ExprKind::BorrowField(value)
+        | ExprKind::BorrowPlace(value)
         | ExprKind::Coerce { value, .. } => {
             live = expr_live(value, live_after, views, heads, exits, out);
+        }
+        ExprKind::PlaceIndex { base, index } => {
+            live = expr_live(base, &live, views, heads, exits, out);
+            live = expr_live(index, &live, views, heads, exits, out);
         }
         ExprKind::Try { value, .. } => {
             // The success path continues; the error path returns. Keep the

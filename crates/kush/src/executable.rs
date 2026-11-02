@@ -279,6 +279,10 @@ pub(crate) struct Local {
     pub mutable: bool,
     /// `@[1]` on an owning/linear value: must be consumed exactly once.
     pub linear: bool,
+    /// Whether this binding's address is taken by a checked borrow or a field
+    /// reference. Only these locals need stable stack storage in the native
+    /// backend; ordinary scalar locals stay in SSA variables.
+    pub pinned: bool,
     /// Explicit usage grade, if the binding was annotated.
     pub grade: Option<Grade>,
     pub span: Span,
@@ -650,6 +654,22 @@ pub(crate) enum ExprKind {
     /// root owner stays live and is conservatively shared-borrowed while the
     /// reference exists.
     BorrowField(Box<Expr>),
+    /// A checked reference to an addressable place: a record field chain, an
+    /// inline-array element, or a vector element. Unlike `Borrow`, which names
+    /// one direct local binding, the operand is a place expression whose
+    /// storage lives in its root owner. The reference is one word and owns
+    /// nothing; the root binding stays loaned until the reference's checked
+    /// last use.
+    BorrowPlace(Box<Expr>),
+    /// A place index: the address of one element of an inline array or of a
+    /// checked `Vec<T>` local/field. It is only ever produced as the operand
+    /// of `BorrowPlace`; evaluating it as a value would require a reference
+    /// type. The index is checked once at reference creation and panics when
+    /// out of bounds.
+    PlaceIndex {
+        base: Box<Expr>,
+        index: Box<Expr>,
+    },
     BoxNew(Box<Expr>),
     BoxTake(Box<Expr>),
     BoxRead(Box<Expr>),
@@ -785,8 +805,14 @@ pub(crate) enum ExprKind {
     /// copyable, so the read does not duplicate owning storage.
     RefRead(Box<Expr>),
     /// Replace the whole referent through a checked exclusive reference and
-    /// return Unit. Used to write a mutated borrowed trait object back.
+    /// return Unit. Used to write a mutated borrowed trait object back; the
+    /// runtime value it overwrites is logically the same payload, so nothing
+    /// is destroyed here.
     RefWrite(Box<Expr>, Box<Expr>),
+    /// Replace the referent of a user-visible `*p = value`. The old affine
+    /// (non-linear) payload is destroyed exactly once before the new value is
+    /// stored. Owning handles use their dedicated operations instead.
+    DerefWrite(Box<Expr>, Box<Expr>),
     Call(Target, Vec<Expr>),
     Return(Box<Expr>),
     If(Box<Expr>, Block, Block),
@@ -1017,8 +1043,14 @@ impl Expr {
             | ExprKind::DynArrayPop { array: value, .. }
             | ExprKind::Project(value, _)
             | ExprKind::BorrowField(value)
+            | ExprKind::BorrowPlace(value)
             | ExprKind::Break(Some(value), _) => f(value),
+            ExprKind::PlaceIndex { base, index } => {
+                f(base);
+                f(index);
+            }
             ExprKind::BoxWrite(a, b)
+            | ExprKind::DerefWrite(a, b)
             | ExprKind::BoxReuse {
                 owner: a,
                 payload: b,
@@ -1772,7 +1804,12 @@ fn fusion_expr_safe(
         | ExprKind::DynArrayNew { .. } => true,
         // A whole-value reference read/write is never fused: it depends on
         // aliasing storage and has no total, capture-free callback shape.
-        ExprKind::RefRead(_) | ExprKind::RefWrite(_, _) | ExprKind::BoxWrite(_, _) => false,
+        ExprKind::RefRead(_)
+        | ExprKind::RefWrite(_, _)
+        | ExprKind::DerefWrite(_, _)
+        | ExprKind::BoxWrite(_, _)
+        | ExprKind::BorrowPlace(_)
+        | ExprKind::PlaceIndex { .. } => false,
         ExprKind::BorrowField(_) => false,
         // No loop has a checked termination argument here.
         ExprKind::While(..) | ExprKind::Loop(_) => false,
@@ -2019,8 +2056,15 @@ fn fuse_expr(
         | ExprKind::Return(value)
         | ExprKind::Project(value, _)
         | ExprKind::BorrowField(value)
+        | ExprKind::BorrowPlace(value)
         | ExprKind::RefRead(value) => fuse_expr(value, types, signatures, safety, fusions),
-        ExprKind::RefWrite(reference, value) | ExprKind::BoxWrite(reference, value) => {
+        ExprKind::PlaceIndex { base, index } => {
+            fuse_expr(base, types, signatures, safety, fusions);
+            fuse_expr(index, types, signatures, safety, fusions);
+        }
+        ExprKind::RefWrite(reference, value)
+        | ExprKind::DerefWrite(reference, value)
+        | ExprKind::BoxWrite(reference, value) => {
             fuse_expr(reference, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
         }
@@ -4074,6 +4118,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             partition_bound: BTreeSet::new(),
             row_bound: BTreeSet::new(),
             continuation_depth: 0,
+            hoisted: Vec::new(),
         };
         let body = (|| {
             let mut runtime = sig.parameters.iter().zip(&sig.parameter_grades);
@@ -4877,6 +4922,35 @@ fn checked_method_receiver(
         ));
     }
     Ok(expected_receiver)
+}
+/// Whether a reference parameter reaches `target` either directly or through
+/// inline nominal-record fields. A returned `&Field` may borrow caller-owned
+/// storage named by a `&Record` parameter; the ownership pass still proves the
+/// exact origin is that parameter. Exclusive results require an exclusive
+/// reference parameter.
+fn reference_reaches_type(types: &Types<'_>, ty: Type, target: Type, mutable: bool) -> bool {
+    fn contains(types: &Types<'_>, ty: Type, target: Type, depth: usize) -> bool {
+        if ty.full() == target.full() {
+            return true;
+        }
+        if depth >= 16 {
+            return false;
+        }
+        let Some(id) = ty.layout().filter(|id| types.enums[*id].record) else {
+            return false;
+        };
+        types.enums[id].variants[0]
+            .fields
+            .iter()
+            .any(|field| contains(types, *field, target, depth + 1))
+    }
+    let (Type::Ref(pointer) | Type::RefMut(pointer)) = ty else {
+        return false;
+    };
+    if mutable && !matches!(ty, Type::RefMut(_)) {
+        return false;
+    }
+    contains(types, types.pointees[pointer], target, 0)
 }
 /// Collect every `Self::Name` projection mentioned by a type. Used to validate
 /// associated type defaults and reject cyclic default chains before lowering.
@@ -8961,14 +9035,12 @@ impl<'a> Functions<'a> {
                     "a borrowed reference result requires a declared result lifetime, as in '-> &'a Record' or '-> &'a mut Record'",
                 ));
             };
+            let mutable_result = matches!(result, Type::RefMut(_));
             let matching = parameter_lifetimes
                 .iter()
                 .zip(parameters.iter())
                 .filter(|(parameter, ty)| {
-                    ty.is_ref()
-                        && ty
-                            .ref_pointee()
-                            .is_some_and(|p| types.pointees[p].full() == result_pointee)
+                    reference_reaches_type(types, **ty, result_pointee, mutable_result)
                         && parameter
                             .as_ref()
                             .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
@@ -9005,7 +9077,6 @@ impl<'a> Functions<'a> {
                         })
                 })
             };
-            let mutable_result = matches!(result, Type::RefMut(_));
             if matching.is_empty() && !container_leaf && !referent_field_leaf(mutable_result) {
                 return Err(Diagnostic::new(
                     f.result.span,
@@ -9861,6 +9932,11 @@ struct Checker<'a, 't> {
     /// `continue` out of the handled body: those control transfers would cross
     /// the resumption boundary and have no sound lowering in this fragment.
     continuation_depth: usize,
+    /// Hidden owner bindings hoisted out of an expression so a checked
+    /// reference to a temporary has real storage. Each enclosing statement
+    /// list drains the entries created while checking it; the local's resource
+    /// drops at that block's end, after every checked reference's last use.
+    hoisted: Vec<Statement>,
 }
 impl Checker<'_, '_> {
     fn nested<T>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
@@ -10453,6 +10529,310 @@ impl Checker<'_, '_> {
             .map(|field| self.types.width(*field))
             .sum::<usize>();
         Some((offset, variant.fields[index]))
+    }
+    /// Drain hidden temporary-owner statements created while checking the
+    /// current statement into the list that owns their lexical scope.
+    fn drain_hoisted(&mut self, base: usize, out: &mut Vec<Statement>) {
+        out.extend(self.hoisted.drain(base..));
+    }
+    /// Move a temporary value into hidden storage so a checked reference can
+    /// point at a real address. The hidden binding is a normal local: it owns
+    /// the value exactly once and its resource drops at the end of the block
+    /// that contains the reference, after the reference's checked last use.
+    fn hoist_owner(&mut self, value: Expr, mutable: bool, span: Span) -> Result<usize> {
+        let slot = self.fresh_local(span, value.ty)?;
+        self.locals[slot].mutable = mutable;
+        self.hoisted.push(Statement::Let(slot, value));
+        Ok(slot)
+    }
+    /// Check a whole-local borrow. Records, trait objects, and owning handles
+    /// use the existing call-scoped semantics; scalar, array, and enum places
+    /// borrow their stack storage directly. Any borrowed local is pinned so
+    /// the native backend gives the reference a stable address.
+    fn borrow_local(&mut self, slot: usize, mutable: bool, span: Span) -> Result<Expr> {
+        let ty = self.locals[slot].ty;
+        if ty.is_ref() {
+            return Err(Diagnostic::new(
+                span,
+                "nested references are not supported; pass the reference binding itself, or use '&*p' / '&mut *p' to reborrow",
+            ));
+        }
+        if ty.is_view() || ty == Type::Str {
+            return Err(Diagnostic::new(
+                span,
+                "a borrowed view is already a reference-like capability; pass it directly, or derive a subview with '&name[start..end]'",
+            ));
+        }
+        if matches!(ty, Type::Task(_) | Type::Fn(_) | Type::Once(_)) {
+            return Err(Diagnostic::new(
+                span,
+                "this value has no checked reference form; task handles, function pointers, and closures are passed or consumed directly",
+            ));
+        }
+        if mutable && !self.locals[slot].mutable {
+            return Err(Diagnostic::new(
+                span,
+                "cannot mutably borrow an immutable binding; declare it with let mut",
+            ));
+        }
+        let record = ty.layout().is_some_and(|id| self.types.enums[id].record);
+        let object = matches!(ty, Type::DynObj(_))
+            || (matches!(ty, Type::Union(_)) && self.functions.object_traits.contains_key(&ty));
+        let owner = matches!(
+            ty,
+            Type::Box(_)
+                | Type::Arena
+                | Type::ArenaBox(_)
+                | Type::Bytes
+                | Type::String
+                | Type::Vec(_)
+        );
+        if mutable && record && self.types.enums[ty.layout().expect("record layout")].borrowed {
+            return Err(Diagnostic::new(
+                span,
+                "cannot mutably borrow a record with borrowed fields; only owned metadata of an owning record may be updated through '&mut Record'",
+            ));
+        }
+        if mutable
+            && !record
+            && !object
+            && !owner
+            && ty.layout().is_none()
+            && ty.scalar_carrier().is_none()
+            && !matches!(ty, Type::Int(_) | Type::Float(_) | Type::Char)
+        {
+            return Err(Diagnostic::new(
+                span,
+                "mutable place borrows support scalar, array, record, trait-object, Box<T>, Arena, ArenaBox<T>, Bytes, String, and Vec<T> storage",
+            ));
+        }
+        self.locals[slot].pinned = true;
+        Ok(Expr {
+            kind: ExprKind::Borrow(slot),
+            ty: if mutable {
+                Type::RefMut(self.types.pointer(ty))
+            } else {
+                Type::Ref(self.types.pointer(ty))
+            },
+            span,
+            resource: None,
+        })
+    }
+    /// Build a checked place expression rooted at a local binding, a stored
+    /// reference, or hidden temporary storage. The result is not evaluated as
+    /// a value; it denotes storage.
+    fn checked_place(&mut self, expr: &ast::Expr, mutable: bool) -> Result<Expr> {
+        match &expr.kind {
+            ast::ExprKind::Name(name) if name != "_" => {
+                let slot = self.slot(expr.span)?;
+                Ok(Expr {
+                    kind: ExprKind::Peek(slot),
+                    ty: self.locals[slot].ty,
+                    span: expr.span,
+                    resource: None,
+                })
+            }
+            ast::ExprKind::Field { value, name }
+                if self.resolution.reference(expr.span).is_none() =>
+            {
+                let base = self.checked_place(value, mutable)?;
+                let (offset, ty) = if base.ty.is_ref() {
+                    let Some(pointer) = base.ty.ref_pointee() else {
+                        return Err(Diagnostic::new(expr.span, "invalid reference pointee"));
+                    };
+                    let pointee = self.types.pointees[pointer];
+                    let Some(id) = pointee.layout().filter(|id| self.types.enums[*id].record)
+                    else {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "field access requires a nominal record",
+                        ));
+                    };
+                    let variant = &self.types.enums[id].variants[0];
+                    let Some(index) = variant.names.iter().position(|field| field == name) else {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            format!("no field named '{name}'"),
+                        ));
+                    };
+                    let offset = 1 + variant.fields[..index]
+                        .iter()
+                        .map(|field| self.types.width(*field))
+                        .sum::<usize>();
+                    (offset, variant.fields[index])
+                } else {
+                    let base_ty = base.ty;
+                    if base_ty.layout().is_none() {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            format!(
+                                "field access requires a record value, found {}",
+                                self.types.name(base_ty)
+                            ),
+                        ));
+                    }
+                    self.record_offset(base_ty, name, expr.span)?
+                };
+                Ok(Expr {
+                    kind: ExprKind::Project(Box::new(base), offset),
+                    ty,
+                    span: expr.span,
+                    resource: None,
+                })
+            }
+            ast::ExprKind::Index { value, index } => {
+                let base = self.checked_place(value, mutable)?;
+                if base.ty == Type::Str {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "a &str view is not indexed by a single index; use Str.byte_at or Str.scalar_at",
+                    ));
+                }
+                let element = if let Some(pointer) = base.ty.slice_element() {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        format!(
+                            "an index place into a slice view is not supported; derive a checked slice subview instead (element type {})",
+                            self.types.name(self.types.pointees[pointer])
+                        ),
+                    ));
+                } else if let Type::Vec(pointer) = base.ty {
+                    self.types.pointees[pointer]
+                } else if let Some((element, _)) =
+                    base.ty.layout().and_then(|id| self.types.enums[id].array)
+                {
+                    element
+                } else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "index places require an inline array or Vec<T> storage; slice views are indexed by value, not by address",
+                    ));
+                };
+                if self.owned_type(element) || self.linear_type(element) {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "an index reference would alias an owning or linear element; move the element out with Vec.pop/Box.take or borrow a non-owning element",
+                    ));
+                }
+                // A compile-time index into an inline array is proved once at
+                // check time; otherwise the place carries a panicking bound.
+                let mut proven = false;
+                if let Some((_, length)) =
+                    base.ty.layout().and_then(|id| self.types.enums[id].array)
+                    && let Some(position) = crate::length::eval_expr(
+                        self.resolution,
+                        self.logical,
+                        &self.consts,
+                        index,
+                    )?
+                {
+                    if position >= length {
+                        return Err(Diagnostic::new(index.span, "array index out of bounds"));
+                    }
+                    proven = true;
+                }
+                if !proven {
+                    self.require(PANIC, expr.span)?;
+                }
+                let index = self.expr_expected(index, Some(Type::I64))?;
+                self.expect(index.ty, Type::I64, index.span)?;
+                Ok(Expr {
+                    kind: ExprKind::PlaceIndex {
+                        base: Box::new(base),
+                        index: Box::new(index),
+                    },
+                    ty: element,
+                    span: expr.span,
+                    resource: None,
+                })
+            }
+            _ => {
+                // A call result or literal has no stable storage yet. Hoist it
+                // into a hidden owning local so the reference points at a real
+                // address with checked cleanup.
+                let value = self.expr_expected(expr, None)?;
+                if value.ty.is_view() || value.ty == Type::Str || value.ty == Type::Never {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "this value has no addressable storage to borrow",
+                    ));
+                }
+                let slot = self.hoist_owner(value, mutable, expr.span)?;
+                Ok(Expr {
+                    kind: ExprKind::Peek(slot),
+                    ty: self.locals[slot].ty,
+                    span: expr.span,
+                    resource: None,
+                })
+            }
+        }
+    }
+    /// The mutability of the capability that owns a checked place.
+    fn place_mutable(&self, place: &Expr) -> bool {
+        match &place.kind {
+            ExprKind::Peek(slot) | ExprKind::Local(slot) | ExprKind::Move(slot) => match place.ty {
+                Type::Ref(_) => false,
+                Type::RefMut(_) => true,
+                _ => self.locals[*slot].mutable,
+            },
+            ExprKind::Project(base, _) => self.place_mutable(base),
+            ExprKind::PlaceIndex { base, .. } => self.place_mutable(base),
+            ExprKind::Coerce { value, .. } => self.place_mutable(value),
+            _ => false,
+        }
+    }
+    /// Borrow a field chain or index place. The resulting reference aliases
+    /// the root owner's storage; the ownership pass keeps the root and every
+    /// ancestor capability loaned until the reference's last use.
+    fn borrow_place_expr(
+        &mut self,
+        operand: &ast::Expr,
+        mutable: bool,
+        span: Span,
+    ) -> Result<Expr> {
+        let place = self.checked_place(operand, mutable)?;
+        let ty = place.ty;
+        if ty.is_view() || ty == Type::Str || ty.is_ref() {
+            return Err(Diagnostic::new(
+                span,
+                "this place holds a borrowed view or reference; pass it directly, or use '&record.view[..]' for a subview",
+            ));
+        }
+        if matches!(
+            ty,
+            Type::Arena
+                | Type::ArenaBox(_)
+                | Type::AllocBox(_)
+                | Type::AllocVec(_)
+                | Type::Allocator
+                | Type::Task(_)
+                | Type::DynObj(_)
+                | Type::Union(_)
+                | Type::Fn(_)
+                | Type::Once(_)
+        ) {
+            return Err(Diagnostic::new(
+                span,
+                "this field type has no checked addressable place form; bind the value, use a direct local borrow, or use its container/receiver operation",
+            ));
+        }
+        if mutable && !self.place_mutable(&place) {
+            return Err(Diagnostic::new(
+                span,
+                "cannot mutably borrow a place through an immutable binding or a shared reference; declare the owner with 'let mut' or use '&mut'",
+            ));
+        }
+        let pointer = self.types.pointer(ty);
+        Ok(Expr {
+            kind: ExprKind::BorrowPlace(Box::new(place)),
+            ty: if mutable {
+                Type::RefMut(pointer)
+            } else {
+                Type::Ref(pointer)
+            },
+            span,
+            resource: None,
+        })
     }
     /// Whether an expression is a pure place: a local name or a field chain
     /// rooted at one. Such receivers use the same non-moving read path as
@@ -12647,6 +13027,7 @@ impl Checker<'_, '_> {
                 ty: *ty,
                 mutable: false,
                 linear: false,
+                pinned: false,
                 grade: None,
                 span,
             })
@@ -12720,6 +13101,7 @@ impl Checker<'_, '_> {
                 ty: member,
                 mutable: false,
                 linear: false,
+                pinned: false,
                 grade: None,
                 span,
             });
@@ -12782,6 +13164,7 @@ impl Checker<'_, '_> {
                     ty: method_value_type,
                     mutable: false,
                     linear: false,
+                    pinned: false,
                     grade: None,
                     span,
                 });
@@ -15071,6 +15454,7 @@ impl Checker<'_, '_> {
                 ty: *ty,
                 mutable: false,
                 linear: false,
+                pinned: false,
                 grade: None,
                 span,
             })
@@ -15177,6 +15561,7 @@ impl Checker<'_, '_> {
                 ty: *ty,
                 mutable: false,
                 linear: false,
+                pinned: false,
                 grade: None,
                 span,
             })
@@ -15262,6 +15647,7 @@ impl Checker<'_, '_> {
             ty: source_ty,
             mutable: false,
             linear: false,
+            pinned: false,
             grade: None,
             span,
         }];
@@ -15269,6 +15655,7 @@ impl Checker<'_, '_> {
             ty: *ty,
             mutable: false,
             linear: false,
+            pinned: false,
             grade: None,
             span,
         }));
@@ -16156,6 +16543,7 @@ impl Checker<'_, '_> {
             ty,
             mutable,
             linear: false,
+            pinned: false,
             grade: None,
             span,
         });
@@ -16177,6 +16565,7 @@ impl Checker<'_, '_> {
             ty,
             mutable: false,
             linear: false,
+            pinned: false,
             grade: None,
             span,
         });
@@ -16422,6 +16811,10 @@ impl Checker<'_, '_> {
     ) -> Result<Block> {
         let mut checked = Vec::new();
         let mut diverges = false;
+        // Hidden temporary owners created while checking this statement list
+        // belong to its scope. A nested block starts a fresh base, so its own
+        // temporaries never leak into the enclosing statement list.
+        let hoist_base = self.hoisted.len();
         for (index, statement) in statements.iter().enumerate() {
             if diverges {
                 return Err(Diagnostic::new(
@@ -16440,6 +16833,7 @@ impl Checker<'_, '_> {
                     if let Some(generated) =
                         self.split_binding(*mutable, pattern, ty.as_ref(), value, span)?
                     {
+                        self.drain_hoisted(hoist_base, &mut checked);
                         checked.extend(generated);
                         continue;
                     }
@@ -16475,6 +16869,7 @@ impl Checker<'_, '_> {
                         continue;
                     }
                     let value = self.expr_expected(value, annotation)?;
+                    self.drain_hoisted(hoist_base, &mut checked);
                     if value.ty.is_ref() && *mutable {
                         return Err(Diagnostic::new(
                             pattern.span,
@@ -16570,6 +16965,7 @@ impl Checker<'_, '_> {
                 ast::Statement::Expr(expr) => {
                     let before = self.facts.clone();
                     let expr = self.expr(expr)?;
+                    self.drain_hoisted(hoist_base, &mut checked);
                     if expr.ty != Type::Never && self.observes_copyable_result(&expr) {
                         return Err(Diagnostic::new(
                             expr.span,
@@ -16602,6 +16998,7 @@ impl Checker<'_, '_> {
         let tail = tail
             .map(|tail| self.expr_expected_result(tail, expected).map(Box::new))
             .transpose()?;
+        self.drain_hoisted(hoist_base, &mut checked);
         let ty = if diverges {
             Type::Never
         } else {
@@ -17761,12 +18158,17 @@ impl Checker<'_, '_> {
                         } else {
                             Type::Ref(pointer)
                         };
-                        return Ok(Expr {
+                        c.locals[slot].pinned = true;
+                        let value = Expr {
                             kind: ExprKind::Local(slot),
                             ty: reborrow,
                             span,
                             resource: None,
-                        });
+                        };
+                        return match expected {
+                            Some(expected) => c.coerce(value, expected, span),
+                            None => Ok(value),
+                        };
                     }
                     if let ast::ExprKind::Slice { value, start, end } = &operand.kind {
                         return c.slice_view(
@@ -17778,83 +18180,81 @@ impl Checker<'_, '_> {
                             expected,
                         );
                     }
-                    if !matches!(operand.kind, ast::ExprKind::Name(_)) {
+                    if let ast::ExprKind::Name(_) = &operand.kind {
+                        let slot = c.slot(operand.span)?;
+                        let value = c.borrow_local(slot, *mutable, span)?;
+                        return match expected {
+                            Some(expected) => c.coerce(value, expected, span),
+                            None => Ok(value),
+                        };
+                    }
+                    // A field chain or index is a real addressable place.
+                    // `&p.field`, `&mut p.inner.x`, and `&mut owner[i]` alias
+                    // the root owner's storage instead of copying the
+                    // projection into a temporary.
+                    if matches!(
+                        operand.kind,
+                        ast::ExprKind::Field { .. } | ast::ExprKind::Index { .. }
+                    ) {
+                        let value = c.borrow_place_expr(operand, *mutable, span)?;
+                        return match expected {
+                            Some(expected) => c.coerce(value, expected, span),
+                            None => Ok(value),
+                        };
+                    }
+                    // A temporary owner or aggregate needs hidden storage whose
+                    // cleanup outlives every checked reference. Hoist it into
+                    // the enclosing statement list, then borrow that binding.
+                    let value = c.expr_expected(operand, None)?;
+                    if value.ty == Type::Never || value.ty.is_view() || value.ty == Type::Str {
                         return Err(Diagnostic::new(
                             span,
-                            "borrow a direct local binding; temporary borrows are not supported, and mutable owner borrows of temporaries, fields, and index results are rejected (mutable slice views use '&mut name[..]')",
+                            "borrow a direct local binding or an addressable field/index place; this temporary value has no stable storage",
                         ));
                     }
-                    let slot = c.slot(operand.span)?;
-                    let ty = c.locals[slot].ty;
-                    let record = ty
-                        .layout()
-                        .is_some_and(|id| c.types.enums[id].record);
-                    let object = matches!(ty, Type::DynObj(_))
-                        || (matches!(ty, Type::Union(_))
-                            && c.functions.object_traits.contains_key(&ty));
-                    if record || object {
-                        if *mutable {
-                            if !c.locals[slot].mutable {
-                                return Err(Diagnostic::new(
-                                    span,
-                                    "cannot mutably borrow an immutable binding; declare it with let mut",
-                                ));
-                            }
-                            if record
-                                && c.types.enums[ty.layout().expect("record layout")].borrowed
-                            {
-                                return Err(Diagnostic::new(
-                                    span,
-                                    "cannot mutably borrow a record with borrowed fields; only owned metadata of an owning record may be updated through '&mut Record'",
-                                ));
-                            }
-                            (ExprKind::Borrow(slot), Type::RefMut(c.types.pointer(ty)))
-                        } else {
-                            (ExprKind::Borrow(slot), Type::Ref(c.types.pointer(ty)))
-                        }
-                    } else {
-                        if *mutable {
-                            if !c.locals[slot].mutable {
-                                return Err(Diagnostic::new(
-                                    span,
-                                    "cannot mutably borrow an immutable binding; declare it with let mut",
-                                ));
-                            }
-                            if !matches!(
-                                ty,
-                                Type::Box(_)
-                                    | Type::Arena
-                                    | Type::ArenaBox(_)
-                                    | Type::Bytes
-                                    | Type::String
-                                    | Type::Vec(_)
-                            ) {
-                                return Err(Diagnostic::new(
-                                    span,
-                                    "mutable owner borrows support Box<T>, Arena, ArenaBox<T>, Bytes, String, and Vec<T>; borrow records with '&mut name', or use '&mut name[..]' for a mutable slice view",
-                                ));
-                            }
-                            (ExprKind::Borrow(slot), Type::RefMut(c.types.pointer(ty)))
-                        } else {
-                            if !matches!(
-                                ty,
-                                Type::Box(_)
-                                    | Type::Arena
-                                    | Type::ArenaBox(_)
-                                    | Type::AllocBox(_)
-                                    | Type::AllocVec(_)
-                                    | Type::Bytes
-                                    | Type::String
-                                    | Type::Vec(_)
-                            ) {
-                                return Err(Diagnostic::new(
-                                    span,
-                                    "borrowing supports immutable &Box<T>, &AllocBox<T>, &AllocVec<T>, &Arena, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &Record, and &[T] slice views",
-                                ));
-                            }
-                            (ExprKind::Borrow(slot), Type::Ref(c.types.pointer(ty)))
-                        }
+                    let slot = c.hoist_owner(value, *mutable, span)?;
+                    let value = c.borrow_local(slot, *mutable, span)?;
+                    return match expected {
+                        Some(expected) => c.coerce(value, expected, span),
+                        None => Ok(value),
+                    };
+                }
+                ast::ExprKind::Unary { op: Kind::Star, operand, .. } => {
+                    // A general checked dereference read. Copying an owning or
+                    // linear payload out of borrowed storage would duplicate an
+                    // obligation, so only non-owning pointees may be read.
+                    let reference = c.expr_expected(operand, None)?;
+                    let Some(pointer) = reference.ty.ref_pointee() else {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "dereference requires a reference, found {}",
+                                c.types.name(reference.ty)
+                            ),
+                        ));
+                    };
+                    let pointee = c.types.pointees[pointer];
+                    if c.owned_type(pointee) || c.linear_type(pointee) {
+                        return Err(Diagnostic::new(
+                            span,
+                            "dereferencing would copy an owning or linear payload out of borrowed storage; move it with the owning operation (Box.take, Vec.pop) or read through a shared reference operation",
+                        ));
                     }
+                    let ty = if reference.ty == Type::Never {
+                        Type::Never
+                    } else {
+                        pointee
+                    };
+                    let value = Expr {
+                        kind: ExprKind::RefRead(Box::new(reference)),
+                        ty,
+                        span,
+                        resource: None,
+                    };
+                    return match expected {
+                        Some(expected) => c.coerce(value, expected, span),
+                        None => Ok(value),
+                    };
                 }
                 ast::ExprKind::Unary { op, operand, .. } => {
                     let hint = expected
@@ -17996,10 +18396,63 @@ impl Checker<'_, '_> {
                             ExprKind::RefAssign(Box::new(reference), offset, Box::new(value)),
                             ty,
                         )
+                    } else if let ast::ExprKind::Unary { op: Kind::Star, operand, .. } = &left.kind {
+                        // `*p = value` replaces the referent exactly once. The
+                        // old affine (non-linear) payload is destroyed by the
+                        // lowering before the new value is stored. Owning
+                        // handles keep their dedicated operations so a pointer
+                        // word is never silently reinterpreted as payload.
+                        let reference = c.expr_expected(operand, None)?;
+                        let Some(pointer) = reference.ty.ref_pointee() else {
+                            return Err(Diagnostic::new(
+                                left.span,
+                                "assignment through '*' requires a reference",
+                            ));
+                        };
+                        if !matches!(reference.ty, Type::RefMut(_)) {
+                            return Err(Diagnostic::new(
+                                left.span,
+                                "cannot write through a shared reference; the operand must be an exclusive '&mut T'",
+                            ));
+                        }
+                        let pointee = c.types.pointees[pointer];
+                        if c.linear_type(pointee) {
+                            return Err(Diagnostic::new(
+                                left.span,
+                                "cannot replace a linear payload through a reference; move it into an owning operation so its obligation is consumed exactly once",
+                            ));
+                        }
+                        if matches!(
+                            pointee,
+                            Type::Box(_)
+                                | Type::Arena
+                                | Type::ArenaBox(_)
+                                | Type::Bytes
+                                | Type::String
+                                | Type::Vec(_)
+                                | Type::AllocBox(_)
+                                | Type::AllocVec(_)
+                        ) {
+                            return Err(Diagnostic::new(
+                                left.span,
+                                "replace an owning handle through its own operation (Box.set/Box.reuse, Vec.push/set/clear), not by assigning through a place reference",
+                            ));
+                        }
+                        let value = c.expr_expected(right, Some(pointee))?;
+                        c.expect(value.ty, pointee, right.span)?;
+                        let ty = if value.ty == Type::Never {
+                            Type::Never
+                        } else {
+                            Type::Unit
+                        };
+                        (
+                            ExprKind::DerefWrite(Box::new(reference), Box::new(value)),
+                            ty,
+                        )
                     } else {
                         return Err(Diagnostic::new(
                             left.span,
-                            "assignment requires a mutable local name or a field of an exclusive '&mut Record' receiver",
+                            "assignment requires a mutable local name, a field of an exclusive '&mut Record' receiver, or an exclusive dereference '*p'",
                         ));
                     }
                 }
@@ -19098,6 +19551,7 @@ impl Checker<'_, '_> {
             ty,
             mutable: false,
             linear: false,
+            pinned: false,
             grade: None,
             span,
         });
@@ -19717,6 +20171,7 @@ impl Checker<'_, '_> {
                     ty: *ty,
                     mutable: false,
                     linear: *linear,
+                    pinned: false,
                     grade: *grade,
                     span,
                 });
@@ -25507,6 +25962,7 @@ impl Checker<'_, '_> {
             ty: result,
             mutable: false,
             linear: false,
+            pinned: false,
             grade: None,
             span,
         }];
@@ -25844,6 +26300,7 @@ impl Checker<'_, '_> {
                     ty: *ty,
                     mutable: false,
                     linear: capture_obligations[index],
+                    pinned: false,
                     grade: capture_grades[index],
                     span: capture_spans[index],
                 });
@@ -25853,6 +26310,7 @@ impl Checker<'_, '_> {
                 ty: result_ty,
                 mutable: result_mutable,
                 linear: false,
+                pinned: false,
                 grade: None,
                 span,
             });

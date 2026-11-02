@@ -1642,6 +1642,32 @@ impl<'a> Types<'a> {
                     Type::Ref(self.pointer(inner))
                 });
             }
+            // A checked scalar, array, or enum reference is a real address of
+            // copyable storage. Reads through `*p` copy only non-owning
+            // payloads; writes through `*p` are checked separately.
+            let copyable_place = matches!(
+                inner,
+                Type::I64 | Type::Int(_) | Type::Float(_) | Type::Char | Type::Bool
+            ) || inner
+                .layout()
+                .is_some_and(|id| self.enums[id].array.is_some());
+            if copyable_place {
+                if inner.layout().is_some_and(|id| self.enums[id].record) {
+                    // Records with borrowed fields are read-only references:
+                    // writing owned metadata through them would be unsound.
+                    if *mutable && self.enums[inner.layout().expect("record layout")].borrowed {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            "exclusive '&mut Record' receivers and parameters are not supported for records with borrowed fields; borrow the record shared, or update its owned metadata through an owning value",
+                        ));
+                    }
+                }
+                return Ok(if *mutable {
+                    Type::RefMut(self.pointer(inner))
+                } else {
+                    Type::Ref(self.pointer(inner))
+                });
+            }
             if *mutable {
                 if !matches!(
                     inner,
@@ -1654,7 +1680,7 @@ impl<'a> Types<'a> {
                 ) {
                     return Err(Diagnostic::new(
                         ty.span,
-                        "mutable owner borrows support Box<T>, Arena, ArenaBox<T>, Bytes, String, Vec<T>, records, and mutable slice views",
+                        "mutable owner borrows support Box<T>, Arena, ArenaBox<T>, Bytes, String, Vec<T>, records, scalar/array places, and mutable slice views",
                     ));
                 }
                 return Ok(Type::RefMut(self.pointer(inner)));
@@ -1673,7 +1699,7 @@ impl<'a> Types<'a> {
             ) {
                 return Err(Diagnostic::new(
                     ty.span,
-                    "borrowing supports immutable &Box<T>, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &Record, and &[T] slice views",
+                    "borrowing supports immutable &Box<T>, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &Record, scalar/array places, and &[T] slice views",
                 ));
             }
             return Ok(Type::Ref(self.pointer(inner)));

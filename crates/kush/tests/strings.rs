@@ -503,9 +503,11 @@ fn borrowed_text_containers_carry_element_lifetimes() {
 
 #[test]
 fn borrowed_text_escape_positions_are_rejected() {
+    // `&"abc"` is an `&String` place reference; it does not implicitly become
+    // a `&str` descriptor without `String.as_str`.
     rejects(
         "fn main() -> Unit ! {alloc, panic} { let view: &str = &\"abc\"; }",
-        "temporary borrows are not supported",
+        "type mismatch",
     );
     rejects(
         "fn main() -> Unit ! {alloc, panic} { let view = \"abc\".as_str(); }",
@@ -534,9 +536,12 @@ fn borrowed_text_escape_positions_are_rejected() {
         }",
         "tuples cannot store references, slice views, or borrowed records",
     );
-    rejects(
-        "fn main() -> Unit ! {alloc, panic} { let view = String.as_str(&\"abc\"); }",
-        "temporary borrows are not supported",
+    // A temporary `String` borrowed for a call has hidden storage in the
+    // enclosing block; the returned view is usable there and cannot escape.
+    agrees(
+        "fn main() -> i64 ! {alloc, panic} { let view = String.as_str(&\"abc\"); Str.len(view) }",
+        3,
+        "",
     );
     rejects(
         "fn main() -> Unit ! {alloc, panic} {
@@ -581,9 +586,10 @@ fn borrowed_text_escape_positions_are_rejected() {
         fn main() -> Unit ! {} { let f = first; }",
         "a function value cannot carry an owner reference or &str text view",
     );
-    rejects(
-        "fn main() -> Unit ! {alloc, panic} { let view = String.as_str(&\"abc\"); }",
-        "temporary borrows are not supported",
+    agrees(
+        "fn main() -> i64 ! {alloc, panic} { let view = String.as_str(&\"abc\"); Str.len(view) }",
+        3,
+        "",
     );
     rejects(
         "fn take(text: &mut str) -> Unit ! {} { }",

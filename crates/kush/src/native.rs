@@ -1016,6 +1016,14 @@ uint64_t kush_vec_set(uint64_t handle, int64_t index, const uint64_t *item, uint
     memcpy(slot, item, (size_t)(v->width * 8));
     return handle;
 }
+/* Address of one checked vector element. The reference evaluator and native
+   backend agree that an element reference is only formed while the vector
+   owner is loaned, so no growth can move this storage. */
+uint64_t kush_vec_element(uint64_t handle, int64_t index) {
+    KushVec *v = (KushVec *)(uintptr_t)handle;
+    if (index < 0 || (uint64_t)index >= v->length) kush_panic();
+    return (uint64_t)(uintptr_t)(v->data + (uint64_t)index * v->width);
+}
 /* Ensure room for `additional` elements after the current length. Growth
    happens at most once, to exactly the requested length, and only when the
    retained capacity is insufficient. Negative or overflowing requests panic. */
@@ -1844,6 +1852,14 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let str_scalar_at = module
         .declare_function("kush_str_scalar_at", Linkage::Import, &str_index_sig)
         .map_err(error)?;
+    let mut vec_element_sig = module.make_signature();
+    vec_element_sig
+        .params
+        .extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    vec_element_sig.returns.push(AbiParam::new(I64));
+    let vec_element = module
+        .declare_function("kush_vec_element", Linkage::Import, &vec_element_sig)
+        .map_err(error)?;
     let mut vec_ops = BTreeMap::new();
     for (op, name, params, returns) in [
         (VecOp::WithCapacity, "kush_vec_with_capacity", 2, true),
@@ -2110,6 +2126,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             str_scalar_at,
             str_to_string,
             vec_ops: &vec_ops,
+            vec_element,
             literal_data: &literal_data,
             closure_drops: &closure_drops,
             task_spawn,
@@ -2166,7 +2183,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
                     | Type::String
                     | Type::Vec(_)
             );
-            if array || record || object || owner_handle {
+            if array || record || object || owner_handle || local.pinned {
                 let width = program.width(local.ty);
                 let slot = g.builder.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
@@ -2947,6 +2964,7 @@ struct Generator<'a, 'b> {
     str_scalar_at: FuncId,
     str_to_string: FuncId,
     vec_ops: &'b BTreeMap<VecOp, FuncId>,
+    vec_element: FuncId,
     /// (continue target, break target, break carries a value, handler depth at
     /// loop entry). Break/continue restore the handler depth so a dynamic
     /// handler frame inside the body cannot survive an early loop exit.
@@ -3564,6 +3582,20 @@ impl Generator<'_, '_> {
         self.builder.ins().call(panic, &[]);
         self.builder.ins().trap(TrapCode::unwrap_user(1));
     }
+    /// Trap when a runtime index is negative or outside `0..length`.
+    fn check_index(&mut self, index: Value, length: i64) {
+        let limit = self.constant(length);
+        let negative = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::SignedLessThan, index, 0);
+        let beyond = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThanOrEqual, index, limit);
+        let invalid = self.builder.ins().bor(negative, beyond);
+        self.guard(invalid);
+    }
     fn guard(&mut self, fail: Value) {
         let bad = self.builder.create_block();
         let good = self.builder.create_block();
@@ -3866,7 +3898,7 @@ impl Generator<'_, '_> {
                     .ty
                     .layout()
                     .is_some_and(|id| self.program.enums[id].record);
-                if record || matches!(local.ty, Type::Union(_) | Type::DynObj(_)) {
+                if record || local.pinned || matches!(local.ty, Type::Union(_) | Type::DynObj(_)) {
                     let pointer = self.locations[*slot]
                         .expect("checked inline object borrow is pinned to stack storage");
                     return Some(vec![pointer]);
@@ -3898,6 +3930,36 @@ impl Generator<'_, '_> {
             }
             ExprKind::BorrowField(place) => {
                 return Some(vec![self.place_address(place)]);
+            }
+            ExprKind::BorrowPlace(place) => {
+                return Some(vec![self.place_address(place)]);
+            }
+            ExprKind::PlaceIndex { .. } => {
+                unreachable!("a checked place index appears only inside a borrow")
+            }
+            ExprKind::DerefWrite(reference, replacement) => {
+                let pointer = lower!(self.scalar(reference));
+                let value = lower!(self.expr(replacement));
+                let pointer_ty = reference
+                    .ty
+                    .ref_pointee()
+                    .expect("checked dereference write");
+                let pointee = self.program.pointees[pointer_ty];
+                if self.program.owns(pointee) {
+                    let width = self.program.width(pointee);
+                    let old = self.load_words(pointer, 0, width);
+                    self.drop_value(pointee, &old);
+                }
+                for (index, word) in value.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        pointer,
+                        (index * 8) as i32,
+                    );
+                }
+                self.consume(replacement);
+                self.constant(0)
             }
             ExprKind::BoxNew(arg) => {
                 let values = lower!(self.expr(arg));
@@ -5890,6 +5952,25 @@ impl Generator<'_, '_> {
                 self.builder
                     .ins()
                     .iadd_imm_s(base_pointer, (*offset * 8) as i64)
+            }
+            ExprKind::PlaceIndex { base, index } => {
+                let index = self.scalar(index).expect("checked place index is a scalar");
+                if matches!(base.ty, Type::Vec(_)) {
+                    let location = self.place_address(base);
+                    let handle = self.load_words(location, 0, 1)[0];
+                    return self.runtime_call(self.vec_element, &[handle, index]);
+                }
+                let (element, length) = base
+                    .ty
+                    .layout()
+                    .and_then(|id| self.program.enums[id].array)
+                    .expect("checked array index place");
+                let location = self.place_address(base);
+                self.check_index(index, length as i64);
+                let stride = (self.program.width(element) * 8) as i64;
+                let offset = self.builder.ins().imul_imm_s(index, stride);
+                let data = self.builder.ins().iadd_imm_s(location, 8);
+                self.builder.ins().iadd(data, offset)
             }
             _ => unreachable!("checked projected borrow has a place expression"),
         }
