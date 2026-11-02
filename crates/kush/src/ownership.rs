@@ -3203,6 +3203,7 @@ impl Checker<'_> {
                 // carries its own region reference.
                 let loans = self.loans.clone();
                 self.expr(arena)?;
+                self.hold_reference_argument(arena)?;
                 self.expr(value)?;
                 self.loans = loans;
             }

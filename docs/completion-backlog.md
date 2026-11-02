@@ -119,26 +119,29 @@ this fix still needs the integrated test/review gate.
   analysis merges only noncapturing callbacks whose effect row is empty or
   `alloc`-only and whose checked bodies are structurally total (no loops,
   recursion, indirect calls, task operations, I/O, or panic). Effectful
-  drop-order is guarded by a non-owning intermediate requirement. Arbitrary
+  drop-order is guarded by a non-owning intermediate requirement. At most one
+  allocating callback stage may merge; the other stages must be inert and
+  non-owning so fallible allocation order is preserved. Arbitrary
   effectful interleaving remains rejected; the explicit chain chooses that
   order at source level.
-- [x] Widening reuse with explicit allocation/capacity guarantees.
+- [ ] Widening reuse with explicit allocation/capacity guarantees. **Partial:**
   **Implemented for box payloads:** `Box.reuse_grow` checks the old owner and
   payload obligations, destroys the old payload once, and either keeps the
   allocation or grows/moves it under an explicit `{alloc, panic}` contract.
   `#[noalloc]` rejects it; `Box.reuse` keeps its no-allocating-fallback
   contract. Widening a vector element in place remains explicitly unsupported.
-- [x] Custom allocators and lifetime-safe allocator ownership. **Implemented as
+- [ ] Custom allocators and lifetime-safe allocator ownership. **Partial, with
   a documented built-in allocator strategy:** `Arena`/`ArenaBox` with
   reference-retained regions, deterministic drop, function/task escape, and
   checked provenance. Arbitrary user-defined allocator callbacks and FFI are
   deliberately not implemented and are not claimed.
-- [x] Fallible allocation/reuse with exact cleanup on all failure paths.
+- [ ] Fallible allocation/reuse with exact cleanup on all failure paths. **Partial:**
   **Implemented:** `Box.try_new`, growth-capable `Box.try_reuse`, and
   `Bytes.try_with_capacity` return the conventional checked `Result`; failures
   preserve the old owner and, for `try_new`, the supplied payload. Real native
   malloc refusal and a reference allocation budget are both exercised; no
-  process abort is disguised as `Err`.
+  process abort is disguised as `Err`. Fallible arena allocation and
+  `Vec.try_reserve` remain outstanding.
 - [x] Reproducible performance and physical-memory benchmarks.
   **Implemented:** `scripts/memory-bench.py` measures allocation counters,
   reference/native parity, wall time, maximum RSS, and native pool retention

@@ -1070,10 +1070,10 @@ fn collect_block_returns<'a>(block: &'a ast::Block, out: &mut Vec<&'a ast::Expr>
 ///   no indirect calls, and no task operations;
 /// * every direct callee is itself eligible.
 ///
-/// With only `alloc` (or no effects) left, callback execution is trace-free:
-/// it cannot print, suspend, cancel, or choose a panic site. Allocation is a
-/// resource event, not an observable trace; a refused fallible allocation is a
-/// checked value and an aborting allocation ends the process in both orders.
+/// This establishes structural totality, not allocation commutativity:
+/// refused allocations produce observable values. The merge separately checks
+/// that only one allocation stage is active and the other stages cannot change
+/// heap ownership, so allocator operations retain their original order.
 /// The pass is deliberately conservative: it does not try to prove termination
 /// for loops, and it rejects indirect calls and recursion outright.
 fn fusion_function_safe(
@@ -1150,9 +1150,7 @@ fn fusion_expr_safe(
         | ExprKind::Move(_)
         | ExprKind::Borrow(_)
         | ExprKind::Peek(_)
-        | ExprKind::ArenaNew
-        | ExprKind::TaskYield
-        | ExprKind::TaskCheckCancel => true,
+        | ExprKind::ArenaNew => true,
         // No loop has a checked termination argument here.
         ExprKind::While(..) | ExprKind::Loop(_) => false,
         ExprKind::Call(Target::Function(index), arguments) => {
@@ -1176,6 +1174,8 @@ fn fusion_expr_safe(
         ExprKind::CallIndirect { .. } => false,
         ExprKind::TaskSpawn { .. }
         | ExprKind::TaskScope { .. }
+        | ExprKind::TaskYield
+        | ExprKind::TaskCheckCancel
         | ExprKind::TaskCancel(_)
         | ExprKind::TaskJoin { .. } => false,
         ExprKind::FnValue { function, captures } => {
@@ -1434,6 +1434,10 @@ fn fuse_expr(
                                 .iter()
                                 .chain(merged.iter())
                                 .all(safe_callback)
+                            && fusion_preserves_allocation_order(
+                                types,
+                                inner_callbacks.iter().chain(merged.iter()),
+                            )
                     }
                     _ => false,
                 };
@@ -1515,6 +1519,40 @@ fn callback_effects(types: &Types<'_>, callback: &Expr) -> u8 {
         Type::Fn(id) => types.function_types[id].effects,
         _ => u8::MAX,
     }
+}
+
+fn fusion_preserves_allocation_order<'a>(
+    types: &Types<'_>,
+    callbacks: impl Iterator<Item = &'a Expr>,
+) -> bool {
+    let callbacks = callbacks.collect::<Vec<_>>();
+    let allocating = callbacks
+        .iter()
+        .filter(|callback| callback_effects(types, callback) != 0)
+        .count();
+    if allocating == 0 {
+        return true;
+    }
+    if allocating > 1 {
+        // Two fallible stages can consume the allocator budget in a different
+        // order even when they are total and produce non-owning values.
+        return false;
+    }
+    callbacks.into_iter().all(|callback| {
+        if callback_effects(types, callback) != 0 {
+            return true;
+        }
+        let Type::Fn(id) = callback.ty else {
+            return false;
+        };
+        let signature = &types.function_types[id];
+        signature
+            .parameters
+            .iter()
+            .copied()
+            .chain(std::iter::once(signature.result))
+            .all(|ty| !crate::runtime_types::type_owns(&types.enums, &types.unions, ty, 0))
+    })
 }
 
 fn placeholder_expr(span: Span) -> Box<Expr> {
@@ -13010,7 +13048,7 @@ impl Checker<'_, '_> {
                         let (kind, ty) = match name {
                             "Box.new" => {
                                 c.require(ALLOC | PANIC, span)?;
-                                if matches!(arg.ty, Type::Ref(_) | Type::RefMut(_) | Type::Never) || arg.ty.is_view() { return Err(Diagnostic::new(span, "Box.new cannot store a borrowed/slice/divergent value (including &str text views)")); }
+                                if arg.ty == Type::Never || crate::runtime_types::has_borrow(c.types, arg.ty) { return Err(Diagnostic::new(span, "Box.new cannot store a borrowed/slice/divergent value (including &str text views or borrowed records)")); }
                                 if crate::runtime_types::contains_task(c.types, arg.ty) { return Err(Diagnostic::new(span, "task handles cannot be stored in Box; join them in the scope that owns them")); }
                                 let pointee = c.types.full(arg.ty, span)?;
                                 let ty = Type::Box(c.types.pointer(pointee)); (ExprKind::BoxNew(Box::new(arg)), ty)
@@ -14761,7 +14799,7 @@ impl Checker<'_, '_> {
                 resource: None,
             });
         }
-        if matches!(payload.ty, Type::Ref(_) | Type::RefMut(_)) || payload.ty.is_view() {
+        if crate::runtime_types::has_borrow(self.types, payload.ty) {
             return Err(Diagnostic::new(
                 span,
                 "Box.reuse cannot store a borrowed reference or slice view (including &str text views)",
@@ -14873,10 +14911,10 @@ impl Checker<'_, '_> {
                 resource: None,
             });
         }
-        if matches!(payload.ty, Type::Ref(_) | Type::RefMut(_)) || payload.ty.is_view() {
+        if crate::runtime_types::has_borrow(self.types, payload.ty) {
             return Err(Diagnostic::new(
                 span,
-                "Box.reuse_grow cannot store a borrowed reference or slice view (including &str text views)",
+                "Box.reuse_grow cannot store a borrowed reference, slice view, or borrowed record (including &str text views)",
             ));
         }
         if crate::runtime_types::contains_task(self.types, payload.ty) {
@@ -14938,10 +14976,10 @@ impl Checker<'_, '_> {
                 resource: None,
             });
         }
-        if matches!(value.ty, Type::Ref(_) | Type::RefMut(_)) || value.ty.is_view() {
+        if crate::runtime_types::has_borrow(self.types, value.ty) {
             return Err(Diagnostic::new(
                 span,
-                "Box.try_new cannot store a borrowed reference or slice view (including &str text views)",
+                "Box.try_new cannot store a borrowed reference, slice view, or borrowed record (including &str text views)",
             ));
         }
         if crate::runtime_types::contains_task(self.types, value.ty) {
@@ -15045,10 +15083,10 @@ impl Checker<'_, '_> {
                 resource: None,
             });
         }
-        if matches!(payload.ty, Type::Ref(_) | Type::RefMut(_)) || payload.ty.is_view() {
+        if crate::runtime_types::has_borrow(self.types, payload.ty) {
             return Err(Diagnostic::new(
                 span,
-                "Box.try_reuse cannot store a borrowed reference or slice view (including &str text views)",
+                "Box.try_reuse cannot store a borrowed reference, slice view, or borrowed record (including &str text views)",
             ));
         }
         if crate::runtime_types::contains_task(self.types, payload.ty) {
@@ -15158,10 +15196,10 @@ impl Checker<'_, '_> {
                 resource: None,
             });
         }
-        if matches!(value.ty, Type::Ref(_) | Type::RefMut(_)) || value.ty.is_view() {
+        if crate::runtime_types::has_borrow(self.types, value.ty) {
             return Err(Diagnostic::new(
                 span,
-                "Arena.alloc cannot store a borrowed reference or slice view (including &str text views)",
+                "Arena.alloc cannot store a borrowed reference, slice view, or borrowed record (including &str text views)",
             ));
         }
         if crate::runtime_types::contains_task(self.types, value.ty) {

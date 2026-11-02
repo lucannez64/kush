@@ -416,9 +416,21 @@ impl MemoryStats {
         )
     }
 }
+/// Mirror the native small-block classes for initial/infallible box storage.
+fn box_allocation_capacity(bytes: usize) -> usize {
+    if bytes <= 1024 {
+        bytes.max(1).next_multiple_of(16)
+    } else {
+        bytes
+    }
+}
+
 #[derive(Debug, Clone)]
 struct HeapState {
     map: BTreeMap<usize, Value>,
+    /// Usable native payload bytes for boxes, independent of their current
+    /// logical payload type. Narrowing reuse must not discard this capacity.
+    box_capacities: BTreeMap<usize, usize>,
     next: usize,
 }
 /// A heap shared by every task in one reference evaluation. Only one task runs
@@ -430,6 +442,7 @@ impl SharedHeap {
     fn new() -> Self {
         Self(Arc::new(Mutex::new(HeapState {
             map: BTreeMap::new(),
+            box_capacities: BTreeMap::new(),
             next: 0,
         })))
     }
@@ -444,7 +457,15 @@ impl SharedHeap {
         self.0.lock().unwrap().map.insert(id, value);
     }
     fn take(&self, id: usize) -> Option<Value> {
-        self.0.lock().unwrap().map.remove(&id)
+        let mut state = self.0.lock().unwrap();
+        state.box_capacities.remove(&id);
+        state.map.remove(&id)
+    }
+    fn box_capacity(&self, id: usize) -> usize {
+        self.0.lock().unwrap().box_capacities[&id]
+    }
+    fn set_box_capacity(&self, id: usize, bytes: usize) {
+        self.0.lock().unwrap().box_capacities.insert(id, bytes);
     }
     fn get(&self, id: usize) -> Option<Value> {
         self.0.lock().unwrap().map.get(&id).cloned()
@@ -804,6 +825,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         self.stats.allocation();
         Value::Owned(id)
     }
+    fn allocate_box(&mut self, payload: Value, words: usize) -> Value {
+        let value = self.allocate(payload);
+        let Value::Owned(id) = value else {
+            unreachable!()
+        };
+        self.heap
+            .set_box_capacity(id, box_allocation_capacity(words * 8));
+        value
+    }
     fn arena_new_value(&mut self) -> Value {
         self.stats.allocation();
         Value::Arena {
@@ -851,11 +881,17 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         let Some(budget) = &self.try_budget else {
             return true;
         };
-        budget
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
+        let mut remaining = budget.load(Ordering::SeqCst);
+        loop {
+            let Some(next) = remaining.checked_sub(1) else {
+                return false;
+            };
+            match budget.compare_exchange_weak(remaining, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return true,
+                Err(actual) => remaining = actual,
+            }
+        }
     }
     /// Read an inline-array local. A pinned cell is cloned so ordinary array
     /// values keep copy semantics; views retain the shared cell identity.
@@ -2216,7 +2252,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             ExprKind::BoxNew(arg) => {
                 let value = value!(self.expr(arg, frame));
                 self.consume(arg, frame);
-                self.allocate(value)
+                self.allocate_box(value, self.program.width(arg.ty))
             }
             ExprKind::BoxTake(arg) => {
                 let Value::Owned(id) = value!(self.expr(arg, frame)) else {
@@ -2242,6 +2278,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     unreachable!("checked Box.reuse owner")
                 };
                 let new = value!(self.expr(payload, frame));
+                let capacity = self.heap.box_capacity(id);
                 // Both arguments have been evaluated. Only now is the old
                 // affine payload destroyed. The outer allocation is preserved.
                 self.consume(owner, frame);
@@ -2251,6 +2288,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 })?;
                 self.drop_value(old)?;
                 self.heap.insert(id, new);
+                self.heap.set_box_capacity(id, capacity);
                 self.stats.reuse();
                 Value::Owned(id)
             }
@@ -2259,6 +2297,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     unreachable!("checked Box.reuse_grow owner")
                 };
                 let new = value!(self.expr(payload, frame));
+                let retained = self.heap.box_capacity(id);
+                let requested = self.program.width(payload.ty) * 8;
+                let capacity = if requested > retained {
+                    box_allocation_capacity(requested)
+                } else {
+                    retained
+                };
                 // Both arguments are evaluated before the old payload is
                 // destroyed. The reference model always has logical room, so
                 // growth never moves the reference allocation id.
@@ -2269,6 +2314,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 })?;
                 self.drop_value(old)?;
                 self.heap.insert(id, new);
+                self.heap.set_box_capacity(id, capacity);
                 self.stats.reuse();
                 Value::Owned(id)
             }
@@ -2320,7 +2366,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let value = value!(self.expr(argument, frame));
                 self.consume(argument, frame);
                 if self.try_charge() {
-                    let owner = self.allocate(value);
+                    let owner = self.allocate_box(value, self.program.width(argument.ty));
                     Value::Enum {
                         tag: shape.ok_tag,
                         fields: vec![owner],
@@ -2343,19 +2389,21 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let new = value!(self.expr(payload, frame));
                 self.consume(owner, frame);
                 self.consume(payload, frame);
-                let Type::Box(old_index) = owner.ty else {
-                    unreachable!("checked Box.try_reuse owner type")
-                };
-                let old_width = self.program.width(self.program.pointees[old_index]);
-                let new_width = self.program.width(payload.ty);
-                // A non-widening reuse needs no allocator action and therefore
-                // cannot fail. Only a growth attempt consumes the probe budget.
-                if new_width <= old_width || self.try_charge() {
+                let retained = self.heap.box_capacity(id);
+                let requested = self.program.width(payload.ty) * 8;
+                // Capacity includes native size-class rounding and survives
+                // narrowing reuse. Only a physical growth spends the budget.
+                let grows = requested > retained;
+                if !grows || self.try_charge() {
                     let previous = self.heap.take(id).ok_or_else(|| {
                         Diagnostic::new(expr.span, "internal ownership error: stale reuse box")
                     })?;
                     self.drop_value(previous)?;
                     self.heap.insert(id, new);
+                    // Native fallible growth uses an exact-sized system block
+                    // rather than the infallible path's size-class rounding.
+                    self.heap
+                        .set_box_capacity(id, if grows { requested } else { retained });
                     self.stats.reuse();
                     Value::Enum {
                         tag: shape.ok_tag,

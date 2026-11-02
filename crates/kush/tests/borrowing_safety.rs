@@ -137,3 +137,17 @@ fn scope_returned_split_half_keeps_its_disjoint_identity() {
         42,
     );
 }
+
+#[test]
+fn reference_assignment_reserves_its_owner_through_the_right_hand_side() {
+    rejects(
+        r#"struct Point { x: i64, keep: Box<i64> }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut p = Point { x: 1, keep: Box.new(2) };
+            let reference = &mut p;
+            reference.x = { drop(p); 42 };
+            0
+        }"#,
+        "cannot move or drop an owner or view",
+    );
+}

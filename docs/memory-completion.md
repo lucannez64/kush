@@ -36,7 +36,10 @@ A callback is **fusion-safe** only when all of the following hold:
   the empty row or an `alloc`-only row is accepted;
 - its body is structurally total: no `while`, no `loop`, no direct or mutual
   recursion, no indirect call, and no structured-task operation;
-- every direct callee is itself fusion-safe.
+- every direct callee is itself fusion-safe;
+- at most one callback stage in the merged traversal has a non-empty effect
+  row; all other stages have non-owning parameters/results, so they cannot
+  change allocator state by releasing payloads between allocation attempts.
 
 The intermediate element type must agree (`inner_target == source`), and each
 step already satisfies its own non-increasing width rule. For a step with a
@@ -53,16 +56,17 @@ callback with a loop or recursion cannot slip through a weaker check.
 
 ### Why this is semantics-preserving
 
-With no `io`, `suspend`, or `panic`, callback execution produces no observable
-trace and cannot change scheduling, cancellation, or the location of a
-language-level panic. Structural totality means each callback makes finitely
-many steps; the only remaining effect is allocation, which is a resource event
-rather than a program-visible trace. A fallible allocation becomes a checked
-value in both orders, and an aborting allocation ends the process in both
-orders. Allocation *counts* are unchanged by fusion. Peak live storage and the
-relative order of physical allocation/free events may differ; those are
-tooling observations, not language results, and the benchmark harness measures
-them instead of assuming them.
+Fallible allocation outcomes are observable. In particular, fusing two
+allocation stages can change which element receives the last successful
+allocation. Such stages remain separate even when both bodies are total.
+Only one allocation stage may be interleaved with total, inert non-owning
+stages. The allocation stage's invocation order stays unchanged, and the other
+stages cannot allocate or release heap owners. The existing non-owning
+intermediate check prevents drop timing from changing allocator availability.
+A deterministic two-success-budget regression distinguishes the correct
+pass-by-pass result from the incorrect interleaved result.
+Pure fusion retains its existing contract: physical peak-live/drop ordering
+may differ, while logical source results and ownership obligations are kept.
 
 Arbitrary effectful interleaving is deliberately **not** enabled. A callback
 with `io`, `panic`, or `suspend` keeps the original pass-by-pass order because
@@ -273,3 +277,17 @@ or a proof obligation.
 - a general termination proof or a general effect system for fusion;
 - performance or physical-memory superiority claims;
 - payload-byte accounting in the stable diagnostics line.
+
+## Integration corrections
+
+All owning storage constructors reject borrowed records (including those
+hidden under other wrappers) until such containers represent provenance. This
+also prevents a box/arena capture from laundering a lexical record borrow into
+an escaping closure.
+
+The reference evaluator tracks usable box capacity separately from the current
+payload type: initial/infallible small allocations use native size classes,
+fallible growth records its exact capacity, and narrowing retains capacity.
+Only growth beyond that retained capacity consumes a failure-budget attempt.
+Capacity metadata is removed when the owning heap entry is released. This
+keeps native/reference refusal behavior consistent after grow/narrow/reuse.

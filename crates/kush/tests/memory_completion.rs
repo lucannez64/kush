@@ -611,3 +611,172 @@ fn arena_box_captures_in_structured_tasks_are_destroyed_once() {
     let native = native_stats(&run);
     assert_eq!(native.allocations, native.deallocations);
 }
+
+#[test]
+fn two_fallible_allocation_stages_keep_pass_order_under_refusal() {
+    let source = r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn probe(x: i64) -> i64 ! {alloc} {
+            match Box.try_new(x) {
+                Ok(b) => { drop(b); 1 },
+                Err(v) => 0,
+            }
+        }
+        fn touch(x: i64) -> i64 ! {alloc} {
+            match Box.try_new(x) {
+                Ok(b) => Box.take(b),
+                Err(v) => v,
+            }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = [10, 20];
+            let out = Vec.map_in_place(Vec.map_in_place(values, probe), touch);
+            Vec.get(&out, 0) + Vec.get(&out, 1)
+        }"#;
+    // Unfused: probe gets both successful allocations before touch runs. An
+    // interleaved traversal would spend the second success in touch(element0)
+    // and incorrectly turn probe(element1)'s result from one into zero.
+    let (value, _) = reference_with_budget(source, 2);
+    assert_eq!(value, 2, "allocation refusal is a program-visible result");
+    assert_eq!(check(source).unwrap().fusion_count(), 0);
+    let native = native_run(source, &[("KUSH_ALLOC_FAIL_AFTER", "2")]);
+    assert_eq!(native.exit, Some(2), "{}", native.stderr);
+}
+
+#[test]
+fn owning_memory_wrappers_cannot_hide_borrowed_record_captures() {
+    let prefix = r#"struct Window<'a> { view: &'a [i64] }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut data: [i64; 1] = [42];
+            let read = make(Window { view: &data[..] });
+            data = [9];
+            read()
+        }"#;
+    for (allocate, extract) in [
+        ("Box.new(window)", "Box.take(boxed)"),
+        ("Box.reuse_grow(Box.new(0), window)", "Box.take(boxed)"),
+        ("Arena.alloc(&arena, window)", "ArenaBox.take(boxed)"),
+    ] {
+        let source = format!(
+            "{prefix}\nfn make<'a>(window: Window<'a>) -> once fn() -> i64 ! {{panic}} ! {{alloc, panic}} {{
+                let arena = Arena.new();
+                let boxed = {allocate};
+                fn() -> i64 ! {{panic}} {{
+                    let w = {extract};
+                    Slice.get(w.view, 0)
+                }}
+            }}"
+        );
+        rejects(&source, "borrowed");
+    }
+}
+
+#[test]
+fn fallible_reuse_that_fits_retained_capacity_cannot_refuse() {
+    let source = r#"enum Result<T, E> { Ok(T), Err(E) }
+        struct Cell { x: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let owner = Box.new(1);
+            match Box.try_reuse(owner, Cell { x: 42 }) {
+                Ok(b) => { let cell = Box.take(b); cell.x },
+                Err(b) => Box.take(b),
+            }
+        }"#;
+    // The native allocator rounds an eight-byte box to a sixteen-byte class;
+    // this two-word record fits without making a fallible allocation attempt.
+    let native = native_run(source, &[("KUSH_ALLOC_FAIL_AFTER", "0")]);
+    assert_eq!(native.exit, Some(42), "{}", native.stderr);
+    let (reference, _) = reference_with_budget(source, 0);
+    assert_eq!(
+        reference, 42,
+        "reference must retain the same usable box capacity"
+    );
+}
+
+#[test]
+fn narrowing_reuse_keeps_capacity_for_later_fallible_growth() {
+    for setup in [
+        "let wide = Box.new([1, 2]); let owner = Box.reuse(wide, 1);",
+        "let small = Box.new(1); let wide = Box.reuse_grow(small, [1, 2]); let owner = Box.reuse(wide, 1);",
+    ] {
+        let source = format!(
+            "enum Result<T, E> {{ Ok(T), Err(E) }} struct Cell {{ x: i64 }}
+             fn main() -> i64 ! {{alloc, panic}} {{
+                {setup}
+                match Box.try_reuse(owner, Cell {{ x: 42 }}) {{
+                    Ok(b) => {{ let cell = Box.take(b); cell.x }},
+                    Err(b) => Box.take(b),
+                }}
+             }}"
+        );
+        assert_eq!(reference_with_budget(&source, 0).0, 42);
+        let native = native_run(&source, &[("KUSH_ALLOC_FAIL_AFTER", "0")]);
+        assert_eq!(native.exit, Some(42), "{}", native.stderr);
+    }
+}
+
+#[test]
+fn fallible_growth_capacity_is_exact_and_not_rounded_by_a_later_noop() {
+    let source = r#"enum Result<T, E> { Ok(T), Err(E) }
+        struct Wide { x: i64, y: i64 }
+        struct Wider { x: i64, y: i64, z: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let owner = Box.new(0);
+            match Box.try_reuse(owner, Wide { x: 1, y: 2 }) {
+                Ok(b) => {
+                    let b = Box.reuse_grow(b, Wide { x: 2, y: 3 });
+                    let b = Box.reuse(b, 1);
+                    match Box.try_reuse(b, Wider { x: 1, y: 2, z: 3 }) {
+                        Ok(wider) => { drop(wider); 99 },
+                        Err(old) => Box.take(old),
+                    }
+                },
+                Err(old) => { drop(old); 77 },
+            }
+        }"#;
+    assert_eq!(reference_with_budget(source, 1).0, 1);
+    let native = native_run(source, &[("KUSH_ALLOC_FAIL_AFTER", "1")]);
+    assert_eq!(native.exit, Some(1), "{}", native.stderr);
+}
+
+#[test]
+fn stored_arena_reference_stays_borrowed_through_payload_evaluation() {
+    rejects(
+        r#"fn main() -> i64 ! {alloc, panic} {
+            let arena = Arena.new();
+            let reference = &arena;
+            let boxed = Arena.alloc(reference, { drop(arena); 42 });
+            ArenaBox.take(boxed)
+        }"#,
+        "cannot move or drop an owner or view",
+    );
+}
+
+#[test]
+fn stored_arena_reference_can_end_after_successful_allocation() {
+    agrees(
+        r#"fn main() -> i64 ! {alloc, panic} {
+            let arena = Arena.new();
+            let reference = &arena;
+            let boxed = Arena.alloc(reference, 42);
+            drop(arena);
+            ArenaBox.take(boxed)
+        }"#,
+        42,
+    );
+}
+
+#[test]
+fn cancellation_state_reads_are_not_automatically_fused() {
+    let source = r#"fn observed(x: i64) -> i64 ! {} {
+            if Task.check_cancel() { x } else { x }
+        }
+        fn identity(x: i64) -> i64 ! {} { x }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = [42];
+            let out = Vec.map_in_place(Vec.map_in_place(values, observed), identity);
+            Vec.get(&out, 0)
+        }"#;
+    assert_eq!(check(source).unwrap().fusion_count(), 0);
+    assert_eq!(reference(source).0, 42);
+    assert_eq!(native_run(source, &[]).exit, Some(42));
+}
