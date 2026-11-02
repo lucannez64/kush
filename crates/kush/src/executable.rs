@@ -21347,10 +21347,8 @@ impl Checker<'_, '_> {
         // Solve each of the four concrete effects independently. A row term is
         // built only from bitwise union/subtraction, so the bit at position `b`
         // of every constraint depends solely on the same bit of each variable.
-        let mut chosen: BTreeMap<BindingId, u8> = unbound
-            .iter()
-            .map(|variable| (*variable, 0u8))
-            .collect();
+        let mut chosen: BTreeMap<BindingId, u8> =
+            unbound.iter().map(|variable| (*variable, 0u8)).collect();
         for bit_index in 0..4u8 {
             let bit = 1u8 << bit_index;
             let limit = 1u32 << unbound.len();
@@ -21384,11 +21382,7 @@ impl Checker<'_, '_> {
                             return Some(*bits);
                         }
                         let position = positions.get(&variable)?;
-                        Some(if mask & (1 << *position) != 0 {
-                            bit
-                        } else {
-                            0
-                        })
+                        Some(if mask & (1 << *position) != 0 { bit } else { 0 })
                     });
                     let Some(covered) = covered else {
                         covers = false;

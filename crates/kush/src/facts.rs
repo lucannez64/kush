@@ -305,10 +305,9 @@ impl Facts {
         }
         match &expr.kind {
             ExprKind::Constant(n) => Some(Linear::constant(i128::from(*n))),
-            ExprKind::Local(slot) | ExprKind::Peek(slot) => Some(Linear::variable(Term::Var(
-                *slot,
-                self.version(*slot),
-            ))),
+            ExprKind::Local(slot) | ExprKind::Peek(slot) => {
+                Some(Linear::variable(Term::Var(*slot, self.version(*slot))))
+            }
             ExprKind::Unary(Kind::Minus, inner) => self.linear(inner)?.negate(),
             ExprKind::Binary(op @ (Kind::Plus | Kind::Minus), l, r) => {
                 let (l, r) = (self.linear(l)?, self.linear(r)?);
@@ -534,9 +533,7 @@ pub(crate) fn compare(l: Linear, op: &Kind, r: Linear, out: &mut Vec<Constraint>
     // l op r  ==>  l - r <= 0 (or < 0 for strict comparisons). Strictness is
     // converted to `<= -1` because every admitted term is integer-valued.
     let one_sided = |l: Linear, r: Linear, strict: bool| {
-        let Some(difference) = l.sub(&r) else {
-            return None;
-        };
+        let difference = l.sub(&r)?;
         let constant = if strict {
             difference.constant.checked_add(1)?
         } else {
@@ -719,7 +716,10 @@ impl Ratio {
         Self::normalized(num, den)
     }
     fn checked_mul(self, other: Self) -> Option<Self> {
-        Self::normalized(self.num.checked_mul(other.num)?, self.den.checked_mul(other.den)?)
+        Self::normalized(
+            self.num.checked_mul(other.num)?,
+            self.den.checked_mul(other.den)?,
+        )
     }
     fn normalized(num: i128, den: i128) -> Option<Self> {
         if den == 0 {
@@ -853,7 +853,10 @@ pub fn verify(certificate: &Certificate) -> bool {
     if certificate.denominator <= 0
         || certificate.steps.len() != certificate.multipliers.len()
         || certificate.negation >= certificate.steps.len()
-        || certificate.multipliers.iter().any(|multiplier| *multiplier < 0)
+        || certificate
+            .multipliers
+            .iter()
+            .any(|multiplier| *multiplier < 0)
     {
         return false;
     }

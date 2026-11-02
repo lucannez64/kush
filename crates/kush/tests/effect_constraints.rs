@@ -503,6 +503,84 @@ fn row_subtraction_solves_principal_minimal_rows() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn unconstrained_rows_default_to_the_principal_lower_bound() {
+    // No callable argument mentions `e`, so the principal choice is `{}`.
+    assert_eq!(
+        value(
+            "fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { x }
+             fn main() -> i64 ! {panic} { apply(41) + 1 }"
+        ),
+        42
+    );
+    // A required lower bound defaults to exactly the required bits.
+    assert_eq!(
+        value(
+            "fn apply<e: Effects + io>(x: i64) -> i64 ! {panic, e} { x }
+             fn main() -> i64 ! {io, panic} { apply(41) + 1 }"
+        ),
+        42
+    );
+    rejects(
+        "fn apply<e: Effects + io>(x: i64) -> i64 ! {panic, e} { x }
+         fn main() -> i64 ! {panic} { apply(41) }",
+        "requires effects {io}",
+    );
+    // Defaulting never hides the body: the body is checked under the chosen
+    // empty specialization.
+    rejects(
+        "fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
+         fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { alloc_id(x) }
+         fn main() -> i64 ! {alloc, panic} { apply(41) }",
+        "requires effects {alloc}",
+    );
+}
+
+#[test]
+fn recursive_row_expressions_share_one_variable_with_subtraction() {
+    let source = r#"
+        fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn split<e: Effects>(
+            f: fn(i64) -> i64 ! {e},
+            g: fn(i64) -> i64 ! {e - io},
+        ) -> i64 ! {panic, e} { f(g(1)) }
+        fn main() -> i64 ! {io, panic} { split(io_inc, inc) }"#;
+    assert_eq!(value(source), 3);
+    native_agrees(source, 3);
+    // The same variable cannot simultaneously require `io` and subtract it
+    // from the second callback's row when the second callback performs it.
+    rejects(
+        "fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+         fn split<e: Effects>(
+             f: fn(i64) -> i64 ! {e},
+             g: fn(i64) -> i64 ! {e - io},
+         ) -> i64 ! {panic, e} { f(g(1)) }
+         fn main() -> i64 ! {io, panic} { split(io_inc, io_inc) }",
+        "no specialization of the effect row parameters",
+    );
+}
+
+#[test]
+fn nested_difference_rows_are_finite_and_checked() {
+    // Union and subtraction nest arbitrarily; `(e | alloc) - io - alloc`
+    // leaves exactly `e - io`.
+    let source = r#"
+        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn take<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
+            -> i64 ! {panic, (e | alloc) - io - alloc} { f(x) }
+        fn main() -> i64 ! {panic} { take(inc, 41) }"#;
+    assert_eq!(value(source), 42);
+    native_agrees(source, 42);
+    rejects(
+        "fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+         fn take<e: Effects>(f: fn(i64) -> i64 ! {e})
+             -> i64 ! {panic, (e | alloc) - io} { f(1) }
+         fn main() -> i64 ! {io, panic} { take(io_inc) }",
+        "requires effects {",
+    );
+}
+
+#[test]
 fn effect_row_aliases_expand_transparently() {
     let source = "effect row IoPanic = {io, panic};
                   fn io_inc(x: i64) -> i64 ! {IoPanic} { x + 1 }

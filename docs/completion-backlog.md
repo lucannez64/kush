@@ -199,16 +199,24 @@ outstanding implementation item.
   continuations, non-tail dynamic resumption, multishot handlers, capturing
   dynamic handlers, task-crossing dynamic frames, and user-defined effect-row
   names are not implemented. See [effect-handlers.md](effect-handlers.md).
-- [ ] General row constraints beyond concrete exclusions. **Partial:** a finite
-  Boolean constraint solver accumulates inclusion constraints across every
-  higher-order argument, supports up to three unbound row variables (4096
-  assignments), unions evidence from repeated row variables, supports union and
-  subtraction inside declared rows (`{e - io}`), applies exclusion and
-  required-effect (`+`) lower bounds, and rejects ambiguous/nonminimal groups.
-  The unique componentwise-minimal solution is the principal row for solved
-  groups, but an unconstrained open row variable is still rejected rather than
-  defaulted to `{}`. There is no recursive row unification, row aliasing, or
-  general first-class row difference. See
+- [x] General row constraints beyond concrete exclusions. A finite Boolean
+  constraint solver accumulates inclusion constraints across every higher-order
+  argument, unions evidence from repeated row variables, and supports arbitrarily
+  nested union and subtraction on the declared side (`{e - io}`,
+  `{(e | alloc) - io - alloc}`). Declared `effect row Name = { ... };` aliases
+  expand transparently, may name other aliases, and reject cycles. The solver is
+  per-bit: the four concrete effects are independent, so `n` variables need
+  `2^n` assignments per bit instead of `16^n` whole rows, with a documented bound
+  of 16 variables per call group. An unconstrained open row now defaults to its
+  principal least row (`{}` without a lower bound, exactly the required bits with
+  `<e: Effects + ...>`), and the callee body is rechecked under that
+  specialization so defaulting cannot hide an effect. Solutions must be unique
+  componentwise-minimal; incomparable minimal rows are still explicit ambiguity
+  errors. Because rows are finite four-bit vectors, recursive row expressions
+  are solved by the same accumulation rather than a separate infinite
+  unification step. Remaining language limits: parameterized row aliases,
+  first-class row values (rows only occur in effect annotations), row equality
+  predicates, and user-defined effects. See
   [effect-constraints.md](effect-constraints.md#accumulated-row-constraints).
 - [ ] Broader runtime-dependent proofs with mutation/version tracking.
   **Partial:** mutable scalar locals index erased proofs at their current
@@ -218,9 +226,17 @@ outstanding implementation item.
   closure capture is an independent frozen snapshot. Branch joins keep an
   index only when every reaching branch agrees, and loop joins invalidate a
   changed scalar to a fresh binder. Erased proof-valued locals can alias
-  checked logical terms and be re-passed to erased parameters. Mutable captures
-  as a live view and arithmetic proof search remain absent. See
-  [runtime-indices.md](runtime-indices.md#4-freezing-mutation-and-joins).
+  checked logical terms and be re-passed to erased parameters. The separate
+  erased arithmetic `{ ... }` fragment now supports general linear expressions
+  (`c * x`, `x + y`, lengths) and is discharged by exact Fourier–Motzkin
+  elimination with an independently verified Farkas-style refutation
+  certificate; nonlinear terms, cutting planes, and the documented row/term
+  budgets remain explicit "not established" boundaries. Still absent: mutable
+  captures as a live view. A closure capture is a sound copy/snapshot; live
+  sharing needs a checked closure borrow lifetime so the environment cannot
+  outlive the captured location, which is not implemented. See
+  [runtime-indices.md](runtime-indices.md#4-freezing-mutation-and-joins) and
+  [runtime-indices.md](runtime-indices.md#4a-arithmetic-proof-search).
 - [ ] Runtime-sized inline arrays with checked lifetime/storage layout.
   **Partial:** `DynArray<T, capacity>` has compile-time capacity, runtime
   length, inline storage, checked push overflow, checked reads, `set`, `pop`,
@@ -691,3 +707,46 @@ regressions:
 
 `dedb144` (all four implementation merges plus every review fix) passes the
 full Boat gate: **953 tests**, formatting, and Clippy.
+
+## Row constraints and arithmetic proof-search checkpoint
+
+This branch implements the two backlog areas as far as their sound contracts
+allow, on top of `15f62d3`:
+
+- **General row constraints** are now a finite, per-bit Boolean row solver.
+  Unconstrained open rows default to their principal least row (exactly the
+  `<e: Effects + ...>` lower bound, or `{}` without one), the callee body is
+  rechecked under that specialization, and the old three-variable/4096-assignment
+  limit is lifted to 16 variables per call group with `2^n` assignments per
+  effect bit. Declared `effect row Name = { ... };` aliases expand transparently,
+  compose, and reject cycles. Nested union/subtraction on the declared side is
+  covered by `tests/effect_constraints.rs`, including hostile alias/hiding and
+  subtraction cases and native/reference agreement. Remaining language limits:
+  parameterized row aliases, first-class row values, row equality predicates,
+  and user-defined effects.
+- **Arithmetic proof search** is implemented in the separate erased arithmetic
+  `{ ... }` fragment. Linear expressions (`c * x`, `x + y`, lengths) become
+  integer linear inequalities; Fourier–Motzkin elimination over exact rationals
+  produces a refutation certificate whose non-negative multipliers are checked
+  independently by `facts::verify`. `tests/arithmetic_proofs.rs` covers
+  coefficient scaling, multi-variable elimination, branch facts, integer
+  strictness, native/reference agreement, nonlinear rejection, and stale-version
+  rejection. Documented limits: no nonlinear terms, no cutting planes or full
+  Presburger completeness, and explicit 64-term/4096-row/200000-pair budgets.
+- **Mutable captures as a live view remain unimplemented and the runtime-proof
+  backlog item stays unchecked.** A closure capture is still a sound copy /
+  independent snapshot; live sharing would need a checked closure borrow
+  lifetime so the environment cannot outlive the captured location.
+  `tests/runtime_indices.rs` and `tests/advanced_types_effects.rs` keep the
+  snapshot contract explicit.
+
+Local Linux x86-64 validation used
+`CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/close-rows-proofs` with
+debug information disabled and two Cargo jobs:
+
+- Full `cargo test -p kush --offline -j 2`: **965 passed, 0 failed** across 63
+  test binaries (including the new `arithmetic_proofs` binary).
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p kush --all-targets --offline -j 2 -- -D warnings`: passed.
+
+The remote Boat gate for this checkpoint was not run from this checkout.
