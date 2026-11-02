@@ -196,18 +196,20 @@ outstanding implementation item.
   snapshot. Proof-valued runtime locals, mutable captures as a live view, branch
   or loop join inference, and arithmetic proof search remain absent. See
   [runtime-indices.md](runtime-indices.md#4-freezing-and-mutation).
-- [x] Runtime-sized inline arrays with checked lifetime/storage layout.
-  **Implemented for the documented fragment:** `DynArray<T, capacity>` has
-  compile-time capacity, runtime length, inline storage, checked push overflow,
-  checked reads, `set`, `pop`, owning-prefix drop, contextual literals, and
-  shared `&[T]` views over the live prefix with owner-loan tracking. Literals
-  are statically bounded by the capacity and use the checked push sequence, so
-  their overflow guards are unreachable and no `panic` effect is added. Views
-  read the runtime length word, use the same slice operations as arrays, and
-  reject owner moves/drops/push/pop while live; a view cannot escape its
-  owner's lexical scope. Patterns over a `DynArray` and mutable `&mut [T]`
-  views are explicit, tested rejections. Capacity remains a compile-time
-  `Nat`; this is not runtime `[T; n]`. See [dynamic-arrays.md](dynamic-arrays.md).
+- [ ] Runtime-sized inline arrays with checked lifetime/storage layout.
+  **Partial:** `DynArray<T, capacity>` has compile-time capacity, runtime
+  length, inline storage, checked push overflow, checked reads, `set`, `pop`,
+  owning-prefix drop, contextual literals, and shared `&[T]` views over the
+  live prefix with owner-loan tracking. Literals are statically bounded by the
+  capacity and use the checked push sequence, so their overflow guards are
+  unreachable and no `panic` effect is added. Views read the runtime length
+  word, use the same slice operations as arrays, and reject owner
+  moves/drops/push/pop while live; a view cannot escape its owner's lexical
+  scope. Still missing: `DynArray` patterns (explicitly rejected because the
+  runtime length is not a static variant tag), mutable `&mut [T]` views
+  (explicitly rejected in favour of `DynArray.set`), views through a projected
+  record field, equality, and runtime `[T; n]`. Capacity remains a compile-time
+  `Nat`. See [dynamic-arrays.md](dynamic-arrays.md).
 
 ## Memory and optimization
 
@@ -519,15 +521,17 @@ Remaining boundaries are listed in [traits.md](traits.md).
 
 ## Allocator and DynArray completion checkpoint
 
-The user-allocator and runtime-sized-array remainder is implemented on top of
-`a87f77b`:
+The user-allocator completion and the runtime-sized-array literal/view work are
+implemented on top of `a87f77b`; `DynArray` patterns and mutable views remain
+explicit rejections, so that backlog item stays partial:
 
 - `e19c470` adds checked `Allocator`, `AllocBox<T>`, and `AllocVec<T>` values,
   their reference/native lowering and drops, the fallible
   `AllocBox.try_new` path, and `crates/kush/tests/allocator_containers.rs`.
-- `7f99701` adds contextual `DynArray` literals, shared live-prefix `&[T]`
-  views with owner-loan tracking, and explicit pattern/mutable-view rejections
-  in `crates/kush/tests/advanced_types_effects.rs`.
+- `7f99701` adds contextual `DynArray` literals and shared live-prefix `&[T]`
+  views with owner-loan tracking in
+  `crates/kush/tests/advanced_types_effects.rs`; `DynArray` patterns and
+  mutable views are explicit, tested rejections and remain outstanding.
 - `0c8681b` boxes the new evaluator heap states so the recursive reference
   evaluator keeps its previous stack frame headroom; this restores the JSON
   recursion/limit test that the larger `Value` enum had pushed past the default
