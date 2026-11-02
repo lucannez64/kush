@@ -1092,6 +1092,17 @@ fn runtime_sized_array_literals_set_the_runtime_length() {
         }"#,
         "DynArray literal has 3 elements but the capacity is 2",
     );
+    // Multi-word elements keep their layout through a literal and a view.
+    let widened = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<[i64; 2], 3> = [[1, 2], [3, 4]];
+            let view: &[[i64; 2]] = &a[..];
+            let row = Slice.get(view, 1);
+            row[0] + row[1]
+        }"#;
+    assert_eq!(value(widened), 7);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(widened, 7);
 }
 
 #[test]

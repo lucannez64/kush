@@ -18901,6 +18901,17 @@ impl Checker<'_, '_> {
         self.expect(allocator.ty, Type::Allocator, allocator.span)?;
         let (value, pointee) =
             self.allocator_payload(value.clone(), expected_inner, "AllocBox.new", span)?;
+        if value.ty == Type::Never {
+            return Ok(Expr {
+                kind: ExprKind::AllocBoxNew {
+                    allocator: Box::new(allocator),
+                    value: Box::new(value),
+                },
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
         let ty = Type::AllocBox(self.types.pointer(pointee));
         let expression = Expr {
             kind: ExprKind::AllocBoxNew {
