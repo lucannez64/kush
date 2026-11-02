@@ -284,9 +284,10 @@ fn main() -> i64 ! {panic} {
 }
 ```
 
-Grade parameters must be specialized explicitly at the call site. They are not
-inferred from the caller, and there is no runtime grade value to inspect. A call
-that omits a grade argument is rejected. Explicit grade arguments may be natural
+Grade parameters can be inferred in the restricted fragment described in
+[general grade inference](grade-inference.md). A call or function value outside
+that fragment must specialize them explicitly. They are not inferred from the
+caller's runtime values, and there is no runtime grade value to inspect. Explicit grade arguments may be natural
 literals, `many`, in-scope grade variables, or `+`/`*` expressions over those.
 Type and grade parameters may be mixed; the explicit argument list follows
 declaration order:
@@ -430,10 +431,10 @@ deferred:
 
 - User-defined grade semirings, fractional/ordered custom algebras, and general
   graded modality introduction/elimination.
-- General grade inference. A bare result-only grade parameter can be inferred
-  as `1` from an expected `@[1]` arrow; all other abstract grades still require
-  explicit specialization. There is no principal grade solver. See
-  [bounded result-grade inference](result-grade-inference.md).
+- A principal grade solver. The implemented solver handles a single-occurrence
+  affine fragment from explicitly graded arguments and expected arrows; all
+  other abstract grades still require explicit specialization. See
+  [general grade inference](grade-inference.md).
 - Result grades beyond the implemented `@[1]` owning/intrinsic-linear and
   copyable must-use subsets: general inference, custom algebras, or
   unrestricted grade polymorphism; and grade-zero result erasure.

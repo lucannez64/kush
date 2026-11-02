@@ -137,6 +137,124 @@ pub(crate) fn split(ty: &ast::Type) -> (&ast::Type, Option<&ast::Type>) {
     }
 }
 
+/// Count occurrences of `binder` in a grade/type expression.
+fn grade_occurrences(resolution: &Resolution, ty: &ast::Type, binder: BindingId) -> usize {
+    use ast::TypeKind as K;
+    match &ty.kind {
+        K::Named { arguments, .. } => {
+            usize::from(resolution.reference(ty.span) == Some(binder))
+                + arguments
+                    .iter()
+                    .map(|argument| grade_occurrences(resolution, argument, binder))
+                    .sum::<usize>()
+        }
+        K::Tuple(items) => items
+            .iter()
+            .map(|item| grade_occurrences(resolution, item, binder))
+            .sum(),
+        K::Slice(inner) | K::Borrow { inner, .. } => grade_occurrences(resolution, inner, binder),
+        K::Array(element, length) => {
+            grade_occurrences(resolution, element, binder)
+                + grade_occurrences(resolution, length, binder)
+        }
+        K::Function {
+            parameters,
+            result,
+            effects,
+            ..
+        } => {
+            parameters
+                .iter()
+                .map(|parameter| grade_occurrences(resolution, &parameter.ty, binder))
+                .sum::<usize>()
+                + grade_occurrences(resolution, result, binder)
+                + effects
+                    .iter()
+                    .map(|effect| grade_occurrences(resolution, effect, binder))
+                    .sum::<usize>()
+        }
+        K::Binary { left, right, .. } => {
+            grade_occurrences(resolution, left, binder)
+                + grade_occurrences(resolution, right, binder)
+        }
+        K::Graded { inner, grade } => {
+            grade_occurrences(resolution, inner, binder)
+                + grade_occurrences(resolution, grade, binder)
+        }
+        K::Integer(_) | K::Bool(_) | K::Lifetime(_) | K::SelfType | K::Predicate(_) => 0,
+    }
+}
+
+/// Solve a single occurrence of `binder` in a grade expression for a concrete
+/// target grade.
+///
+/// The decidable fragment is deliberately small and explicit: the binder occurs
+/// exactly once in `expr`, every other leaf is already concrete, and the
+/// expression is built from `+`, `*`, parentheses, naturals, `many`, and known
+/// grade variables. Such an expression is affine in the binder, so evaluating
+/// it at `0` and `1` gives `e(g) = e(0) + (e(1) - e(0)) * g`. A finite target
+/// has a unique natural solution when the difference is nonzero and divides
+/// the offset. A bare binder may also be solved as `many`. Repeated occurrences
+/// (`G + G`), zero-slope expressions (`G * 0`, `G * many`), non-divisible
+/// targets, and expressions whose arithmetic overflows are rejected as
+/// outside the fragment rather than guessed.
+pub(crate) fn solve_single(
+    resolution: &Resolution,
+    variables: &BTreeMap<BindingId, Grade>,
+    expr: &ast::Type,
+    binder: BindingId,
+    target: Grade,
+) -> Result<Option<Grade>> {
+    if grade_occurrences(resolution, expr, binder) != 1 {
+        return Ok(None);
+    }
+    if crate::executable::bare_grade_binder(resolution, expr) == Some(binder) {
+        return Ok(Some(target));
+    }
+    let mut at_zero = variables.clone();
+    at_zero.insert(binder, Grade::ZERO);
+    let mut at_one = variables.clone();
+    at_one.insert(binder, Grade::ONE);
+    let zero = match evaluate(resolution, &at_zero, expr) {
+        Ok(value) => value,
+        // Another unsolved binder remains; this constraint cannot determine
+        // `binder` alone.
+        Err(_) => return Ok(None),
+    };
+    let one = match evaluate(resolution, &at_one, expr) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let (Grade::Finite(zero), Grade::Finite(one), Grade::Finite(wanted)) = (zero, one, target)
+    else {
+        // `many` in the expression or a `many` target cannot have a finite
+        // natural solution here. The bare-binder case above is the only
+        // unbounded solution.
+        return Ok(None);
+    };
+    if one <= zero {
+        // A repeated/annihilated binder or an expression that does not depend
+        // on it in a recoverable way.
+        return Ok(None);
+    }
+    let slope = one - zero;
+    let Some(offset) = wanted.checked_sub(zero) else {
+        return Ok(None);
+    };
+    if offset % slope != 0 {
+        return Ok(None);
+    }
+    let solution = Grade::Finite(offset / slope);
+    // Re-check the candidate with the full evaluator so overflow and operator
+    // assumptions are never bypassed by the algebra shortcut.
+    let mut checked = variables.clone();
+    checked.insert(binder, solution);
+    if evaluate(resolution, &checked, expr)? == target {
+        Ok(Some(solution))
+    } else {
+        Ok(None)
+    }
+}
 /// Evaluate a grade annotation at compile time. No runtime grade values exist.
 pub(crate) fn evaluate(
     resolution: &Resolution,

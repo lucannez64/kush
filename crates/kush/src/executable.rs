@@ -724,7 +724,11 @@ fn expand_result_aliases(
 
 /// Whether `ty` mentions the given binding anywhere, including nested grade
 /// expressions and alias arguments.
-fn type_mentions_binding(resolution: &Resolution, ty: &ast::Type, binder: BindingId) -> bool {
+pub(crate) fn type_mentions_binding(
+    resolution: &Resolution,
+    ty: &ast::Type,
+    binder: BindingId,
+) -> bool {
     use ast::TypeKind as K;
     match &ty.kind {
         K::Named { arguments, .. } => {
@@ -769,7 +773,7 @@ fn type_mentions_binding(resolution: &Resolution, ty: &ast::Type, binder: Bindin
 }
 /// The binder named by a bare grade expression, as in `@[G]`. Composite
 /// expressions such as `@[G + 1]` and `@[G * 2]` are not inferable.
-fn bare_grade_binder(resolution: &Resolution, grade: &ast::Type) -> Option<BindingId> {
+pub(crate) fn bare_grade_binder(resolution: &Resolution, grade: &ast::Type) -> Option<BindingId> {
     let ast::TypeKind::Named { arguments, .. } = &grade.kind else {
         return None;
     };
@@ -5065,7 +5069,7 @@ impl Checker<'_, '_> {
                 .iter()
                 .zip(arguments)
                 .filter(|(parameter, _)| !parameter.erased)
-                .map(|(parameter, argument)| (split_grade(&parameter.ty).0, argument))
+                .map(|(parameter, argument)| (&parameter.ty, argument))
                 .collect::<Vec<_>>();
             let what = format!("method '{}'", f.name);
             let self_type = self.functions.declared[&binding].self_ty;
@@ -7673,6 +7677,40 @@ impl Checker<'_, '_> {
             .is_some_and(|id| self.resolution.bindings[id].kind == BindingKind::Constructor)
     }
 
+    /// Exact usage grade evidenced by an already-checked argument expression.
+    /// Only forms that carry one annotated binding are used for inference;
+    /// everything else stays unknown instead of defaulting to one.
+    fn expression_grade(&self, expr: &Expr) -> Option<Grade> {
+        match &expr.kind {
+            ExprKind::Local(slot) | ExprKind::Move(slot) => self.locals[*slot].grade,
+            ExprKind::Coerce { value, .. } => self.expression_grade(value),
+            ExprKind::Block(block) => block
+                .tail
+                .as_ref()
+                .and_then(|tail| self.expression_grade(tail)),
+            ExprKind::If(_, yes, no) => {
+                let left = (yes.ty != Type::Never)
+                    .then(|| {
+                        yes.tail
+                            .as_ref()
+                            .and_then(|tail| self.expression_grade(tail))
+                    })
+                    .flatten();
+                let right = (no.ty != Type::Never)
+                    .then(|| {
+                        no.tail
+                            .as_ref()
+                            .and_then(|tail| self.expression_grade(tail))
+                    })
+                    .flatten();
+                match (left, right) {
+                    (Some(left), Some(right)) if left == right => Some(left),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
     /// Whether this expression evaluates to a copyable result carrying the
     /// must-use `@[1]` contract. The obligation is transferred through value
     /// positions (`let`, assignment, `return`, blocks, branches, match arms,
@@ -10295,47 +10333,91 @@ impl Checker<'_, '_> {
                 .effects
                 .insert(variables[0], signature.effects & !fixed);
         }
-        // A usage grade has no runtime representation, so the expected arrow's
-        // result contract is the only evidence available for it. Infer exactly
-        // one bare outer result grade `@[G]` when the target arrow promises the
-        // concrete `@[1]` transfer. A binder that also reaches a parameter, a
-        // parameter grade, or the underlying result type is not determined by
-        // the contract and remains explicit-only.
+        // General grade inference for a generic function value. The expected
+        // arrow supplies concrete grades for its parameters and result; each
+        // declared grade expression is solved in the single-occurrence affine
+        // fragment. A binder that reaches an underlying runtime type, that has
+        // no expected grade evidence, or whose equation has no unique natural
+        // solution remains an explicit-specialization error. Unknown grades are
+        // never guessed as one.
         let mut grades = Vec::new();
         if !grade_vars.is_empty() {
-            let expected_contract = match signature.result_grade {
-                Some(grade @ Grade::Finite(1)) => Some(grade),
-                _ => None,
+            let mut solved: BTreeMap<BindingId, Grade> = BTreeMap::new();
+            let constrain = |declared: &ast::Type,
+                             expected: Option<Grade>,
+                             solved: &mut BTreeMap<BindingId, Grade>|
+             -> Result<()> {
+                let Some(expected) = expected else {
+                    return Ok(());
+                };
+                for binder in &grade_vars {
+                    if let Some(previous) = solved.get(binder) {
+                        let mut variables = self.grades.clone();
+                        variables.insert(*binder, *previous);
+                        if let Ok(value) = grades::evaluate(self.resolution, &variables, declared)
+                            && value != expected
+                        {
+                            return Err(Diagnostic::new(
+                                self.resolution.bindings[*binder].span,
+                                format!(
+                                    "conflicting inferred grades for parameter '{}' of {what}: the expected arrow requires @[{expected}] here but another position requires @[{previous}]",
+                                    self.resolution.bindings[*binder].name
+                                ),
+                            ));
+                        }
+                        continue;
+                    }
+                    if let Some(solution) = grades::solve_single(
+                        self.resolution,
+                        &self.grades,
+                        declared,
+                        *binder,
+                        expected,
+                    )? {
+                        solved.insert(*binder, solution);
+                    }
+                }
+                Ok(())
             };
-            let inferred = result_grade.and_then(|grade| bare_grade_binder(self.resolution, grade));
+            for (parameter, expected) in runtime.iter().zip(&signature.parameter_grades) {
+                if let Some(declared) = split_grade(&parameter.ty).1 {
+                    constrain(declared, *expected, &mut solved)?;
+                }
+            }
+            if let Some(declared) = result_grade {
+                constrain(declared, signature.result_grade, &mut solved)?;
+            }
             for binder in &grade_vars {
                 let name = &self.resolution.bindings[*binder].name;
-                let elsewhere =
-                    f.parameters.iter().any(|parameter| {
-                        type_mentions_binding(self.resolution, &parameter.ty, *binder)
-                    }) || type_mentions_binding(self.resolution, declared_result, *binder);
-                let reason = if elsewhere {
-                    "it occurs in a parameter type or grade, or in the underlying result type"
-                } else if expected_contract.is_none() {
-                    "the expected function type has no concrete '@[1]' result contract to bind it from"
-                } else if result_grade.is_none() {
-                    "it is not the outer result grade"
-                } else if inferred != Some(*binder) {
-                    "only a single bare outer result grade '@[G]' can be inferred; composite grade expressions and extra grade parameters require explicit specialization"
+                let in_underlying_type = runtime.iter().any(|parameter| {
+                    type_mentions_binding(self.resolution, split_grade(&parameter.ty).0, *binder)
+                }) || type_mentions_binding(
+                    self.resolution,
+                    declared_result,
+                    *binder,
+                );
+                let reason = if in_underlying_type {
+                    "it occurs in an underlying parameter or result type, where a usage grade cannot be inferred".to_owned()
+                } else if let Some(value) = solved.get(binder) {
+                    subst.grades.insert(*binder, *value);
+                    grades.push(*value);
+                    continue;
+                } else if result_grade.is_none()
+                    && !runtime
+                        .iter()
+                        .any(|parameter| split_grade(&parameter.ty).1.is_some())
+                {
+                    "the declaration has no grade expression for the expected arrow to determine"
+                        .to_owned()
                 } else {
-                    ""
+                    "no expected parameter/result grade determines it, or its grade expression is outside the single-occurrence affine fragment".to_owned()
                 };
-                if !reason.is_empty() {
-                    return Err(Diagnostic::new(
-                        self.resolution.bindings[*binder].span,
-                        format!(
-                            "cannot infer usage grade parameter '{name}' of {what}: {reason}. Specialize it explicitly with '::<...>'"
-                        ),
-                    ));
-                }
-                let grade = expected_contract.expect("the bare result grade contract");
-                subst.grades.insert(*binder, grade);
-                grades.push(grade);
+                return Err(Diagnostic::new(
+                    self.resolution.bindings[*binder].span,
+                    format!(
+                        "cannot infer usage grade parameter '{name}' of {what}: {reason}. Specialize it explicitly with '::<...>'"
+                    ),
+                ));
             }
         }
         let mut types = Vec::new();
@@ -11388,15 +11470,6 @@ impl Checker<'_, '_> {
                 }
             }
         } else {
-            if let Some(generic) = grade_generics.first() {
-                return Err(Diagnostic::new(
-                    span,
-                    format!(
-                        "cannot infer usage grade parameter '{}' of {what}; specialize it explicitly, for example with '::<...>'",
-                        generic.name
-                    ),
-                ));
-            }
             if let Some((declared, expected)) = result {
                 self.unify(
                     declared,
@@ -11409,8 +11482,13 @@ impl Checker<'_, '_> {
                 )?;
             }
         }
+        let parameter_grade_exprs = pairs
+            .iter()
+            .map(|(declared, _)| split_grade(declared).1.cloned())
+            .collect::<Vec<_>>();
         let mut values = Vec::new();
-        for (declared, value) in pairs {
+        for (declared, value) in pairs.iter() {
+            let (declared, _) = split_grade(declared);
             if let (ast::TypeKind::Array(element, length), ast::ExprKind::Array(items)) =
                 (&declared.kind, &value.kind)
             {
@@ -11453,6 +11531,62 @@ impl Checker<'_, '_> {
                 span,
             )?;
             values.push(value);
+        }
+        // General grade inference for direct calls: solve a grade parameter
+        // from an explicitly graded argument. The decidable fragment is a
+        // single occurrence of the binder in one parameter-grade expression,
+        // affine in that binder. Ungraded arguments never invent a grade.
+        if explicit.is_none() && !grade_generics.is_empty() {
+            let mut solved: BTreeMap<BindingId, Grade> = BTreeMap::new();
+            for (grade_expr, value) in parameter_grade_exprs.iter().zip(&values) {
+                let Some(grade_expr) = grade_expr else {
+                    continue;
+                };
+                let Some(actual) = self.expression_grade(value) else {
+                    continue;
+                };
+                for generic in &grade_generics {
+                    let binder = self.resolution.binder(generic.span).unwrap();
+                    if let Some(previous) = solved.get(&binder) {
+                        let mut variables = self.grades.clone();
+                        variables.insert(binder, *previous);
+                        if let Ok(value) = grades::evaluate(self.resolution, &variables, grade_expr)
+                            && value != actual
+                        {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!(
+                                    "conflicting inferred grades for parameter '{}' of {what}: one argument requires @[{previous}] and another requires @[{actual}]",
+                                    generic.name
+                                ),
+                            ));
+                        }
+                        continue;
+                    }
+                    if let Some(solution) = grades::solve_single(
+                        self.resolution,
+                        &self.grades,
+                        grade_expr,
+                        binder,
+                        actual,
+                    )? {
+                        solved.insert(binder, solution);
+                    }
+                }
+            }
+            for generic in &grade_generics {
+                let binder = self.resolution.binder(generic.span).unwrap();
+                let Some(value) = solved.get(&binder) else {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "cannot infer usage grade parameter '{}' of {what}: no argument is explicitly graded @[{}] or the parameter grade expression is outside the single-occurrence affine fragment. Specialize it explicitly with '::<...>'",
+                            generic.name, generic.name
+                        ),
+                    ));
+                };
+                grade_arguments.push(*value);
+            }
         }
         let mut type_arguments = Vec::new();
         for (var, generic) in type_vars.iter().zip(&type_generics) {
@@ -11989,7 +12123,7 @@ impl Checker<'_, '_> {
             .iter()
             .zip(arguments)
             .filter(|(p, _)| !p.erased)
-            .map(|(p, a)| (split_grade(&p.ty).0, a))
+            .map(|(p, a)| (&p.ty, a))
             .collect::<Vec<_>>();
         let what = format!("'{}'", f.name);
         let hint = match expected {

@@ -110,8 +110,11 @@ fn a_missing_expected_arrow_cannot_bind_a_result_grade() {
 }
 
 #[test]
-fn a_grade_used_by_a_parameter_blocks_result_inference() {
-    rejects(
+fn a_grade_reaching_a_parameter_is_solved_and_checked_for_conflicts() {
+    // A parameter grade is now a real inference constraint: here the expected
+    // arrow parameters are ungraded, so the result contract determines G = 1
+    // and the specialization simply has a stricter @[1] parameter.
+    agrees(
         r#"fn make<G: Grade>(n: i64, b: Box<i64> @[G]) -> Box<i64> @[G] ! {alloc, panic} {
             Box.take(b); Box.new(n)
         }
@@ -119,7 +122,17 @@ fn a_grade_used_by_a_parameter_blocks_result_inference() {
             Box.take(f(42, Box.new(0)))
         }
         fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
-        "cannot infer usage grade parameter",
+        42,
+        "",
+    );
+    // Two positions demand different values for the same binder.
+    rejects(
+        r#"fn make<G: Grade>(b: i64 @[G]) -> Box<i64> @[G] ! {alloc, panic} { Box.new(b) }
+        fn apply(f: fn(i64 @[2]) -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+            Box.take(f(42))
+        }
+        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        "conflicting inferred grades",
     );
 }
 
@@ -136,8 +149,20 @@ fn a_grade_used_inside_the_underlying_result_blocks_inference() {
 }
 
 #[test]
-fn composite_result_grades_stay_explicit() {
-    for grade in ["G + 1", "G * 2"] {
+fn composite_result_grades_use_the_single_occurrence_solver() {
+    // `G + 1 = 1` has the unique natural solution G = 0.
+    agrees(
+        r#"fn make<G: Grade>(n: i64) -> Box<i64> @[G + 1] ! {alloc, panic} { Box.new(n) }
+        fn apply(f: fn(i64) -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+            Box.take(f(42))
+        }
+        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        42,
+        "",
+    );
+    // `G * 2 = 1` has no natural solution, and `G + G` has two occurrences,
+    // so both stay explicit-specialization errors.
+    for grade in ["G * 2", "G + G"] {
         rejects(
             &format!(
                 r#"fn make<G: Grade>(n: i64) -> Box<i64> @[{grade}] ! {{alloc, panic}} {{ Box.new(n) }}

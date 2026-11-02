@@ -2,8 +2,9 @@
 
 Status: implemented for the executable subset. This milestone adds one narrow
 inference rule and permits grade arguments in result-contract alias expansion.
-Effect constraints are a separate future milestone and are not part of this
-work.
+The rule is now a special case of the [general grade inference](grade-inference.md)
+solver. Effect constraints are a separate future milestone and are not part of
+this work.
 
 ## Scope
 
@@ -79,13 +80,12 @@ cannot be tracked.
 
 The following remain errors:
 
-- direct-call grade inference: a direct call still never infers a grade
-  parameter, whether it appears in a parameter or in the result; specialize
-  explicitly with `f::<...>(...)`;
-- composite result grades such as `@[G + 1]` or `@[G * 2]`, even when the
-  expected arrow is `@[1]`;
-- a grade parameter that also appears in a parameter type/grade or in the
-  underlying result type;
+- indirect-call grade inference for a binder with no expected parameter or
+  result grade, or outside the single-occurrence affine fragment (see
+  [general grade inference](grade-inference.md));
+- repeated occurrences, zero-slope expressions, and non-divisible equations;
+- a grade parameter that also appears in a parameter type or in the underlying
+  result type;
 - an extra grade parameter that cannot be determined by the single outer
   result grade;
 - an expected arrow with no result contract, or no expected arrow at all;

@@ -327,11 +327,12 @@ reuses small blocks under a 1 MiB physical retention cap, with normal-exit drain
 and unchanged logical allocation diagnostics. The pool adds 32 bytes of header
 per allocation and has no benchmarked latency or memory superiority claim.
 
-[Bounded result-grade inference](result-grade-inference.md) infers a bare,
-result-only grade parameter as `1` from a checked expected arrow. Transparent
-aliases can carry grade parameters in result positions. Composite grade
-inference, direct-call grade inference, and grade-parameterized aliases in
-parameter/storage positions remain rejected.
+[General grade inference](grade-inference.md) solves a single-occurrence affine
+fragment from explicitly graded arguments and expected arrows, including
+composite parameter and result grade expressions. Transparent aliases can carry
+grade parameters in result positions. Multiple occurrences, zero-slope or
+non-divisible equations, unconstrained binders, and binders in underlying
+runtime types remain rejected rather than guessed.
 
 The integrated additions above passed the full corrected Boat gate: **681
 tests**, formatting, and Clippy with warnings denied. Independent review of
