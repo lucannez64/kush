@@ -3365,6 +3365,31 @@ impl Checker<'_> {
                 self.available[slot] = true;
                 self.moved_at[slot] = None;
             }
+            ExprKind::RefRead(reference) => {
+                if !reference.ty.is_ref() {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: whole-value reference read requires a reference",
+                    ));
+                }
+                self.expr(reference)?;
+            }
+            ExprKind::RefWrite(reference, value) => {
+                if !matches!(reference.ty, Type::RefMut(_)) {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: whole-value reference write requires an exclusive '&mut' reference",
+                    ));
+                }
+                if self.moves(value.ty) || self.value_moves_linear(value) {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "cannot replace a borrowed object with an owning or linear value that the reference does not own",
+                    ));
+                }
+                self.expr(reference)?;
+                self.expr(value)?;
+            }
             ExprKind::RefAssign(reference, _, value) => {
                 if !matches!(reference.ty, Type::RefMut(_)) {
                     return Err(Diagnostic::new(
@@ -4519,9 +4544,12 @@ fn expr_live(
             live = expr_live(value, &after, views, heads, exits, out);
             live.remove(slot);
         }
-        ExprKind::RefAssign(reference, _, value) => {
+        ExprKind::RefAssign(reference, _, value) | ExprKind::RefWrite(reference, value) => {
             live = expr_live(reference, &live, views, heads, exits, out);
             live = expr_live(value, &live, views, heads, exits, out);
+        }
+        ExprKind::RefRead(reference) => {
+            live = expr_live(reference, &live, views, heads, exits, out);
         }
         ExprKind::Unary(_, value)
         | ExprKind::BoxNew(value)

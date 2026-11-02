@@ -2532,7 +2532,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
             ExprKind::Borrow(slot) => {
                 let ty = self.program.functions[frame.function].locals[*slot].ty;
-                if ty.layout().is_some_and(|id| self.program.enums[id].record) {
+                let inline = ty.layout().is_some_and(|id| self.program.enums[id].record)
+                    || matches!(ty, Type::Union(_));
+                if inline {
                     let current = frame.locals[*slot].clone();
                     let cell = match current {
                         Value::RecordCell(cell) => cell,
@@ -2817,6 +2819,30 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 } else if self.program.owns(arg.ty) {
                     self.drop_value(value)?;
                 }
+                Value::Scalar(0)
+            }
+            ExprKind::RefRead(reference) => {
+                let reference = value!(self.expr(reference, frame));
+                let Value::RecordRef(cell) = reference else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: whole-value reference read has no inline storage",
+                    ));
+                };
+                let value = cell.lock().unwrap().clone();
+                value
+            }
+            ExprKind::RefWrite(reference_expr, replacement_expr) => {
+                let reference = value!(self.expr(reference_expr, frame));
+                let replacement = value!(self.expr(replacement_expr, frame));
+                let Value::RecordRef(cell) = reference else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: whole-value reference write has no inline storage",
+                    ));
+                };
+                self.consume(replacement_expr, frame);
+                *cell.lock().unwrap() = replacement;
                 Value::Scalar(0)
             }
             ExprKind::RefAssign(reference_expr, offset, replacement) => {

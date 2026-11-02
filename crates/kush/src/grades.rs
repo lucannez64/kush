@@ -1875,7 +1875,12 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
-            ExprKind::RefAssign(reference, _, value) => {
+            ExprKind::RefRead(base) => {
+                if !self.expr(base, multiplier)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::RefAssign(reference, _, value) | ExprKind::RefWrite(reference, value) => {
                 if !self.expr(reference, Grade::ONE)? {
                     return Ok(false);
                 }

@@ -659,6 +659,129 @@ fn mutable_dynamic_dispatch_writes_back_to_the_object_local() {
 }
 
 #[test]
+fn stored_shared_borrowed_trait_objects_dispatch_read_only() {
+    agrees(
+        r#"
+        struct Point { x: i64 }
+        struct Flag { on: Bool }
+        trait Describe { fn describe(self: &Self) -> i64 ! {panic}; }
+        impl Describe for Point { fn describe(self: &Self) -> i64 ! {panic} { self.x } }
+        impl Describe for Flag { fn describe(self: &Self) -> i64 ! {panic} { if self.on { 1 } else { 0 } } }
+        fn read(object: &dyn Describe) -> i64 ! {panic} { object.describe() }
+        fn main() -> i64 ! {io, panic} {
+            let point: dyn Describe = Point { x: 7 };
+            let reference: &dyn Describe = &point;
+            print_i64(reference.describe());
+            print_i64(read(&point));
+            print_i64(point.describe());
+            let flag: dyn Describe = Flag { on: true };
+            print_i64(read(&flag));
+            0
+        }"#,
+        0,
+        "7
+7
+7
+1
+",
+    );
+}
+
+#[test]
+fn stored_mutable_borrowed_trait_objects_write_through_the_reference() {
+    agrees(
+        r#"
+        struct Counter { value: i64 }
+        struct Offset { value: i64 }
+        trait Bump {
+            fn bump(self: &mut Self, by: i64) -> Unit ! {panic};
+            fn current(self: &Self) -> i64 ! {panic};
+        }
+        impl Bump for Counter {
+            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by; }
+            fn current(self: &Self) -> i64 ! {panic} { self.value }
+        }
+        impl Bump for Offset {
+            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by * 10; }
+            fn current(self: &Self) -> i64 ! {panic} { self.value }
+        }
+        fn bump_twice(object: &mut dyn Bump) -> Unit ! {panic} {
+            object.bump(1);
+            object.bump(2);
+        }
+        fn main() -> i64 ! {io, panic} {
+            let mut object: dyn Bump = Counter { value: 1 };
+            let reference: &mut dyn Bump = &mut object;
+            reference.bump(2);
+            print_i64(reference.current());
+            reference.bump(3);
+            print_i64(object.current());
+            bump_twice(&mut object);
+            print_i64(object.current());
+            let mut other: dyn Bump = Offset { value: 4 };
+            let borrowed: &mut dyn Bump = &mut other;
+            borrowed.bump(2);
+            print_i64(other.current());
+            0
+        }"#,
+        0,
+        "3
+6
+9
+24
+",
+    );
+}
+
+#[test]
+fn borrowed_trait_object_boundaries_are_explicit() {
+    rejects(
+        r#"
+        struct Text { name: String }
+        struct Other { name: String }
+        trait Consume { fn consume(self: Self) -> i64 ! {panic}; }
+        impl Consume for Text { fn consume(self: Self) -> i64 ! {panic} { 1 } }
+        impl Consume for Other { fn consume(self: Self) -> i64 ! {panic} { 2 } }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let object: dyn Consume = Text { name: "x" };
+            let reference: &dyn Consume = &object;
+            print_i64(reference.consume());
+            0
+        }"#,
+        "must have copyable members",
+    );
+    rejects(
+        r#"
+        struct Counter { value: i64 }
+        struct Other { value: i64 }
+        trait Bump { fn bump(self: &mut Self) -> Unit ! {panic}; }
+        impl Bump for Counter { fn bump(self: &mut Self) -> Unit ! {panic} { self.value = self.value + 1; } }
+        impl Bump for Other { fn bump(self: &mut Self) -> Unit ! {panic} { self.value = self.value + 2; } }
+        fn main() -> i64 ! {panic} {
+            let object: dyn Bump = Counter { value: 1 };
+            let reference: &dyn Bump = &object;
+            reference.bump();
+            0
+        }"#,
+        "exclusive dynamic method through a shared",
+    );
+    rejects(
+        r#"
+        struct Counter { value: i64 }
+        struct Other { value: i64 }
+        trait Consume { fn consume(self: Self) -> i64 ! {panic}; }
+        impl Consume for Counter { fn consume(self: Self) -> i64 ! {panic} { self.value } }
+        impl Consume for Other { fn consume(self: Self) -> i64 ! {panic} { self.value } }
+        fn main() -> i64 ! {panic} {
+            let object: dyn Consume = Counter { value: 1 };
+            let reference: &dyn Consume = &object;
+            reference.consume()
+        }"#,
+        "owning dynamic method through a borrowed",
+    );
+}
+
+#[test]
 fn closed_world_trait_objects_dispatch_and_clean_up_ownership() {
     let stats = agrees(
         r#"

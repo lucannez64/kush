@@ -1592,7 +1592,8 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             // the local reads and writes. Inline arrays keep their existing
             // pinning rule.
             let record = local.ty.layout().is_some_and(|id| program.enums[id].record);
-            if array || record {
+            let object = matches!(local.ty, Type::Union(_));
+            if array || record || object {
                 let width = program.width(local.ty);
                 let slot = g.builder.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
@@ -3162,13 +3163,14 @@ impl Generator<'_, '_> {
                 );
             }
             ExprKind::Borrow(slot) => {
-                let record = self.program.functions[self.function_index].locals[*slot]
+                let local = &self.program.functions[self.function_index].locals[*slot];
+                let record = local
                     .ty
                     .layout()
                     .is_some_and(|id| self.program.enums[id].record);
-                if record {
+                if record || matches!(local.ty, Type::Union(_)) {
                     let pointer = self.locations[*slot]
-                        .expect("checked record borrow is pinned to stack storage");
+                        .expect("checked inline object borrow is pinned to stack storage");
                     return Some(vec![pointer]);
                 }
                 let variable = self.builder.use_var(self.variables[*slot][0]);
@@ -4048,6 +4050,24 @@ impl Generator<'_, '_> {
                 } else if self.program.owns(replacement.ty) {
                     self.drop_value(replacement.ty, &value);
                 }
+                self.constant(0)
+            }
+            ExprKind::RefRead(reference) => {
+                let pointer = lower!(self.scalar(reference));
+                return Some(self.load_words(pointer, 0, self.program.width(expr.ty)));
+            }
+            ExprKind::RefWrite(reference, replacement) => {
+                let pointer = lower!(self.scalar(reference));
+                let value = lower!(self.expr(replacement));
+                for (index, word) in value.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        pointer,
+                        (index * 8) as i32,
+                    );
+                }
+                self.consume(replacement);
                 self.constant(0)
             }
             ExprKind::RefAssign(reference, offset, replacement) => {

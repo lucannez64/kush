@@ -1562,6 +1562,17 @@ impl<'a> Types<'a> {
                 }
                 return Ok(Type::Ref(self.pointer(inner)));
             }
+            // A borrowed trait object is a reference to the closed-world object
+            // union. Dispatch through it is checked separately: a shared
+            // reference may only copy a copyable object, and an exclusive
+            // reference writes the mutated object back through the same loan.
+            if matches!(inner, Type::Union(_)) {
+                return Ok(if *mutable {
+                    Type::RefMut(self.pointer(inner))
+                } else {
+                    Type::Ref(self.pointer(inner))
+                });
+            }
             if *mutable {
                 return Err(Diagnostic::new(
                     ty.span,

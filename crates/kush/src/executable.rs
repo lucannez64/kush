@@ -543,6 +543,13 @@ pub(crate) enum ExprKind {
     /// store. Owning, borrowed-view, and nested-owning field replacement is
     /// rejected by the checker.
     RefAssign(Box<Expr>, usize, Box<Expr>),
+    /// Read a whole value through a checked reference. Used for a stored
+    /// borrowed trait object (`&dyn Trait`/`&mut dyn Trait`); the referent is
+    /// copyable, so the read does not duplicate owning storage.
+    RefRead(Box<Expr>),
+    /// Replace the whole referent through a checked exclusive reference and
+    /// return Unit. Used to write a mutated borrowed trait object back.
+    RefWrite(Box<Expr>, Box<Expr>),
     Call(Target, Vec<Expr>),
     Return(Box<Expr>),
     If(Box<Expr>, Block, Block),
@@ -1225,6 +1232,9 @@ fn fusion_expr_safe(
         | ExprKind::Peek(_)
         | ExprKind::ArenaNew
         | ExprKind::DynArrayNew { .. } => true,
+        // A whole-value reference read/write is never fused: it depends on
+        // aliasing storage and has no total, capture-free callback shape.
+        ExprKind::RefRead(_) | ExprKind::RefWrite(_, _) => false,
         // No loop has a checked termination argument here.
         ExprKind::While(..) | ExprKind::Loop(_) => false,
         ExprKind::Call(Target::Function(index), arguments) => {
@@ -1417,7 +1427,12 @@ fn fuse_expr(
         | ExprKind::Unary(_, value)
         | ExprKind::Assign(_, value)
         | ExprKind::Return(value)
-        | ExprKind::Project(value, _) => fuse_expr(value, types, signatures, safety, fusions),
+        | ExprKind::Project(value, _)
+        | ExprKind::RefRead(value) => fuse_expr(value, types, signatures, safety, fusions),
+        ExprKind::RefWrite(reference, value) => {
+            fuse_expr(reference, types, signatures, safety, fusions);
+            fuse_expr(value, types, signatures, safety, fusions);
+        }
         ExprKind::ArenaAlloc { arena, value } => {
             fuse_expr(arena, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
@@ -8995,6 +9010,21 @@ impl Checker<'_, '_> {
         if receiver.ty == Type::Never {
             return Ok(receiver);
         }
+        if let Some(pointer) = receiver.ty.ref_pointee() {
+            let pointee = self.types.pointees[pointer];
+            if matches!(pointee, Type::Union(_))
+                && self.functions.object_traits.contains_key(&pointee)
+            {
+                return self.dynamic_method_call(
+                    receiver,
+                    name,
+                    trait_selection.clone(),
+                    arguments,
+                    expected,
+                    span,
+                );
+            }
+        }
         if matches!(receiver.ty, Type::Union(_))
             && self.functions.object_traits.contains_key(&receiver.ty)
         {
@@ -9216,15 +9246,47 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
-        let Some(entries) = self.functions.object_traits.get(&receiver.ty).cloned() else {
+        // A stored borrowed object is a reference to the same closed-world
+        // union. Dispatch reads a copy through the reference; a copyable object
+        // has value semantics, so this neither moves nor duplicates owning
+        // storage. Mutable dispatch writes the updated object back through an
+        // exclusive reference.
+        let reference_slot = match &receiver.kind {
+            ExprKind::Peek(slot) | ExprKind::Local(slot) => Some((*slot, receiver.ty)),
+            _ => None,
+        };
+        let borrowed_object = receiver.ty.ref_pointee().map(|pointer| {
+            let pointee = self.types.pointees[pointer];
+            (pointee, receiver.ty)
+        });
+        let object_ty = borrowed_object
+            .map(|(object, _)| object)
+            .unwrap_or(receiver.ty);
+        let Some(entries) = self.functions.object_traits.get(&object_ty).cloned() else {
             return Err(Diagnostic::new(
                 span,
                 format!(
                     "no dynamic method '{name}' is available for '{}'",
-                    self.types.name(receiver.ty)
+                    self.types.name(object_ty)
                 ),
             ));
         };
+        if borrowed_object.is_some()
+            && (crate::runtime_types::type_owns(
+                &self.types.enums,
+                &self.types.unions,
+                object_ty,
+                0,
+            ) || self.linear_type(object_ty))
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "a stored borrowed trait object must have copyable members; '{}' owns storage or is linear. Store the object by value or in Box<dyn Trait>",
+                    self.types.name(object_ty)
+                ),
+            ));
+        }
         let entry = if let Some((trait_id, arguments)) = trait_selection {
             entries
                 .iter()
@@ -9299,7 +9361,46 @@ impl Checker<'_, '_> {
             ));
         }
         self.require(signature.effects, span)?;
-        let mut receiver = receiver;
+        let mut writeback = None;
+        let mut receiver = if let Some((object, reference_ty)) = borrowed_object {
+            match (reference_ty, receiver_mode) {
+                (Type::Ref(_), ReceiverMode::Mutable) => {
+                    return Err(Diagnostic::new(
+                        span,
+                        "cannot call an exclusive dynamic method through a shared '&dyn' reference; bind the object with '&mut' or call on the owning local",
+                    ));
+                }
+                (_, ReceiverMode::Owned) => {
+                    return Err(Diagnostic::new(
+                        span,
+                        "cannot call an owning dynamic method through a borrowed trait object; call it on the owning value instead",
+                    ));
+                }
+                (Type::RefMut(_), ReceiverMode::Mutable) => {
+                    let Some((slot, _)) = reference_slot else {
+                        return Err(Diagnostic::new(
+                            span,
+                            "a mutable borrowed trait-object call requires a reference binding, as in '&mut object'",
+                        ));
+                    };
+                    writeback = Some(Expr {
+                        kind: ExprKind::Peek(slot),
+                        ty: reference_ty,
+                        span,
+                        resource: None,
+                    });
+                }
+                _ => {}
+            }
+            Expr {
+                kind: ExprKind::RefRead(Box::new(receiver)),
+                ty: object,
+                span,
+                resource: None,
+            }
+        } else {
+            receiver
+        };
         if let ExprKind::Peek(slot) = &receiver.kind {
             let slot = *slot;
             let ty = receiver.ty;
@@ -9353,6 +9454,40 @@ impl Checker<'_, '_> {
                         statements: vec![Statement::Expr(Expr {
                             kind: ExprKind::Assign(
                                 slot,
+                                Box::new(Expr {
+                                    kind: ExprKind::Local(updated),
+                                    ty: object,
+                                    span,
+                                    resource: None,
+                                }),
+                            ),
+                            ty: Type::Unit,
+                            span,
+                            resource: None,
+                        })],
+                        tail: Some(Box::new(Expr {
+                            kind: ExprKind::Local(extracted),
+                            ty: result_ty,
+                            span,
+                            resource: None,
+                        })),
+                        ty: result_ty,
+                    },
+                )
+            } else if let Some(reference) = writeback {
+                let updated = self.temp(object, span)?;
+                (
+                    Pattern::Variant {
+                        tag: 0,
+                        fields: vec![
+                            (1, Pattern::Bind(updated)),
+                            (1 + object_width, Pattern::Bind(extracted)),
+                        ],
+                    },
+                    Block {
+                        statements: vec![Statement::Expr(Expr {
+                            kind: ExprKind::RefWrite(
+                                Box::new(reference),
                                 Box::new(Expr {
                                     kind: ExprKind::Local(updated),
                                     ty: object,
@@ -13871,7 +14006,9 @@ impl Checker<'_, '_> {
                     let record = ty
                         .layout()
                         .is_some_and(|id| c.types.enums[id].record);
-                    if record {
+                    let object = matches!(ty, Type::Union(_))
+                        && c.functions.object_traits.contains_key(&ty);
+                    if record || object {
                         if *mutable {
                             if !c.locals[slot].mutable {
                                 return Err(Diagnostic::new(
@@ -13879,7 +14016,9 @@ impl Checker<'_, '_> {
                                     "cannot mutably borrow an immutable binding; declare it with let mut",
                                 ));
                             }
-                            if c.types.enums[ty.layout().expect("record layout")].borrowed {
+                            if record
+                                && c.types.enums[ty.layout().expect("record layout")].borrowed
+                            {
                                 return Err(Diagnostic::new(
                                     span,
                                     "cannot mutably borrow a record with borrowed fields; only owned metadata of an owning record may be updated through '&mut Record'",
