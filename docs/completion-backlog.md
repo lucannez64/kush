@@ -708,3 +708,27 @@ regressions:
 
 `dedb144` (all four implementation merges plus every review fix) passes the
 full Boat gate: **953 tests**, formatting, and Clippy.
+
+## Structural rows and algebraic inference checkpoint
+
+Local Linux x86-64 validation used
+`CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/close-structural` with
+debug information disabled and two Cargo jobs:
+
+- Full `cargo test -p kush --offline -j 2`: **958 passed, 0 failed** across 61
+  test binaries.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p kush --all-targets --offline -j 2 -- -D warnings`: passed.
+
+The structural-record backlog item is checked: true named row variables
+(including nested residual-row unification and open-row impl headers), explicit
+top-level field renaming, and structural equality over comparable leaves are
+implemented in both backends with hostile and positive tests. The algebraic
+inference item remains unchecked because indexed/dependent union inference is
+still absent: it is an explicit-specialization boundary, not a silently guessed
+alternative. Cross-parameter partition replay is bounded at 4096 complete
+attempts; the single-variable residual rule is principal, while multi-variable
+partitions are deterministic but not principal. Borrowed structural results,
+nested field renaming, row subtraction/aliasing, first-class row values, and
+bare `..` impl headers remain explicit, tested rejections. See
+[subtyping.md](subtyping.md#structural-records).
