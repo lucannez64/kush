@@ -13,8 +13,8 @@ Integrated on `main` in `401662d` and `342537d`; see
 [expanded borrowing contracts](borrowing-extensions.md) for the exact contract
 and remaining limits.
 
-- [x] General shared/exclusive reference support, including escape and reborrow
-  contracts. Reference parameters may be returned and reborrowed through calls;
+- [ ] General shared/exclusive reference support, including escape and reborrow
+  contracts. **Partial:** reference parameters may be returned and reborrowed through calls;
   stored shared/exclusive reference locals, implicit use reborrow, explicit
   `&*p`/`&mut *p`, shared `&Box`/`&Vec`/`&Bytes`/`&String` escape contracts, and
   direct reference fields in nominal records are checked. `Box<&T>` and
@@ -332,3 +332,13 @@ silently relabelled successes.
 The new borrowing integration gate and independent review are pending. Earlier
 branch-only test counts above are historical evidence, not evidence that the
 remaining unchecked features are complete.
+
+Parent borrowing integration forwards named function container-result leaves
+through the same call-provenance channel as records, validates their result
+lifetime contracts, and merges all vector element sources on append/replacement.
+The replacement value comes from the third `Vec.set` argument. Regressions cover
+owner replacement after multi-source construction/update, legal clearing,
+container results through named/indirect calls, and exclusive boxed reference
+returns. Twelve new reference test cases pass locally, together with the
+existing borrowing-safety, memory, and advanced-trait suites. The combined gate
+with the latest borrowing changes is pending.

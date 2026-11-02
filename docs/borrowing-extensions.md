@@ -273,6 +273,14 @@ annotation never appears in a user-visible expression type.
   provenance: the owner stays loaned while the container or a read reference is
   live, and replacing or dropping the owner is rejected. Containers of
   borrowed records (rather than direct references) remain rejected.
+- Reference vectors retain the union of every possible element source after
+  literals, `push`, and `set`; updating one index does not prove that an old
+  source is absent from other indices. This is conservative: source loans end
+  after `clear`, destruction, or the vector's checked last use, rather than
+  after a particular replacement. A read reference keeps its own source loan.
+- Fallible reserve of a reference vector remains rejected because general
+  borrow-carrying `Result` payloads are unsupported; `Vec.reserve` preserves
+  reference-vector provenance without a sum-type boundary.
 - A record may store a reference container. Because owner references require a
   direct local receiver, destructure the container field into a local before
   borrowing it for `Box.read`/`Vec.get`.

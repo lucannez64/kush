@@ -283,7 +283,7 @@ fn reference_element_containers_reject_aliasing_and_escapes() {
             [&local]
         }
         fn main() -> i64 ! {alloc, panic} { 0 }"#,
-        "would outlive the lexical scope",
+        "does not appear on any parameter",
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
@@ -292,7 +292,7 @@ fn reference_element_containers_reject_aliasing_and_escapes() {
             Box.new(&local)
         }
         fn main() -> i64 ! {alloc, panic} { 0 }"#,
-        "would outlive the lexical scope",
+        "does not appear on any parameter",
     );
     rejects(
         r#"struct Point { x: i64, y: i64 }
@@ -494,5 +494,121 @@ fn reference_valued_arrows_keep_sources_borrowed() {
             r.x
         }"#,
         "cannot replace an owner while a slice view or reference borrows it",
+    );
+}
+
+#[test]
+fn returned_reference_containers_keep_their_sources_borrowed() {
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn wrap<'a>(p: &'a Point) -> Box<&'a Point> ! {alloc, panic} { Box.new(p) }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut p = Point {x: 40, y: 2};
+            let boxed = wrap(&p);
+            p = Point {x: 0, y: 0};
+            let reference = Box.take(boxed);
+            reference.x
+        }"#,
+        "borrow",
+    );
+}
+
+#[test]
+fn every_reference_vector_element_remains_borrowed_after_append_and_replace() {
+    for build in [
+        "let values: Vec<&Point> = [&a, &b];",
+        "let values: Vec<&Point> = [&a]; let values = Vec.push(values, &b);",
+    ] {
+        rejects(
+            &format!(
+                "struct Point {{ x: i64, y: i64 }}
+            fn main() -> i64 ! {{alloc, panic}} {{
+                let mut a = Point {{x: 40, y: 2}};
+                let b = Point {{x: 1, y: 0}};
+                {build}
+                a = Point {{x: 0, y: 0}};
+                Vec.get(&values, 0).x
+            }}"
+            ),
+            "borrow",
+        );
+    }
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let a = Point {x: 1, y: 0};
+            let mut b = Point {x: 40, y: 2};
+            let values: Vec<&Point> = [&a];
+            let values = Vec.set(values, 0, &b);
+            b = Point {x: 0, y: 0};
+            Vec.get(&values, 0).x
+        }"#,
+        "borrow",
+    );
+}
+
+#[test]
+fn reference_container_results_work_through_named_and_indirect_calls() {
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        fn wrap<'a>(p: &'a Point) -> Box<&'a Point> ! {alloc, panic} { Box.new(p) }
+        fn keep<'a>(values: Vec<&'a Point>) -> Vec<&'a Point> ! {} { values }
+        fn main() -> i64 ! {alloc, panic} {
+            let p = Point {x: 40, y: 2};
+            let boxed = wrap(&p);
+            let reference = Box.take(boxed);
+            let values: Vec<&Point> = [reference];
+            let call: fn<'a>(Vec<&'a Point>) -> Vec<&'a Point> ! {} = keep;
+            let values = call(values);
+            Vec.get(&values, 0).x + p.y
+        }"#,
+        42,
+        "",
+    );
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        fn wrap<'a>(p: &'a mut Point) -> Box<&'a mut Point> ! {alloc, panic} { Box.new(p) }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut p = Point {x: 40, y: 0};
+            let boxed = wrap(&mut p);
+            let reference = Box.take(boxed);
+            reference.y = 2;
+            p.x + p.y
+        }"#,
+        42,
+        "",
+    );
+}
+
+#[test]
+fn shared_reference_vectors_can_replace_elements_and_clear_all_source_loans() {
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut a = Point {x: 1, y: 0};
+            let mut b = Point {x: 40, y: 2};
+            let values: Vec<&Point> = [&a];
+            let values = Vec.push(values, &b);
+            let values = Vec.set(values, 0, &b);
+            let answer = Vec.get(&values, 0).x + Vec.get(&values, 1).y;
+            let values = Vec.clear(values);
+            a = Point {x: 3, y: 0};
+            b = Point {x: 4, y: 0};
+            drop(values);
+            answer
+        }"#,
+        42,
+        "",
+    );
+    rejects(
+        r#"enum Result<T, E> { Ok(T), Err(E) }
+        struct Point { x: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let p = Point {x: 42};
+            let values: Vec<&Point> = [&p];
+            drop(Vec.try_reserve(values, 1));
+            0
+        }"#,
+        "enums cannot store borrowed",
     );
 }

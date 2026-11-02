@@ -97,6 +97,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                 .result
                 .layout()
                 .is_some_and(|layout| program.enums[layout].borrowed)
+                || container_carries_borrow(&program.pointees, function.result)
             {
                 CallResult::Record(leaves_of(
                     &program.enums,
@@ -3711,7 +3712,8 @@ impl Checker<'_> {
                     let mut provenance = RecordProvenance::default();
                     match op {
                         crate::executable::VecOp::WithCapacity
-                        | crate::executable::VecOp::Clear => {}
+                        | crate::executable::VecOp::Clear
+                        | crate::executable::VecOp::TryReserve { .. } => {}
                         crate::executable::VecOp::Push | crate::executable::VecOp::Set => {
                             provenance = self.record_provenance(&args[0]);
                             if crate::runtime_types::width(
@@ -3720,8 +3722,20 @@ impl Checker<'_> {
                                 self.functions,
                                 element,
                             ) == 1
-                                && let Some(loan) = self.reference_element_loan(&args[1])
+                                && let Some(loan) = self.reference_element_loan(
+                                    &args[if *op == crate::executable::VecOp::Set {
+                                        2
+                                    } else {
+                                        1
+                                    }],
+                                )
                             {
+                                // A shared vector may contain references to
+                                // several owners. Retain every possible source;
+                                // replacing one position does not prove that an
+                                // earlier source is absent from other positions.
+                                let existing = provenance.leaves.remove(&Vec::new());
+                                let loan = self.merge_loans(existing.into_iter().chain([loan]));
                                 provenance.leaves.insert(Vec::new(), loan);
                             }
                         }

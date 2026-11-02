@@ -7502,6 +7502,7 @@ impl<'a> Functions<'a> {
         } else if result
             .layout()
             .is_some_and(|layout| types.enums[layout].borrowed)
+            || crate::runtime_types::is_reference_container(types, result)
         {
             // A returned borrowed record may mention only declared lifetime
             // parameters that also describe some parameter's borrowed field.
@@ -7528,7 +7529,9 @@ impl<'a> Functions<'a> {
                             (parameter
                                 .as_ref()
                                 .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
-                                && (!leaf.mutable || ty.is_mut_slice()))
+                                && (!leaf.mutable
+                                    || ty.is_mut_slice()
+                                    || matches!(ty, Type::RefMut(_))))
                                 || crate::runtime_types::borrow_leaves(types, *ty).iter().any(
                                     |parameter_leaf| {
                                         parameter_leaf.lifetime.as_ref().is_some_and(|name| {
@@ -15394,7 +15397,9 @@ impl Checker<'_, '_> {
             .with_note(self.locals[*slot].span, "text view declared here"));
         }
         let borrowed_capture = captures.iter().any(|slot| {
-            self.locals[*slot].ty.is_slice() || self.carrier_type(self.locals[*slot].ty)
+            self.locals[*slot].ty.is_slice()
+                || self.carrier_type(self.locals[*slot].ty)
+                || crate::runtime_types::is_reference_container(self.types, self.locals[*slot].ty)
         });
         for slot in &captures {
             let local = self.locals[*slot];
@@ -15782,6 +15787,7 @@ impl Checker<'_, '_> {
             lambda_result_lifetime = Some(lifetime.clone());
             borrow_result_lifetime = Some(lifetime);
         } else if crate::runtime_types::is_borrowed_record(self.types, result)
+            || crate::runtime_types::is_reference_container(self.types, result)
             || crate::runtime_types::is_borrowed_task_exit(self.types, result)
         {
             let leaves = crate::runtime_types::borrow_leaves(self.types, result);
