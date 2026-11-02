@@ -24,3 +24,21 @@ matches checking; InitOwner place reads retain one owner; hidden declarations
 use their real source span for lexical escape detection. Focused local checks:
 38 borrowing-reference tests and 8 borrowing-safety tests pass with mbx, two
 jobs. Broader compiler validation and independent review remain required.
+
+## Project workflow milestone
+
+The practical project layer is implemented in `kush::project` and documented in
+[projects.md](projects.md): strict `Kush.toml` parsing, local path dependency
+resolution with deterministic ordering and cycle/missing/name-collision
+diagnostics, a generated `Kush.lock`, `kush new`, project
+check/build/run/test, `#[test]` discovery with per-test processes and filtering,
+a comment/string-preserving whitespace formatter with `--check`, process-argument
+forwarding after `--`, and validated `[native]` manifest extension points.
+
+This is not full editor or package tooling: there is no LSP, live diagnostics,
+go-to-definition, registry, workspace, or incremental build, and `[native]`
+entries intentionally fail project build/run/test until the Rust/C bridge lands.
+Test functions return `Unit` and use the `std.test` assertion helpers; runtime
+failures are reported by test name with captured output, while compile errors
+retain normal source diagnostics. See [projects.md](projects.md) for exact
+limits and integration points.

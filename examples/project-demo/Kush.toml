@@ -1,0 +1,8 @@
+[package]
+name = "project_demo"
+version = "0.1.0"
+entry = "src/main.kush"
+test = "tests/main.kush"
+
+[dependencies]
+words = { path = "deps/words" }

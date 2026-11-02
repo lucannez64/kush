@@ -1,16 +1,45 @@
-use kush::{Diagnostic, Span, ast::ItemKind};
+use kush::{
+    Diagnostic, Span,
+    ast::ItemKind,
+    project::{self, Project},
+};
 use std::{
     env,
     ffi::OsString,
     fs,
     io::{self, Write},
-    path::Path,
-    process::{Command, ExitCode},
+    path::{Path, PathBuf},
+    process::ExitCode,
 };
-const HELP: &str = "Kush 0.1.0\n\nUsage:\n  kush parse <file.kush> [--ast]\n  kush lex <file.kush>\n  kush resolve <file.kush>\n  kush check <file.kush>\n  kush build <file.kush> -o <executable> [--stats]\n  kush run <file.kush> [--stats]\n  kush eval <file.kush> [--stats]\n  kush --help\n  kush --version\n\nBuild/run use Cranelift on Linux x86-64 and require cc. Eval is the bounded reference interpreter.\nCheck accepts mixed programs: total logical definitions are kernel-checked and erased before executable checking.\n--stats writes one 'allocation-stats:' line to stderr; program stdout and exit status are unchanged.\n";
+
+const HELP: &str = "Kush 0.1.0\n\n\
+Single files:\n\
+  kush parse <file.kush> [--ast]\n\
+  kush lex <file.kush>\n\
+  kush resolve <file.kush>\n\
+  kush check <file.kush>\n\
+  kush build <file.kush> -o <executable> [--stats]\n\
+  kush run <file.kush> [--stats] [-- <program args>...]\n\
+  kush eval <file.kush> [--stats]\n\n\
+Projects (Kush.toml):\n\
+  kush new <directory> [--name <name>]\n\
+  kush check [--manifest-path <Kush.toml>] [--locked]\n\
+  kush build [--manifest-path <Kush.toml>] [-o <executable>] [--stats] [--locked]\n\
+  kush run [--manifest-path <Kush.toml>] [--stats] [--locked] [-- <program args>...]\n\
+  kush test [--manifest-path <Kush.toml>] [FILTER] [--exact] [--list] [--nocapture] [--locked]\n\
+  kush fmt [--check] [--manifest-path <Kush.toml>] [FILE...]\n\n\
+  kush --help\n\
+  kush --version\n\n\
+Build/run use Cranelift on Linux x86-64 and require cc. Eval is the bounded reference interpreter.\n\
+Check accepts mixed programs: total logical definitions are kernel-checked and erased before executable checking.\n\
+--stats writes one 'allocation-stats:' line to stderr; program stdout and exit status are unchanged.\n\
+Project commands search upward for Kush.toml. Arguments after '--' are forwarded unchanged to the program.\n\
+Test targets declare tests with #[test]; see docs/projects.md. kush fmt only normalizes trailing whitespace and the final newline.\n";
+
 fn output_error(e: io::Error) -> (u8, String) {
     (1, format!("cannot write output: {e}"))
 }
+
 fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
     let Some(command) = args.first() else {
         return Err((2, HELP.into()));
@@ -26,26 +55,356 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
         }
         return Ok(0);
     }
-    let known = ["parse", "lex", "resolve", "check", "build", "run", "eval"]
-        .iter()
-        .any(|name| command == name);
+    let name = command.to_string_lossy();
+    let rest = &args[1..];
+    match name.as_ref() {
+        "new" => new_command(rest, out),
+        "fmt" => format_command(rest, out),
+        "test" => test_command(rest, out),
+        "check" | "build" | "run" if is_project_invocation(rest) => {
+            project_command(name.as_ref(), rest, out)
+        }
+        _ => single_file_command(&args, out),
+    }
+}
+
+fn is_project_invocation(rest: &[OsString]) -> bool {
+    rest.is_empty()
+        || rest
+            .first()
+            .is_some_and(|argument| argument.to_string_lossy().starts_with('-'))
+}
+
+fn project_command(
+    command: &str,
+    args: &[OsString],
+    out: &mut impl Write,
+) -> Result<u8, (u8, String)> {
+    match command {
+        "check" => {
+            let mut manifest = None;
+            let mut locked = false;
+            let mut index = 0;
+            while index < args.len() {
+                match argument(args, index, command)? {
+                    "--manifest-path" => {
+                        manifest = Some(PathBuf::from(value(args, &mut index, command)?));
+                    }
+                    "--locked" => locked = true,
+                    other => return Err(usage_error(command, other)),
+                }
+                index += 1;
+            }
+            let project = open_project(manifest)?;
+            let summaries = project::check(&project, locked).map_err(project_error)?;
+            for summary in summaries {
+                writeln!(out, "{}", summary.render()).map_err(output_error)?;
+            }
+            Ok(0)
+        }
+        "build" => {
+            let mut manifest = None;
+            let mut output = None;
+            let mut stats = false;
+            let mut locked = false;
+            let mut index = 0;
+            while index < args.len() {
+                match argument(args, index, command)? {
+                    "--manifest-path" => {
+                        manifest = Some(PathBuf::from(value(args, &mut index, command)?));
+                    }
+                    "-o" => {
+                        output = Some(PathBuf::from(value(args, &mut index, command)?));
+                    }
+                    "--stats" => stats = true,
+                    "--locked" => locked = true,
+                    other => return Err(usage_error(command, other)),
+                }
+                index += 1;
+            }
+            let project = open_project(manifest)?;
+            let built = project::build(
+                &project,
+                &project::BuildOptions {
+                    output,
+                    stats,
+                    locked,
+                },
+            )
+            .map_err(project_error)?;
+            writeln!(out, "Built {} with Cranelift.", built.output.display())
+                .map_err(output_error)?;
+            Ok(0)
+        }
+        "run" => {
+            let mut manifest = None;
+            let mut stats = false;
+            let mut locked = false;
+            let mut program_arguments = Vec::new();
+            let mut index = 0;
+            while index < args.len() {
+                let text = argument(args, index, command)?;
+                if text == "--" {
+                    program_arguments.extend(args[index + 1..].iter().cloned());
+                    break;
+                }
+                match text {
+                    "--manifest-path" => {
+                        manifest = Some(PathBuf::from(value(args, &mut index, command)?));
+                    }
+                    "--stats" => stats = true,
+                    "--locked" => locked = true,
+                    other => return Err(usage_error(command, other)),
+                }
+                index += 1;
+            }
+            let project = open_project(manifest)?;
+            out.flush().map_err(output_error)?;
+            project::run(
+                &project,
+                &project::RunOptions {
+                    output: None,
+                    stats,
+                    locked,
+                    arguments: program_arguments,
+                },
+            )
+            .map_err(project_error)
+        }
+        _ => Err((2, format!("invalid command\n\n{HELP}"))),
+    }
+}
+
+fn new_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {
+    let mut directory = None;
+    let mut name = None;
+    let mut index = 0;
+    while index < args.len() {
+        match argument(args, index, "new")? {
+            "--name" => {
+                name = Some(
+                    value(args, &mut index, "new")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            other if other.starts_with('-') => return Err(usage_error("new", other)),
+            other => {
+                if directory.is_some() {
+                    return Err((2, "new accepts exactly one directory path".into()));
+                }
+                directory = Some(PathBuf::from(other));
+            }
+        }
+        index += 1;
+    }
+    let directory = directory.ok_or_else(|| (2, "new requires a directory path".into()))?;
+    let created = project::new::create(&directory, name.as_deref()).map_err(project_error)?;
+    writeln!(
+        out,
+        "Created {} (package {})",
+        created.directory.display(),
+        created.name
+    )
+    .map_err(output_error)?;
+    Ok(0)
+}
+
+fn test_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {
+    let mut manifest = None;
+    let mut filter = None;
+    let mut exact = false;
+    let mut list = false;
+    let mut nocapture = false;
+    let mut locked = false;
+    let mut index = 0;
+    while index < args.len() {
+        match argument(args, index, "test")? {
+            "--manifest-path" => {
+                manifest = Some(PathBuf::from(value(args, &mut index, "test")?));
+            }
+            "--exact" => exact = true,
+            "--list" => list = true,
+            "--nocapture" => nocapture = true,
+            "--locked" => locked = true,
+            other if other.starts_with('-') => return Err(usage_error("test", other)),
+            other => {
+                if filter.is_some() {
+                    return Err((2, "test accepts at most one filter argument".into()));
+                }
+                filter = Some(other.to_owned());
+            }
+        }
+        index += 1;
+    }
+    let project = open_project(manifest)?;
+    let summary = project::test_project(
+        &project,
+        &project::TestOptions {
+            filter,
+            exact,
+            list,
+            nocapture,
+            locked,
+        },
+        out,
+    )
+    .map_err(project_error)?;
+    Ok(u8::from(summary.failed != 0))
+}
+
+fn format_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {
+    let mut check = false;
+    let mut manifest = None;
+    let mut files = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match argument(args, index, "fmt")? {
+            "--check" => check = true,
+            "--manifest-path" => {
+                manifest = Some(PathBuf::from(value(args, &mut index, "fmt")?));
+            }
+            other if other.starts_with('-') => return Err(usage_error("fmt", other)),
+            other => files.push(PathBuf::from(other)),
+        }
+        index += 1;
+    }
+    if files.is_empty() {
+        let project = open_project(manifest)?;
+        let outcome = project::format::format_project(&project, check).map_err(project_error)?;
+        for path in &outcome.changed {
+            if check {
+                writeln!(out, "{}: would be reformatted", path.display()).map_err(output_error)?;
+            } else {
+                writeln!(out, "Formatted {}", path.display()).map_err(output_error)?;
+            }
+        }
+        if outcome.changed.is_empty() {
+            writeln!(out, "{} files already formatted", outcome.unchanged).map_err(output_error)?;
+        }
+        return Ok(u8::from(check && !outcome.changed.is_empty()));
+    }
+    let mut changed = 0;
+    for path in &files {
+        let was_changed = project::format::format_file(path, check).map_err(project_error)?;
+        if was_changed {
+            changed += 1;
+            if check {
+                writeln!(out, "{}: would be reformatted", path.display()).map_err(output_error)?;
+            } else {
+                writeln!(out, "Formatted {}", path.display()).map_err(output_error)?;
+            }
+        }
+    }
+    if changed == 0 {
+        writeln!(out, "{} files already formatted", files.len()).map_err(output_error)?;
+    }
+    Ok(u8::from(check && changed != 0))
+}
+
+fn open_project(manifest: Option<PathBuf>) -> Result<Project, (u8, String)> {
+    let manifest = match manifest {
+        Some(path) => {
+            if !path.exists() {
+                return Err((
+                    2,
+                    format!("project manifest {} does not exist", path.display()),
+                ));
+            }
+            path
+        }
+        None => {
+            let current = env::current_dir()
+                .map_err(|e| (1, format!("cannot determine current directory: {e}")))?;
+            project::find_manifest(&current).ok_or_else(|| {
+                (
+                    2,
+                    format!(
+                        "no Kush.toml found in {} or any parent directory",
+                        current.display()
+                    ),
+                )
+            })?
+        }
+    };
+    project::load(&manifest).map_err(project_error)
+}
+
+fn project_error(failure: project::Failure) -> (u8, String) {
+    (1, failure.message().to_owned())
+}
+
+fn argument<'a>(
+    args: &'a [OsString],
+    index: usize,
+    command: &str,
+) -> Result<&'a str, (u8, String)> {
+    args[index].to_str().ok_or_else(|| {
+        (
+            2,
+            format!("{command}: arguments must be valid UTF-8 option names"),
+        )
+    })
+}
+
+fn value<'a>(
+    args: &'a [OsString],
+    index: &mut usize,
+    command: &str,
+) -> Result<&'a OsString, (u8, String)> {
+    *index += 1;
+    args.get(*index)
+        .ok_or_else(|| (2, format!("{command}: option requires a value\n\n{HELP}")))
+}
+
+fn usage_error(command: &str, argument: &str) -> (u8, String) {
+    (
+        2,
+        format!("{command}: unexpected argument '{argument}'\n\n{HELP}"),
+    )
+}
+
+fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {
+    let Some(command) = args.first() else {
+        return Err((2, HELP.into()));
+    };
+    let run_like = command == "run" || command == "eval";
     let ast = command == "parse" && args.len() == 3 && args[2] == "--ast";
     let build = command == "build"
         && args.len() >= 4
         && args[2] == "-o"
         && (args.len() == 4 || (args.len() == 5 && args[4] == "--stats"));
-    let run_like = command == "run" || command == "eval";
-    let stats = (run_like && args.len() == 3 && args[2] == "--stats")
+    let mut stats = (run_like && args.len() == 3 && args[2] == "--stats")
         || (command == "build" && args.len() == 5);
+    let mut program_arguments = Vec::new();
+    let mut run_file_valid = false;
+    if command == "run" && args.len() >= 3 && args[1] != "--stats" {
+        let mut index = 2;
+        if args.get(index).is_some_and(|value| value == "--stats") {
+            stats = true;
+            index += 1;
+        }
+        if index == args.len() {
+            run_file_valid = true;
+        } else if args.get(index).is_some_and(|value| value == "--") {
+            run_file_valid = true;
+            program_arguments.extend(args[index + 1..].iter().cloned());
+        }
+    }
     let valid = if command == "parse" {
         args.len() == 2 || ast
     } else if command == "build" {
         build
-    } else if run_like {
+    } else if command == "run" {
+        args.len() == 2 || run_file_valid
+    } else if command == "eval" {
         args.len() == 2 || stats
     } else {
         args.len() == 2
     };
+    let known = ["parse", "lex", "resolve", "check", "build", "run", "eval"]
+        .iter()
+        .any(|name| command == name);
     if !known || !valid {
         return Err((2, format!("invalid arguments\n\n{HELP}")));
     }
@@ -138,16 +497,8 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
             let scratch = kush::native::Scratch::new(&env::temp_dir()).map_err(diagnostic)?;
             let binary = scratch.path().join("program");
             kush::native::build_with_stats(&checked, &binary, stats).map_err(diagnostic)?;
-            let status = Command::new(&binary)
-                .status()
-                .map_err(|e| (1, format!("cannot execute program: {e}")))?;
-            return match status.code() {
-                Some(code) => Ok(code as u8),
-                None => Err((
-                    1,
-                    "native program aborted or was terminated by a signal".into(),
-                )),
-            };
+            return kush::project::runtime::run_artifact(&binary, &program_arguments)
+                .map_err(project_error);
         }
     } else {
         let module = kush::parse(&source).map_err(diagnostic)?;
@@ -164,6 +515,7 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
     }
     Ok(0)
 }
+
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect(), &mut io::stdout().lock()) {
         Ok(code) => ExitCode::from(code),

@@ -1,0 +1,319 @@
+//! Conservative source formatting.
+//!
+//! The formatter is deliberately not a reflowing pretty-printer. The AST does
+//! not retain comments, so an AST-based rewrite would delete them. Instead this
+//! pass removes trailing spaces/tabs outside string literals, character
+//! literals, and block comments, and ensures exactly one final newline. It never
+//! changes indentation or token order. Every rewrite is lexed before and after
+//! and rejected unless the token kinds are identical, so a scanner mistake
+//! cannot silently change program text.
+use super::{Failure, Project};
+use crate::lexer;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+const MAX_FILES: usize = 4096;
+const MAX_DEPTH: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    Code,
+    LineComment,
+    BlockComment(usize),
+    String,
+    Char,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FormatOutcome {
+    /// Files that were (or, in check mode, would be) rewritten.
+    pub changed: Vec<PathBuf>,
+    pub unchanged: usize,
+}
+
+pub fn format_source(name: &str, source: &str) -> Result<String, Failure> {
+    let before =
+        lexer::lex(source).map_err(|diagnostic| Failure::new(diagnostic.render(name, source)))?;
+    let candidate = normalize(source);
+    let after = lexer::lex(&candidate).map_err(|diagnostic| {
+        Failure::new(format!(
+            "formatter safety check failed for {name}; file not changed\n{}",
+            diagnostic.render(name, &candidate)
+        ))
+    })?;
+    let same = before
+        .iter()
+        .map(|token| &token.kind)
+        .eq(after.iter().map(|token| &token.kind));
+    if !same {
+        return Err(Failure::new(format!(
+            "formatter safety check failed for {name}: token stream changed; file not changed"
+        )));
+    }
+    Ok(candidate)
+}
+
+pub fn format_file(path: &Path, check: bool) -> Result<bool, Failure> {
+    let name = path.display().to_string();
+    let source =
+        fs::read_to_string(path).map_err(|e| Failure::new(format!("cannot read {name}: {e}")))?;
+    let formatted = format_source(&name, &source)?;
+    if formatted == source {
+        return Ok(false);
+    }
+    if !check {
+        fs::write(path, formatted)
+            .map_err(|e| Failure::new(format!("cannot write {name}: {e}")))?;
+    }
+    Ok(true)
+}
+
+pub fn format_project(project: &Project, check: bool) -> Result<FormatOutcome, Failure> {
+    let files = project_files(project)?;
+    let mut outcome = FormatOutcome::default();
+    for file in files {
+        if format_file(&file, check)? {
+            outcome.changed.push(file);
+        } else {
+            outcome.unchanged += 1;
+        }
+    }
+    Ok(outcome)
+}
+
+/// All root-package `.kush` files, excluding `target/`, hidden directories, and
+/// dependency package roots. Sorted for deterministic reports and writes.
+pub fn project_files(project: &Project) -> Result<Vec<PathBuf>, Failure> {
+    let skip = project
+        .dependencies
+        .iter()
+        .map(|package| package.root.clone())
+        .collect::<Vec<_>>();
+    let mut files = Vec::new();
+    walk(&project.root, &skip, 0, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn walk(
+    directory: &Path,
+    skip: &[PathBuf],
+    depth: usize,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), Failure> {
+    if depth > MAX_DEPTH {
+        return Err(Failure::new(format!(
+            "{}: source tree is deeper than {MAX_DEPTH} directories",
+            directory.display()
+        )));
+    }
+    let mut entries = fs::read_dir(directory)
+        .map_err(|e| {
+            Failure::new(format!(
+                "{}: cannot read directory: {e}",
+                directory.display()
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            Failure::new(format!(
+                "{}: cannot read directory entry: {e}",
+                directory.display()
+            ))
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|e| Failure::new(format!("{}: cannot inspect: {e}", path.display())))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "target" || name.starts_with('.') || skip.iter().any(|p| p == &path) {
+                continue;
+            }
+            walk(&path, skip, depth + 1, files)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("kush") {
+            files.push(path);
+            if files.len() > MAX_FILES {
+                return Err(Failure::new(format!(
+                    "project contains more than {MAX_FILES} Kush source files"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize(source: &str) -> String {
+    if source.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(source.len() + 1);
+    let mut state = State::Code;
+    for segment in source.split_inclusive('\n') {
+        let (content, ending) = if let Some(content) = segment.strip_suffix("\r\n") {
+            (content, "\r\n")
+        } else if let Some(content) = segment.strip_suffix('\n') {
+            (content, "\n")
+        } else {
+            (segment, "")
+        };
+        let trim_start = content.trim_end_matches([' ', '\t']).len();
+        let state_at_trim = scan(content, trim_start, &mut state);
+        let keep_trailing = matches!(
+            state_at_trim,
+            State::BlockComment(_) | State::String | State::Char
+        );
+        if keep_trailing {
+            out.push_str(content);
+        } else {
+            out.push_str(&content[..trim_start]);
+        }
+        if state == State::LineComment {
+            state = State::Code;
+        }
+        out.push_str(ending);
+    }
+    if !source.ends_with('\n') {
+        out.push('\n');
+    }
+    if out.is_empty() {
+        // The input was non-empty but consisted of no kept characters; keep a
+        // newline so the file is still a valid, non-empty source file.
+        out.push('\n');
+    }
+    out
+}
+
+/// Scan the whole line, update `state`, and return the state observed just
+/// before byte `mark` (or the final state when `mark` is at the end).
+fn scan(content: &str, mark: usize, state: &mut State) -> State {
+    let mut index = 0;
+    let mut at_mark = *state;
+    while index < content.len() {
+        if index == mark {
+            at_mark = *state;
+        }
+        let rest = &content[index..];
+        match *state {
+            State::Code => {
+                if rest.starts_with("//") {
+                    *state = State::LineComment;
+                    index += 2;
+                } else if rest.starts_with("/*") {
+                    *state = State::BlockComment(1);
+                    index += 2;
+                } else if let Some(ch) = rest.chars().next() {
+                    if ch == '"' {
+                        *state = State::String;
+                        index += 1;
+                    } else if ch == '\'' {
+                        if is_char_literal(rest) {
+                            *state = State::Char;
+                        }
+                        index += 1;
+                    } else {
+                        index += ch.len_utf8();
+                    }
+                }
+            }
+            State::LineComment => {
+                if let Some(ch) = rest.chars().next() {
+                    index += ch.len_utf8();
+                }
+            }
+            State::BlockComment(depth) => {
+                if rest.starts_with("/*") {
+                    *state = State::BlockComment(depth + 1);
+                    index += 2;
+                } else if rest.starts_with("*/") {
+                    *state = if depth == 1 {
+                        State::Code
+                    } else {
+                        State::BlockComment(depth - 1)
+                    };
+                    index += 2;
+                } else if let Some(ch) = rest.chars().next() {
+                    index += ch.len_utf8();
+                }
+            }
+            State::String => {
+                if rest.starts_with('\\') {
+                    if let Some(ch) = rest.chars().nth(1) {
+                        index += 1 + ch.len_utf8();
+                    } else {
+                        index += 1;
+                    }
+                } else if let Some(ch) = rest.chars().next() {
+                    if ch == '"' {
+                        *state = State::Code;
+                    }
+                    index += ch.len_utf8();
+                }
+            }
+            State::Char => {
+                if rest.starts_with('\\') {
+                    if let Some(ch) = rest.chars().nth(1) {
+                        index += 1 + ch.len_utf8();
+                    } else {
+                        index += 1;
+                    }
+                } else if let Some(ch) = rest.chars().next() {
+                    if ch == '\'' {
+                        *state = State::Code;
+                    }
+                    index += ch.len_utf8();
+                }
+            }
+        }
+    }
+    if mark >= content.len() {
+        at_mark = *state;
+    }
+    at_mark
+}
+
+/// Distinguish `'x'` / `'\n'` from a lifetime such as `'a` in `&'a [T]`.
+fn is_char_literal(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    if chars.next() != Some('\'') {
+        return false;
+    }
+    match chars.next() {
+        Some('\\') => chars.next().is_some() && chars.next() == Some('\''),
+        Some(_) => chars.next() == Some('\''),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_lifetime_tokens_and_crlf_line_endings() {
+        let source = "fn f<'a>(value: &'a i64) -> i64 ! {panic} {\r\n    *value   \r\n}\r\n";
+        let formatted = format_source("<test>", source).unwrap();
+        assert!(formatted.contains("<'a>"));
+        assert!(formatted.contains("&'a i64"));
+        assert!(formatted.contains("*value\r\n"));
+        assert!(formatted.ends_with("}\r\n"));
+        assert!(!formatted.contains("   \r\n"));
+    }
+
+    #[test]
+    fn keeps_string_and_character_contents_while_trimming_code_whitespace() {
+        let source = "fn main() -> Unit ! {panic} {\n    let text = \"a // b /* c */ \\\"  \";   \n    let ch = '\\n';   \n    let lt = 'a;   \n}\n";
+        let formatted = format_source("<test>", source).unwrap();
+        assert!(formatted.contains("\"a // b /* c */ \\\"  \";"));
+        assert!(formatted.contains("'\\n';"));
+        assert!(formatted.contains("'a;"));
+        assert!(!formatted.contains(";   \n"));
+    }
+}

@@ -1,0 +1,20 @@
+module project_demo.tests.main;
+
+use std.test;
+use project_demo.greeting;
+use words;
+
+#[test]
+fn local_module_is_reachable() -> Unit ! {panic} {
+    test.is_true(greeting.value(6) == 106);
+}
+
+#[test]
+fn local_dependency_is_reachable() -> Unit ! {panic} {
+    test.is_true(words.answer() == 42);
+}
+
+#[test]
+fn assertion_helpers_report_values() -> Unit ! {io, panic} {
+    test.equal_i64(6 * 7, 42);
+}

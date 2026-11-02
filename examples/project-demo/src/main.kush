@@ -1,0 +1,9 @@
+module project_demo;
+
+use project_demo.greeting;
+use words;
+
+fn main() -> Unit ! {io, panic} {
+    greeting.greet(6);
+    print_i64(words.answer());
+}
