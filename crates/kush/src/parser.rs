@@ -752,7 +752,32 @@ impl Parser {
     fn effects(&mut self) -> Result<Vec<Type>> {
         self.expect(&Kind::Bang, "an explicit effect row '! { ... }'")?;
         self.expect(&Kind::LBrace, "'{' in effect row")?;
-        self.separated(Kind::RBrace, |p| p.ty())
+        self.separated(Kind::RBrace, |p| p.effect_row())
+    }
+    /// One effect-row element. Subtraction is a row operation, not part of the
+    /// ordinary type grammar: `e - io` removes `io` from the row expression
+    /// before it is checked against the finite four-effect universe. It binds
+    /// looser than `|`, so `(a | b) - c` needs parentheses for the other order.
+    fn effect_row(&mut self) -> Result<Type> {
+        let start = self.current().span;
+        let mut left = self.ty()?;
+        let mut steps = 0;
+        while self.eat(&Kind::Minus) {
+            steps += 1;
+            if steps > LIMIT {
+                return Err(self.error("effect row exceeds limit (128) subtractions"));
+            }
+            let right = self.ty()?;
+            left = Node::new(
+                TypeKind::Binary {
+                    op: Kind::Minus,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                self.since(start),
+            );
+        }
+        Ok(left)
     }
     fn ty(&mut self) -> Result<Type> {
         self.type_bp(0)

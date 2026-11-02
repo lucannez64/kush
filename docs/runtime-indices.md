@@ -119,7 +119,7 @@ Aliases are transparent on both sides. A logical alias such as
 index carrier or proof type. A structured runtime alias is still not a logical
 definition and cannot enter a proof.
 
-## 4. Freezing and mutation
+## 4. Freezing, mutation, and joins
 
 The central soundness rule is:
 
@@ -134,6 +134,19 @@ Implemented consequences:
   rewriting the old hypothesis; a later `refl::<i64>(n)` therefore describes
   the new value, and an old literal proof such as `refl::<i64>(5)` no longer
   establishes `Eq<i64, n, n>` after `n = 6`.
+- An assignment of a canonical machine literal records that literal as the
+  current index value. This is what makes `let mut n = 0; n = 6;
+  keep(n, refl::<i64>(6))` check.
+- A **branch join** keeps a scalar index only when both reaching branches agree.
+  If both branches assign the same literal, that literal survives; if one
+  branch changes the value and the other does not, or the branches disagree,
+  the joined index is a fresh opaque binder. A proof about an older value is
+  rejected against the new binder. The join also handles one branch that
+  diverges with `return`/`panic`.
+- A **loop join** keeps a scalar index only when the body never changes it. Any
+  scalar the body may assign becomes a fresh opaque binder after the loop, so a
+  literal proof cannot survive a loop iteration that might have replaced the
+  value, even when the loop condition is false at run time.
 - An actual argument to a scalar-indexed parameter must be a canonical literal
   or the **name** of an in-scope scalar (immutable or mutable). An arbitrary
   evaluated expression such as `keep(make(3), refl::<i64>(3))` is rejected with
@@ -145,6 +158,12 @@ Implemented consequences:
   assignment to the source appends a new binder and leaves the alias frozen at
   the old value; using the alias to prove a proposition about the new source
   value is rejected. Chained aliases resolve to the original binder.
+- A **proof-valued local** `let p = <proof>` is erased like an erased
+  parameter. The right-hand side is elaborated to a checked kernel term at the
+  binding point and each use re-checks that term at the current context (free
+  variables are shifted as later binders are appended). A proof-valued local
+  may alias another such local, may shadow, and has no runtime slot, so it
+  cannot be returned, stored, or read as a runtime value.
 - A closure capture of a scalar is a **copy made when the closure is
   constructed**. That copy is an independent immutable snapshot: it may index
   proofs in the lambda body even if the outer binding is later assigned. The
@@ -162,10 +181,11 @@ The version rule is structural rather than a general def-use solver: each
 assignment produces a new binder for the mutable name, and older proof terms
 keep their own prefix context. It does not attempt to prove that an arbitrary
 expression over a mutable local is unchanged. It never accepts a proof about an
-older value after assignment, a branch join, or a loop iteration. The
+older value after an assignment that is not known to agree on every path. The
 implementation is tested by `crates/kush/tests/advanced_types_effects.rs` with
-current-value proofs, old-literal rejection, unrelated versioned binders, and a
-frozen closure snapshot.
+current-value proofs, old-literal rejection, unrelated versioned binders,
+branch/loop join agreement and disagreement, proof-valued locals, and a frozen
+closure snapshot.
 
 ## 5. Erasure, grades, ownership, and `Prop`
 
@@ -226,15 +246,25 @@ fn consume(erased p: Eq<i64, 0, 0>); consume(n)
   encoding for `Unit` only; there is no general singleton elimination for other
   types.
 - Only simple `let` names, by-value scalar aliases, function/lambda
-  parameters, and scalar closure captures are symbolic. Destructured pattern
-  bindings and temporary compiler slots are conservatively not admitted. A
-  mutable name is admitted at its current version; assignment appends a fresh
-  version binder and removes any alias status from the assigned name.
+  parameters, scalar closure captures, and erased proof-valued locals are
+  symbolic. Destructured pattern bindings and temporary compiler slots are
+  conservatively not admitted. A mutable name is admitted at its current
+  version; assignment appends a fresh version binder and removes any alias
+  status from the assigned name.
+- A branch or loop join tracks only a canonical literal that every reaching
+  path agrees on. It does not solve arbitrary path equalities or machine
+  arithmetic; disagreement becomes an opaque binder. Mutable captures remain
+  rejected, so a closure never observes a live mutable location.
+- Proof-valued locals are erased aliases of checked logical terms. There is no
+  runtime proof storage, no proof-returning function, and no proof-valued
+  closure capture at run time.
 - An admitted local is a symbolic kernel value, not its source initializer.
   `let n = 0; keep_zero(n, zero_proof())` does not by itself identify `n` with
   the literal `0`; pass the literal directly or supply an explicit logical
-  equality proof. This conservative choice keeps freezing simple and avoids
-  reusing an initializer after arbitrary control flow.
+  equality proof. Assignments and agreeing branch joins are the only places
+  where the checker records a literal value for a binding. This conservative
+  choice keeps freezing simple and avoids reusing an initializer after
+  arbitrary control flow.
 - Runtime scalar values cannot size inline arrays. `[T; n]` still requires a
   compile-time `Nat` length; use `Vec<T>` or `&[T]` for runtime lengths.
 - There is no proof search, implicit argument, tactic, arithmetic solver, or

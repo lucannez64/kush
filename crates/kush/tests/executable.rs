@@ -76,7 +76,9 @@ fn arithmetic_io_and_callee_effects_are_enforced() {
         "fn main() -> Unit ! {state} {}",
         "only io, alloc, suspend, and panic",
     );
-    rejects("fn main() -> Unit ! {panic, panic} {}", "duplicate effect");
+    // Row union is idempotent in the finite four-bit algebra: repeating a
+    // concrete effect names the same bit.
+    check("fn main() -> Unit ! {panic, panic} {}").unwrap();
 }
 #[test]
 fn lexical_scopes_forward_calls_mutation_and_early_returns() {

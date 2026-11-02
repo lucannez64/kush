@@ -1,10 +1,13 @@
 # One-shot effect handlers
 
-Status: implemented restricted handler fragment. Handlers are **one-shot and
-tail-resumptive** and are checked by the normal executable type/ownership
-rules. A handler is directly visible to performs in its own function body; a
-declared operation additionally makes the handler visible through the dynamic
-handler stack to performs in called functions. Handlers are still not general
+Status: implemented restricted handler fragment. Handlers are **one-shot**.
+A `perform` in tail position uses the original allocation-free identity
+resumption token; a `perform` that is the whole value of a top-level statement
+gets a real one-shot continuation, so the handler can run code after
+`resume(x)` returns. Checked by the normal executable type/ownership rules. A
+handler is directly visible to performs in its own function body; a declared
+operation additionally makes the handler visible through the dynamic handler
+stack to performs in called functions. Handlers are still not general
 delimited continuations and they do not add user-defined names to the
 `{io, alloc, panic, suspend}` effect-row vocabulary.
 
@@ -37,7 +40,7 @@ fn main() -> i64 ! {panic} {
         a + 1
     }
 }
-// 43
+// 44: resume(21) runs `a + 1`, returns 22, and the handler computes 44
 ```
 
 ## Surface
@@ -100,10 +103,16 @@ the function epilogue; a child task does not inherit a parent's dynamic handler
 frame. `effect` declarations reject borrowed payload/result types because a
 stack frame has no caller lifetime to borrow from.
 
+Dynamic performs remain **tail-resumptive** in this fragment: the token is the
+identity on the operation result. A called function has no continuation of the
+caller's handled body, so capturing one would cross an arbitrary call stack.
+Lexical non-tail resumption is implemented only where the continuation is
+visible in the same function body.
+
 ## One-shot resumption semantics
 
-`resume` has type `linear once fn(Result) -> Result ! {}`. It is an identity
-capability over the operation result:
+`resume` has type `linear once fn(Result) -> Result ! {}`. The linear token is
+consumed on every normal path:
 
 1. The handler must invoke `resume` exactly once on every normal path.
 2. Calling it twice is a use-after-move (`linear once` is consumed by the first
@@ -111,15 +120,50 @@ capability over the operation result:
 3. Returning without calling it leaves an unconsumed linear obligation.
 4. Passing it to another callable transfers the obligation; the ultimate
    consumer must still call it exactly once.
+5. A loop that moves the token and iterates again is rejected as a loop-carried
+   move, so a token cannot be called a second time on a later iteration.
 
-After the handler returns, the perform site continues with the handler's
-returned value. There is no captured continuation between `perform` and the
-handler, so **multishot** (calling the continuation a second time after the
-first resumption) is unrepresentable. A linear value held across `perform` is
-never copied or duplicated by handling; ordinary ownership rules apply to the
-body, the payload, and the handler captures. A capturing `once fn` handler is
-consumed by its first `perform`, so a second `perform` is rejected unless the
-handler mode is copyable `fn`.
+There are two resumption lowerings:
+
+- **Tail perform.** When `perform` is the handled body's tail expression, its
+  continuation is empty. `resume(x)` returns `x`, the handler's value is the
+  handle result, and the token is a noncapturing identity adapter with no
+  allocation.
+- **Non-tail perform.** When `perform` is the entire value of a top-level
+  `let` or expression statement, the rest of the handled body is checked as a
+  real continuation closure of type `linear once fn(Result) -> Result`. Calling
+  `resume(x)` runs that continuation with `x` and returns the body's final
+  result to the handler. The handler may run code before and after the call,
+  and its return value is the handle result. The continuation is one-shot
+  because the token is linear; multishot is unrepresentable.
+
+The non-tail fragment is deliberately explicit:
+
+- exactly one lexical `perform` for the handled operation, at a top-level
+  statement of the handled body; a nested operand or a second non-tail perform
+  is rejected instead of silently falling back to identity semantics;
+- the handled body's result type must be the operation result type, because
+  that is what the continuation returns;
+- `return`, `break`, and `continue` inside the continuation are rejected; they
+  would cross the resumption boundary;
+- the continuation captures values live at the perform point by value. It
+  rejects mutable, borrowed, reference, task, and `@[0]` captures rather than
+  inventing aliasing or lifetime rules. A capturing continuation allocates its
+  environment, so the handle body requires `{alloc, panic}`; a noncapturing
+  continuation needs neither;
+- a linear operation result is rejected for non-tail resumption;
+- arithmetic `{ ... }` facts are reset inside the continuation, so a proof
+  obligation there must be re-established from the continuation's own
+  bindings; erased proof parameters and symbolic scalar indices remain usable.
+
+After the handler returns, the perform site has already been replaced by the
+handler call; there is no captured continuation frame left. Multishot
+(calling the continuation a second time after the first resumption) is
+unrepresentable, and a linear value held across `perform` is never copied or
+duplicated by handling. Ordinary ownership rules apply to the body, the
+payload, and the handler captures. A capturing `once fn` handler is consumed by
+its first `perform`, so a second `perform` is rejected unless the handler mode
+is copyable `fn`.
 
 ## Effects
 
@@ -129,35 +173,38 @@ calling `print_i64`) cannot appear in a function whose row omits `io`. Handler
 effects are ordinary row bits; there is no new effect name and no row
 subtraction. Performing an operation does not itself add an effect to the
 function row: the handler's effects and the body's effects are the complete
-observable contract.
+observable contract. The continuation runs inside the handler call but its
+effects are the body's effects; they are therefore already required at the
+`handle` site even though the resume token's static arrow is pure.
 
 ## Representation
 
-Handlers add no value representation and no runtime allocation for their
-frames. A `handle` lowers to an ordinary hidden local binding plus an ordinary
-block. A direct `perform` lowers to an indirect call with a synthesized
-noncapturing identity function as the resumption value; a dynamic `perform`
-lowers to a checked handler-stack lookup followed by the same indirect call.
-The resumption value uses the existing `once` callable ABI (a code pointer plus
-a null environment), so the reference evaluator and Cranelift backend execute
-the same checked IR. The hidden handler local is released/dropped by the
-ordinary ownership pass on every exit, including early `return`, `?`, and loop
-exits. Declared-operation frames hold one operation id plus one code pointer;
-the stack itself is a fixed per-thread array in the native runtime and a vector
-in the reference evaluator.
+Tail handles add no value representation and no runtime allocation for their
+frames: a tail `perform` lowers to an indirect call with a synthesized
+noncapturing identity function as the resumption value. A non-tail `perform`
+lowers to an ordinary `once fn` closure whose environment holds the captured
+values and whose body is the remaining checked body; it uses the existing
+closure ABI, so the reference evaluator and Cranelift backend execute the same
+checked IR. A dynamic `perform` lowers to a checked handler-stack lookup
+followed by the identity-resumption indirect call. The hidden handler local is
+released/dropped by the ordinary ownership pass on every exit, including early
+`return`, `?`, and loop exits. Declared-operation frames hold one operation id
+plus one code pointer; the stack itself is a fixed per-thread array in the
+native runtime and a vector in the reference evaluator.
 
 ## Limits
 
 This is a usable handler fragment, not a general algebraic-effect runtime:
 
-- no captured delimited continuation, no non-tail continuation capture, no
-  multishot handlers, and no handler reinterpretation of arbitrary control
-  effects. `resume` is still the identity operation result, so handler-side work
-  before and after the call happens around the body rather than inside a
-  captured continuation;
-- declared effects make a handler dynamically visible to called functions, but
-  only for pure noncapturing `fn` handlers. Capturing/`once` handlers stay
-  lexical, and dynamic frames do not cross structured-task boundaries;
+- lexical non-tail resumption is limited to one top-level statement perform per
+  handle; general expression contexts, multiple prompts, and nested
+  continuations are not implemented;
+- dynamic performs remain tail-resumptive; declared effects make a handler
+  dynamically visible to called functions, but only for pure noncapturing `fn`
+  handlers. Capturing/`once` handlers stay lexical, and dynamic frames do not
+  cross structured-task boundaries;
+- there is no multishot, no handler reinterpretation of arbitrary control
+  effects, and no `return`/`break`/`continue` through a resumption;
 - effect-row names remain the fixed `{panic, io, alloc, suspend}` vocabulary;
   `effect Name` declares an operation signature, not a new row name, and there
   is no effect-polymorphic handler type over operation names;
@@ -167,8 +214,11 @@ This is a usable handler fragment, not a general algebraic-effect runtime:
 
 The tests in `crates/kush/tests/advanced_types_effects.rs` cover execution in
 both backends, nested shadowing, multiple pure performs, owning payload/result
-cleanup, one-shot resume use-after-move, ignored linear resumption, missing
-handlers, exact resume-contract checking, handler-effect propagation, dynamic
-handler lookup in a called function, copyable multi-perform handlers, early
-return stack restoration, and rejection of impure/capturing/signature-mismatched
+cleanup, one-shot resume use-after-move, ignored linear resumption, loop-carried
+resumption moves, missing handlers, exact resume-contract checking,
+handler-effect propagation, dynamic handler lookup in a called function,
+copyable multi-perform handlers, early return stack restoration, real non-tail
+resumption in both backends, continuation capture cleanup, rejected nested and
+multiple non-tail performs, continuation-effect leakage, rejected linear
+operation results, and rejection of impure/capturing/signature-mismatched
 dynamic handlers.

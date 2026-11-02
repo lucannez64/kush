@@ -1,9 +1,8 @@
-//! Bounded concrete effect exclusion on effect-row binders.
+//! Bounded concrete effect exclusion and finite row subtraction.
 //!
 //! `<e: Effects - alloc>` and `<e: Effects - (alloc | suspend)>` restrict which
-//! concrete rows a specialization may supply. They are a bound on valid
-//! specialization, not row subtraction: the declaration's own effect row is
-//! unchanged and its body may still perform every effect the row declares.
+//! concrete rows a specialization may supply. Separately, a declared row may
+//! subtract effects (`{e - io}`) inside the finite four-bit row algebra.
 use kush::executable::{MemoryStats, check};
 
 fn run(source: &str) -> (i64, MemoryStats) {
@@ -424,5 +423,77 @@ fn trait_and_impl_method_contracts_include_the_constraint() {
          }
          fn main() -> i64 ! {panic} { 0 }",
         "does not match the trait signature exactly",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Finite row subtraction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn row_subtraction_removes_concrete_effects_from_a_polymorphic_row() {
+    let source = "fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
+                      -> i64 ! {panic, e - io} { f(x) }
+                  fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+                  fn main() -> i64 ! {panic} { apply(inc, 41) }";
+    assert_eq!(value(source), 42);
+    native_agrees(source, 42);
+    // A union on the right of `-` removes every named effect.
+    assert_eq!(
+        value(
+            "fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
+                 -> i64 ! {panic, e - (io | alloc)} { f(x) }
+             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+        ),
+        42
+    );
+    // Subtraction is part of a higher-order row too: the callback may not be
+    // specialized with the removed effect.
+    rejects(
+        "fn take<e: Effects>(f: fn(i64) -> i64 ! {e - io}) -> i64 ! {panic, e} { f(1) }
+         fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+         fn main() -> i64 ! {io, panic} { take(io_inc) }",
+        "is excluded by",
+    );
+    // The checked function body still needs every effect it actually performs;
+    // subtraction in the declared row cannot hide the callback's io.
+    rejects(
+        "fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}) -> i64 ! {panic, e - io} { f(1) }
+         fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+         fn main() -> i64 ! {io, panic} { apply(io_inc) }",
+        "requires effects {io}",
+    );
+    // A row subtraction that leaves a concrete effect is still checked by the
+    // enclosing row, and an explicit specialization is respected.
+    assert_eq!(
+        value(
+            "fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
+                 -> i64 ! {panic, e - io} { f(x) }
+             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+             fn main() -> i64 ! {panic} { apply::<panic>(inc, 41) }"
+        ),
+        42
+    );
+}
+
+#[test]
+fn row_subtraction_solves_principal_minimal_rows() {
+    // `e - io` only needs to cover panic, so the principal (least) solution is
+    // e = {panic}; the solver does not arbitrarily pick a larger row.
+    let source = "fn apply<e: Effects>(f: fn(i64) -> i64 ! {e})
+                      -> i64 ! {panic, e - io} { f(1) }
+                  fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+                  fn main() -> i64 ! {panic} { apply(inc) }";
+    assert_eq!(value(source), 2);
+    // Two unbound rows with subtraction remain in the finite four-bit
+    // universe: the solver enumerates all assignments and rejects incomparable
+    // minima rather than choosing one.
+    rejects(
+        "fn apply<e: Effects, f: Effects>(g: fn(i64) -> i64 ! {e - io, f})
+             -> i64 ! {panic, e, f} { g(1) }
+         fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+         fn main() -> i64 ! {panic} { apply(inc) }",
+        "incomparable minimal",
     );
 }

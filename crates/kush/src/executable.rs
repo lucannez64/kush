@@ -3237,9 +3237,12 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             binding: sig.binding,
             scalar_epochs: BTreeMap::new(),
             kernel_aliases: BTreeMap::new(),
+            scalar_values: BTreeMap::new(),
+            proof_values: BTreeMap::new(),
             effect_operations,
             handlers: Vec::new(),
             effect_constraints: Vec::new(),
+            continuation_depth: 0,
         };
         let body = (|| {
             let mut runtime = sig.parameters.iter().zip(&sig.parameter_grades);
@@ -8544,8 +8547,7 @@ struct Loop {
 /// a unique minimal specialization.
 #[derive(Debug, Clone)]
 struct EffectConstraint {
-    fixed: u8,
-    variables: Vec<BindingId>,
+    row: crate::runtime_types::EffectRowTerm,
     actual: u8,
     span: Span,
 }
@@ -8558,6 +8560,25 @@ struct EffectOperation {
     id: usize,
     parameter: Type,
     result: Type,
+}
+/// The canonical kernel index of an admitted runtime scalar binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ScalarValue {
+    /// A symbolic binder at this absolute position in `kernel_locals`.
+    Position(usize),
+    /// A machine literal known on every path reaching the current point.
+    Literal(Term),
+    /// A value changed on only some path or across a loop iteration. It has no
+    /// stable index until [`Checker::fresh_scalar_value`] appends a binder.
+    Unknown,
+}
+/// One non-tail lexical `perform` selected for continuation lowering.
+struct NonTailPerform<'a> {
+    index: usize,
+    value: &'a ast::Expr,
+    pattern: Option<&'a ast::Pattern>,
+    annotation: Option<&'a ast::Type>,
+    mutable: bool,
 }
 /// One lexical effect-handler binding. The handler is materialized in a hidden
 /// local so `perform` can call it and the ownership pass can enforce the
@@ -8646,6 +8667,15 @@ struct Checker<'a, 't> {
     /// assignment to the source appends a new binder and leaves the alias
     /// denoting the value copied at binding time.
     kernel_aliases: BTreeMap<BindingId, usize>,
+    /// Canonical index value of an admitted scalar binding. `Position` names a
+    /// symbolic binder; `Literal` is a machine literal known for every branch
+    /// reaching this point; `Unknown` has no stable index until a fresh binder
+    /// is appended at a branch or loop join.
+    scalar_values: BTreeMap<BindingId, ScalarValue>,
+    /// Erased proof-valued locals bound by `let p = <proof>`. Each entry stores
+    /// the checked kernel term together with the context length at which it was
+    /// elaborated, so later context growth can shift its free variables.
+    proof_values: BTreeMap<BindingId, (Term, usize)>,
     /// Declared effect operations used by dynamic performs in called bodies.
     effect_operations: &'t BTreeMap<String, EffectOperation>,
     /// Lexically active effect handlers, innermost last. A handler is visible
@@ -8655,6 +8685,11 @@ struct Checker<'a, 't> {
     /// group. `infer` takes a mark and solves them after every argument has
     /// contributed its evidence.
     effect_constraints: Vec<EffectConstraint>,
+    /// Nonzero while checking the synthesized continuation of a non-tail
+    /// effect resumption. Such a continuation must not `return`, `break`, or
+    /// `continue` out of the handled body: those control transfers would cross
+    /// the resumption boundary and have no sound lowering in this fragment.
+    continuation_depth: usize,
 }
 impl Checker<'_, '_> {
     fn nested<T>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
@@ -13652,6 +13687,18 @@ impl Checker<'_, '_> {
             .map(|(alias, position)| (*alias, *position))
             .collect()
     }
+    /// Canonical literal values of scalar locals at the current program point.
+    /// These make `refl::<i64>(n)` elaborate to the same literal the checker
+    /// substituted for a symbolic argument after a branch/loop join.
+    fn kernel_literals(&self) -> BTreeMap<BindingId, Term> {
+        self.scalar_values
+            .iter()
+            .filter_map(|(id, value)| match value {
+                ScalarValue::Literal(term) => Some((*id, term.clone())),
+                ScalarValue::Position(_) | ScalarValue::Unknown => None,
+            })
+            .collect()
+    }
     /// Admit a runtime scalar binding as a symbolic kernel index. Mutable
     /// bindings are admitted at their current version; [`Self::renew_scalar_index`]
     /// appends a fresh binder on assignment. The mutable local itself is never
@@ -13659,11 +13706,36 @@ impl Checker<'_, '_> {
     /// locals, and each use translates the *current* version at its call site.
     fn admit_scalar_index(&mut self, id: BindingId, ty: Type, _span: Span) -> Result<()> {
         if let Some(carrier) = ty.scalar_carrier() {
+            let position = self.kernel_locals.len();
             self.kernel_types.insert(id, Term::Scalar(carrier));
             self.kernel_locals.push(id);
             self.scalar_epochs.insert(id, 0);
+            self.scalar_values
+                .insert(id, ScalarValue::Position(position));
         }
         Ok(())
+    }
+
+    /// The machine literal a checked initializer denotes, if it is canonical.
+    fn scalar_literal(&self, ty: Type, value: &Expr) -> Option<ScalarValue> {
+        let carrier = ty.scalar_carrier()?;
+        let term = match (&value.kind, carrier) {
+            (ExprKind::Constant(raw), Scalar::I64) => Term::i64(*raw),
+            (ExprKind::Constant(raw), Scalar::Bool) => Term::boolean(*raw != 0),
+            (ExprKind::Constant(_), Scalar::Unit) => Term::unit(),
+            (ExprKind::Local(slot), _) => {
+                let id = self
+                    .slots
+                    .iter()
+                    .find_map(|(id, candidate)| (*candidate == *slot).then_some(*id))?;
+                match self.scalar_values.get(&id) {
+                    Some(ScalarValue::Literal(term)) => term.clone(),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        Some(ScalarValue::Literal(term))
     }
 
     /// Record that a mutable scalar local was assigned. Every stored kernel
@@ -13671,7 +13743,7 @@ impl Checker<'_, '_> {
     /// binding, then a fresh binder for the new value is appended. The de
     /// Bruijn shift is essential: growing the context at the nearest end must
     /// not reinterpret an earlier `Eq<i64, n, n>` as a different variable.
-    fn renew_scalar_index(&mut self, slot: usize) -> Result<()> {
+    fn renew_scalar_index(&mut self, slot: usize, value: &Expr) -> Result<()> {
         let ty = self.locals[slot].ty;
         let Some(carrier) = ty.scalar_carrier() else {
             return Ok(());
@@ -13687,12 +13759,37 @@ impl Checker<'_, '_> {
         self.kernel_aliases.remove(&id);
         self.kernel_types.insert(id, Term::Scalar(carrier));
         self.kernel_locals.push(id);
+        let position = self.kernel_locals.len() - 1;
+        let state = self
+            .scalar_literal(ty, value)
+            .unwrap_or(ScalarValue::Position(position));
+        self.scalar_values.insert(id, state);
         *self.scalar_epochs.entry(id).or_insert(0) += 1;
         Ok(())
+    }
+    /// Append a fresh unconstrained binder for a scalar whose value changed on
+    /// only some path or across a loop iteration. The old binder stays in the
+    /// proof prefix; later uses denote the new opaque value.
+    fn fresh_scalar_value(&mut self, id: BindingId, ty: Type) {
+        let Some(carrier) = ty.scalar_carrier() else {
+            return;
+        };
+        self.kernel_types.insert(id, Term::Scalar(carrier));
+        self.kernel_locals.push(id);
+        let position = self.kernel_locals.len() - 1;
+        self.scalar_values
+            .insert(id, ScalarValue::Position(position));
+        *self.scalar_epochs.entry(id).or_insert(0) += 1;
     }
     /// The current absolute position of a symbolic scalar binder. An alias
     /// resolves to the position that was copied at its binding site.
     fn kernel_position(&self, id: BindingId) -> Option<usize> {
+        if let Some(state) = self.scalar_values.get(&id) {
+            return match state {
+                ScalarValue::Position(position) => Some(*position),
+                ScalarValue::Literal(_) | ScalarValue::Unknown => None,
+            };
+        }
         if let Some(position) = self.kernel_aliases.get(&id) {
             return Some(*position);
         }
@@ -13702,18 +13799,221 @@ impl Checker<'_, '_> {
     /// `source`. The alias keeps the source's evaluation-point binder instead
     /// of introducing a fresh unconstrained index.
     fn alias_scalar_index(&mut self, id: BindingId, source: BindingId) -> bool {
+        if let Some(state) = self.scalar_values.get(&source).cloned() {
+            match state {
+                ScalarValue::Position(position) => {
+                    self.scalar_aliases_position(id, position);
+                    return true;
+                }
+                ScalarValue::Literal(term) => {
+                    self.scalar_values.insert(id, ScalarValue::Literal(term));
+                    return true;
+                }
+                ScalarValue::Unknown => return false,
+            }
+        }
         let Some(position) = self.kernel_position(source) else {
             return false;
         };
-        self.kernel_aliases.insert(id, position);
+        self.scalar_aliases_position(id, position);
         true
+    }
+    fn scalar_aliases_position(&mut self, id: BindingId, position: usize) {
+        self.kernel_aliases.insert(id, position);
+        self.scalar_values
+            .insert(id, ScalarValue::Position(position));
     }
     /// The de Bruijn term for an in-scope symbolic runtime scalar local. The
     /// innermost binder wins, matching lexical shadowing and captures.
     fn kernel_local_term(&self, id: BindingId) -> Option<Term> {
+        if let Some(state) = self.scalar_values.get(&id) {
+            match state {
+                ScalarValue::Literal(term) => return Some(term.clone()),
+                ScalarValue::Position(position) => {
+                    let index = self.kernel_locals.len().checked_sub(1 + position)?;
+                    return Some(Term::Var(index));
+                }
+                ScalarValue::Unknown => return None,
+            }
+        }
         let position = self.kernel_position(id)?;
         let index = self.kernel_locals.len().checked_sub(1 + position)?;
         Some(Term::Var(index))
+    }
+    /// Join the scalar index states of two branches. Equal stable values are
+    /// preserved, so a proof about a literal established by both branches
+    /// survives; any disagreement appends a fresh opaque binder. The joined
+    /// telescope has length `live` (the branch-local binders were truncated).
+    fn join_scalars(
+        &mut self,
+        baseline: &BTreeMap<BindingId, ScalarValue>,
+        left: &BTreeMap<BindingId, ScalarValue>,
+        right: &BTreeMap<BindingId, ScalarValue>,
+        live: usize,
+        left_diverges: bool,
+        right_diverges: bool,
+    ) {
+        for (id, base) in baseline {
+            let slot = self
+                .slots
+                .iter()
+                .find_map(|(candidate, slot)| (candidate == id).then_some(*slot));
+            let Some(slot) = slot else {
+                continue;
+            };
+            let ty = self.locals[slot].ty;
+            if ty.scalar_carrier().is_none() {
+                continue;
+            }
+            let left_state = if left_diverges && !right_diverges {
+                Self::map_scalar_state(right, *id, live)
+            } else {
+                Self::map_scalar_state(left, *id, live)
+            };
+            let right_state = if right_diverges && !left_diverges {
+                Self::map_scalar_state(left, *id, live)
+            } else {
+                Self::map_scalar_state(right, *id, live)
+            };
+            let joined = match (&left_state, &right_state) {
+                (Some(ScalarValue::Literal(left)), Some(ScalarValue::Literal(right)))
+                    if left == right =>
+                {
+                    ScalarValue::Literal(left.clone())
+                }
+                (Some(ScalarValue::Position(left)), Some(ScalarValue::Position(right)))
+                    if left == right && *left < live =>
+                {
+                    ScalarValue::Position(*left)
+                }
+                _ if left_state.is_none() && right_state.is_none() => base.clone(),
+                _ => ScalarValue::Unknown,
+            };
+            match joined {
+                ScalarValue::Unknown => self.fresh_scalar_value(*id, ty),
+                state => {
+                    self.scalar_values.insert(*id, state);
+                }
+            }
+        }
+    }
+    fn map_scalar_state(
+        map: &BTreeMap<BindingId, ScalarValue>,
+        id: BindingId,
+        live: usize,
+    ) -> Option<ScalarValue> {
+        match map.get(&id) {
+            Some(ScalarValue::Literal(term)) => Some(ScalarValue::Literal(term.clone())),
+            Some(ScalarValue::Position(position)) if *position < live => {
+                Some(ScalarValue::Position(*position))
+            }
+            Some(_) => Some(ScalarValue::Unknown),
+            None => None,
+        }
+    }
+    /// Join the scalar state of a loop body back into the enclosing scope. Any
+    /// scalar the body may have assigned becomes a fresh opaque binder; an
+    /// untouched scalar keeps its stable index.
+    fn join_loop_scalars(
+        &mut self,
+        baseline: &BTreeMap<BindingId, ScalarValue>,
+        body: &BTreeMap<BindingId, ScalarValue>,
+        live: usize,
+    ) {
+        for (id, base) in baseline {
+            let slot = self
+                .slots
+                .iter()
+                .find_map(|(candidate, slot)| (candidate == id).then_some(*slot));
+            let Some(slot) = slot else {
+                continue;
+            };
+            let ty = self.locals[slot].ty;
+            if ty.scalar_carrier().is_none() {
+                continue;
+            }
+            let body_state = Self::map_scalar_state(body, *id, live);
+            if body_state.as_ref() == Some(base) {
+                self.scalar_values.insert(*id, base.clone());
+            } else {
+                self.fresh_scalar_value(*id, ty);
+            }
+        }
+    }
+    /// Whether this expression denotes an erased logical proof or data value
+    /// rather than a runtime computation. Only such expressions may introduce a
+    /// proof-valued local without a runtime slot.
+    fn erased_proof_expression(&self, expr: &ast::Expr) -> bool {
+        let root = match &expr.kind {
+            ast::ExprKind::Call { callee, .. } => self.logical_data_root(callee),
+            _ => self.logical_data_root(expr),
+        };
+        let Some(id) = root else {
+            return false;
+        };
+        self.logical.names.contains_key(&id)
+            || self.logical.data.contains_key(&id)
+            || self.logical.constructors.contains_key(&id)
+            || self.kernel_proofs.contains_key(&id)
+            || self.proof_values.contains_key(&id)
+            || (self.resolution.bindings[id].kind == BindingKind::Builtin
+                && matches!(
+                    self.resolution.bindings[id].name.as_str(),
+                    "refl" | "Nat.induct" | "Eq.transport" | "Eq.elim" | "Data.elim"
+                ))
+    }
+    /// Elaborate the right-hand side of `let p = <proof>`. A name of another
+    /// proof-valued local aliases its checked term, shifted to the current
+    /// telescope. Anything else is checked in the current logical context.
+    fn elaborate_proof_local(&mut self, value: &ast::Expr) -> Result<Term> {
+        if let Some(id) = self.resolution.reference(value.span)
+            && let Some((stored, stored_len)) = self.proof_values.get(&id).cloned()
+        {
+            let current = self.kernel_locals.len();
+            if current < stored_len {
+                return Err(Diagnostic::new(
+                    value.span,
+                    "proof-valued local refers to a binder outside its scope",
+                ));
+            }
+            return self
+                .logical
+                .kernel
+                .shift_open(&stored, current - stored_len)
+                .map_err(|e| {
+                    Diagnostic::new(
+                        value.span,
+                        format!("internal error: proof-valued local shift failed: {e}"),
+                    )
+                });
+        }
+        let term = crate::check::elaborate_value_with_aliases(
+            self.resolution,
+            self.logical,
+            &self.kernel_bindings(),
+            value,
+            &self.kernel_alias_sources(),
+            &self.kernel_literals(),
+        )
+        .map_err(|e| {
+            Diagnostic::new(
+                e.span,
+                format!(
+                    "erased proof-valued local must be a checked logical term: {}",
+                    e.message
+                ),
+            )
+        })?;
+        self.logical
+            .kernel
+            .infer_open(&term, &self.kernel_context())
+            .map_err(|e| {
+                Diagnostic::new(
+                    value.span,
+                    format!("invalid erased proof-valued local: {e}"),
+                )
+            })?;
+        Ok(term)
     }
     /// Translate one evaluated runtime scalar argument into a kernel term in the
     /// caller's context. Only canonical literals and immutable, in-scope scalar
@@ -13845,22 +14145,44 @@ impl Checker<'_, '_> {
                     format!("internal error: dependent erased substitution failed: {e}"),
                 )
             })?;
-        let term = crate::check::elaborate_value_with_aliases(
-            self.resolution,
-            self.logical,
-            &self.kernel_bindings(),
-            evidence,
-            &self.kernel_alias_sources(),
-        )
-        .map_err(|e| {
-            Diagnostic::new(
-                e.span,
-                format!(
-                    "erased argument must be a checked logical proof term: {}",
-                    e.message
-                ),
+        let term = if let Some(id) = self.resolution.reference(evidence.span)
+            && let Some((stored, stored_len)) = self.proof_values.get(&id).cloned()
+        {
+            let current = self.kernel_locals.len();
+            if current < stored_len {
+                return Err(Diagnostic::new(
+                    evidence.span,
+                    "proof-valued local refers to a binder outside its scope",
+                ));
+            }
+            self.logical
+                .kernel
+                .shift_open(&stored, current - stored_len)
+                .map_err(|e| {
+                    Diagnostic::new(
+                        evidence.span,
+                        format!("internal error: proof-valued local shift failed: {e}"),
+                    )
+                })?
+        } else {
+            crate::check::elaborate_value_with_aliases(
+                self.resolution,
+                self.logical,
+                &self.kernel_bindings(),
+                evidence,
+                &self.kernel_alias_sources(),
+                &self.kernel_literals(),
             )
-        })?;
+            .map_err(|e| {
+                Diagnostic::new(
+                    e.span,
+                    format!(
+                        "erased argument must be a checked logical proof term: {}",
+                        e.message
+                    ),
+                )
+            })?
+        };
         // A runtime scalar may occur inside a proof term (as an index), but the
         // evidence itself must be a logical value, never a runtime observation.
         if self.evidence_is_runtime_scalar(&term) {
@@ -14215,6 +14537,27 @@ impl Checker<'_, '_> {
                         }
                         None => (None, None),
                     };
+                    // A `let p = <proof>` binding is erased: it introduces a
+                    // checked kernel term, never a runtime local. Proof-valued
+                    // locals may be re-passed to erased parameters and shadow
+                    // each other exactly like ordinary lexical bindings.
+                    if annotation.is_none()
+                        && matches!(&pattern.kind, ast::PatternKind::Name(path) if path.len() == 1)
+                        && !self.is_constructor_pattern(pattern)
+                        && self.erased_proof_expression(value)
+                    {
+                        if *mutable {
+                            return Err(Diagnostic::new(
+                                pattern.span,
+                                "a proof-valued local is erased and cannot be mutable",
+                            ));
+                        }
+                        let id = self.resolution.binder(pattern.span).unwrap();
+                        let term = self.elaborate_proof_local(value)?;
+                        self.proof_values
+                            .insert(id, (term, self.kernel_locals.len()));
+                        continue;
+                    }
                     let value = self.expr_expected(value, annotation)?;
                     if value.ty.is_ref() && *mutable {
                         return Err(Diagnostic::new(
@@ -15074,6 +15417,12 @@ impl Checker<'_, '_> {
                                 "erased logical proofs have no runtime value; pass them only to erased parameters",
                             ));
                         }
+                        if c.proof_values.contains_key(&id) {
+                            return Err(Diagnostic::new(
+                                span,
+                                "an erased proof-valued local has no runtime value; pass it only to an erased parameter",
+                            ));
+                        }
                         if c.proofs.contains_key(&id) {
                             return Err(Diagnostic::new(
                                 span,
@@ -15290,24 +15639,40 @@ impl Checker<'_, '_> {
                     let mark = c.facts.mark();
                     let facts = c.facts.condition(&condition, true);
                     c.facts.add(facts);
+                    let scalar_baseline = c.scalar_values.clone();
+                    let scalar_live = c.kernel_locals.len();
                     c.loops.push(Loop { value: None, is_while: true, expected: None });
                     let body = c.block(body, Some(Type::Unit));
                     c.loops.pop();
                     c.facts.reset(mark);
                     let body = body?;
+                    let body_scalars = c.scalar_values.clone();
+                    c.scalar_values = scalar_baseline.clone();
+                    c.join_loop_scalars(&scalar_baseline, &body_scalars, scalar_live);
                     c.expect(body.ty, Type::Unit, span)?;
                     (ExprKind::While(Box::new(condition), body), Type::Unit)
                 }
                 ast::ExprKind::Loop(body) => {
                     c.bump_assigned(body);
+                    let scalar_baseline = c.scalar_values.clone();
+                    let scalar_live = c.kernel_locals.len();
                     c.loops.push(Loop { value: Some(Type::Never), is_while: false, expected });
                     let body = c.block(body, Some(Type::Unit));
                     let state = c.loops.pop().unwrap();
                     let body = body?;
+                    let body_scalars = c.scalar_values.clone();
+                    c.scalar_values = scalar_baseline.clone();
+                    c.join_loop_scalars(&scalar_baseline, &body_scalars, scalar_live);
                     c.expect(body.ty, Type::Unit, span)?;
                     (ExprKind::Loop(body), state.value.unwrap())
                 }
                 ast::ExprKind::Break(value) => {
+                    if c.continuation_depth != 0 {
+                        return Err(Diagnostic::new(
+                            span,
+                            "a non-tail resumption continuation cannot 'break' or 'continue' out of the handled body",
+                        ));
+                    }
                     let Some(state) = c.loops.last() else {
                         return Err(Diagnostic::new(span, "'break' outside of a loop"));
                     };
@@ -15360,6 +15725,12 @@ impl Checker<'_, '_> {
                     (ExprKind::Break(value, vec![]), Type::Never)
                 }
                 ast::ExprKind::Continue => {
+                    if c.continuation_depth != 0 {
+                        return Err(Diagnostic::new(
+                            span,
+                            "a non-tail resumption continuation cannot 'break' or 'continue' out of the handled body",
+                        ));
+                    }
                     if c.loops.is_empty() {
                         return Err(Diagnostic::new(span, "'continue' outside of a loop"));
                     }
@@ -15576,7 +15947,7 @@ impl Checker<'_, '_> {
                         }
                         c.locals[slot].linear |= c.value_moves_linear(&value);
                         c.facts.assign(slot, &value);
-                        c.renew_scalar_index(slot)?;
+                        c.renew_scalar_index(slot, &value)?;
                         let ty = if value.ty == Type::Never {
                             Type::Never
                         } else {
@@ -16085,6 +16456,12 @@ impl Checker<'_, '_> {
                     )
                 }
                 ast::ExprKind::Return(value) => {
+                    if c.continuation_depth != 0 {
+                        return Err(Diagnostic::new(
+                            span,
+                            "a non-tail resumption continuation cannot 'return' out of the handled body; use the resumption result or restructure the handler",
+                        ));
+                    }
                     let value = if let Some(value) = value {
                         c.expr_expected_result(value, Some(c.result))?
                     } else {
@@ -16117,6 +16494,8 @@ impl Checker<'_, '_> {
                     let condition = c.expr(condition)?;
                     c.expect(condition.ty, Type::Bool, condition.span)?;
                     let baseline = c.facts.clone();
+                    let scalar_baseline = c.scalar_values.clone();
+                    let scalar_live = c.kernel_locals.len();
                     let facts = c.facts.condition(&condition, true);
                     c.facts.add(facts);
                     let has_else = otherwise.is_some();
@@ -16125,6 +16504,8 @@ impl Checker<'_, '_> {
                     let then_facts = c.facts.clone();
                     c.facts = baseline.clone();
                     let then = then?;
+                    let then_scalars = c.scalar_values.clone();
+                    c.scalar_values = scalar_baseline.clone();
                     let otherwise = if let Some(otherwise) = otherwise {
                         let facts = c.facts.condition(&condition, false);
                         c.facts.add(facts);
@@ -16151,7 +16532,16 @@ impl Checker<'_, '_> {
                             ty: Type::Unit,
                         }
                     };
+                    let otherwise_scalars = c.scalar_values.clone();
                     c.facts = crate::facts::Facts::branch_join(&baseline, &then_facts, &c.facts);
+                    c.join_scalars(
+                        &scalar_baseline,
+                        &then_scalars,
+                        &otherwise_scalars,
+                        scalar_live,
+                        then.ty == Type::Never,
+                        otherwise.ty == Type::Never,
+                    );
                     let (then, otherwise, ty) = if has_else {
                         if c.erased_result_context(expected)
                             && (then.ty == Type::Unit || otherwise.ty == Type::Unit)
@@ -17567,17 +17957,19 @@ impl Checker<'_, '_> {
         // The expected arrow's effect row is also evidence: the source may
         // perform only effects permitted by the target. This is accumulated
         // with constraints from callable parameters, then solved as one group.
-        let (fixed, variables) =
-            crate::runtime_types::effect_bits_partial(self.resolution, &f.effects)?;
+        let row = crate::runtime_types::effect_row_term(self.resolution, &f.effects)?;
         let effect_generics = f
             .generics
             .iter()
             .filter(|generic| crate::runtime_types::is_effect_generic(self.resolution, generic))
             .collect::<Vec<_>>();
-        if !variables.is_empty() {
+        let row_variables = row.variables();
+        if row_variables
+            .iter()
+            .any(|variable| !subst.effects.contains_key(variable))
+        {
             self.effect_constraints.push(EffectConstraint {
-                fixed,
-                variables,
+                row,
                 actual: signature.effects,
                 span,
             });
@@ -19343,8 +19735,8 @@ impl Checker<'_, '_> {
         subst: &mut crate::runtime_types::Subst,
         span: Span,
     ) -> Result<()> {
-        let (fixed, variables) =
-            crate::runtime_types::effect_bits_partial(self.resolution, declared)?;
+        let row = crate::runtime_types::effect_row_term(self.resolution, declared)?;
+        let variables = row.variables();
         if variables.is_empty() {
             // Concrete rows are still checked by the final arrow coercion.
             return Ok(());
@@ -19360,28 +19752,23 @@ impl Checker<'_, '_> {
                 ));
             }
         }
-        // A variable already fixed by an explicit specialization is folded
-        // into the concrete part of the constraint.
-        let mut fixed = fixed;
-        for variable in &variables {
-            if let Some(value) = subst.effects.get(variable) {
-                fixed |= *value;
-            }
-        }
-        let variables = variables
-            .into_iter()
+        // A variable already fixed by an explicit specialization is evaluated
+        // directly when the constraint is solved; it is not part of the
+        // remaining assignment search.
+        let unbound = variables
+            .iter()
             .filter(|variable| !subst.effects.contains_key(variable))
-            .collect::<Vec<_>>();
-        if variables.is_empty() && actual & !fixed != 0 {
-            return Err(self.effect_row_mismatch(actual, fixed, span));
-        }
-        if !variables.is_empty() {
-            self.effect_constraints.push(EffectConstraint {
-                fixed,
-                variables,
-                actual,
-                span,
-            });
+            .count();
+        if unbound == 0 {
+            let covered = row.evaluate(&subst.effects).ok_or_else(|| {
+                Diagnostic::new(span, "internal error: effect row could not be evaluated")
+            })?;
+            if actual & !covered != 0 {
+                return Err(self.effect_row_mismatch(actual, covered, span));
+            }
+        } else {
+            self.effect_constraints
+                .push(EffectConstraint { row, actual, span });
         }
         Ok(())
     }
@@ -19440,7 +19827,7 @@ impl Checker<'_, '_> {
         }
         let mut mentioned = BTreeSet::new();
         for constraint in &constraints {
-            mentioned.extend(constraint.variables.iter().copied());
+            mentioned.extend(constraint.row.variables());
         }
         for generic in effect_generics {
             let binder = self.resolution.binder(generic.span).unwrap();
@@ -19483,12 +19870,12 @@ impl Checker<'_, '_> {
                 }
             }
             for constraint in constraints {
-                let covered = constraint.fixed
-                    | constraint
-                        .variables
-                        .iter()
-                        .filter_map(|variable| subst.effects.get(variable).copied())
-                        .fold(0, |left, right| left | right);
+                let covered = constraint.row.evaluate(&subst.effects).ok_or_else(|| {
+                    Diagnostic::new(
+                        constraint.span,
+                        "internal error: effect row could not be evaluated",
+                    )
+                })?;
                 if constraint.actual & !covered != 0 {
                     return Err(self.effect_row_mismatch(
                         constraint.actual,
@@ -19530,24 +19917,25 @@ impl Checker<'_, '_> {
             .into_iter()
             .filter(|solution| {
                 constraints.iter().all(|constraint| {
-                    let covered = constraint.fixed
-                        | constraint
-                            .variables
-                            .iter()
-                            .filter_map(|variable| solution.get(variable).copied())
-                            .fold(0, |left, right| left | right);
+                    let Some(covered) = constraint.row.evaluate(solution) else {
+                        return false;
+                    };
                     constraint.actual & !covered == 0
                 })
             })
             .collect::<Vec<_>>();
         if valid.is_empty() {
             let first = &constraints[0];
-            let reachable = first.fixed
-                | first
-                    .variables
-                    .iter()
-                    .filter_map(|variable| allowed.get(variable).copied())
-                    .fold(0, |left, right| left | right);
+            let reachable = first
+                .row
+                .evaluate_with(&mut |variable| {
+                    subst
+                        .effects
+                        .get(&variable)
+                        .copied()
+                        .or_else(|| allowed.get(&variable).copied())
+                })
+                .unwrap_or(0);
             let excluded = first.actual & !reachable;
             if excluded != 0 {
                 let names = (0..4)
@@ -19567,16 +19955,22 @@ impl Checker<'_, '_> {
                             left,
                             right,
                         } => format!("{} | {}", effect_spelling(left), effect_spelling(right)),
+                        ast::TypeKind::Binary {
+                            op: crate::lexer::Kind::Minus,
+                            left,
+                            right,
+                        } => format!("{} - {}", effect_spelling(left), effect_spelling(right)),
                         _ => "concrete effects".to_owned(),
                     }
                 }
                 let variables = first
-                    .variables
+                    .row
+                    .variables()
                     .iter()
                     .map(|variable| format!("'{}'", self.resolution.bindings[*variable].name))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let bound = first.variables.first().and_then(|variable| {
+                let bound = first.row.variables().first().and_then(|variable| {
                     effect_generics
                         .iter()
                         .find(|generic| {
@@ -21838,16 +22232,30 @@ impl Checker<'_, '_> {
         let handler_type = handler_value.ty;
         let slot = self.fresh_local(span, handler_type)?;
         self.locals[slot].linear = signature.linear;
+        let handler_parameter = signature.parameters[0];
+        let handler_result = signature.result;
         self.handlers.push(HandlerScope {
             operation: operation.to_owned(),
             parameter: parameter_ty,
             result: result_ty,
             slot,
-            handler_parameter: signature.parameters[0],
-            handler_result: signature.result,
+            handler_parameter,
+            handler_result,
             effects: signature.effects,
         });
-        let checked = self.block(body, expected);
+        let checked = self.checked_effect_body(
+            body,
+            operation,
+            parameter_ty,
+            result_ty,
+            expected,
+            span,
+            slot,
+            handler_type,
+            handler_parameter,
+            handler_result,
+            signature.effects,
+        );
         self.handlers.pop();
         let inner = checked?;
         let ty = inner.ty;
@@ -21939,6 +22347,380 @@ impl Checker<'_, '_> {
             kind: ExprKind::FnValue {
                 function,
                 captures: vec![],
+            },
+            ty,
+            span,
+            resource: None,
+        })
+    }
+    /// Check the body of a lexical handler, choosing between tail-resumptive
+    /// lowering and a real one-shot continuation.
+    ///
+    /// A `perform` in tail position has an empty continuation, so the identity
+    /// resumption token is exactly the right semantics and needs no allocation.
+    /// A `perform` that is the whole value of a top-level `let`/expression
+    /// statement has a real continuation: the rest of the handled body is
+    /// checked as a separate `linear once fn(R) -> R` closure that captures the
+    /// values live at the perform point. The handler may then do work after
+    /// `resume(x)` returns, and `resume(x)` returns the result of the remaining
+    /// body. Other placements are explicit rejections rather than silently
+    /// falling back to identity semantics.
+    #[allow(clippy::too_many_arguments)]
+    fn checked_effect_body(
+        &mut self,
+        body: &ast::Block,
+        operation: &str,
+        parameter_ty: Type,
+        result_ty: Type,
+        expected: Option<Type>,
+        span: Span,
+        slot: usize,
+        handler_ty: Type,
+        handler_parameter: Type,
+        handler_result: Type,
+        effects: u8,
+    ) -> Result<Block> {
+        let unsupported = || {
+            Diagnostic::new(
+                span,
+                "a non-tail 'perform' must be the entire value of a top-level 'let' or expression statement of the handled body; bind intermediate subexpressions first, or use a declared 'effect' with a called function",
+            )
+        };
+        let tail_perform = body.tail.as_deref().filter(|tail| {
+            matches!(&tail.kind, ast::ExprKind::Perform { operation: name, .. } if name == operation)
+        });
+        if tail_perform.is_some() {
+            for statement in &body.statements {
+                let value = match statement {
+                    ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => value,
+                };
+                if contains_lexical_perform(value, operation) {
+                    return Err(unsupported());
+                }
+            }
+            return self.block(body, expected);
+        }
+        if body
+            .tail
+            .as_deref()
+            .is_some_and(|tail| contains_lexical_perform(tail, operation))
+        {
+            return Err(unsupported());
+        }
+        let mut perform: Option<NonTailPerform> = None;
+        for (index, statement) in body.statements.iter().enumerate() {
+            let (value, pattern, ty, mutable) = match statement {
+                ast::Statement::Let {
+                    value,
+                    pattern,
+                    ty,
+                    mutable,
+                    ..
+                } => (value, Some(pattern), ty.as_ref(), *mutable),
+                ast::Statement::Expr(value) => (value, None, None, false),
+            };
+            if matches!(&value.kind, ast::ExprKind::Perform { operation: name, .. } if name == operation)
+            {
+                if perform.is_some() {
+                    return Err(unsupported());
+                }
+                perform = Some(NonTailPerform {
+                    index,
+                    value,
+                    pattern,
+                    annotation: ty,
+                    mutable,
+                });
+            } else if contains_lexical_perform(value, operation) {
+                return Err(unsupported());
+            }
+        }
+        let Some(perform) = perform else {
+            return self.block(body, expected);
+        };
+        let NonTailPerform {
+            index,
+            value: perform_value,
+            pattern,
+            annotation,
+            mutable,
+        } = perform;
+        let ast::ExprKind::Perform { value, .. } = &perform_value.kind else {
+            unreachable!("perform shape checked above")
+        };
+        let prefix = self.statements(&body.statements[..index], None, span, Some(Type::Unit))?;
+        if prefix.ty == Type::Never {
+            return Err(Diagnostic::new(
+                span,
+                "this perform is unreachable because the preceding statements diverge",
+            ));
+        }
+        self.require(effects, span)?;
+        let payload = self.expr_expected(value, Some(parameter_ty))?;
+        let payload = self.coerce(payload, handler_parameter, span)?;
+        let mut result_slot = None;
+        let mut result_id = None;
+        if let Some(pattern) = pattern {
+            let ast::PatternKind::Name(path) = &pattern.kind else {
+                return Err(Diagnostic::new(
+                    pattern.span,
+                    "a non-tail resumption result must be bound by a simple name",
+                ));
+            };
+            if path.len() != 1 || self.is_constructor_pattern(pattern) {
+                return Err(Diagnostic::new(
+                    pattern.span,
+                    "a non-tail resumption result must be bound by a simple name",
+                ));
+            }
+            let grade = match annotation {
+                Some(annotation) => {
+                    let (inner, grade) = split_grade(annotation);
+                    let inner_ty = self.ty(inner)?;
+                    self.expect(result_ty, inner_ty, pattern.span)?;
+                    grade
+                        .map(|grade| grades::evaluate(self.resolution, &self.grades, grade))
+                        .transpose()?
+                }
+                None => None,
+            };
+            let slot = self.bind(pattern.span, result_ty, mutable)?;
+            self.locals[slot].grade = grade;
+            let id = self.resolution.binder(pattern.span).unwrap();
+            self.admit_scalar_index(id, result_ty, pattern.span)?;
+            result_slot = Some(slot);
+            result_id = Some(id);
+        }
+        let suffix = &body.statements[index + 1..];
+        let mut references = BTreeSet::new();
+        for statement in suffix {
+            match statement {
+                ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
+                    collect_expr_refs(self.resolution, value, &mut references)
+                }
+            }
+        }
+        if let Some(tail) = &body.tail {
+            collect_expr_refs(self.resolution, tail, &mut references);
+        }
+        let captures = references
+            .iter()
+            .filter_map(|id| self.slots.get(id).copied())
+            .filter(|slot| Some(*slot) != result_slot)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let resume = self.resumption_continuation(
+            captures,
+            result_id,
+            result_ty,
+            suffix,
+            body.tail.as_deref(),
+            span,
+        )?;
+        let handler = Expr {
+            kind: ExprKind::Local(slot),
+            ty: handler_ty,
+            span,
+            resource: None,
+        };
+        let call = Expr {
+            kind: ExprKind::CallIndirect {
+                callee: Box::new(handler),
+                arguments: vec![payload, resume],
+            },
+            ty: handler_result,
+            span,
+            resource: None,
+        };
+        let call = self.coerce(call, result_ty, span)?;
+        let call = match expected {
+            Some(expected) => self.coerce(call, expected, span)?,
+            None => call,
+        };
+        let ty = call.ty;
+        Ok(Block {
+            statements: prefix.statements,
+            tail: Some(Box::new(call)),
+            ty,
+        })
+    }
+    /// Build the one-shot continuation closure for a non-tail perform. The
+    /// closure is a `linear once fn(R) -> R` whose environment holds the values
+    /// live at the perform point; it is consumed by the handler's resumption
+    /// token. The closure body is the remaining handled body checked with the
+    /// operation result bound to the single call parameter.
+    fn resumption_continuation(
+        &mut self,
+        captures: Vec<usize>,
+        result_id: Option<crate::resolve::BindingId>,
+        result_ty: Type,
+        statements: &[ast::Statement],
+        tail: Option<&ast::Expr>,
+        span: Span,
+    ) -> Result<Expr> {
+        if self.linear_type(result_ty) {
+            return Err(Diagnostic::new(
+                span,
+                "non-tail resumption of a linear operation result is not supported; return an owning value through the resumption or use a tail-resuming handler",
+            ));
+        }
+        for slot in &captures {
+            let local = self.locals[*slot];
+            let ty = local.ty;
+            if ty.is_view()
+                || ty.is_ref()
+                || ty == Type::Str
+                || crate::runtime_types::has_borrow(self.types, ty)
+                || crate::runtime_types::contains_task(self.types, ty)
+            {
+                return Err(Diagnostic::new(
+                    span,
+                    "a non-tail resumption continuation cannot capture a borrowed view, reference, task handle, or borrowed record; pass the borrowed value to a named function instead",
+                )
+                .with_note(local.span, "captured value declared here"));
+            }
+            if local.mutable {
+                return Err(Diagnostic::new(
+                    span,
+                    "a non-tail resumption continuation cannot capture a mutable local; copy the value into an immutable local before the perform",
+                )
+                .with_note(local.span, "mutable capture declared here"));
+            }
+            if local.grade.is_some_and(Grade::is_zero) {
+                return Err(Diagnostic::new(
+                    span,
+                    "a non-tail resumption continuation cannot capture a value graded @[0]",
+                )
+                .with_note(local.span, "grade @[0] binding declared here"));
+            }
+        }
+        let capture_types = captures
+            .iter()
+            .map(|slot| self.locals[*slot].ty)
+            .collect::<Vec<_>>();
+        let capture_obligations = captures
+            .iter()
+            .map(|slot| {
+                let local = self.locals[*slot];
+                local.linear || local.grade.is_some_and(Grade::is_one) || self.linear_type(local.ty)
+            })
+            .collect::<Vec<_>>();
+        let capture_grades = captures
+            .iter()
+            .map(|slot| self.locals[*slot].grade)
+            .collect::<Vec<_>>();
+        let capture_spans = captures
+            .iter()
+            .map(|slot| self.locals[*slot].span)
+            .collect::<Vec<_>>();
+        let capture_expressions = captures
+            .iter()
+            .map(|slot| Expr {
+                kind: ExprKind::Local(*slot),
+                ty: self.locals[*slot].ty,
+                span: self.locals[*slot].span,
+                resource: None,
+            })
+            .collect::<Vec<_>>();
+        let capture_ids = captures
+            .iter()
+            .map(|slot| {
+                self.slots
+                    .iter()
+                    .find(|(_, outer)| *outer == slot)
+                    .map(|(id, _)| *id)
+            })
+            .collect::<Vec<_>>();
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_slots = std::mem::take(&mut self.slots);
+        let saved_result = self.result;
+        let saved_result_grade = self.result_grade;
+        let saved_effects = self.effects;
+        let saved_loops = std::mem::take(&mut self.loops);
+        let saved_facts = std::mem::take(&mut self.facts);
+        let saved_handlers = std::mem::take(&mut self.handlers);
+        let saved_scope_depth = self.scope_depth;
+        let kernel_mark = self.kernel_locals.len();
+        self.continuation_depth += 1;
+        let checked = (|| {
+            let mut locals = Vec::new();
+            for (index, ty) in capture_types.iter().enumerate() {
+                locals.push(Local {
+                    ty: *ty,
+                    mutable: false,
+                    linear: capture_obligations[index],
+                    grade: capture_grades[index],
+                    span: capture_spans[index],
+                });
+            }
+            let result_slot = locals.len();
+            locals.push(Local {
+                ty: result_ty,
+                mutable: false,
+                linear: false,
+                grade: None,
+                span,
+            });
+            let mut slots = BTreeMap::new();
+            for (index, id) in capture_ids.iter().enumerate() {
+                if let Some(id) = id {
+                    slots.insert(*id, index);
+                }
+            }
+            if let Some(id) = result_id {
+                slots.insert(id, result_slot);
+            }
+            self.locals = locals;
+            self.slots = slots;
+            self.result = result_ty;
+            self.result_grade = None;
+            self.effects = saved_effects;
+            self.loops.clear();
+            self.facts = crate::facts::Facts::default();
+            self.scope_depth = 0;
+            if let Some(id) = result_id {
+                self.admit_scalar_index(id, result_ty, span)?;
+            }
+            let body = self.statements(statements, tail, span, Some(result_ty))?;
+            self.expect(body.ty, result_ty, span)?;
+            Ok(body)
+        })();
+        self.kernel_locals.truncate(kernel_mark);
+        self.continuation_depth -= 1;
+        self.scope_depth = saved_scope_depth;
+        self.handlers = saved_handlers;
+        let locals = std::mem::take(&mut self.locals);
+        self.locals = saved_locals;
+        self.slots = saved_slots;
+        self.result = saved_result;
+        self.result_grade = saved_result_grade;
+        self.effects = saved_effects;
+        self.loops = saved_loops;
+        self.facts = saved_facts;
+        let body = checked?;
+        if !captures.is_empty() {
+            // Building an environment is a real allocation.
+            self.require(ALLOC | PANIC, span)?;
+        }
+        let ty = self.resume_type(result_ty);
+        let Type::Once(id) = ty else {
+            unreachable!("resume type is once")
+        };
+        let signature = self.types.function_types[id].clone();
+        let function = self.register_adapter(
+            "effect resumption",
+            &signature,
+            capture_types,
+            true,
+            locals,
+            body,
+            span,
+        )?;
+        Ok(Expr {
+            kind: ExprKind::FnValue {
+                function,
+                captures: capture_expressions,
             },
             ty,
             span,
@@ -23788,6 +24570,112 @@ fn block_allocates(block: &Block) -> bool {
     block.statements.iter().any(|statement| match statement {
         Statement::Let(_, value) | Statement::Expr(value) => expr(value),
     }) || block.tail.as_deref().is_some_and(expr)
+}
+
+/// Whether an expression contains a direct `perform operation` that targets
+/// the currently enclosing lexical handler. Nested handles for the same
+/// operation shadow the outer one, and lambdas are separate callables that do
+/// not inherit a lexical handler. Used only to classify the handled body before
+/// choosing the tail-resumptive or continuation lowering.
+fn contains_lexical_perform(expr: &ast::Expr, operation: &str) -> bool {
+    match &expr.kind {
+        ast::ExprKind::Perform {
+            operation: name, ..
+        } => name == operation,
+        ast::ExprKind::Handle {
+            operation: inner,
+            handler,
+            body,
+            ..
+        } => {
+            contains_lexical_perform(handler, operation)
+                || (inner != operation && block_contains_lexical_perform(body, operation))
+        }
+        ast::ExprKind::Lambda(_) => false,
+        ast::ExprKind::Name(_)
+        | ast::ExprKind::Integer(_)
+        | ast::ExprKind::Float(_)
+        | ast::ExprKind::String(_)
+        | ast::ExprKind::Char(_)
+        | ast::ExprKind::Bool(_)
+        | ast::ExprKind::Continue => false,
+        ast::ExprKind::Tuple(values) | ast::ExprKind::Array(values) => values
+            .iter()
+            .any(|value| contains_lexical_perform(value, operation)),
+        ast::ExprKind::StructuralLiteral(fields) => fields
+            .iter()
+            .any(|(_, value)| contains_lexical_perform(value, operation)),
+        ast::ExprKind::Block(block) => block_contains_lexical_perform(block, operation),
+        ast::ExprKind::Unary { operand, .. } | ast::ExprKind::Try(operand) => {
+            contains_lexical_perform(operand, operation)
+        }
+        ast::ExprKind::Binary { left, right, .. } => {
+            contains_lexical_perform(left, operation) || contains_lexical_perform(right, operation)
+        }
+        ast::ExprKind::Call { callee, arguments } => {
+            contains_lexical_perform(callee, operation)
+                || arguments
+                    .iter()
+                    .any(|argument| contains_lexical_perform(argument, operation))
+        }
+        ast::ExprKind::Specialize { callee, .. } | ast::ExprKind::Field { value: callee, .. } => {
+            contains_lexical_perform(callee, operation)
+        }
+        ast::ExprKind::Index { value, index } => {
+            contains_lexical_perform(value, operation) || contains_lexical_perform(index, operation)
+        }
+        ast::ExprKind::Slice { value, start, end } => {
+            contains_lexical_perform(value, operation)
+                || start
+                    .as_deref()
+                    .is_some_and(|start| contains_lexical_perform(start, operation))
+                || end
+                    .as_deref()
+                    .is_some_and(|end| contains_lexical_perform(end, operation))
+        }
+        ast::ExprKind::Return(value) | ast::ExprKind::Break(value) => value
+            .as_deref()
+            .is_some_and(|value| contains_lexical_perform(value, operation)),
+        ast::ExprKind::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            contains_lexical_perform(condition, operation)
+                || block_contains_lexical_perform(then, operation)
+                || otherwise
+                    .as_deref()
+                    .is_some_and(|otherwise| contains_lexical_perform(otherwise, operation))
+        }
+        ast::ExprKind::Match { value, arms } => {
+            contains_lexical_perform(value, operation)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(|guard| contains_lexical_perform(guard, operation))
+                        || contains_lexical_perform(&arm.body, operation)
+                })
+        }
+        ast::ExprKind::Record { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| contains_lexical_perform(value, operation)),
+        ast::ExprKind::While { condition, body } => {
+            contains_lexical_perform(condition, operation)
+                || block_contains_lexical_perform(body, operation)
+        }
+        ast::ExprKind::Loop(body) => block_contains_lexical_perform(body, operation),
+    }
+}
+
+fn block_contains_lexical_perform(block: &ast::Block, operation: &str) -> bool {
+    block.statements.iter().any(|statement| match statement {
+        ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
+            contains_lexical_perform(value, operation)
+        }
+    }) || block
+        .tail
+        .as_deref()
+        .is_some_and(|tail| contains_lexical_perform(tail, operation))
 }
 
 /// Collect runtime binding references in a lambda body so captures can be

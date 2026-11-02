@@ -395,14 +395,17 @@ converted by the same checked rules.
 
 ## Remaining boundaries
 
-- Effect rows are first-order sets. There is no row subtraction, effect
-  handlers, aliasing rows, or a general effect-constraint solver; inference
-  binds exactly one unbound row variable per callable argument. A bounded
-  binder `<e: Effects - alloc>` restricts which concrete rows may specialize a
-  function or method, but it never subtracts or hides an effect; see
-  [bounded effect exclusion](effect-constraints.md). There is no surface literal
-  for the empty row in an explicit specialization; a pure callable argument
-  infers it.
+- Effect rows are first-order finite Boolean expressions over the four concrete
+  effects. Declared rows may union and subtract row variables (`{e - io}`), and
+  a finite solver accumulates inclusion constraints over every higher-order
+  argument. There is no general row unification, row aliasing, or principal
+  inference for an unconstrained open row. A bounded binder
+  `<e: Effects - alloc>` restricts which concrete rows may specialize a
+  function or method. Lexical one-shot effect handlers are implemented in the
+  restricted fragment described in [effect-handlers.md](effect-handlers.md),
+  including real non-tail resumption for a single top-level perform. There is
+  still no surface literal for the empty row in an explicit specialization; a
+  pure callable argument infers it.
 - No function intersections with a synthesized common callable. Identical
   function types intersect to themselves; mutually subtype arrows keep one
   deterministic representative; subtype-related arrows obey absorption.
