@@ -48,7 +48,7 @@ impl ModuleIndex {
             let module = crate::parser::parse(&source)
                 .map_err(|e| Failure::new(e.render(&entry.display().to_string(), &source)))?;
             if !matches!(module.items.first().map(|item| &item.item.kind),
-                Some(crate::ast::ItemKind::Module(parts)) if parts == &[package.name.clone()])
+                Some(crate::ast::ItemKind::Module(parts)) if parts == std::slice::from_ref(&package.name))
             {
                 return Err(Failure::new(format!(
                     "{}: entry module must be declared as 'module {};': header does not match the package",
