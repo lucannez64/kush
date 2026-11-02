@@ -414,10 +414,12 @@ remain rejected. See
 [expanded borrowing contracts](borrowing-extensions.md).
 
 [Effect-row exclusions](effect-constraints.md) permit concrete forbidden-effect
-sets on executable function/method binders. Checked specializations enforce the
-constraint, including inferred arguments and trait defaults. `noalloc` and
-`nosuspend` permit only rows constrained to exclude their forbidden effect.
-There are still no handlers, row subtraction, or general constraint solver.
+sets on executable function/method binders, and declared rows support finite
+union/subtraction (`{e - io}`). Checked specializations enforce the constraint,
+including inferred arguments and trait defaults. `noalloc` and `nosuspend`
+permit only rows constrained to exclude their forbidden effect. Effect handlers
+exist only as the restricted one-shot fragment in
+[effect-handlers.md](effect-handlers.md); there is no general constraint solver.
 
 [Vector reuse](vector-reuse.md) adds capacity-preserving `Vec.clear`, checked
 `Vec.reserve`, and explicitly interleaved effectful map chains. Existing nested

@@ -1,10 +1,12 @@
-# Bounded effect exclusion
+# Bounded effect exclusion and finite row subtraction
 
 Status: implemented for executable function and method effect-row binders.
 `<e: Effects - alloc>` and `<e: Effects - (alloc | suspend)>` restrict which
-concrete rows a specialization may supply. This is a **constraint on valid
-specialization**, not row subtraction, not an effect handler, and not a new
-effect. The runtime effect bitset and its representation are unchanged.
+concrete rows a specialization may supply. Separately, a declared **effect row**
+may subtract concrete effects or row variables with `{e - io}`. This is a
+finite Boolean row algebra over the four concrete effects, not a general row
+unification calculus. The runtime effect bitset and its representation are
+unchanged.
 
 ```rust
 #[noalloc]
@@ -29,21 +31,31 @@ program. See also [first-class functions](functions.md) and
 ## Syntax
 
 ```text
-binder   = name (":" "Effects" ("-" exclusion)?)?
+binder    = name (":" "Effects" ("+" includes)? ("-" exclusion)?)?
+inclusion = effect
+          | "(" inclusion ("|" inclusion)* ")"
 exclusion = effect
           | "(" exclusion ("|" exclusion)* ")"
 effect    = "io" | "alloc" | "suspend" | "panic"
+row       = effect ("|" effect)* ("-" effect)*
 ```
 
 - The binder must be a direct `Effects` row parameter. A constraint on a type,
   grade, or natural binder is rejected instead of being ignored.
-- Exclusion leaves must be concrete effect names. Effect variables, aliases,
-  records, and arbitrary type expressions are rejected with a diagnostic.
+- Exclusion and inclusion leaves are concrete effect names. Effect variables,
+  aliases, records, and arbitrary type expressions are rejected with a
+  diagnostic.
 - A `|` union may be written with or without parentheses:
   `<e: Effects - (alloc | suspend)>` and `<e: Effects - alloc | suspend>` mean
   the same set. Duplicate names are harmless and collapse to one bit.
-- A `-` lists **forbidden** specializations. It cannot add an effect and cannot
-  remove an effect from the function's declared row.
+- A `-` on a binder lists **forbidden** specializations. It cannot add an
+  effect and cannot remove an effect from the function's declared row.
+- In a declared effect row, `-` is row subtraction: `{e - io}` removes every
+  bit selected by `io` from the row selected by `e`. Subtraction binds looser
+  than `|`, so `(a | b) - c` needs parentheses when the union should be
+  subtracted. Both sides may be concrete effects or row variables.
+- Row union is idempotent: `{panic, panic}` denotes the same bit as
+  `{panic}`.
 
 Only executable function and method binders accept the constraint. Trait
 parameters, data declarations (`struct`, `enum`, `prop`), constructor binders,
@@ -87,27 +99,31 @@ specialization.
 A call may mention more than one effect row on its higher-order parameters,
 and the same row variable may occur in several parameter types. Inference no
 longer commits to the first callable argument's row. It accumulates one
-**inclusion constraint** per callable argument:
+**row inclusion constraint** per callable argument:
 
 ```text
-fixed | e1 | e2 ...  covers  actual
+row-expression  covers  actual
 ```
 
-After every argument has been checked, `solve_effect_constraints` solves the
-group by finite enumeration over the four-effect universe. The supported
-decidable fragment is:
+where a row expression is a finite union/subtraction tree over the four
+concrete bits and row variables. After every argument has been checked,
+`solve_effect_constraints` solves the group by finite enumeration over the
+four-effect universe. The supported decidable fragment is:
 
-- up to **three** unbound row variables per call group (at most `16^3 = 4096`
-  assignments); a larger group is rejected with a request for explicit
-  `::<...>` specialization;
-- every row equation is an inclusion (union coverage), never row subtraction;
-- a row variable bound by an explicit specialization is folded into the
-  constraint's fixed part before solving;
+- up to **three** unbound row variables per call group (at most
+  `16^3 = 4096` assignments); a larger group is rejected with a request for
+  explicit `::<...>` specialization;
+- every row equation is an inclusion (the declared row must cover the actual
+  callable row), with union and subtraction inside the declared row;
+- a row variable bound by an explicit specialization is evaluated directly and
+  is not part of the remaining assignment search;
 - a variable that no constraint mentions is an error, not `{}`, because
   defaulting it could hide an effect promised by the caller;
 - a valid solution must be **unique componentwise-minimal**. Several
   incomparable minimal assignments are reported as ambiguous instead of
-  choosing one arbitrarily;
+  choosing one arbitrarily. For monotone union-only rows this is the principal
+  row; subtraction is still finite, but it can make the solution set smaller or
+  empty and the same uniqueness check applies;
 - an exclusion bound (`<e: Effects - io>`) removes bits from the variable's
   finite domain. If an argument requires an excluded effect, the diagnostic
   names the excluded effect and the row parameter;
@@ -142,11 +158,30 @@ ambiguous when the actual effects can be partitioned in several ways.
 expected arrow's effect row is added as one more constraint, so a callable
 parameter and the expected result contract are considered together.
 
-This is a finite constraint solver, not a general row-unification calculus.
+Row subtraction is checked at each specialization rather than believed:
+
+```rust
+fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
+    -> i64 ! {panic, e - io} { f(x) }
+
+fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+
+fn main() -> i64 ! {io, panic} { apply(io_inc, 1) }
+// rejected: the specialization has e = {io, panic}, so e - io = {panic},
+// but the body still calls f and requires the io it promised.
+```
+
+The declared row is recomputed for every specialization. Subtracting an effect
+from a declaration is not a promise that the body no longer performs it; the
+body's own `require` check still sees the concrete callable row.
+
+This is a finite Boolean row solver, not a general row-unification calculus.
 Lower (`+`) and upper/exclusion (`-`) bounds are both finite domain
-restrictions; there is no row subtraction, no polymorphic row aliases, no
-recursive row constraints, and no principal inference for open rows. Exceeding
-the four-bit universe or the 4096-assignment budget is an explicit diagnostic.
+restrictions; declared rows may additionally union and subtract row terms.
+There is no row difference predicate, no polymorphic row aliases, no recursive
+row constraints, and no principal inference for an open row variable that no
+constraint mentions. Exceeding the four-bit universe or the 4096-assignment
+budget is an explicit diagnostic.
 
 ## `#[noalloc]` and `#[nosuspend]`
 
@@ -183,29 +218,34 @@ attribute and are checked when their specialization is materialized.
 
 ## Boundaries
 
-- No row subtraction, row difference, aliasing rows, or subtyping on bound
-  sets.
-- No lower bounds (`<e: Effects + alloc>`), no inference of exclusion lists from
-  a body, and no general recursive row unification. The implemented solver is
-  the finite inclusion/equality group described above.
+- No row aliases, no subtyping on bound sets, and no recursive row unification.
+- An unconstrained open row variable is still an error rather than defaulting
+  to `{}`; the solver has a principal minimal solution only when every variable
+  is mentioned by at least one constraint.
+- Subtraction is a finite bit operation over the same four effects. It is not a
+  general set-difference constraint language for arbitrary first-class rows.
 - Only the four concrete effects `io`, `alloc`, `suspend`, and `panic` may be
-  excluded. There are no user-defined effects.
-- Exclusions do not change runtime representation, calls, or optimization. They
-  add no effect bit and generate no runtime check.
+  excluded or subtracted. There are no user-defined effects.
+- Exclusions and subtraction do not change runtime representation, calls, or
+  optimization. They add no effect bit and generate no runtime check.
 - The checker, evaluator, Cranelift backend, and C runtime remain trusted; this
   is a checked interface restriction, not a formal soundness proof.
 
 ## Implementation and tests
 
-- `crates/kush/src/parser.rs` parses the binder suffix.
+- `crates/kush/src/parser.rs` parses the binder suffix and effect-row
+  subtraction.
 - `crates/kush/src/resolve.rs` resolves the excluded names and rejects
   non-effect binders and unsupported declaration forms.
-- `crates/kush/src/runtime_types.rs` provides `effect_excludes`, which maps a
-  validated binder to its concrete forbidden bits.
+- `crates/kush/src/runtime_types.rs` provides `EffectRowTerm`,
+  `effect_row_term`, and `effect_excludes`; rows are evaluated over the finite
+  four-bit universe.
 - `crates/kush/src/executable.rs` enforces the bound in `Functions::instance`,
-  relaxes `#[noalloc]`/`#[nosuspend]`, and includes the constraint in
-  `method_contract_key`.
+  relaxes `#[noalloc]`/`#[nosuspend]`, includes the constraint in
+  `method_contract_key`, and solves accumulated inclusion constraints by finite
+  enumeration.
 - `crates/kush/tests/effect_constraints.rs` covers inference, explicit
   specialization, forwarding, methods and defaults, native/reference execution,
-  non-effect binders, unsupported declarations, and the retained
-  unconstrained-contract rejection.
+  non-effect binders, unsupported declarations, the retained
+  unconstrained-contract rejection, and row subtraction on declarations and
+  higher-order callback rows.

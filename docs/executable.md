@@ -258,10 +258,11 @@ to executable code. Heterogeneous union/intersection subtyping is implemented
 for value types; see [subtyping.md](subtyping.md), and first-class
 [functions and closures](functions.md) have checked arrow subtyping and owning
 once closures. Canonical structural record width subtyping, finite effect-row
-constraints, lexical one-shot tail-resumptive handlers, versioned runtime proof
-indices, and `DynArray<T, capacity>` are implemented restricted fragments; see
-the linked documents. General nested structural conversions, captured
-continuations/multishot handlers, open-row principal inference, user-defined
-graded modalities, general fusion, forced cancellation unwinding, nonblocking
-task I/O, and LLVM remain future work. The implemented natural/abstract grade fragment is
-described in [grades.md](grades.md).
+constraints with union/subtraction, restricted one-shot effect handlers with
+non-tail lexical resumption, versioned runtime proof indices with branch/loop
+joins and proof-valued locals, and `DynArray<T, capacity>` are implemented
+restricted fragments; see the linked documents. General nested structural
+conversions, multi-prompt/dynamic/multishot handlers, open-row principal
+inference, user-defined graded modalities, general fusion, forced cancellation
+unwinding, nonblocking task I/O, and LLVM remain future work. The implemented
+natural/abstract grade fragment is described in [grades.md](grades.md).
