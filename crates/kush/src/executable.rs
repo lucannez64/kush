@@ -7938,6 +7938,16 @@ impl<'a> Functions<'a> {
                     &mut sources,
                 );
             }
+            // Infer only between a parameter's own declared lifetime and the
+            // result. A record field's lifetime is already an explicit part of
+            // the parameter type, so selecting a different field lifetime
+            // remains an explicit error rather than silently adding a bound.
+            let parameter_bound_lifetimes = parameter_lifetimes
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            sources.retain(|source| parameter_bound_lifetimes.contains(source));
             for source in sources {
                 if source == *result_lifetime
                     || outlives(&lifetime_bounds, &source, result_lifetime)
@@ -14846,8 +14856,7 @@ impl Checker<'_, '_> {
                 ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
                     find(checker, left).or_else(|| find(checker, right))
                 }
-                ExprKind::RefAssign(reference, _, value)
-                | ExprKind::BoxWrite(reference, value) => {
+                ExprKind::RefAssign(reference, _, value) | ExprKind::BoxWrite(reference, value) => {
                     find(checker, reference).or_else(|| find(checker, value))
                 }
                 ExprKind::BoxReuse { owner, payload }
@@ -22718,10 +22727,9 @@ impl Checker<'_, '_> {
                 "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" | "Vec.try_reserve",
                 Type::Vec(_),
             ) => first.ty,
-            (
-                "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve",
-                Type::RefMut(p),
-            ) if matches!(self.types.pointees[p], Type::Vec(_)) => {
+            ("Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve", Type::RefMut(p))
+                if matches!(self.types.pointees[p], Type::Vec(_)) =>
+            {
                 borrowed_mutation = true;
                 self.types.pointees[p]
             }
@@ -23835,7 +23843,13 @@ impl Executable {
         })
     }
     pub(crate) fn width(&self, ty: Type) -> usize {
-        crate::runtime_types::width(&self.pointees, &self.enums, &self.unions, &self.function_types, ty)
+        crate::runtime_types::width(
+            &self.pointees,
+            &self.enums,
+            &self.unions,
+            &self.function_types,
+            ty,
+        )
     }
     pub(crate) fn owns(&self, ty: Type) -> bool {
         match ty {

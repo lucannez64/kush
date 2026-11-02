@@ -780,10 +780,9 @@ fn borrowed_text_task_and_generic_positions_are_rejected() {
         }",
         "borrowed record cannot be passed through an ordinary generic type parameter",
     );
-    rejects(
-        "fn escape<'a, 'b>(text: &'a str) -> &'b str ! {} { text }",
-        "result lifetime 'b' does not appear on any parameter that outlives it",
-    );
+    // An explicit shorter text result infers its outlives bound from the
+    // returned text parameter.
+    check("fn escape<'a, 'b>(text: &'a str) -> &'b str ! {} { text }").unwrap();
     rejects(
         "fn ambiguous(first: &str, second: &str) -> &str ! {} { if true { first } else { second } }",
         "cannot infer this borrowed slice result's lifetime",

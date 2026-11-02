@@ -2254,10 +2254,8 @@ impl<'a> Types<'a> {
                 }
                 let inner = self.lower(arguments[0], substitution, depth + 1)?;
                 let inner = self.full(inner, ty.span)?;
-                let direct_reference = matches!(
-                    inner,
-                    Type::Ref(_) | Type::RefMut(_) | Type::Str
-                ) && matches!(arguments[0].kind, ast::TypeKind::Borrow { .. });
+                let direct_reference = matches!(inner, Type::Ref(_) | Type::RefMut(_) | Type::Str)
+                    && matches!(arguments[0].kind, ast::TypeKind::Borrow { .. });
                 let task_borrowed_record = b.name == "Task" && is_borrowed_record(self, inner);
                 if (matches!(
                     inner,
@@ -4353,7 +4351,9 @@ fn validate_record_declaration(
                 direct_borrows += 1;
                 borrowed = true;
             }
-            ast::TypeKind::Borrow { lifetime, inner, .. } if is_str_type(inner) => {
+            ast::TypeKind::Borrow {
+                lifetime, inner, ..
+            } if is_str_type(inner) => {
                 let Some(name) = lifetime else {
                     return Err(Diagnostic::new(
                         field.span,

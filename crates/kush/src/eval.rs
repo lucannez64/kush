@@ -1888,7 +1888,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         ));
                     }
                     capacity = next;
-                    usable = box_allocation_capacity(24 + capacity * self.program.width(element) * 8);
+                    usable =
+                        box_allocation_capacity(24 + capacity * self.program.width(element) * 8);
                     self.stats.growth();
                 }
                 items.push(value);
@@ -3841,6 +3842,7 @@ fn project(
 /// Store a checked copyable field through a record reference. `offset` is a
 /// word offset from the record tag; nested copyable record paths are handled by
 /// recursing instead of flattening or copying the whole owner.
+#[allow(clippy::too_many_arguments)]
 fn assign_project(
     pointees: &[Type],
     enums: &[crate::runtime_types::Enum],

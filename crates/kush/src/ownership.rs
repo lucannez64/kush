@@ -105,13 +105,8 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                     // well, so a call that mutates the caller's container can
                     // relate every written reference to the declared element
                     // lifetime.
-                    if let Some(container) = referent_of(
-                        &program.pointees,
-                        local.ty,
-                    )
-                    .filter(|container| {
-                        container_carries_borrow(&program.pointees, *container)
-                    })
+                    if let Some(container) = referent_of(&program.pointees, local.ty)
+                        .filter(|container| container_carries_borrow(&program.pointees, *container))
                     {
                         for leaf in leaves_of(
                             &program.enums,
@@ -953,7 +948,13 @@ impl Checker<'_> {
             if at == offset {
                 return Some(index);
             }
-            at += crate::runtime_types::width(self.pointees, self.enums, self.unions, self.functions, *field);
+            at += crate::runtime_types::width(
+                self.pointees,
+                self.enums,
+                self.unions,
+                self.functions,
+                *field,
+            );
         }
         None
     }
@@ -1006,11 +1007,10 @@ impl Checker<'_> {
                 let mut origins = BTreeSet::from([*slot]);
                 if matches!(expr.ty, Type::Ref(_))
                     && self.is_carrier_type(self.locals[*slot].ty)
+                    && let Some(provenance) = &self.record_sources[*slot]
                 {
-                    if let Some(provenance) = &self.record_sources[*slot] {
-                        for leaf in provenance.leaves.values() {
-                            origins.extend(leaf.origins.iter().copied());
-                        }
+                    for leaf in provenance.leaves.values() {
+                        origins.extend(leaf.origins.iter().copied());
                     }
                 }
                 Loan {
@@ -1385,7 +1385,8 @@ impl Checker<'_> {
     /// The borrow leaf of one reference value stored in a container. A direct
     /// reference expression carries its own loan; a nested borrowed record is
     /// not admitted as a container element.
-    fn reference_element_loan(&self, expr: &Expr) -> Option<Loan> {        (expr.ty.is_ref() || expr.ty.is_view()).then(|| self.view_loan(expr))
+    fn reference_element_loan(&self, expr: &Expr) -> Option<Loan> {
+        (expr.ty.is_ref() || expr.ty.is_view()).then(|| self.view_loan(expr))
     }
     /// Whether a container element itself carries borrowed storage. Container
     /// provenance applies to reference elements and text views; shared slice
@@ -2075,7 +2076,11 @@ impl Checker<'_> {
     }
     fn argument_leaf_loan(&self, argument: &Expr, path: &[usize]) -> Option<Loan> {
         if let Some(rest) = path.strip_prefix(&[CONTAINER_LEAF]) {
-            return self.container_provenance(argument).leaves.get(rest).cloned();
+            return self
+                .container_provenance(argument)
+                .leaves
+                .get(rest)
+                .cloned();
         }
         if path.is_empty() && (argument.ty.is_view() || argument.ty.is_ref()) {
             return Some(self.view_loan(argument));
@@ -3390,15 +3395,11 @@ impl Checker<'_> {
                             None,
                         );
                         self.reference_lifetimes[slot] = lifetime;
-                        if self
-                            .referent(self.locals[slot].ty)
-                            .is_some_and(|referent| {
-                                self.is_carrier_type(referent)
-                                    || container_carries_borrow(self.pointees, referent)
-                            })
-                        {
-                            self.record_sources[slot] =
-                                Some(self.container_provenance(expr));
+                        if self.referent(self.locals[slot].ty).is_some_and(|referent| {
+                            self.is_carrier_type(referent)
+                                || container_carries_borrow(self.pointees, referent)
+                        }) {
+                            self.record_sources[slot] = Some(self.container_provenance(expr));
                         }
                     } else if let Some(provenance) = self.task_results.get(&site_pointer).cloned() {
                         // A child task's borrowed-record result is still loaned
@@ -3751,7 +3752,9 @@ impl Checker<'_> {
                             .with_note(self.locals[*slot].span, "owner declared here"));
                         }
                         self.temporary_exclusive.insert(*slot);
-                        self.exclusive_loans.insert(*slot);
+                        if record {
+                            self.exclusive_loans.insert(*slot);
+                        }
                     } else {
                         if self.exclusive_loaned_at(*slot, expr_ptr) {
                             return Err(Diagnostic::new(
@@ -3761,7 +3764,9 @@ impl Checker<'_> {
                             .with_note(self.locals[*slot].span, "owner declared here"));
                         }
                         self.temporary_shared.insert(*slot);
-                        self.shared_record_loans.insert(*slot);
+                        if record {
+                            self.shared_record_loans.insert(*slot);
+                        }
                     }
                 }
                 self.loans.insert(*slot);
@@ -3963,13 +3968,10 @@ impl Checker<'_> {
                         .get(&Vec::new())
                         .and_then(|leaf| leaf.lifetime.clone())
                     {
-                        let written = loan
-                            .lifetime
-                            .clone()
-                            .or_else(|| {
-                                (!loan.origins.is_empty())
-                                    .then(|| self.anonymous_lifetime(&loan.origins))
-                            });
+                        let written = loan.lifetime.clone().or_else(|| {
+                            (!loan.origins.is_empty())
+                                .then(|| self.anonymous_lifetime(&loan.origins))
+                        });
                         if !written
                             .as_deref()
                             .is_some_and(|written| self.actual_outlives(written, &declared))
@@ -4188,9 +4190,8 @@ impl Checker<'_> {
                                     | crate::executable::VecOp::SetBorrowed
                             );
                             if self.element_carries_borrow(element)
-                                && let Some(loan) = self.reference_element_loan(
-                                    &args[if setting { 2 } else { 1 }],
-                                )
+                                && let Some(loan) =
+                                    self.reference_element_loan(&args[if setting { 2 } else { 1 }])
                             {
                                 // A reference written into a container whose
                                 // element type declares a lifetime must outlive
@@ -4206,15 +4207,19 @@ impl Checker<'_> {
                                         (!loan.origins.is_empty())
                                             .then(|| self.anonymous_lifetime(&loan.origins))
                                     });
-                                    if !pushed
-                                        .as_deref()
-                                        .is_some_and(|pushed| self.actual_outlives(pushed, &declared))
-                                    {
+                                    if !pushed.as_deref().is_some_and(|pushed| {
+                                        self.actual_outlives(pushed, &declared)
+                                    }) {
                                         return Err(Diagnostic::new(
                                             expr.span,
                                             format!(
                                                 "the reference written into this container has {}, which does not outlive its declared element lifetime {}; declare the pushed source with that lifetime or an outlives bound",
-                                                pushed.as_deref().map(describe_actual).unwrap_or_else(|| "a temporary or local owner".to_owned()),
+                                                pushed
+                                                    .as_deref()
+                                                    .map(describe_actual)
+                                                    .unwrap_or_else(|| {
+                                                        "a temporary or local owner".to_owned()
+                                                    }),
                                                 describe_lifetime(&declared)
                                             ),
                                         ));
@@ -4283,7 +4288,13 @@ impl Checker<'_> {
                     let bounds = call.bounds.clone();
                     let effect_parameters = parameters.clone();
                     self.apply_call_lifetime(
-                        parameters, result, bounds.clone(), args, expr_ptr, expr.ty, expr.span,
+                        parameters,
+                        result,
+                        bounds.clone(),
+                        args,
+                        expr_ptr,
+                        expr.ty,
+                        expr.span,
                     )?;
                     self.apply_mutable_container_effects(
                         &effect_parameters,

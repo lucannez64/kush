@@ -5888,7 +5888,7 @@ impl Generator<'_, '_> {
                 self.builder
                     .ins()
                     .store(ir::MemFlagsData::new(), zero, handle, 0);
-                return vec![self.constant(0)];
+                vec![self.constant(0)]
             }
             VecOp::ReserveBorrowed => {
                 let reference = values[0];
@@ -5900,7 +5900,7 @@ impl Generator<'_, '_> {
                 self.builder
                     .ins()
                     .store(ir::MemFlagsData::new(), grown, reference, 0);
-                return vec![self.constant(0)];
+                vec![self.constant(0)]
             }
             VecOp::PushBorrowed => {
                 let reference = values[0];
@@ -5914,7 +5914,7 @@ impl Generator<'_, '_> {
                 self.builder
                     .ins()
                     .store(ir::MemFlagsData::new(), grown, reference, 0);
-                return vec![self.constant(0)];
+                vec![self.constant(0)]
             }
             VecOp::SetBorrowed => {
                 let reference = values[0];
@@ -5925,14 +5925,10 @@ impl Generator<'_, '_> {
                 let item = self.stack_words(width);
                 self.store_words(item, &values[2..2 + width]);
                 let old = self.stack_words(width);
-                call(
-                    self,
-                    VecOp::Set,
-                    &[handle, values[1], item, old],
-                );
+                call(self, VecOp::Set, &[handle, values[1], item, old]);
                 let previous = self.load_words(old, 0, width);
                 self.drop_value(element, &previous);
-                return vec![self.constant(0)];
+                vec![self.constant(0)]
             }
             VecOp::Clear => {
                 let handle = values[0];
