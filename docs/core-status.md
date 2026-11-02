@@ -282,8 +282,18 @@ requires `object.Trait.method(...)`.
 Stored `&dyn Trait`/`&mut dyn Trait` values, associated type defaults, const,
 grade, and effect impl parameters, lifetime-parameterized impls, `default fn`,
 negative impls, and arbitrary-overlap specialization remain outside this
-subset. See [static traits](traits.md) and the focused
-`crates/kush/tests/trait_advanced.rs` regression file.
+subset. Nominal record/enum declarations are laid out before impl collection,
+so `dyn Trait` is supported in function signatures, `Box`/`Vec`, tuples, and
+arrays but not as a declared nominal field. See [static traits](traits.md) and
+the focused `crates/kush/tests/trait_advanced.rs` regression file.
+
+The advanced-trait changes were validated locally on Linux x86-64 with the
+shared Cargo cache at `/home/hirew/Projects/kush/target/traits`: **705
+automated tests**, formatting, and Clippy with warnings denied all pass. Every
+accepted `trait_advanced.rs` program is compared between the reference
+evaluator and the Cranelift backend, including owning-member allocation
+balance. The workspace-wide Boat gate has not been re-run for this stage;
+that integrated run remains with the coordinating parent.
 
 ## Deliberate current boundaries
 
