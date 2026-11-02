@@ -354,6 +354,22 @@ fn resumption_is_linear_and_cannot_be_duplicated_or_ignored() {
         }"#,
         "consumed",
     );
+    // A resumption token cannot escape into a container that might drop or
+    // copy the continuation.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {alloc, panic} {
+                let v: Vec<linear once fn(i64) -> i64 ! {}> = Vec.new();
+                let v = Vec.push(v, resume);
+                Vec.len(&v)
+            } { let a = perform Op(20); a }
+        }"#,
+        "vectors cannot hold linear values",
+    );
 }
 
 #[test]
