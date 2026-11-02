@@ -641,6 +641,13 @@ enum Value {
     Task(usize),
     /// A temporary `&Task<T>` borrow used only by `Task.cancel`.
     TaskRef(usize),
+    /// An open/generic trait object: the registered member identifier and the
+    /// owned payload cell. The cell lets a borrowed `&dyn`/`&mut dyn` dispatch
+    /// pass the same storage to the concrete method without copying.
+    DynObject {
+        member: usize,
+        value: Arc<Mutex<Value>>,
+    },
 }
 impl Value {
     fn scalar(&self) -> i64 {
@@ -1511,6 +1518,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             Coercion::Struct { kept, drops, .. } => {
                 self.apply_struct_coercion(value, kept, drops, span)
             }
+            Coercion::DynBox { member, .. } => {
+                self.stats.allocation();
+                Ok(Value::DynObject {
+                    member: *member,
+                    value: Arc::new(Mutex::new(value)),
+                })
+            }
         }
     }
     fn dyn_array_call(
@@ -2017,6 +2031,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
             }
             Value::Union { value, .. } => self.drop_value(*value)?,
+            Value::DynObject { value, .. } => {
+                let payload = match Arc::try_unwrap(value) {
+                    Ok(cell) => cell.into_inner().unwrap(),
+                    Err(cell) => cell.lock().unwrap().clone(),
+                };
+                self.stats.deallocation();
+                self.drop_value(payload)?;
+            }
             Value::Function {
                 environment: Some(id),
                 ..
@@ -2137,6 +2159,62 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+    /// Resolve the registered member vtable and call the selected checked
+    /// method. The receiver value is already adapted to the impl's receiver
+    /// mode (owned payload, payload-cell reference, or mutable cell reference).
+    fn call_dyn_member(
+        &mut self,
+        spec: &DynCallSpec,
+        member: usize,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value> {
+        let entry = self
+            .program
+            .dyn_members
+            .get(spec.object)
+            .and_then(|members| members.get(member))
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    span,
+                    format!(
+                        "internal error: no registered member {member} for dynamic object '{}'",
+                        spec.trait_name
+                    ),
+                )
+            })?;
+        let function = *entry.methods.get(&spec.method).ok_or_else(|| {
+            Diagnostic::new(
+                span,
+                format!(
+                    "internal error: member of dynamic object '{}' has no dynamic method '{}'",
+                    self.program
+                        .dyn_object_names
+                        .get(spec.object)
+                        .map(String::as_str)
+                        .unwrap_or("<unknown>"),
+                    spec.method
+                ),
+            )
+        })?;
+        // The receiver has no grade; the remaining logical arguments drop any
+        // grade-zero position before the physical call.
+        let mut args = args.into_iter();
+        let receiver = args.next().expect("dynamic call has a receiver");
+        let mut physical = vec![receiver];
+        for (index, value) in args.enumerate() {
+            if !spec
+                .parameter_grades
+                .get(index)
+                .copied()
+                .flatten()
+                .is_some_and(Grade::is_zero)
+            {
+                physical.push(value);
+            }
+        }
+        self.call(function, physical)
     }
     fn call(&mut self, index: usize, args: Vec<Value>) -> Result<Value> {
         self.call_with(index, vec![], args)
@@ -2519,6 +2597,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Coercion::Struct { kept, drops, .. } => {
                         self.apply_struct_coercion(inner, kept, drops, expr.span)?
                     }
+                    Coercion::DynBox { member, .. } => {
+                        self.stats.allocation();
+                        Value::DynObject {
+                            member: *member,
+                            value: Arc::new(Mutex::new(inner)),
+                        }
+                    }
                 }
             }
             ExprKind::DynArrayNew { capacity, .. } => Value::DynArray {
@@ -2792,7 +2877,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             ExprKind::Borrow(slot) => {
                 let ty = self.program.functions[frame.function].locals[*slot].ty;
                 let inline = ty.layout().is_some_and(|id| self.program.enums[id].record)
-                    || matches!(ty, Type::Union(_));
+                    || matches!(ty, Type::Union(_) | Type::DynObj(_));
                 if inline {
                     let current = frame.locals[*slot].clone();
                     let cell = match current {
@@ -3274,6 +3359,111 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             }
                         }
                         self.call(*index, physical)?
+                    }
+                    Target::DynCall { spec, .. } => {
+                        let spec = self.program.dyn_calls[*spec].clone();
+                        let first = values.remove(0);
+                        let (member, receiver) = match spec.mode {
+                            ReceiverMode::Owned => match first {
+                                Value::DynObject { member, value } => {
+                                    let payload = match Arc::try_unwrap(value) {
+                                        Ok(cell) => cell.into_inner().unwrap(),
+                                        Err(cell) => cell.lock().unwrap().clone(),
+                                    };
+                                    self.stats.deallocation();
+                                    (member, payload)
+                                }
+                                other => {
+                                    return Err(Diagnostic::new(
+                                        expr.span,
+                                        format!(
+                                            "internal error: dynamic dispatch expected an owned trait object, found {other:?}"
+                                        ),
+                                    ));
+                                }
+                            },
+                            ReceiverMode::Shared | ReceiverMode::Mutable => {
+                                let Value::RecordRef(cell) = first else {
+                                    return Err(Diagnostic::new(
+                                        expr.span,
+                                        "internal error: borrowed dynamic dispatch expected a trait-object reference",
+                                    ));
+                                };
+                                let object = cell.lock().unwrap().clone();
+                                let Value::DynObject { member, value } = object else {
+                                    return Err(Diagnostic::new(
+                                        expr.span,
+                                        "internal error: borrowed dynamic dispatch reference does not point at a trait object",
+                                    ));
+                                };
+                                (member, Value::RecordRef(value))
+                            }
+                        };
+                        values.insert(0, receiver);
+                        self.call_dyn_member(&spec, member, values, expr.span)?
+                    }
+
+                    Target::UnionBorrowCall { spec, .. } => {
+                        let spec = self.program.union_calls[*spec].clone();
+                        let first = values.remove(0);
+                        let Value::RecordRef(cell) = first else {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal error: borrowed union dispatch expected a union reference",
+                            ));
+                        };
+                        let mutable = spec.mode == ReceiverMode::Mutable;
+                        let (tag, payload) = {
+                            let mut whole = cell.lock().unwrap();
+                            let Value::Union { tag, value } = &mut *whole else {
+                                return Err(Diagnostic::new(
+                                    expr.span,
+                                    "internal error: borrowed union dispatch reference does not point at a union",
+                                ));
+                            };
+                            let tag = *tag;
+                            if mutable {
+                                (tag, std::mem::replace(&mut **value, Value::Scalar(0)))
+                            } else {
+                                (tag, (**value).clone())
+                            }
+                        };
+                        let (_, _, function) = spec
+                            .members
+                            .iter()
+                            .find(|(member_tag, _, _)| *member_tag == tag)
+                            .copied()
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    expr.span,
+                                    "internal error: union member tag is not registered for this dispatch",
+                                )
+                            })?;
+                        let payload_cell = Arc::new(Mutex::new(payload));
+                        let mut args = vec![Value::RecordRef(payload_cell.clone())];
+                        for (index, value) in values.into_iter().enumerate() {
+                            if !spec
+                                .parameter_grades
+                                .get(index)
+                                .copied()
+                                .flatten()
+                                .is_some_and(Grade::is_zero)
+                            {
+                                args.push(value);
+                            }
+                        }
+                        let result = self.call(function, args)?;
+                        if mutable {
+                            let updated = match Arc::try_unwrap(payload_cell) {
+                                Ok(cell) => cell.into_inner().unwrap(),
+                                Err(cell) => cell.lock().unwrap().clone(),
+                            };
+                            *cell.lock().unwrap() = Value::Union {
+                                tag,
+                                value: Box::new(updated),
+                            };
+                        }
+                        result
                     }
                     Target::Panic => return Err(panic()),
                     Target::Print => {

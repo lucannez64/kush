@@ -72,29 +72,37 @@ and remaining limits.
   and are rejected as unconstrained; lifetime parameters remain rejected by the
   parser.
 - [ ] Trait objects and checked dynamic dispatch/object safety. **Partial:**
-  Closed-world union representation, owned, copyable shared, and mutable
-  receivers with write-back to a direct object local, temporary mutable
-  receivers, stored copyable `&dyn Trait`/`&mut dyn Trait` values with
-  reference write-back, object-argument dispatch, owning cleanup, associated
-  item/default agreement, and explicit rejection of open sets,
-  non-copyable borrowed objects, owning-through-borrowed calls,
-  mutable-through-shared calls, generic methods, and nominal fields mentioning
-  `dyn` (directly or through `Box`/`Vec`/tuples) are implemented and tested.
-  Generic fields instantiated with `dyn Trait` later are supported; owning
-  projected receivers must be destructured into locals before method dispatch.
-  Open/generic member sets and borrowed objects with owning/linear members
-  remain outside the subset.
+  Two checked representations are implemented. A finite non-generic member set
+  keeps the closed-world union (`owned`, copyable shared, and mutable receivers
+  with temporary write-back, object arguments, associated item/default
+  agreement). A trait with a generic/blanket impl, or one appearing in a
+  nominal field (including `Box<dyn Trait>`/`Vec<dyn Trait>`), uses a two-word
+  dynamic fat object: a registered member identifier and an owned payload
+  pointer. Coercion registers the concrete member's checked method table,
+  instantiates generic and non-type (`Nat`) impl parameters, allocates the
+  payload under `alloc`, and dispatch resolves the identifier at runtime.
+  Shared and mutable `&dyn`/`&mut dyn` and direct-local calls dispatch in place
+  without copying, so borrowed objects with owning or linear members work;
+  linear objects still require explicit consumption. Lifetime-parameterized
+  object methods may return a view tied to a borrowed receiver or another
+  caller-owned argument; the selected member's checked borrow contract is the
+  lifetime witness. Generic method type parameters, owning-through-borrowed
+  calls, mutable-through-shared calls, borrowed results through owned or
+  temporary receivers, and associated projections supplied only by a
+  parameter-dependent generic impl remain explicit rejections. Owning projected
+  receivers must still be destructured into locals before method dispatch.
 - [x] Specialization with an explicit deterministic coherence contract. Unique
   most-specific resolution, concrete-over-generic preference, duplicate
   rejection, and incomparable-overlap rejection are implemented and tested.
   `default fn`, negative impls, and arbitrary overlap remain rejected.
 
-Open trait work still includes open/generic object member sets, `dyn Trait`
-explicitly written inside a nominal field, borrowed objects with owning/linear members,
-object methods with lifetime or exact-use contracts, owning or `String`
-associated constants, associated constants depending on an impl type
-parameter, and lifetime/effect impl parameters. The implemented closed-world union dispatch is
-not a claim of general vtable-based trait-object support. See
+Open trait work still includes borrowed results through an owned or temporary
+receiver, exact-use `@[1]` object-method results, associated projections
+supplied only by a parameter-dependent generic impl, owning or `String`
+associated constants, associated constants depending on an impl type parameter,
+and lifetime/effect impl parameters. The dynamic representation is a
+whole-program checked member table with a fixed fat-object layout, not an
+FFI-compatible vtable or arbitrary open-world membership. See
 [trait contracts](traits.md).
 
 ## Grades and linear resources
@@ -324,7 +332,8 @@ physically erased parameters/results. The 40 advanced-trait tests pass on
 both backends; library/all-target Clippy and formatting pass locally. The combined remote gate at `059f99c` passed **857 tests, formatting, and
 Clippy**, and the sandbox stopped afterwards. This also validates
 `Vec.try_reserve`. Open-world membership, nominal-field objects, and borrowed
-owning objects remain unchecked above.
+owning objects were still unchecked at that historical checkpoint; the
+trait-object completion checkpoint below addresses them.
 
 ## Borrowing branch validation checkpoint
 
@@ -372,6 +381,31 @@ are also rejected instead of silently losing updates. Regressions cover tuple
 fields, generic wrappers, and legal destructuring before mutable dispatch.
 The previous 857-test gate predates these fixes and the latest borrowing/effect
 integration; the new full gate is pending.
+
+## Trait object completion checkpoint
+
+The remaining trait-object contracts are implemented on top of `460ec58`:
+open/generic member sets use a fixed two-word dynamic fat object with a checked
+per-member method table, nominal fields may spell `dyn Trait` directly, stored
+borrowed objects with owning/linear members dispatch in place, call-scoped
+lifetime parameters are accepted on object methods, and generic impl headers
+with `Nat` parameters substitute per registered member. Local Linux x86-64
+validation used `target/dyn-traits` with debug information disabled and two
+Cargo jobs:
+
+- Full locked workspace suite: **890 passed, 0 failed**.
+- `cargo fmt --all -- --check`: passed.
+- All-targets Clippy: passed.
+
+`crates/kush/tests/trait_advanced.rs` adds positive and hostile cases for open
+blanket impls, nested generic member dispatch, `Nat` impl substitution, nominal
+`dyn`/`Box<dyn>` fields, borrowed owning and linear members (including linear
+consumption rejection), lifetime-parameterized object methods returning a view
+of a caller argument in both representations, temporary shared dispatch
+rejection, and owned/temporary-receiver borrowed-result rejection.
+Native/reference agreement and allocation balance are checked by the shared
+`agrees` helper.
+The remote combined gate is parent-coordinated.
 
 ## Latest combined gate
 

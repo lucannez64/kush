@@ -106,6 +106,18 @@ pub(crate) struct UnionType {
     /// non-borrowed runtime value type.
     pub members: Vec<Type>,
 }
+/// One dynamically dispatched trait-object specialization. Unlike the
+/// closed-world union representation, this does not enumerate members at the
+/// type level: the runtime value carries a member identifier and an owned
+/// payload, so adding an impl (including a generic or blanket instantiation)
+/// changes only the dispatch tables, never the value layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DynObjectType {
+    pub trait_id: BindingId,
+    pub arguments: TraitArguments,
+    /// Checker spelling such as `dyn Show` or `dyn Convert<i64>`.
+    pub name: String,
+}
 
 type FunctionKey = (
     Vec<Type>,
@@ -503,10 +515,20 @@ pub(crate) struct Types<'a> {
     structural_cache: BTreeMap<Vec<(String, Type)>, usize>,
     function_cache: BTreeMap<FunctionKey, usize>,
     active: BTreeSet<BindingId>,
-    /// Closed-world trait objects: `(trait, trait arguments) -> union of every
-    /// concrete impl target`. Populated once impls are collected, before any
-    /// function instance is checked.
+    /// Trait objects by `(trait, trait arguments)`. A trait with a finite
+    /// non-generic member set keeps the legacy inline closed-world union; an
+    /// open/generic member set, or any trait used inside a nominal field, uses
+    /// the dynamically dispatched fat object below.
     pub dyn_objects: BTreeMap<(BindingId, TraitArguments), Type>,
+    /// Dynamically dispatched trait-object specializations, indexed by
+    /// `Type::DynObj`. Interning is by `(trait, trait arguments)`.
+    pub objects: Vec<DynObjectType>,
+    object_cache: BTreeMap<(BindingId, TraitArguments), usize>,
+    /// Traits whose objects cannot use the inline closed-world union because
+    /// they have generic/blanket impls or appear in a nominal field. This is
+    /// decided before layouts are built so a field can hold a fixed-size fat
+    /// object without knowing the member set.
+    pub dynamic_traits: BTreeSet<BindingId>,
     /// Traits that cannot be used as `dyn` objects, with the checked reason.
     pub dyn_errors: BTreeMap<BindingId, String>,
     /// Monotonic source of compiler-internal lifetime identities for inferred
@@ -523,6 +545,7 @@ impl<'a> Types<'a> {
         module: &'a ast::Module,
         resolution: &'a Resolution,
         logical: &'a LogicalEnvironment,
+        dynamic_traits: BTreeSet<BindingId>,
     ) -> Result<Self> {
         let mut definitions = BTreeMap::new();
         let mut aliases = BTreeMap::new();
@@ -725,6 +748,9 @@ impl<'a> Types<'a> {
             function_cache: BTreeMap::new(),
             active: BTreeSet::new(),
             dyn_objects: BTreeMap::new(),
+            objects: Vec::new(),
+            object_cache: BTreeMap::new(),
+            dynamic_traits,
             dyn_errors: BTreeMap::new(),
             inferred_lifetimes: 0,
             reference_labels: vec![String::new()],
@@ -1080,7 +1106,8 @@ impl<'a> Types<'a> {
                 | Type::Box(_)
                 | Type::Vec(_)
                 | Type::Once(_)
-                | Type::Task(_) => true,
+                | Type::Task(_)
+                | Type::DynObj(_) => true,
                 Type::Enum(id) | Type::Variants(id, _) if depth < 64 => {
                     types.enums[id].linear
                         || types.enums[id].variants.iter().any(|variant| {
@@ -1377,6 +1404,11 @@ impl<'a> Types<'a> {
             Type::Fn(id) => self.callable_name(id),
             Type::Once(id) => self.callable_name(id),
             Type::Task(p) => format!("Task<{}>", self.name(self.pointees[p])),
+            Type::DynObj(id) => self
+                .objects
+                .get(id)
+                .map(|object| object.name.clone())
+                .unwrap_or_else(|| "dyn <unknown>".into()),
         }
     }
     fn function_name(&self, id: usize) -> String {
@@ -1582,11 +1614,11 @@ impl<'a> Types<'a> {
                 }
                 return Ok(Type::Ref(self.pointer(inner)));
             }
-            // A borrowed trait object is a reference to the closed-world object
-            // union. Dispatch through it is checked separately: a shared
-            // reference may only copy a copyable object, and an exclusive
-            // reference writes the mutated object back through the same loan.
-            if matches!(inner, Type::Union(_)) {
+            // A borrowed trait object is a reference to the closed-world union
+            // or to a fixed dynamic fat object. Dispatch through it is checked
+            // separately: local/reference calls borrow the payload in place,
+            // while a temporary shared receiver still needs copyable members.
+            if matches!(inner, Type::Union(_) | Type::DynObj(_)) {
                 return Ok(if *mutable {
                     Type::RefMut(self.pointer(inner))
                 } else {
@@ -2019,21 +2051,12 @@ impl<'a> Types<'a> {
                     ),
                 ));
             }
-            if let Some(reason) = self.dyn_errors.get(&trait_id) {
-                return Err(Diagnostic::new(
-                    ty.span,
-                    format!(
-                        "trait '{}' is not object-safe: {reason}",
-                        self.resolution.bindings[trait_id].name
-                    ),
-                ));
-            }
             let mut type_arguments = Vec::new();
             for argument in arguments {
                 if matches!(argument.kind, ast::TypeKind::Lifetime(_)) {
                     return Err(Diagnostic::new(
                         argument.span,
-                        "trait objects do not take lifetime arguments in this subset; object values are owned and cannot store borrows",
+                        "trait objects do not take lifetime arguments in this subset; object values own their payload and cannot store borrows",
                     ));
                 }
                 type_arguments.push(self.lower(argument, substitution, depth + 1)?);
@@ -2045,6 +2068,47 @@ impl<'a> Types<'a> {
                     ..Default::default()
                 },
             );
+            if let Some(reason) = self.dyn_errors.get(&trait_id) {
+                return Err(Diagnostic::new(
+                    ty.span,
+                    format!(
+                        "trait '{}' is not object-safe: {reason}",
+                        self.resolution.bindings[trait_id].name
+                    ),
+                ));
+            }
+            if self.dynamic_traits.contains(&trait_id) {
+                if let Some(id) = self.object_cache.get(&key) {
+                    return Ok(Type::DynObj(*id));
+                }
+                if self.objects.len() >= 256 {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "trait-object budget exhausted (256)",
+                    ));
+                }
+                let mut name = self.resolution.bindings[trait_id].name.clone();
+                if !key.1.types.is_empty() {
+                    name.push('<');
+                    name.push_str(
+                        &key.1
+                            .types
+                            .iter()
+                            .map(|argument| self.name(*argument))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    );
+                    name.push('>');
+                }
+                let id = self.objects.len();
+                self.objects.push(DynObjectType {
+                    trait_id,
+                    arguments: key.1.clone(),
+                    name: format!("dyn {name}"),
+                });
+                self.object_cache.insert(key, id);
+                return Ok(Type::DynObj(id));
+            }
             return self.dyn_objects.get(&key).copied().ok_or_else(|| {
                 Diagnostic::new(
                     ty.span,
@@ -3523,7 +3587,7 @@ impl<'a> Types<'a> {
                 }
                 Type::Slice(_) | Type::SliceMut(_) | Type::Str => Ok(4),
                 Type::Fn(_) => Ok(1),
-                Type::Once(_) => Ok(2),
+                Type::Once(_) | Type::DynObj(_) => Ok(2),
                 _ => Ok(1),
             }
         }
@@ -4654,7 +4718,8 @@ pub(crate) fn type_owns(enums: &[Enum], unions: &[UnionType], ty: Type, depth: u
         | Type::String
         | Type::Vec(_)
         | Type::Once(_)
-        | Type::Task(_) => true,
+        | Type::Task(_)
+        | Type::DynObj(_) => true,
         Type::Enum(id) | Type::Variants(id, _) => {
             enums[id].linear
                 || enums[id]
@@ -4719,6 +4784,9 @@ pub(crate) fn width(
         4
     } else if matches!(ty, Type::Once(_)) {
         // (code pointer, owned environment pointer)
+        2
+    } else if matches!(ty, Type::DynObj(_)) {
+        // (member identifier, owned payload pointer)
         2
     } else {
         let _ = functions;

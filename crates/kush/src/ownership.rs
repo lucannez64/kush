@@ -31,10 +31,33 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                     &program.unions,
                     &program.pointees,
                     &program.function_types,
+                    &[],
                 )
             });
         }
         if owned == old_owned && linear == old_linear {
+            break;
+        }
+    }
+    // A dynamic object is linear when any registered member carries a linear
+    // obligation. Members cannot themselves be dynamic objects, but a record
+    // member may contain one, so iterate to a fixed point.
+    let mut dyn_linear = vec![false; program.dyn_members.len()];
+    loop {
+        let previous = dyn_linear.clone();
+        for (index, members) in program.dyn_members.iter().enumerate() {
+            dyn_linear[index] = members.iter().any(|member| {
+                is_linear(
+                    member.member,
+                    &linear,
+                    &program.unions,
+                    &program.pointees,
+                    &program.function_types,
+                    &previous,
+                )
+            });
+        }
+        if dyn_linear == previous {
             break;
         }
     }
@@ -46,6 +69,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                 &program.unions,
                 &program.pointees,
                 &program.function_types,
+                &dyn_linear,
             )
         {
             return Err(Diagnostic::new(
@@ -115,6 +139,40 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             }
         })
         .collect::<Vec<_>>();
+    // Dynamic dispatch uses the checked member function as its lifetime
+    // witness. Object safety and exact impl contracts guarantee that every
+    // member of one specialization has the same alpha-equivalent borrow
+    // contract, so any registered member supplies the same result provenance.
+    let empty_call = CallLifetime {
+        parameters: Vec::new(),
+        result: CallResult::None,
+        bounds: BTreeSet::new(),
+    };
+    let dyn_call_lifetimes = program
+        .dyn_calls
+        .iter()
+        .map(|spec| {
+            program
+                .dyn_members
+                .get(spec.object)
+                .and_then(|members| members.first())
+                .and_then(|member| member.methods.get(&spec.method))
+                .and_then(|function| calls.get(*function))
+                .cloned()
+                .unwrap_or_else(|| empty_call.clone())
+        })
+        .collect::<Vec<_>>();
+    let union_call_lifetimes = program
+        .union_calls
+        .iter()
+        .map(|spec| {
+            spec.members
+                .first()
+                .and_then(|(_, _, function)| calls.get(*function))
+                .cloned()
+                .unwrap_or_else(|| empty_call.clone())
+        })
+        .collect::<Vec<_>>();
     let liveness = program
         .functions
         .iter()
@@ -138,6 +196,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                         &program.unions,
                         &program.pointees,
                         &program.function_types,
+                        &dyn_linear,
                     ),
                 )
             })
@@ -148,12 +207,15 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             enums: &program.enums,
             owned: &program.owned_enums,
             linear: &program.linear_enums,
+            dyn_linear: &dyn_linear,
             unions: &program.unions,
             pointees: &program.pointees,
             reference_labels: &program.reference_labels,
             functions: &program.function_types,
             result_grades: &result_grades,
             calls: &calls,
+            dyn_call_lifetimes: &dyn_call_lifetimes,
+            union_call_lifetimes: &union_call_lifetimes,
             result_lifetime: function.result_lifetime.clone(),
             result_type: function.result,
             parameter_lifetimes: function.parameter_lifetimes.clone(),
@@ -396,6 +458,7 @@ fn intersect_splits(left: &SplitLabels, right: &SplitLabels) -> SplitLabels {
 }
 /// Lifetime information needed at a call site: which parameter fields can
 /// flow into the borrowed result, plus the callee's declared outlives relation.
+#[derive(Clone)]
 struct CallLifetime {
     /// Borrowed leaves of every runtime parameter, in parameter order. A slice
     /// parameter contributes a root leaf; a borrowed record parameter
@@ -537,7 +600,8 @@ fn owns(
         | Type::String
         | Type::Vec(_)
         | Type::Once(_)
-        | Type::Task(_) => true,
+        | Type::Task(_)
+        | Type::DynObj(_) => true,
         Type::Enum(id) | Type::Variants(id, _) => enums[id],
         Type::Union(id) => unions[id]
             .members
@@ -552,16 +616,18 @@ fn is_linear(
     unions: &[crate::runtime_types::UnionType],
     pointees: &[Type],
     functions: &[crate::runtime_types::FunctionType],
+    dyn_linear: &[bool],
 ) -> bool {
     match ty {
         Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
-            is_linear(pointees[p], enums, unions, pointees, functions)
+            is_linear(pointees[p], enums, unions, pointees, functions, dyn_linear)
         }
         Type::Enum(id) | Type::Variants(id, _) => enums[id],
         Type::Union(id) => unions[id]
             .members
             .iter()
-            .any(|member| is_linear(*member, enums, unions, pointees, functions)),
+            .any(|member| is_linear(*member, enums, unions, pointees, functions, dyn_linear)),
+        Type::DynObj(id) => dyn_linear.get(id).copied().unwrap_or(false),
         Type::Once(id) => functions[id].linear,
         _ => false,
     }
@@ -629,6 +695,8 @@ struct Checker<'a> {
     enums: &'a [crate::runtime_types::Enum],
     owned: &'a [bool],
     linear: &'a [bool],
+    /// `Type::DynObj(id)` is linear when any registered member is linear.
+    dyn_linear: &'a [bool],
     unions: &'a [crate::runtime_types::UnionType],
     pointees: &'a [Type],
     reference_labels: &'a [String],
@@ -640,6 +708,10 @@ struct Checker<'a> {
     /// unchanged.
     result_grades: &'a [Option<(Grade, bool)>],
     calls: &'a [CallLifetime],
+    /// Lifetime provenance witness for each dynamic-object and closed-union
+    /// borrowed call site.
+    dyn_call_lifetimes: &'a [CallLifetime],
+    union_call_lifetimes: &'a [CallLifetime],
     result_lifetime: Option<String>,
     result_type: Type,
     parameter_lifetimes: Vec<Option<String>>,
@@ -755,7 +827,14 @@ impl Checker<'_> {
         ty.is_mut_slice()
             || matches!(ty, Type::RefMut(_))
             || owns(ty, self.owned, self.unions, self.pointees)
-            || is_linear(ty, self.linear, self.unions, self.pointees, self.functions)
+            || is_linear(
+                ty,
+                self.linear,
+                self.unions,
+                self.pointees,
+                self.functions,
+                self.dyn_linear,
+            )
             || ty.layout().is_some_and(|id| self.enums[id].mutable_borrow)
     }
     fn slot_linear(&self, slot: usize) -> bool {
@@ -766,6 +845,7 @@ impl Checker<'_> {
                 self.unions,
                 self.pointees,
                 self.functions,
+                self.dyn_linear,
             )
     }
     fn live_views_at(&self, ptr: usize) -> &BTreeSet<usize> {
@@ -2721,6 +2801,7 @@ impl Checker<'_> {
                                 self.unions,
                                 self.pointees,
                                 self.functions,
+                                self.dyn_linear,
                             ))
                 }),
                 _ => false,
@@ -3132,6 +3213,7 @@ impl Checker<'_> {
                             self.unions,
                             self.pointees,
                             self.functions,
+                            self.dyn_linear,
                         ) || self.discards_linear(expr))
                     {
                         return Err(Diagnostic::new(
@@ -3537,6 +3619,7 @@ impl Checker<'_> {
                     self.unions,
                     self.pointees,
                     self.functions,
+                    self.dyn_linear,
                 ) || matches!(&value.kind, ExprKind::Local(s) if self.locals[*s].linear)
                     || self.value_moves_linear(value)
                 {
@@ -3815,10 +3898,23 @@ impl Checker<'_> {
                         self.call_records.insert(expr_ptr, provenance);
                     }
                 }
-                if let Some(index) = func {
-                    let parameters = self.calls[index].parameters.clone();
-                    let result = self.calls[index].result.clone();
-                    let bounds = self.calls[index].bounds.clone();
+                let call_lifetime = if let Some(index) = func {
+                    Some(&self.calls[index])
+                } else {
+                    match target {
+                        crate::executable::Target::DynCall { spec } => {
+                            self.dyn_call_lifetimes.get(*spec)
+                        }
+                        crate::executable::Target::UnionBorrowCall { spec } => {
+                            self.union_call_lifetimes.get(*spec)
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(call) = call_lifetime {
+                    let parameters = call.parameters.clone();
+                    let result = call.result.clone();
+                    let bounds = call.bounds.clone();
                     self.apply_call_lifetime(
                         parameters, result, bounds, args, expr_ptr, expr.ty, expr.span,
                     )?;
@@ -4261,6 +4357,7 @@ impl Checker<'_> {
                         self.unions,
                         self.pointees,
                         self.functions,
+                        self.dyn_linear,
                     )
                 {
                     return Err(Diagnostic::new(
@@ -4645,6 +4742,7 @@ impl Checker<'_> {
                 self.unions,
                 self.pointees,
                 self.functions,
+                self.dyn_linear,
             ) || self.value_moves_linear(expr))
         {
             self.pending_linear.push(expr.span);
@@ -4691,7 +4789,14 @@ impl Checker<'_> {
         match pattern {
             Pattern::Any => {
                 whole_linear
-                    || is_linear(ty, self.linear, self.unions, self.pointees, self.functions)
+                    || is_linear(
+                        ty,
+                        self.linear,
+                        self.unions,
+                        self.pointees,
+                        self.functions,
+                        self.dyn_linear,
+                    )
             }
             Pattern::Or(ps) => ps.iter().any(|p| self.ignores_linear(p, ty, whole_linear)),
             Pattern::Variant { tag, fields } => ty.layout().is_some_and(|id| {

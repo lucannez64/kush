@@ -230,6 +230,7 @@ fn useful(
             | Type::Str
             | Type::Fn(_)
             | Type::Once(_)
+            | Type::DynObj(_)
             | Type::Bytes
             | Type::String
             | Type::Stdin
