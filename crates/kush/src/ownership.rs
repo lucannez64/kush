@@ -2060,11 +2060,12 @@ impl Checker<'_> {
                 }
                 labels.unwrap_or_default()
             }
-            ExprKind::Call(_, _) | ExprKind::CallIndirect { .. } => self
-                .call_splits
-                .get(&(expr as *const Expr as usize))
-                .cloned()
-                .unwrap_or_default(),
+            ExprKind::Call(_, _) | ExprKind::CallIndirect { .. } | ExprKind::TaskScope { .. } => {
+                self.call_splits
+                    .get(&(expr as *const Expr as usize))
+                    .cloned()
+                    .unwrap_or_default()
+            }
             _ => SplitLabels::default(),
         }
     }
@@ -3267,7 +3268,7 @@ impl Checker<'_> {
                 if self.any_loan_at(slot, expr_ptr) {
                     return Err(Diagnostic::new(
                         expr.span,
-                        "cannot replace an owner while a slice view borrows it",
+                        "cannot replace an owner while a slice view or reference borrows it",
                     ));
                 }
                 if self.loans.contains(&slot) || (self.moves(self.locals[slot].ty) && self.guard) {

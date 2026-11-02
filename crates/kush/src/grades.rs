@@ -104,7 +104,7 @@ impl Drop for Algebra {
     fn drop(&mut self) {
         algebra_registry()
             .lock()
-            .expect("algebra registry lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.id);
     }
 }
@@ -113,12 +113,15 @@ impl Drop for Algebra {
 pub(crate) struct AlgebraRef(u64);
 impl AlgebraRef {
     fn get(self) -> std::sync::Arc<Algebra> {
-        algebra_registry()
-            .lock()
-            .expect("algebra registry lock poisoned")
-            .get(&self.0)
-            .and_then(std::sync::Weak::upgrade)
-            .expect("grade algebra must remain owned by its compilation or executable")
+        let table = {
+            let registry = algebra_registry()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.get(&self.0).and_then(std::sync::Weak::upgrade)
+        };
+        // An invariant failure must not poison the global registry or turn
+        // subsequent table cleanup into a second panic during unwinding.
+        table.expect("grade algebra must remain owned by its compilation or executable")
     }
 }
 /// The usage semiring: finite natural bounds plus infinity, extended with
@@ -563,7 +566,7 @@ fn lower_algebra(
     });
     algebra_registry()
         .lock()
-        .expect("algebra registry lock poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(id, Arc::downgrade(&algebra));
     Ok(algebra)
 }
@@ -1758,6 +1761,13 @@ mod tests {
 #[cfg(test)]
 mod algebra_ownership_tests {
     use super::*;
+
+    #[test]
+    fn invalid_internal_identity_does_not_poison_registry_cleanup() {
+        // Identity zero is reserved and can never be allocated from source.
+        assert!(std::panic::catch_unwind(|| AlgebraRef(0).get()).is_err());
+        assert!(!algebra_registry().is_poisoned());
+    }
 
     #[test]
     fn oversized_algebras_are_rejected_before_allocating_operation_tables() {

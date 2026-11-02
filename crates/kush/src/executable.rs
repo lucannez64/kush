@@ -171,8 +171,6 @@ fn normalized_scalar(term: &Term) -> Option<Scalar> {
 }
 #[derive(Debug)]
 pub struct Executable {
-    /// Own grade tables for every copyable grade identity in this program.
-    pub(crate) _grade_algebras: Vec<std::sync::Arc<crate::grades::Algebra>>,
     pub(crate) functions: Vec<Function>,
     pub(crate) entry: Option<usize>,
     pub(crate) enums: Vec<Enum>,
@@ -190,6 +188,9 @@ pub struct Executable {
     /// Whether any checked body contains a structured-task operation. Task
     /// programs use the cooperative reference scheduler and buffered host I/O.
     pub(crate) uses_tasks: bool,
+    /// Own grade tables for every copyable identity above. Keep this last so
+    /// tables remain available while all other program metadata is dropped.
+    pub(crate) _grade_algebras: Vec<std::sync::Arc<crate::grades::Algebra>>,
 }
 #[derive(Debug)]
 pub(crate) struct Function {

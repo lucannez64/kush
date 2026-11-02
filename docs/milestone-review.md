@@ -55,3 +55,27 @@ ownership checks. The reference evaluator has a bounded vector budget that the
 native runtime does not impose. Direct nested-record field borrows also remain
 restricted. Pooling adds a 32-byte allocation header and has no benchmarked
 performance or memory superiority claim.
+
+## Expanded integration and safety recheck (2026-11-02)
+
+Integrated borrowing, grades, and advanced traits at `12756e1` passed the full
+Boat gate: **756 tests**, formatting, and Clippy with warnings denied; the
+sandbox stopped afterward. This is an integration checkpoint, not completion
+of the full five-area backlog.
+
+Independent review found three high-severity borrowing defects in `d11016a`:
+a borrowed TaskExit hidden in a closure environment, missing provenance on a
+scope-returned slice, and repeated stored mutable-reference arguments. These
+were fixed in `bbccc2f`, together with explicit ownership of algebra metadata.
+A new independent recheck of that implementation found the three holes closed
+and no confirmed metadata leak/cycle/dangling-identity defect, within its
+limited source review and six probes.
+
+The recheck identified a conservative Task.scope split-label gap and weak
+assertions/misleading borrow diagnostics. Follow-up changes preserve scope
+split labels, assert specific conflicts, and describe both slice and reference
+loans. Metadata owners now drop last, and missing internal identities panic
+outside the registry lock so cleanup cannot inherit mutex poisoning.
+The affected local suites pass **120 tests**; the extra two regressions are not
+included in the earlier 756-test Boat count. The full-area backlog remains in
+[completion-backlog.md](completion-backlog.md).

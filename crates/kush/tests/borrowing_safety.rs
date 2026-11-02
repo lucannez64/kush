@@ -69,7 +69,7 @@ fn scope_slice_results_keep_their_original_owner_loaned() {
             data = [9, 9, 9];
             Slice.get(out, 1)
         }"#,
-        "borrow",
+        "cannot replace an owner while a slice view or reference borrows it",
     );
     rejects(
         r#"fn main() -> i64 ! {alloc, panic, suspend} {
@@ -92,7 +92,17 @@ fn exclusive_reference_arguments_cannot_alias_but_shared_ones_can() {
             b.x = a.x + b.x;
             a.x
         }"#;
-    for arguments in ["r, r", "&mut *r, &mut *r", "&mut p, &mut p"] {
+    for (arguments, diagnostic) in [
+        ("r, r", "while a child view derived from it is live"),
+        (
+            "&mut *r, &mut *r",
+            "while a child view derived from it is live",
+        ),
+        (
+            "&mut p, &mut p",
+            "cannot borrow an owner while an exclusive",
+        ),
+    ] {
         let source = format!(
             "{prefix} fn main() -> i64 ! {{panic}} {{
                 let mut p = Point {{ x: 1, y: 2 }};
@@ -100,7 +110,7 @@ fn exclusive_reference_arguments_cannot_alias_but_shared_ones_can() {
                 swap({arguments})
             }}"
         );
-        rejects(&source, "live");
+        rejects(&source, diagnostic);
     }
     agrees(
         r#"struct Point { x: i64, y: i64 }
@@ -109,6 +119,20 @@ fn exclusive_reference_arguments_cannot_alias_but_shared_ones_can() {
             let p = Point { x: 40, y: 2 };
             let r = &p;
             read(r, r)
+        }"#,
+        42,
+    );
+}
+
+#[test]
+fn scope_returned_split_half_keeps_its_disjoint_identity() {
+    agrees(
+        r#"fn main() -> i64 ! {alloc, panic, suspend} {
+            let mut data: [i64; 2] = [40, 2];
+            let (left, right) = Slice.split_at_mut(&mut data[..], 1);
+            let out = Task.scope(fn() -> &mut [i64] ! {alloc, panic, suspend} { left });
+            let right_child = &mut right[..];
+            Slice.get(out, 0) + Slice.get(right_child, 0)
         }"#,
         42,
     );

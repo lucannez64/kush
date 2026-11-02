@@ -230,7 +230,7 @@ fn owners_cannot_move_drop_or_be_replaced_while_a_view_is_live() {
             v = Vec.push(v, 2);
             Slice.len(s);
         }"#,
-        "slice view borrows it",
+        "slice view or reference borrows it",
     );
     rejects(
         r#"fn main() -> Unit ! {alloc, panic} {
@@ -248,7 +248,7 @@ fn owners_cannot_move_drop_or_be_replaced_while_a_view_is_live() {
             a = [3, 4];
             Slice.len(s);
         }"#,
-        "slice view borrows it",
+        "slice view or reference borrows it",
     );
     rejects(
         r#"fn main() -> Unit ! {alloc, panic} {
@@ -482,6 +482,6 @@ fn try_get_rejects_malformed_option_and_rival_owner_access() {
             let x = Slice.try_get(view, { a = [2]; 0 });
         }
         "#,
-        "cannot replace an owner while a slice view borrows it",
+        "cannot replace an owner while a slice view or reference borrows it",
     );
 }

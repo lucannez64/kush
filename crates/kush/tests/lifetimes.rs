@@ -1753,7 +1753,7 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
             a = [4, 5, 6];
             Slice.len(child);
         }"#,
-        "slice view borrows it",
+        "slice view or reference borrows it",
     );
     rejects(
         r#"fn consume(s: &mut [i64]) -> Unit ! {panic} { Slice.len(s); }
@@ -2480,7 +2480,7 @@ fn mutable_split_rejections_are_specific_and_conservative() {
             a = [4, 5, 6];
             Slice.len(left) + Slice.len(right);
         }"#,
-        "slice view borrows it",
+        "slice view or reference borrows it",
     );
     rejects(
         r#"fn main() -> Unit ! {panic} {

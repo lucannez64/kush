@@ -587,7 +587,7 @@ fn borrowed_text_keeps_its_owner_until_the_last_view_use() {
             text = \"zyx\";
             print_i64(Str.len(view));
         }",
-        "cannot replace an owner while a slice view borrows it",
+        "cannot replace an owner while a slice view or reference borrows it",
     );
     agrees(
         "fn main() -> i64 ! {io, alloc, panic} {
