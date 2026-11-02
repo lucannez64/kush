@@ -361,3 +361,13 @@ are also rejected instead of silently losing updates. Regressions cover tuple
 fields, generic wrappers, and legal destructuring before mutable dispatch.
 The previous 857-test gate predates these fixes and the latest borrowing/effect
 integration; the new full gate is pending.
+
+## Latest combined gate
+
+Compiler checkpoint `460ec58` passes **878 tests** in the full locked local
+workspace suite and the full Boat gate. Formatting and all-targets Clippy pass.
+This includes the projected-receiver double-free fix, the reference-container
+and vector-source fixes, and the declared-effect/structural/DynArray follow-up.
+Boat reused the persistent workspace marker after resume. Remaining unchecked
+items above are still outstanding; this gate does not establish completeness
+or constitute an independent review of the latest borrowing/effect changes.

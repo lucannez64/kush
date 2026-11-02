@@ -230,4 +230,7 @@ its workspace marker and artifacts on every resume, despite the earlier cache
 preservation statements in this document. The script now stores Cargo outputs
 in `/home/user/kush-build-cache`, outside the snapshot-excluded directory.
 The path remains outside the replaced source tree and is never uploaded from
-the local target directory. A stop/resume cache-persistence check is pending.
+the local target directory. Verification found 486 cache snapshot entries
+(116,612,493 bytes), including the workspace marker. The subsequent stop/resume
+full gate reused that marker without clearing the cache and passed 878 tests,
+formatting, and Clippy.
