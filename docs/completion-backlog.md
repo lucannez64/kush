@@ -1146,3 +1146,14 @@ of a concrete state record. There is still no FFI/raw-pointer callback and no
 user-supplied per-container metadata allocation. The full Boat gate for this
 checkpoint is pending.
 
+
+## Stateful allocator integration gate
+
+Compiler checkpoint `8279f55` merges `a31fb19` allocator instances with the
+`24fb4b9` loop-result/box-replacement provenance corrections. The full Boat gate
+passed **1024 tests**, formatting, and Clippy; sandbox `bx_3m6vs6ah` was stopped
+with its snapshot preserved. Log:
+`/tmp/kush-boat-allocator-context-gate.log` (machine-local).
+Independent allocator ownership/protocol review is pending. Runtime-erased
+allocator selection is implemented; a static allocator type parameter and the
+other explicit limits above remain absent.
