@@ -1777,7 +1777,7 @@ impl Checker<'_> {
                         || layout
                             .variants
                             .get(*tag)
-                            .map_or(true, |variant| variant.name != "Completed")
+                            .is_none_or(|variant| variant.name != "Completed")
                     {
                         return Ok(());
                     }
