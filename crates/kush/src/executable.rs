@@ -2495,6 +2495,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             unit: resolution.unit_of.get(&sig.binding).copied().unwrap_or(0),
             field_place: false,
             binding: sig.binding,
+            effect_constraints: Vec::new(),
         };
         let body = (|| {
             let mut runtime = sig.parameters.iter().zip(&sig.parameter_grades);
@@ -7338,6 +7339,18 @@ struct Loop {
     /// Type expected of the whole loop expression, for `break` values.
     expected: Option<Type>,
 }
+/// One inclusion constraint on an effect row during a call: the declared row
+/// `fixed | e1 | e2 ...` must cover the actual callable row. Constraints are
+/// accumulated across every higher-order argument before a finite solver picks
+/// a unique minimal specialization.
+#[derive(Debug, Clone)]
+struct EffectConstraint {
+    fixed: u8,
+    variables: Vec<BindingId>,
+    actual: u8,
+    span: Span,
+}
+
 struct Checker<'a, 't> {
     types: &'t mut Types<'a>,
     resolution: &'a Resolution,
@@ -7397,6 +7410,10 @@ struct Checker<'a, 't> {
     /// Binding of the function or method body being checked. Used to resolve
     /// `T.NAME` associated-constant projections through `T`'s trait bound.
     binding: BindingId,
+    /// Pending effect-row inclusion constraints for the current inference
+    /// group. `infer` takes a mark and solves them after every argument has
+    /// contributed its evidence.
+    effect_constraints: Vec<EffectConstraint>,
 }
 impl Checker<'_, '_> {
     fn nested<T>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
@@ -14606,6 +14623,7 @@ impl Checker<'_, '_> {
             }
         }
         let mut subst = crate::runtime_types::Subst::default();
+        let constraint_mark = self.effect_constraints.len();
         for (parameter, actual) in runtime.iter().zip(&signature.parameters) {
             self.unify(
                 split_grade(&parameter.ty).0,
@@ -14628,15 +14646,25 @@ impl Checker<'_, '_> {
             &mut subst,
             span,
         )?;
-        // The expected arrow's effect row identifies an effect parameter when
-        // the declared row has exactly one unbound variable.
+        // The expected arrow's effect row is also evidence: the source may
+        // perform only effects permitted by the target. This is accumulated
+        // with constraints from callable parameters, then solved as one group.
         let (fixed, variables) =
             crate::runtime_types::effect_bits_partial(self.resolution, &f.effects)?;
-        if variables.len() == 1 && !subst.effects.contains_key(&variables[0]) {
-            subst
-                .effects
-                .insert(variables[0], signature.effects & !fixed);
+        let effect_generics = f
+            .generics
+            .iter()
+            .filter(|generic| crate::runtime_types::is_effect_generic(self.resolution, generic))
+            .collect::<Vec<_>>();
+        if !variables.is_empty() {
+            self.effect_constraints.push(EffectConstraint {
+                fixed,
+                variables,
+                actual: signature.effects,
+                span,
+            });
         }
+        self.solve_effect_constraints(constraint_mark, &effect_generics, &mut subst, span)?;
         // General grade inference for a generic function value. The expected
         // arrow supplies concrete grades for its parameters and result; each
         // declared grade expression is solved in the single-occurrence affine
@@ -16015,10 +16043,13 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
-    /// Infer an effect-row parameter from a callable argument. A declared row
-    /// `{fixed | e}` accepts an actual row whose extra bits are exactly the
-    /// minimal instantiation of `e`. Multiple unbound row variables are
-    /// ambiguous and require explicit specialization.
+    /// Accumulate one effect-row inclusion constraint from a callable
+    /// argument. A declared row `{fixed | e1 | e2}` must cover the actual
+    /// callable row. Constraints from every higher-order argument are solved
+    /// together by [`Self::solve_effect_constraints`], so a variable that gets
+    /// evidence from several positions is the union of that evidence instead of
+    /// the first argument winning. Hiding an actual effect is impossible: a
+    /// solution is accepted only when every constraint is covered.
     fn unify_effects(
         &mut self,
         declared: &[ast::Type],
@@ -16030,58 +16061,246 @@ impl Checker<'_, '_> {
         let (fixed, variables) =
             crate::runtime_types::effect_bits_partial(self.resolution, declared)?;
         if variables.is_empty() {
-            // Concrete rows are checked by the final arrow coercion.
+            // Concrete rows are still checked by the final arrow coercion.
             return Ok(());
         }
-        let mut unbound = Vec::new();
-        let mut covered = fixed;
-        for variable in variables {
-            if !effect_vars.contains(&variable) {
+        for variable in &variables {
+            if !effect_vars.contains(variable) {
                 return Err(Diagnostic::new(
                     span,
                     format!(
                         "effect parameter '{}' is not in scope here",
-                        self.resolution.bindings[variable].name
+                        self.resolution.bindings[*variable].name
                     ),
                 ));
             }
-            match subst.effects.get(&variable) {
-                Some(value) => covered |= *value,
-                None => unbound.push(variable),
+        }
+        // A variable already fixed by an explicit specialization is folded
+        // into the concrete part of the constraint.
+        let mut fixed = fixed;
+        for variable in &variables {
+            if let Some(value) = subst.effects.get(variable) {
+                fixed |= *value;
             }
         }
-        if unbound.len() > 1 {
+        let variables = variables
+            .into_iter()
+            .filter(|variable| !subst.effects.contains_key(variable))
+            .collect::<Vec<_>>();
+        if variables.is_empty() && actual & !fixed != 0 {
+            return Err(self.effect_row_mismatch(actual, fixed, span));
+        }
+        if !variables.is_empty() {
+            self.effect_constraints.push(EffectConstraint {
+                fixed,
+                variables,
+                actual,
+                span,
+            });
+        }
+        Ok(())
+    }
+    fn effect_row_mismatch(&self, actual: u8, covered: u8, span: Span) -> Diagnostic {
+        let missing = actual & !covered;
+        let names = (0..4)
+            .filter(|bit| missing & (1 << bit) != 0)
+            .map(|bit| match 1u8 << bit {
+                crate::executable::PANIC => "panic",
+                crate::executable::IO => "io",
+                crate::executable::ALLOC => "alloc",
+                _ => "suspend",
+            })
+            .collect::<Vec<_>>();
+        Diagnostic::new(
+            span,
+            format!(
+                "effect row mismatch: the callable argument requires {{{}}}, which is not covered by the specialized effect row",
+                names.join(", ")
+            ),
+        )
+    }
+    /// Solve accumulated row constraints by finite enumeration.
+    ///
+    /// The effect universe has four concrete bits. For `n` unbound row
+    /// variables the solver considers at most `16^n` assignments; the budget is
+    /// 4096 assignments, so up to three variables are always exhaustive and a
+    /// larger group is rejected with an explicit request for specialization.
+    /// A solver result must be *unique componentwise-minimal*: every variable
+    /// assignment is a subset of every other valid assignment. If several
+    /// incomparable minimal solutions exist, the call is ambiguous and the
+    /// diagnostic asks for explicit `::<...>` arguments. A variable that no
+    /// constraint mentions is also rejected instead of defaulting to `{}`,
+    /// because doing so could hide an effect promised by the caller.
+    fn solve_effect_constraints(
+        &mut self,
+        mark: usize,
+        effect_generics: &[&ast::Generic],
+        subst: &mut crate::runtime_types::Subst,
+        span: Span,
+    ) -> Result<()> {
+        if mark >= self.effect_constraints.len() {
+            return Ok(());
+        }
+        let constraints = self.effect_constraints.split_off(mark);
+        let mut allowed: BTreeMap<BindingId, u8> = BTreeMap::new();
+        for generic in effect_generics {
+            let binder = self.resolution.binder(generic.span).unwrap();
+            let excluded =
+                crate::runtime_types::effect_excludes(self.resolution, generic)?.unwrap_or(0);
+            allowed.insert(binder, EFFECT_BITS & !excluded);
+        }
+        let mut mentioned = BTreeSet::new();
+        for constraint in &constraints {
+            mentioned.extend(constraint.variables.iter().copied());
+        }
+        for generic in effect_generics {
+            let binder = self.resolution.binder(generic.span).unwrap();
+            if !subst.effects.contains_key(&binder) && !mentioned.contains(&binder) {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "cannot infer effect row parameter '{}' of this call: no callable argument mentions it. Pass a callable whose effects constrain the row, or specialize it explicitly with '::<...>'",
+                        generic.name
+                    ),
+                ));
+            }
+        }
+        let mut unbound = Vec::new();
+        for generic in effect_generics {
+            let binder = self.resolution.binder(generic.span).unwrap();
+            if !subst.effects.contains_key(&binder) {
+                unbound.push(binder);
+            }
+        }
+        if unbound.is_empty() {
+            for constraint in constraints {
+                let covered = constraint.fixed
+                    | constraint
+                        .variables
+                        .iter()
+                        .filter_map(|variable| subst.effects.get(variable).copied())
+                        .fold(0, |left, right| left | right);
+                if constraint.actual & !covered != 0 {
+                    return Err(self.effect_row_mismatch(
+                        constraint.actual,
+                        covered,
+                        constraint.span,
+                    ));
+                }
+            }
+            return Ok(());
+        }
+        let mut assignments: u128 = 1;
+        for _ in &unbound {
+            assignments *= 16;
+        }
+        if assignments > 4096 {
+            return Err(Diagnostic::new(
+                span,
+                "effect-row constraint group exceeds the finite solver budget (more than three unbound row variables); specialize the effect rows explicitly with '::<...>'",
+            ));
+        }
+        let mut solutions: Vec<BTreeMap<BindingId, u8>> = vec![BTreeMap::new()];
+        for variable in &unbound {
+            let maximum = allowed.get(variable).copied().unwrap_or(EFFECT_BITS);
+            let mut next = Vec::new();
+            for solution in &solutions {
+                for bits in 0..=EFFECT_BITS {
+                    if bits & !maximum != 0 {
+                        continue;
+                    }
+                    let mut candidate = solution.clone();
+                    candidate.insert(*variable, bits);
+                    next.push(candidate);
+                }
+            }
+            solutions = next;
+        }
+        let valid = solutions
+            .into_iter()
+            .filter(|solution| {
+                constraints.iter().all(|constraint| {
+                    let covered = constraint.fixed
+                        | constraint
+                            .variables
+                            .iter()
+                            .filter_map(|variable| solution.get(variable).copied())
+                            .fold(0, |left, right| left | right);
+                    constraint.actual & !covered == 0
+                })
+            })
+            .collect::<Vec<_>>();
+        if valid.is_empty() {
+            let first = &constraints[0];
+            let reachable = first.fixed
+                | first
+                    .variables
+                    .iter()
+                    .filter_map(|variable| allowed.get(variable).copied())
+                    .fold(0, |left, right| left | right);
+            let excluded = first.actual & !reachable;
+            if excluded != 0 {
+                let names = (0..4)
+                    .filter(|bit| excluded & (1 << bit) != 0)
+                    .map(|bit| match 1u8 << bit {
+                        crate::executable::PANIC => "panic",
+                        crate::executable::IO => "io",
+                        crate::executable::ALLOC => "alloc",
+                        _ => "suspend",
+                    })
+                    .collect::<Vec<_>>();
+                let variables = first
+                    .variables
+                    .iter()
+                    .map(|variable| format!("'{}'", self.resolution.bindings[*variable].name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(Diagnostic::new(
+                    first.span,
+                    format!(
+                        "effect {} is excluded by the declared bound on row parameter {variables}, but the callable argument requires it",
+                        names
+                            .iter()
+                            .map(|name| format!("'{name}'"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+            return Err(Diagnostic::new(
+                first.span,
+                format!(
+                    "no specialization of the effect row parameters satisfies every callable argument; the actual row {:#06b} conflicts with another argument",
+                    first.actual
+                ),
+            ));
+        }
+        let minimal = valid
+            .iter()
+            .filter(|candidate| {
+                !valid.iter().any(|other| {
+                    other != *candidate
+                        && other
+                            .iter()
+                            .all(|(variable, bits)| bits & !candidate.get(variable).copied().unwrap_or(0) == 0)
+                })
+            })
+            .collect::<Vec<_>>();
+        if minimal.len() != 1 {
             let names = unbound
                 .iter()
-                .map(|id| format!("'{}'", self.resolution.bindings[*id].name))
+                .map(|variable| format!("'{}'", self.resolution.bindings[*variable].name))
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "cannot infer effect row parameters {names}; the actual row {actual:#b} does not identify which variable supplies which effects. Specialize them explicitly with '::<...>'"
+                    "effect row parameters {names} have several incomparable minimal solutions; the callable arguments do not identify one row. Specialize them explicitly with '::<...>'"
                 ),
             ));
         }
-        if let Some(variable) = unbound.first().copied() {
-            subst.effects.insert(variable, actual & !covered & !fixed);
-        } else if actual & !covered != 0 {
-            let names = (0..4)
-                .filter(|bit| actual & (1 << bit) != 0)
-                .map(|bit| match 1u8 << bit {
-                    crate::executable::PANIC => "panic",
-                    crate::executable::IO => "io",
-                    crate::executable::ALLOC => "alloc",
-                    _ => "suspend",
-                })
-                .collect::<Vec<_>>();
-            return Err(Diagnostic::new(
-                span,
-                format!(
-                    "effect row mismatch: the callable argument requires {{{}}}, which is not covered by the specialized effect row",
-                    names.join(", ")
-                ),
-            ));
+        for (variable, bits) in minimal[0] {
+            subst.effects.insert(*variable, *bits);
         }
         Ok(())
     }
@@ -16180,6 +16399,7 @@ impl Checker<'_, '_> {
             .collect::<Vec<_>>();
         let mut subst = base.cloned().unwrap_or_default();
         subst.self_type = self_type;
+        let constraint_mark = self.effect_constraints.len();
         let mut grade_arguments = Vec::new();
         if let Some(list) = explicit {
             if list.len() != generics.len() {
@@ -16288,6 +16508,7 @@ impl Checker<'_, '_> {
             )?;
             values.push(value);
         }
+        self.solve_effect_constraints(constraint_mark, &effect_generics, &mut subst, span)?;
         // General grade inference for direct calls: solve a grade parameter
         // from an explicitly graded argument. The decidable fragment is a
         // single occurrence of the binder in one parameter-grade expression,

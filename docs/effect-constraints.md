@@ -82,6 +82,66 @@ effects in its own row. For example, `apply<e: Effects - alloc>` above may still
 perform `panic` and whatever `e` supplies; `alloc` is simply never a valid
 specialization.
 
+## Accumulated row constraints
+
+A call may mention more than one effect row on its higher-order parameters,
+and the same row variable may occur in several parameter types. Inference no
+longer commits to the first callable argument's row. It accumulates one
+**inclusion constraint** per callable argument:
+
+```text
+fixed | e1 | e2 ...  covers  actual
+```
+
+After every argument has been checked, `solve_effect_constraints` solves the
+group by finite enumeration over the four-effect universe. The supported
+decidable fragment is:
+
+- up to **three** unbound row variables per call group (at most `16^3 = 4096`
+  assignments); a larger group is rejected with a request for explicit
+  `::<...>` specialization;
+- every row equation is an inclusion (union coverage), never row subtraction;
+- a row variable bound by an explicit specialization is folded into the
+  constraint's fixed part before solving;
+- a variable that no constraint mentions is an error, not `{}`, because
+  defaulting it could hide an effect promised by the caller;
+- a valid solution must be **unique componentwise-minimal**. Several
+  incomparable minimal assignments are reported as ambiguous instead of
+  choosing one arbitrarily;
+- an exclusion bound (`<e: Effects - io>`) removes bits from the variable's
+  finite domain. If an argument requires an excluded effect, the diagnostic
+  names the excluded effect and the row parameter.
+
+For example, a shared row variable receives the union of every argument:
+
+```rust
+fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+
+fn two<e: Effects>(
+    f: fn(i64) -> i64 ! {e},
+    g: fn(i64) -> i64 ! {e},
+    x: i64,
+) -> i64 ! {panic, e} { g(f(x)) }
+
+fn main() -> i64 ! {io, panic} { two(inc, io_inc, 1) }  // e = {io, panic}
+```
+
+Omitting `io` from `main` is rejected; the solver cannot satisfy the second
+argument's evidence with a smaller row. Separate variables `e1`/`e2` are
+solved from their own arguments, and a single row with two variables is
+ambiguous when the actual effects can be partitioned in several ways.
+
+`infer_function_value` uses the same solver for a generic function value: the
+expected arrow's effect row is added as one more constraint, so a callable
+parameter and the expected result contract are considered together.
+
+This is a finite constraint solver, not a general row-unification calculus.
+There are no lower bounds (`+ io`), no row subtraction, no polymorphic row
+aliases, no recursive row constraints, and no principal inference for open
+rows. Exceeding the four-bit universe or the 4096-assignment budget is an
+explicit diagnostic.
+
 ## `#[noalloc]` and `#[nosuspend]`
 
 Before this feature, these attributes rejected every effect-polymorphic
@@ -117,10 +177,11 @@ attribute and are checked when their specialization is materialized.
 
 ## Boundaries
 
-- No row subtraction, row difference, aliasing rows, effect handlers, or
-  subtyping on exclusion sets.
-- No lower bounds (`<e: Effects + alloc>`), no general effect-constraint solver,
-  and no inference of exclusion lists from a body.
+- No row subtraction, row difference, aliasing rows, or subtyping on exclusion
+  sets.
+- No lower bounds (`<e: Effects + alloc>`), no inference of exclusion lists from
+  a body, and no general recursive row unification. The implemented solver is
+  the finite inclusion/equality group described above.
 - Only the four concrete effects `io`, `alloc`, `suspend`, and `panic` may be
   excluded. There are no user-defined effects.
 - Exclusions do not change runtime representation, calls, or optimization. They

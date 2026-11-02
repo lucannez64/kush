@@ -839,13 +839,26 @@ fn effect_specialization_is_checked_and_stays_separate_from_other_categories() {
          fn main() -> i64 ! {panic} { apply::<i64>(1) }",
         "only io, alloc, suspend, and panic",
     );
+    // A shared row variable accumulates the union of every higher-order
+    // argument. The specializing caller must declare that union; otherwise the
+    // call would hide an effect introduced by a later argument.
+    assert_eq!(
+        value(
+            "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+             fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+             fn two<e: Effects>(f: fn(i64) -> i64 ! {e}, g: fn(i64) -> i64 ! {e}, x: i64)
+                 -> i64 ! {panic, e} { g(f(x)) }
+             fn main() -> i64 ! {io, panic} { two(inc, io_inc, 1) }"
+        ),
+        3
+    );
     rejects(
         "fn inc(x: i64) -> i64 ! {panic} { x + 1 }
          fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
          fn two<e: Effects>(f: fn(i64) -> i64 ! {e}, g: fn(i64) -> i64 ! {e}, x: i64)
              -> i64 ! {panic, e} { g(f(x)) }
-         fn main() -> i64 ! {io, panic} { two(inc, io_inc, 1) }",
-        "type mismatch",
+         fn main() -> i64 ! {panic} { two(inc, io_inc, 1) }",
+        "requires effects {io}",
     );
     rejects(
         "fn four<G: Grade>(x: i64 @[G * 2]) -> i64 ! {panic} { x + x + x + x }

@@ -51,6 +51,68 @@ fn agrees(source: &str, expected: i64) {
 }
 
 // ---------------------------------------------------------------------------
+// General effect-row constraints
+// ---------------------------------------------------------------------------
+
+#[test]
+fn row_constraints_accumulate_across_every_higher_order_argument() {
+    // One shared row variable sees `{panic}` from `f` and `{io, panic}` from
+    // `g`. The solver takes their union rather than letting the first argument
+    // choose the row. The caller must declare the resulting union.
+    let source = r#"
+        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn two<e: Effects>(f: fn(i64) -> i64 ! {e}, g: fn(i64) -> i64 ! {e}, x: i64)
+            -> i64 ! {panic, e} { g(f(x)) }
+        fn main() -> i64 ! {io, panic} { two(inc, io_inc, 1) }"#;
+    assert_eq!(value(source), 3);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 3);
+    rejects(
+        r#"
+        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn two<e: Effects>(f: fn(i64) -> i64 ! {e}, g: fn(i64) -> i64 ! {e}, x: i64)
+            -> i64 ! {panic, e} { g(f(x)) }
+        fn main() -> i64 ! {panic} { two(inc, io_inc, 1) }"#,
+        "requires effects {io}",
+    );
+}
+
+#[test]
+fn separate_row_variables_get_their_own_evidence() {
+    let source = r#"
+        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn both<e1: Effects, e2: Effects>(
+            f: fn(i64) -> i64 ! {e1},
+            g: fn(i64) -> i64 ! {e2},
+        ) -> i64 ! {panic, e1, e2} { g(f(1)) }
+        fn main() -> i64 ! {io, panic} { both(inc, io_inc) }"#;
+    assert_eq!(value(source), 3);
+}
+
+#[test]
+fn row_constraint_solver_rejects_ambiguity_and_exclusions() {
+    rejects(
+        r#"
+        fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+        fn split<e1: Effects, e2: Effects>(f: fn(i64) -> i64 ! {e1, e2}, x: i64)
+            -> i64 ! {panic, e1, e2} { f(x) }
+        fn main() -> i64 ! {panic} { split(inc, 1) }"#,
+        "incomparable minimal",
+    );
+    rejects(
+        r#"
+        fn io_inc(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn only<e: Effects - io>(f: fn(i64) -> i64 ! {e}, x: i64)
+            -> i64 ! {panic, e} { f(x) }
+        fn main() -> i64 ! {io, panic} { only(io_inc, 1) }"#,
+        "is excluded by",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Structural records
 // ---------------------------------------------------------------------------
 
