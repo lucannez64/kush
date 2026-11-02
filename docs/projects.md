@@ -17,17 +17,16 @@ Implemented:
 - `#[test]` functions with per-test processes, readable source diagnostics,
   filtering, listing, captured output, and exit status;
 - process-argument forwarding after `--`;
-- syntax highlighting for editors and validated manifest extension points for
-  the native Rust/C bridge.
+- syntax highlighting for editors, validated `[native]` manifest fields, and
+  `kush bindgen` for declarative Rust/C adapters.
 
 Not implemented yet:
 
 - a language server, live editor diagnostics, or go-to-definition;
 - package registries, remote dependencies, workspaces, or publish commands;
 - incremental compilation or a build cache;
-- linking native libraries or Rust adapters from `[native]` (the fields are
-  parsed and validated, but project build refuses them until the native bridge
-  lands);
+- callbacks, arbitrary Rust ABI, borrowed foreign results, or structs/variadics
+  through the native bridge (see [native-interop.md](native-interop.md));
 - a source-level `argv` API in the Kush runtime (arguments are delivered as
   process arguments; see the host-API note below).
 
@@ -58,8 +57,7 @@ test = "tests/main.kush"   # optional; defaults to tests/main.kush when present
 [dependencies]
 words = { path = "deps/words" }
 
-# Reserved for the native bridge. These fields are validated at load time but
-# build/run/test currently report that linking is not implemented yet.
+# Native link inputs used by project build/run/test.
 [native]
 libraries = ["m"]
 library-paths = ["native/lib"]
@@ -284,8 +282,12 @@ are performed once per project test invocation, not once per test function.
 Cargo resolves Rust dependencies according to each adapter's Cargo manifest and
 lockfile; `CARGO_NET_OFFLINE=true` can enforce offline builds. Kush.lock records
 the Kush path dependency graph, not a replacement for Cargo.lock.
-`kush check` checks types without invoking Cargo or linking. See
-[native-interop.md](native-interop.md) for ABI and trusted-foreign-code contracts.
+`kush check` checks types without invoking Cargo or linking. Generated adapters
+are declared in a strict `Bridge.toml` and produced with
+`kush bindgen Bridge.toml [--check]`, which writes both the Rust shims and the
+matching Kush module. See
+[native-interop.md](native-interop.md) for the schema, ABI, panic/cleanup
+contracts, and trusted-foreign-code limits.
 
 ## Verification
 

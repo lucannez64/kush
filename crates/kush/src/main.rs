@@ -28,13 +28,17 @@ Projects (Kush.toml):\n\
   kush run [--manifest-path <Kush.toml>] [--stats] [--locked] [-- <program args>...]\n\
   kush test [--manifest-path <Kush.toml>] [FILTER] [--exact] [--list] [--nocapture] [--locked]\n\
   kush fmt [--check] [--manifest-path <Kush.toml>] [FILE...]\n\n\
+Native adapters (Bridge.toml):\n\
+  kush bindgen <Bridge.toml> [--check]\n\n\
   kush --help\n\
   kush --version\n\n\
 Build/run use Cranelift on Linux x86-64 and require cc. Eval is the bounded reference interpreter.\n\
 Check accepts mixed programs: total logical definitions are kernel-checked and erased before executable checking.\n\
 --stats writes one 'allocation-stats:' line to stderr; program stdout and exit status are unchanged.\n\
 Project commands search upward for Kush.toml. Arguments after '--' are forwarded unchanged to the program.\n\
-Test targets declare tests with #[test]; see docs/projects.md. kush fmt only normalizes trailing whitespace and the final newline.\n";
+Test targets declare tests with #[test]; see docs/projects.md. kush fmt only normalizes trailing whitespace and the final newline.\n\
+kush bindgen reads a strict Bridge.toml, writes generated Rust shims and a matching Kush module,\n\
+and with --check reports drift without writing. It never overwrites files without the generated marker.\n";
 
 fn output_error(e: io::Error) -> (u8, String) {
     (1, format!("cannot write output: {e}"))
@@ -59,6 +63,7 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
     let rest = &args[1..];
     match name.as_ref() {
         "new" => new_command(rest, out),
+        "bindgen" => bindgen_command(rest, out),
         "fmt" => format_command(rest, out),
         "test" => test_command(rest, out),
         "check" | "build" | "run" if is_project_invocation(rest) => {
@@ -173,6 +178,31 @@ fn project_command(
         }
         _ => Err((2, format!("invalid command\n\n{HELP}"))),
     }
+}
+
+fn bindgen_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {
+    let mut config = None;
+    let mut check = false;
+    let mut index = 0;
+    while index < args.len() {
+        match argument(args, index, "bindgen")? {
+            "--check" => check = true,
+            other if other.starts_with('-') => return Err(usage_error("bindgen", other)),
+            other => {
+                if config.is_some() {
+                    return Err((2, "bindgen accepts exactly one Bridge.toml path".into()));
+                }
+                config = Some(PathBuf::from(other));
+            }
+        }
+        index += 1;
+    }
+    let config = config.ok_or_else(|| (2, "bindgen requires a Bridge.toml path".into()))?;
+    let report =
+        kush::bindgen::run(&config, check).map_err(|error| (1, format!("bindgen: {error}")))?;
+    out.write_all(report.render().as_bytes())
+        .map_err(output_error)?;
+    Ok(u8::from(check && report.changed()))
 }
 
 fn new_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {

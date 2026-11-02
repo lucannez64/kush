@@ -1,0 +1,77 @@
+# Declarative adapter configuration for `kush bindgen Bridge.toml`.
+#
+# Paths are resolved relative to this file. The generator writes both files
+# atomically and refuses to replace a file without a generated marker.
+[adapter]
+module = "rust_adapter_example.sha256_adapter"
+rust-output = "src/ffi.rs"
+kush-output = "src/sha256_adapter.kush"
+
+[[resource]]
+name = "Hasher"
+rust-type = "crate::bridge::Hasher"
+release-symbol = "kush_example_hasher_release"
+
+[[function]]
+name = "add"
+symbol = "kush_example_add"
+rust-path = "crate::bridge::add"
+parameters = [
+  { name = "a", type = "i64" },
+  { name = "b", type = "i64" },
+]
+result = "i64"
+
+[[function]]
+name = "sha256"
+symbol = "kush_example_sha256"
+rust-path = "crate::bridge::sha256"
+parameters = [{ name = "data", type = "bytes" }]
+result = "bytes"
+fallible = true
+
+[[function]]
+name = "hasher_new"
+symbol = "kush_example_hasher_new"
+rust-path = "crate::bridge::hasher_new"
+result = { resource = "Hasher" }
+
+[[function]]
+name = "hasher_update"
+symbol = "kush_example_hasher_update"
+rust-path = "crate::bridge::hasher_update"
+parameters = [
+  { name = "hasher", resource = "Hasher" },
+  { name = "data", type = "bytes" },
+]
+result = "i64"
+fallible = true
+
+[[function]]
+name = "hasher_finish"
+symbol = "kush_example_hasher_finish"
+rust-path = "crate::bridge::hasher_finish"
+parameters = [{ name = "hasher", resource = "Hasher" }]
+result = "bytes"
+fallible = true
+
+[[function]]
+name = "fail"
+symbol = "kush_example_fail"
+rust-path = "crate::bridge::fail"
+parameters = [{ name = "data", type = "bytes" }]
+result = "i64"
+fallible = true
+
+[[function]]
+name = "boom"
+symbol = "kush_example_boom"
+rust-path = "crate::bridge::boom"
+result = "i64"
+fallible = true
+
+[[function]]
+name = "live"
+symbol = "kush_example_live"
+rust-path = "crate::bridge::live"
+result = "i64"

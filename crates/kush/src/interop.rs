@@ -30,10 +30,17 @@
 //! pointer as an integer.
 //!
 //! `AdapterSpec` generates ordinary Rust `extern "C"` shims around safe Rust
-//! functions. Every shim catches unwinding at the boundary. Fallible shims map
-//! a Rust `Err(String)` to status 1 plus a retrievable message and a caught
-//! panic to status 2. Infallible shims abort after recording a panic rather
-//! than crossing the boundary with a half-written result.
+//! functions. Every shim catches unwinding at the boundary, so adapters must be
+//! built with `panic = "unwind"`; a generated compile-time check rejects
+//! `panic = "abort"` builds. Fallible shims map a Rust `Err(String)` to status 1
+//! plus a retrievable message and a caught panic to status 2. Infallible shims
+//! abort after recording a panic rather than crossing the boundary with a
+//! half-written result.
+//!
+//! Error helpers use a configurable support-symbol prefix
+//! ([`AdapterOptions::support_symbol_prefix`]) so multiple adapters can link
+//! into one executable. The default prefix is `kush_bridge`; `kush bindgen`
+//! derives a distinct prefix from the module path.
 use std::fmt::Write as _;
 
 /// One C ABI scalar type admitted by the bridge.
@@ -159,6 +166,32 @@ pub struct Resource {
     pub release_symbol: String,
 }
 
+/// Options for generated adapter source.
+///
+/// The support prefix names the two `#[no_mangle]` error-retrieval symbols
+/// emitted by every generated file. A caller that links more than one adapter
+/// must give each one a distinct prefix; `kush bindgen` derives it from the
+/// declared Kush module path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterOptions {
+    /// Identifier prefix, for example `kush_example_bridge`.
+    pub support_symbol_prefix: String,
+}
+impl Default for AdapterOptions {
+    fn default() -> Self {
+        Self {
+            support_symbol_prefix: "kush_bridge".to_owned(),
+        }
+    }
+}
+impl AdapterOptions {
+    pub fn new(support_symbol_prefix: impl Into<String>) -> Self {
+        Self {
+            support_symbol_prefix: support_symbol_prefix.into(),
+        }
+    }
+}
+
 /// A complete generated adapter source file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AdapterSpec {
@@ -171,10 +204,14 @@ impl AdapterSpec {
     /// generated code readable and avoids accidental source injection.
     pub fn validate(&self) -> std::result::Result<(), String> {
         let mut symbols = std::collections::BTreeSet::new();
+        let mut resource_names = std::collections::BTreeSet::new();
         for resource in &self.resources {
             validate_identifier(&resource.name, "resource name")?;
             validate_symbol(&resource.release_symbol)?;
             validate_rust_path(&resource.rust_type, "resource Rust type")?;
+            if !resource_names.insert(resource.name.clone()) {
+                return Err(format!("duplicate resource name '{}'", resource.name));
+            }
             if !symbols.insert(resource.release_symbol.clone()) {
                 return Err(format!(
                     "duplicate generated symbol '{}'",
@@ -189,7 +226,10 @@ impl AdapterSpec {
             if !symbols.insert(function.symbol.clone()) {
                 return Err(format!("duplicate generated symbol '{}'", function.symbol));
             }
-            let mut names = std::collections::BTreeSet::new();
+            // Match the identifiers that actually appear in the generated C
+            // signature. `kush_out` is added for fallible non-Unit results, and
+            // borrowed buffers expand to `<name>_data` and `<name>_len`.
+            let mut c_names = std::collections::BTreeSet::new();
             for parameter in &function.parameters {
                 let name = match parameter {
                     Parameter::Scalar { name, .. }
@@ -198,11 +238,16 @@ impl AdapterSpec {
                     | Parameter::Resource { name, .. } => name,
                 };
                 validate_identifier(name, "parameter name")?;
-                if !names.insert(name.clone()) {
+                if name == "kush_out" {
                     return Err(format!(
-                        "duplicate parameter name '{name}' in '{}'",
+                        "parameter name 'kush_out' in '{}' is reserved for the generated result slot",
                         function.symbol
                     ));
+                }
+                insert_c_parameter(&mut c_names, name, &function.symbol)?;
+                if matches!(parameter, Parameter::Str { .. } | Parameter::Bytes { .. }) {
+                    insert_c_parameter(&mut c_names, &format!("{name}_data"), &function.symbol)?;
+                    insert_c_parameter(&mut c_names, &format!("{name}_len"), &function.symbol)?;
                 }
                 if let Parameter::Resource { resource, .. } = parameter
                     && !self
@@ -215,6 +260,9 @@ impl AdapterSpec {
                         function.symbol, resource
                     ));
                 }
+            }
+            if function.fallible && !matches!(function.result, ResultType::Unit) {
+                insert_c_parameter(&mut c_names, "kush_out", &function.symbol)?;
             }
             if let ResultType::Resource(resource) = &function.result
                 && !self
@@ -230,19 +278,43 @@ impl AdapterSpec {
         }
         Ok(())
     }
+    /// Generate a self-contained Rust source file using the default
+    /// `kush_bridge` support prefix.
+    pub fn generate(&self) -> std::result::Result<String, String> {
+        self.generate_with_options(&AdapterOptions::default())
+    }
+
     /// Generate a self-contained Rust source file suitable for
     /// `include!`/`mod` in an ordinary library crate. The file contains the
     /// bridge support module, resource release shims, error retrieval, and one
     /// `#[unsafe(no_mangle)] extern "C"` shim per function.
-    pub fn generate(&self) -> std::result::Result<String, String> {
+    ///
+    /// Besides `<prefix>_last_error(out, capacity)`, the generated support
+    /// module exposes `<prefix>_last_error_bytes(out: *mut i64) -> i64`, which
+    /// returns status 0 and writes a Kush-owned `Bytes` handle containing the
+    /// latest error text, status 1 when there is no error, 2 for a null out
+    /// pointer, and 3 when the runtime cannot allocate the buffer. That shape is
+    /// directly callable from a checked Kush `Result<Bytes, i64>` declaration;
+    /// [`crate::bindgen`] emits the matching declaration.
+    pub fn generate_with_options(
+        &self,
+        options: &AdapterOptions,
+    ) -> std::result::Result<String, String> {
         self.validate()?;
+        validate_identifier(&options.support_symbol_prefix, "support symbol prefix")?;
+        let error_symbol = format!("{}_last_error", options.support_symbol_prefix);
+        let error_bytes_symbol = format!("{}_last_error_bytes", options.support_symbol_prefix);
         let mut out = String::new();
         out.push_str(
             "// @generated by kush::interop::AdapterSpec. Do not edit by hand.\n\
              // Trusted boundary: the C ABI is checked on the Kush side; the Rust\n\
              // implementations below remain trusted code.\n\
-             #![allow(clippy::missing_safety_doc)]\n\n\
-             #[allow(dead_code)]\n             mod kush_bridge_support {\n\
+             // This file is an item sequence and works both as a module file and\n\
+             // through `include!` inside a module. It requires panic=unwind so the\n\
+             // generated `catch_unwind` boundary can turn a panic into status 2.\n\
+             #[cfg(panic = \"abort\")]\n\
+             compile_error!(\"kush generated adapters require panic=unwind so panics can be contained at the C boundary\");\n\n\
+             #[allow(dead_code, clippy::missing_safety_doc)]\n             mod kush_bridge_support {\n\
              \x20   use std::cell::RefCell;\n\
              \x20   thread_local! {\n\
              \x20       static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };\n\
@@ -265,7 +337,7 @@ impl AdapterSpec {
              \x20   /// Copy the most recent adapter error into a caller buffer.\n\
              \x20   /// Returns the full message length, or -1 when there is no error.\n\
              \x20   #[unsafe(no_mangle)]\n\
-             \x20   pub extern \"C\" fn kush_bridge_last_error(out: *mut u8, capacity: i64) -> i64 {\n\
+             \x20   pub extern \"C\" fn __KUSH_LAST_ERROR__(out: *mut u8, capacity: i64) -> i64 {\n\
              \x20       LAST_ERROR.with(|slot| {\n\
              \x20           let borrow = slot.borrow();\n\
              \x20           let Some(message) = borrow.as_deref() else { return -1 };\n\
@@ -276,6 +348,22 @@ impl AdapterSpec {
              \x20               unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, count) }\n\
              \x20           }\n\
              \x20           length\n\
+             \x20       })\n\
+             \x20   }\n\
+             \x20   /// Copy the most recent adapter error into a Kush-owned `Bytes`\n\
+             \x20   /// allocation. Status 0 writes the handle, 1 means no error, 2 is a\n\
+             \x20   /// null out pointer, and 3 means the runtime allocation failed.\n\
+             \x20   #[unsafe(no_mangle)]\n\
+             \x20   pub extern \"C\" fn __KUSH_LAST_ERROR_BYTES__(out: *mut i64) -> i64 {\n\
+             \x20       LAST_ERROR.with(|slot| {\n\
+             \x20           let borrow = slot.borrow();\n\
+             \x20           let Some(message) = borrow.as_deref() else { return 1 };\n\
+             \x20           if out.is_null() { return 2 }\n\
+             \x20           let bytes = message.as_bytes();\n\
+             \x20           let handle = unsafe { super::kush_bytes_from(bytes.as_ptr(), bytes.len() as i64) };\n\
+             \x20           if handle == 0 { return 3 }\n\
+             \x20           unsafe { *out = handle };\n\
+             \x20           0\n\
              \x20       })\n\
              \x20   }\n\
              \x20   pub fn guard(\n\
@@ -332,6 +420,9 @@ impl AdapterSpec {
              \x20   fn kush_bytes_from(source: *const u8, length: i64) -> i64;\n\
              }\n\n",
         );
+        out = out
+            .replace("__KUSH_LAST_ERROR_BYTES__", &error_bytes_symbol)
+            .replace("__KUSH_LAST_ERROR__", &error_symbol);
         for resource in &self.resources {
             let release = &resource.release_symbol;
             let ty = &resource.rust_type;
@@ -539,20 +630,99 @@ fn generate_function(spec: &AdapterSpec, function: &Function) -> String {
     out
 }
 
+fn insert_c_parameter(
+    names: &mut std::collections::BTreeSet<String>,
+    name: &str,
+    symbol: &str,
+) -> std::result::Result<(), String> {
+    if !names.insert(name.to_owned()) {
+        return Err(format!(
+            "generated C parameter name '{name}' collides in '{symbol}'"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_identifier(name: &str, what: &str) -> std::result::Result<(), String> {
     let mut characters = name.chars();
     let valid = characters
         .next()
         .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
         && characters.all(|character| character == '_' || character.is_ascii_alphanumeric());
-    if valid {
-        Ok(())
-    } else {
-        Err(format!(
+    if !valid {
+        return Err(format!(
             "{what} '{name}' must be a Rust/C identifier ([A-Za-z_][A-Za-z0-9_]*)"
-        ))
+        ));
     }
+    if name == "_" {
+        return Err(format!("{what} '_' is a wildcard, not a name"));
+    }
+    if is_rust_keyword(name) {
+        return Err(format!(
+            "{what} '{name}' is a Rust keyword; use safe glue with a non-keyword name"
+        ));
+    }
+    Ok(())
 }
+
+fn is_rust_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "gen"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "try"
+            | "typeof"
+            | "union"
+            | "unsized"
+            | "virtual"
+            | "yield"
+    )
+}
+
 fn validate_symbol(symbol: &str) -> std::result::Result<(), String> {
     validate_identifier(symbol, "C symbol")
 }
@@ -560,7 +730,10 @@ fn validate_rust_path(path: &str, what: &str) -> std::result::Result<(), String>
     if path.is_empty() {
         return Err(format!("{what} must not be empty"));
     }
-    for segment in path.split("::") {
+    for (index, segment) in path.split("::").enumerate() {
+        if index == 0 && matches!(segment, "crate" | "self" | "super" | "Self") {
+            continue;
+        }
         validate_identifier(segment, what)?;
     }
     Ok(())
