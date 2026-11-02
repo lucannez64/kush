@@ -1378,6 +1378,9 @@ impl<'a> Types<'a> {
             Type::Box(p) => format!("Box<{}>", self.name(self.pointees[p])),
             Type::Arena => "Arena".into(),
             Type::ArenaBox(p) => format!("ArenaBox<{}>", self.name(self.pointees[p])),
+            Type::Allocator => "Allocator".into(),
+            Type::AllocBox(p) => format!("AllocBox<{}>", self.name(self.pointees[p])),
+            Type::AllocVec(p) => format!("AllocVec<{}>", self.name(self.pointees[p])),
             Type::Vec(p) => format!("Vec<{}>", self.name(self.pointees[p])),
             Type::Ref(p) => format!("&{}", self.name(self.pointees[p])),
             Type::RefMut(p) => format!("&mut {}", self.name(self.pointees[p])),
@@ -1633,7 +1636,14 @@ impl<'a> Types<'a> {
             }
             if !matches!(
                 inner,
-                Type::Box(_) | Type::Arena | Type::Bytes | Type::String | Type::Vec(_)
+                Type::Box(_)
+                    | Type::Arena
+                    | Type::Bytes
+                    | Type::String
+                    | Type::Vec(_)
+                    | Type::Allocator
+                    | Type::AllocBox(_)
+                    | Type::AllocVec(_)
             ) {
                 return Err(Diagnostic::new(
                     ty.span,
@@ -2216,7 +2226,10 @@ impl<'a> Types<'a> {
                 return self.dynamic_array(element, capacity, ty.span);
             }
             if b.kind == BindingKind::Builtin
-                && matches!(b.name.as_str(), "Box" | "Vec" | "Task" | "ArenaBox")
+                && matches!(
+                    b.name.as_str(),
+                    "Box" | "Vec" | "Task" | "ArenaBox" | "AllocBox" | "AllocVec"
+                )
             {
                 if !lifetime_arguments.is_empty() {
                     return Err(Diagnostic::new(
@@ -2266,7 +2279,7 @@ impl<'a> Types<'a> {
                 if contains_task(self, inner) {
                     return Err(Diagnostic::new(
                         ty.span,
-                        "task handles cannot be stored inside Box, ArenaBox, or Vec; join them in the scope that owns them",
+                        "task handles cannot be stored inside Box, ArenaBox, AllocBox, Vec, or AllocVec; join them in the scope that owns them",
                     ));
                 }
                 let inner = self.annotate_container_element(inner, arguments[0], substitution);
@@ -2274,6 +2287,8 @@ impl<'a> Types<'a> {
                 return Ok(match b.name.as_str() {
                     "Box" => Type::Box(pointer),
                     "ArenaBox" => Type::ArenaBox(pointer),
+                    "AllocBox" => Type::AllocBox(pointer),
+                    "AllocVec" => Type::AllocVec(pointer),
                     _ => Type::Vec(pointer),
                 });
             }
@@ -2351,6 +2366,7 @@ impl<'a> Types<'a> {
                         "Bytes" => return Ok(Type::Bytes),
                         "String" => return Ok(Type::String),
                         "Arena" => return Ok(Type::Arena),
+                        "Allocator" => return Ok(Type::Allocator),
                         "str" => {
                             return Err(Diagnostic::new(
                                 ty.span,
@@ -2910,7 +2926,9 @@ impl<'a> Types<'a> {
             (_, Type::Annotated(b, _)) => return self.subtype(actual, self.pointees[b]),
             (Type::Box(a), Type::Box(b))
             | (Type::ArenaBox(a), Type::ArenaBox(b))
-            | (Type::Vec(a), Type::Vec(b)) => {
+            | (Type::Vec(a), Type::Vec(b))
+            | (Type::AllocBox(a), Type::AllocBox(b))
+            | (Type::AllocVec(a), Type::AllocVec(b)) => {
                 return self.subtype(self.pointees[a], self.pointees[b])
                     && self.subtype(self.pointees[b], self.pointees[a]);
             }
@@ -3012,7 +3030,9 @@ impl<'a> Types<'a> {
                 (_, Type::Annotated(b, _)) => self.same_representation(actual, self.pointees[b]),
                 (Type::Box(a), Type::Box(b))
                 | (Type::ArenaBox(a), Type::ArenaBox(b))
-                | (Type::Vec(a), Type::Vec(b)) => {
+                | (Type::Vec(a), Type::Vec(b))
+                | (Type::AllocBox(a), Type::AllocBox(b))
+                | (Type::AllocVec(a), Type::AllocVec(b)) => {
                     self.same_representation(self.pointees[a], self.pointees[b])
                 }
                 _ => {
@@ -4399,7 +4419,11 @@ pub(crate) fn has_borrow(types: &Types<'_>, ty: Type) -> bool {
         match ty {
             Type::Ref(_) | Type::RefMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::Str => true,
             Type::Annotated(p, _) => go(types, types.pointees[p], seen),
-            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
+            Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => {
                 types.enums[id].borrowed
                     || types.enums[id]
@@ -4434,7 +4458,11 @@ fn has_forbidden_record_metadata(types: &Types<'_>, ty: Type) -> bool {
             | Type::Fn(_)
             | Type::Once(_)
             | Type::Task(_) => return true,
-            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => pending.push(types.pointees[p]),
+            Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p) => pending.push(types.pointees[p]),
             Type::Enum(id) | Type::Variants(id, _) => pending.extend(
                 types.enums[id]
                     .variants
@@ -4459,7 +4487,11 @@ pub(crate) fn has_mutable_borrow(types: &Types<'_>, ty: Type) -> bool {
         match ty {
             Type::SliceMut(_) | Type::RefMut(_) => true,
             Type::Annotated(p, _) => go(types, types.pointees[p], seen),
-            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
+            Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => {
                 types.enums[id].mutable_borrow
                     || types.enums[id]
@@ -4488,7 +4520,11 @@ pub(crate) fn contains_linear(types: &Types<'_>, ty: Type) -> bool {
         match ty {
             Type::Once(id) => types.function_types[id].linear,
             Type::Annotated(p, _) => go(types, types.pointees[p], seen),
-            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
+            Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => {
                 types.enums[id].linear
                     || types.enums[id]
@@ -4521,9 +4557,11 @@ fn collect_borrow_lifetimes(types: &Types<'_>, ty: Type, out: &mut BTreeSet<Stri
                     out.insert(name);
                 }
             }
-            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
-                go(types, types.pointees[p], out, seen)
-            }
+            Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p) => go(types, types.pointees[p], out, seen),
             Type::Enum(id) | Type::Variants(id, _) => {
                 let layout = &types.enums[id];
                 out.extend(layout.lifetimes.iter().cloned());
@@ -4577,10 +4615,12 @@ pub(crate) fn is_borrowed_task_exit(types: &Types<'_>, ty: Type) -> bool {
 /// even though its immediate type is not a reference or borrowed record.
 pub(crate) fn is_reference_container(types: &Types<'_>, ty: Type) -> bool {
     match ty {
-        Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => match types.pointees[p] {
-            Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) => true,
-            inner => is_reference_container(types, inner),
-        },
+        Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) | Type::AllocBox(p) | Type::AllocVec(p) => {
+            match types.pointees[p] {
+                Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) => true,
+                inner => is_reference_container(types, inner),
+            }
+        }
         _ => false,
     }
 }
@@ -4611,9 +4651,12 @@ pub(crate) fn contains_task_exit_borrow(types: &Types<'_>, ty: Type) -> bool {
                     .flat_map(|variant| variant.fields.iter())
                     .any(|field| go(types, *field, seen))
             }
-            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) | Type::Task(p) => {
-                go(types, types.pointees[p], seen)
-            }
+            Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p)
+            | Type::Task(p) => go(types, types.pointees[p], seen),
             Type::Union(id) => types.unions[id]
                 .members
                 .iter()
@@ -4669,9 +4712,11 @@ pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {
                 lifetime: types.reference_label_name(label),
                 mutable: matches!(types.pointees[p], Type::RefMut(_)),
             }),
-            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
-                go(types, types.pointees[p], None, path, out)
-            }
+            Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p) => go(types, types.pointees[p], None, path, out),
             Type::Enum(id) | Type::Variants(id, _)
                 if types.enums[id].record || types.enums[id].name == "TaskExit" =>
             {
@@ -4744,7 +4789,11 @@ pub(crate) fn contains_task(types: &Types<'_>, ty: Type) -> bool {
         match ty {
             Type::Task(_) => true,
             Type::Annotated(p, _) => go(types, types.pointees[p], seen),
-            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
+            Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => types.enums[id]
                 .variants
                 .iter()
@@ -4782,6 +4831,9 @@ pub(crate) fn width(
     } else if matches!(ty, Type::Slice(_) | Type::SliceMut(_) | Type::Str) {
         // (data pointer, length, stride, byte-elements flag)
         4
+    } else if matches!(ty, Type::Allocator) {
+        // (allocation code pointer, release code pointer)
+        2
     } else if matches!(ty, Type::Once(_)) {
         // (code pointer, owned environment pointer)
         2

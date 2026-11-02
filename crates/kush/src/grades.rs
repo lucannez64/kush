@@ -1598,6 +1598,43 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
+            ExprKind::AllocatorNew { alloc, free } => {
+                if !self.expr(alloc, Grade::ONE)? || !self.expr(free, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::AllocBoxNew { allocator, value }
+            | ExprKind::AllocBoxTryNew {
+                allocator, value, ..
+            } => {
+                if !self.expr(allocator, Grade::ONE)? || !self.expr(value, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::AllocBoxRead(value) => {
+                if !self.expr(value, multiplier)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::AllocBoxTake(value) => {
+                if !self.expr(value, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::AllocVecNew {
+                allocator,
+                capacity,
+                ..
+            } => {
+                if !self.expr(allocator, Grade::ONE)? {
+                    return Ok(false);
+                }
+                if let Some(capacity) = capacity
+                    && !self.expr(capacity, Grade::ONE)?
+                {
+                    return Ok(false);
+                }
+            }
             ExprKind::VecMap {
                 vector, callbacks, ..
             } => {
