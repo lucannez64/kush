@@ -14,6 +14,7 @@ mod int;
 pub mod interop;
 pub use facts::Certificate;
 pub mod kernel;
+pub mod language_server;
 mod length;
 pub mod lexer;
 pub mod native;

@@ -8,7 +8,8 @@ Active work targets useful applications and reusing existing Rust/C libraries:
 2. Checked host APIs: filesystem, arguments/environment, clocks, processes,
    networking and timeouts, with explicit effects and deterministic cleanup.
 3. Project manifests, reproducible local dependencies, project build/run/test,
-   formatting and basic editor integration.
+   formatting and editor integration (`kush lsp`, diagnostics,
+   go-to-definition, VS Code client).
 4. Rust-first native-library integration, generated checked adapters and C ABI
    support, with ownership, errors, panic boundaries, and executable examples.
    Implemented in this branch for Linux x86-64: `foreign "symbol" fn ...;`
@@ -67,9 +68,10 @@ check/build/run/test, `#[test]` discovery with per-test processes and filtering,
 a comment/string-preserving whitespace formatter with `--check`, process-argument
 forwarding after `--`, and validated `[native]` manifest extension points.
 
-This is not full editor or package tooling: there is no LSP, live diagnostics,
-go-to-definition, registry, workspace, or incremental build, and `[native]`
-entries intentionally fail project build/run/test until the Rust/C bridge lands.
+This is not full editor or package tooling: the LSP now supplies live
+diagnostics and lexical go-to-definition, but not completion, hover, rename,
+references, semantic tokens, or incremental sync; there is no package registry,
+workspace, or incremental build. See [language-server.md](language-server.md).
 Test functions return `Unit` and use the `std.test` assertion helpers; runtime
 failures are reported by test name with captured output, while compile errors
 retain normal source diagnostics. See [projects.md](projects.md) for exact
@@ -80,9 +82,8 @@ limits and integration points.
 Merged `6180569` as `bcc0aa5`: strict Kush.toml manifests, deterministic local
 path dependency resolution and Kush.lock verification, project build/run/check,
 per-process #[test] execution, argument forwarding, conservative whitespace
-formatting, and VS Code syntax highlighting. LSP diagnostics/go-to-definition
-are not implemented. Native manifest entries remain explicit build errors until
-the Rust/C bridge is integrated.
+formatting, and VS Code syntax highlighting. Editor tooling was later extended
+with `kush lsp`; see the language-server section below.
 
 Boat validation: 28 focused project/library/CLI tests pass. The full workspace
 run passed formatting, Clippy, and every target except one stale diagnostic
@@ -175,8 +176,28 @@ empty bodies. It also fixes lone-CR trimming, root basenames, and dotfile
 extensions. Eleven focused host/helper tests and all-targets Clippy pass on
 Boat. Log: `/tmp/kush-boat-http-helper-review-fixes.log`. Sandbox stopped.
 
+## Editor language server
+
+`kush lsp` implements bounded stdio JSON-RPC framing, initialize/shutdown/exit,
+full-sync `didOpen`/`didChange`/`didClose`, versioned diagnostics from unsaved
+overlays, lexical go-to-definition for local bindings, declarations, imported
+items, and `use` module paths, and formatting through the existing
+whitespace-only formatter. It reuses `program::load`,
+`resolve::resolve_program`, and `executable::check_program`; diagnostics do not
+write `Kush.lock` or run Cargo/native code. The VS Code extension uses
+`vscode-languageclient` and a configurable `kush.server.path` while preserving
+the TextMate grammar.
+
+Not implemented and not claimed: completion, hover, rename, references,
+semantic tokens, incremental sync, type-directed method dispatch in
+go-to-definition, or a real pretty-printer. Builtins and virtual standard
+modules return no definition instead of a bogus file path. See
+[language-server.md](language-server.md) for protocol details, UTF-16 handling,
+and the exact limits. Local focused tests pass; the full integrated/Boat gate
+remains parent-owned.
+
 Still unresolved: evaluator-wide TCP/process deadline behavior, secure todo
-file replacement and permissions, full LSP support, and the other documented
+file replacement and permissions, fuller editor features, and the other documented
 readiness limits. These passing tests do not erase outstanding review findings.
 
 ## Declarative Rust adapter integration
@@ -202,4 +223,4 @@ Clippy pass. The sandbox was stopped with its snapshot preserved. Compiler
 source matches `21c566d`; later commits only document output protection and
 validation. Log: `/tmp/kush-boat-bindgen-full.log` (machine-local).
 Independent bindgen review remains pending, along with the host deadline,
-persistence, and LSP work above.
+persistence, and integrated LSP validation above.
