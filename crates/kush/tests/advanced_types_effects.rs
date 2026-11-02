@@ -177,6 +177,88 @@ fn row_constraint_solver_rejects_ambiguity_and_exclusions() {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime-sized inline arrays
+// ---------------------------------------------------------------------------
+
+#[test]
+fn runtime_sized_inline_arrays_push_grow_and_read() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = DynArray.new::<i64, 4>();
+            let mut i = 0;
+            while i < 3 {
+                a = DynArray.push(a, i * 10);
+                i = i + 1;
+            }
+            DynArray.len(&a) + DynArray.get(&a, 0) + DynArray.get(&a, 2)
+        }"#;
+    assert_eq!(value(source), 23);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 23);
+}
+
+#[test]
+fn runtime_sized_arrays_drop_only_the_initialized_owning_prefix() {
+    let source = r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 3> = DynArray.new::<Box<i64>, 3>();
+            let a = DynArray.push(a, Box.new(1));
+            let a = DynArray.push(a, Box.new(2));
+            DynArray.len(&a)
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 2);
+    assert_eq!(stats.allocations, 2);
+    assert_eq!(stats.deallocations, 2);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 2);
+}
+
+#[test]
+fn runtime_sized_arrays_check_capacity_and_bounds_at_runtime() {
+    let overflow = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 1> = DynArray.new::<i64, 1>();
+            let a = DynArray.push(a, 1);
+            let a = DynArray.push(a, 2);
+            DynArray.len(&a)
+        }"#;
+    let program = check(overflow).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(error.message.contains("capacity exceeded"), "{error:?}");
+    let bounds = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 2> = DynArray.new::<i64, 2>();
+            let a = DynArray.push(a, 1);
+            DynArray.get(&a, 1)
+        }"#;
+    let program = check(bounds).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(error.message.contains("index out of bounds"), "{error:?}");
+}
+
+#[test]
+fn runtime_sized_array_layout_contracts_are_checked() {
+    rejects(
+        "fn main() -> i64 ! {alloc, panic} { let a: DynArray<i64, 32> = DynArray.new(); 0 }",
+        "capacity must be 1..31",
+    );
+    rejects(
+        "fn main() -> i64 ! {panic} { let a: DynArray<i64, 0> = DynArray.new(); 0 }",
+        "capacity must be 1..31",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 2] = [1, 2];
+            let a: DynArray<&mut [i64], 1> = DynArray.new();
+            0
+        }"#,
+        "non-borrowed",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Structural records
 // ---------------------------------------------------------------------------
 

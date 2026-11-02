@@ -611,6 +611,12 @@ enum Value {
     Closure {
         captures: Vec<Value>,
     },
+    /// Runtime-sized inline array: `items.len()` is the current length and
+    /// `capacity` is the static bound. Only `items` is initialized.
+    DynArray {
+        items: Vec<Value>,
+        capacity: usize,
+    },
     /// An opaque structured-task handle. The handle owns no heap cell; scope
     /// completion joins the child exactly once.
     Task(usize),
@@ -1329,6 +1335,47 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             )),
         }
     }
+    fn dyn_array_call(
+        &mut self,
+        op: DynArrayOp,
+        element: Type,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value> {
+        let cell = match &args[0] {
+            Value::RecordRef(cell) => cell.clone(),
+            other => {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "internal error: DynArray operation expected a borrow, found {other:?}"
+                    ),
+                ));
+            }
+        };
+        let borrowed = cell.lock().unwrap();
+        let Value::DynArray { items, .. } = &*borrowed else {
+            return Err(Diagnostic::new(
+                span,
+                "internal error: DynArray borrow does not point at a runtime-sized array",
+            ));
+        };
+        match op {
+            DynArrayOp::Len => Ok(Value::Scalar(items.len() as i64)),
+            DynArrayOp::Get => {
+                let index = usize::try_from(args[1].scalar())
+                    .map_err(|_| Diagnostic::new(span, "panic: DynArray index out of bounds"))?;
+                let Some(value) = items.get(index) else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "panic: DynArray index out of bounds",
+                    ));
+                };
+                debug_assert!(!self.program.owns(element));
+                Ok(value.clone())
+            }
+        }
+    }
     fn slice_call(&mut self, op: SliceOp, args: Vec<Value>, span: Span) -> Result<Value> {
         match op {
             SliceOp::Len => {
@@ -1705,6 +1752,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     self.drop_value(payload)?;
                 }
                 self.arena_release(&state)?;
+            }
+            Value::DynArray { items, .. } => {
+                for item in items.into_iter().rev() {
+                    self.drop_value(item)?;
+                }
             }
             // A slice view borrows its base and owns nothing.
             Value::Slice { .. } => {}
@@ -2087,6 +2139,40 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         }
                     }
                 }
+            }
+            ExprKind::DynArrayNew { capacity, .. } => Value::DynArray {
+                items: Vec::new(),
+                capacity: *capacity,
+            },
+            ExprKind::DynArrayPush {
+                array: array_expr,
+                value: value_expr,
+                capacity,
+                ..
+            } => {
+                let mut array = value!(self.expr(array_expr, frame));
+                let value = value!(self.expr(value_expr, frame));
+                self.consume(array_expr, frame);
+                self.consume(value_expr, frame);
+                let Value::DynArray {
+                    items,
+                    capacity: actual,
+                } = &mut array
+                else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: DynArray.push received a non-array value",
+                    ));
+                };
+                debug_assert_eq!(actual, capacity);
+                if items.len() >= *capacity {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "panic: DynArray capacity exceeded",
+                    ));
+                }
+                items.push(value);
+                array
             }
             ExprKind::Local(slot) | ExprKind::Peek(slot) => {
                 self.materialize(frame.locals[*slot].clone())
@@ -2659,6 +2745,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Target::Str(op) => self.str_call(*op, values, expr.span)?,
                     Target::Vec(op, _) => self.vec_call(*op, values, expr.span)?,
                     Target::Slice(op, _) => self.slice_call(*op, values, expr.span)?,
+                    Target::DynArray(op, element) => {
+                        self.dyn_array_call(*op, *element, values, expr.span)?
+                    }
                     Target::Function(index) => self.call(*index, values)?,
                     Target::Panic => return Err(panic()),
                     Target::Print => {

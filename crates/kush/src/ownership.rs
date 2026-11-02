@@ -2519,6 +2519,9 @@ impl Checker<'_> {
             ExprKind::Construct { fields, .. } => {
                 fields.iter().any(|field| self.value_moves_linear(field))
             }
+            ExprKind::DynArrayPush { array, value, .. } => {
+                self.value_moves_linear(array) || self.value_moves_linear(value)
+            }
             ExprKind::FnValue { captures, .. } => captures
                 .iter()
                 .any(|capture| self.value_moves_linear(capture)),
@@ -3850,6 +3853,15 @@ impl Checker<'_> {
                     self.expr(capture)?;
                 }
             }
+            ExprKind::DynArrayNew { .. } => {}
+            ExprKind::DynArrayPush {
+                array, value, ..
+            } => {
+                // The array is consumed and returned in the same inline
+                // storage; the element is evaluated only after the array.
+                self.expr(array)?;
+                self.expr(value)?;
+            }
             ExprKind::Construct {
                 enum_id,
                 fields,
@@ -4327,6 +4339,11 @@ pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
                     walk(field, out);
                 }
             }
+            ExprKind::DynArrayNew { .. } => {}
+            ExprKind::DynArrayPush { array, value, .. } => {
+                walk(array, out);
+                walk(value, out);
+            }
             ExprKind::FnValue { captures, .. } => {
                 for capture in captures {
                     walk(capture, out);
@@ -4528,6 +4545,11 @@ fn expr_live(
             live = expr_live(owner, &live, views, heads, exits, out);
         }
         ExprKind::ArenaNew => {}
+        ExprKind::DynArrayNew { .. } => {}
+        ExprKind::DynArrayPush { array, value, .. } => {
+            live = expr_live(value, live_after, views, heads, exits, out);
+            live = expr_live(array, &live, views, heads, exits, out);
+        }
         ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
             live = expr_live(right, live_after, views, heads, exits, out);
             live = expr_live(left, &live, views, heads, exits, out);

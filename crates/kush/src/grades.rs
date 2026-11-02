@@ -1285,7 +1285,15 @@ impl<'a> Checker<'a> {
     fn expr(&mut self, expr: &Expr, multiplier: Grade) -> Result<bool> {
         self.tick(expr.span)?;
         match &expr.kind {
-            ExprKind::Constant(_) | ExprKind::BytesLiteral(_) => {}
+            ExprKind::Constant(_) | ExprKind::BytesLiteral(_) | ExprKind::DynArrayNew { .. } => {}
+            ExprKind::DynArrayPush { array, value, .. } => {
+                if !self.expr(array, multiplier)? {
+                    return Ok(false);
+                }
+                if !self.expr(value, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
             ExprKind::Local(slot) => {
                 let amount = if self.moves(self.function.locals[*slot].ty) {
                     Grade::ONE

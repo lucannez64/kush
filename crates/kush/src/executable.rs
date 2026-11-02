@@ -271,6 +271,9 @@ pub(crate) enum Target {
     Vec(VecOp, Type),
     /// Slice operation with its element type.
     Slice(SliceOp, Type),
+    /// Runtime-sized inline array read: `(len, capacity?)` with the element
+    /// type used to widen the loaded words.
+    DynArray(DynArrayOp, Type),
     Function(usize),
     Print,
     /// Print any fixed-width integer in decimal.
@@ -433,6 +436,14 @@ pub(crate) enum SliceOp {
     /// Checked write through an exclusive mutable view; panics out of bounds.
     Set,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DynArrayOp {
+    /// Runtime length stored in word zero.
+    Len,
+    /// Checked element read; bounds are checked against the runtime length.
+    Get,
+}
+
 #[derive(Debug)]
 pub(crate) enum ExprKind {
     Constant(i64),
@@ -586,6 +597,16 @@ pub(crate) enum ExprKind {
         callbacks: Vec<Expr>,
         source: Type,
         target: Type,
+    },
+    /// Construct an empty runtime-sized inline array with zeroed capacity.
+    DynArrayNew { element: Type, capacity: usize },
+    /// Append one element, consuming and returning the same inline storage.
+    /// The runtime length check panics before any out-of-capacity store.
+    DynArrayPush {
+        array: Box<Expr>,
+        value: Box<Expr>,
+        element: Type,
+        capacity: usize,
     },
     /// Read a local without moving it (only to project copyable fields).
     Peek(usize),
@@ -12033,6 +12054,9 @@ impl Checker<'_, '_> {
             | ExprKind::ArenaBoxTake(value) => self.value_moves_linear(value),
             // In-place map returns the same vector owner it consumed.
             ExprKind::VecMap { vector, .. } => self.value_moves_linear(vector),
+            ExprKind::DynArrayPush { array, value, .. } => {
+                self.value_moves_linear(array) || self.value_moves_linear(value)
+            }
             // A task/scope whose result carries an owning or linear obligation
             // transfers it to the handle (or to the joined TaskExit).
             ExprKind::TaskSpawn { obligation, .. }
@@ -12118,6 +12142,10 @@ impl Checker<'_, '_> {
                     value: payload,
                 } => find(checker, owner).or_else(|| find(checker, payload)),
                 ExprKind::ArenaNew => None,
+                ExprKind::DynArrayPush { array, value, .. } => {
+                    find(checker, array).or_else(|| find(checker, value))
+                }
+                ExprKind::DynArrayNew { .. } => None,
                 ExprKind::VecMap {
                     vector, callbacks, ..
                 } => find(checker, vector).or_else(|| {
@@ -13236,6 +13264,15 @@ impl Checker<'_, '_> {
                     }
                     if binding.kind == BindingKind::Builtin && binding.name.starts_with("Task.") {
                         return c.task_call(&binding.name.clone(), explicit, arguments, expected, span);
+                    }
+                    if binding.kind == BindingKind::Builtin && binding.name.starts_with("DynArray.") {
+                        return c.dyn_array_call(
+                            &binding.name.clone(),
+                            explicit,
+                            arguments,
+                            expected,
+                            span,
+                        );
                     }
                     if binding.kind == BindingKind::Builtin && binding.name.starts_with("Vec.") || binding.name == "Bytes.at" {
                         return c.vec_call(&binding.name.clone(), explicit, arguments, expected, span);
@@ -18444,6 +18481,195 @@ impl Checker<'_, '_> {
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
+        }
+    }
+    /// Runtime-sized inline array constructors and reads. The capacity is a
+    /// compile-time bound; only the length is dynamic. `DynArray.new` and
+    /// `DynArray.push` preserve the inline representation (no heap allocation),
+    /// while `DynArray.len`/`DynArray.get` borrow the value for the call, so a
+    /// view into the dynamic stack storage cannot escape its lexical owner.
+    fn dyn_array_call(
+        &mut self,
+        name: &str,
+        explicit: Option<&[ast::Type]>,
+        arguments: &[ast::Expr],
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        let from_expected = expected.and_then(|ty| {
+            ty.layout()
+                .and_then(|id| self.types.enums[id].dynamic_array)
+        });
+        let explicit_layout = match explicit {
+            Some([element_ty, capacity_ty]) => {
+                let element = self.ty(element_ty)?;
+                let element = self.types.full(element, span)?;
+                let capacity = crate::length::eval_type(
+                    self.resolution,
+                    self.logical,
+                    &self.consts,
+                    capacity_ty,
+                )?;
+                Some((element, capacity))
+            }
+            Some(_) => {
+                return Err(Diagnostic::new(
+                    span,
+                    "DynArray expects two arguments: an element type and a compile-time capacity",
+                ));
+            }
+            None => None,
+        };
+        match name {
+            "DynArray.new" => {
+                let (element, capacity) = explicit_layout.or(from_expected).ok_or_else(|| {
+                    Diagnostic::new(
+                        span,
+                        "cannot infer the DynArray element type and capacity; annotate the binding or write DynArray.new::<T, capacity>()",
+                    )
+                })?;
+                let ty = self.types.dynamic_array(element, capacity, span)?;
+                if !arguments.is_empty() {
+                    return Err(Diagnostic::new(
+                        span,
+                        "DynArray.new takes no value arguments; push elements with DynArray.push",
+                    ));
+                }
+                let value = Expr {
+                    kind: ExprKind::DynArrayNew { element, capacity },
+                    ty,
+                    span,
+                    resource: None,
+                };
+                match expected {
+                    Some(expected) => self.coerce(value, expected, span),
+                    None => Ok(value),
+                }
+            }
+            "DynArray.push" => {
+                if explicit.is_some() {
+                    return Err(Diagnostic::new(
+                        span,
+                        "DynArray.push infers its element type from the array argument",
+                    ));
+                }
+                if arguments.len() != 2 {
+                    return Err(Diagnostic::new(
+                        span,
+                        "DynArray.push takes the array and one element",
+                    ));
+                }
+                let array = if let Some(expected) = expected {
+                    self.expr_expected(&arguments[0], Some(expected))?
+                } else {
+                    self.expr(&arguments[0])?
+                };
+                let Some((element, capacity)) = array
+                    .ty
+                    .layout()
+                    .and_then(|id| self.types.enums[id].dynamic_array)
+                else {
+                    return Err(Diagnostic::new(
+                        arguments[0].span,
+                        "DynArray.push requires a runtime-sized inline array",
+                    ));
+                };
+                let ty = array.ty;
+                let value = self.expr_expected(&arguments[1], Some(element))?;
+                self.expect(value.ty, element, arguments[1].span)?;
+                self.require(PANIC, span)?;
+                let value = Expr {
+                    kind: ExprKind::DynArrayPush {
+                        array: Box::new(array),
+                        value: Box::new(value),
+                        element,
+                        capacity,
+                    },
+                    ty,
+                    span,
+                    resource: None,
+                };
+                match expected {
+                    Some(expected) => self.coerce(value, expected, span),
+                    None => Ok(value),
+                }
+            }
+            "DynArray.len" | "DynArray.get" => {
+                if explicit.is_some() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("{name} takes no type arguments"),
+                    ));
+                }
+                let wanted = if name == "DynArray.get" { 2 } else { 1 };
+                if arguments.len() != wanted {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("{name} takes {wanted} argument(s)"),
+                    ));
+                }
+                let array = self.expr(&arguments[0])?;
+                let Some(pointer) = array.ty.ref_pointee() else {
+                    return Err(Diagnostic::new(
+                        arguments[0].span,
+                        format!("{name} requires a '&DynArray<T, capacity>' borrow"),
+                    ));
+                };
+                let ty = self.types.pointees[pointer];
+                let Some((element, _capacity)) = ty
+                    .layout()
+                    .and_then(|id| self.types.enums[id].dynamic_array)
+                else {
+                    return Err(Diagnostic::new(
+                        arguments[0].span,
+                        format!("{name} requires a borrow of a runtime-sized inline array"),
+                    ));
+                };
+                if name == "DynArray.len" {
+                    let value = Expr {
+                        kind: ExprKind::Call(
+                            Target::DynArray(DynArrayOp::Len, element),
+                            vec![array],
+                        ),
+                        ty: Type::I64,
+                        span,
+                        resource: None,
+                    };
+                    return match expected {
+                        Some(expected) => self.coerce(value, expected, span),
+                        None => Ok(value),
+                    };
+                }
+                if self.owned_type(element)
+                    || self.linear_type(element)
+                    || element.is_view()
+                {
+                    return Err(Diagnostic::new(
+                        span,
+                        "DynArray.get copies its element; owning, linear, and view elements need an explicit consuming operation",
+                    ));
+                }
+                self.require(PANIC, span)?;
+                let index = self.expr_expected(&arguments[1], Some(Type::I64))?;
+                self.expect(index.ty, Type::I64, arguments[1].span)?;
+                let value = Expr {
+                    kind: ExprKind::Call(
+                        Target::DynArray(DynArrayOp::Get, element),
+                        vec![array, index],
+                    ),
+                    ty: element,
+                    span,
+                    resource: None,
+                };
+                match expected {
+                    Some(expected) => self.coerce(value, expected, span),
+                    None => Ok(value),
+                }
+            }
+            _ => Err(Diagnostic::new(
+                span,
+                format!("unsupported DynArray operation '{name}'"),
+            )),
         }
     }
     fn vec_call(

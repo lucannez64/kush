@@ -7,8 +7,8 @@ use crate::int::IntKind;
 use crate::{
     Diagnostic, Span,
     executable::{
-        self as ex, BytesOp, Coercion, Executable, Expr, ExprKind, IoOp, Pattern, SliceOp, StrOp,
-        StringOp, Target, Type, VecOp,
+        self as ex, BytesOp, Coercion, DynArrayOp, Executable, Expr, ExprKind, IoOp, Pattern,
+        SliceOp, StrOp, StringOp, Target, Type, VecOp,
     },
     lexer::Kind,
 };
@@ -2035,32 +2035,64 @@ fn synthesize_drops(
                 builder.ins().return_(&[]);
             }
             Type::Enum(index) => {
-                for (tag, variant) in program.enums[index].variants.iter().enumerate() {
-                    let hit = builder.create_block();
-                    let next = builder.create_block();
-                    let condition = builder.ins().icmp_imm_s(IntCC::Equal, args[0], tag as i64);
-                    builder.ins().brif(condition, hit, &[], next, &[]);
-                    builder.switch_to_block(hit);
-                    let mut offset = 1;
-                    let mut fields = Vec::new();
-                    for ty in &variant.fields {
-                        fields.push((*ty, offset));
-                        offset += program.width(*ty);
-                    }
-                    for (ty, offset) in fields.into_iter().rev() {
-                        if program.owns(ty) {
+                if let Some((element, capacity)) = program.enums[index].dynamic_array {
+                    if program.owns(element) {
+                        // The runtime length is word zero; fields at or beyond
+                        // it are uninitialized and must never be interpreted.
+                        // Words arrive as function arguments, so the capacity
+                        // bound is expanded into a guard per slot instead of a
+                        // dynamic index into SSA values.
+                        let width = program.width(element);
+                        let length = args[0];
+                        for slot in (0..capacity).rev() {
+                            let active = builder.ins().icmp_imm_s(
+                                IntCC::UnsignedGreaterThan,
+                                length,
+                                slot as i64,
+                            );
+                            let body = builder.create_block();
+                            let next = builder.create_block();
+                            builder.ins().brif(active, body, &[], next, &[]);
+                            builder.switch_to_block(body);
                             emit_drop(
                                 &mut builder,
                                 module,
-                                ids[&ty.full()],
-                                &args[offset..offset + program.width(ty)],
+                                ids[&element.full()],
+                                &args[1 + slot * width..1 + (slot + 1) * width],
                             );
+                            builder.ins().jump(next, &[]);
+                            builder.switch_to_block(next);
                         }
                     }
                     builder.ins().return_(&[]);
-                    builder.switch_to_block(next);
+                } else {
+                    for (tag, variant) in program.enums[index].variants.iter().enumerate() {
+                        let hit = builder.create_block();
+                        let next = builder.create_block();
+                        let condition = builder.ins().icmp_imm_s(IntCC::Equal, args[0], tag as i64);
+                        builder.ins().brif(condition, hit, &[], next, &[]);
+                        builder.switch_to_block(hit);
+                        let mut offset = 1;
+                        let mut fields = Vec::new();
+                        for ty in &variant.fields {
+                            fields.push((*ty, offset));
+                            offset += program.width(*ty);
+                        }
+                        for (ty, offset) in fields.into_iter().rev() {
+                            if program.owns(ty) {
+                                emit_drop(
+                                    &mut builder,
+                                    module,
+                                    ids[&ty.full()],
+                                    &args[offset..offset + program.width(ty)],
+                                );
+                            }
+                        }
+                        builder.ins().return_(&[]);
+                        builder.switch_to_block(next);
+                    }
+                    builder.ins().trap(TrapCode::unwrap_user(2));
                 }
-                builder.ins().trap(TrapCode::unwrap_user(2));
             }
             Type::Union(index) => {
                 for (tag, member) in program.unions[index].members.iter().enumerate() {
@@ -3554,6 +3586,47 @@ impl Generator<'_, '_> {
                     }
                 }
             }
+            ExprKind::DynArrayNew { element, capacity } => {
+                let width = self.program.width(*element);
+                return Some(vec![self.constant(0); 1 + width * capacity]);
+            }
+            ExprKind::DynArrayPush {
+                array,
+                value,
+                element,
+                capacity,
+            } => {
+                let values = lower!(self.expr(array));
+                self.consume(array);
+                let item = lower!(self.expr(value));
+                self.consume(value);
+                let element_width = self.program.width(*element);
+                let length = values[0];
+                let full = self.builder.ins().icmp_imm_s(
+                    IntCC::UnsignedGreaterThanOrEqual,
+                    length,
+                    *capacity as i64,
+                );
+                self.guard(full);
+                let mut out = values.clone();
+                let next = self.builder.ins().iadd_imm_s(length, 1);
+                out[0] = next;
+                // The inline storage is represented as SSA words, not memory.
+                // Select the active capacity slot without a runtime index into
+                // the value vector: each slot compares the length once.
+                for slot in 0..*capacity {
+                    let active = self.builder.ins().icmp_imm_s(
+                        IntCC::Equal,
+                        length,
+                        slot as i64,
+                    );
+                    for (word, value) in item.iter().take(element_width).enumerate() {
+                        let index = 1 + slot * element_width + word;
+                        out[index] = self.builder.ins().select(active, *value, out[index]);
+                    }
+                }
+                return Some(out);
+            }
             ExprKind::Project(base, offset) => {
                 let values = lower!(self.expr(base));
                 let width = self.program.width(expr.ty);
@@ -4316,6 +4389,9 @@ impl Generator<'_, '_> {
                     Target::Slice(op, element) => {
                         return Some(self.slice_call(*op, *element, values));
                     }
+                    Target::DynArray(op, element) => {
+                        return Some(self.dyn_array_call(*op, *element, values));
+                    }
                     Target::Print => self.runtime_call(self.print, &values),
                     Target::PrintInt(kind) => {
                         let callee = if *kind == IntKind::U64 {
@@ -4509,6 +4585,39 @@ impl Generator<'_, '_> {
             }
             StrOp::ToString => {
                 vec![self.runtime_call(self.str_to_string, &[pointer, length])]
+            }
+        }
+    }
+    fn dyn_array_call(&mut self, op: DynArrayOp, element: Type, values: Words) -> Words {
+        let pointer = values[0];
+        let length = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), pointer, 0);
+        match op {
+            DynArrayOp::Len => vec![length],
+            DynArrayOp::Get => {
+                let index = values[1];
+                let negative = self.builder.ins().icmp_imm_s(IntCC::SignedLessThan, index, 0);
+                let past_end = self
+                    .builder
+                    .ins()
+                    .icmp(IntCC::UnsignedGreaterThanOrEqual, index, length);
+                let bad = self.builder.ins().bor(negative, past_end);
+                self.guard(bad);
+                let width = self.program.width(element);
+                let stride = self.builder.ins().imul_imm_s(index, (width * 8) as i64);
+                let base = self.builder.ins().iadd(pointer, stride);
+                (0..width)
+                    .map(|word| {
+                        self.builder.ins().load(
+                            I64,
+                            ir::MemFlagsData::new(),
+                            base,
+                            (8 + word * 8) as i32,
+                        )
+                    })
+                    .collect()
             }
         }
     }

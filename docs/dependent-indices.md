@@ -223,10 +223,12 @@ machine `i64` remain distinct; there is no implicit conversion.
 This is a usable restricted dependent fragment, not the full calculus in the
 [v0.1 design](spec-v0.1.md):
 
-- **No runtime-sized inline arrays.** `[T; n]` with a runtime `n` is rejected
-  rather than lowering to a dynamic stack layout. Use owned `Vec<T>` or an
-  immutable `&[T]` view for a length that is not statically known. There is no
-  implicit conversion from that representation to a `[T; N]`.
+- **No runtime-sized `[T; n]` layout.** `[T; n]` with a runtime `n` is still
+  rejected rather than lowering to a dynamic stack layout. The separate
+  `DynArray<T, capacity>` type provides inline storage with a compile-time
+  capacity and a runtime length, checked in both backends; see
+  [runtime-sized inline arrays](dynamic-arrays.md). There is no implicit
+  conversion between `DynArray`, `[T; N]`, `Vec<T>`, or a slice.
 - Length inference reads an actual inline array, a literal array, or a generic
   alias whose expansion is an array; it does not solve general equations such as
   `N + 1 = 3`, and there is no partial specialization (`f::<i64>` with `N`

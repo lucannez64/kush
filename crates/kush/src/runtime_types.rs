@@ -86,6 +86,10 @@ pub(crate) struct Enum {
     /// leaf. Such records are affine even when they own no heap storage.
     pub mutable_borrow: bool,
     pub array: Option<(Type, usize)>,
+    /// A runtime-sized inline array: fixed compile-time capacity and a runtime
+    /// length in word zero. Fields beyond the length are uninitialized and must
+    /// never be dropped or read.
+    pub dynamic_array: Option<(Type, usize)>,
     /// An anonymous tuple layout; `arguments` are its element types.
     pub tuple: bool,
     /// Declared `#[linear]`: values must be consumed, never implicitly dropped.
@@ -766,6 +770,88 @@ impl<'a> Types<'a> {
             mutable_borrow: false,
             linear: false,
             array: Some((element, length)),
+            dynamic_array: None,
+            tuple: false,
+            structural: false,
+        });
+        Ok(Type::Enum(id))
+    }
+    /// Intern a runtime-sized inline array `DynArray<T, capacity>`. Word zero is
+    /// the runtime length; the remaining `capacity * width(T)` words are inline
+    /// storage. The capacity is a compile-time bound, so the layout is finite
+    /// and a value may be moved or returned without a hidden stack pointer.
+    pub fn dynamic_array(
+        &mut self,
+        element: Type,
+        capacity: usize,
+        span: Span,
+    ) -> Result<Type> {
+        if capacity == 0 || capacity > 31 {
+            return Err(Diagnostic::new(
+                span,
+                "DynArray capacity must be 1..31 (word zero stores the runtime length and the 32-word layout limit applies)",
+            ));
+        }
+        if matches!(
+            element,
+            Type::Ref(_)
+                | Type::RefMut(_)
+                | Type::Slice(_)
+                | Type::SliceMut(_)
+                | Type::Str
+                | Type::Never
+        ) || has_borrow(self, element)
+        {
+            return Err(Diagnostic::new(
+                span,
+                "DynArray elements must be concrete non-borrowed values; a view cannot escape the inline storage",
+            ));
+        }
+        if contains_task(self, element) || contains_linear(self, element) {
+            return Err(Diagnostic::new(
+                span,
+                "DynArray elements cannot be task handles or carry linear obligations; use an explicit record/vector for owned linear payloads",
+            ));
+        }
+        let width = self.width(element);
+        if 1 + width * capacity > MAX_WORDS {
+            return Err(Diagnostic::new(
+                span,
+                "DynArray exceeds the 32-word inline layout budget; reduce its capacity or element width",
+            ));
+        }
+        if let Some(id) = self
+            .enums
+            .iter()
+            .position(|e| e.dynamic_array == Some((element, capacity)))
+        {
+            return Ok(Type::Enum(id));
+        }
+        if self.enums.len() >= 256 {
+            return Err(Diagnostic::new(span, "DynArray layout budget exhausted"));
+        }
+        let id = self.enums.len();
+        self.enums.push(Enum {
+            definition: usize::MAX,
+            name: format!("DynArray<{}; {}>", self.name(element), capacity),
+            arguments: vec![element],
+            consts: vec![capacity],
+            lifetimes: vec![],
+            variants: vec![Variant {
+                name: "DynArray".into(),
+                fields: vec![element; capacity],
+                tuple: false,
+                names: vec![],
+            }],
+            words: 1 + width * capacity,
+            result: None,
+            record: true,
+            field_lifetimes: vec![None; capacity],
+            borrowed: false,
+            mutable_borrow: false,
+            linear: false,
+            array: None,
+            dynamic_array: Some((element, capacity)),
             tuple: false,
             structural: false,
         });
@@ -870,6 +956,7 @@ impl<'a> Types<'a> {
             mutable_borrow,
             linear,
             array: None,
+            dynamic_array: None,
             tuple: false,
             structural: true,
         });
@@ -955,6 +1042,7 @@ impl<'a> Types<'a> {
             mutable_borrow: false,
             linear,
             array: None,
+            dynamic_array: None,
             tuple: true,
             structural: false,
         });
@@ -1326,7 +1414,8 @@ impl<'a> Types<'a> {
     }
     fn layout_name(&self, id: usize) -> String {
         let layout = &self.enums[id];
-        if layout.tuple || layout.array.is_some() || layout.structural {
+        if layout.tuple || layout.array.is_some() || layout.dynamic_array.is_some() || layout.structural
+        {
             return layout.name.clone();
         }
         if layout.arguments.is_empty() && layout.consts.is_empty() && layout.lifetimes.is_empty() {
@@ -1886,6 +1975,28 @@ impl<'a> Types<'a> {
                     depth,
                     ty.span,
                 );
+            }
+            if b.kind == BindingKind::Builtin && b.name == "DynArray" {
+                if !lifetime_arguments.is_empty() {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "builtin 'DynArray' does not take lifetime arguments",
+                    ));
+                }
+                if arguments.len() != 2 {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "DynArray expects an element type and a compile-time capacity, as in DynArray<i64, 8>",
+                    ));
+                }
+                let element = self.lower(arguments[0], substitution, depth + 1)?;
+                let capacity = crate::length::eval_type(
+                    self.resolution,
+                    self.logical,
+                    &substitution.consts,
+                    arguments[1],
+                )?;
+                return self.dynamic_array(element, capacity, ty.span);
             }
             if b.kind == BindingKind::Builtin
                 && matches!(b.name.as_str(), "Box" | "Vec" | "Task" | "ArenaBox")
@@ -2837,6 +2948,7 @@ impl<'a> Types<'a> {
             words: 0,
             result: None,
             array: None,
+            dynamic_array: None,
             tuple: false,
             record: def.fields.is_some(),
             field_lifetimes: Vec::new(),
@@ -3131,6 +3243,7 @@ impl<'a> Types<'a> {
                 words,
                 result,
                 array: None,
+                dynamic_array: None,
                 tuple: false,
                 record: def.fields.is_some(),
                 field_lifetimes,
