@@ -32,11 +32,15 @@ fn main() -> i64 ! {alloc, panic, suspend} {
 - `Task.join` produces `TaskExit<T>`. When `T` carries the obligation, the
   completed arm's payload is linear and must be consumed; the cancelled arm has
   no payload.
-- A copyable `@[1]` task result is still rejected: cancellation has no place to
-  deliver the must-use observation. Return an owning value or observe it inside
-  the task.
+- A copyable `@[1]` task result carries a must-join/must-use obligation: the
+  handle is linear, joining produces a must-use `TaskExit<T>`, and a joined
+  exit must be matched or observed. Cancellation delivers a completed copyable
+  payload as `Completed(payload)` so the observation is never lost. The
+  obligation is tracked by the grade pass in the same way as any other copyable
+  exactly-use result, so it survives `let`, blocks, branches, match arms, and
+  loop exits.
 - `Task.scope` itself runs in the current task, so its result may carry a linear
-  obligation directly; the enclosing task result rules apply.
+  or copyable must-use obligation directly; the enclosing result rules apply.
 
 ## Cancellation policy
 
@@ -45,11 +49,11 @@ normal return/`?` path after whatever checkpoints it chooses. Ownership already
 requires every captured or local linear resource to be consumed or transferred
 on that exit path.
 
-When a cancellation request is set and the body still completes with an owning
-or intrinsically linear payload, the runtime returns `Completed(payload)`
-instead of `Cancelled`. The joiner must consume the payload. This is the
-explicit cleanup/transfer contract; no linear payload is dropped merely because
-a cancellation bit was set.
+When a cancellation request is set and the body still completes with an owning,
+intrinsically linear, or copyable must-use payload, the runtime returns
+`Completed(payload)` instead of `Cancelled`. The joiner must consume or observe
+the payload. This is the explicit cleanup/transfer contract; no obligation is
+dropped merely because a cancellation bit was set.
 
 ```kush
 fn make() -> Box<i64> @[1] ! {alloc, panic, suspend} {
@@ -96,7 +100,8 @@ unchanged.
 ## Tests
 
 `crates/kush/tests/linear_tasks.rs` covers normal join transfer, cancellation
-transfer, linear captures, rejected ignored/unjoined handles, linear scope
-results, and copyable-task-result rejection in both backends.
-`crates/kush/tests/async.rs` and `linear_resources.rs` retain the affine
-cancellation and linear-result boundaries.
+transfer (owning and copyable), linear captures, rejected ignored/unjoined
+handles, linear scope results, copyable must-use scope results, and must-use
+join results in both backends. `crates/kush/tests/async.rs` and
+`linear_resources.rs` retain the affine cancellation and linear-result
+boundaries.

@@ -218,10 +218,10 @@ behavior and ordinary finite-input tests.
   networking.
 - Cancellation is cooperative; no masking regions or cancellation handlers yet.
 - No nonblocking stream API; blocking I/O may stall the scheduler.
-- Task bodies may return owning/linear results only through explicit `@[1]` (or
-  intrinsically linear) contracts; those handles are linear and must be joined.
-  Copyable must-use task results remain rejected. Handles still cannot escape
-  their scope through data.
+- Task bodies may return owning/linear results or copyable must-use observations
+  through explicit `@[1]` (or intrinsically linear) contracts; those handles are
+  linear and must be joined. A cancelled completion still delivers the payload
+  as `Completed`. Handles still cannot escape their scope through data.
 - Fixed native limits: 255 spawned tasks per program execution (joined task IDs
   are not reused), 16 nested scopes per task, 64 children per
   scope frame, 256 KiB task stacks. Exceeding a limit panics rather than

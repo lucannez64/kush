@@ -166,10 +166,10 @@ obligation only when the success payload is owning; a copyable success payload
 is rejected instead of becoming affine.
 
 Borrowed views and exclusive capabilities are never made owning by a result
-grade. Task results remain rejected: cancellation would have to discard the
-obligation, and no complete cancel/cleanup contract exists yet. The existing
-conservative rejection of linear owners through `String.bytes` and
-`String.from_utf8` is unchanged.
+grade. Task results transfer owning/linear obligations and copyable must-use
+observations; a cancellation-requested completion delivers the payload as
+`Completed` and such handles are linear. The existing conservative rejection of
+linear owners through `String.bytes` and `String.from_utf8` is unchanged.
 
 ## Uses, demands, and calls
 
@@ -439,13 +439,15 @@ deferred:
   comparison/join structures beyond that semiring are still missing.
 - General graded modality introduction/elimination beyond binding, parameter,
   and result grades.
-- A principal grade solver. The implemented solver handles a single-occurrence
-  affine fragment from explicitly graded arguments and expected arrows; all
-  other abstract grades still require explicit specialization. See
+- A principal grade solver. The implemented solver handles simultaneous
+  natural constraints (including repeated/nonlinear occurrences with a proven
+  target bound) and unique finite-algebra enumeration from explicitly graded
+  arguments and expected arrows; ambiguous or arbitrary multivariate
+  Diophantine systems still require explicit specialization. See
   [general grade inference](grade-inference.md).
-- Result grades beyond the implemented `@[1]` owning/intrinsic-linear and
-  copyable must-use subsets: general inference, custom algebras, or
-  unrestricted grade polymorphism; and grade-zero result erasure.
+- Result grades beyond the implemented `@[1]` owning/intrinsic-linear,
+  copyable must-use, and copyable `@[0]` erasure subsets: general inference,
+  unrestricted grade polymorphism, and owning/linear result erasure.
 - General dependent grade indices, grades mentioning runtime values, and
   erasure/relevance interaction with graded dependent types.
 - Full dependent algebraic subtyping combined with grades, general borrowed-return
@@ -455,12 +457,12 @@ deferred:
 - A machine-checked soundness proof for the combination of grades, affine
   ownership, dependent erasure, effect polymorphism, and subtyping.
 - Forced cancellation delivery/unwinding. Cooperative cancellation already
-  transfers completed owning/linear task results and checks their handles; see
-  [linear task results](linear-task-results.md). Copyable must-use task results
-  remain rejected.
-- Grade-zero result erasure and erasure of an already-passed ABI argument. Local
-  `@[0]` bindings are erased; parameter slots keep the call ABI but remain
-  unobservable. See [grade-zero runtime erasure](grade-zero-erasure.md).
+  transfers completed owning/linear/copyable must-use task results and checks
+  their handles; see [linear task results](linear-task-results.md).
+- Erasure of parameters and results beyond the implemented physical ABI
+  rewrite: owning/linear parameters and results are deliberately rejected
+  instead of discarded, and vector-map callbacks cannot erase observed
+  elements. See [grade-zero runtime erasure](grade-zero-erasure.md).
 - A precise effect-sensitive accounting for side-effecting argument blocks. The
   current multiplicative rule is conservative.
 - Loop analyses stronger than "restore the loop-head count" or "all breaks

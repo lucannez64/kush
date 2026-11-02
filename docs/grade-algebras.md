@@ -55,9 +55,17 @@ table rows, and a wrong `zero`/`one` are rejected.
   must-use copyable), because it is the algebra's multiplicative identity.
   `@[Algebra.Zero]` is the algebra's zero and is subject to the same
   observation restriction as builtin `@[0]`.
-- Grade inference currently solves builtin finite/natural equations only.
-  Custom-algebra grades are accepted with explicit specialization; a custom
-  target is outside the affine solver rather than being guessed.
+- A declaration whose `zero` and `one` are the same element is rejected: an
+  erasure contract and an exact-observation contract would be indistinguishable.
+- An idempotent `one` (`one + one = one`) is a valid semiring, but it is not the
+  builtin exactly-once observation. A copyable result bound from
+  `@[Algebra.One]` keeps that algebra element as its local grade, so one or more
+  observations in the algebra satisfy the must-use contract. Builtin `@[1]`
+  alone means exactly one physical observation.
+- Grade inference solves a finite-algebra equation by exhaustive enumeration of
+  the validated carrier (at most 64 elements) and accepts only a unique
+  solution; see [grade inference](grade-inference.md). Unrelated algebra leaves
+  mixed in one equation are outside the fragment.
 - Elements are compile-time metadata. They add no runtime representation, tag,
   allocation, ABI change, or runtime check.
 
@@ -81,4 +89,5 @@ unchanged. An ownership regression checks repeated public check/drop cycles.
 `crates/kush/tests/grade_algebras.rs` covers a saturated three-level algebra in
 both backends, algebra elements as parameter and result contracts, exact-use
 failures, bare/unknown element names, missing and repeated table rows,
-identity/law violations, duplicate declarations, and malformed declarations.
+identity/law violations, duplicate declarations, malformed declarations,
+idempotent-one observation semantics, and rejection of identical zero/one.

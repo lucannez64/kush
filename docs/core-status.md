@@ -331,22 +331,23 @@ no general disjoint-range inference beyond checked `Slice.split_at_mut` pairs,
 nominal records, explicit
 specialization when inference is ambiguous, and
 no overload representation for incomparable callable intersections.
-Explicit `@[1]` result contracts are implemented for owning and intrinsically
-linear results: a factory or transfer function hands a linear obligation to its
-caller, and an ungraded result can no longer make a binding-based `@[1]` owner
-affine. Result grades are static metadata erased at runtime, are threaded
-through generic functions, lambdas, arrow types, trait/method contracts,
-indirect calls, aliases, and adapters, and are matched exactly by subtyping.
-Only `@[1]` is supported: `@[0]`, `> 1`, `many`, and abstract result grades without
-a concrete specialization remain rejected on both owning and copyable results.
-Copyable `@[1]` results are must-use observations, not owning moves. User-defined
-finite grade algebras are validated by exhaustive law enumeration; see
-[grade algebras](grade-algebras.md). General grade inference is documented in
-[grade inference](grade-inference.md), local grade-zero erasure in
-[grade-zero erasure](grade-zero-erasure.md), and cancellation-preserving linear
-task results in [linear task results](linear-task-results.md). Copyable must-use
-task results remain rejected, and forced cancellation unwinding is not
-implemented.
+Explicit result contracts are implemented for owning and intrinsically linear
+`@[1]` transfers and for copyable `@[1]` must-use observations. A factory or
+transfer function hands a linear obligation to its caller, and an ungraded
+result can no longer make a binding-based `@[1]` owner affine. Result grades are
+static metadata erased at runtime, are threaded through generic functions,
+lambdas, arrow types, trait/method contracts, indirect calls, aliases, and
+adapters, and are matched exactly by subtyping. A copyable `@[0]` result is
+physically erased: the caller sees `Unit` and no value can be laundered through
+it. `@[0]` on an owning/linear result, `> 1`, `many`, and abstract result grades
+without a concrete specialization remain rejected on both owning and copyable
+results. User-defined finite grade algebras are validated by exhaustive law
+enumeration; see [grade algebras](grade-algebras.md). General grade inference is
+documented in [grade inference](grade-inference.md), physical grade-zero
+parameter/result/local erasure in [grade-zero erasure](grade-zero-erasure.md),
+and cancellation-preserving linear and copyable task results in
+[linear task results](linear-task-results.md). Forced cancellation unwinding is
+not implemented.
 
 LLVM, general filesystem/FFI APIs, general automatic effectful fusion, vector-element widening reuse, nonblocking task I/O, forced cancellation unwinding, benchmarked
 performance superiority, and kernel/embedded targets remain future work. The
@@ -399,12 +400,16 @@ fallible box/byte allocation, the reference-retained `Arena`/`ArenaBox`
 strategy, and `scripts/memory-bench.py` for measured allocations, RSS, timing,
 and pool retention.
 
-[General grade inference](grade-inference.md) solves a single-occurrence affine
-fragment from explicitly graded arguments and expected arrows, including
-composite parameter and result grade expressions. Transparent aliases can carry
-grade parameters in result positions. Multiple occurrences, zero-slope or
-non-divisible equations, unconstrained binders, and binders in underlying
-runtime types remain rejected rather than guessed.
+[General grade inference](grade-inference.md) solves simultaneous equations
+over a decidable natural fragment (`+`/`*`, including repeated occurrences with
+a proven target bound) and over declared finite grade algebras, from explicitly
+graded arguments and expected arrows. Composite parameter and result grade
+expressions and multiple binders are supported; conflicts are diagnosed and
+only unique solutions are accepted. Transparent aliases can carry grade
+parameters in result positions. Ambiguous or over-budget equations,
+zero-slope/non-divisible equations, unconstrained binders, arbitrary
+multivariate Diophantine systems, and binders in underlying runtime types remain
+rejected rather than guessed. This is not a principal solver.
 
 The integrated additions above passed the full corrected Boat gate: **681
 tests**, formatting, and Clippy with warnings denied. Independent review of

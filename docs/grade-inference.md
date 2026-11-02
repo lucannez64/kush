@@ -1,44 +1,82 @@
 # General usage-grade inference
 
-Status: implemented for the executable subset. This extends the earlier
-bare-result-only inference rule with a small, explicit solver. It is not a
-principal grade solver and it never guesses an unknown grade.
+Status: implemented for the executable subset. Inference solves a set of
+simultaneous equations over natural grades or a declared finite grade algebra.
+It is deliberately not a principal grade solver: anything outside the fragment
+below stays an explicit `::<...>` specialization error, and an unknown grade is
+never guessed as one.
 
-## Decidable fragment
+## Solving model
 
-Inference works on one usage-grade binder of a generic function or function
-value at a time. A declared grade expression is accepted by the solver only
-when all of the following hold:
+All equations contributed by the current inference site are collected first:
 
-- the binder occurs **exactly once** in the expression;
-- every other leaf is already concrete (a natural, `many`, or a grade variable
-  bound by the current specialization);
-- the expression is built from natural literals, `many`, `+`, `*`, and
-  parentheses;
-- a concrete expected grade exists at that position.
+- a direct call contributes one equation for each argument whose expression has
+  a known exact grade, pairing the declared parameter grade with that grade;
+- a function value contributes equations from the expected arrow's concrete
+  parameter and result grades.
 
-Under these conditions the expression is affine in the binder:
+The solver then repeatedly looks for an equation in which exactly one binder is
+still unsolved, substitutes the already-known binders, and solves that binder.
+Solutions are substituted into every other equation, so a later equation may
+depend on an earlier binder. Every candidate is checked against all evaluable
+equations; a disagreement is a conflict error rather than a silent choice. If a
+pass makes no progress, the remaining binders are unresolved and the call site
+reports an explicit-specialization error. Bindings that occur in an underlying
+runtime type (parameter type, element type, stored field, or underlying result
+type) are never inferred.
 
-```text
-e(g) = e(0) + (e(1) - e(0)) * g
-```
+## Natural fragment
 
-The checker evaluates the expression at `0` and `1`, computes the slope, and
-accepts a target `t` only when `t - e(0)` is nonnegative and divisible by the
-slope. The candidate is then re-evaluated with the full grade evaluator, so
-overflow checking and operator rules are never bypassed. A bare `@[G]` may also
-be solved as `many` from an expected `@[many]`.
+The declared expression is built from natural literals, `many`, known grade
+variables, `+`, `*`, and parentheses. For one binder, let `e(g)` be the value
+with that binder set to `g` and every other leaf concrete.
 
-The following stay outside the fragment and are rejected rather than guessed:
+- **Affine equations** (`e` has at most one occurrence of the binder) are solved
+  exactly: `e(g) = e(0) + (e(1) - e(0)) * g`. A unique natural solution exists
+  when the slope is nonzero and divides the offset.
+- **Repeated occurrences** such as `G + G`, `G * G`, or `(G + 1) * G` are
+  accepted when `e(1) > e(0)` and the target is finite. Every such expression
+  has nonnegative integer coefficients with at least one positive degree term,
+  so `e(g) >= g` for every `g >= 1`. Therefore no solution can exceed the
+  target, and enumerating `0..=target` is complete. The solver accepts exactly
+  one solution and rejects zero or several.
+- The enumeration budget is 100,000 candidates. A finite target above that
+  bound is outside the fragment instead of causing an unbounded compile-time
+  search. Evaluator overflow above the target terminates the search, because
+  the expression is monotone in the binder.
+- A bare `@[G]` may be solved directly from any expected grade, including
+  `many`.
+- A `many` target does not produce a finite solution for a composite
+  expression; only the bare-binder case is defined.
 
-- repeated occurrences such as `G + G` or `(G + 1) * G`;
-- zero-slope expressions such as `G * 0` or a constant expression that happens
-  to mention the binder;
+Still outside the fragment and rejected rather than guessed:
+
+- zero-slope expressions such as `G * 0` or `G * many` (every or no binder
+  value satisfies them);
+- ambiguous equations with several solutions (`G * 0 = 0`, or a multivariate
+  equation such as `G + H = 3` with no other constraint);
 - non-divisible equations such as `G * 2 = 1`;
-- a binder that occurs in an underlying runtime type (parameter type, element
-  type, stored field, or underlying result type);
-- conflicting constraints from two positions (`@[2]` here and `@[3]` there);
-- any binder for which no position supplies an expected grade.
+- targets above the enumeration budget;
+- arbitrary multivariate Diophantine systems: the solver only propagates
+  single-unknown equations. It makes no general decidability or completeness
+  claim.
+
+## Finite-algebra fragment
+
+When the expected grade is a declared algebra element, or the expression
+contains element leaves, the binder ranges over that algebra's validated finite
+carrier. The solver evaluates the entire expression with the full table
+semantics for every element (at most 64) and accepts the result only when
+exactly one element satisfies the target. Two or more solutions stay explicit.
+Expressions mixing unrelated algebras are outside the fragment.
+
+Custom-algebra `one` is not silently equated with the builtin exactly-once
+observation: a copyable result bound from `@[Algebra.One]` keeps that algebra
+element as its local grade, so an idempotent one (`one + one = one`) means
+"at least one observation in this algebra", not builtin `@[1]`. Builtin `@[1]`
+continues to mean exactly one physical observation. A declaration whose zero
+and one are the same element is rejected because erasure and observation would
+be indistinguishable.
 
 ## Direct calls
 
@@ -57,10 +95,10 @@ fn main() -> i64 ! {panic} {
 Only explicitly annotated bindings (or value positions that preserve one, such
 as a block tail, `if/else` with equal grades, or a coercion) provide evidence.
 An unannotated argument does not default to `@[1]`. Multiple argument
-constraints must agree. Composite parameter grades such as `x: i64 @[G * 2]`
-work in the same single-occurrence fragment. A grade parameter that only occurs
-in the result of a direct call still needs explicit specialization, because a
-direct call supplies no expected grade for its result.
+constraints are solved simultaneously and must agree. Composite parameter
+grades such as `x: i64 @[G * G]` work in the natural fragment. A grade parameter
+that only occurs in the result of a direct call still needs explicit
+specialization, because a direct call supplies no expected grade for its result.
 
 ## Function values
 
@@ -74,25 +112,23 @@ fn apply(f: fn(i64 @[4]) -> i64 ! {panic}) -> i64 ! {panic} { f(10) }
 fn main() -> i64 ! {panic} { apply(four) }    // G = 2
 ```
 
-Result contractions compose with the earlier alias forwarding:
+Several binders may be solved together. In
 
 ```kush
-fn make<G: Grade>() -> Box<i64> @[G + 1] ! {alloc, panic} { Box.new(1) }
-fn apply(f: fn() -> Box<i64> @[1] ! {alloc, panic}) -> i64 ! {alloc, panic} {
-    Box.take(f())
-}
-// G + 1 = 1  =>  G = 0
+fn combine<G: Grade, H: Grade>(x: i64 @[G + 1], y: i64 @[H + G]) -> i64 ! {panic} { ... }
+fn apply(f: fn(i64 @[3], i64 @[5]) -> i64 ! {panic}) -> i64 ! {panic} { ... }
 ```
 
-`G * 2 = 1`, `G + G`, and extra unconstrained binders are rejected with the
-usual explicit-specialization diagnostic. Explicit `::<...>` specialization
-remains available and unchanged.
+`G + 1 = 3` determines `G = 2`, then `H + G = 5` determines `H = 3`, regardless
+of the binder declaration order.
 
 ## Tests
 
 `crates/kush/tests/grade_inference.rs` covers direct-call parameter inference,
-composite parameters, conflicts, ungraded arguments, function-value parameter
-inference, composite copyable result inference, unsolvable/ambiguous equations,
-underlying-type occurrences, and native/reference agreement.
-`crates/kush/tests/result_grade_inference.rs` keeps the earlier result-contract
-and alias cases, updated for the solver.
+composite parameters, simultaneous multi-binder constraints, repeated and
+nonlinear natural equations, ambiguity rejection, budget/ungraded boundaries,
+function-value parameter inference, finite-algebra enumeration, composite
+copyable result inference, underlying-type occurrences, and native/reference
+agreement. `crates/kush/tests/result_grade_inference.rs` keeps the earlier
+result-contract and alias cases. `crates/kush/tests/grade_algebras.rs` covers
+custom-algebra one/zero observability.

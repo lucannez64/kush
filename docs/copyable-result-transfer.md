@@ -26,7 +26,8 @@ spelling of the annotation.
 A value-position expression transfers the obligation instead of observing it:
 
 - `let x = f(...)` binds `x` as `@[1]` (a copyable `x` is tracked by the grade
-  pass; an owning `x` is tracked by ownership);
+  pass; an owning `x` is tracked by ownership); for a custom algebra result the
+  local keeps that algebra element as its exact grade;
 - assignment to a binding already graded `@[1]` starts a fresh obligation;
 - `return` through a function whose result is the matching copyable `@[1]`;
 - block tails, `if`/`else` tails, `match` arm bodies, loop break values, and
@@ -37,6 +38,12 @@ exactly once: a call argument, a constructor/aggregate field, a read or
 projection, a match scrutinee, a `?` operand, and a capture. A capture of a
 `@[1]` copyable local makes the closure `linear once`, so the closure must be
 called exactly once.
+
+`Task.join` of a task whose payload carries a copyable `@[1]` obligation
+produces a must-use `TaskExit<T>`: the joined exit must be matched or otherwise
+observed, and the task handle itself is linear and must be joined. Cancellation
+delivers a completed copyable payload as `Completed`, exactly like an owning
+one. See [linear task results](linear-task-results.md).
 
 The following discard positions are rejected:
 
@@ -61,10 +68,14 @@ is observed by that operation and does not need an intermediate binding.
 - An owning `@[1]` result keeps all previous linear-resource rules, including
   the rejection of ungraded returns and the requirement to consume the value on
   every normal exit.
+- A custom algebra's `one` is not the builtin exactly-once contract. Its
+  obligation is counted in that algebra, so an idempotent one means at least one
+  observation; builtin `@[1]` remains exactly one physical observation.
 - Arrow subtyping still requires an exact result-grade match. A copyable `@[1]`
   arrow cannot be widened to an ungraded one, which could drop the obligation.
 - `@[0]`, finite `n > 1`, and `many` results remain rejected for both owning and
-  copyable results.
+  copyable results, except that `@[0]` is accepted for a *copyable* result and
+  erased physically (see [grade-zero erasure](grade-zero-erasure.md)).
 
 ## Tests and examples
 

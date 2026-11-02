@@ -76,32 +76,45 @@ trait-object support. See [trait contracts](traits.md).
 ## Grades and linear resources
 
 - [x] General grade inference beyond bare result-only expected-arrow inference.
-  Implemented as a single-occurrence affine solver over `+`/`*` for direct calls
-  with explicitly graded arguments and for expected arrows; unsolvable or
-  ambiguous equations stay explicit. See `docs/grade-inference.md`.
+  **Implemented subset:** simultaneous equations over natural `+`/`*` grades and
+  declared finite algebras, including repeated/nonlinear natural occurrences
+  with a proven target bound, multi-binder substitution, conflict detection,
+  and unique-solution enumeration. Ambiguous, over-budget, underlying-type, and
+  arbitrary multivariate Diophantine cases stay explicit; this is not a
+  principal solver. See `docs/grade-inference.md`.
 - [x] User-defined grade algebras with validated laws and decidable checking
   boundaries. Explicit finite carriers and total `add`/`mul` tables are checked
   by exhaustive enumeration (closure, identities, associativity, commutativity,
-  distributivity, annihilation). See `docs/grade-algebras.md`.
+  distributivity, annihilation). Finite-algebra grade inference enumerates the
+  carrier for a unique solution; idempotent-one observation semantics and the
+  rejection of identical zero/one are explicit. See `docs/grade-algebras.md`.
 - [x] Copyable exact-use result transfer across every control-flow/discard
   position. A copyable `@[1]` result is a must-use observation, never an owning
   move; `let`, assignment, return, blocks, branches, match arms, loops, `?`,
-  captures, aggregates, and every tested discard position are checked. See
-  `docs/copyable-result-transfer.md`.
-- [ ] Grade-zero runtime erasure with relevance/effect guarantees. **Partial:** local
-  `@[0]` bindings are not materialized in either backend; initializer effects,
-  order, and allocation balance are preserved. Parameter slots remain ABI-bound
-  but unobservable, and result `@[0]` is still rejected. See
-  `docs/grade-zero-erasure.md`. Parameter/result erasure is still outstanding.
+  captures, aggregates, every tested discard position, and copyable task
+  results are checked. See `docs/copyable-result-transfer.md` and
+  `docs/linear-task-results.md`.
+- [x] Grade-zero runtime erasure with relevance/effect guarantees. Implemented
+  for local bindings, parameters, results, function values, checked adapters,
+  closures, static/default/dynamic trait dispatch, and both backends.
+  Initializer/argument effects, source order, allocation balance, and actual
+  eager cleanup are preserved. Erased parameters/results have no ABI slot or
+  return payload; subtyping across differing physical arities synthesizes
+  checked adapters instead of casting function pointers. Affine-owned zero
+  bindings eagerly initialize and drop; owning/linear parameters and results
+  stay rejected, as do vector-map callbacks that would erase observed elements.
+  See `docs/grade-zero-erasure.md`.
 - [x] Cancellation cleanup of linear resources and linear task results.
-  Cooperative cancellation transfers a completed owning/linear payload as
-  `Completed` instead of dropping it; such task handles are linear and must be
-  joined explicitly. Copyable must-use task results and forced cancellation
-  unwinding remain out of scope. See `docs/linear-task-results.md`.
+  Cooperative cancellation transfers a completed owning/linear/copyable
+  must-use payload as `Completed` instead of dropping it; such task handles are
+  linear and must be joined explicitly, and a copyable joined exit remains
+  must-use. Forced cancellation unwinding remains out of scope. See
+  `docs/linear-task-results.md`.
 
-Finite-algebra compiler metadata now has explicit compilation/executable
-owners and weak lookup entries. Program-drop tests verify table reclamation;
-this fix still needs the integrated test/review gate.
+Finite-algebra compiler metadata has explicit compilation/executable owners and
+weak lookup entries. Program-drop tests verify table reclamation; the integrated
+test/review gate for this change is tracked by the parent integration, not by an
+outstanding implementation item.
 
 ## Advanced types and effects
 

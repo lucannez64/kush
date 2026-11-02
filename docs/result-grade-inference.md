@@ -81,16 +81,16 @@ cannot be tracked.
 The following remain errors:
 
 - indirect-call grade inference for a binder with no expected parameter or
-  result grade, or outside the single-occurrence affine fragment (see
+  result grade, or outside the decidable natural/finite-algebra fragment (see
   [general grade inference](grade-inference.md));
-- repeated occurrences, zero-slope expressions, and non-divisible equations;
+- ambiguous equations, zero-slope expressions, and non-divisible equations;
 - a grade parameter that also appears in a parameter type or in the underlying
   result type;
-- an extra grade parameter that cannot be determined by the single outer
-  result grade;
+- an extra grade parameter that cannot be determined by the expected equations;
 - an expected arrow with no result contract, or no expected arrow at all;
-- result grades other than exactly `@[1]` (`0`, `2`, `many`), whether written
-  directly or through an alias argument;
+- result grades other than exactly `@[1]`, or `@[0]` on a copyable result,
+  whether written directly or through an alias argument;
+- owning/linear `@[0]` results, and `@[0]` parameters on owning/linear values;
 - task results and effect-constraint inference (unchanged/out of scope).
 
 Copyable and borrowed results may carry an explicit `@[1]` must-use contract;
