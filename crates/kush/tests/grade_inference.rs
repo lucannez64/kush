@@ -120,6 +120,87 @@ fn equations_without_a_unique_natural_solution_stay_explicit() {
 }
 
 #[test]
+fn simultaneous_constraints_solve_several_binders() {
+    agrees(
+        r#"fn combine<G: Grade, H: Grade>(x: i64 @[G + 1], y: i64 @[H + G]) -> i64 ! {panic} {
+            x + x + x + y + y + y + y + y
+        }
+        fn apply(f: fn(i64 @[3], i64 @[5]) -> i64 ! {panic}) -> i64 ! {panic} {
+            f(1, 2)
+        }
+        fn main() -> i64 ! {panic} { apply(combine) }"#,
+        13,
+    );
+}
+
+#[test]
+fn repeated_binder_occurrences_are_solved_uniquely() {
+    agrees(
+        r#"fn doubled<G: Grade>(x: i64 @[G + G]) -> i64 ! {panic} { x + x + x + x }
+        fn apply(f: fn(i64 @[4]) -> i64 ! {panic}) -> i64 ! {panic} { f(21) }
+        fn main() -> i64 ! {panic} { apply(doubled) }"#,
+        84,
+    );
+    agrees(
+        r#"fn square<G: Grade>(x: i64 @[G * G]) -> i64 ! {panic} {
+            x + x + x + x
+        }
+        fn apply(f: fn(i64 @[4]) -> i64 ! {panic}) -> i64 ! {panic} { f(10) }
+        fn main() -> i64 ! {panic} { apply(square) }"#,
+        40,
+    );
+}
+
+#[test]
+fn non_unique_polynomial_equations_stay_explicit() {
+    // Every binder value satisfies `G * 0 = 0`; there is no unique solution.
+    rejects(
+        r#"fn make<G: Grade>() -> Box<i64> @[G * 0] ! {alloc, panic} { Box.new(1) }
+        fn apply(f: fn() -> Box<i64> @[0] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+            Box.take(f())
+        }
+        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        "cannot infer usage grade parameter",
+    );
+    // `G * G = 1` has two natural solutions (0 and 1) only if zero is a
+    // solution for the square; use a target with two positive roots instead:
+    // `G * (G - 1)` is unavailable, so `G * 0 + (G * 0) = 0` also stays
+    // ambiguous.
+    rejects(
+        r#"fn make<G: Grade>() -> Box<i64> @[G * 0 + G * 0] ! {alloc, panic} { Box.new(1) }
+        fn apply(f: fn() -> Box<i64> @[0] ! {alloc, panic}) -> i64 ! {alloc, panic} {
+            Box.take(f())
+        }
+        fn main() -> i64 ! {alloc, panic} { apply(make) }"#,
+        "cannot infer usage grade parameter",
+    );
+}
+
+#[test]
+fn a_finite_algebra_equation_is_solved_by_carrier_enumeration() {
+    agrees(
+        r#"algebra Usage {
+            elements { None, Once, Twice }
+            zero = None; one = Once;
+            add {
+                None + None = None, None + Once = Once, None + Twice = Twice,
+                Once + None = Once, Once + Once = Twice, Once + Twice = Twice,
+                Twice + None = Twice, Twice + Once = Twice, Twice + Twice = Twice,
+            }
+            mul {
+                None * None = None, None * Once = None, None * Twice = None,
+                Once * None = None, Once * Once = Once, Once * Twice = Twice,
+                Twice * None = None, Twice * Once = Twice, Twice * Twice = Twice,
+            }
+        }
+        fn twice<G: Grade>(x: i64 @[G * Usage.Once]) -> i64 ! {panic} { x + x }
+        fn apply(f: fn(i64 @[Usage.Twice]) -> i64 ! {panic}) -> i64 ! {panic} { f(21) }
+        fn main() -> i64 ! {panic} { apply(twice) }"#,
+        42,
+    );
+}
+
+#[test]
 fn a_binder_in_an_underlying_type_is_not_inferred() {
     rejects(
         r#"fn make<G: Grade>() -> Box<i64 @[G]> @[1] ! {alloc, panic} { Box.new(1) }

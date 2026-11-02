@@ -353,76 +353,213 @@ fn grade_occurrences(resolution: &Resolution, ty: &ast::Type, binder: BindingId)
     }
 }
 
-/// Solve a single occurrence of `binder` in a grade expression for a concrete
-/// target grade.
+/// Maximum number of candidate naturals examined for one polynomial equation.
+/// Targets above this bound stay outside the inference fragment rather than
+/// turning compilation into an unbounded search.
+const SOLVER_BUDGET: u64 = 100_000;
+
+/// Solve a set of grade constraints simultaneously.
 ///
-/// The decidable fragment is deliberately small and explicit: the binder occurs
-/// exactly once in `expr`, every other leaf is already concrete, and the
-/// expression is built from `+`, `*`, parentheses, naturals, `many`, and known
-/// grade variables. Such an expression is affine in the binder, so evaluating
-/// it at `0` and `1` gives `e(g) = e(0) + (e(1) - e(0)) * g`. A finite target
-/// has a unique natural solution when the difference is nonzero and divides
-/// the offset. A bare binder may also be solved as `many`. Repeated occurrences
-/// (`G + G`), zero-slope expressions (`G * 0`, `G * many`), non-divisible
-/// targets, and expressions whose arithmetic overflows are rejected as
-/// outside the fragment rather than guessed.
-pub(crate) fn solve_single(
+/// Each constraint pairs a declared grade expression with the concrete grade
+/// required at that position. A binder is solved only when it is the single
+/// remaining unknown in that expression; solutions are substituted back into
+/// every other constraint, so later equations can mention earlier binders.
+/// Conflicting equations are reported, and a binder that no constraint can
+/// determine stays unsolved instead of being guessed.
+pub(crate) fn solve_all(
+    resolution: &Resolution,
+    base: &BTreeMap<BindingId, Grade>,
+    binders: &[BindingId],
+    constraints: &[(&ast::Type, Grade)],
+) -> Result<Option<BTreeMap<BindingId, Grade>>> {
+    let mut solved: BTreeMap<BindingId, Grade> = BTreeMap::new();
+    loop {
+        let mut progress = false;
+        for binder in binders {
+            if solved.contains_key(binder) {
+                continue;
+            }
+            let mut variables = base.clone();
+            variables.extend(solved.iter().map(|(key, value)| (*key, *value)));
+            for (expr, target) in constraints {
+                if grade_occurrences(resolution, expr, *binder) == 0 {
+                    continue;
+                }
+                let unresolved = binders
+                    .iter()
+                    .filter(|other| {
+                        !variables.contains_key(*other)
+                            && grade_occurrences(resolution, expr, **other) > 0
+                    })
+                    .copied()
+                    .collect::<Vec<_>>();
+                if unresolved.as_slice() != [*binder] {
+                    continue;
+                }
+                let Some(solution) = solve_binder(resolution, &variables, expr, *binder, *target)?
+                else {
+                    continue;
+                };
+                // A candidate must satisfy every constraint that is already
+                // evaluable; otherwise the system is inconsistent.
+                let mut trial = variables.clone();
+                trial.insert(*binder, solution);
+                for (other_expr, other_target) in constraints {
+                    if let Ok(value) = evaluate(resolution, &trial, other_expr)
+                        && value != *other_target
+                    {
+                        return Err(Diagnostic::new(
+                            resolution.bindings[*binder].span,
+                            format!(
+                                "conflicting inferred grades for '{}': one position requires @[{other_target}] but the simultaneous solution @[{solution}] gives @[{value}]",
+                                resolution.bindings[*binder].name
+                            ),
+                        ));
+                    }
+                }
+                solved.insert(*binder, solution);
+                progress = true;
+            }
+        }
+        if !progress {
+            break;
+        }
+    }
+    let mut variables = base.clone();
+    variables.extend(solved.iter().map(|(key, value)| (*key, *value)));
+    for (expr, target) in constraints {
+        if let Ok(value) = evaluate(resolution, &variables, expr)
+            && value != *target
+        {
+            return Err(Diagnostic::new(
+                expr.span,
+                format!(
+                    "conflicting grade constraints: this position requires @[{target}] but the simultaneous solution gives @[{value}]"
+                ),
+            ));
+        }
+    }
+    Ok((solved.len() == binders.len()).then_some(solved))
+}
+
+/// The unique finite algebra named by element leaves/target, if any.
+fn grade_algebra(resolution: &Resolution, expr: &ast::Type, target: Grade) -> Option<AlgebraRef> {
+    let algebra = match target {
+        Grade::Element(algebra, _) => Some(algebra),
+        _ => None,
+    };
+    let found = algebra_leaf(resolution, expr);
+    match (algebra, found) {
+        (Some(existing), Some(found)) if existing != found => None,
+        (Some(existing), _) => Some(existing),
+        (None, found) => found,
+    }
+}
+
+fn algebra_leaf(resolution: &Resolution, expr: &ast::Type) -> Option<AlgebraRef> {
+    use ast::TypeKind as K;
+    match &expr.kind {
+        K::Named { path, arguments } => {
+            if arguments.is_empty()
+                && path.len() == 2
+                && let Some(table) = resolution.lowered_algebras.get(&path[0])
+                && table.element(&path[1]).is_some()
+            {
+                return Some(AlgebraRef(table.id));
+            }
+            arguments
+                .iter()
+                .find_map(|argument| algebra_leaf(resolution, argument))
+        }
+        K::Binary { left, right, .. } => {
+            algebra_leaf(resolution, left).or_else(|| algebra_leaf(resolution, right))
+        }
+        K::Slice(inner) | K::Borrow { inner, .. } | K::Dyn(inner) => {
+            algebra_leaf(resolution, inner)
+        }
+        _ => None,
+    }
+}
+
+/// Solve one binder from a single expression. Returns `None` when the equation
+/// has no unique solution or lies outside the documented decidable fragment.
+fn solve_binder(
     resolution: &Resolution,
     variables: &BTreeMap<BindingId, Grade>,
     expr: &ast::Type,
     binder: BindingId,
     target: Grade,
 ) -> Result<Option<Grade>> {
-    if grade_occurrences(resolution, expr, binder) != 1 {
-        return Ok(None);
-    }
     if crate::executable::bare_grade_binder(resolution, expr) == Some(binder) {
         return Ok(Some(target));
     }
+    // Finite algebra: enumerate the carrier. A carrier has at most 64
+    // elements, so this is a bounded, exhaustive search with an explicit
+    // uniqueness requirement.
+    if let Some(algebra) = grade_algebra(resolution, expr, target) {
+        let table = algebra.get();
+        let mut found = None;
+        let mut count = 0;
+        for element in 0..table.elements.len() {
+            let mut trial = variables.clone();
+            trial.insert(binder, Grade::Element(algebra, element));
+            if let Ok(value) = evaluate(resolution, &trial, expr)
+                && value == target
+            {
+                count += 1;
+                found = Some(Grade::Element(algebra, element));
+            }
+        }
+        return Ok((count == 1).then_some(found).flatten());
+    }
+    let Grade::Finite(wanted) = target else {
+        // A `many` target has no unique finite solution; only a bare binder
+        // (handled above) can be assigned `many` directly.
+        return Ok(None);
+    };
     let mut at_zero = variables.clone();
     at_zero.insert(binder, Grade::ZERO);
+    let zero = match evaluate(resolution, &at_zero, expr) {
+        Ok(Grade::Finite(value)) => value,
+        _ => return Ok(None),
+    };
     let mut at_one = variables.clone();
     at_one.insert(binder, Grade::ONE);
-    let zero = match evaluate(resolution, &at_zero, expr) {
-        Ok(value) => value,
-        // Another unsolved binder remains; this constraint cannot determine
-        // `binder` alone.
-        Err(_) => return Ok(None),
-    };
     let one = match evaluate(resolution, &at_one, expr) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
+        Ok(Grade::Finite(value)) => value,
+        _ => return Ok(None),
     };
-    let (Grade::Finite(zero), Grade::Finite(one), Grade::Finite(wanted)) = (zero, one, target)
-    else {
-        // `many` in the expression or a `many` target cannot have a finite
-        // natural solution here. The bare-binder case above is the only
-        // unbounded solution.
-        return Ok(None);
-    };
+    // Every expression in this fragment has nonnegative integer coefficients
+    // and no subtraction. If it grows between 0 and 1, it contains a term
+    // `c * g^k` with `c >= 1`, so `e(g) >= g` for every `g >= 1`. A target
+    // larger than `g` therefore proves that no solution exists above the
+    // target, which makes enumeration up to the target complete.
     if one <= zero {
-        // A repeated/annihilated binder or an expression that does not depend
-        // on it in a recoverable way.
         return Ok(None);
     }
-    let slope = one - zero;
-    let Some(offset) = wanted.checked_sub(zero) else {
-        return Ok(None);
-    };
-    if offset % slope != 0 {
+    if wanted > SOLVER_BUDGET {
         return Ok(None);
     }
-    let solution = Grade::Finite(offset / slope);
-    // Re-check the candidate with the full evaluator so overflow and operator
-    // assumptions are never bypassed by the algebra shortcut.
-    let mut checked = variables.clone();
-    checked.insert(binder, solution);
-    if evaluate(resolution, &checked, expr)? == target {
-        Ok(Some(solution))
-    } else {
-        Ok(None)
+    let mut found = None;
+    let mut count = 0;
+    for candidate in 0..=wanted {
+        let mut trial = variables.clone();
+        trial.insert(binder, Grade::Finite(candidate));
+        match evaluate(resolution, &trial, expr) {
+            Ok(value) if value == target => {
+                count += 1;
+                found = Some(Grade::Finite(candidate));
+            }
+            Ok(_) => {}
+            // An overflow above the target cannot be the solution. Because
+            // the expression is monotone in the binder, no later candidate
+            // can return to the target value either.
+            Err(_) => break,
+        }
     }
+    Ok((count == 1).then_some(found).flatten())
 }
+
 /// Validate and lower every declared finite grade algebra. The operation
 /// tables must be total and are checked by exhaustive enumeration: zero/one
 /// identities, commutativity, associativity, distributivity, and zero
@@ -472,6 +609,15 @@ fn lower_algebra(
     };
     let zero = lookup(&declaration.zero)?;
     let one = lookup(&declaration.one)?;
+    if zero == one {
+        return Err(Diagnostic::new(
+            declaration.span,
+            format!(
+                "grade algebra '{}' has the same element for zero and one; erasure (@[0]) and an exact-observation contract (@[1]) would be indistinguishable",
+                declaration.name
+            ),
+        ));
+    }
     let add = algebra_table(declaration, &declaration.add, "add", &index, count)?;
     let mul = algebra_table(declaration, &declaration.mul, "mul", &index, count)?;
     let law = |detail: String| {

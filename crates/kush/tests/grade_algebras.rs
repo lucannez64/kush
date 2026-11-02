@@ -157,7 +157,7 @@ fn identity_and_law_violations_are_rejected() {
     rejects(
         r#"algebra Bad {
             elements { A, B }
-            zero = B; one = B;
+            zero = B; one = A;
             add { A + A = A, A + B = B, B + A = B, B + B = B }
             mul { A * A = A, A * B = A, B * A = A, B * B = B }
         }
@@ -208,5 +208,71 @@ fn malformed_declarations_are_rejected() {
         }
         fn main() -> i64 ! {} { 0 }"#,
         "unknown element",
+    );
+}
+
+const IDEMPOTENT_ONE: &str = r#"algebra Flag {
+    elements { Off, On }
+    zero = Off; one = On;
+    add {
+        Off + Off = Off, Off + On = On,
+        On + Off = On, On + On = On,
+    }
+    mul {
+        Off * Off = Off, Off * On = Off,
+        On * Off = Off, On * On = On,
+    }
+}
+"#;
+
+#[test]
+fn an_idempotent_one_is_not_equated_with_exactly_one_physical_observation() {
+    // The algebra's `one` is idempotent: one or more observations both count
+    // as `On`. The must-use contract is still enforced (zero uses are
+    // rejected), but it is not the builtin exactly-once observation.
+    agrees(
+        &format!(
+            "{IDEMPOTENT_ONE}
+            fn make() -> i64 @[Flag.On] ! {{}} {{ 21 }}
+            fn main() -> i64 ! {{panic}} {{
+                let value = make();
+                value + value
+            }}"
+        ),
+        42,
+    );
+    rejects(
+        &format!(
+            "{IDEMPOTENT_ONE}
+            fn make() -> i64 @[Flag.On] ! {{}} {{ 21 }}
+            fn main() -> i64 ! {{panic}} {{
+                let value = make();
+                0
+            }}"
+        ),
+        "not used consistently",
+    );
+    // Builtin `@[1]` keeps the physical exactly-once contract.
+    rejects(
+        r#"fn make() -> i64 @[1] ! {} { 21 }
+        fn main() -> i64 ! {panic} {
+            let value = make();
+            value + value
+        }"#,
+        "requires exactly 1",
+    );
+}
+
+#[test]
+fn an_algebra_with_identical_zero_and_one_is_rejected() {
+    rejects(
+        r#"algebra Degenerate {
+            elements { A }
+            zero = A; one = A;
+            add { A + A = A }
+            mul { A * A = A }
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "same element for zero and one",
     );
 }

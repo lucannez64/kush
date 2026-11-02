@@ -15270,59 +15270,31 @@ impl Checker<'_, '_> {
         }
         self.solve_effect_constraints(constraint_mark, &effect_generics, &mut subst, span)?;
         // General grade inference for a generic function value. The expected
-        // arrow supplies concrete grades for its parameters and result; each
-        // declared grade expression is solved in the single-occurrence affine
-        // fragment. A binder that reaches an underlying runtime type, that has
-        // no expected grade evidence, or whose equation has no unique natural
-        // solution remains an explicit-specialization error. Unknown grades are
-        // never guessed as one.
+        // arrow supplies concrete grades for its parameters and result. All
+        // equations are solved simultaneously in the decidable natural or
+        // finite-algebra fragment. A binder that reaches an underlying runtime
+        // type, that has no expected-grade evidence, or whose equation has no
+        // unique solution remains an explicit-specialization error. Unknown
+        // grades are never guessed as one.
         let mut grades = Vec::new();
         if !grade_vars.is_empty() {
-            let mut solved: BTreeMap<BindingId, Grade> = BTreeMap::new();
-            let constrain = |declared: &ast::Type,
-                             expected: Option<Grade>,
-                             solved: &mut BTreeMap<BindingId, Grade>|
-             -> Result<()> {
-                let Some(expected) = expected else {
-                    return Ok(());
-                };
-                for binder in &grade_vars {
-                    if let Some(previous) = solved.get(binder) {
-                        let mut variables = self.grades.clone();
-                        variables.insert(*binder, *previous);
-                        if let Ok(value) = grades::evaluate(self.resolution, &variables, declared)
-                            && value != expected
-                        {
-                            return Err(Diagnostic::new(
-                                self.resolution.bindings[*binder].span,
-                                format!(
-                                    "conflicting inferred grades for parameter '{}' of {what}: the expected arrow requires @[{expected}] here but another position requires @[{previous}]",
-                                    self.resolution.bindings[*binder].name
-                                ),
-                            ));
-                        }
-                        continue;
-                    }
-                    if let Some(solution) = grades::solve_single(
-                        self.resolution,
-                        &self.grades,
-                        declared,
-                        *binder,
-                        expected,
-                    )? {
-                        solved.insert(*binder, solution);
-                    }
-                }
-                Ok(())
-            };
-            for (parameter, expected) in runtime.iter().zip(&signature.parameter_grades) {
-                if let Some(declared) = split_grade(&parameter.ty).1 {
-                    constrain(declared, *expected, &mut solved)?;
-                }
+            let mut constraints = runtime
+                .iter()
+                .zip(&signature.parameter_grades)
+                .filter_map(|(parameter, expected)| {
+                    let declared = split_grade(&parameter.ty).1?;
+                    let expected = (*expected)?;
+                    Some((declared, expected))
+                })
+                .collect::<Vec<_>>();
+            if let Some(declared) = result_grade
+                && let Some(expected) = signature.result_grade
+            {
+                constraints.push((declared, expected));
             }
-            if let Some(declared) = result_grade {
-                constrain(declared, signature.result_grade, &mut solved)?;
-            }
+            let solved =
+                grades::solve_all(self.resolution, &self.grades, &grade_vars, &constraints)?
+                    .unwrap_or_default();
             for binder in &grade_vars {
                 let name = &self.resolution.bindings[*binder].name;
                 let in_underlying_type = runtime.iter().any(|parameter| {
@@ -15346,7 +15318,7 @@ impl Checker<'_, '_> {
                     "the declaration has no grade expression for the expected arrow to determine"
                         .to_owned()
                 } else {
-                    "no expected parameter/result grade determines it, or its grade expression is outside the single-occurrence affine fragment".to_owned()
+                    "no expected parameter/result grade uniquely determines it, or its grade equation is outside the decidable natural/finite-algebra fragment".to_owned()
                 };
                 return Err(Diagnostic::new(
                     self.resolution.bindings[*binder].span,
@@ -17244,55 +17216,31 @@ impl Checker<'_, '_> {
             values.push(value);
         }
         self.solve_effect_constraints(constraint_mark, &effect_generics, &mut subst, span)?;
-        // General grade inference for direct calls: solve a grade parameter
-        // from an explicitly graded argument. The decidable fragment is a
-        // single occurrence of the binder in one parameter-grade expression,
-        // affine in that binder. Ungraded arguments never invent a grade.
+        // General grade inference for direct calls: solve grade parameters from
+        // explicitly graded arguments. All equations are accumulated and solved
+        // simultaneously; an ungraded argument never invents a grade.
         if explicit.is_none() && !grade_generics.is_empty() {
-            let mut solved: BTreeMap<BindingId, Grade> = BTreeMap::new();
-            for (grade_expr, value) in parameter_grade_exprs.iter().zip(&values) {
-                let Some(grade_expr) = grade_expr else {
-                    continue;
-                };
-                let Some(actual) = self.expression_grade(value) else {
-                    continue;
-                };
-                for generic in &grade_generics {
-                    let binder = self.resolution.binder(generic.span).unwrap();
-                    if let Some(previous) = solved.get(&binder) {
-                        let mut variables = self.grades.clone();
-                        variables.insert(binder, *previous);
-                        if let Ok(value) = grades::evaluate(self.resolution, &variables, grade_expr)
-                            && value != actual
-                        {
-                            return Err(Diagnostic::new(
-                                span,
-                                format!(
-                                    "conflicting inferred grades for parameter '{}' of {what}: one argument requires @[{previous}] and another requires @[{actual}]",
-                                    generic.name
-                                ),
-                            ));
-                        }
-                        continue;
-                    }
-                    if let Some(solution) = grades::solve_single(
-                        self.resolution,
-                        &self.grades,
-                        grade_expr,
-                        binder,
-                        actual,
-                    )? {
-                        solved.insert(binder, solution);
-                    }
-                }
-            }
-            for generic in &grade_generics {
-                let binder = self.resolution.binder(generic.span).unwrap();
-                let Some(value) = solved.get(&binder) else {
+            let binders = grade_generics
+                .iter()
+                .map(|generic| self.resolution.binder(generic.span).unwrap())
+                .collect::<Vec<_>>();
+            let constraints = parameter_grade_exprs
+                .iter()
+                .zip(&values)
+                .filter_map(|(grade_expr, value)| {
+                    let grade_expr = grade_expr.as_ref()?;
+                    let actual = self.expression_grade(value)?;
+                    Some((grade_expr, actual))
+                })
+                .collect::<Vec<_>>();
+            let solved = grades::solve_all(self.resolution, &self.grades, &binders, &constraints)?
+                .unwrap_or_default();
+            for (generic, binder) in grade_generics.iter().zip(&binders) {
+                let Some(value) = solved.get(binder) else {
                     return Err(Diagnostic::new(
                         span,
                         format!(
-                            "cannot infer usage grade parameter '{}' of {what}: no argument is explicitly graded @[{}] or the parameter grade expression is outside the single-occurrence affine fragment. Specialize it explicitly with '::<...>'",
+                            "cannot infer usage grade parameter '{}' of {what}: no argument is explicitly graded @[{}] or its grade equation has no unique solution in the decidable natural/finite-algebra fragment. Specialize it explicitly with '::<...>'",
                             generic.name, generic.name
                         ),
                     ));
