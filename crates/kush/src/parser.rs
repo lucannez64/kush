@@ -362,9 +362,7 @@ impl Parser {
     }
     fn algebra_identity(&mut self, which: &str) -> Result<String> {
         if !self.word_keyword(which) {
-            return Err(self.error(format!(
-                "expected '{which}' in a grade algebra declaration"
-            )));
+            return Err(self.error(format!("expected '{which}' in a grade algebra declaration")));
         }
         self.bump();
         self.expect(&Kind::Eq, "'=' after grade algebra identity")?;

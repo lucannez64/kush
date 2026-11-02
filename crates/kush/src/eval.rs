@@ -1,5 +1,6 @@
 //! Bounded reference evaluator for checked executable IR. It shares no
 //! execution logic with the native backend; tests compare the two.
+use crate::grades::Grade;
 use crate::{Diagnostic, Span, executable::*, lexer::Kind, runtime_types::ResultShape};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -725,6 +726,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     }
     /// Read an inline-array local. A pinned cell is cloned so ordinary array
     /// values keep copy semantics; views retain the shared cell identity.
+    /// A grade-zero binding is never materialized: its initializer still runs
+    /// for strict effects, but the reference frame never stores, activates, or
+    /// reads it.
+    fn erased_local(&self, slot: usize, frame: &Frame) -> bool {
+        self.program.functions[frame.function].locals[slot]
+            .grade
+            .is_some_and(Grade::is_zero)
+    }
     fn store_local(&self, slot: usize, value: Value, frame: &mut Frame) {
         let value = self.materialize(value);
         match &frame.locals[slot] {
@@ -1626,6 +1635,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 Statement::Let(slot, expr) => {
                     let value = value!(self.expr(expr, frame));
                     self.consume(expr, frame);
+                    if self.erased_local(*slot, frame) {
+                        continue;
+                    }
                     self.store_local(*slot, value, frame);
                     self.local_active(*slot, frame);
                     slots.push(*slot);
@@ -2139,13 +2151,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
             ExprKind::Assign(slot, arg) => {
                 let value = value!(self.expr(arg, frame));
-                self.drop_resource(
-                    self.program.functions[frame.function].local_resources[*slot],
-                    frame,
-                )?;
                 self.consume(arg, frame);
-                self.store_local(*slot, value, frame);
-                self.local_active(*slot, frame);
+                if !self.erased_local(*slot, frame) {
+                    self.drop_resource(
+                        self.program.functions[frame.function].local_resources[*slot],
+                        frame,
+                    )?;
+                    self.store_local(*slot, value, frame);
+                    self.local_active(*slot, frame);
+                }
                 Value::Scalar(0)
             }
             ExprKind::RefAssign(reference_expr, offset, replacement) => {

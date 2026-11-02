@@ -228,9 +228,10 @@ Ungraded results no longer silently make a binding-based `@[1]` owner affine;
 the former acceptance is replaced by an explicit diagnostic and graded
 replacement tests. Task and scope results that would carry a linear obligation
 stay rejected. The grade is static metadata erased at runtime: payload types,
-allocation counts, and the ABI are unchanged. General result-grade inference, custom
-grade semirings, grade-zero erasure, and
-cancellation-time linear cleanup remain future work. The full Boat run passes
+allocation counts, and the ABI are unchanged. Later milestones add general
+grade inference, validated finite grade algebras, copyable must-use results,
+grade-zero binding erasure, and cancellation-preserving linear task results.
+The full Boat run passes
 **618 tests**, formatting, and Clippy with warnings denied; the new
 `examples/linear-resources.kush` prints `20`, `21`, `21`, `7`, and `42` and
 exits with status 0 in both backends. See [usage grades](grades.md) and

@@ -90,11 +90,14 @@ every normal exit, and an implicit drop is still an error. `@[1]` on a copyable
 value is enforced by the grade checker; it must be observed or passed exactly
 once, and explicit `drop` is rejected as it was for the original linear mode.
 
-Grade zero is a **use restriction**, not proof erasure. Its initializer is still
-evaluated because Kush is strict, but the resulting binding cannot be read,
-moved, borrowed, passed to a call, matched, or otherwise observed. Owning and
-linear values cannot be graded zero. True erased logical values remain the
-`erased` proof-parameter mechanism described in [kernel.md](kernel.md).
+Grade zero is a **use restriction plus binding erasure**, not proof erasure. Its
+initializer is still evaluated because Kush is strict, but the resulting binding
+is not materialized at runtime: no store, read, local resource, or cleanup is
+emitted. The resulting binding cannot be read, moved, borrowed, passed to a
+call, matched, or otherwise observed. Owning and linear values cannot be graded
+zero. True erased logical values remain the `erased` proof-parameter mechanism
+described in [kernel.md](kernel.md). See
+[grade-zero runtime erasure](grade-zero-erasure.md).
 
 ## Result transfer contracts
 
@@ -454,9 +457,9 @@ deferred:
 - Automatic cleanup of a linear result when a task or cancellation path would
   otherwise discard it. Task results that would transfer a `@[1]` or
   binding-based linear obligation stay rejected.
-- Actual runtime erasure of grade-zero storage. Grade zero currently restricts
-  observations; the initializer is still evaluated and the slot may still be
-  allocated on the stack.
+- Grade-zero result erasure and erasure of an already-passed ABI argument. Local
+  `@[0]` bindings are erased; parameter slots keep the call ABI but remain
+  unobservable. See [grade-zero runtime erasure](grade-zero-erasure.md).
 - A precise effect-sensitive accounting for side-effecting argument blocks. The
   current multiplicative rule is conservative.
 - Loop analyses stronger than "restore the loop-head count" or "all breaks

@@ -2,6 +2,7 @@
 //! supplies process entry, standard-stream I/O, allocation, byte operations, and abort;
 //! user functions are CLIF.
 use crate::float::FloatKind;
+use crate::grades::Grade;
 use crate::int::IntKind;
 use crate::{
     Diagnostic, Span,
@@ -2238,6 +2239,14 @@ impl Generator<'_, '_> {
     fn consume(&mut self, expr: &Expr) {
         self.deactivate(expr.resource);
     }
+    /// A grade-zero binding is not materialized at runtime. Its initializer is
+    /// still evaluated for strict effects, but no store, local resource, or
+    /// read is emitted for the binding.
+    fn erased_local(&self, slot: usize) -> bool {
+        self.program.functions[self.function_index].locals[slot]
+            .grade
+            .is_some_and(Grade::is_zero)
+    }
     fn activate_local(&mut self, slot: usize) {
         let values = self.variables[slot]
             .iter()
@@ -2630,6 +2639,9 @@ impl Generator<'_, '_> {
                 ex::Statement::Let(slot, expr) => {
                     let value = lower!(self.expr(expr));
                     self.consume(expr);
+                    if self.erased_local(*slot) {
+                        continue;
+                    }
                     self.assign(*slot, &value);
                     self.activate_local(*slot);
                     slots.push(*slot);
@@ -3275,10 +3287,14 @@ impl Generator<'_, '_> {
             }
             ExprKind::Assign(slot, replacement) => {
                 let value = lower!(self.expr(replacement));
-                self.cleanup(self.program.functions[self.function_index].local_resources[*slot]);
                 self.consume(replacement);
-                self.assign(*slot, &value);
-                self.activate_local(*slot);
+                if !self.erased_local(*slot) {
+                    self.cleanup(
+                        self.program.functions[self.function_index].local_resources[*slot],
+                    );
+                    self.assign(*slot, &value);
+                    self.activate_local(*slot);
+                }
                 self.constant(0)
             }
             ExprKind::RefAssign(reference, offset, replacement) => {
