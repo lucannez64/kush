@@ -75,6 +75,53 @@ normalize to one deterministic representative rather than both absorbing into
 Incomparable callable intersections remain an explicit diagnostic; there is no
 overloaded-function representation.
 
+## Structural records
+
+An anonymous structural record type is written `struct { a: i64, b: Bool }`.
+It has no nominal declaration and no module-level name. Fields are stored in a
+**canonical row**: sorted by field name, independent of source order. Two
+occurrences with the same field names and value types therefore intern to one
+layout, and the runtime order is deterministic.
+
+A record value (nominal or structural) is a subtype of a structural record when
+every target field is present in the source with a subtype-compatible type.
+Width subtyping drops source fields that the target does not mention. Dropping
+is a real runtime conversion, not a pointer reinterpretation:
+
+- target fields are copied into canonical order;
+- source fields absent from the target are cleaned up exactly once;
+- an omitted field that carries a linear obligation is rejected, because the
+  target cannot consume it;
+- fields that are already at the target representation are copied directly;
+- a nested representation change (for example a field that would need a union
+  tag insertion) is rejected with an explicit diagnostic and must be converted
+  before the structural coercion.
+
+Borrowed leaves are invariant. A structural conversion cannot change an
+`&[T]` into `&mut [T]`, drop the mutability of a view, or relabel a borrowed
+record leaf. Mutability follows the underlying `&[T]`/`&mut [T]` types, which
+are already invariant under `subtype`. Owning affine fields may be erased by
+width subtyping; they are dropped exactly once by the conversion. The runtime
+conversion is available in the reference evaluator and the native backend and
+allocates nothing.
+
+```rust
+struct Wide { b: i64, a: i64, extra: Box<i64> }
+
+fn sum(v: struct { a: i64, b: i64 }) -> i64 ! {panic} {
+    v.a + v.b
+}
+
+fn main() -> i64 ! {alloc, panic} {
+    sum(Wide { b: 20, a: 22, extra: Box.new(1) }) // 42, extra dropped
+}
+```
+
+Structural records are not a general row-polymorphic record calculus. There is
+no open row variable, no field renaming, no structural record literal syntax,
+and no structural equality. An implementation type in an impl header cannot be
+an anonymous structural record; nominal declarations keep coherence decidable.
+
 ## Subtyping and conversions
 
 The checked subtype relation includes:
@@ -208,9 +255,11 @@ Implemented and tested:
 
 Deliberately unsupported, with explicit diagnostics:
 
-- **Structural record/width subtyping:** source declarations are nominal and the
-  executable IR has no anonymous row/structural record type. A record is
-  invariant; two different record declarations are disjoint.
+- **Structural record limits:** anonymous `struct { ... }` rows support width
+  subtyping, canonical reordering, and exact-representation field copying, as
+  described above. Nested field conversions, open rows, field renaming, generic
+  structural patterns, and structural records in impl headers are rejected.
+  Nominal records remain invariant with respect to other nominal records.
 - **Function subtyping:** arrow subtyping is implemented for first-class
   function values (`fn(...)`, owning `once fn(...)`, and `linear once fn(...)`),
   with contravariant parameters, covariant results, effect-row inclusion

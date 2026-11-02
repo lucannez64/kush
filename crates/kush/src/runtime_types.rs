@@ -90,6 +90,10 @@ pub(crate) struct Enum {
     pub tuple: bool,
     /// Declared `#[linear]`: values must be consumed, never implicitly dropped.
     pub linear: bool,
+    /// An anonymous structural record type (`struct { a: A, b: B }`). Its
+    /// fields are stored in canonical name order, so equal rows intern to one
+    /// layout. Structural width subtyping is checked field by field.
+    pub structural: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UnionType {
@@ -472,6 +476,9 @@ pub(crate) struct Types<'a> {
     pub function_types: Vec<FunctionType>,
     cache: BTreeMap<LayoutKey, usize>,
     union_cache: BTreeMap<Vec<Type>, usize>,
+    /// Canonical structural record rows. Fields are sorted by name, so the key
+    /// is both the interning identity and the runtime storage order.
+    structural_cache: BTreeMap<Vec<(String, Type)>, usize>,
     function_cache: BTreeMap<FunctionKey, usize>,
     active: BTreeSet<BindingId>,
     /// Closed-world trait objects: `(trait, trait arguments) -> union of every
@@ -688,6 +695,7 @@ impl<'a> Types<'a> {
             function_types: Vec::new(),
             cache: BTreeMap::new(),
             union_cache: BTreeMap::new(),
+            structural_cache: BTreeMap::new(),
             function_cache: BTreeMap::new(),
             active: BTreeSet::new(),
             dyn_objects: BTreeMap::new(),
@@ -759,8 +767,118 @@ impl<'a> Types<'a> {
             linear: false,
             array: Some((element, length)),
             tuple: false,
+            structural: false,
         });
         Ok(Type::Enum(id))
+    }
+    /// Intern an anonymous structural record row. Fields are sorted by name:
+    /// this is the canonical row representation used for layout, equality, and
+    /// field coercion. Duplicate names are rejected, so the ordering is total.
+    pub fn structural(
+        &mut self,
+        mut fields: Vec<(String, Type)>,
+        span: Span,
+    ) -> Result<Type> {
+        fields.sort_by(|left, right| left.0.cmp(&right.0));
+        if fields.is_empty() {
+            return Err(Diagnostic::new(
+                span,
+                "a structural record type must have at least one field",
+            ));
+        }
+        if fields.len() > 64 {
+            return Err(Diagnostic::new(
+                span,
+                "structural records support at most 64 fields",
+            ));
+        }
+        for pair in fields.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                return Err(Diagnostic::new(
+                    span,
+                    format!("duplicate structural record field '{}'", pair[0].0),
+                ));
+            }
+        }
+        for (name, ty) in &fields {
+            if *ty == Type::Never {
+                return Err(Diagnostic::new(
+                    span,
+                    format!("structural record field '{name}' cannot have type Never"),
+                ));
+            }
+            if matches!(ty, Type::Ref(_) | Type::RefMut(_)) {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "structural record field '{name}' cannot store an owner reference; use a by-value owner, a slice view, or a borrowed record"
+                    ),
+                ));
+            }
+            if contains_task(self, *ty) {
+                return Err(Diagnostic::new(
+                    span,
+                    format!("structural record field '{name}' cannot store a task handle"),
+                ));
+            }
+        }
+        let words = 1 + fields.iter().map(|(_, ty)| self.width(*ty)).sum::<usize>();
+        if words > MAX_WORDS {
+            return Err(Diagnostic::new(
+                span,
+                "structural record exceeds the 32-word layout limit",
+            ));
+        }
+        if let Some(id) = self.structural_cache.get(&fields) {
+            return Ok(Type::Enum(*id));
+        }
+        if self.enums.len() >= 256 {
+            return Err(Diagnostic::new(
+                span,
+                "structural record layout budget exhausted (256)",
+            ));
+        }
+        let borrowed = fields.iter().any(|(_, ty)| has_borrow(self, *ty));
+        let mutable_borrow = fields.iter().any(|(_, ty)| has_mutable_borrow(self, *ty));
+        let linear = fields.iter().any(|(_, ty)| contains_linear(self, *ty));
+        let id = self.enums.len();
+        let name = format!(
+            "struct {{ {} }}",
+            fields
+                .iter()
+                .map(|(name, ty)| format!("{name}: {}", self.name(*ty)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        self.enums.push(Enum {
+            definition: usize::MAX,
+            name,
+            arguments: fields.iter().map(|(_, ty)| *ty).collect(),
+            consts: vec![],
+            lifetimes: vec![],
+            variants: vec![Variant {
+                name: "Struct".into(),
+                fields: fields.iter().map(|(_, ty)| *ty).collect(),
+                tuple: false,
+                names: fields.iter().map(|(name, _)| name.clone()).collect(),
+            }],
+            words,
+            result: None,
+            record: true,
+            field_lifetimes: vec![None; fields.len()],
+            borrowed,
+            mutable_borrow,
+            linear,
+            array: None,
+            tuple: false,
+            structural: true,
+        });
+        self.structural_cache.insert(fields, id);
+        Ok(Type::Enum(id))
+    }
+    /// Whether a layout is an anonymous structural record.
+    pub fn is_structural(&self, ty: Type) -> bool {
+        ty.layout().is_some_and(|id| self.enums[id].structural)
     }
     /// An anonymous tuple layout `(A, B, ...)`: a record whose fields are
     /// named `0`, `1`, ... Equal element types give the same layout.
@@ -838,6 +956,7 @@ impl<'a> Types<'a> {
             linear,
             array: None,
             tuple: true,
+            structural: false,
         });
         Ok(Type::Enum(id))
     }
@@ -955,6 +1074,11 @@ impl<'a> Types<'a> {
                 (Type::Enum(a), Type::Enum(b)) | (Type::Variants(a, _), Type::Enum(b))
                     if types.enums[a].record && types.enums[b].record =>
                 {
+                    if types.enums[a].structural || types.enums[b].structural {
+                        // Structural rows are interned by canonical field row,
+                        // so only exact identity is representation-equivalent.
+                        return false;
+                    }
                     let (a, b) = (&types.enums[a], &types.enums[b]);
                     a.definition == b.definition
                         && a.consts == b.consts
@@ -1001,6 +1125,7 @@ impl<'a> Types<'a> {
         span: Span,
     ) -> Result<Type> {
         match ty {
+            Type::Enum(id) if self.enums[id].structural => Ok(ty),
             Type::Enum(id) if self.enums[id].record && self.enums[id].borrowed => {
                 let definition = self.enums[id].definition;
                 let consts = self.enums[id].consts.clone();
@@ -1201,7 +1326,7 @@ impl<'a> Types<'a> {
     }
     fn layout_name(&self, id: usize) -> String {
         let layout = &self.enums[id];
-        if layout.tuple || layout.array.is_some() {
+        if layout.tuple || layout.array.is_some() || layout.structural {
             return layout.name.clone();
         }
         if layout.arguments.is_empty() && layout.consts.is_empty() && layout.lifetimes.is_empty() {
@@ -1328,6 +1453,23 @@ impl<'a> Types<'a> {
                 length,
             )?;
             return self.array(element, length, ty.span);
+        }
+        if let ast::TypeKind::Structural(fields) = &ty.kind {
+            let mut lowered = Vec::with_capacity(fields.len());
+            for field in fields {
+                let (inner, grade) = crate::grades::split(&field.ty);
+                if grade.is_some() {
+                    return Err(Diagnostic::new(
+                        field.ty.span,
+                        "a structural record field cannot carry a usage grade; grade the record value or binding instead",
+                    ));
+                }
+                lowered.push((
+                    field.name.clone(),
+                    self.lower(inner, substitution, depth + 1)?,
+                ));
+            }
+            return self.structural(lowered, ty.span);
         }
         if let ast::TypeKind::Function {
             lifetimes,
@@ -2434,6 +2576,11 @@ impl<'a> Types<'a> {
                 return self.function_subtype(&self.function_types[a], &self.function_types[b]);
             }
             (Type::Once(_), Type::Fn(_)) => return false,
+            (Type::Enum(a), Type::Enum(b))
+                if self.enums[a].record && self.enums[b].structural =>
+            {
+                return self.structural_subtype(a, b);
+            }
             (Type::Enum(a), Type::Enum(b)) if self.enums[a].record && self.enums[b].record => {
                 // Erased record lifetimes are not part of the runtime layout or
                 // of nominal identity. A call boundary still relates the
@@ -2448,6 +2595,64 @@ impl<'a> Types<'a> {
             }
             _ => false,
         }
+    }
+    /// Structural width/depth subtyping into a canonical structural row.
+    /// Every target field must exist in the source with a subtype-compatible
+    /// value. Borrowed leaves are invariant: a structural conversion may not
+    /// relabel, reborrow, or change the mutability of a view. Source fields
+    /// absent from the target are erased, so they must not carry a linear
+    /// obligation; owning affine fields are dropped exactly once by the
+    /// checked coercion.
+    fn structural_subtype(&self, source: usize, target: usize) -> bool {
+        let source_enum = &self.enums[source];
+        let target_enum = &self.enums[target];
+        let source_variant = &source_enum.variants[0];
+        let target_variant = &target_enum.variants[0];
+        for (target_name, target_ty) in target_variant.names.iter().zip(&target_variant.fields) {
+            let Some(index) = source_variant
+                .names
+                .iter()
+                .position(|name| name == target_name)
+            else {
+                return false;
+            };
+            let source_ty = source_variant.fields[index];
+            if !self.subtype(source_ty, *target_ty) {
+                return false;
+            }
+            if has_borrow(self, *target_ty) || has_mutable_borrow(self, *target_ty) {
+                // Borrowed leaves are invariant under structural subtyping.
+                if source_ty != *target_ty {
+                    return false;
+                }
+            }
+        }
+        for (index, source_ty) in source_variant
+            .names
+            .iter()
+            .zip(&source_variant.fields)
+        {
+            if target_variant.names.contains(index) {
+                continue;
+            }
+            if contains_linear(self, *source_ty) {
+                return false;
+            }
+        }
+        true
+    }
+    /// The canonical `(name, type)` row of a structural record layout.
+    pub fn structural_row(&self, ty: Type) -> Option<Vec<(String, Type)>> {
+        let id = ty.layout().filter(|id| self.enums[*id].structural)?;
+        let variant = &self.enums[id].variants[0];
+        Some(
+            variant
+                .names
+                .iter()
+                .cloned()
+                .zip(variant.fields.iter().copied())
+                .collect(),
+        )
     }
     /// Whether two types have the same runtime word layout despite differing
     /// only in erased record lifetime labels.
@@ -2638,6 +2843,7 @@ impl<'a> Types<'a> {
             borrowed: false,
             mutable_borrow: false,
             linear: def.linear,
+            structural: false,
         });
         self.cache.insert(key.clone(), index);
         let mut substitution = Subst::default();
@@ -2931,6 +3137,7 @@ impl<'a> Types<'a> {
                 borrowed,
                 mutable_borrow,
                 linear: def.linear,
+                structural: false,
             })
         })();
         self.active.remove(&id);

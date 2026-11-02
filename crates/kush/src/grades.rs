@@ -314,6 +314,10 @@ fn grade_occurrences(resolution: &Resolution, ty: &ast::Type, binder: BindingId)
             .iter()
             .map(|item| grade_occurrences(resolution, item, binder))
             .sum(),
+        K::Structural(fields) => fields
+            .iter()
+            .map(|field| grade_occurrences(resolution, &field.ty, binder))
+            .sum(),
         K::Slice(inner) | K::Borrow { inner, .. } | K::Dyn(inner) => {
             grade_occurrences(resolution, inner, binder)
         }
@@ -345,6 +349,7 @@ fn grade_occurrences(resolution: &Resolution, ty: &ast::Type, binder: BindingId)
             grade_occurrences(resolution, inner, binder)
                 + grade_occurrences(resolution, grade, binder)
         }
+        K::Dyn(inner) => grade_occurrences(resolution, inner, binder),
         K::Integer(_) | K::Bool(_) | K::Lifetime(_) | K::SelfType | K::Predicate(_) => 0,
     }
 }

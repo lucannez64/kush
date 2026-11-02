@@ -269,6 +269,10 @@ pub enum TypeKind {
     /// checked integer arithmetic). It is evaluated during executable type
     /// lowering; it is never a runtime value.
     Array(Box<Type>, Box<Type>),
+    /// `struct { name: Type, ... }`: an anonymous structural record type with a
+    /// canonical field row. Unlike a nominal declaration it has no module-level
+    /// name; two occurrences with the same fields intern to one layout.
+    Structural(Vec<Field>),
     Borrow {
         /// Optional explicit lifetime, as in `&'a [T]`.
         lifetime: Option<String>,

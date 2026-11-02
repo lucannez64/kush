@@ -2052,6 +2052,40 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         };
                         Value::Union { tag, value }
                     }
+                    Coercion::Struct { kept, drops } => {
+                        let Value::Enum { fields, .. } = inner else {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal error: structural record conversion received a non-record value",
+                            ));
+                        };
+                        let mut source = fields.into_iter().map(Some).collect::<Vec<_>>();
+                        let mut target = Vec::with_capacity(kept.len());
+                        for (_, source_index) in kept {
+                            let Some(field) = source
+                                .get_mut(*source_index)
+                                .and_then(|field| field.take())
+                            else {
+                                return Err(Diagnostic::new(
+                                    expr.span,
+                                    "internal error: structural conversion reuses a source field",
+                                ));
+                            };
+                            target.push(field);
+                        }
+                        for (source_index, _) in drops {
+                            if let Some(field) = source
+                                .get_mut(*source_index)
+                                .and_then(|field| field.take())
+                            {
+                                self.drop_value(field)?;
+                            }
+                        }
+                        Value::Enum {
+                            tag: 0,
+                            fields: target,
+                        }
+                    }
                 }
             }
             ExprKind::Local(slot) | ExprKind::Peek(slot) => {

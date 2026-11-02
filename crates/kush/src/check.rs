@@ -367,6 +367,11 @@ fn alias_refs_in_type(resolution: &Resolution, ty: &Type, out: &mut BTreeSet<Bin
                 alias_refs_in_type(resolution, item, out);
             }
         }
+        TypeKind::Structural(fields) => {
+            for field in fields {
+                alias_refs_in_type(resolution, &field.ty, out);
+            }
+        }
         TypeKind::Slice(inner)
         | TypeKind::Borrow { inner, .. }
         | TypeKind::Graded { inner, .. } => alias_refs_in_type(resolution, inner, out),

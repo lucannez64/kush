@@ -638,6 +638,14 @@ pub(crate) enum Coercion {
     Inject { tag: usize },
     /// Remap every source alternative tag to a target alternative tag.
     Repack { map: Vec<usize> },
+    /// Rebuild a record in a canonical structural row. `kept` maps each target
+    /// field index to its source field index. `drops` lists source fields that
+    /// are absent from the target and must be cleaned up exactly once; the
+    /// checker guarantees none of them carries a linear obligation.
+    Struct {
+        kept: Vec<(usize, usize)>,
+        drops: Vec<(usize, Type)>,
+    },
 }
 #[derive(Debug, Clone)]
 pub(crate) enum Pattern {
@@ -804,6 +812,9 @@ pub(crate) fn type_mentions_binding(
         K::Tuple(items) => items
             .iter()
             .any(|item| type_mentions_binding(resolution, item, binder)),
+        K::Structural(fields) => fields
+            .iter()
+            .any(|field| type_mentions_binding(resolution, &field.ty, binder)),
         K::Dyn(inner) => type_mentions_binding(resolution, inner, binder),
         K::Slice(inner) => type_mentions_binding(resolution, inner, binder),
         K::Array(element, length) => {
@@ -2688,6 +2699,21 @@ fn type_key(ty: &ast::Type) -> String {
             text
         }
         ast::TypeKind::Dyn(inner) => format!("dyn {}", type_key(inner)),
+        ast::TypeKind::Structural(fields) => {
+            let mut fields = fields
+                .iter()
+                .map(|field| (field.name.clone(), field.ty.clone()))
+                .collect::<Vec<_>>();
+            fields.sort_by(|left, right| left.0.cmp(&right.0));
+            format!(
+                "struct{{{}}}",
+                fields
+                    .iter()
+                    .map(|(name, ty)| format!("{name}:{}", type_key(ty)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
         ast::TypeKind::Integer(value) => value.clone(),
         ast::TypeKind::Bool(value) => format!("bool:{value}"),
         ast::TypeKind::Tuple(items) => {
@@ -2869,6 +2895,16 @@ impl ContractNames {
             ast::TypeKind::Tuple(items) => {
                 ast::TypeKind::Tuple(items.iter().map(|item| self.ty(item)).collect())
             }
+            ast::TypeKind::Structural(fields) => ast::TypeKind::Structural(
+                fields
+                    .iter()
+                    .map(|field| ast::Field {
+                        name: field.name.clone(),
+                        ty: self.ty(&field.ty),
+                        span: field.span,
+                    })
+                    .collect(),
+            ),
             ast::TypeKind::Slice(inner) => ast::TypeKind::Slice(Box::new(self.ty(inner))),
             ast::TypeKind::Array(inner, length) => {
                 ast::TypeKind::Array(Box::new(self.ty(inner)), Box::new(self.ty(length)))
@@ -3223,6 +3259,9 @@ fn type_mentions_self(ty: &ast::Type) -> bool {
                 || arguments.iter().any(type_mentions_self)
         }
         ast::TypeKind::Tuple(arguments) => arguments.iter().any(type_mentions_self),
+        ast::TypeKind::Structural(fields) => {
+            fields.iter().any(|field| type_mentions_self(&field.ty))
+        }
         ast::TypeKind::Dyn(inner) => type_mentions_self(inner),
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => {
             type_mentions_self(inner)
@@ -4515,6 +4554,12 @@ fn validate_impl_pattern(
             Ok(())
         }
         ast::TypeKind::Integer(_) | ast::TypeKind::Bool(_) => Ok(()),
+        ast::TypeKind::Structural(_) => Err(Diagnostic::new(
+            pattern.span,
+            format!(
+                "an impl {what} may not be an anonymous structural record; declare a nominal record and use it in the impl header"
+            ),
+        )),
         ast::TypeKind::Dyn(_) => Err(Diagnostic::new(
             pattern.span,
             format!("an impl {what} may not be a trait object; name the concrete receiver"),
@@ -7138,6 +7183,12 @@ fn validate_type_template(
             }
             Ok(())
         }
+        ast::TypeKind::Structural(fields) => {
+            for field in fields {
+                validate_type_template(resolution, &field.ty, consts, false, false)?;
+            }
+            Ok(())
+        }
         ast::TypeKind::Slice(inner)
         | ast::TypeKind::Borrow { inner, .. }
         | ast::TypeKind::Graded { inner, .. } => {
@@ -7190,6 +7241,9 @@ fn type_references_binding(resolution: &Resolution, ty: &ast::Type, id: BindingI
         ast::TypeKind::Tuple(items) => items
             .iter()
             .any(|item| type_references_binding(resolution, item, id)),
+        ast::TypeKind::Structural(fields) => fields
+            .iter()
+            .any(|field| type_references_binding(resolution, &field.ty, id)),
         ast::TypeKind::Dyn(inner) => type_references_binding(resolution, inner, id),
         ast::TypeKind::Slice(inner)
         | ast::TypeKind::Borrow { inner, .. }
@@ -10273,6 +10327,9 @@ impl Checker<'_, '_> {
         if value.ty == Type::Never || value.ty == expected {
             return Ok(value);
         }
+        if self.types.is_structural(expected) {
+            return self.coerce_struct(value, expected, span);
+        }
         if !self.subtype(value.ty, expected) {
             self.expect(value.ty, expected, span)?;
             debug_assert!(false, "expect returned for a non-subtype");
@@ -10375,6 +10432,118 @@ impl Checker<'_, '_> {
                 coercion,
             },
             ty,
+            span,
+            resource: None,
+        })
+    }
+    /// A checked width/row conversion into an anonymous structural record.
+    /// Fields are matched by name, the target row is canonical (sorted), and
+    /// omitted source fields are dropped by the runtime conversion. A nested
+    /// representation change in a retained field is rejected explicitly: the
+    /// supported fragment copies fields that already have the target
+    /// representation, while width/order changes still require a real
+    /// conversion. This is a deliberate limit, not a silent relabeling.
+    fn coerce_struct(&mut self, value: Expr, expected: Type, span: Span) -> Result<Expr> {
+        let Some(target_row) = self.types.structural_row(expected) else {
+            return Err(Diagnostic::new(
+                span,
+                "internal error: structural conversion target is not a structural record",
+            ));
+        };
+        let Some(source_layout) = value.ty.layout().filter(|id| self.types.enums[*id].record)
+        else {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "type mismatch: expected {}, found {}",
+                    self.types.name(expected),
+                    self.types.name(value.ty)
+                ),
+            ));
+        };
+        let source_variant = &self.types.enums[source_layout].variants[0];
+        if !self.subtype(value.ty, expected) {
+            // Produce the precise field mismatch before falling back to the
+            // generic diagnostic. The structural relation is the authority.
+            for (name, target_ty) in &target_row {
+                let Some(index) = source_variant.names.iter().position(|n| n == name) else {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "cannot convert {} to {}: the source row has no field '{name}'",
+                            self.types.name(value.ty),
+                            self.types.name(expected)
+                        ),
+                    ));
+                };
+                let source_ty = source_variant.fields[index];
+                if !self.subtype(source_ty, *target_ty) {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "cannot convert field '{name}' from {} to {} in structural record conversion",
+                            self.types.name(source_ty),
+                            self.types.name(*target_ty)
+                        ),
+                    ));
+                }
+            }
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "cannot convert {} to {}: a width-erased field carries a linear obligation or changes a borrowed leaf",
+                    self.types.name(value.ty),
+                    self.types.name(expected)
+                ),
+            ));
+        }
+        let mut kept = Vec::with_capacity(target_row.len());
+        for (target_index, (name, target_ty)) in target_row.iter().enumerate() {
+            let source_index = source_variant
+                .names
+                .iter()
+                .position(|source| source == name)
+                .expect("structural subtype has every target field");
+            let source_ty = source_variant.fields[source_index];
+            if !self.same_layout(source_ty, *target_ty) {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "structural field '{name}' would need a nested representation change from {} to {}; this fragment copies representation-compatible fields. Convert the field explicitly before the structural coercion",
+                        self.types.name(source_ty),
+                        self.types.name(*target_ty)
+                    ),
+                ));
+            }
+            kept.push((target_index, source_index));
+        }
+        let mut drops = Vec::new();
+        for (source_index, source_ty) in source_variant.fields.iter().enumerate() {
+            if target_row
+                .iter()
+                .any(|(name, _)| source_variant.names[source_index] == *name)
+            {
+                continue;
+            }
+            if crate::runtime_types::contains_linear(self.types, *source_ty) {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "cannot erase field '{}' of type {} through structural width subtyping: it carries a linear obligation that the target cannot consume",
+                        source_variant.names[source_index],
+                        self.types.name(*source_ty)
+                    ),
+                ));
+            }
+            drops.push((source_index, *source_ty));
+        }
+        Ok(Expr {
+            kind: ExprKind::Coerce {
+                value: Box::new(value),
+                to: expected,
+                coercion: Coercion::Struct { kept, drops },
+            },
+            ty: expected,
             span,
             resource: None,
         })
@@ -18964,6 +19133,16 @@ pub(crate) fn substitute_alias_type(
             items
                 .iter()
                 .map(|item| substitute_alias_type(resolution, item, map))
+                .collect(),
+        ),
+        K::Structural(fields) => K::Structural(
+            fields
+                .iter()
+                .map(|field| ast::Field {
+                    name: field.name.clone(),
+                    ty: substitute_alias_type(resolution, &field.ty, map),
+                    span: field.span,
+                })
                 .collect(),
         ),
         K::Slice(inner) => K::Slice(Box::new(substitute_alias_type(resolution, inner, map))),

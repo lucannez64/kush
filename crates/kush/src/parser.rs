@@ -901,6 +901,23 @@ impl Parser {
                 TypeKind::Predicate(Box::new(proposition)),
                 self.since(start),
             )
+        } else if self.eat(&Kind::Struct) {
+            self.expect(
+                &Kind::LBrace,
+                "'{' after 'struct' in an anonymous structural record type",
+            )?;
+            let fields = self.separated(Kind::RBrace, |p| {
+                let start = p.current().span;
+                let name = p.ident()?;
+                p.expect(&Kind::Colon, "':' after structural record field name")?;
+                let ty = p.ty()?;
+                Ok(Field {
+                    name,
+                    ty,
+                    span: p.since(start),
+                })
+            })?;
+            Node::new(TypeKind::Structural(fields), self.since(start))
         } else if self.eat(&Kind::LBracket) {
             let inner = self.ty()?;
             let kind = if self.eat(&Kind::Semi) {

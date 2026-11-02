@@ -3498,6 +3498,35 @@ impl Generator<'_, '_> {
                         }
                         return Some(out);
                     }
+                    Coercion::Struct { kept, drops } => {
+                        let source_id = value
+                            .ty
+                            .layout()
+                            .expect("checked structural source layout");
+                        let source_fields = self.program.enums[source_id].variants[0].fields.clone();
+                        let mut offsets = Vec::with_capacity(source_fields.len());
+                        let mut offset = 1usize;
+                        for field in &source_fields {
+                            offsets.push(offset);
+                            offset += self.program.width(*field);
+                        }
+                        let mut out = Vec::with_capacity(width);
+                        out.push(self.constant(0));
+                        for (_, source_index) in kept {
+                            let start = offsets[*source_index];
+                            let field_width = self.program.width(source_fields[*source_index]);
+                            out.extend(values[start..start + field_width].iter().copied());
+                        }
+                        for (source_index, ty) in drops {
+                            let start = offsets[*source_index];
+                            let field_width = self.program.width(*ty);
+                            self.drop_value(*ty, &values[start..start + field_width]);
+                        }
+                        while out.len() < width {
+                            out.push(self.constant(0));
+                        }
+                        return Some(out);
+                    }
                     Coercion::Repack { map } => {
                         let exit = self.join(*to)?;
                         for (source_tag, target_tag) in map.iter().enumerate() {
