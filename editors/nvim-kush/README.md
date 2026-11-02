@@ -30,7 +30,8 @@ directory to `vim.opt.runtimepath:append()`.
 
 - `lsp/kush.lua`: default `vim.lsp.config` values; Neovim loads it when the
   file is on the runtimepath.
-- `ftplugin/kush.lua`: comment string and indent settings for `kush` buffers.
+- `ftplugin/kush.lua`: comment string, indent settings, and a delayed regex
+  fallback that runs only while the language server is not attached.
 - `syntax/kush.vim`: regex fallback highlighting for when the language server
   is not attached (scratch buffers, cold starts before initialization).
 
