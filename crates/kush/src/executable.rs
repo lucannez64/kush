@@ -15261,6 +15261,55 @@ impl Checker<'_, '_> {
                             None => Ok(value),
                         };
                     }
+                    if let Some((element, capacity)) = expected
+                        .and_then(|ty| ty.layout())
+                        .and_then(|id| c.types.enums[id].dynamic_array)
+                    {
+                        // A contextual literal is the checked construction of
+                        // a runtime-sized inline array. Its static length is at
+                        // most the capacity, so the reused push guards are
+                        // unreachable; no runtime panic can occur and no
+                        // `panic` effect is required.
+                        if values.len() > capacity {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!(
+                                    "DynArray literal has {} elements but the capacity is {capacity}",
+                                    values.len()
+                                ),
+                            ));
+                        }
+                        let literal_ty = c.types.dynamic_array(element, capacity, span)?;
+                        let mut current = Expr {
+                            kind: ExprKind::DynArrayNew {
+                                element,
+                                capacity,
+                            },
+                            ty: literal_ty,
+                            span,
+                            resource: None,
+                        };
+                        for value in values {
+                            let value = c.expr_expected(value, Some(element))?;
+                            c.expect(value.ty, element, value.span)?;
+                            let ty = current.ty;
+                            current = Expr {
+                                kind: ExprKind::DynArrayPush {
+                                    array: Box::new(current),
+                                    value: Box::new(value),
+                                    element,
+                                    capacity,
+                                },
+                                ty,
+                                span,
+                                resource: None,
+                            };
+                        }
+                        return match expected {
+                            Some(expected) => c.coerce(current, expected, span),
+                            None => Ok(current),
+                        };
+                    }
                     return c.vec_literal(values, span, expected);
                 }
                 ast::ExprKind::Index { value, index } => {
@@ -21877,6 +21926,30 @@ impl Checker<'_, '_> {
                     element,
                     Some(length),
                 )
+            } else if let Some((element, _capacity)) = ty
+                .layout()
+                .and_then(|id| self.types.enums[id].dynamic_array)
+            {
+                if mutable {
+                    return Err(Diagnostic::new(
+                        value.span,
+                        "a DynArray does not expose a mutable '&mut [T]' view; use DynArray.set for checked in-place writes",
+                    ));
+                }
+                // The view covers the live prefix: its length is the runtime
+                // length word, not the compile-time capacity. A reborrow via
+                // `Borrow` keeps the owner loaned for the view's lexical scope,
+                // so push/pop/assignment cannot run while the view is live.
+                (
+                    Expr {
+                        kind: ExprKind::Borrow(slot),
+                        ty: Type::Ref(self.types.pointer(ty)),
+                        span: value.span,
+                        resource: None,
+                    },
+                    element,
+                    None,
+                )
             } else if let Type::Vec(pointer) = ty {
                 let element = self.types.pointees[pointer];
                 let owner = self.types.pointer(ty);
@@ -24051,6 +24124,15 @@ impl Checker<'_, '_> {
                 });
             }
             if let ast::PatternKind::Slice(parts) = &pattern.kind {
+                if ty
+                    .layout()
+                    .is_some_and(|id| c.types.enums[id].dynamic_array.is_some())
+                {
+                    return Err(Diagnostic::new(
+                        pattern.span,
+                        "DynArray patterns are not supported: the runtime length is not a static variant tag; read DynArray.len and DynArray.get instead",
+                    ));
+                }
                 let Some((element, length)) = ty.layout().and_then(|id| c.types.enums[id].array)
                 else {
                     return Err(Diagnostic::new(

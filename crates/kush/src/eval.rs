@@ -1395,6 +1395,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         match value {
             Value::Slice { len, .. } => Ok(*len),
             Value::Enum { fields, .. } => Ok(fields.len()),
+            Value::DynArray { items, .. } => Ok(items.len()),
+            Value::RecordRef(cell) => match &*cell.lock().unwrap() {
+                Value::DynArray { items, .. } => Ok(items.len()),
+                Value::Enum { fields, .. } => Ok(fields.len()),
+                _ => Err(Diagnostic::new(
+                    span,
+                    "internal error: invalid record slice source",
+                )),
+            },
             Value::Borrowed(id) => match self.heap.get(*id) {
                 Some(Value::Buffer { data, .. }) => Ok(data.len()),
                 Some(Value::Vector { items, .. }) => Ok(items.len()),
@@ -1430,6 +1439,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             let value = cell.lock().unwrap();
             return match &*value {
                 Value::Enum { fields, .. } => fields.get(position).cloned().ok_or_else(|| {
+                    Diagnostic::new(span, "internal error: slice array index out of bounds")
+                }),
+                Value::DynArray { items, .. } => items.get(position).cloned().ok_or_else(|| {
                     Diagnostic::new(span, "internal error: slice array index out of bounds")
                 }),
                 _ => Err(Diagnostic::new(
@@ -2984,6 +2996,27 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             value => {
                                 let cell = Arc::new(Mutex::new(value));
                                 frame.locals[*slot] = Value::ArrayCell(cell.clone());
+                                cell
+                            }
+                        };
+                        Some(cell)
+                    }
+                    // A shared DynArray view aliases the pinned record cell, so
+                    // later reads see the same live inline storage. The
+                    // ownership pass rejects push/pop/assignment while the view
+                    // is live, so this shared cell is never mutated behind it.
+                    ExprKind::Borrow(slot)
+                        if self.program.functions[frame.function].locals[*slot]
+                            .ty
+                            .layout()
+                            .is_some_and(|id| self.program.enums[id].dynamic_array.is_some()) =>
+                    {
+                        let current = frame.locals[*slot].clone();
+                        let cell = match current {
+                            Value::RecordCell(cell) => cell,
+                            value => {
+                                let cell = Arc::new(Mutex::new(value));
+                                frame.locals[*slot] = Value::RecordCell(cell.clone());
                                 cell
                             }
                         };

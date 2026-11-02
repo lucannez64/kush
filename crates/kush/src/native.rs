@@ -4927,89 +4927,119 @@ impl Generator<'_, '_> {
                     }
                     _ => None,
                 };
-                let base_values = if array_location.is_some() {
+                // A checked DynArray view borrows the pinned record storage, so
+                // the descriptor points at the live inline slots. The length is
+                // the runtime length word, and the capacity is the static bound.
+                let dynamic_array_location = match &base.kind {
+                    ExprKind::Borrow(slot)
+                        if base
+                            .ty
+                            .ref_pointee()
+                            .and_then(|pointee| self.program.pointees.get(pointee).copied())
+                            .and_then(|pointee| pointee.layout())
+                            .is_some_and(|id| self.program.enums[id].dynamic_array.is_some()) =>
+                    {
+                        self.locations[*slot]
+                    }
+                    _ => None,
+                };
+                let base_values = if array_location.is_some() || dynamic_array_location.is_some() {
                     Vec::new()
                 } else {
                     lower!(self.expr(base))
                 };
-                let (pointer, length, stride, bytes) = if let Some(location) = array_location {
-                    let (_, length) = base
-                        .ty
-                        .layout()
-                        .and_then(|id| self.program.enums[id].array)
-                        .expect("checked array slice source");
-                    // Word 0 is the private array tag; elements follow it.
-                    let data = self.builder.ins().iadd_imm_s(location, 8);
-                    (
-                        data,
-                        self.constant(length as i64),
-                        self.constant((element_width * 8) as i64),
-                        self.constant(0),
-                    )
-                } else if let Some((_, length)) =
-                    base.ty.layout().and_then(|id| self.program.enums[id].array)
-                {
-                    let slot = self.stack_words(base_values.len());
-                    self.store_words(slot, &base_values);
-                    // Word 0 is the private array tag; elements follow it.
-                    let data = self.builder.ins().iadd_imm_s(slot, 8);
-                    (
-                        data,
-                        self.constant(length as i64),
-                        self.constant((element_width * 8) as i64),
-                        self.constant(0),
-                    )
-                } else {
-                    match base.ty {
-                        Type::Ref(p) => match self.program.pointees[p] {
-                            Type::Bytes => {
-                                let handle = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    base_values[0],
-                                    0,
-                                );
-                                let data = self.builder.ins().iadd_imm_s(handle, 16);
-                                let length = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    handle,
-                                    0,
-                                );
-                                (data, length, self.constant(1), self.constant(1))
-                            }
-                            Type::Vec(_) => {
-                                let handle = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    base_values[0],
-                                    0,
-                                );
-                                let data = self.builder.ins().iadd_imm_s(handle, 24);
-                                let length = self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    handle,
-                                    0,
-                                );
-                                (
-                                    data,
-                                    length,
-                                    self.constant((element_width * 8) as i64),
-                                    self.constant(0),
-                                )
-                            }
+                let (pointer, length, stride, bytes) =
+                    if let Some(location) = dynamic_array_location {
+                        // Word 0 is the runtime length; elements follow it.
+                        let data = self.builder.ins().iadd_imm_s(location, 8);
+                        let length =
+                            self.builder
+                                .ins()
+                                .load(I64, ir::MemFlagsData::new(), location, 0);
+                        (
+                            data,
+                            length,
+                            self.constant((element_width * 8) as i64),
+                            self.constant(0),
+                        )
+                    } else if let Some(location) = array_location {
+                        let (_, length) = base
+                            .ty
+                            .layout()
+                            .and_then(|id| self.program.enums[id].array)
+                            .expect("checked array slice source");
+                        // Word 0 is the private array tag; elements follow it.
+                        let data = self.builder.ins().iadd_imm_s(location, 8);
+                        (
+                            data,
+                            self.constant(length as i64),
+                            self.constant((element_width * 8) as i64),
+                            self.constant(0),
+                        )
+                    } else if let Some((_, length)) =
+                        base.ty.layout().and_then(|id| self.program.enums[id].array)
+                    {
+                        let slot = self.stack_words(base_values.len());
+                        self.store_words(slot, &base_values);
+                        // Word 0 is the private array tag; elements follow it.
+                        let data = self.builder.ins().iadd_imm_s(slot, 8);
+                        (
+                            data,
+                            self.constant(length as i64),
+                            self.constant((element_width * 8) as i64),
+                            self.constant(0),
+                        )
+                    } else {
+                        match base.ty {
+                            Type::Ref(p) => match self.program.pointees[p] {
+                                Type::Bytes => {
+                                    let handle = self.builder.ins().load(
+                                        I64,
+                                        ir::MemFlagsData::new(),
+                                        base_values[0],
+                                        0,
+                                    );
+                                    let data = self.builder.ins().iadd_imm_s(handle, 16);
+                                    let length = self.builder.ins().load(
+                                        I64,
+                                        ir::MemFlagsData::new(),
+                                        handle,
+                                        0,
+                                    );
+                                    (data, length, self.constant(1), self.constant(1))
+                                }
+                                Type::Vec(_) => {
+                                    let handle = self.builder.ins().load(
+                                        I64,
+                                        ir::MemFlagsData::new(),
+                                        base_values[0],
+                                        0,
+                                    );
+                                    let data = self.builder.ins().iadd_imm_s(handle, 24);
+                                    let length = self.builder.ins().load(
+                                        I64,
+                                        ir::MemFlagsData::new(),
+                                        handle,
+                                        0,
+                                    );
+                                    (
+                                        data,
+                                        length,
+                                        self.constant((element_width * 8) as i64),
+                                        self.constant(0),
+                                    )
+                                }
+                                _ => unreachable!("checked slice source"),
+                            },
+                            Type::Slice(_) | Type::SliceMut(_) => (
+                                base_values[0],
+                                base_values[1],
+                                base_values[2],
+                                base_values[3],
+                            ),
                             _ => unreachable!("checked slice source"),
-                        },
-                        Type::Slice(_) | Type::SliceMut(_) => (
-                            base_values[0],
-                            base_values[1],
-                            base_values[2],
-                            base_values[3],
-                        ),
-                        _ => unreachable!("checked slice source"),
-                    }
-                };
+                        }
+                    };
                 let start = match start {
                     Some(start) => lower!(self.scalar(start)),
                     None => self.constant(0),

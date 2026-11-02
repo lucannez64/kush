@@ -1050,3 +1050,159 @@ fn dynamically_resolved_perform_requires_panic() {
         "requires effects {panic}",
     );
 }
+
+#[test]
+fn runtime_sized_array_literals_set_the_runtime_length() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [10, 20, 30];
+            let empty: DynArray<i64, 2> = [];
+            DynArray.len(&a) + DynArray.get(&a, 2) + DynArray.len(&empty)
+        }"#;
+    assert_eq!(value(source), 33);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 33);
+    // The literal length is statically bounded by the capacity; the reused
+    // push guards are unreachable, so no `panic` effect is required.
+    let literal = r#"
+        fn main() -> i64 ! {} {
+            let a: DynArray<i64, 2> = [4, 5];
+            DynArray.len(&a)
+        }"#;
+    assert_eq!(value(literal), 2);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(literal, 2);
+    // Owning elements in a literal are dropped as a prefix.
+    let owning = r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 3> = [Box.new(1), Box.new(2)];
+            DynArray.len(&a)
+        }"#;
+    let (result, stats) = evaluate(owning);
+    assert_eq!(result, 2);
+    assert_eq!(stats.allocations, 2);
+    assert_eq!(stats.deallocations, 2);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(owning, 2);
+    rejects(
+        r#"
+        fn main() -> i64 ! {} {
+            let a: DynArray<i64, 2> = [1, 2, 3];
+            0
+        }"#,
+        "DynArray literal has 3 elements but the capacity is 2",
+    );
+}
+
+#[test]
+fn runtime_sized_array_slice_views_cover_the_live_prefix() {
+    let source = r#"
+        fn head(s: &[i64]) -> i64 ! {panic} { Slice.get(s, 0) }
+        fn main() -> i64 ! {io, panic} {
+            let a: DynArray<i64, 4> = [10, 20, 30];
+            let all: &[i64] = &a[..];
+            let middle = &a[1..3];
+            {
+                let inner: &[i64] = &a[2..];
+                print_i64(Slice.len(inner));
+            }
+            Slice.len(all) + head(all) + Slice.len(middle) + Slice.get(middle, 1) + all[2]
+        }"#;
+    assert_eq!(value(source), 3 + 10 + 2 + 30 + 30);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 75);
+    // The range is checked against the runtime length, not the capacity.
+    let out_of_bounds = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1, 2, 3];
+            let bad: &[i64] = &a[0..4];
+            Slice.len(bad)
+        }"#;
+    let program = check(out_of_bounds).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("slice range out of bounds"),
+        "{error:?}"
+    );
+    // A view is invalidated by push, pop, assignment, or moving the owner.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [1, 2];
+            let view: &[i64] = &a[..];
+            a = DynArray.push(a, 3);
+            Slice.len(view)
+        }"#,
+        "slice view or reference borrows it",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1, 2];
+            let view: &[i64] = &a[..];
+            drop(a);
+            Slice.len(view)
+        }"#,
+        "move",
+    );
+    let runtime_bounds = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1, 2];
+            let bad: &[i64] = &a[0..3];
+            Slice.len(bad)
+        }"#;
+    let program = check(runtime_bounds).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("slice range out of bounds"),
+        "{error:?}"
+    );
+    rejects(
+        "fn f() -> &[i64] ! {} { let a: DynArray<i64, 2> = [1, 2]; &a[..] } fn main() -> Unit ! {} {}",
+        "cannot be returned",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 2> = [Box.new(1)];
+            let view: &[Box<i64>] = &a[..];
+            Slice.len(view)
+        }"#,
+        "owning or linear elements",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [1, 2];
+            let view: &mut [i64] = &mut a[..];
+            0
+        }"#,
+        "does not expose a mutable '&mut [T]' view",
+    );
+    // Releasing the view at the end of its block permits a later push.
+    let released = r#"
+        fn main() -> i64 ! {io, panic} {
+            let mut a: DynArray<i64, 4> = [1, 2];
+            { let view: &[i64] = &a[..]; print_i64(Slice.len(view)); }
+            a = DynArray.push(a, 3);
+            DynArray.len(&a)
+        }"#;
+    assert_eq!(value(released), 3);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(released, 3);
+}
+
+#[test]
+fn runtime_sized_array_patterns_are_rejected_explicitly() {
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 2> = [1, 2];
+            match a {
+                [x, y] => x + y,
+                _ => 0
+            }
+        }"#,
+        "DynArray patterns are not supported",
+    );
+}
