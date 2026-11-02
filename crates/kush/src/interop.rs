@@ -238,6 +238,7 @@ impl AdapterSpec {
                     | Parameter::Resource { name, .. } => name,
                 };
                 validate_identifier(name, "parameter name")?;
+                reject_support_name(name)?;
                 if name == "kush_out" {
                     return Err(format!(
                         "parameter name 'kush_out' in '{}' is reserved for the generated result slot",
@@ -543,8 +544,14 @@ fn generate_function(spec: &AdapterSpec, function: &Function) -> String {
         );
         let _ = writeln!(
             out,
-            "    guard(\"{}\", || {{\n{}        match {call} {{\n            Ok(value) => {{",
-            function.symbol, setup
+            "    guard(\"{}\", || {{\n{}        match {call} {{\n            Ok({}) => {{",
+            function.symbol,
+            setup,
+            if matches!(function.result, ResultType::Unit) {
+                "()"
+            } else {
+                "value"
+            }
         );
         match &function.result {
             ResultType::Unit => out.push_str("                Ok(())\n"),
@@ -723,8 +730,30 @@ fn is_rust_keyword(name: &str) -> bool {
     )
 }
 
+fn reject_support_name(name: &str) -> std::result::Result<(), String> {
+    if [
+        "guard",
+        "abort_on_panic",
+        "write_word",
+        "input_bytes",
+        "input_str",
+        "kush_bytes_from",
+        "kush_bridge_support",
+        "set_error",
+        "clear_error",
+    ]
+    .contains(&name)
+    {
+        return Err(format!(
+            "name '{name}' is reserved by the generated bridge support"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_symbol(symbol: &str) -> std::result::Result<(), String> {
-    validate_identifier(symbol, "C symbol")
+    validate_identifier(symbol, "C symbol")?;
+    reject_support_name(symbol)
 }
 fn validate_rust_path(path: &str, what: &str) -> std::result::Result<(), String> {
     if path.is_empty() {

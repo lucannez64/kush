@@ -31,7 +31,7 @@ compile_error!("kush generated adapters require panic=unwind so panics can be co
     /// Copy the most recent adapter error into a caller buffer.
     /// Returns the full message length, or -1 when there is no error.
     #[unsafe(no_mangle)]
-    pub extern "C" fn kush_rust_adapter_example_sha256_adapter_bridge_last_error(out: *mut u8, capacity: i64) -> i64 {
+    pub extern "C" fn kush_m20_rust_adapter_example_m14_sha256_adapter_bridge_last_error(out: *mut u8, capacity: i64) -> i64 {
         LAST_ERROR.with(|slot| {
             let borrow = slot.borrow();
             let Some(message) = borrow.as_deref() else { return -1 };
@@ -48,7 +48,7 @@ compile_error!("kush generated adapters require panic=unwind so panics can be co
     /// allocation. Status 0 writes the handle, 1 means no error, 2 is a
     /// null out pointer, and 3 means the runtime allocation failed.
     #[unsafe(no_mangle)]
-    pub extern "C" fn kush_rust_adapter_example_sha256_adapter_bridge_last_error_bytes(out: *mut i64) -> i64 {
+    pub extern "C" fn kush_m20_rust_adapter_example_m14_sha256_adapter_bridge_last_error_bytes(out: *mut i64) -> i64 {
         LAST_ERROR.with(|slot| {
             let borrow = slot.borrow();
             let Some(message) = borrow.as_deref() else { return 1 };

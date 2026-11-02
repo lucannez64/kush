@@ -145,6 +145,12 @@ pub fn load(config_path: &Path) -> Result<Generated, Error> {
         )));
     }
 
+    if rust_relative.starts_with(&kush_relative) || kush_relative.starts_with(&rust_relative) {
+        return Err(Error::new(
+            "rust-output and kush-output must not be directory prefixes of each other",
+        ));
+    }
+
     let mut resources = Vec::new();
     let mut resource_names = BTreeSet::new();
     if let Some(value) = root.remove("resource") {
@@ -161,7 +167,10 @@ pub fn load(config_path: &Path) -> Result<Generated, Error> {
                     resource.name
                 )));
             }
-            if RESERVED_RESOURCE_NAMES.contains(&resource.name.as_str()) {
+            if RESERVED_RESOURCE_NAMES.contains(&resource.name.as_str())
+                || crate::resolve::BUILTIN_NAMES.contains(&resource.name.as_str())
+                || resource.name == "last_error"
+            {
                 return Err(Error::new(format!(
                     "{}: resource name '{}' is reserved by the Kush prelude",
                     config_path.display(),
@@ -188,9 +197,12 @@ pub fn load(config_path: &Path) -> Result<Generated, Error> {
                     function.name
                 )));
             }
-            if RESERVED_FUNCTION_NAMES.contains(&function.name.as_str()) {
+            if RESERVED_FUNCTION_NAMES.contains(&function.name.as_str())
+                || crate::resolve::BUILTIN_NAMES.contains(&function.name.as_str())
+                || resource_names.contains(&function.name)
+            {
                 return Err(Error::new(format!(
-                    "{}: function name '{}' is reserved for the generated error accessor",
+                    "{}: function name '{}' is reserved or conflicts with a resource declaration",
                     config_path.display(),
                     function.name
                 )));
@@ -571,7 +583,12 @@ fn render_kush(module: &str, support_prefix: &str, spec: &AdapterSpec) -> String
 }
 
 fn support_prefix(module: &str) -> String {
-    format!("kush_{}_bridge", module.replace('.', "_"))
+    let mut prefix = String::from("kush");
+    for part in module.split('.') {
+        prefix.push_str(&format!("_m{}_{}", part.len(), part));
+    }
+    prefix.push_str("_bridge");
+    prefix
 }
 
 fn validate_module(module: &str, path: &Path) -> Result<(), Error> {

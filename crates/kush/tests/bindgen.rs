@@ -235,7 +235,7 @@ fn adapter_exposes_error_text() -> Unit ! {io, alloc, panic} {
 fn compile_generated_rust(project: &Path) -> PathBuf {
     let generated = fs::read_to_string(project.join("generated output/ffi.rs")).unwrap();
     assert!(generated.contains("kush_test_counter_release"));
-    assert!(generated.contains("kush_app_generated_bridge_last_error_bytes"));
+    assert!(generated.contains("kush_m3_app_m9_generated_bridge_last_error_bytes"));
     assert!(generated.contains("catch_unwind"));
     let source = project.join("adapter crate root.rs");
     write(&source, &format!("{generated}\n{BRIDGE_IMPLEMENTATION}"));
@@ -414,7 +414,7 @@ fn bindgen_refuses_to_overwrite_handwritten_files_or_follow_symlinks() {
 fn invalid_configs_report_unknown_keys_collisions_and_reserved_symbols() {
     let (_scratch, project) = scratch();
     let config = smoke_config(&project, &minimal_config(""));
-    let prefix = "kush_app_generated_bridge";
+    let prefix = "kush_m3_app_m9_generated_bridge";
     let cases = [
         (
             minimal_config("unknown = true\n"),
@@ -447,7 +447,7 @@ fn invalid_configs_report_unknown_keys_collisions_and_reserved_symbols() {
         ),
         (
             minimal_config("").replace("name = \"answer\"", "name = \"last_error\""),
-            "reserved for the generated error accessor",
+            "reserved or conflicts with a resource declaration",
         ),
         (
             minimal_config("").replace("result = \"i64\"", "result = { resource = \"Missing\" }"),
@@ -630,9 +630,9 @@ fn two_generated_adapters_link_without_helper_symbol_collisions_and_include_work
     let one_generated = fs::read_to_string(root.join("one/ffi.rs")).unwrap();
     let two_generated = fs::read_to_string(root.join("two/ffi.rs")).unwrap();
     assert!(!one_generated.contains("#![allow"));
-    assert!(one_generated.contains("kush_one_bridge_last_error_bytes"));
-    assert!(two_generated.contains("kush_two_bridge_last_error_bytes"));
-    assert!(!one_generated.contains("kush_two_bridge_last_error"));
+    assert!(one_generated.contains("kush_m3_one_bridge_last_error_bytes"));
+    assert!(two_generated.contains("kush_m3_two_bridge_last_error_bytes"));
+    assert!(!one_generated.contains("kush_m3_two_bridge_last_error"));
 
     let one_source = format!(
         "mod bridge {{ pub fn answer() -> i64 {{ 1 }} }}\nmod adapter {{\ninclude!(r#\"{}\"#);\n}}\n",
@@ -774,5 +774,83 @@ fn temporary_symlinks_are_not_followed_and_private_modes_stay_private() {
     assert_eq!(
         fs::metadata(output).unwrap().permissions().mode() & 0o777,
         0o600
+    );
+}
+
+#[test]
+fn reviewed_names_and_output_prefixes_are_rejected_before_writes() {
+    let (_scratch, project) = scratch();
+    let config = smoke_config(&project, &minimal_config(""));
+    let base = minimal_config("");
+    let mut cases = vec![
+        base.replace("src/ffi.rs", "src"),
+        base.replace("src/generated.kush", "src"),
+        base.replace("name = \"answer\"", "name = \"drop\""),
+    ];
+    for helper in [
+        "guard",
+        "abort_on_panic",
+        "write_word",
+        "input_bytes",
+        "input_str",
+        "kush_bytes_from",
+        "kush_bridge_support",
+    ] {
+        cases.push(base.replace("kush_test_answer", helper));
+        cases.push(base.replace("name = \"value\"", &format!("name = \"{helper}\"")));
+        cases.push(format!("{base}\n[[resource]]\nname = \"Handle\"\nrust-type = \"crate::Handle\"\nrelease-symbol = \"{helper}\"\n"));
+    }
+    for name in ["Int", "Box", "Vec", "last_error", "answer"] {
+        cases.push(format!("{base}\n[[resource]]\nname = \"{name}\"\nrust-type = \"crate::Handle\"\nrelease-symbol = \"release_handle\"\n"));
+    }
+    for body in cases {
+        write(&config, &body);
+        assert!(bindgen::run(&config, false).is_err(), "accepted {body}");
+        assert!(
+            !project.join("src").exists(),
+            "invalid config wrote outputs"
+        );
+    }
+}
+
+#[test]
+fn dotted_and_underscored_modules_have_distinct_helper_namespaces() {
+    let (_scratch, project) = scratch();
+    let config = smoke_config(&project, &one_function_config("a.b", "dotted_answer"));
+    let dotted = bindgen::load(&config).unwrap();
+    write(&config, &one_function_config("a_b", "underscored_answer"));
+    let underscored = bindgen::load(&config).unwrap();
+    assert!(dotted.rust.contains("kush_m1_a_m1_b_bridge_last_error"));
+    assert!(underscored.rust.contains("kush_m3_a_b_bridge_last_error"));
+    compile_staticlib(
+        &project,
+        "distinct_namespaces",
+        &format!(
+            "#![deny(warnings)]\npub mod bridge {{ pub fn answer() -> i64 {{ 42 }} }}\nmod dotted {{ {} }}\nmod underscored {{ {} }}",
+            dotted.rust, underscored.rust
+        ),
+    );
+}
+
+#[test]
+fn fallible_unit_shims_compile_with_warnings_denied() {
+    let (_scratch, project) = scratch();
+    let config = smoke_config(
+        &project,
+        &minimal_config("")
+            .replace(
+                "parameters = [{ name = \"value\", type = \"i64\" }]",
+                "parameters = []",
+            )
+            .replace("result = \"i64\"", "result = \"unit\"\nfallible = true"),
+    );
+    let generated = bindgen::load(&config).unwrap();
+    compile_staticlib(
+        &project,
+        "fallible_unit",
+        &format!(
+            "#![deny(warnings)]\npub mod bridge {{ pub fn answer() -> Result<(), String> {{ Ok(()) }} }}\nmod ffi {{ {} }}",
+            generated.rust
+        ),
     );
 }

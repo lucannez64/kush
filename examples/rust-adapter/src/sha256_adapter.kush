@@ -18,4 +18,4 @@ pub foreign "kush_example_fail" fn fail(data: &Bytes) -> Result<i64, i64> ! {io}
 pub foreign "kush_example_boom" fn boom() -> Result<i64, i64> ! {io};
 pub foreign "kush_example_live" fn live() -> i64 ! {io};
 
-pub foreign "kush_rust_adapter_example_sha256_adapter_bridge_last_error_bytes" fn last_error() -> Result<Bytes, i64> ! {io};
+pub foreign "kush_m20_rust_adapter_example_m14_sha256_adapter_bridge_last_error_bytes" fn last_error() -> Result<Bytes, i64> ! {io};

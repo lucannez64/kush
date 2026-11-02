@@ -108,9 +108,10 @@ Deliberately unsupported, with an exact diagnostic rather than a guess:
 
 The support prefix is configurable through
 `AdapterSpec::generate_with_options(AdapterOptions { support_symbol_prefix })`.
-`kush bindgen` derives it deterministically from the Kush module path, so two
-generated adapters can be linked into one executable without colliding on the
-error helpers. The generated file contains only items: no `#![inner]`
+`kush bindgen` derives it deterministically from length-prefixed module
+components, so even `a.b` and `a_b` have distinct error-helper symbols. Regenerate
+both outputs when changing generator versions; the generated declarations and
+Rust shims must use the same prefix. The generated file contains only items: no `#![inner]`
 attributes. It works as a normal module file and through `include!` inside a
 module.
 
@@ -190,7 +191,10 @@ duplicate resource/function names, duplicate generated C parameters, undeclared
 resources, Rust keywords and `_` in generated Rust names, and collisions with
 the generated `last_error` accessor, `kush_out`, `<name>_data`, and `<name>_len`
 parameter slots. The names `last_error`, `kush_bytes_from`, and the derived
-support helper symbols are reserved.
+support helper symbols are reserved. Symbols and parameters also reject names
+that shadow Rust bridge helpers. Kush resources and functions share one checked
+namespace, including reserved builtin names. Neither output may be a directory
+prefix of the other.
 
 Generated files start with a marker. `kush bindgen` refuses to replace an
 existing file without that marker and refuses output symlinks. Writes use a
