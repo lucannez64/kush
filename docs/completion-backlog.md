@@ -239,3 +239,19 @@ applicable, exact cleanup checks for owning values, documentation of semantics,
 and integration checks. Code must be committed and independently reviewed.
 This list is not a promise that all requirements have a general decidable or
 single-day implementation; unresolved design conflicts remain visible here.
+
+## Combined integration checkpoint
+
+At `20e9a0d`, the borrowing/trait/grade changes, advanced types/effects, and
+memory changes are integrated on `main`. Local Linux x86-64 validation used
+`target/main-integration` with debug information disabled and six Cargo jobs:
+
+- Full locked workspace suite: **832 passed, 0 failed**.
+- All-targets Clippy with warnings denied: passed.
+- Formatting: checked after resolving the combined grade/array match arms.
+- Memory benchmark smoke run: all five workloads preserved native/reference
+  allocation-counter parity; results are observations, not a speed claim.
+
+The final combined Boat gate and independent review are pending. Earlier
+branch-only test counts above are historical evidence, not evidence that the
+remaining unchecked features are complete.
