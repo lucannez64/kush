@@ -1302,9 +1302,12 @@ fn fusion_expr_safe(
         }
         ExprKind::Match(value, arms) => {
             safe(value, signatures, bodies, memo, visiting)
-                && arms
-                    .iter()
-                    .all(|arm| fusion_expr_safe(&arm.body, signatures, bodies, memo, visiting))
+                && arms.iter().all(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .is_none_or(|guard| safe(guard, signatures, bodies, memo, visiting))
+                        && safe(&arm.body, signatures, bodies, memo, visiting)
+                })
         }
         ExprKind::VecMap {
             vector, callbacks, ..
@@ -1451,6 +1454,9 @@ fn fuse_expr(
         ExprKind::Match(value, arms) => {
             fuse_expr(value, types, signatures, safety, fusions);
             for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    fuse_expr(guard, types, signatures, safety, fusions);
+                }
                 fuse_expr(&mut arm.body, types, signatures, safety, fusions);
             }
         }

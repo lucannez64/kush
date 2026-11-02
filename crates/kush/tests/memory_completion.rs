@@ -780,3 +780,19 @@ fn cancellation_state_reads_are_not_automatically_fused() {
     assert_eq!(reference(source).0, 42);
     assert_eq!(native_run(source, &[]).exit, Some(42));
 }
+
+#[test]
+fn cancellation_state_reads_in_match_guards_are_not_automatically_fused() {
+    let source = r#"fn observed(x: i64) -> i64 ! {} {
+            match x { y if Task.check_cancel() => y, z => z }
+        }
+        fn identity(x: i64) -> i64 ! {} { x }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = [42];
+            let out = Vec.map_in_place(Vec.map_in_place(values, observed), identity);
+            Vec.get(&out, 0)
+        }"#;
+    assert_eq!(check(source).unwrap().fusion_count(), 0);
+    assert_eq!(reference(source).0, 42);
+    assert_eq!(native_run(source, &[]).exit, Some(42));
+}

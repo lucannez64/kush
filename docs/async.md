@@ -54,13 +54,14 @@ enum TaskExit<T> { Completed(T), Cancelled }
 ```
 
 `Task.join` consumes the handle. A task that returned normally yields
-`Completed(value)`. If the body completed with an owning or intrinsically linear
-payload under a `@[1]` contract, the payload is transferred as `Completed` even
-when a cancellation request was observed; the handle is linear and must be
-joined explicitly. An affine (ungraded) owning payload for which cancellation
-was requested yields `Cancelled` and is dropped exactly once. A copyable `@[1]`
-task result is rejected. A task body that panics aborts the process, as
-elsewhere in the current panic policy. See
+`Completed(value)`. A completed payload carrying an owning, intrinsically
+linear, or copyable `@[1]` obligation is transferred as `Completed` even when
+cancellation was requested; its handle is linear and must be joined explicitly.
+Joining a copyable `@[1]` result also produces a must-use `TaskExit<T>` whose
+`Completed` payload must be observed. An affine (ungraded) owning payload for
+which cancellation was requested yields `Cancelled` and is dropped exactly
+once. A task body that panics aborts the process, as elsewhere in the current
+panic policy. See
 [linear task results and cancellation cleanup](linear-task-results.md).
 
 An expected `Task<U>` type or explicit `Task.spawn::<U>(...)` may widen the
@@ -168,9 +169,9 @@ See [task-borrows.kush](../examples/task-borrows.kush). Execution is still
 cooperative on one OS thread; this is not a claim of parallel data-race
 freedom across threads. Linear captures are therefore allowed, and a cancelled task must return through
 a checked path that consumes or transfers them. A task result type may carry an
-owning/linear obligation when the handle is linear and explicitly joined; a
-copyable must-use result stays rejected because `TaskExit.Cancelled` has no
-place to deliver it.
+owning, linear, or copyable must-use obligation when the handle is linear and
+explicitly joined. Cancellation preserves completed obligated results by
+delivering `TaskExit.Completed`, rather than discarding them as `Cancelled`.
 
 If a future implementation adds forced cancellation delivery, it must add
 per-frame unwind metadata or masking; this document does not claim that feature.

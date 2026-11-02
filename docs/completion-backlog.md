@@ -254,6 +254,10 @@ memory changes are integrated on `main`. Local Linux x86-64 validation used
 
 The combined Boat gate passed for source checkpoint `20e9a0d`: **832 tests,
 formatting, and Clippy**, with the sandbox confirmed stopped afterwards.
-Independent review is pending. Earlier branch-only test counts above are
-historical evidence, not evidence that the remaining unchecked features are
-complete.
+Independent review found no acceptance, ABI, ownership, or refusal-behavior
+defect in its focused probes. It found a skipped match-guard traversal in
+fusion analysis and stale copyable-task-result documentation; both were fixed.
+The regression and existing memory/task suites pass locally (33 tests), with
+formatting and library Clippy clean. This focused follow-up does not replace
+the preceding full gate. Earlier branch-only test counts above are historical
+evidence, not evidence that remaining unchecked features are complete.
