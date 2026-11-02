@@ -1,8 +1,9 @@
 # Runtime-sized inline arrays
 
 Status: implemented for owned inline storage with a compile-time capacity and a
-runtime length, contextual literals, and shared slice views over the live
-prefix, in the reference evaluator and the Cranelift backend.
+runtime length, contextual literals, equality, shared and exclusive slice views
+over the live prefix (including views through a record field), and
+length-checked patterns, in the reference evaluator and the Cranelift backend.
 
 ```rust
 fn main() -> i64 ! {panic} {
@@ -40,6 +41,14 @@ the length, and returns the array together with the removed copyable value.
 `pop` copy copyable elements; owning, linear, and view elements are rejected
 instead of being copied or duplicated.
 
+`==` and `!=` compare two `DynArray<T, capacity>` values of the same type by
+runtime length and live elements. Elements must be one-word comparable values:
+`i64`/fixed-width integers, `f32`/`f64`, `Bool`, or `Char`. A length mismatch is
+unequal without reading a slot. Floats compare numerically, so `NaN != NaN` and
+`-0.0 == 0.0` follow the language's scalar `==`. Owning, linear, view, and
+multi-word elements are explicit equality rejections; narrow with `DynArray.len`
+and `DynArray.get` instead.
+
 ## Literals
 
 A contextual inline-array literal constructs a `DynArray` when the expected type
@@ -63,8 +72,10 @@ fails. Elements follow the same non-borrow, non-linear, non-task rule as
 ## Slice views
 
 `&a[..]` and `&a[start..end]` produce the ordinary shared slice type `&[T]` over
-the live prefix. The owner must be a direct local binding (or another slice
-view); projecting a `DynArray` field and viewing it is not implemented:
+the live prefix. `&mut a[..]` and `&mut a[start..end]` produce `&mut [T]`; they
+require a `let mut` owner and are exclusive capabilities. The owner must be a
+direct local binding (or another slice view); a `DynArray` field of a direct
+local record may also be viewed:
 
 ```rust
 let a: DynArray<i64, 4> = [10, 20, 30];
@@ -73,17 +84,59 @@ let middle: &[i64] = &a[1..3];
 Slice.len(all) + Slice.get(middle, 0)
 ```
 
+```rust
+let mut a: DynArray<i64, 4> = [10, 20, 30];
+{
+    let view: &mut [i64] = &mut a[1..3];
+    Slice.set(view, 0, 7);       // writes a[1] in place
+}
+let b: &[i64] = &a[..];
+```
+
 The descriptor's length is the runtime length word, not the capacity; native
 lowering points at the pinned inline storage and reads the live length. An
 explicit range is checked against the runtime length in both backends and
 requires `panic`; the unchecked `&a[..]` form always covers exactly the live
 prefix. Ownership treats the view like any other slice view: the owner cannot be
-moved, dropped, assigned, pushed, or popped while the view is live, and a view
-cannot escape the owner's lexical scope. Releasing the view at the end of its
-block restores the owner for later mutation. Views over owning or linear
-elements are rejected because element reads would copy an owner. A mutable
-`&mut [T]` view of a `DynArray` is not provided; use the checked `DynArray.set`
-write instead.
+moved, dropped, assigned, pushed, set, popped, or read while the view is live,
+and a view cannot escape the owner's lexical scope. Releasing the view at the
+end of its block restores the owner for later mutation. Two exclusive views of
+the same owner, or a shared and an exclusive view, cannot coexist. Views over
+owning or linear elements are rejected because element reads would copy an
+owner. `Slice.set` requires `&mut [T]`; it checks the runtime length and writes
+exactly one initialized slot.
+
+A view through a record field (`&r.a[..]`, `&mut r.a[..]`, including nested
+fields such as `&mut r.inner.a[1..]`) aliases the record's inline storage. The
+record must be a direct local binding, so both backends can pin it; a temporary,
+call result, or reference-based record place is rejected. The field loan blocks
+replacing or mutating the record while the view is live, and an exclusive field
+view requires `let mut` on the record.
+
+## Patterns
+
+A `match` on a `DynArray<T, capacity>` may use length-checked slice patterns:
+
+```rust
+match a {
+    [] => 0,
+    [x] => x,
+    [x, y] => x + y,
+    [first, ..rest] => first + DynArray.len(&rest),
+    _ => 99,
+}
+```
+
+`[]`, `[x]`, `[x, y]` require exactly that live length. A trailing `..` matches
+any remaining length; `..rest` additionally binds the tail as a fresh
+`DynArray<T, capacity>` containing copies of the remaining elements (the
+original capacity bound is kept). Literal sub-patterns are checked elementwise,
+and guards may fall through to a later arm. Only a trailing rest is supported;
+a suffix after the rest is an explicit rejection. Elements must be copyable
+one-word or concrete values, so owning, linear, and view elements cannot be
+matched by value. The runtime length is not a finite variant tag, so a match
+over `DynArray` must end in an unguarded catch-all; the ordinary exhaustiveness
+check rejects anything else.
 
 ## Layout and lifetime contract
 
@@ -115,15 +168,19 @@ words 1 .. 1 + capacity: inline element slots
 
 This is not `[T; n]` with a runtime `n`, not a dynamically sized stack allocation
 with a hidden layout descriptor, and not a general dependent array. The capacity
-is always a compile-time `Nat`; the length is a runtime word. Patterns over a
-`DynArray` are rejected explicitly: the runtime length is not a static variant
-tag, so use `DynArray.len` and `DynArray.get`. There is no `DynArray` equality,
-mutable view, or element-wise owning move beyond push/pop of owning values.
-`Vec<T>` remains the growable owning container and `&[T]` the borrow for
-arbitrary lengths.
+is always a compile-time `Nat`; the length is a runtime word. A runtime array
+length in a type annotation such as `[i64; n]` remains an explicit diagnostic:
+use `Vec<T>` for an owned runtime-sized container or `DynArray<T, capacity>` for
+inline storage with a static bound. There is no element-wise owning move beyond
+push/pop of copyable values, no view of a `DynArray` inside a reference-based
+record place, no suffix after a `..` pattern, and no recursive/borrowed element
+pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow
+for arbitrary lengths.
 
 The implementation is checked by `crates/kush/tests/advanced_types_effects.rs`
-with positive push/get/literal/view execution, native/reference agreement,
-owning-prefix cleanup, capacity overflow, out-of-bounds reads, runtime view
-bounds, view/owner loan rejections, explicit pattern rejection, and layout
+with positive push/get/literal/view/pattern/equality execution,
+native/reference agreement, owning-prefix cleanup, capacity overflow,
+out-of-bounds reads and writes, runtime view bounds, mutable-view aliasing
+rejections, field-view aliasing/write-back, owner moves/drops while a view is
+live, pattern fallthrough/exhaustiveness/owning-element rejections, and layout
 rejection.
