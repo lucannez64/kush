@@ -63,7 +63,8 @@ fails. Elements follow the same non-borrow, non-linear, non-task rule as
 ## Slice views
 
 `&a[..]` and `&a[start..end]` produce the ordinary shared slice type `&[T]` over
-the live prefix:
+the live prefix. The owner must be a direct local binding (or another slice
+view); projecting a `DynArray` field and viewing it is not implemented:
 
 ```rust
 let a: DynArray<i64, 4> = [10, 20, 30];
