@@ -195,5 +195,11 @@ FFI 15, project 15), formatting, and workspace/all-targets Clippy with warnings
 denied. Generated example files pass drift checking. The Rust SHA-256 project
 runs correctly and its **two app tests** pass, including exactly-once resource
 release and error text. Log: `/tmp/kush-boat-bindgen-integration.log`
-(machine-local). A full integrated workspace gate and independent bindgen
-review are pending; this focused result does not claim either is complete.
+(machine-local).
+
+Full Boat gate after integration: **1102 workspace tests**, formatting, and
+Clippy pass. The sandbox was stopped with its snapshot preserved. Compiler
+source matches `21c566d`; later commits only document output protection and
+validation. Log: `/tmp/kush-boat-bindgen-full.log` (machine-local).
+Independent bindgen review remains pending, along with the host deadline,
+persistence, and LSP work above.
