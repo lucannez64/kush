@@ -823,6 +823,14 @@ impl Kernel {
     /// Substitute caller-supplied terms for the outermost binders of an open
     /// term, outermost first. This is the checked call-site substitution used
     /// by dependent erased parameters; it does not admit unchecked globals.
+    /// Shift every free de Bruijn variable in an already checked open term by
+    /// `amount`, as required when the surrounding telescope grows after the
+    /// term was elaborated. Used by stable erased proof-valued local aliases.
+    pub(crate) fn shift_open(&self, term: &Term, amount: usize) -> Result<Term> {
+        let mut e = self.engine();
+        e.shift(term, amount, 0)
+    }
+
     pub(crate) fn substitute_outer(&self, term: &Term, arguments: &[Term]) -> Result<Term> {
         let mut e = self.engine();
         let mut term = term.clone();

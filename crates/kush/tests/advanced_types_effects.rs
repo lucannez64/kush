@@ -282,11 +282,13 @@ fn row_constraint_solver_rejects_ambiguity_and_exclusions() {
 }
 
 // ---------------------------------------------------------------------------
-// One-shot tail-resumptive effect handlers
+// One-shot effect handlers
 // ---------------------------------------------------------------------------
 
 #[test]
-fn handler_resumes_once_and_returns_the_operation_result() {
+fn handler_resumes_nonlinearly_and_returns_the_continuation_result() {
+    // `resume(x + 1)` runs the rest of the handled body (`a + 1`) and returns
+    // its result 22 to the handler, which then computes 44.
     let source = r#"
         fn main() -> i64 ! {panic} {
             handle Op: i64 -> i64 with fn(
@@ -300,9 +302,9 @@ fn handler_resumes_once_and_returns_the_operation_result() {
                 a + 1
             }
         }"#;
-    assert_eq!(value(source), 43);
+    assert_eq!(value(source), 44);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    agrees(source, 43);
+    agrees(source, 44);
 }
 
 #[test]
@@ -358,15 +360,15 @@ fn resumption_is_linear_and_cannot_be_duplicated_or_ignored() {
 fn owning_handler_payload_and_result_cleanup_once() {
     let source = r#"
         fn main() -> i64 ! {alloc, panic} {
-            handle Op: Box<i64> -> Box<i64> with fn(
+            Box.take(handle Op: Box<i64> -> Box<i64> with fn(
                 x: Box<i64>,
                 resume: linear once fn(Box<i64>) -> Box<i64> ! {},
             ) -> Box<i64> ! {alloc, panic} {
                 resume(x)
             } {
                 let b = perform Op(Box.new(42));
-                Box.take(b)
-            }
+                b
+            })
         }"#;
     let (result, stats) = evaluate(source);
     assert_eq!(result, 42);
@@ -378,10 +380,12 @@ fn owning_handler_payload_and_result_cleanup_once() {
 
 #[test]
 fn linear_values_survive_a_perform_without_duplication() {
+    // The continuation owns the linear token after the perform, so building its
+    // environment requires `alloc`.
     let source = r#"
         #[linear]
         struct Token { id: i64 }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {alloc, panic} {
             let token = Token { id: 5 };
             handle Op: i64 -> i64 with fn(
                 x: i64,
@@ -393,6 +397,8 @@ fn linear_values_survive_a_perform_without_duplication() {
             }
         }"#;
     assert_eq!(value(source), 6);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 6);
 }
 
 #[test]
@@ -406,8 +412,10 @@ fn handler_effects_are_part_of_the_handle_contract() {
                 print_i64(x);
                 resume(x + 1)
             } {
-                print_i64(perform Op(41));
-            }
+                let a = perform Op(41);
+                print_i64(a);
+                a
+            };
         }"#;
     check(source).unwrap();
     rejects(
@@ -419,7 +427,11 @@ fn handler_effects_are_part_of_the_handle_contract() {
             ) -> i64 ! {io, panic} {
                 print_i64(x);
                 resume(x + 1)
-            } { print_i64(perform Op(41)); }
+            } {
+                let a = perform Op(41);
+                print_i64(a);
+                a
+            };
         }"#,
         "requires effects {io}",
     );
@@ -459,10 +471,11 @@ fn declared_effects_reach_handlers_through_called_functions() {
     assert_eq!(value(many), 22);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(many, 22);
-    // An early return leaves the handled body before the normal pop. The
+    // An early continue leaves the handled body before the normal pop. The
     // function-entry depth restoration must make the next perform handlerless.
     let loop_restore = r#"
         effect Op: i64 -> i64;
+        fn next() -> i64 ! {panic} { perform Op(1) }
         fn main() -> i64 ! {panic} {
             let mut i = 0;
             let mut sum = 0;
@@ -475,7 +488,7 @@ fn declared_effects_reach_handlers_through_called_functions() {
                         i = i + 1;
                         continue;
                     }
-                    sum = sum + perform Op(1);
+                    sum = sum + next();
                 }
                 i = i + 1;
             }
@@ -486,12 +499,13 @@ fn declared_effects_reach_handlers_through_called_functions() {
     agrees(loop_restore, 3);
     let restored = r#"
         effect Op: i64 -> i64;
+        fn next() -> i64 ! {panic} { perform Op(1) }
         fn scoped() -> i64 ! {panic} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
             ) -> i64 ! {} { resume(x) } {
-                return perform Op(1);
+                return next();
             }
         }
         fn main() -> i64 ! {panic} {
@@ -597,6 +611,163 @@ fn performs_require_a_lexical_handler_and_a_exact_resume_contract() {
 }
 
 // ---------------------------------------------------------------------------
+// Non-tail one-shot resumption
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_tail_perform_keeps_the_allocation_free_identity_resumption() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x + 1) } {
+                perform Op(20)
+            }
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 21);
+    assert_eq!(stats.allocations, 0);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 21);
+}
+
+#[test]
+fn non_tail_resumption_rejects_unsupported_continuation_shapes() {
+    // The perform must be the whole value of a top-level statement; a nested
+    // operand would need a more general expression continuation.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x) } {
+                let a = perform Op(20) + 1;
+                a
+            }
+        }"#,
+        "non-tail 'perform' must be the entire value",
+    );
+    // Two non-tail performs would need a multi-prompt continuation.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x) } {
+                let a = perform Op(1);
+                let b = perform Op(2);
+                a + b
+            }
+        }"#,
+        "non-tail 'perform' must be the entire value",
+    );
+    // The body result is the operation result under real resumption.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x) } {
+                let a = perform Op(20);
+                a > 0
+            }
+        }"#,
+        "type mismatch",
+    );
+    // Control transfers cannot cross the resumption boundary.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x) } {
+                let a = perform Op(20);
+                return a;
+            }
+        }"#,
+        "cannot 'return' out of the handled body",
+    );
+    // A linear operation result would let the continuation transfer an
+    // obligation the linear resume token cannot describe.
+    rejects(
+        r#"
+        #[linear]
+        struct Token { id: i64 }
+        fn main() -> i64 ! {panic} {
+            handle Op: Token -> Token with fn(
+                x: Token,
+                resume: linear once fn(Token) -> Token ! {},
+            ) -> Token ! {panic} { resume(x) } {
+                let a = perform Op(Token { id: 1 });
+                a
+            }
+        }"#,
+        "linear operation result",
+    );
+}
+
+#[test]
+fn non_tail_continuation_effects_are_visible_at_the_handle() {
+    // The handler is pure, but its resumption runs the rest of the body, which
+    // prints. The enclosing row must still require io.
+    rejects(
+        r#"
+        fn main() -> Unit ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x) } {
+                let a = perform Op(1);
+                print_i64(a);
+                a
+            };
+        }"#,
+        "requires effects {io}",
+    );
+    let source = r#"
+        fn main() -> Unit ! {io, panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x) } {
+                let a = perform Op(41);
+                print_i64(a);
+                a
+            };
+        }"#;
+    check(source).unwrap();
+}
+
+#[test]
+fn non_tail_resumption_preserves_handler_and_continuation_order() {
+    // The handler runs before and after `resume`; the continuation observes the
+    // resumed value, and the handler sees the continuation result.
+    let source = r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let n = 1;
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} {
+                let r = resume(x + 1);
+                r * 2 + n
+            } {
+                let a = perform Op(20);
+                a + 1
+            }
+        }"#;
+    // resume(21) -> 21 + 1 = 22; handler -> 22 * 2 + 1 = 45.
+    assert_eq!(value(source), 45);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 45);
+}
+
+// ---------------------------------------------------------------------------
 // Versioned runtime-dependent proofs
 // ---------------------------------------------------------------------------
 
@@ -629,6 +800,95 @@ fn total_logical_evidence_is_independent_and_versioned() {
             a + b
         }"#;
     assert_eq!(value(source), 12);
+}
+
+#[test]
+fn branch_and_loop_joins_preserve_only_agreed_literal_indices() {
+    let same_branches = r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n = 0;
+            if true { n = 6; } else { n = 6; }
+            let a = keep(n, refl::<i64>(6));
+            let b = keep(n, refl::<i64>(n));
+            a + b
+        }"#;
+    assert_eq!(value(same_branches), 12);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(same_branches, 12);
+    // A literal proof may not survive a branch that changes the value on one
+    // side only: one route reaches 0, the other 1, and the joined index is a
+    // fresh opaque value.
+    rejects(
+        r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n = 0;
+            if true { n = 0; } else { n = 1; }
+            keep(n, refl::<i64>(0))
+        }"#,
+        "proof does not establish",
+    );
+    // A loop that may assign the value invalidates a literal proof even when
+    // the condition happens to be false at run time.
+    rejects(
+        r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n = 6;
+            while false { n = 7; }
+            keep(n, refl::<i64>(6))
+        }"#,
+        "proof does not establish",
+    );
+    // A loop that never assigns keeps the joined literal index alive.
+    let loop_preserves = r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n = 0;
+            if true { n = 6; } else { n = 6; }
+            while false { let _copy = n; }
+            keep(n, refl::<i64>(6))
+        }"#;
+    assert_eq!(value(loop_preserves), 6);
+}
+
+#[test]
+fn proof_valued_locals_are_erased_aliases_with_checked_terms() {
+    let source = r#"
+        total fn same_i64(n: i64) -> Eq<i64, n, n> ! {} { refl::<i64>(n) }
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let n = 5;
+            let p = same_i64(n);
+            let q = p;
+            keep(n, p) + keep(n, q)
+        }"#;
+    assert_eq!(value(source), 10);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 10);
+    // A proof-valued local has no runtime representation.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let p = refl::<i64>(1);
+            p
+        }"#,
+        "has no runtime value",
+    );
+    // The stored term must establish the callee's proposition at the use site.
+    rejects(
+        r#"
+        prop ZeroI<n: i64> { Zero: ZeroI<0> }
+        total fn zero_proof() -> ZeroI<0> ! {} { ZeroI.Zero::<0> }
+        fn keep_zero(n: i64, erased p: ZeroI<n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let n = 1;
+            let p = zero_proof();
+            keep_zero(n, p)
+        }"#,
+        "proof does not establish",
+    );
 }
 
 #[test]

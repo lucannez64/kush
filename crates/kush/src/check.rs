@@ -800,6 +800,7 @@ fn check_selected(
             constructor_counts: &constructor_counts,
             nullary: &nullary,
             aliases: &EMPTY_ALIASES,
+            literals: &EMPTY_LITERALS,
             locals: Vec::new(),
             local_types: Vec::new(),
             depth: 0,
@@ -944,6 +945,11 @@ struct Elaborator<'a> {
     /// so `let m = n` denotes the same frozen occurrence even after a later
     /// assignment appends a newer binder for `n`.
     aliases: &'a BTreeMap<BindingId, usize>,
+    /// Scalar bindings whose canonical value is a machine literal at the
+    /// current program point. Elaborating a proof term for such a name uses the
+    /// literal, matching the value the checker substituted for a symbolic
+    /// runtime argument.
+    literals: &'a BTreeMap<BindingId, Term>,
     /// Kernel type of every binder in `locals`, in the same order. These are
     /// hypothesis types, so a symbolic runtime scalar `n : i64` contributes
     /// `Scalar(I64)` and an erased proof contributes its proposition.
@@ -997,6 +1003,9 @@ impl Elaborator<'_> {
                 "dependent member projection is not supported by logical checking yet",
             )
         })?;
+        if let Some(term) = self.literals.get(&id) {
+            return Ok(term.clone());
+        }
         if let Some(position) = self.aliases.get(&id).copied()
             && position < self.local_types.len()
         {
@@ -1691,6 +1700,8 @@ impl Elaborator<'_> {
 /// binder with its kernel hypothesis type, outermost first.
 static EMPTY_ALIASES: std::sync::LazyLock<BTreeMap<BindingId, usize>> =
     std::sync::LazyLock::new(BTreeMap::new);
+static EMPTY_LITERALS: std::sync::LazyLock<BTreeMap<BindingId, Term>> =
+    std::sync::LazyLock::new(BTreeMap::new);
 
 pub(crate) fn elaborate_type(
     resolution: &Resolution,
@@ -1708,6 +1719,7 @@ pub(crate) fn elaborate_type(
         nullary: &environment.nullary,
         locals: locals.iter().map(|(id, _)| Some(*id)).collect(),
         aliases: &EMPTY_ALIASES,
+        literals: &EMPTY_LITERALS,
         local_types: locals.iter().map(|(_, ty)| ty.clone()).collect(),
         depth: 0,
     };
@@ -1724,6 +1736,7 @@ pub(crate) fn elaborate_value_with_aliases(
     locals: &[(BindingId, Term)],
     expr: &Expr,
     aliases: &BTreeMap<BindingId, usize>,
+    literals: &BTreeMap<BindingId, Term>,
 ) -> Result<Term> {
     let mut elaborator = Elaborator {
         resolution,
@@ -1735,6 +1748,7 @@ pub(crate) fn elaborate_value_with_aliases(
         nullary: &environment.nullary,
         locals: locals.iter().map(|(id, _)| Some(*id)).collect(),
         aliases,
+        literals,
         local_types: locals.iter().map(|(_, ty)| ty.clone()).collect(),
         depth: 0,
     };

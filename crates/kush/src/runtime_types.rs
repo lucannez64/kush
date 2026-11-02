@@ -3853,68 +3853,152 @@ impl<'a> Types<'a> {
         ))
     }
 }
+/// A declared effect row as a small Boolean expression over concrete effect
+/// bits and `<e: Effects>` variables. The effect universe has only four bits, so
+/// union and subtraction are finite and decidable; the checker never has to
+/// solve an infinite row equation. Subtraction binds looser than `|` in the
+/// surface grammar, so `(a | b) - c` is written with explicit parentheses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EffectRowTerm {
+    Constant(u8),
+    Variable(BindingId),
+    Union(Box<EffectRowTerm>, Box<EffectRowTerm>),
+    Difference(Box<EffectRowTerm>, Box<EffectRowTerm>),
+}
+impl EffectRowTerm {
+    pub(crate) fn variables(&self) -> Vec<BindingId> {
+        let mut variables = Vec::new();
+        self.collect_variables(&mut variables);
+        variables.sort();
+        variables.dedup();
+        variables
+    }
+    fn collect_variables(&self, variables: &mut Vec<BindingId>) {
+        match self {
+            EffectRowTerm::Constant(_) => {}
+            EffectRowTerm::Variable(id) => variables.push(*id),
+            EffectRowTerm::Union(left, right) | EffectRowTerm::Difference(left, right) => {
+                left.collect_variables(variables);
+                right.collect_variables(variables);
+            }
+        }
+    }
+    /// Evaluate every variable from a complete substitution. `None` means a
+    /// variable is still unbound.
+    pub(crate) fn evaluate(&self, subst: &BTreeMap<BindingId, u8>) -> Option<u8> {
+        self.evaluate_with(&mut |id| subst.get(&id).copied())
+    }
+    pub(crate) fn evaluate_with(
+        &self,
+        lookup: &mut impl FnMut(BindingId) -> Option<u8>,
+    ) -> Option<u8> {
+        Some(match self {
+            EffectRowTerm::Constant(bits) => *bits,
+            EffectRowTerm::Variable(id) => lookup(*id)?,
+            EffectRowTerm::Union(left, right) => {
+                left.evaluate_with(lookup)? | right.evaluate_with(lookup)?
+            }
+            EffectRowTerm::Difference(left, right) => {
+                left.evaluate_with(lookup)? & !right.evaluate_with(lookup)?
+            }
+        })
+    }
+    /// Fixed bits that can be read without any variable binding. A subtraction
+    /// whose right side cannot be evaluated contributes no fixed coverage; the
+    /// caller must use [`Self::evaluate`] for a precise answer.
+    fn partial(&self) -> (u8, Vec<BindingId>) {
+        match self {
+            EffectRowTerm::Constant(bits) => (*bits, Vec::new()),
+            EffectRowTerm::Variable(id) => (0, vec![*id]),
+            EffectRowTerm::Union(left, right) => {
+                let (left_bits, mut left_vars) = left.partial();
+                let (right_bits, right_vars) = right.partial();
+                left_vars.extend(right_vars);
+                left_vars.sort();
+                left_vars.dedup();
+                (left_bits | right_bits, left_vars)
+            }
+            EffectRowTerm::Difference(left, right) => {
+                let (left_bits, mut left_vars) = left.partial();
+                let (right_bits, right_vars) = right.partial();
+                left_vars.extend(right_vars);
+                left_vars.sort();
+                left_vars.dedup();
+                (left_bits & !right_bits, left_vars)
+            }
+        }
+    }
+}
 /// Convert a declared effect row to the executable effect bitset. Function
 /// value types and direct declarations share this single rule. `subst` maps
-/// `<e: Effects>` binders to concrete rows; a row is the union of its fixed
-/// effect names and its substituted variables.
+/// `<e: Effects>` binders to concrete rows; a row is a union/subtraction
+/// expression over its fixed effect names and its substituted variables.
 pub(crate) fn effect_bits_with(
     resolution: &Resolution,
     effects: &[ast::Type],
     subst: &BTreeMap<BindingId, u8>,
 ) -> Result<u8> {
-    let (fixed, variables) = effect_bits_partial(resolution, effects)?;
-    let mut bits = fixed;
-    for variable in variables {
-        let Some(value) = subst.get(&variable) else {
-            return Err(Diagnostic::new(
+    let term = effect_row_term(resolution, effects)?;
+    term.evaluate(subst).ok_or_else(|| {
+        let variable = term
+            .variables()
+            .into_iter()
+            .find(|variable| !subst.contains_key(variable));
+        match variable {
+            Some(variable) => Diagnostic::new(
                 resolution.bindings[variable].span,
                 format!(
                     "effect parameter '{}' is not specialized here; effect-polymorphic signatures require explicit specialization or an inferable callable argument",
                     resolution.bindings[variable].name
                 ),
-            ));
-        };
-        if *value & !crate::executable::EFFECT_BITS != 0 {
-            return Err(Diagnostic::new(
-                resolution.bindings[variable].span,
-                "internal error: effect argument contains unknown effect bits",
-            ));
+            ),
+            None => Diagnostic::new(
+                resolution.bindings.first().map_or(Span::default(), |binding| binding.span),
+                "internal error: effect row has no unspecialized variable but could not be evaluated",
+            ),
         }
-        bits |= *value;
+    })
+}
+/// Parse a declared effect row into its finite Boolean expression.
+pub(crate) fn effect_row_term(
+    resolution: &Resolution,
+    effects: &[ast::Type],
+) -> Result<EffectRowTerm> {
+    let mut term = EffectRowTerm::Constant(0);
+    for effect in effects {
+        let part = effect_row_expr(resolution, effect)?;
+        term = EffectRowTerm::Union(Box::new(term), Box::new(part));
     }
-    Ok(bits)
+    Ok(term)
 }
 /// Split an effect row into its fixed effect bits and its effect variables,
 /// without requiring the variables to be specialized. Used to validate a
-/// polymorphic declaration and to infer a row from callable arguments.
+/// polymorphic declaration. A subtracted variable makes the fixed part
+/// conservative; precise checks use [`effect_row_term`].
 pub(crate) fn effect_bits_partial(
     resolution: &Resolution,
     effects: &[ast::Type],
 ) -> Result<(u8, Vec<BindingId>)> {
-    let mut bits = 0u8;
-    let mut variables = Vec::new();
-    for effect in effects {
-        effect_row_part(resolution, effect, &mut bits, &mut variables)?;
-    }
-    variables.sort();
-    variables.dedup();
-    Ok((bits, variables))
+    Ok(effect_row_term(resolution, effects)?.partial())
 }
-fn effect_row_part(
-    resolution: &Resolution,
-    effect: &ast::Type,
-    bits: &mut u8,
-    variables: &mut Vec<BindingId>,
-) -> Result<()> {
+fn effect_row_expr(resolution: &Resolution, effect: &ast::Type) -> Result<EffectRowTerm> {
     match &effect.kind {
         ast::TypeKind::Binary {
             op: crate::lexer::Kind::Pipe,
             left,
             right,
-        } => {
-            effect_row_part(resolution, left, bits, variables)?;
-            effect_row_part(resolution, right, bits, variables)
-        }
+        } => Ok(EffectRowTerm::Union(
+            Box::new(effect_row_expr(resolution, left)?),
+            Box::new(effect_row_expr(resolution, right)?),
+        )),
+        ast::TypeKind::Binary {
+            op: crate::lexer::Kind::Minus,
+            left,
+            right,
+        } => Ok(EffectRowTerm::Difference(
+            Box::new(effect_row_expr(resolution, left)?),
+            Box::new(effect_row_expr(resolution, right)?),
+        )),
         ast::TypeKind::Named { arguments, .. } => {
             let Some(id) = resolution.reference(effect.span) else {
                 return Err(Diagnostic::new(
@@ -3933,8 +4017,7 @@ fn effect_row_part(
                         ),
                     ));
                 }
-                variables.push(id);
-                return Ok(());
+                return Ok(EffectRowTerm::Variable(id));
             }
             let bit = match (binding.kind, binding.name.as_str(), arguments.is_empty()) {
                 (BindingKind::Builtin, "panic", true) => crate::executable::PANIC,
@@ -3948,11 +4031,7 @@ fn effect_row_part(
                     ));
                 }
             };
-            if *bits & bit != 0 {
-                return Err(Diagnostic::new(effect.span, "duplicate effect"));
-            }
-            *bits |= bit;
-            Ok(())
+            Ok(EffectRowTerm::Constant(bit))
         }
         _ => Err(Diagnostic::new(
             effect.span,
