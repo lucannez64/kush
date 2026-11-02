@@ -267,9 +267,8 @@ compiler diagnostics. This is basic syntax support, not full editor tooling.
 
 ## Native bridge extension points
 
-The Rust/C interop worker owns the actual native build and adapter API. This
-milestone only defines and validates manifest fields so a future integration
-does not require another manifest format change:
+Project builds and tests accept native libraries and Rust staticlib adapter
+crates through these manifest fields:
 
 - `[native] libraries` — opaque library names/paths for the adapter's link step;
 - `[native] library-paths` — validated search directories;

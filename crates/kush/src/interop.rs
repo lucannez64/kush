@@ -18,8 +18,8 @@
 //! | `i8`/`u8`/`i16`/... | the matching `int8_t`/`uint8_t`/... |
 //! | `f64`/`f32` | `double`/`float` |
 //! | `Bool` | `int32_t` (0 or 1) |
-//! | `&str`, `&[u8]` | `const uint8_t *, int64_t` |
-//! | `&mut [u8]` | `uint8_t *, int64_t` |
+//! | `&str`, `&Bytes`, `&String` | `const uint8_t *, int64_t` |
+//! Inline slices are rejected: checked elements use word-sized storage.
 //! | foreign resource | `void *` (`int64_t` on the wire) |
 //!
 //! A direct scalar/resource result is returned as the matching C value. For a

@@ -106,12 +106,9 @@ dependency: `src/ffi.rs` is generated, `src/bridge.rs` is hand-written safe
 Rust, and `sha256.kush` is the checked Kush program. Build and run:
 
 ```sh
-cargo build --offline --release \
-  --manifest-path examples/rust-adapter/Cargo.toml
-kush build examples/rust-adapter/sha256.kush -o /tmp/sha256-example \
-  --link <target-dir>/release/libkush_rust_adapter_example.a \
-  --link-lib pthread --link-lib dl
-/tmp/sha256-example
+cd examples/rust-adapter
+kush run
+
 ```
 
 Expected output includes the SHA-256 hex of `abc` twice, then `42`, `0`, `1`,
@@ -139,8 +136,8 @@ Concrete mapping for `project::manifest::NativeOptions`:
 | `library-paths = ["vendor"]` | `library_dirs` -> `-L<dir>` |
 | `cargo-manifests = ["adapters/foo/Cargo.toml"]` | built with `cargo build --release --lib --message-format=json`; the emitted `.a` is appended to `libraries`; `pthread` and `dl` are added once for Rust std staticlibs |
 
-Proposed wiring in `project/mod.rs` (replacing the current
-`ensure_native_bridge_absent` gate in both `build` and `test_project`):
+Project build and test commands now collect these inputs from the root package
+and its dependencies and call `build_with_options`. The core mapping is:
 
 ```rust
 let links = crate::native::LinkSpec::from_project_native(
@@ -154,11 +151,13 @@ crate::native::build_with_options(&checked, &output, options.stats, &links)
     .map_err(|error| Failure::new(program.sources.render(&error)))?;
 ```
 
-`from_project_native` runs no shell, does no host-wide search, downloads
-nothing implicitly, and validates bare `-l` names. `cargo-manifests` is the
-explicit opt-in that invokes `cargo` for a staticlib adapter. `project::test`
-should compute the same `LinkSpec` once per project (or per artifact) and pass
-it to its generated test binaries.
+`from_project_native` invokes no shell and validates bare library names.
+`cargo-manifests` explicitly opts into Cargo builds, including dependency
+resolution according to Cargo.toml/Cargo.lock. Set `CARGO_NET_OFFLINE=true`
+when offline behavior is required. Rust adapters use a separate
+`target/kush-adapter` directory with two build jobs; they never write into the
+compiler's mbx target. Project tests compute link inputs once before running
+selected tests; listing tests does not build adapters.
 
 Manifest fragment:
 
@@ -193,9 +192,6 @@ cargo-manifests = ["adapters/rust-adapter/Cargo.toml"]
 
 - Host OS APIs (filesystem, argv/env, clocks, processes, networking) are the
   host worker's area; this bridge only links and calls supplied native code.
-- The project manifest workflow is owned by another worker; the mapping above
-  is the interface, not a claim that `[native]` is already wired into
-  `kush build`/`kush test`.
 - The CLI has a small isolated `build --link <archive>` / `--link-lib <name>`
   hook for examples; the project workflow should use the library API above.
 - Foreign callbacks into Kush, C variadics, structs by value, and ownership

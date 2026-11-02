@@ -68,3 +68,23 @@ in one uninterrupted clean run. Sandbox confirmed stopped. Logs are local:
 `/tmp/kush-boat-project-full.log`, `/tmp/kush-boat-project-executable-rerun.log`.
 Independent project workflow review remains pending; host APIs and Rust/C
 integration continue in separate worktrees.
+
+## Rust/C bridge integration
+
+Compiler checkpoint `2f318ae` adds checked foreign declarations, opaque owned
+foreign resources, generated Rust adapters, and project-manifest native linking
+for both build/run and tests. Explicit C libraries and Cargo staticlib adapters
+are collected from the root and local dependencies. Adapter Cargo builds use
+separate target directories to avoid the mbx compiler cache.
+
+Full Boat validation passes **1071 tests**, formatting, and Clippy with warnings
+denied. The same command then runs `examples/rust-adapter/Kush.toml`: SHA-256 of
+`abc` is correct twice, the live Hasher count is zero, and fallible error/panic
+statuses are 1/2. The expected Rust panic-hook message is printed on stderr;
+unwinding is contained and the example exits successfully. Sandbox confirmed
+stopped. Log: `/tmp/kush-boat-rust-full-example.log` (machine-local).
+
+This provides a native-only trusted C ABI bridge, not arbitrary Rust ABI/type
+compatibility. Interpreter foreign calls are rejected explicitly. Independent
+interop review remains pending; host APIs and fuller editor/library support
+remain in progress.
