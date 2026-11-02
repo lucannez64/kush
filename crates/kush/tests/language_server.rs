@@ -168,6 +168,17 @@ impl Client {
             response["result"]["capabilities"]["documentFormattingProvider"],
             true
         );
+        assert_eq!(response["result"]["capabilities"]["hoverProvider"], true);
+        assert_eq!(
+            response["result"]["capabilities"]["documentSymbolProvider"],
+            true
+        );
+        assert!(
+            response["result"]["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("comment"))
+        );
         self.send(&json!({
             "jsonrpc": "2.0",
             "method": "initialized",
@@ -244,6 +255,65 @@ fn read_message<R: BufRead>(reader: &mut R) -> Option<Value> {
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body).ok()?;
     serde_json::from_slice(&body).ok()
+}
+
+#[test]
+fn editor_symbols_semantic_tokens_and_hover_are_offered_for_unsaved_text() {
+    let (_scratch, root, main, _util) = project();
+    let main_uri = path_to_uri(&main);
+    let text = "module demo;\n\n// explains\nfn main() -> i64 ! {panic} {\n    let answer = 42;\n    answer\n}\n";
+    let mut client = Client::spawn(&root);
+    client.initialize(&root);
+    client.open(&main_uri, 1, text);
+    assert!(
+        client.receive_diagnostics_for(&main_uri)["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    client.send(&json!({"jsonrpc":"2.0","id":2,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":main_uri}}}));
+    let response = client.receive();
+    assert_eq!(response["id"], 2);
+    let symbols = response["result"].as_array().unwrap();
+    assert_eq!(symbols[0]["name"], "demo");
+    assert_eq!(symbols[0]["kind"], 2);
+    assert_eq!(symbols[1]["name"], "main");
+    assert_eq!(symbols[1]["kind"], 12);
+    assert_eq!(
+        symbols[1]["selectionRange"]["start"],
+        json!({"line": 3, "character": 3})
+    );
+
+    client.send(&json!({"jsonrpc":"2.0","id":3,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":main_uri}}}));
+    let response = client.receive();
+    assert_eq!(response["id"], 3);
+    let data = response["result"]["data"].as_array().unwrap();
+
+    // (data index, [deltaLine, deltaStart, length, type]) for the opening
+    // module keyword/name, the comment, the function keyword/name, and the
+    // let binding with its numeric initializer.
+    let expected: &[(usize, [u64; 3])] = &[
+        (0, [0, 0, 6]),
+        (5, [0, 7, 4]),
+        (10, [2, 0, 11]),
+        (15, [1, 0, 2]),
+        (20, [0, 3, 4]),
+        (25, [1, 4, 3]),
+        (30, [0, 4, 6]),
+        (35, [0, 9, 2]),
+    ];
+    for (index, token) in expected {
+        assert_eq!(&data[*index..index + 3], &token.to_vec());
+    }
+    // The token types follow in each block: keyword, namespace, comment,
+    // keyword, function, keyword, variable, number (0,3,8,0,1,0,10,7).
+    let types: Vec<u64> = data
+        .chunks(5)
+        .map(|block| block[3].as_u64().unwrap())
+        .collect();
+    assert_eq!(types, vec![0, 3, 8, 0, 1, 0, 10, 7]);
+    client.shutdown();
 }
 
 #[test]
@@ -342,16 +412,25 @@ fn project_diagnostics_definition_unicode_and_clean_shutdown() {
     assert_eq!(response["result"]["uri"], main_uri);
     assert_eq!(response["result"]["range"]["start"]["line"], 3);
 
-    // Unknown requests receive a protocol error, not stray stdout.
+    // Hover resolves the local binding to its declaration header.
     client.send(&json!({
         "jsonrpc": "2.0",
         "id": 5,
         "method": "textDocument/hover",
-        "params": {}
+        "params": {
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 4, "character": 5 }
+        }
     }));
     let response = client.receive();
     assert_eq!(response["id"], 5);
-    assert_eq!(response["error"]["code"], -32601);
+    assert_eq!(response["result"]["contents"]["kind"], "markdown");
+    assert!(
+        response["result"]["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("let answer")
+    );
 
     // A stale version must not replace version 3's unsaved text.
     client.change(&main_uri, 2, "module demo;\nthis is not kush\n");

@@ -277,13 +277,20 @@ fn check_exclusive_run(root: &Path, observation: &Observation) {
     ];
     assert_eq!(
         observation.output,
-        expected.iter().flat_map(|line| line.as_bytes()).cloned().collect::<Vec<u8>>()
+        expected
+            .iter()
+            .flat_map(|line| line.as_bytes())
+            .cloned()
+            .collect::<Vec<u8>>()
     );
     assert_eq!(fs::read(root.join("victim.txt")).unwrap(), b"keep\n");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(root.join("fresh.tmp")).unwrap().permissions().mode();
+        let mode = fs::metadata(root.join("fresh.tmp"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "fresh file mode: {mode:o}");
     }
 }
@@ -298,7 +305,6 @@ fn write_exclusive_refuses_planted_paths_and_creates_0600_files() {
         &[],
     );
     check_exclusive_run(&reference_root, &expected);
-    drop(&reference_root);
     let native_root = unique_directory("exclusive-native");
     prepare_exclusive_fixture(&native_root);
     let actual = native(

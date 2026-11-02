@@ -613,7 +613,9 @@ impl HostOp {
     pub fn borrowed(self) -> &'static [bool] {
         match self {
             Self::FsRead | Self::FsList => &[true, false],
-            Self::FsWrite | Self::FsWriteExclusive | Self::FsAppend | Self::FsRename => &[true, true],
+            Self::FsWrite | Self::FsWriteExclusive | Self::FsAppend | Self::FsRename => {
+                &[true, true]
+            }
             Self::FsRemove
             | Self::FsMkdir
             | Self::FsRemoveDir

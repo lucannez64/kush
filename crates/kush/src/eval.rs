@@ -4278,7 +4278,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 } else {
                     None
                 };
-                let remaining = || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                let remaining =
+                    || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
                 let connect = if timeout_ms == 0 {
                     TcpStream::connect((host.as_str(), port))
                 } else {
@@ -4287,8 +4288,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             let mut last = io::Error::from_raw_os_error(5);
                             let mut connected = None;
                             for address in addresses {
-                                let Some(left) = remaining().filter(|left| !left.is_zero())
-                                else {
+                                let Some(left) = remaining().filter(|left| !left.is_zero()) else {
                                     last = io::Error::from_raw_os_error(110);
                                     break;
                                 };
@@ -4298,8 +4298,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                                         break;
                                     }
                                     Err(error) => {
-                                        let timed_out =
-                                            error.kind() == io::ErrorKind::TimedOut;
+                                        let timed_out = error.kind() == io::ErrorKind::TimedOut;
                                         last = error;
                                         if timed_out {
                                             break;
@@ -4368,9 +4367,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
                 if send_status != 0 {
                     self.heap.insert(id, Value::Buffer { data, capacity });
-                    return Ok(
-                        self.host_result(shape, send_status, Value::Scalar(0))
-                    );
+                    return Ok(self.host_result(shape, send_status, Value::Scalar(0)));
                 }
                 let _ = stream.shutdown(Shutdown::Write);
                 let initialized = data.len();

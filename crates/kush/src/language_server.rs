@@ -161,7 +161,16 @@ impl<W: Write> Server<W> {
                                 "positionEncoding": "utf-16",
                                 "textDocumentSync": 1,
                                 "definitionProvider": true,
-                                "documentFormattingProvider": true
+                                "documentFormattingProvider": true,
+                                "hoverProvider": true,
+                                "documentSymbolProvider": true,
+                                "semanticTokensProvider": {
+                                    "legend": {
+                                        "tokenTypes": SEMANTIC_TOKEN_TYPES.to_vec(),
+                                        "tokenModifiers": []
+                                    },
+                                    "full": true
+                                }
                             },
                             "serverInfo": {
                                 "name": "kush-lsp",
@@ -197,6 +206,21 @@ impl<W: Write> Server<W> {
                     let mut result = self.definition(&params);
                     self.remap_location_uris(&mut result);
                     self.respond(&id, result)?;
+                }
+            }
+            "textDocument/hover" => {
+                if let Some(id) = id {
+                    self.respond(&id, self.hover(&params))?;
+                }
+            }
+            "textDocument/documentSymbol" => {
+                if let Some(id) = id {
+                    self.respond(&id, self.document_symbol(&params))?;
+                }
+            }
+            "textDocument/semanticTokens/full" => {
+                if let Some(id) = id {
+                    self.respond(&id, self.semantic_tokens(&params))?;
                 }
             }
             "textDocument/formatting" => {
@@ -518,6 +542,22 @@ impl<W: Write> Server<W> {
     }
 
     fn definition_at_root(&self, root: &Path, document: &Document, offset: usize) -> Option<Value> {
+        let probe = self.probe_at_root(root, document, offset)?;
+        if let Some(location) = probe.location {
+            return Some(location);
+        }
+        let binding = probe.binding?;
+        binding_location(&probe.program, &probe.resolution, binding)
+    }
+
+    /// Reuses the whole program-resolution probe so definition and hover have
+    /// one source of truth for what binds at the cursor.
+    fn probe_at_root(
+        &self,
+        root: &Path,
+        document: &Document,
+        offset: usize,
+    ) -> Option<CursorProbe> {
         let text = self
             .document_text(root)
             .or_else(|| fs::read_to_string(root).ok())?;
@@ -533,11 +573,10 @@ impl<W: Write> Server<W> {
             })?;
         let base = program.sources.files[file_index].base;
         let global = base.saturating_add(offset);
-        if let Some(location) = use_definition(&program, file_index, document, offset) {
-            return Some(location);
-        }
+        let location = use_definition(&program, file_index, document, offset);
         let resolution = crate::resolve::resolve_program(&program).ok()?;
         let token = token_at(&document.text, offset);
+        let mut binding = None;
         if let Some(reference) = resolution
             .references
             .iter()
@@ -551,22 +590,20 @@ impl<W: Write> Server<W> {
                     })
             })
             .min_by_key(|reference| reference.span.end.saturating_sub(reference.span.start))
-            && let Some(location) = binding_location(&program, &resolution, reference.binding)
         {
-            return Some(location);
+            let candidate = reference.binding;
+            let valid = resolution.bindings.get(candidate).is_some_and(|binding| {
+                !matches!(binding.kind, crate::resolve::BindingKind::Builtin)
+                    && binding.span != Span::default()
+            });
+            binding = valid.then_some(candidate);
         }
-        if let Some(token) = token {
+        if binding.is_none()
+            && let Some(token) = token
+        {
             let token_span = Span::new(base + token.start, base + token.end);
-            if let Some(binding) = resolution.binder(token_span)
-                && let Some(location) = binding_location(&program, &resolution, binding)
-            {
-                return Some(location);
-            }
-            if let Some(binding) = resolution.method(token_span)
-                && let Some(location) = binding_location(&program, &resolution, binding)
-            {
-                return Some(location);
-            }
+            binding = binding.or_else(|| resolution.binder(token_span));
+            binding = binding.or_else(|| resolution.method(token_span));
             let token_text = document
                 .text
                 .get(token.start..token.end)
@@ -584,13 +621,14 @@ impl<W: Write> Server<W> {
                 .collect::<Vec<_>>();
             candidates
                 .sort_by_key(|(_, binding)| binding.span.end.saturating_sub(binding.span.start));
-            if let Some((id, _)) = candidates.first()
-                && let Some(location) = binding_location(&program, &resolution, *id)
-            {
-                return Some(location);
-            }
+            binding = binding.or(candidates.into_iter().next().map(|(id, _)| id));
         }
-        None
+        Some(CursorProbe {
+            program,
+            resolution,
+            location,
+            binding,
+        })
     }
 
     fn formatting(&self, params: &Value) -> Value {
@@ -612,6 +650,68 @@ impl<W: Write> Server<W> {
             },
             "newText": formatted
         }])
+    }
+
+    fn hover(&self, params: &Value) -> Value {
+        let Some(document) = self.document_from_params(params) else {
+            return Value::Null;
+        };
+        let position = params.get("position").cloned().unwrap_or(Value::Null);
+        let line = position.get("line").and_then(Value::as_u64).unwrap_or(0);
+        let character = position
+            .get("character")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let Some(offset) = position_to_offset(&document.text, line, character) else {
+            return Value::Null;
+        };
+        let mut roots = Vec::new();
+        if let Some(project) = &self.project {
+            let entry = normalize_path(&project.package.entry_path());
+            let in_project = project
+                .all_packages()
+                .any(|package| document.path.starts_with(normalize_path(&package.root)));
+            if in_project {
+                roots.push(entry);
+            }
+        }
+        if !roots.contains(&document.path) {
+            roots.push(document.path.clone());
+        }
+        for root in roots {
+            let Some(probe) = self.probe_at_root(&root, document, offset) else {
+                continue;
+            };
+            if let Some(value) = hover_value(&probe) {
+                return value;
+            }
+        }
+        Value::Null
+    }
+
+    fn document_symbol(&self, params: &Value) -> Value {
+        let Some(document) = self.document_from_params(params) else {
+            return Value::Null;
+        };
+        let module = match crate::parser::parse(&document.text) {
+            Ok(module) => module,
+            Err(_) => return Value::Null,
+        };
+        let mut symbols = Vec::new();
+        for item in &module.items {
+            let Some(symbol) = document_symbol_item(&document.text, item) else {
+                continue;
+            };
+            symbols.push(symbol);
+        }
+        Value::Array(symbols)
+    }
+
+    fn semantic_tokens(&self, params: &Value) -> Value {
+        let Some(document) = self.document_from_params(params) else {
+            return Value::Null;
+        };
+        semantic_token_data(&document.text)
     }
 
     fn respond(&mut self, id: &Value, result: Value) -> io::Result<()> {
@@ -1096,6 +1196,368 @@ fn location_for_span(program: &Program, span: Span) -> Option<Value> {
         &path,
         span_to_range(&file.text, local_span(span, file.base)),
     ))
+}
+
+fn document_symbol_item(text: &str, declaration: &crate::ast::Declaration) -> Option<Value> {
+    let item = &declaration.item;
+    let item_span = item.span;
+    let kind = match &item.kind {
+        ItemKind::Module(parts) => {
+            return Some(json!({
+                "name": parts.join("."),
+                "kind": 2,
+                "range": span_to_range(text, item_span),
+                "selectionRange": span_to_range(text, item_span)
+            }));
+        }
+        ItemKind::Function(_) => 12,
+        ItemKind::Enum { name, variants, .. } | ItemKind::Prop { name, variants, .. } => {
+            let mut children = Vec::new();
+            for variant in variants {
+                children.push(json!({
+                    "name": variant.name,
+                    "kind": 22,
+                    "range": span_to_range(text, variant.span),
+                    "selectionRange": span_to_range(text, variant.span)
+                }));
+            }
+            return Some(symbol_value(text, name, 10, &item_span, children));
+        }
+        ItemKind::Struct { .. } => 23,
+        ItemKind::Alias { .. } | ItemKind::Effect { .. } | ItemKind::EffectRow { .. } => 26,
+        ItemKind::Trait { .. } => 11,
+        ItemKind::Impl { .. } => 5,
+        _ => return None,
+    };
+    let name = match &item.kind {
+        ItemKind::Function(function) => function.name.clone(),
+        ItemKind::Struct { name, .. }
+        | ItemKind::Alias { name, .. }
+        | ItemKind::Effect { name, .. }
+        | ItemKind::EffectRow { name, .. }
+        | ItemKind::Trait { name, .. } => name.clone(),
+        ItemKind::Impl { .. } => "impl".to_owned(),
+        _ => return None,
+    };
+    Some(symbol_value(text, &name, kind, &item_span, Vec::new()))
+}
+
+fn symbol_value(text: &str, name: &str, kind: u64, span: &Span, children: Vec<Value>) -> Value {
+    // The selection range is the last identifier token inside the item that
+    // matches the tail of the qualified name, falling back to the whole item
+    // span for shapes whose name is only implicit.
+    let tail = name.rsplit('.').next().unwrap_or(name);
+    let selection = identifier_span_in(text, span.start, span.end, tail)
+        .map_or(*span, |(start, end)| Span::new(start, end));
+    json!({
+        "name": name,
+        "kind": kind,
+        "range": span_to_range(text, *span),
+        "selectionRange": span_to_range(text, selection),
+        "children": children
+    })
+}
+
+/// Hover text for the binding that the cursor probe resolved: builtins name
+/// their surface directly, declarations show the clipped header slice.
+fn hover_value(probe: &CursorProbe) -> Option<Value> {
+    let binding = probe.binding?;
+    let data = probe.resolution.bindings.get(binding)?;
+    let content = if matches!(data.kind, crate::resolve::BindingKind::Builtin) {
+        data.name.clone()
+    } else if data.span == Span::default() {
+        return None;
+    } else {
+        let file = probe.program.sources.file(data.span)?;
+        let local = local_span(data.span, file.base);
+        if matches!(data.kind, crate::resolve::BindingKind::Local) {
+            local_statement_text(&file.text, local).unwrap_or_else(|| data.name.clone())
+        } else {
+            let end = header_end(&file.text, local.start, local.end);
+            let slice = file
+                .text
+                .get(local.start..end)
+                .unwrap_or_default()
+                .trim_end();
+            slice.chars().take(200).collect::<String>()
+        }
+    };
+    Some(json!({
+        "contents": { "kind": "markdown", "value": format!("```kush\n{content}\n```") }
+    }))
+}
+
+/// The whole enclosing `let` statement for a local binder, as hover text.
+fn local_statement_text(text: &str, binder: Span) -> Option<String> {
+    let tokens = lexer::lex(text).ok()?;
+    let mut start = binder.start;
+    let mut end = binder.end;
+    for token in &tokens {
+        if token.span.end <= binder.start {
+            if matches!(token.kind, Kind::Let) {
+                start = token.span.start;
+            }
+        } else if token.span.start >= binder.start && matches!(token.kind, Kind::Semi) {
+            end = token.span.end;
+            break;
+        }
+    }
+    Some(
+        text.get(start..end)?
+            .trim()
+            .chars()
+            .take(200)
+            .collect::<String>(),
+    )
+}
+
+/// The header-slice end for a declaration: the first `{` or `;` after `from`,
+/// whichever comes first, bounded by `limit`.
+fn header_end(text: &str, from: usize, limit: usize) -> usize {
+    match text
+        .get(from..limit)
+        .and_then(|slice| slice.find(['{', ';']))
+    {
+        Some(at) => from + at,
+        None => limit,
+    }
+}
+
+/// LSP semantic token types, in legend order.
+const SEMANTIC_TOKEN_TYPES: &[&str] = &[
+    "keyword",
+    "function",
+    "type",
+    "namespace",
+    "enum",
+    "enumMember",
+    "string",
+    "number",
+    "comment",
+    "operator",
+    "variable",
+];
+
+const KEYWORD_WORDS: &[&str] = &["trait", "impl", "prop", "test", "effect", "row", "foreign"];
+
+const KEYWORD: u64 = 0;
+const FUNCTION_TOKEN: u64 = 1;
+const TYPE_TOKEN: u64 = 2;
+const NAMESPACE: u64 = 3;
+const STRING_TOKEN: u64 = 6;
+const NUMBER_TOKEN: u64 = 7;
+const COMMENT_TOKEN: u64 = 8;
+const VARIABLE_TOKEN: u64 = 10;
+
+/// How the next identifier token should be colored, decided by the preceding
+/// declaration keyword.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Expected {
+    None,
+    Function,
+    Type,
+    Namespace,
+    Variable,
+}
+
+fn semantic_token_data(text: &str) -> Value {
+    let Ok(tokens) = lexer::lex(text) else {
+        return json!({ "data": [] });
+    };
+    // Comments live in the trivia between tokens, so the gap after each token
+    // is scanned for `//` and nested `/* */` comments.
+    let mut events: Vec<(usize, usize, u64)> = Vec::new();
+    let mut expected = Expected::None;
+    for (index, token) in tokens.iter().enumerate() {
+        let (start, end) = (token.span.start, token.span.end);
+        if let Some(next) = tokens.get(index + 1)
+            && next.span.start > end
+        {
+            scan_comment_range(
+                text,
+                start.min(next.span.start),
+                end,
+                next.span.start,
+                &mut events,
+            );
+        }
+        let _ = start;
+        match &token.kind {
+            Kind::Fn => {
+                events.push((start, end, KEYWORD));
+                expected = Expected::Function;
+            }
+            Kind::Enum | Kind::Struct | Kind::Type | Kind::Erased => {
+                events.push((start, end, KEYWORD));
+                expected = Expected::Type;
+            }
+            Kind::Module | Kind::Use | Kind::Handle | Kind::Perform | Kind::With => {
+                events.push((start, end, KEYWORD));
+                expected = if matches!(token.kind, Kind::Module | Kind::Use) {
+                    Expected::Namespace
+                } else {
+                    Expected::None
+                };
+            }
+            Kind::Ident(name)
+                if matches!(&token.kind, Kind::Ident(_))
+                    && KEYWORD_WORDS.contains(&name.as_str()) =>
+            {
+                events.push((start, end, KEYWORD));
+            }
+            Kind::Ident(_) if expected == Expected::Function => {
+                events.push((start, end, FUNCTION_TOKEN));
+                expected = Expected::None;
+            }
+            Kind::Ident(_) if matches!(expected, Expected::Type) => {
+                events.push((start, end, TYPE_TOKEN));
+                expected = Expected::None;
+            }
+            Kind::Ident(_) if expected == Expected::Namespace => {
+                events.push((start, end, NAMESPACE));
+                // Module paths continue across dots until `;` or `{`.
+            }
+            Kind::Ident(_) if expected == Expected::Variable => {
+                events.push((start, end, VARIABLE_TOKEN));
+                expected = Expected::None;
+            }
+            Kind::Let | Kind::Pub => {
+                events.push((start, end, KEYWORD));
+                if matches!(token.kind, Kind::Let) {
+                    expected = Expected::Variable;
+                }
+            }
+            Kind::String(_) | Kind::Char(_) => events.push((start, end, STRING_TOKEN)),
+            Kind::Integer(_) | Kind::Float(_) => events.push((start, end, NUMBER_TOKEN)),
+            Kind::Lifetime(_) => events.push((start, end, TYPE_TOKEN)),
+            _ => {
+                expected = Expected::None;
+            }
+        }
+    }
+    if let Some(last) = tokens.last()
+        && last.span.end < text.len()
+    {
+        scan_comment_range(
+            text,
+            last.span.start,
+            last.span.end,
+            text.len(),
+            &mut events,
+        );
+    }
+    json!({ "data": token_deltas(text, dedupe_sorted(events)) })
+}
+
+/// Deliberately Tolerant comment scan for an editor hint only.
+fn scan_comment_range(
+    text: &str,
+    _previous_end: usize,
+    from: usize,
+    to: usize,
+    events: &mut Vec<(usize, usize, u64)>,
+) {
+    let mut index = from;
+    while index < to {
+        let rest = text.get(index..to).unwrap_or("");
+        if let Some(slice) = Some(rest) {
+            let _ = slice;
+        }
+        if rest.starts_with("//") {
+            let end = rest.find('\n').map_or(to, |at| index + at);
+            events.push((index, end, COMMENT_TOKEN));
+            index = end;
+        } else if rest.starts_with("/*") {
+            let start = index;
+            let mut depth = 0usize;
+            let mut at = index;
+            while at < to {
+                let here = text.get(at..to).unwrap_or("");
+                if here.starts_with("/*") {
+                    depth += 1;
+                    at += 2;
+                } else if here.starts_with("*/") {
+                    depth -= 1;
+                    at += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    at += here.chars().next().map_or(1, |c| c.len_utf8());
+                }
+            }
+            events.push((start, at, COMMENT_TOKEN));
+            index = at;
+        } else {
+            index += rest.chars().next().map_or(1, |c| c.len_utf8());
+        }
+    }
+}
+
+fn dedupe_sorted(mut events: Vec<(usize, usize, u64)>) -> Vec<(usize, usize, u64)> {
+    events.sort_by_key(|(start, end, _)| (*start, std::cmp::Reverse(*end)));
+    events.dedup();
+    events
+}
+
+fn token_deltas(text: &str, events: Vec<(usize, usize, u64)>) -> Vec<u64> {
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(
+            text.char_indices()
+                .filter(|(_, c)| *c == '\n')
+                .map(|(index, _)| index + 1),
+        )
+        .collect();
+    let utf16_units = |slice: &str| slice.chars().map(|c| c.len_utf16()).sum::<usize>();
+    let mut data = Vec::new();
+    let mut previous_line = 0u64;
+    let mut previous_column = 0u64;
+    for (start, end, kind) in events {
+        let line = match line_starts.binary_search(&start) {
+            Ok(index) => index,
+            Err(index) => index - 1,
+        } as u64;
+        let line_start = line_starts[line as usize];
+        let column = utf16_units(&text[line_start..start]) as u64;
+        let length = utf16_units(&text[start.min(end)..end.max(start)]) as u64;
+        let (delta_line, delta_start) = if !data.is_empty() && line == previous_line {
+            (0, column - previous_column)
+        } else if data.is_empty() {
+            (line, column)
+        } else {
+            (line - previous_line, column)
+        };
+        data.extend([delta_line, delta_start, length, kind, 0]);
+        previous_line = line;
+        previous_column = column;
+    }
+    data
+}
+
+/// Shared result of the definition/hover cursor probe: what the program
+/// resolution binds at the cursor plus any use-import location override.
+struct CursorProbe {
+    program: Program,
+    resolution: crate::resolve::Resolution,
+    location: Option<Value>,
+    binding: Option<usize>,
+}
+
+/// The last identifier token inside `[start, end)` matching `wanted`, as a
+/// global byte span. Falls back to the whole range without a match.
+fn identifier_span_in(
+    text: &str,
+    start: usize,
+    end: usize,
+    wanted: &str,
+) -> Option<(usize, usize)> {
+    let tokens = lexer::lex(&text[start..end]).ok()?;
+    tokens
+        .iter()
+        .filter(|token| text.get(start + token.span.start..start + token.span.end) == Some(wanted))
+        .map(|token| (start + token.span.start, start + token.span.end))
+        .next_back()
+        .or(Some((start, end)))
 }
 
 fn location_value(path: &Path, range: Value) -> Value {
