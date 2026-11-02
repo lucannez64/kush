@@ -295,6 +295,36 @@ pub fn load(config_path: &Path) -> Result<Generated, Error> {
     })
 }
 
+/// Canonicalization catches symlink aliases; hardlinks to the same inode are
+/// the remaining alias the pair's independent atomic writes would clobber.
+fn reject_hardlinked_pair(
+    rust_path: &Path,
+    kush_path: &Path,
+    config_path: &Path,
+) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let rust_inode = match fs::metadata(rust_path) {
+            Ok(metadata) if metadata.is_file() => Some((metadata.dev(), metadata.ino())),
+            Ok(_) | Err(_) => None,
+        };
+        let kush_inode = match fs::metadata(kush_path) {
+            Ok(metadata) if metadata.is_file() => Some((metadata.dev(), metadata.ino())),
+            Ok(_) | Err(_) => None,
+        };
+        if let Some(inode) = rust_inode.filter(|inode| Some(*inode) == kush_inode) {
+            return Err(Error::new(format!(
+                "{}: rust-output and kush-output are hardlinks to the same file (device {}, inode {})",
+                config_path.display(),
+                inode.0,
+                inode.1
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Generate and (unless `check`) write the configured outputs.
 ///
 /// Existing files without the matching generated marker are never replaced.
@@ -316,6 +346,7 @@ pub fn run(config_path: &Path, check: bool) -> Result<Report, Error> {
         &generated.kush,
         KUSH_MARKER,
     )?;
+    reject_hardlinked_pair(&generated.rust_path, &generated.kush_path, config_path)?;
     let report = Report {
         rust_path: generated.rust_path.clone(),
         kush_path: generated.kush_path.clone(),

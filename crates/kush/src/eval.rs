@@ -12,7 +12,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread,
@@ -4171,10 +4171,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let limit = capacity - initialized;
                 let overflow_flag = Arc::new(AtomicBool::new(false));
                 let reader_overflow = overflow_flag.clone();
+                let deadline =
+                    (timeout != 0).then(|| Instant::now() + Duration::from_millis(timeout as u64));
+                let mut timed_out = false;
+                // Reader state mirrors the native pipe loop: running, EOF, or
+                // a read error (native kills and reports the errno then).
+                let reader_state = Arc::new(AtomicU8::new(0));
+                let spawn_state = reader_state.clone();
                 let reader = thread::spawn(move || {
                     let mut captured = Vec::new();
                     let mut buffer = [0u8; 4096];
                     let mut overflow = false;
+                    let mut read_error = None;
                     loop {
                         match stdout.read(&mut buffer) {
                             Ok(0) => break,
@@ -4189,45 +4197,61 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                                 captured.extend_from_slice(&buffer[..count]);
                             }
                             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                            Err(error) => return (captured, overflow, Some(io_error_code(&error))),
+                            Err(error) => {
+                                read_error = Some(io_error_code(&error));
+                                break;
+                            }
                         }
                     }
-                    (captured, overflow, None)
+                    let outcome = (captured, overflow, read_error);
+                    spawn_state.store(if outcome.2.is_some() { 2 } else { 1 }, Ordering::Relaxed);
+                    outcome
                 });
-                let deadline =
-                    (timeout != 0).then(|| Instant::now() + Duration::from_millis(timeout as u64));
-                let mut timed_out = false;
-                let status = loop {
+                let mut status: Option<std::process::ExitStatus> = None;
+                loop {
                     match child.try_wait() {
-                        Ok(Some(status)) => break Some(status),
+                        Ok(Some(exit)) => {
+                            status = Some(exit);
+                            break;
+                        }
                         Ok(None) => {}
                         Err(_) => {
                             let _ = child.kill();
                             let _ = child.wait();
-                            break None;
+                            break;
                         }
                     }
-                    if overflow_flag.load(Ordering::Relaxed)
-                        || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                    // An overflowing pipe or a reader failure ends the wait
+                    // like the native poll loop: the post-join status decides
+                    // which errno wins.
+                    if reader_state.load(Ordering::Relaxed) == 2
+                        || overflow_flag.load(Ordering::Relaxed)
                     {
-                        timed_out = deadline.is_some_and(|deadline| Instant::now() >= deadline);
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break None;
+                        break;
+                    }
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        timed_out = true;
+                        break;
                     }
                     thread::sleep(Duration::from_millis(2));
-                };
+                }
+                if status.is_none() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
                 let (captured, overflow, read_error) = reader.join().unwrap();
                 let append_status = Self::append_bounded(&mut data, capacity, &captured);
                 self.heap.insert(id, Value::Buffer { data, capacity });
-                if timed_out {
-                    return Ok(self.host_result(shape, 110, Value::Scalar(0)));
+                // Overflow beats a concurrent deadline like the native loop,
+                // which breaks the pipe loop before its timeout can re-arm.
+                if overflow {
+                    return Ok(self.host_result(shape, 27, Value::Scalar(0)));
                 }
                 if let Some(error) = read_error {
                     return Ok(self.host_result(shape, error, Value::Scalar(0)));
                 }
-                if overflow {
-                    return Ok(self.host_result(shape, 27, Value::Scalar(0)));
+                if timed_out {
+                    return Ok(self.host_result(shape, 110, Value::Scalar(0)));
                 }
                 let Some(status) = status else {
                     return Ok(self.host_result(shape, 5, Value::Scalar(0)));
@@ -4285,7 +4309,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 } else {
                     match (host.as_str(), port).to_socket_addrs() {
                         Ok(addresses) => {
-                            let mut last = io::Error::from_raw_os_error(5);
+                            // A successful resolution with zero addresses
+                            // fails like the native empty list: refused.
+                            let mut last = io::Error::from_raw_os_error(111);
                             let mut connected = None;
                             for address in addresses {
                                 let Some(left) = remaining().filter(|left| !left.is_zero()) else {

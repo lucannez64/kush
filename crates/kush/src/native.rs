@@ -1150,8 +1150,14 @@ static int64_t kush_host_write_file(uint64_t path_handle, uint64_t data_handle, 
         if (written == 0) { code = EIO; break; }
         offset += (uint64_t)written;
     }
-    (void)close(fd);
-    if (code != 0) return code;
+    if (code != 0) {
+        (void)close(fd);
+        return code;
+    }
+    if (close(fd) != 0) {
+        int failure = errno;
+        if (failure != EINTR) return failure;
+    }
     *out = (uint64_t)data->length;
     return 0;
 }
@@ -1174,8 +1180,14 @@ static int64_t kush_host_write_file_exclusive(uint64_t path_handle, uint64_t dat
         if (written == 0) { code = EIO; break; }
         offset += (uint64_t)written;
     }
-    (void)close(fd);
-    if (code != 0) return code;
+    if (code != 0) {
+        (void)close(fd);
+        return code;
+    }
+    if (close(fd) != 0) {
+        int failure = errno;
+        if (failure != EINTR) return failure;
+    }
     *out = (uint64_t)data->length;
     return 0;
 }
@@ -1376,6 +1388,15 @@ static int kush_host_remaining(int64_t deadline) {
     int64_t left = deadline - now;
     return left > 60000 ? 60000 : (int)left;
 }
+/* Saturates instead of wrapping: an enormous timeout is effectively unbounded,
+ * and wrapped C arithmetic would turn it into "no deadline" by accident. */
+static int64_t kush_host_deadline(int64_t timeout_ms) {
+    if (timeout_ms == 0) return -1;
+    int64_t now = kush_host_now_ms();
+    if (now < 0) return 0;
+    if (timeout_ms > INT64_MAX - now) return INT64_MAX;
+    return now + timeout_ms;
+}
 static void kush_host_reap(pid_t child, int *status) {
     for (;;) {
         pid_t result = waitpid(child, status, 0);
@@ -1474,7 +1495,7 @@ int64_t kush_proc_run(uint64_t program_handle, uint64_t args_handle,
     (void)fcntl(errpipe[0], F_SETFL, O_NONBLOCK);
     KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
     uint64_t length = b->length;
-    int64_t deadline = timeout_ms == 0 ? -1 : kush_host_now_ms() + timeout_ms;
+    int64_t deadline = kush_host_deadline(timeout_ms);
     int failed = 0, timed_out = 0;
     for (;;) {
         int full = length == b->capacity;
@@ -1484,7 +1505,12 @@ int64_t kush_proc_run(uint64_t program_handle, uint64_t args_handle,
             if (errno == EINTR) continue;
             code = errno; failed = 1; break;
         }
-        if (ready == 0) { timed_out = 1; break; }
+        if (ready == 0) {
+            /* poll() returns 0 after at most 60s; only a drained budget is a
+             * timeout, so long budgets stay valid. */
+            if (deadline >= 0 && kush_host_remaining(deadline) != 0) continue;
+            timed_out = 1; break;
+        }
         if (full) {
             unsigned char probe;
             ssize_t received = read(outpipe[0], &probe, 1);
@@ -1555,6 +1581,7 @@ static int64_t kush_host_connect(struct addrinfo *address, int64_t deadline) {
         for (;;) {
             ready = poll(&waiting, 1, kush_host_remaining(deadline));
             if (ready < 0 && errno == EINTR) continue;
+            if (ready == 0 && deadline >= 0 && kush_host_remaining(deadline) != 0) continue;
             break;
         }
         if (ready < 0) { int code = errno; (void)close(fd); return -code; }
@@ -1576,6 +1603,10 @@ int64_t kush_net_tcp_exchange(uint64_t host_handle, int64_t port,
     int code = 0;
     char *host = kush_host_c_path((const KushBytes *)(uintptr_t)host_handle, &code);
     if (host == NULL) { return code; }
+    if (!kush_utf8_valid_data((const unsigned char *)host, (uint64_t)strlen(host))) {
+        free(host);
+        return EINVAL;
+    }
     char service[8];
     (void)snprintf(service, sizeof(service), "%lld", (long long)port);
     struct addrinfo hints;
@@ -1589,7 +1620,7 @@ int64_t kush_net_tcp_exchange(uint64_t host_handle, int64_t port,
         int failure = resolved == EAI_MEMORY ? ENOMEM : resolved == EAI_SYSTEM ? errno : EINVAL;
         return failure == 0 ? EINVAL : failure;
     }
-    int64_t deadline = timeout_ms == 0 ? -1 : kush_host_now_ms() + timeout_ms;
+    int64_t deadline = kush_host_deadline(timeout_ms);
     int fd = -1;
     int last = ECONNREFUSED;
     for (struct addrinfo *address = addresses; address != NULL; address = address->ai_next) {
@@ -1611,7 +1642,10 @@ int64_t kush_net_tcp_exchange(uint64_t host_handle, int64_t port,
             int ready = poll(&waiting, 1, kush_host_remaining(deadline));
             if (ready < 0 && errno == EINTR) continue;
             if (ready < 0) { code = errno; break; }
-            if (ready == 0) { code = ETIMEDOUT; break; }
+            if (ready == 0) {
+                if (deadline >= 0 && kush_host_remaining(deadline) != 0) continue;
+                code = ETIMEDOUT; break;
+            }
             continue;
         }
         if (written < 0) { code = errno; break; }
@@ -1627,7 +1661,10 @@ int64_t kush_net_tcp_exchange(uint64_t host_handle, int64_t port,
         struct pollfd waiting = { fd, POLLIN | POLLHUP, 0 };
         int ready = poll(&waiting, 1, kush_host_remaining(deadline));
         if (ready < 0) { if (errno == EINTR) continue; code = errno; break; }
-        if (ready == 0) { code = ETIMEDOUT; break; }
+        if (ready == 0) {
+            if (deadline >= 0 && kush_host_remaining(deadline) != 0) continue;
+            code = ETIMEDOUT; break;
+        }
         unsigned char probe;
         void *destination = full ? (void *)&probe : (void *)(b->data + length);
         size_t room = full ? 1 : (size_t)(b->capacity - length);

@@ -572,9 +572,11 @@ fn generate_function(spec: &AdapterSpec, function: &Function) -> String {
                     .find(|declared| &declared.name == resource)
                     .expect("validated resource")
                     .rust_type;
+                // The box is created only after the null check so a null out
+                // slot cannot orphan a freshly allocated handle.
                 let _ = writeln!(
                     out,
-                    "                write_word(kush_out, Box::into_raw(Box::new(value)) as i64)?;\n                Ok(())"
+                    "                if kush_out.is_null() {{ return Err(\"null out-pointer\".into()) }}\n                write_word(kush_out, Box::into_raw(Box::new(value)) as i64)?;\n                Ok(())"
                 );
                 let _ = ty;
             }
