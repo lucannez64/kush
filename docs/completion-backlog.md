@@ -157,8 +157,8 @@ outstanding implementation item.
 
 ## Advanced types and effects
 
-- [ ] Structural record subtyping and representation-changing coercions.
-  **Partial:** anonymous `struct { ... }` rows, canonical field order,
+- [x] Structural record subtyping and representation-changing coercions.
+  **Implemented:** anonymous `struct { ... }` rows, canonical field order,
   width/order subtyping, recursive nested structural field conversions,
   atom-to-union field injection, nested union-to-union repacking,
   representation-changing callable-field adapters (with one-time linear
@@ -166,21 +166,38 @@ outstanding implementation item.
   record literals and patterns, exact-row structural impl headers (including
   generic patterns), affine-field cleanup, linear field erasure rejection, and
   borrowed-leaf/mutability invariance are implemented in both backends.
-  Open rows are an erased contract: unmentioned fields are dropped at the call
-  boundary rather than preserved by a row variable. Field renaming, structural
-  equality, true row variables, and open rows in impl headers remain out of
-  scope. See [subtyping.md](subtyping.md#structural-records).
+  Named `..r` row variables are monomorphized per concrete residual row and
+  preserve unmentioned owning, linear, and borrowed fields through function
+  parameters/results; nested rows unify recursively, one row variable must
+  receive the same residual from every parameter, and an unbound tail is
+  rejected. Open named-row impl headers dispatch on structural receivers with
+  checked coherence. Explicit top-level field renaming uses
+  `value as struct { target: T from source }` with each source moved once.
+  Structural `==`/`!=` compares every canonical field when leaves are copyable
+  scalars or nested structural rows; both operands are evaluated once in both
+  backends. Remaining boundaries are documented, not silent: nested field
+  renaming, row subtraction/aliasing, first-class row values, bare `..` impl
+  headers, borrowed structural results, and floating-point/owning/borrowed/
+  union/nominal structural equality. See
+  [subtyping.md](subtyping.md#structural-records).
 - [ ] Broader algebraic subtype inference with documented decidability
   boundaries. **Partial:** contextual array/vector/tuple/structural literals
   and first-order generic matching accumulate constraints over every finite
   union alternative instead of choosing the first matching arm. A declared
   union pattern with one bare type variable and a concrete fixed part binds the
-  residual alternatives (`T | i64`). Several bare variables partition the
-  residual alternatives with a bounded (4096-step) canonical backtracking
-  search (`T | U | i64`), requiring every variable to receive an alternative;
-  conflicting, incomparable, non-unique, and budget-exhausted bindings are
-  explicit. There is no cross-parameter backtracking, recursive row
-  unification, general principal inference, or indexed-union inference. See
+  residual alternatives (`T | i64`); this rule is principal. Several bare
+  variables partition the residual alternatives with a bounded (4096-step)
+  canonical search (`T | U | i64`). Cross-parameter backtracking now replays
+  the whole constraint group from the base substitution when a later parameter
+  rejects an earlier partition; the replay is deterministic, lexicographic,
+  and capped at 4096 complete attempts, with budget exhaustion explicit. Named
+  row variables provide recursive residual-row unification for structural
+  records. The principal result and its exact boundary are documented:
+  single-variable residuals are principal, multi-variable partitions are
+  deterministic but not principal, and indexed/dependent unions remain an
+  explicit-specialization boundary (a union of `Option<i64> | Option<Bool>` is
+  never collapsed to an invariant `Option<i64 | Bool>`). General indexed-union
+  inference is still missing, so this item stays unchecked. See
   [subtyping.md](subtyping.md#contextual-and-algebraic-inference).
 - [ ] Effect handlers and checked resumption ownership. **Partial:** lexical
   one-shot `handle`/`perform`, nested shadowing, first-class handler callables,

@@ -75,8 +75,11 @@ enum Example { Unit, EmptyTuple(), Value(i64) }
 ```
 
 `Unit` and `()` are supported as the unit type; `()` is its value and pattern.
-Enum equality is deliberately unsupported rather than silently comparing only
-tags. Use pattern matching until structural equality has a defined implementation.
+Nominal enum equality is deliberately unsupported rather than silently
+comparing only tags. Anonymous structural records have field-by-field `==`/`!=`
+when every leaf is a copyable scalar or a nested structural row; use pattern
+matching for nominal enums and for structural records with owning, borrowed,
+union, nominal, or floating-point fields.
 
 ## Pattern matching
 
