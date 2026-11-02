@@ -3787,6 +3787,13 @@ fn inject_allocator_protocol(program: &crate::program::Program) -> Result<crate:
     let prelude = crate::parser::parse_at(ALLOCATOR_PROTOCOL_SOURCE, ALLOCATOR_PROTOCOL_BASE)?;
     let added = prelude.items.len();
     let mut injected = program.clone();
+    // Give synthetic diagnostics a renderable source file rather than mapping
+    // them onto the first user file.
+    injected.sources.files.push(crate::program::SourceFile {
+        name: "<allocator-protocol>".to_owned(),
+        text: ALLOCATOR_PROTOCOL_SOURCE.to_owned(),
+        base: ALLOCATOR_PROTOCOL_BASE,
+    });
     for (index, unit) in injected.units.iter_mut().enumerate() {
         // The prelude belongs to the root unit, which is first. Later units
         // keep their own item ranges, shifted by the inserted item count.

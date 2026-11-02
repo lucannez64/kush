@@ -1109,3 +1109,25 @@ fn allocator_context_and_container_cross_a_function_boundary() {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(&source, 7);
 }
+
+#[test]
+fn allocator_context_is_an_ordinary_function_parameter_and_result() {
+    let source = format!(
+        r#"{STATEFUL_ALLOCATOR}
+        fn make(context: AllocatorContext) -> AllocBox<i64> ! {{alloc, panic}} {{
+            AllocBox.new(context, 5)
+        }}
+        fn share_context(context: &AllocatorContext) -> AllocatorContext ! {{}} {{
+            AllocatorContext.share(context)
+        }}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
+            let first = make(share_context(&context));
+            let second = make(context);
+            AllocBox.take(first) + AllocBox.take(second)
+        }}"#
+    );
+    assert_eq!(value(&source), 10);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 10);
+}

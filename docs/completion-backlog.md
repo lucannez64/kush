@@ -1107,7 +1107,8 @@ allows, on top of `edb98f1`:
   refusal, sharing and dropping the original binding, owning state cleanup,
   context-backed growth and hostile typed-payload overwrites, affine-copy and
   borrowed-state rejections, wrong/missing protocol methods, and a structured
-  task and function boundaries. Task programs check balanced native cleanup
+  task and function boundaries, including a context passed and returned as an
+  ordinary function value. Task programs check balanced native cleanup
   separately because scheduler bookkeeping is not part of the allocator-parity
   contract.
 
@@ -1115,7 +1116,7 @@ Local Linux x86-64 validation used mbx exclusively with
 `CARGO_TARGET_DIR=$HOME/.cache/kush-mbx-allocator-instances`, debug information
 disabled, and two jobs:
 
-- Full `mbx test -p kush --offline -j 2`: **1020 passed, 0 failed**.
+- Full `mbx test -p kush --offline -j 2`: **1021 passed, 0 failed**.
 - `mbx fmt --all -- --check`: passed.
 - `mbx clippy -p kush --all-targets --offline -j 2 -- -D warnings`: passed.
 
