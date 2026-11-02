@@ -520,7 +520,7 @@ Remaining boundaries are listed in [traits.md](traits.md).
 ## Allocator and DynArray completion checkpoint
 
 The user-allocator and runtime-sized-array remainder is implemented on top of
-`a87f77b` in three commits:
+`a87f77b`:
 
 - `e19c470` adds checked `Allocator`, `AllocBox<T>`, and `AllocVec<T>` values,
   their reference/native lowering and drops, the fallible
@@ -532,6 +532,8 @@ The user-allocator and runtime-sized-array remainder is implemented on top of
   evaluator keeps its previous stack frame headroom; this restores the JSON
   recursion/limit test that the larger `Value` enum had pushed past the default
   test-thread stack.
+- `890743f`, `4f5b26e`, and `2d7615a` update the memory/dynamic-array/backlog
+  contracts and add the divergent-payload and multiword-element regressions.
 
 Local Linux x86-64 validation used
 `CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/alloc-dynarray` with debug
