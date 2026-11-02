@@ -275,13 +275,16 @@ fn references_reject_temporaries_fields_storage_returns_and_owned_writes() {
         "#,
         "direct local binding",
     );
+    // `&p.x` is now a checked `&i64` place reference; the callee expects
+    // `&P`, so the call is still a type mismatch rather than a borrow-form
+    // rejection.
     rejects(
         r#"
         struct P { x: i64 }
         fn peek_ref(p: &P) -> i64 ! {panic} { p.x }
         fn main() -> i64 ! {panic} { let p = P { x: 1 }; peek_ref(&p.x) }
         "#,
-        "direct local binding",
+        "type mismatch",
     );
     // A stored reference is a lexical capability; reading it reborrows the
     // same owner instead of copying or moving the storage.
@@ -559,14 +562,18 @@ fn borrowed_fields_and_temporary_reference_arguments_stay_rejected() {
         "#,
         "owns storage or contains a borrow",
     );
-    rejects(
+    // A temporary record borrowed for one call has hidden storage that lives
+    // until the call ends.
+    agrees(
         r#"
         struct P { x: i64 }
         fn peek(p: &P) -> i64 ! {panic} { p.x }
         fn main() -> i64 ! {panic} { peek(&P { x: 1 }) }
         "#,
-        "direct local binding",
+        1,
+        "",
     );
+    // `&p.values[0]` is an `&i64` place reference; the callee expects `&P`.
     rejects(
         r#"
         struct P { values: [i64; 2] }
@@ -576,7 +583,7 @@ fn borrowed_fields_and_temporary_reference_arguments_stay_rejected() {
             peek(&p.values[0])
         }
         "#,
-        "direct local binding",
+        "type mismatch",
     );
 }
 

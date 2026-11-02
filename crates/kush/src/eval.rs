@@ -674,6 +674,23 @@ enum Value {
     /// A checked call-scoped record reference. It aliases the owning local's
     /// pinned cell and never owns the record or its fields.
     RecordRef(Arc<Mutex<Value>>),
+    /// A checked reference to a projected place inside a pinned local
+    /// aggregate. `steps` records each relative word offset together with the
+    /// aggregate type that contains it, so reads and writes navigate the live
+    /// value rather than a copy. It owns nothing.
+    PlaceRef {
+        root: Arc<Mutex<Value>>,
+        steps: Vec<(usize, Type)>,
+    },
+    /// A checked reference to one element of an owned `Vec<T>` local or field.
+    /// `steps` are relative field offsets inside that element. The vector owner
+    /// remains loaned for the reference's checked last use, so the element
+    /// never moves while the reference is live.
+    ElementRef {
+        owner: usize,
+        index: usize,
+        steps: Vec<(usize, Type)>,
+    },
     /// One normalized heterogeneous union alternative. Only the active
     /// alternative owns resources; dropping a union drops just this payload.
     Union {
@@ -743,6 +760,23 @@ impl Value {
             unreachable!("scalar operand checked")
         }
     }
+}
+/// A resolved checked place: either a path into a pinned local aggregate or a
+/// path into one element of an owned vector. It is not a runtime value; the
+/// borrow expression converts it into a `Value::PlaceRef`/`ElementRef` handle.
+#[derive(Debug, Clone)]
+enum ResolvedPlace {
+    Cell {
+        root: Arc<Mutex<Value>>,
+        steps: Vec<(usize, Type)>,
+        ty: Type,
+    },
+    Element {
+        owner: usize,
+        index: usize,
+        steps: Vec<(usize, Type)>,
+        ty: Type,
+    },
 }
 #[derive(Debug)]
 enum Flow {
@@ -1419,6 +1453,456 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             Value::ArrayCell(cell) | Value::RecordCell(cell) => cell.lock().unwrap().clone(),
             value => value,
         }
+    }
+    /// The child index and type at one relative word offset inside an inline
+    /// aggregate. Arrays keep their length/tag word at offset zero; records
+    /// start their fields at word one.
+    fn place_child(&self, ty: Type, offset: usize) -> Option<(usize, Type)> {
+        let id = ty.layout()?;
+        if let Some((element, _)) = self.program.enums[id].array {
+            let width = self.program.width(element);
+            if offset < 1 || width == 0 || !(offset - 1).is_multiple_of(width) {
+                return None;
+            }
+            return Some(((offset - 1) / width, element));
+        }
+        let variant = &self.program.enums[id].variants[0];
+        let mut at = 1;
+        for (index, field) in variant.fields.iter().enumerate() {
+            if at == offset {
+                return Some((index, *field));
+            }
+            at += self.program.width(*field);
+        }
+        None
+    }
+    /// Navigate to the value at a checked place path for a field write.
+    fn place_navigate_mut<'a>(
+        &self,
+        value: &'a mut Value,
+        steps: &[(usize, Type)],
+    ) -> Option<&'a mut Value> {
+        if steps.is_empty() {
+            return Some(value);
+        }
+        let (offset, container) = steps[0];
+        let (index, _) = self.place_child(container, offset)?;
+        let Value::Enum { fields, .. } = value else {
+            return None;
+        };
+        let child = fields.get_mut(index)?;
+        self.place_navigate_mut(child, &steps[1..])
+    }
+    /// Read the value at a checked place path from a snapshot of its root.
+    fn place_read(&self, value: Value, steps: &[(usize, Type)]) -> Option<Value> {
+        let mut current = value;
+        for (offset, container) in steps {
+            let (index, _) = self.place_child(*container, *offset)?;
+            let Value::Enum { fields, .. } = current else {
+                return None;
+            };
+            current = fields.get(index)?.clone();
+        }
+        Some(current)
+    }
+    /// Move the value at a checked place path out of a root snapshot.
+    fn place_take(&self, value: &mut Value, steps: &[(usize, Type)]) -> Option<Value> {
+        if steps.is_empty() {
+            return Some(std::mem::replace(value, Value::Scalar(0)));
+        }
+        let (offset, container) = steps[0];
+        let (index, _) = self.place_child(container, offset)?;
+        let Value::Enum { fields, .. } = value else {
+            return None;
+        };
+        let child = fields.get_mut(index)?;
+        self.place_take(child, &steps[1..])
+    }
+    /// Store a replacement at a checked place path without dropping anything.
+    fn place_store(&self, value: &mut Value, steps: &[(usize, Type)], replacement: Value) -> bool {
+        if steps.is_empty() {
+            *value = replacement;
+            return true;
+        }
+        let (offset, container) = steps[0];
+        let Some((index, _)) = self.place_child(container, offset) else {
+            return false;
+        };
+        let Value::Enum { fields, .. } = value else {
+            return false;
+        };
+        let Some(child) = fields.get_mut(index) else {
+            return false;
+        };
+        self.place_store(child, &steps[1..], replacement)
+    }
+    /// Read a whole place through a checked reference value.
+    fn reference_read(&self, reference: &Value, _pointee: Type) -> Option<Value> {
+        match reference {
+            Value::RecordRef(cell) => Some(cell.lock().unwrap().clone()),
+            Value::PlaceRef { root, steps, .. } => {
+                let value = root.lock().unwrap().clone();
+                self.place_read(value, steps)
+            }
+            Value::ElementRef {
+                owner,
+                index,
+                steps,
+                ..
+            } => {
+                let element = self.element_value(*owner, *index)?;
+                self.place_read(element, steps)
+            }
+            _ => None,
+        }
+    }
+    /// Snapshot of one vector element.
+    fn element_value(&self, owner: usize, index: usize) -> Option<Value> {
+        let Value::Vector { items, .. } = self.heap.get(owner)? else {
+            return None;
+        };
+        items.get(index).cloned()
+    }
+    /// Replace the value behind a checked reference, destroying the old affine
+    /// payload exactly once. Linear referents are rejected by the checker.
+    fn reference_replace(
+        &mut self,
+        reference: &Value,
+        pointee: Type,
+        replacement: Value,
+    ) -> Result<()> {
+        let old = match reference {
+            Value::RecordRef(cell) => std::mem::replace(&mut *cell.lock().unwrap(), replacement),
+            Value::PlaceRef { root, steps, .. } => {
+                let mut whole = root.lock().unwrap().clone();
+                let old = self.place_take(&mut whole, steps).ok_or_else(|| {
+                    Diagnostic::new(Span::default(), "internal error: place path is missing")
+                })?;
+                if !self.place_store(&mut whole, steps, replacement) {
+                    return Err(Diagnostic::new(
+                        Span::default(),
+                        "internal error: place replacement has no target",
+                    ));
+                }
+                *root.lock().unwrap() = whole;
+                old
+            }
+            Value::ElementRef {
+                owner,
+                index,
+                steps,
+                ..
+            } => {
+                let mut element = self.element_value(*owner, *index).ok_or_else(|| {
+                    Diagnostic::new(Span::default(), "internal error: vector element is missing")
+                })?;
+                let old = self.place_take(&mut element, steps).ok_or_else(|| {
+                    Diagnostic::new(Span::default(), "internal error: element path is missing")
+                })?;
+                if !self.place_store(&mut element, steps, replacement) {
+                    return Err(Diagnostic::new(
+                        Span::default(),
+                        "internal error: element replacement has no target",
+                    ));
+                }
+                let mut vector = self.heap.get(*owner).ok_or_else(|| {
+                    Diagnostic::new(Span::default(), "internal error: vector owner is missing")
+                })?;
+                let Value::Vector { items, .. } = &mut vector else {
+                    return Err(Diagnostic::new(
+                        Span::default(),
+                        "internal error: element reference owner is not a vector",
+                    ));
+                };
+                items[*index] = element;
+                self.heap.insert(*owner, vector);
+                old
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    Span::default(),
+                    "internal error: reference write has no writable place",
+                ));
+            }
+        };
+        if self.program.owns(pointee) {
+            self.drop_value(old)?;
+        }
+        Ok(())
+    }
+    /// Evaluate a subexpression of an addressable place. Control transfers
+    /// are not meaningful there: the checker only builds places from local,
+    /// field, and index expressions, and the index is a scalar value.
+    fn expression_value(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Value> {
+        match self.expr(expr, frame)? {
+            Flow::Value(value) => Ok(value),
+            _ => Err(Diagnostic::new(
+                expr.span,
+                "an addressable place expression cannot transfer control",
+            )),
+        }
+    }
+    /// Resolve a checked place expression into root storage plus a typed word
+    /// path. Inline aggregates are pinned on first use so every reference to
+    /// them aliases one live location.
+    fn resolve_place(&mut self, place: &Expr, frame: &mut Frame) -> Result<ResolvedPlace> {
+        match &place.kind {
+            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
+                let ty = self.program.functions[frame.function].locals[*slot].ty;
+                let current = frame.locals[*slot].clone();
+                let cell = match current {
+                    Value::RecordCell(cell) | Value::ArrayCell(cell) => cell,
+                    value => {
+                        let cell = Arc::new(Mutex::new(value));
+                        let array = ty
+                            .layout()
+                            .is_some_and(|id| self.program.enums[id].array.is_some());
+                        frame.locals[*slot] = if array {
+                            Value::ArrayCell(cell.clone())
+                        } else {
+                            Value::RecordCell(cell.clone())
+                        };
+                        cell
+                    }
+                };
+                Ok(ResolvedPlace::Cell {
+                    root: cell,
+                    steps: Vec::new(),
+                    ty,
+                })
+            }
+            ExprKind::Project(base, offset) => {
+                if base.ty.is_ref() {
+                    let reference = self.expression_value(base, frame)?;
+                    let resolved = self.resolve_reference_place(&reference, *offset, base.ty)?;
+                    return Ok(resolved);
+                }
+                let mut resolved = self.resolve_place(base, frame)?;
+                let (container, child) = match &resolved {
+                    ResolvedPlace::Cell { ty, .. } | ResolvedPlace::Element { ty, .. } => {
+                        let (_, child) = self.place_child(*ty, *offset).ok_or_else(|| {
+                            Diagnostic::new(place.span, "internal error: place offset has no field")
+                        })?;
+                        (*ty, child)
+                    }
+                };
+                match &mut resolved {
+                    ResolvedPlace::Cell { steps, ty, .. }
+                    | ResolvedPlace::Element { steps, ty, .. } => {
+                        steps.push((*offset, container));
+                        *ty = child;
+                    }
+                }
+                Ok(resolved)
+            }
+            ExprKind::PlaceIndex { base, index } => {
+                let index = self.expression_value(index, frame)?.scalar();
+                if index < 0 {
+                    return Err(Diagnostic::new(place.span, "panic: index out of bounds"));
+                }
+                let index = index as usize;
+                if let Type::Vec(_) = base.ty {
+                    let base_value = self.expression_value(base, frame)?;
+                    let Value::Owned(owner) = base_value else {
+                        return Err(Diagnostic::new(
+                            place.span,
+                            "internal error: checked vector place has no owned handle",
+                        ));
+                    };
+                    let Some(Value::Vector { items, .. }) = self.heap.get(owner) else {
+                        return Err(Diagnostic::new(
+                            place.span,
+                            "internal ownership error: dangling vector place",
+                        ));
+                    };
+                    let element = match base.ty {
+                        Type::Vec(pointer) => self.program.pointees[pointer],
+                        _ => unreachable!(),
+                    };
+                    if index >= items.len() {
+                        return Err(Diagnostic::new(place.span, "panic: index out of bounds"));
+                    }
+                    return Ok(ResolvedPlace::Element {
+                        owner,
+                        index,
+                        steps: Vec::new(),
+                        ty: element,
+                    });
+                }
+                let (element, length) = base
+                    .ty
+                    .layout()
+                    .and_then(|id| self.program.enums[id].array)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            place.span,
+                            "internal error: index place has no array or vector storage",
+                        )
+                    })?;
+                if index >= length {
+                    return Err(Diagnostic::new(place.span, "panic: index out of bounds"));
+                }
+                let mut resolved = self.resolve_place(base, frame)?;
+                let container = base.ty;
+                let offset = 1 + index * self.program.width(element);
+                match &mut resolved {
+                    ResolvedPlace::Cell { steps, ty, .. }
+                    | ResolvedPlace::Element { steps, ty, .. } => {
+                        steps.push((offset, container));
+                        *ty = element;
+                    }
+                }
+                Ok(resolved)
+            }
+            _ => Err(Diagnostic::new(
+                place.span,
+                "internal error: expression is not an addressable place",
+            )),
+        }
+    }
+    fn resolve_reference_place(
+        &mut self,
+        reference: &Value,
+        offset: usize,
+        reference_ty: Type,
+    ) -> Result<ResolvedPlace> {
+        let pointer = reference_ty.ref_pointee().ok_or_else(|| {
+            Diagnostic::new(
+                Span::default(),
+                "internal error: place base is not a reference",
+            )
+        })?;
+        let pointee = self.program.pointees[pointer];
+        let (_, child) = self.place_child(pointee, offset).ok_or_else(|| {
+            Diagnostic::new(
+                Span::default(),
+                "internal error: reference field place has no field",
+            )
+        })?;
+        match reference {
+            Value::RecordRef(root) => Ok(ResolvedPlace::Cell {
+                root: root.clone(),
+                steps: vec![(offset, pointee)],
+                ty: child,
+            }),
+            Value::PlaceRef { root, steps, .. } => {
+                let mut steps = steps.clone();
+                steps.push((offset, pointee));
+                Ok(ResolvedPlace::Cell {
+                    root: root.clone(),
+                    steps,
+                    ty: child,
+                })
+            }
+            Value::ElementRef {
+                owner,
+                index,
+                steps,
+                ..
+            } => {
+                let mut steps = steps.clone();
+                steps.push((offset, pointee));
+                Ok(ResolvedPlace::Element {
+                    owner: *owner,
+                    index: *index,
+                    steps,
+                    ty: child,
+                })
+            }
+            _ => Err(Diagnostic::new(
+                Span::default(),
+                "internal error: reference place has no storage root",
+            )),
+        }
+    }
+    /// Convert a resolved place into its one-word checked reference value.
+    fn borrow_place(&mut self, place: &Expr, frame: &mut Frame) -> Result<Value> {
+        if matches!(
+            place.ty,
+            Type::Box(_)
+                | Type::Bytes
+                | Type::String
+                | Type::Vec(_)
+                | Type::AllocBox(_)
+                | Type::AllocVec(_)
+                | Type::AllocatorContext
+                | Type::Arena
+                | Type::ArenaBox(_)
+        ) {
+            let value = self.expression_value(place, frame)?;
+            return match value {
+                Value::Owned(id) => Ok(Value::Borrowed(id)),
+                Value::AllocatorContext(state) => Ok(Value::AllocatorContextRef(state)),
+                Value::Arena { state } => Ok(Value::ArenaRef(state)),
+                Value::ArenaBox { state, slot } => Ok(Value::ArenaBoxRef { state, slot }),
+                _ => Err(Diagnostic::new(
+                    place.span,
+                    "internal error: owning field reference has no owned handle",
+                )),
+            };
+        }
+        let resolved = self.resolve_place(place, frame)?;
+        Ok(match resolved {
+            ResolvedPlace::Cell { root, steps, .. } => Value::PlaceRef { root, steps },
+            ResolvedPlace::Element {
+                owner,
+                index,
+                steps,
+                ..
+            } => Value::ElementRef {
+                owner,
+                index,
+                steps,
+            },
+        })
+    }
+    /// One vector element reference used by explicit `PlaceIndex` evaluation
+    /// (only produced as a borrow operand).
+    fn place_index_reference(&mut self, place: &Expr, frame: &mut Frame) -> Result<Value> {
+        let ExprKind::PlaceIndex { base, index } = &place.kind else {
+            return Err(Diagnostic::new(
+                place.span,
+                "internal error: expected a place index",
+            ));
+        };
+        let index = self.expression_value(index, frame)?.scalar();
+        if matches!(base.ty, Type::Vec(_)) {
+            let base_value = self.expression_value(base, frame)?;
+            let Value::Owned(owner) = base_value else {
+                return Err(Diagnostic::new(
+                    place.span,
+                    "internal error: checked vector place has no owned handle",
+                ));
+            };
+            let Some(Value::Vector { items, .. }) = self.heap.get(owner) else {
+                return Err(Diagnostic::new(
+                    place.span,
+                    "internal ownership error: dangling vector place",
+                ));
+            };
+            if index < 0 || index as usize >= items.len() {
+                return Err(Diagnostic::new(place.span, "panic: index out of bounds"));
+            }
+            return Ok(Value::ElementRef {
+                owner,
+                index: index as usize,
+                steps: Vec::new(),
+            });
+        }
+        let resolved = self.resolve_place(place, frame)?;
+        Ok(match resolved {
+            ResolvedPlace::Cell { root, steps, .. } => Value::PlaceRef { root, steps },
+            ResolvedPlace::Element {
+                owner,
+                index,
+                steps,
+                ..
+            } => Value::ElementRef {
+                owner,
+                index,
+                steps,
+            },
+        })
     }
     fn buffer(&self, reference: &Value, span: Span) -> Result<(usize, Vec<u8>, usize)> {
         let Value::Borrowed(id) = reference else {
@@ -2984,7 +3468,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     }
     fn local_active(&self, slot: usize, frame: &mut Frame) {
         if let Some(id) = self.program.functions[frame.function].local_resources[slot] {
-            frame.resources[id] = Some(self.materialize(frame.locals[slot].clone()));
+            // A pinned aggregate local keeps its live storage in the cell.
+            // The resource entry aliases that cell instead of snapshotting it,
+            // so a replacement through `&mut` or `*p = value` is observed and
+            // dropped exactly once at scope exit.
+            frame.resources[id] = Some(match &frame.locals[slot] {
+                Value::RecordCell(cell) | Value::ArrayCell(cell) => Value::RecordCell(cell.clone()),
+                value => self.materialize(value.clone()),
+            });
         }
     }
     fn drop_value(&mut self, value: Value) -> Result<()> {
@@ -3000,6 +3491,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 for field in fields.into_iter().rev() {
                     self.drop_value(field)?;
                 }
+            }
+            Value::RecordCell(cell) | Value::ArrayCell(cell) => {
+                let value = std::mem::replace(&mut *cell.lock().unwrap(), Value::Scalar(0));
+                self.drop_value(value)?;
             }
             Value::Union { value, .. } => self.drop_value(*value)?,
             Value::DynObject { value, .. } => {
@@ -4457,6 +4952,40 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         let pointer = base.ty.ref_pointee().expect("record reference");
                         (self.program.pointees[pointer], cell.lock().unwrap().clone())
                     }
+                    Value::PlaceRef { root, steps, .. } => {
+                        let pointer = base.ty.ref_pointee().expect("record reference");
+                        let pointee = self.program.pointees[pointer];
+                        let whole = root.lock().unwrap().clone();
+                        let value = self.place_read(whole, &steps).ok_or_else(|| {
+                            Diagnostic::new(
+                                expr.span,
+                                "internal error: projected place reference is missing",
+                            )
+                        })?;
+                        (pointee, value)
+                    }
+                    Value::ElementRef {
+                        owner,
+                        index,
+                        steps,
+                        ..
+                    } => {
+                        let pointer = base.ty.ref_pointee().expect("record reference");
+                        let pointee = self.program.pointees[pointer];
+                        let element = self.element_value(owner, index).ok_or_else(|| {
+                            Diagnostic::new(
+                                expr.span,
+                                "internal ownership error: dangling element reference",
+                            )
+                        })?;
+                        let value = self.place_read(element, &steps).ok_or_else(|| {
+                            Diagnostic::new(
+                                expr.span,
+                                "internal error: projected element reference is missing",
+                            )
+                        })?;
+                        (pointee, value)
+                    }
                     value => (base.ty, value),
                 };
                 project(
@@ -4548,18 +5077,44 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
             ExprKind::Borrow(slot) => {
                 let ty = self.program.functions[frame.function].locals[*slot].ty;
-                let inline = ty.layout().is_some_and(|id| self.program.enums[id].record)
-                    || matches!(ty, Type::Union(_) | Type::DynObj(_));
-                if inline {
+                let owner_like = matches!(
+                    ty,
+                    Type::Box(_)
+                        | Type::Arena
+                        | Type::ArenaBox(_)
+                        | Type::Bytes
+                        | Type::String
+                        | Type::Vec(_)
+                        | Type::AllocatorContext
+                        | Type::AllocBox(_)
+                        | Type::AllocVec(_)
+                        | Type::Task(_)
+                );
+                if !owner_like {
+                    // Any addressable inline value (record, array, scalar, or
+                    // enum) is pinned to shared storage so `&x`, `&mut x`, and
+                    // field/index references can alias the live location.
                     let current = frame.locals[*slot].clone();
                     let cell = match current {
-                        Value::RecordCell(cell) => cell,
+                        Value::RecordCell(cell) | Value::ArrayCell(cell) => cell,
                         value => {
                             let cell = Arc::new(Mutex::new(value));
-                            frame.locals[*slot] = Value::RecordCell(cell.clone());
+                            let array = ty
+                                .layout()
+                                .is_some_and(|id| self.program.enums[id].array.is_some());
+                            frame.locals[*slot] = if array {
+                                Value::ArrayCell(cell.clone())
+                            } else {
+                                Value::RecordCell(cell.clone())
+                            };
                             cell
                         }
                     };
+                    // The local's ownership resource must alias the pinned
+                    // cell now, so a later replacement through the reference is
+                    // dropped from the live contents rather than a stale
+                    // snapshot taken at binding time.
+                    self.local_active(*slot, frame);
                     Value::RecordRef(cell)
                 } else {
                     match frame.locals[*slot].clone() {
@@ -4579,6 +5134,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 // field's owner keeps its single obligation.
                 Value::RecordRef(Arc::new(Mutex::new(value)))
             }
+            ExprKind::BorrowPlace(place) => self.borrow_place(place, frame)?,
+            ExprKind::PlaceIndex { .. } => self.place_index_reference(expr, frame)?,
             ExprKind::BoxNew(..)
             | ExprKind::BoxTake(..)
             | ExprKind::BoxRead(..)
@@ -4674,15 +5231,21 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
                 Value::Scalar(0)
             }
-            ExprKind::RefRead(reference) => {
-                let reference = value!(self.expr(reference, frame));
-                let Value::RecordRef(cell) = reference else {
-                    return Err(Diagnostic::new(
+            ExprKind::RefRead(reference_expr) => {
+                let reference = value!(self.expr(reference_expr, frame));
+                let pointer = reference_expr.ty.ref_pointee().ok_or_else(|| {
+                    Diagnostic::new(
+                        expr.span,
+                        "internal error: whole-value reference read has no pointee",
+                    )
+                })?;
+                let pointee = self.program.pointees[pointer];
+                self.reference_read(&reference, pointee).ok_or_else(|| {
+                    Diagnostic::new(
                         expr.span,
                         "internal error: whole-value reference read has no inline storage",
-                    ));
-                };
-                cell.lock().unwrap().clone()
+                    )
+                })?
             }
             ExprKind::RefWrite(reference_expr, replacement_expr) => {
                 let reference = value!(self.expr(reference_expr, frame));
@@ -4697,35 +5260,114 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 *cell.lock().unwrap() = replacement;
                 Value::Scalar(0)
             }
+            ExprKind::DerefWrite(reference_expr, replacement_expr) => {
+                let reference = value!(self.expr(reference_expr, frame));
+                let replacement = value!(self.expr(replacement_expr, frame));
+                self.consume(replacement_expr, frame);
+                let pointer = reference_expr.ty.ref_pointee().ok_or_else(|| {
+                    Diagnostic::new(
+                        expr.span,
+                        "internal error: dereference write has no pointee",
+                    )
+                })?;
+                let pointee = self.program.pointees[pointer];
+                self.reference_replace(&reference, pointee, replacement)?;
+                Value::Scalar(0)
+            }
             ExprKind::RefAssign(reference_expr, offset, replacement) => {
                 let reference = value!(self.expr(reference_expr, frame));
                 let replacement = value!(self.expr(replacement, frame));
-                let Value::RecordRef(cell) = reference else {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "internal ownership error: record field write has no record reference",
-                    ));
-                };
                 let pointer = reference_expr
                     .ty
                     .ref_pointee()
                     .expect("checked record reference");
                 let ty = self.program.pointees[pointer];
-                let mut whole = cell.lock().unwrap();
-                if !assign_project(
-                    &self.program.pointees,
-                    &self.program.enums,
-                    &self.program.unions,
-                    &self.program.function_types,
-                    ty,
-                    &mut whole,
-                    *offset,
-                    replacement,
-                ) {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "internal ownership error: record field write has no matching field",
-                    ));
+                let assign = |whole: &mut Value| {
+                    assign_project(
+                        &self.program.pointees,
+                        &self.program.enums,
+                        &self.program.unions,
+                        &self.program.function_types,
+                        ty,
+                        whole,
+                        *offset,
+                        replacement,
+                    )
+                };
+                match reference {
+                    Value::RecordRef(cell) => {
+                        let mut whole = cell.lock().unwrap();
+                        if !assign(&mut whole) {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal ownership error: record field write has no matching field",
+                            ));
+                        }
+                    }
+                    Value::PlaceRef { root, steps, .. } => {
+                        let mut whole = root.lock().unwrap().clone();
+                        let target =
+                            self.place_navigate_mut(&mut whole, &steps).ok_or_else(|| {
+                                Diagnostic::new(
+                                    expr.span,
+                                    "internal error: place field write has no target",
+                                )
+                            })?;
+                        if !assign(target) {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal ownership error: record field write has no matching field",
+                            ));
+                        }
+                        *root.lock().unwrap() = whole;
+                    }
+                    Value::ElementRef {
+                        owner,
+                        index,
+                        steps,
+                        ..
+                    } => {
+                        let mut element = self.element_value(owner, index).ok_or_else(|| {
+                            Diagnostic::new(
+                                expr.span,
+                                "internal ownership error: dangling element field write",
+                            )
+                        })?;
+                        let target =
+                            self.place_navigate_mut(&mut element, &steps)
+                                .ok_or_else(|| {
+                                    Diagnostic::new(
+                                        expr.span,
+                                        "internal error: element field write has no target",
+                                    )
+                                })?;
+                        if !assign(target) {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal ownership error: record field write has no matching field",
+                            ));
+                        }
+                        let mut vector = self.heap.get(owner).ok_or_else(|| {
+                            Diagnostic::new(
+                                expr.span,
+                                "internal ownership error: dangling element vector",
+                            )
+                        })?;
+                        let Value::Vector { items, .. } = &mut vector else {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal ownership error: element owner is not a vector",
+                            ));
+                        };
+                        items[index] = element;
+                        self.heap.insert(owner, vector);
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "internal ownership error: record field write has no record reference",
+                        ));
+                    }
                 }
                 Value::Scalar(0)
             }

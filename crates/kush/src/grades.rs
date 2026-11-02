@@ -1519,6 +1519,19 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
+            ExprKind::BorrowPlace(value) => {
+                if !self.expr(value, multiplier)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::PlaceIndex { base, index } => {
+                if !self.expr(base, multiplier)? {
+                    return Ok(false);
+                }
+                if !self.expr(index, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
             ExprKind::Local(slot) => {
                 let amount = if self.moves(self.function.locals[*slot].ty) {
                     Grade::ONE
@@ -2018,6 +2031,7 @@ impl<'a> Checker<'a> {
             }
             ExprKind::RefAssign(reference, _, value)
             | ExprKind::RefWrite(reference, value)
+            | ExprKind::DerefWrite(reference, value)
             | ExprKind::BoxWrite(reference, value) => {
                 if !self.expr(reference, Grade::ONE)? {
                     return Ok(false);

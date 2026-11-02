@@ -1131,3 +1131,25 @@ fn allocator_context_is_an_ordinary_function_parameter_and_result() {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(&source, 10);
 }
+
+#[test]
+fn allocator_contexts_and_containers_support_projected_shared_references() {
+    let source = format!(
+        r#"{STATEFUL_ALLOCATOR}
+        struct Owner {{ context: AllocatorContext }}
+        struct Buffers {{ boxed: AllocBox<i64>, vector: AllocVec<i64> }}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            let owner = Owner {{ context: AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }}) }};
+            let vector: AllocVec<i64> = AllocVec.with_capacity(AllocatorContext.share(&owner.context), 1);
+            let buffers = Buffers {{
+                boxed: AllocBox.new(AllocatorContext.share(&owner.context), 40),
+                vector: AllocVec.push(vector, 2),
+            }};
+            drop(owner);
+            AllocBox.read(&buffers.boxed) + AllocVec.get(&buffers.vector, 0)
+        }}"#
+    );
+    assert_eq!(value(&source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 42);
+}

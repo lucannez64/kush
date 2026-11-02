@@ -51,7 +51,13 @@ The system covers:
   from scope-external storage; reference-valued arrow parameters/results and
   borrowed `Task.scope`/`TaskExit<T>` boundaries are checked too;
 - nested record-field subviews and structurally disjoint mutable field loans
-  for direct local records.
+  for direct local records;
+- checked `&place`/`&mut place` references to nested and owning record fields,
+  inline-array elements, `Vec<T>` elements, and hidden temporary owners, with
+  real storage identity, structural disjointness for constant indices, and
+  last-use release;
+- general `*p` reads for non-owning referents and `*p = value` replacement for
+  exclusive references, destroying an old affine payload exactly once.
 
 See [expanded borrowing contracts](borrowing-extensions.md).
 
@@ -724,9 +730,14 @@ be returned across a task boundary.
   supported; records may store shared reference fields, shared slice fields,
   and text fields, and `Box<&T>`/`Vec<&T>`/`Box<&str>`/`Vec<&str>` reference
   elements. Shared reference and text fields are readable through `&Record`.
-  Stored reference locals and explicit reborrows are supported. Mutable owner
-  borrows of temporaries, fields, and index results, `&mut str`, and containers
-  of borrowed records remain unsupported.
+  Stored reference locals, explicit reborrows, and `&record.field` place
+  references are supported, including returning a field reference from a
+  reference parameter. A mutable place reference requires a mutable root or an
+  exclusive reference root; a record with borrowed fields is not mutated as a
+  whole. `&mut str` remains unsupported because unrestricted byte mutation can
+  invalidate UTF-8; a sound operation would have to replace complete Unicode
+  scalars with unchanged encoded length. Place references into slice elements
+  and containers of borrowed records remain unsupported.
 - Dynamic disjoint-range reasoning is limited to `Slice.split_at_mut` pairs.
   There is no general range algebra, no arbitrary tuple of views, and no
   storage or forwarding of a split pair itself. Two separately written

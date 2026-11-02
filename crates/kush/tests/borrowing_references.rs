@@ -41,6 +41,28 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
     }
 }
 
+/// A checked program whose runtime bounds check must fail in the reference
+/// evaluator and in the native executable.
+fn runtime_panic(source: &str) {
+    let program = check(source).unwrap();
+    assert!(
+        program.evaluate(&mut Vec::new()).is_err(),
+        "reference evaluator accepted an out-of-bounds place: {source}"
+    );
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let program = check(source).unwrap();
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("borrowing-place-panic");
+        kush::native::build(&program, &binary).unwrap();
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert!(
+            !output.status.success(),
+            "native program did not panic on an out-of-bounds place"
+        );
+    }
+}
+
 #[test]
 fn reference_annotations_do_not_change_the_caller_visible_type() {
     // The callee spells the outer and element lifetime with one name; the
@@ -542,53 +564,208 @@ fn reference_element_containers_reject_aliasing_and_escapes() {
 }
 
 #[test]
-fn remaining_reference_forms_are_explicit_rejections() {
-    // Mutable owner borrows of temporaries, record fields, and index results
-    // stay outside the checked subset; the diagnostic names every excluded
-    // form instead of silently materializing a temporary address.
+fn field_index_and_temporary_places_are_checked_references() {
+    // Nested record fields, owning fields, inline-array elements, vector
+    // elements, and a hidden temporary owner all share one checked reference
+    // form. Disjoint fields and distinct constant indices may be loaned in the
+    // same expression; scalar writes reach the original storage.
+    agrees(
+        r#"struct Inner { a: i64, b: i64 }
+        struct Outer { inner: Inner, note: i64 }
+        fn add(left: &mut i64, right: &mut i64) -> Unit ! {panic} {
+            *left = *left + *right;
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut outer = Outer { inner: Inner { a: 3, b: 4 }, note: 10 };
+            add(&mut outer.inner.a, &mut outer.inner.b);
+            let note = &outer.note;
+            let mut values: Vec<i64> = [1, 2, 3];
+            let element = &mut values[1];
+            *element = *element + 5;
+            let mut array: [i64; 3] = [1, 2, 3];
+            add(&mut array[0], &mut array[2]);
+            let temp = &mut Box.new(7);
+            Box.set(temp, 9);
+            *note + outer.inner.a + Box.read(temp) + Vec.get(&values, 1) + array[0] + array[2]
+        }"#,
+        40,
+        "",
+    );
+    // A field reference may be returned from a reference parameter, and an
+    // exclusive field reference is reborrowable through a helper.
+    agrees(
+        r#"struct P { x: i64 }
+        fn pick(p: &P) -> &i64 ! {panic} { &p.x }
+        fn bump(p: &mut P) -> &mut i64 ! {panic} { &mut p.x }
+        fn main() -> i64 ! {panic} {
+            let mut p = P { x: 5 };
+            *bump(&mut p) = 8;
+            *pick(&p)
+        }"#,
+        8,
+        "",
+    );
+    // A temporary aggregate or owning handle is hoisted into hidden storage;
+    // its cleanup follows the reference's checked last use and releases every
+    // allocation exactly once.
+    agrees(
+        r#"struct P { x: i64, y: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let r = &mut (P { x: 2, y: 3 });
+            r.x = r.x + 1;
+            let b = &mut Box.new(4);
+            Box.set(b, 9);
+            r.x + r.y + Box.read(b)
+        }"#,
+        15,
+        "",
+    );
+    // A branch may select different disjoint field places; the joined
+    // reference keeps the live storage identity.
+    agrees(
+        r#"struct Pair { a: i64, b: i64 }
+        fn main() -> i64 ! {panic} {
+            let mut p = Pair { a: 1, b: 2 };
+            let flag = p.a == 1;
+            let r = if flag { &mut p.a } else { &mut p.b };
+            *r = 7;
+            p.a + p.b
+        }"#,
+        9,
+        "",
+    );
+}
+
+#[test]
+fn affine_reference_replacement_destroys_the_old_payload_exactly_once() {
+    agrees(
+        r#"struct H { b: Box<i64>, n: i64 }
+        fn replace(h: &mut H) -> Unit ! {alloc, panic} {
+            *h = H { b: Box.new(9), n: 2 };
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut h = H { b: Box.new(1), n: 0 };
+            replace(&mut h);
+            replace(&mut h);
+            Box.read(&h.b) + h.n
+        }"#,
+        11,
+        "",
+    );
+}
+
+#[test]
+fn place_reference_hostile_forms_are_rejected() {
+    // Two overlapping field references of the same owner, including the same
+    // field through a stored reference, are rejected.
+    rejects(
+        r#"struct Pair { a: i64, b: i64 }
+        fn add(l: &mut i64, r: &mut i64) -> Unit ! {panic} { *l = *l + *r; }
+        fn main() -> i64 ! {panic} {
+            let mut p = Pair { a: 3, b: 4 };
+            add(&mut p.a, &mut p.a);
+            0
+        }"#,
+        "cannot create an exclusive place borrow",
+    );
     rejects(
         r#"struct Point { x: i64, y: i64 }
         fn main() -> i64 ! {panic} {
             let mut p = Point { x: 1, y: 2 };
             let r = &mut p.x;
+            let s = &mut p.x;
+            *r = 1;
             0
         }"#,
-        "mutable owner borrows of temporaries, fields, and index results are rejected",
+        "cannot create an exclusive place borrow",
     );
+    // A mutable element reference suspends vector growth and whole-owner
+    // access until its checked last use.
     rejects(
         r#"fn main() -> i64 ! {alloc, panic} {
-            let mut values: Vec<i64> = [1, 2];
-            let r = &mut values[0];
-            0
+            let mut v: Vec<i64> = [1, 2];
+            let r = &mut v[0];
+            Vec.push(&mut v, 3);
+            *r
         }"#,
-        "mutable owner borrows of temporaries, fields, and index results are rejected",
+        "cannot borrow an owner",
     );
+    // A field reference cannot escape the function that owns the storage.
     rejects(
-        r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {panic} {
-            let r = &mut (Point { x: 1, y: 2 });
-            0
-        }"#,
-        "temporary borrows are not supported",
+        r#"struct P { x: i64 }
+        fn escape() -> &i64 ! {panic} {
+            let p = P { x: 1 };
+            &p.x
+        }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "cannot be returned",
     );
-    // General `&record.field` reference-taking is not implemented. Shared
-    // slice/text/reference fields remain readable through `&Record` and a
-    // slice field can be sub-sliced in place.
+    // Reading through a typed reference never copies an owning payload.
     rejects(
-        r#"struct Point { x: i64, y: i64 }
-        fn main() -> i64 ! {panic} {
-            let p = Point { x: 1, y: 2 };
-            let r = &p.x;
+        r#"fn main() -> i64 ! {alloc, panic} {
+            let b = Box.new(4);
+            let r = &b;
+            *r
+        }"#,
+        "dereferencing would copy an owning or linear payload",
+    );
+    // Replacing an owning handle uses its own operation, not a place write.
+    rejects(
+        r#"fn main() -> i64 ! {alloc, panic} {
+            let mut b = Box.new(1);
+            let r = &mut b;
+            *r = Box.new(2);
+            Box.read(&b)
+        }"#,
+        "replace an owning handle through its own operation",
+    );
+    // Index references alias only non-owning elements.
+    rejects(
+        r#"fn main() -> i64 ! {alloc, panic} {
+            let mut v: Vec<Box<i64>> = [Box.new(1)];
+            let r = &mut v[0];
             0
         }"#,
-        "borrow a direct local binding",
+        "an index reference would alias an owning or linear element",
+    );
+    // A linear referent is never silently dropped by reference replacement.
+    rejects(
+        r#"#[linear]
+        struct L { x: i64 }
+        fn replace(p: &mut L) -> Unit ! {panic} { *p = L { x: 1 }; }
+        fn main() -> Unit ! {panic} {}"#,
+        "cannot replace a linear payload",
     );
     // Text views are immutable; a `&mut str` parameter is rejected at its
-    // declaration rather than pretending byte mutation is available.
+    // declaration rather than pretending arbitrary byte mutation preserves
+    // UTF-8. A sound `&mut str` needs a replacement operation that validates
+    // every write as one Unicode scalar with an unchanged encoded length.
     rejects(
         r#"fn read(text: &mut str) -> i64 ! {panic} { Str.len(text) }
         fn main() -> i64 ! {panic} { 0 }"#,
         "mutable borrowed text '&mut str' is not supported",
+    );
+}
+
+#[test]
+fn out_of_bounds_place_indices_panic_in_both_backends() {
+    runtime_panic(
+        r#"fn main() -> i64 ! {panic} {
+            let mut a: [i64; 2] = [1, 2];
+            let i = 5;
+            let r = &mut a[i];
+            *r = 9;
+            0
+        }"#,
+    );
+    runtime_panic(
+        r#"fn main() -> i64 ! {alloc, panic} {
+            let mut v: Vec<i64> = [1, 2];
+            let i = 9;
+            let r = &mut v[i];
+            *r = 9;
+            0
+        }"#,
     );
 }
 
@@ -1235,6 +1412,34 @@ fn writes_through_a_stored_mutable_reference_reach_the_owner_scope_check() {
             Str.len(Vec.get(&v, 0))
         }"#,
         4,
+        "",
+    );
+}
+
+#[test]
+fn temporary_reference_initializers_preserve_argument_evaluation_order() {
+    agrees(
+        r#"struct P { x: i64 }
+        fn first() -> i64 ! {io, panic} { print_i64(1); 1 }
+        fn second() -> P ! {io, panic} { print_i64(2); P { x: 40 } }
+        fn read(x: i64, p: &P) -> i64 ! {panic} { x + p.x }
+        fn main() -> i64 ! {io, panic} { read(first(), &second()) }"#,
+        41,
+        "1\n2\n",
+    );
+}
+
+#[test]
+fn skipped_short_circuit_operands_do_not_initialize_temporary_owners() {
+    agrees(
+        r#"struct P { x: i64 }
+        fn make() -> P ! {io, panic} { print_i64(99); P { x: 1 } }
+        fn read(p: &P) -> Bool ! {} { true }
+        fn main() -> i64 ! {io, panic} {
+            let skipped = false && read(&make());
+            if skipped { 0 } else { 42 }
+        }"#,
+        42,
         "",
     );
 }
