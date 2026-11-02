@@ -1648,7 +1648,7 @@ fn borrowed_object_results_require_a_stable_receiver_and_borrowed_receiver() {
         }"#,
         "temporary receiver would be dropped",
     );
-    rejects(
+    agrees(
         r#"
         trait Owned {
             fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic};
@@ -1657,12 +1657,15 @@ fn borrowed_object_results_require_a_stable_receiver_and_borrowed_receiver() {
         struct B { tag: i64 }
         impl Owned for A { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
         impl Owned for B { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
-        fn main() -> i64 ! {panic} {
+        fn main() -> i64 ! {io, alloc, panic} {
             let object: dyn Owned = A { tag: 1 };
-            let values = [1, 2];
-            object.grab(&values[..])[0]
+            let values = [3, 4];
+            print_i64(object.grab(&values[..])[1]);
+            print_i64(B { tag: 2 }.grab(&values[..])[0]);
+            0
         }"#,
-        "borrowed value through an owned receiver",
+        0,
+        "4\n3\n",
     );
 }
 
@@ -1947,5 +1950,73 @@ fn non_type_trait_arguments_dispatch_through_dyn() {
         }"#,
         0,
         "7\n6\n",
+    );
+}
+
+#[test]
+fn temporary_shared_receivers_of_open_objects_bind_to_a_hidden_place() {
+    let stats = agrees(
+        r#"
+        struct Text { name: String, count: i64 }
+        struct W<T> { value: T }
+        trait Counted { fn value(self: &Self) -> i64 ! {panic}; }
+        impl Counted for Text { fn value(self: &Self) -> i64 ! {panic} { self.count } }
+        impl<T> Counted for W<T> { fn value(self: &Self) -> i64 ! {panic} { 7 } }
+        fn make_text() -> dyn Counted ! {alloc, panic} { Text { name: "x", count: 5 } }
+        fn make_wrap() -> dyn Counted ! {alloc, panic} {
+            W { value: Text { name: "y", count: 9 } }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            print_i64(make_text().value());
+            print_i64(make_wrap().value());
+            0
+        }"#,
+        0,
+        "5\n7\n",
+    );
+    // Two object payloads plus the two member Strings, each released once.
+    assert_eq!(stats.allocations, 4, "{}", stats.allocations);
+}
+
+#[test]
+fn temporary_shared_receivers_still_reject_borrowed_results() {
+    rejects(
+        r#"
+        trait Pick {
+            fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+        }
+        struct A { tag: i64 }
+        struct W<T> { value: T }
+        impl Pick for A { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl<T> Pick for W<T> { fn pick<'a>(self: &Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        fn make() -> dyn Pick ! {alloc, panic} { W { value: A { tag: 1 } } }
+        fn main() -> i64 ! {alloc, alloc, panic} {
+            let values = [1, 2];
+            make().pick(&values[..])[0]
+        }"#,
+        "temporary receiver would be dropped",
+    );
+}
+
+#[test]
+fn owned_receivers_may_return_views_of_caller_arguments_through_open_objects() {
+    agrees(
+        r#"
+        trait Owned {
+            fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+        }
+        struct A { tag: i64 }
+        struct W<T> { value: T }
+        impl Owned for A { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        impl<T> Owned for W<T> { fn grab<'a>(self: Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values } }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let object: dyn Owned = W { value: A { tag: 1 } };
+            let values = [3, 4];
+            print_i64(object.grab(&values[..])[1]);
+            print_i64(A { tag: 2 }.grab(&values[..])[0]);
+            0
+        }"#,
+        0,
+        "4\n3\n",
     );
 }

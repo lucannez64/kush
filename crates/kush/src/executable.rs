@@ -5687,29 +5687,10 @@ fn prepare_trait_objects<'a>(
                     ));
                     break;
                 }
-                // A borrowed result must be tied to caller-owned storage. The
-                // borrowed-receiver modes dispatch through a reference and can
-                // return a view of the receiver or another argument; an owned
-                // receiver frees its payload during dispatch, so a result that
-                // borrows from it would dangle.
-                let mut used = BTreeSet::new();
-                type_lifetimes(&f.result, &mut used);
-                let result_borrows = !used.is_empty()
-                    || matches!(
-                        &f.result.kind,
-                        ast::TypeKind::Borrow { .. } | ast::TypeKind::Slice(_)
-                    )
-                    || matches!(
-                        &f.result.kind,
-                        ast::TypeKind::Named { path, .. }
-                            if path.len() == 1 && path[0] == "str"
-                    );
-                if result_borrows && trait_receiver_mode(f) == ReceiverMode::Owned {
-                    reason = Some(format!(
-                        "method '{name}' returns a borrowed value through an owned receiver; dynamic dispatch consumes the payload, so the result would dangle. Use '&self'/'&mut self' or return an owned value"
-                    ));
-                    break;
-                }
+                // A borrowed result is checked against the selected member's
+                // lifetime contract at each call site. An owned receiver has no
+                // receiver lifetime, so a result can only borrow caller-owned
+                // storage (another argument) and remains valid after dispatch.
                 if let Some(parameter) = f.parameters[1..].iter().find(|parameter| {
                     parameter.erased
                         || type_mentions_self_outside_assoc(&parameter.ty, &associated_type_names)
@@ -11047,6 +11028,7 @@ impl Checker<'_, '_> {
             ExprKind::Peek(slot) | ExprKind::Local(slot) => Some(*slot),
             _ => None,
         };
+        let mut temporary_receiver = None;
         let receiver = if let Some((_, reference_ty)) = borrowed_object {
             match (contract.mode, reference_ty) {
                 (ReceiverMode::Owned, _) => {
@@ -11082,29 +11064,51 @@ impl Checker<'_, '_> {
                     }
                 }
                 ReceiverMode::Shared | ReceiverMode::Mutable => {
-                    let Some(slot) = reference_slot else {
+                    if let Some(slot) = reference_slot {
+                        if contract.mode == ReceiverMode::Mutable && !self.locals[slot].mutable {
+                            return Err(Diagnostic::new(
+                                span,
+                                "a mutable dynamic method requires a mutable object binding; declare it with 'let mut'",
+                            ));
+                        }
+                        let pointee = self.types.pointer(object_ty);
+                        let ty = if contract.mode == ReceiverMode::Mutable {
+                            Type::RefMut(pointee)
+                        } else {
+                            Type::Ref(pointee)
+                        };
+                        Expr {
+                            kind: ExprKind::Borrow(slot),
+                            ty,
+                            span,
+                            resource: None,
+                        }
+                    } else if contract.mode == ReceiverMode::Shared {
+                        // A temporary shared receiver owns its payload just
+                        // like a local. Bind it to one hidden local and borrow
+                        // that place; the block drops it after the call, so the
+                        // payload is released exactly once. A borrowed result
+                        // could outlive this drop and remains rejected.
+                        if crate::runtime_types::has_borrow(self.types, contract.result) {
+                            return Err(Diagnostic::new(
+                                span,
+                                "a borrowed dynamic result requires a direct object local or stored reference; a temporary receiver would be dropped before the result is used",
+                            ));
+                        }
+                        let temp = self.temp(object_ty, span)?;
+                        let pointee = self.types.pointer(object_ty);
+                        temporary_receiver = Some((temp, receiver));
+                        Expr {
+                            kind: ExprKind::Borrow(temp),
+                            ty: Type::Ref(pointee),
+                            span,
+                            resource: None,
+                        }
+                    } else {
                         return Err(Diagnostic::new(
                             span,
                             "a borrowed dynamic method receiver must be a direct local binding or a stored '&dyn'/'&mut dyn' reference",
                         ));
-                    };
-                    if contract.mode == ReceiverMode::Mutable && !self.locals[slot].mutable {
-                        return Err(Diagnostic::new(
-                            span,
-                            "a mutable dynamic method requires a mutable object binding; declare it with 'let mut'",
-                        ));
-                    }
-                    let pointee = self.types.pointer(object_ty);
-                    let ty = if contract.mode == ReceiverMode::Mutable {
-                        Type::RefMut(pointee)
-                    } else {
-                        Type::Ref(pointee)
-                    };
-                    Expr {
-                        kind: ExprKind::Borrow(slot),
-                        ty,
-                        span,
-                        resource: None,
                     }
                 }
             }
@@ -11129,6 +11133,19 @@ impl Checker<'_, '_> {
             ty: contract.value_type,
             span,
             resource: None,
+        };
+        let value = match temporary_receiver {
+            Some((temp, original)) => Expr {
+                kind: ExprKind::Block(Block {
+                    statements: vec![Statement::Let(temp, original)],
+                    tail: Some(Box::new(value)),
+                    ty: contract.value_type,
+                }),
+                ty: contract.value_type,
+                span,
+                resource: None,
+            },
+            None => value,
         };
         match expected {
             Some(expected) => self.coerce(value, expected, span),
@@ -11373,7 +11390,9 @@ impl Checker<'_, '_> {
             ));
         }
         self.require(signature.effects, span)?;
-        if crate::runtime_types::has_borrow(self.types, signature.result) {
+        if receiver_mode != ReceiverMode::Owned
+            && crate::runtime_types::has_borrow(self.types, signature.result)
+        {
             return Err(Diagnostic::new(
                 span,
                 "a borrowed dynamic result requires a direct object local or stored reference; a temporary receiver would be dropped before the result is used",
@@ -11737,6 +11756,11 @@ impl Checker<'_, '_> {
             .collect::<Vec<_>>();
         let mut total_effects = 0u8;
         let mut signatures = Vec::new();
+        let mut witness_lifetimes: Option<(
+            Vec<Option<String>>,
+            Option<String>,
+            BTreeSet<(String, String)>,
+        )> = None;
         for member in &members {
             let Some(impl_methods) =
                 self.functions
@@ -11787,6 +11811,13 @@ impl Checker<'_, '_> {
                 ));
             }
             total_effects |= signature.effects;
+            if witness_lifetimes.is_none() {
+                witness_lifetimes = Some((
+                    signature.parameter_lifetimes.clone(),
+                    signature.result_lifetime.clone(),
+                    signature.lifetime_bounds.clone(),
+                ));
+            }
             signatures.push((index, *member));
         }
         let mut arms = Vec::new();
@@ -11935,6 +11966,9 @@ impl Checker<'_, '_> {
             })),
             ty: function_result,
         };
+        let (witness_parameter_lifetimes, witness_result_lifetime, witness_bounds) =
+            witness_lifetimes
+                .unwrap_or_else(|| (vec![None; parameters.len()], None, BTreeSet::new()));
         let function = Function {
             name: format!(
                 "<dyn {}::{}>",
@@ -11950,9 +11984,9 @@ impl Checker<'_, '_> {
             local_resources: vec![],
             parameter_grades: parameter_grades.clone(),
             result_grade: if mutable_receiver { None } else { result_grade },
-            parameter_lifetimes: vec![None; parameters.len()],
-            result_lifetime: None,
-            lifetime_bounds: BTreeSet::new(),
+            parameter_lifetimes: witness_parameter_lifetimes.clone(),
+            result_lifetime: witness_result_lifetime.clone(),
+            lifetime_bounds: witness_bounds.clone(),
         };
         let signature = Signature {
             binding: usize::MAX,
@@ -11968,9 +12002,9 @@ impl Checker<'_, '_> {
             origin: None,
             parameter_grades,
             result_grade: if mutable_receiver { None } else { result_grade },
-            parameter_lifetimes: vec![None; function.parameters],
-            result_lifetime: None,
-            lifetime_bounds: BTreeSet::new(),
+            parameter_lifetimes: witness_parameter_lifetimes,
+            result_lifetime: witness_result_lifetime,
+            lifetime_bounds: witness_bounds,
             self_type: None,
             default_trait: None,
             associated_consts: BTreeMap::new(),
