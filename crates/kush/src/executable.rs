@@ -834,6 +834,18 @@ pub(crate) enum Coercion {
     /// payload. `member` is the registered runtime member identifier. The
     /// payload is allocated once and owned by the object value.
     DynBox { member: usize, member_type: Type },
+    /// Rebuild a callable field through a checked adapter function. Used by a
+    /// structural conversion when a retained field's arrow changes
+    /// representation. `capture` is the source callable type when the adapter
+    /// needs its input in the closure environment; the source field is moved
+    /// into that environment exactly once. `target` selects the output ABI
+    /// (`Fn` or `Once`), so the runtime knows whether an environment word is
+    /// part of the value.
+    Callable {
+        function: usize,
+        capture: Option<Type>,
+        target: Type,
+    },
 }
 #[derive(Debug, Clone)]
 pub(crate) enum Pattern {
@@ -12865,6 +12877,39 @@ impl Checker<'_, '_> {
         if self.types.is_structural(target) {
             return Ok(Some(self.struct_coercion(source, target, span, depth)?));
         }
+        // A retained field whose arrow type changes representation needs a
+        // generated adapter. The field value is dynamic at this point, so the
+        // adapter must carry it in an owned environment; that allocation is
+        // charged to the enclosing function's effect row.
+        if let (Some((_, source_once)), Some((target_id, target_once))) =
+            (Self::function_parts(source), Self::function_parts(target))
+        {
+            let rep_change = {
+                let source_index = Self::function_parts(source).expect("checked callable").0;
+                let source_fn = &self.types.function_types[source_index];
+                let target_fn = &self.types.function_types[target_id];
+                self.arrow_rep_change(source_fn, target_fn)
+            };
+            if source_once == target_once && !rep_change {
+                return Ok(None);
+            }
+            if !source_once && !target_once {
+                return Err(Diagnostic::new(
+                    span,
+                    "a structural field of pure function type cannot change its parameter/result representation: a pure function has no environment for the generated adapter. Bind the function and adapt it explicitly before the structural coercion",
+                ));
+            }
+            debug_assert!(
+                target_once,
+                "an owning callable is not a subtype of a pure arrow"
+            );
+            let function = self.call_adapter(source, target_id, span)?;
+            return Ok(Some(Coercion::Callable {
+                function,
+                capture: Some(source),
+                target,
+            }));
+        }
         let Type::Union(target_id) = target else {
             return Err(Diagnostic::new(
                 span,
@@ -12924,11 +12969,14 @@ impl Checker<'_, '_> {
             ));
         };
         if Self::function_parts(source).is_some()
-            && Self::function_parts(target_members[tag]).is_some()
+            && !self.union_member_representation_compatible(source, target_members[tag])
         {
             return Err(Diagnostic::new(
                 span,
-                "a callable field cannot be converted to a union alternative inside a structural coercion; adapt the field explicitly first",
+                format!(
+                    "a callable field cannot be injected into union alternative {} inside a structural coercion because its calling convention changes; adapt the field explicitly first",
+                    self.types.name(target_members[tag])
+                ),
             ));
         }
         Ok(Some(Coercion::Inject { tag }))
@@ -13382,13 +13430,14 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
-    /// A once-consuming capturing adapter. The source callable is moved into
-    /// the closure environment exactly once; a call consumes it and the
-    /// callee's normal cleanup drops any remaining captures.
-    fn closure_adapter(&mut self, value: Expr, target_id: usize, span: Span) -> Result<Expr> {
+    /// Register the checked adapter body used by a capturing callable
+    /// conversion. The adapter's first local is the source callable and it
+    /// calls that value indirectly. The returned function index is shared by
+    /// ordinary closure conversion and by a structural field conversion, so
+    /// both paths use one checked adapter per signature.
+    fn call_adapter(&mut self, source_ty: Type, target_id: usize, span: Span) -> Result<usize> {
         self.require(ALLOC | PANIC, span)?;
         let target = self.types.function_types[target_id].clone();
-        let source_ty = value.ty;
         let (source_id, _) = Self::function_parts(source_ty).expect("checked callable");
         let source = self.types.function_types[source_id].clone();
         let mut locals = vec![Local {
@@ -13461,7 +13510,7 @@ impl Checker<'_, '_> {
             },
         };
         self.check_adapter_effects(&body, &target, span)?;
-        let index = self.register_adapter(
+        self.register_adapter(
             "once fn adapter",
             &target,
             vec![source_ty],
@@ -13469,7 +13518,14 @@ impl Checker<'_, '_> {
             locals,
             body,
             span,
-        )?;
+        )
+    }
+    /// A once-consuming capturing adapter. The source callable is moved into
+    /// the closure environment exactly once; a call consumes it and the
+    /// callee's normal cleanup drops any remaining captures.
+    fn closure_adapter(&mut self, value: Expr, target_id: usize, span: Span) -> Result<Expr> {
+        let source_ty = value.ty;
+        let index = self.call_adapter(source_ty, target_id, span)?;
         Ok(Expr {
             kind: ExprKind::FnValue {
                 function: index,

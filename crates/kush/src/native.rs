@@ -2054,6 +2054,26 @@ fn emit_drop(
     let reference = module.declare_func_in_func(id, builder.func);
     builder.ins().call(reference, values);
 }
+/// Environment capture types introduced by checked coercions. A callable
+/// field adapter stores its source callable in an owned environment exactly
+/// like a capturing `FnValue`, so the native backend must synthesize the same
+/// environment drop function for it.
+fn collect_coercion_captures(coercion: &ex::Coercion, out: &mut Vec<Vec<Type>>) {
+    match coercion {
+        ex::Coercion::Callable {
+            capture: Some(capture),
+            ..
+        } => out.push(vec![capture.full()]),
+        ex::Coercion::Struct { kept, .. } => {
+            for (_, _, nested) in kept {
+                if let Some(nested) = nested {
+                    collect_coercion_captures(nested, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
 fn collect_closure_types(program: &Executable) -> Vec<Vec<Type>> {
     fn walk(program: &Executable, node: &Expr, out: &mut Vec<Vec<Type>>) {
         match &node.kind {
@@ -2079,6 +2099,15 @@ fn collect_closure_types(program: &Executable) -> Vec<Vec<Type>> {
                 walk(program, payload, out);
                 walk(program, resume, out);
             }
+            ExprKind::Coerce {
+                value, coercion, ..
+            } => {
+                // A callable field adapter owns its source callable in an
+                // environment. Record that capture type so the native backend
+                // synthesizes the matching environment drop function.
+                collect_coercion_captures(coercion, out);
+                walk(program, value, out);
+            }
             ExprKind::Unary(_, value)
             | ExprKind::Try { value, .. }
             | ExprKind::Return(value)
@@ -2089,7 +2118,6 @@ fn collect_closure_types(program: &Executable) -> Vec<Vec<Type>> {
             | ExprKind::ArenaBoxTake(value)
             | ExprKind::Drop(value)
             | ExprKind::Project(value, _)
-            | ExprKind::Coerce { value, .. }
             | ExprKind::Break(Some(value), _)
             | ExprKind::Assign(_, value) => walk(program, value, out),
             ExprKind::ArenaAlloc { arena, value } => {
@@ -4274,6 +4302,9 @@ impl Generator<'_, '_> {
                         self.builder.switch_to_block(exit);
                         return Some(self.builder.block_params(exit).to_vec());
                     }
+                    Coercion::Callable { .. } => {
+                        return Some(self.nested_coercion_words(coercion, *to, &values));
+                    }
                     Coercion::DynBox {
                         member,
                         member_type,
@@ -5539,6 +5570,42 @@ impl Generator<'_, '_> {
             } => {
                 let pointer = self.allocate_dyn_payload(*member_type, values);
                 vec![self.constant(*member as i64), pointer]
+            }
+            Coercion::Callable {
+                function,
+                capture,
+                target,
+            } => {
+                let reference = self
+                    .module
+                    .declare_func_in_func(self.ids[*function], self.builder.func);
+                let code = self.builder.ins().func_addr(I64, reference);
+                if !matches!(target, Type::Once(_)) {
+                    return vec![code];
+                }
+                let Some(capture_ty) = capture else {
+                    return vec![code, self.constant(0)];
+                };
+                let types = vec![capture_ty.full()];
+                let bytes = 8 + self.program.width(*capture_ty) * 8;
+                let size = self.constant(bytes as i64);
+                let environment = self.runtime_call(self.allocate, &[size]);
+                let drop = self.closure_drops[&types];
+                let drop = self.module.declare_func_in_func(drop, self.builder.func);
+                let drop = self.builder.ins().func_addr(I64, drop);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), drop, environment, 0);
+                let width = self.program.width(*capture_ty);
+                for (index, value) in values.iter().take(width).enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *value,
+                        environment,
+                        8 + (index * 8) as i32,
+                    );
+                }
+                vec![code, environment]
             }
         }
     }

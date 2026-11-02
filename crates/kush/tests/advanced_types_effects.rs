@@ -1025,6 +1025,100 @@ fn structural_record_literals_and_generic_patterns_share_the_canonical_row() {
 }
 
 #[test]
+fn structural_callable_field_adapts_arrow_representation() {
+    // A retained field of pure function type is converted to a `once` arrow.
+    // The calling convention changes (an environment word appears), so the
+    // structural conversion must generate a checked adapter instead of copying
+    // the code pointer.
+    let source = r#"
+        fn widen(value: i64 | Bool) -> i64 ! {panic} {
+            match value { i64 @ n => n, Bool @ _ => 0 }
+        }
+        struct Holder { f: fn(i64 | Bool) -> i64 ! {panic}, tag: Bool }
+        fn call(v: struct { f: once fn(i64) -> i64 ! {panic} }) -> i64 ! {panic} {
+            let struct { f } = v;
+            f(21) * 2
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            call(Holder { f: widen, tag: true })
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // A pure-to-pure conversion that changes a parameter representation cannot
+    // capture the dynamic code pointer in a pure arrow, so it stays rejected.
+    rejects(
+        r#"
+        fn both(value: i64 | Bool) -> i64 ! {panic} {
+            match value { i64 @ n => n, Bool @ _ => 0 }
+        }
+        struct Holder { f: fn(i64 | Bool) -> i64 ! {panic} }
+        fn read(v: struct { f: fn(i64) -> i64 ! {panic} }) -> i64 ! {panic} { v.f(42) }
+        fn main() -> i64 ! {panic} { read(Holder { f: both }) }"#,
+        "pure function has no environment",
+    );
+}
+
+#[test]
+fn structural_callable_field_preserves_borrow_and_linear_obligations() {
+    // A callable field cannot be mixed into a borrowed record, so the
+    // callable adapter cannot hide a borrowed leaf behind its environment. The
+    // ordinary structural borrow-provenance tests cover reordered view fields;
+    // this hostile case keeps the callable path from weakening that rule.
+    rejects(
+        r#"struct Window<'a> { start: i64, view: &'a [i64], f: fn(i64) -> i64 ! {panic} }
+        fn noop(n: i64) -> i64 ! {panic} { n }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut data: Vec<i64> = [40];
+            let w = Window { start: 0, view: &data[..], f: noop };
+            let narrow: struct { f: once fn(i64) -> i64 ! {panic}, view: &[i64] } = w;
+            match narrow { struct { view, .. } => { data = [9]; Slice.get(view, 0) } }
+        }"#,
+        "mixed borrowed record",
+    );
+    // A captured linear callable is moved into the adapter environment exactly
+    // once. Calling the converted field consumes it and releases the
+    // environment exactly once.
+    let source = r#"
+        fn widen(value: i64 | Bool) -> i64 ! {panic} {
+            match value { i64 @ n => n, Bool @ _ => 0 }
+        }
+        struct Holder { f: linear once fn(i64 | Bool) -> i64 ! {panic}, tag: Bool }
+        fn call(v: struct { f: linear once fn(i64) -> i64 ! {panic} }) -> i64 ! {alloc, panic} {
+            let struct { f } = v;
+            f(42)
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let make: linear once fn(i64 | Bool) -> i64 ! {panic} =
+                fn(value: i64 | Bool) -> i64 ! {panic} { widen(value) };
+            call(Holder { f: make, tag: true })
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 42);
+    assert!(stats.allocations == stats.deallocations);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // A linear callable retained by the conversion still imposes its
+    // obligation: the converted record cannot simply be discarded.
+    rejects(
+        r#"fn noop(n: i64) -> i64 ! {panic} { n }
+        struct Holder { f: linear once fn(i64) -> i64 ! {panic} }
+        fn main() -> i64 ! {alloc, panic} {
+            let f: linear once fn(i64) -> i64 ! {panic} =
+                fn(n: i64) -> i64 ! {panic} { noop(n) };
+            let h = Holder { f: f };
+            let narrow: struct { f: linear once fn(i64) -> i64 ! {panic} } = h;
+            drop(narrow);
+            0
+        }"#,
+        "linear",
+    );
+}
+
+#[test]
 fn structural_borrowed_field_transfer_keeps_cleanup_balanced() {
     let source = r#"
         struct View<'a> { view: &'a mut [i64], n: i64, extra: Box<i64> }
