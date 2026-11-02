@@ -230,3 +230,27 @@ fn text_path_sort_and_collections_match_across_backends() {
         "{text}"
     );
 }
+
+#[test]
+fn path_and_newline_edges_have_exact_results() {
+    let source = r#"use std.text; use std.path;
+        fn main() -> i64 ! {io, alloc, panic} {
+            let cr = Bytes.from("a\r"); let newline = text.trim_newline(&cr);
+            print_i64(Bytes.len(&newline));
+            let crlf = Bytes.from("a\r\n"); let newline2 = text.trim_newline(&crlf);
+            print_i64(Bytes.len(&newline2));
+            let root = Bytes.from("//"); let base = path.basename(&root);
+            print_i64(Bytes.len(&base)); print_i64(Bytes.get(&base, 0));
+            let dotfile = Bytes.from(".bashrc"); let ext = path.extension(&dotfile);
+            print_i64(Bytes.len(&ext));
+            let compound = Bytes.from(".config.json"); let ext2 = path.extension(&compound);
+            print_i64(Bytes.len(&ext2));
+            0
+        }"#;
+    let (status, output) = reference(source);
+    assert_eq!(status, 0);
+    assert_eq!(output, b"2\n1\n1\n47\n0\n4\n");
+    let (status, output) = native(source);
+    assert_eq!(status, 0);
+    assert_eq!(output, b"2\n1\n1\n47\n0\n4\n");
+}

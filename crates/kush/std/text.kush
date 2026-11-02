@@ -150,8 +150,10 @@ pub fn trim(text: &Bytes) -> Bytes ! {alloc, panic} {
 /// Remove one trailing LF and, if present, one preceding CR.
 pub fn trim_newline(text: &Bytes) -> Bytes ! {alloc, panic} {
     let mut end = Bytes.len(text);
-    if end > 0 && Bytes.get(text, end - 1) == 10 { end = end - 1; }
-    if end > 0 && Bytes.get(text, end - 1) == 13 { end = end - 1; }
+    if end > 0 && Bytes.get(text, end - 1) == 10 {
+        end = end - 1;
+        if end > 0 && Bytes.get(text, end - 1) == 13 { end = end - 1; }
+    }
     let mut out = Bytes.with_capacity(end);
     let mut i = 0;
     while i < end {

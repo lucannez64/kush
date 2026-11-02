@@ -82,12 +82,22 @@ fn parse(raw: Bytes) -> Result<Response, i64> ! {alloc, panic} {
             return Result.Err(code);
         }
     };
-    let headers_end = find_pair(&raw, 13, 10, line_end + 2);
+    let mut headers_end = -1;
+    let mut at = line_end;
+    while at + 3 < Bytes.len(&raw) {
+        if Bytes.get(&raw, at) == 13 && Bytes.get(&raw, at + 1) == 10
+            && Bytes.get(&raw, at + 2) == 13 && Bytes.get(&raw, at + 3) == 10 {
+            headers_end = at;
+            break;
+        }
+        at = at + 1;
+    }
     if headers_end < 0 {
         drop(raw);
         return Result.Err(22);
     }
-    let headers = match text.slice(&raw, line_end + 2, headers_end) {
+    let headers_stop = if headers_end < line_end + 2 { line_end + 2 } else { headers_end };
+    let headers = match text.slice(&raw, line_end + 2, headers_stop) {
         Result.Ok(value) => value,
         Result.Err(code) => {
             drop(raw);

@@ -47,8 +47,8 @@ changes.
 Still missing and not claimed: recursive directory operations, file handles and
 seek, stderr capture, environment mutation, persistent sockets/nonblocking or
 TLS HTTP, DNS timeouts, and resource-handle types. The cooperative scheduler is
-not used to pretend blocking host calls are cancellable. A frontend limitation
-prevents `return i64` inside `while`; the helpers use found flags instead. Full
+not used to pretend blocking host calls are cancellable. The helpers use explicit found flags for searches; simple `i64` returns from
+`while` are supported. Full
 integrated/Boat validation remains parent-owned.
 
 Initial safety correction: indexed-place base/index evaluation order now

@@ -474,6 +474,7 @@ fn tcp_exchange_and_http_client_work_on_loopback() {
     let reference_port = start_http_pair_server();
     let native_port = start_http_pair_server();
     let expected = reference(NETWORK, &[reference_port.to_string()], &[]);
+    assert_eq!(expected.output, b"5\n5\n112\n200\n5\n104\n");
     let root = unique_directory("net-native");
     let actual = native(NETWORK, &[native_port.to_string()], &[], &root);
     let _ = fs::remove_dir_all(&root);
@@ -536,4 +537,60 @@ fn tcp_timeout_is_explicit_in_both_backends() {
     let _ = fs::remove_dir_all(&root);
     assert_eq!(actual.status, expected.status);
     assert_eq!(actual.output, expected.output);
+}
+
+#[test]
+fn http_response_boundaries_preserve_zero_one_and_multiple_headers() {
+    let source = r#"use std.result.Result; use std.text; use std.http;
+        fn main() -> i64 ! {io, alloc, panic} {
+            let port_text = match ENV.arg(1, Bytes.with_capacity(16)) { Ok(v) => v, Err(e) => return e };
+            let port = match text.parse_i64(&port_text) { Result.Ok(n) => n, Result.Err(e) => return e };
+            let host = Bytes.from("127.0.0.1"); let path = Bytes.from("/");
+            let response = match http.get(&host, port, &path, 5000) { Result.Ok(v) => v, Result.Err(e) => return e };
+            print_i64(http.response_status(&response));
+            print_i64(Bytes.len(&response.headers));
+            print_i64(Bytes.len(&response.body));
+            let mut i = 0;
+            while i < Bytes.len(&response.body) { print_i64(Bytes.get(&response.body, i)); i = i + 1; }
+            0
+        }"#;
+    for (status, headers, body) in [
+        (200, "", "hello"),
+        (200, "Content-Length: 5", "hello"),
+        (200, "Content-Length: 5\r\nConnection: close", "hello"),
+        (204, "", ""),
+    ] {
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\n{}\r\n{body}",
+            if headers.is_empty() {
+                String::new()
+            } else {
+                format!("{headers}\r\n")
+            }
+        );
+        let start = || {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let reply = response.clone();
+            thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                io::Read::read_to_end(&mut stream, &mut request).unwrap();
+                io::Write::write_all(&mut stream, reply.as_bytes()).unwrap();
+            });
+            port
+        };
+        let observed = reference(source, &[start().to_string()], &[]);
+        let mut expected = format!("{status}\n{}\n{}\n", headers.len(), body.len());
+        for byte in body.bytes() {
+            expected.push_str(&format!("{byte}\n"));
+        }
+        assert_eq!(observed.status, 0);
+        assert_eq!(observed.output, expected.as_bytes());
+        let root = unique_directory("http-boundary");
+        let observed = native(source, &[start().to_string()], &[], &root);
+        assert_eq!(observed.status, 0);
+        assert_eq!(observed.output, expected.as_bytes());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -11,6 +11,7 @@ pub fn basename(path: &Bytes) -> Bytes ! {alloc, panic} {
     let n = Bytes.len(path);
     let mut end = n;
     while end > 0 && Bytes.get(path, end - 1) == 47 { end = end - 1; }
+    if n > 0 && end == 0 { return Bytes.from("/"); }
     let mut start = end;
     while start > 0 && Bytes.get(path, start - 1) != 47 { start = start - 1; }
     let mut out = Bytes.with_capacity(end - start);
@@ -44,6 +45,7 @@ pub fn extension(path: &Bytes) -> Bytes ! {alloc, panic} {
     let mut at = n;
     while at > 0 {
         if Bytes.get(&name, at - 1) == 46 {
+            if at == 1 { break; }
             let mut out = Bytes.with_capacity(n - at);
             let mut i = at;
             while i < n {
