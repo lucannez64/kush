@@ -1024,6 +1024,24 @@ fn object_safety_rejections_are_explicit() {
         }"#,
         "has no concrete impls",
     );
+    rejects(
+        r#"
+        struct Point { x: i64 }
+        trait Describe { fn describe(self: &Self) -> i64 ! {panic}; }
+        impl Describe for Point { fn describe(self: &Self) -> i64 ! {panic} { self.x } }
+        struct Holder { object: dyn Describe }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "no finite closed-world object type exists",
+    );
+    rejects(
+        r#"
+        struct Point { x: i64 }
+        trait Describe { fn describe(self: &Self) -> i64 ! {panic}; }
+        impl Describe for Point { fn describe(self: &Self) -> i64 ! {panic} { self.x } }
+        struct Holder { object: Box<dyn Describe> }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "no finite closed-world object type exists",
+    );
 }
 
 #[test]

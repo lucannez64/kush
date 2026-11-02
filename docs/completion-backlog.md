@@ -71,16 +71,17 @@ and remaining limits.
   reference write-back, object-argument dispatch, owning cleanup, associated
   item/default agreement, and explicit rejection of open sets,
   non-copyable borrowed objects, owning-through-borrowed calls,
-  mutable-through-shared calls, generic methods, and direct nominal fields are
-  implemented and tested. Open/generic member sets and borrowed objects with
-  owning/linear members remain outside the subset.
+  mutable-through-shared calls, generic methods, and nominal fields mentioning
+  `dyn` (directly or through `Box`/`Vec`/tuples) are implemented and tested.
+  Open/generic member sets and borrowed objects with owning/linear members
+  remain outside the subset.
 - [x] Specialization with an explicit deterministic coherence contract. Unique
   most-specific resolution, concrete-over-generic preference, duplicate
   rejection, and incomparable-overlap rejection are implemented and tested.
   `default fn`, negative impls, and arbitrary overlap remain rejected.
 
-Open trait work still includes open/generic object member sets, direct
-`dyn Trait` nominal fields, borrowed objects with owning/linear members,
+Open trait work still includes open/generic object member sets, `dyn Trait`
+anywhere inside a nominal field, borrowed objects with owning/linear members,
 object methods with lifetime or exact-use contracts, owning or `String`
 associated constants, associated constants depending on an impl type
 parameter, and lifetime/effect impl parameters. The implemented closed-world union dispatch is

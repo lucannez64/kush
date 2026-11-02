@@ -532,9 +532,11 @@ objects or inside `Box<dyn Trait>`. Both stored forms are ordinary checked
 reference locals and can be passed to functions taking `&dyn Trait` or
 `&mut dyn Trait`.
 
-Nominal record and enum declarations are laid out before impl collection; a
-declared field of type `dyn Trait` is therefore still rejected, while the same
-type inside a function signature, `Box`, `Vec`, tuple, or array is supported.
+Nominal record and enum declarations are laid out before impl collection. A
+declared nominal field whose type mentions `dyn Trait` is therefore rejected,
+including a field spelled `Box<dyn Trait>`, `Vec<dyn Trait>`, or a tuple/array
+containing an object. The same type is supported inside function signatures,
+local `Box`/`Vec`/tuple/array values, and object parameters/results.
 
 Object safety is checked at every `dyn` use:
 
@@ -690,8 +692,10 @@ The following remain intentionally outside the implemented subset:
 
 - vtables, fat pointers, and open-world trait objects; the represented member
   set must still be finite and closed at compile time;
-- `dyn Trait` as a declared nominal record or enum field (layout happens before
-  impl collection); use `Box<dyn Trait>` or a tuple when storage is needed;
+- `dyn Trait` anywhere inside a declared nominal record or enum field
+  (including `Box<dyn Trait>`/`Vec<dyn Trait>`), because layout happens before
+  impl collection; keep the object in a function-local container or a
+  function parameter/result instead;
 - borrowed trait objects whose members own storage or are linear, and object
   methods with lifetime or exact-use contracts;
 - associated `Nat`/grade/effect values, owning or `String` associated
