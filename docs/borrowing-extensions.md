@@ -242,11 +242,17 @@ let element = &mut values[1];
   out-of-bounds index panics in both backends. The owner is loaned until the
   reference's checked last use, so a later vector growth cannot invalidate the
   element address.
-- A temporary aggregate or owning handle used as the borrowed place is hoisted
-  into hidden storage in the enclosing statement list. The hidden owner is
-  dropped at that block's end, after every checked reference's last use, and
-  exactly once. A projection is never turned into a copied reference, and the
-  hidden owner is never duplicated.
+- A temporary aggregate or owning handle used as the borrowed place is given
+  hidden backing storage declared in the enclosing lexical block, but its
+  initializer runs at the operand's source evaluation point: inside an
+  argument list, a short-circuit operand, a branch, or a loop condition. The
+  declaration only reserves storage; initialization is tracked at runtime, so
+  a skipped operand never evaluates or drops it. Re-evaluating one loop
+  iteration's temporary releases the previous value before storing the new
+  one. The hidden owner is dropped at block end after every checked
+  reference's last use, or earlier on break/continue/return/panic, exactly
+  once. A projection is never turned into a copied reference, and the hidden
+  owner is never duplicated.
 
 ### Dereference reads and writes
 

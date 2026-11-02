@@ -1436,6 +1436,10 @@ impl<'a> Checker<'a> {
                     }
                     self.activate(*slot);
                 }
+                Statement::Declare(_) => {
+                    // Hidden backing storage is initialized by the expression
+                    // that borrows it; declaration itself has no grade effect.
+                }
                 Statement::Expr(expr) => {
                     survives = self.expr(expr, multiplier)?;
                     if !survives {
@@ -1519,7 +1523,9 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
-            ExprKind::BorrowPlace(value) => {
+            ExprKind::BorrowPlace(value)
+            | ExprKind::InitOwner { value, .. }
+            | ExprKind::BorrowInit { value, .. } => {
                 if !self.expr(value, multiplier)? {
                     return Ok(false);
                 }
@@ -2105,6 +2111,7 @@ fn block_span(block: &Block) -> Span {
         .or_else(|| {
             block.statements.last().map(|statement| match statement {
                 Statement::Let(_, expr) | Statement::Expr(expr) => expr.span,
+                Statement::Declare(_) => Span::default(),
             })
         })
         .unwrap_or_default()

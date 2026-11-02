@@ -778,6 +778,26 @@ enum ResolvedPlace {
         ty: Type,
     },
 }
+/// Result of resolving an addressable place. A temporary-owner initializer at
+/// a place root may itself `return`, `break`, `continue`, or `?`; those flows
+/// must reach the surrounding expression instead of becoming a place error.
+enum PlaceFlow {
+    Place(ResolvedPlace),
+    Value(Value),
+    Return(Value),
+    Break(Value),
+    Continue,
+}
+impl From<Flow> for PlaceFlow {
+    fn from(flow: Flow) -> Self {
+        match flow {
+            Flow::Value(value) => PlaceFlow::Value(value),
+            Flow::Return(value) => PlaceFlow::Return(value),
+            Flow::Break(value) => PlaceFlow::Break(value),
+            Flow::Continue => PlaceFlow::Continue,
+        }
+    }
+}
 #[derive(Debug)]
 enum Flow {
     Value(Value),
@@ -988,6 +1008,20 @@ macro_rules! value {
         match $e? {
             Flow::Value(v) => v,
             returned => return Ok(returned),
+        }
+    };
+}
+/// Redeem a checked-place evaluation into its reference value, propagating a
+/// `return`/`break`/`continue` that originated in a temporary-owner
+/// initializer at the place root.
+macro_rules! place_value {
+    ($e:expr) => {
+        match $e? {
+            PlaceFlow::Value(v) => v,
+            PlaceFlow::Return(v) => return Ok(Flow::Return(v)),
+            PlaceFlow::Break(v) => return Ok(Flow::Break(v)),
+            PlaceFlow::Continue => return Ok(Flow::Continue),
+            PlaceFlow::Place(_) => unreachable!("a place evaluation has no ordinary place flow"),
         }
     };
 }
@@ -1630,54 +1664,86 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
         Ok(())
     }
-    /// Evaluate a subexpression of an addressable place. Control transfers
-    /// are not meaningful there: the checker only builds places from local,
-    /// field, and index expressions, and the index is a scalar value.
-    fn expression_value(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Value> {
-        match self.expr(expr, frame)? {
-            Flow::Value(value) => Ok(value),
-            _ => Err(Diagnostic::new(
-                expr.span,
-                "an addressable place expression cannot transfer control",
-            )),
-        }
+    /// Store a temporary-owner initializer into its already-declared hidden
+    /// slot. Re-initializing the same source occurrence (for example a loop
+    /// condition) releases the previous value first, so repeated evaluation
+    /// neither leaks nor double-drops it.
+    ///
+    /// Kept out of line so the large recursive expression frame stays bounded.
+    #[inline(never)]
+    fn store_initialized_owner(
+        &mut self,
+        slot: usize,
+        value: Value,
+        frame: &mut Frame,
+    ) -> Result<()> {
+        let id = self.program.functions[frame.function].local_resources[slot];
+        self.drop_resource(id, frame)?;
+        self.store_local(slot, value, frame);
+        self.local_active(slot, frame);
+        Ok(())
+    }
+    /// Resolve one local slot to its pinned storage cell, creating the cell on
+    /// first use so every reference to an inline aggregate aliases one live
+    /// location.
+    fn resolve_local_place(&mut self, slot: usize, frame: &mut Frame) -> Result<ResolvedPlace> {
+        let ty = self.program.functions[frame.function].locals[slot].ty;
+        let current = frame.locals[slot].clone();
+        let cell = match current {
+            Value::RecordCell(cell) | Value::ArrayCell(cell) => cell,
+            value => {
+                let cell = Arc::new(Mutex::new(value));
+                let array = ty
+                    .layout()
+                    .is_some_and(|id| self.program.enums[id].array.is_some());
+                frame.locals[slot] = if array {
+                    Value::ArrayCell(cell.clone())
+                } else {
+                    Value::RecordCell(cell.clone())
+                };
+                cell
+            }
+        };
+        Ok(ResolvedPlace::Cell {
+            root: cell,
+            steps: Vec::new(),
+            ty,
+        })
     }
     /// Resolve a checked place expression into root storage plus a typed word
     /// path. Inline aggregates are pinned on first use so every reference to
     /// them aliases one live location.
-    fn resolve_place(&mut self, place: &Expr, frame: &mut Frame) -> Result<ResolvedPlace> {
+    fn resolve_place(&mut self, place: &Expr, frame: &mut Frame) -> Result<PlaceFlow> {
         match &place.kind {
             ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
-                let ty = self.program.functions[frame.function].locals[*slot].ty;
-                let current = frame.locals[*slot].clone();
-                let cell = match current {
-                    Value::RecordCell(cell) | Value::ArrayCell(cell) => cell,
-                    value => {
-                        let cell = Arc::new(Mutex::new(value));
-                        let array = ty
-                            .layout()
-                            .is_some_and(|id| self.program.enums[id].array.is_some());
-                        frame.locals[*slot] = if array {
-                            Value::ArrayCell(cell.clone())
-                        } else {
-                            Value::RecordCell(cell.clone())
-                        };
-                        cell
-                    }
+                Ok(PlaceFlow::Place(self.resolve_local_place(*slot, frame)?))
+            }
+            ExprKind::InitOwner { slot, value: init } => {
+                // A borrowed place rooted at a temporary owner. The
+                // initializer may itself return, break, continue, or `?`
+                // before the place exists, so propagate that flow exactly as
+                // the un-hoisted expression would.
+                let value = match self.expr(init, frame)? {
+                    Flow::Value(value) => value,
+                    flow => return Ok(flow.into()),
                 };
-                Ok(ResolvedPlace::Cell {
-                    root: cell,
-                    steps: Vec::new(),
-                    ty,
-                })
+                self.consume(init, frame);
+                self.store_initialized_owner(*slot, value, frame)?;
+                Ok(PlaceFlow::Place(self.resolve_local_place(*slot, frame)?))
             }
             ExprKind::Project(base, offset) => {
                 if base.ty.is_ref() {
-                    let reference = self.expression_value(base, frame)?;
+                    let reference = match self.expr(base, frame)? {
+                        Flow::Value(value) => value,
+                        flow => return Ok(flow.into()),
+                    };
                     let resolved = self.resolve_reference_place(&reference, *offset, base.ty)?;
-                    return Ok(resolved);
+                    return Ok(PlaceFlow::Place(resolved));
                 }
-                let mut resolved = self.resolve_place(base, frame)?;
+                let mut resolved = match self.resolve_place(base, frame)? {
+                    PlaceFlow::Place(resolved) => resolved,
+                    flow => return Ok(flow),
+                };
                 let (container, child) = match &resolved {
                     ResolvedPlace::Cell { ty, .. } | ResolvedPlace::Element { ty, .. } => {
                         let (_, child) = self.place_child(*ty, *offset).ok_or_else(|| {
@@ -1693,16 +1759,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         *ty = child;
                     }
                 }
-                Ok(resolved)
+                Ok(PlaceFlow::Place(resolved))
             }
             ExprKind::PlaceIndex { base, index } => {
-                let index = self.expression_value(index, frame)?.scalar();
+                let index = match self.expr(index, frame)? {
+                    Flow::Value(value) => value.scalar(),
+                    flow => return Ok(flow.into()),
+                };
                 if index < 0 {
                     return Err(Diagnostic::new(place.span, "panic: index out of bounds"));
                 }
                 let index = index as usize;
                 if let Type::Vec(_) = base.ty {
-                    let base_value = self.expression_value(base, frame)?;
+                    let base_value = match self.expr(base, frame)? {
+                        Flow::Value(value) => value,
+                        flow => return Ok(flow.into()),
+                    };
                     let Value::Owned(owner) = base_value else {
                         return Err(Diagnostic::new(
                             place.span,
@@ -1722,12 +1794,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     if index >= items.len() {
                         return Err(Diagnostic::new(place.span, "panic: index out of bounds"));
                     }
-                    return Ok(ResolvedPlace::Element {
+                    return Ok(PlaceFlow::Place(ResolvedPlace::Element {
                         owner,
                         index,
                         steps: Vec::new(),
                         ty: element,
-                    });
+                    }));
                 }
                 let (element, length) = base
                     .ty
@@ -1742,7 +1814,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 if index >= length {
                     return Err(Diagnostic::new(place.span, "panic: index out of bounds"));
                 }
-                let mut resolved = self.resolve_place(base, frame)?;
+                let mut resolved = match self.resolve_place(base, frame)? {
+                    PlaceFlow::Place(resolved) => resolved,
+                    flow => return Ok(flow),
+                };
                 let container = base.ty;
                 let offset = 1 + index * self.program.width(element);
                 match &mut resolved {
@@ -1752,7 +1827,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         *ty = element;
                     }
                 }
-                Ok(resolved)
+                Ok(PlaceFlow::Place(resolved))
             }
             _ => Err(Diagnostic::new(
                 place.span,
@@ -1815,8 +1890,63 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             )),
         }
     }
+    /// Borrow one direct local binding. Inline aggregates are promoted to a
+    /// shared cell so later reads and writes through the reference observe the
+    /// live storage rather than a snapshot.
+    #[inline(never)]
+    fn borrow_local_value(&mut self, slot: usize, frame: &mut Frame) -> Result<Value> {
+        let ty = self.program.functions[frame.function].locals[slot].ty;
+        let owner_like = matches!(
+            ty,
+            Type::Box(_)
+                | Type::Arena
+                | Type::ArenaBox(_)
+                | Type::Bytes
+                | Type::String
+                | Type::Vec(_)
+                | Type::AllocatorContext
+                | Type::AllocBox(_)
+                | Type::AllocVec(_)
+                | Type::Task(_)
+        );
+        if !owner_like {
+            // Any addressable inline value (record, array, scalar, or enum) is
+            // pinned to shared storage so `&x`, `&mut x`, and field/index
+            // references can alias the live location.
+            let current = frame.locals[slot].clone();
+            let cell = match current {
+                Value::RecordCell(cell) | Value::ArrayCell(cell) => cell,
+                value => {
+                    let cell = Arc::new(Mutex::new(value));
+                    let array = ty
+                        .layout()
+                        .is_some_and(|id| self.program.enums[id].array.is_some());
+                    frame.locals[slot] = if array {
+                        Value::ArrayCell(cell.clone())
+                    } else {
+                        Value::RecordCell(cell.clone())
+                    };
+                    cell
+                }
+            };
+            // The local's ownership resource must alias the pinned cell now,
+            // so a later replacement through the reference is dropped from the
+            // live contents rather than a stale snapshot taken at binding time.
+            self.local_active(slot, frame);
+            Ok(Value::RecordRef(cell))
+        } else {
+            match frame.locals[slot].clone() {
+                Value::Owned(id) => Ok(Value::Borrowed(id)),
+                Value::Task(id) => Ok(Value::TaskRef(id)),
+                Value::Arena { state } => Ok(Value::ArenaRef(state)),
+                Value::ArenaBox { state, slot } => Ok(Value::ArenaBoxRef { state, slot }),
+                Value::AllocatorContext(state) => Ok(Value::AllocatorContextRef(state)),
+                _ => unreachable!("checked borrow of an owned handle"),
+            }
+        }
+    }
     /// Convert a resolved place into its one-word checked reference value.
-    fn borrow_place(&mut self, place: &Expr, frame: &mut Frame) -> Result<Value> {
+    fn borrow_place(&mut self, place: &Expr, frame: &mut Frame) -> Result<PlaceFlow> {
         if matches!(
             place.ty,
             Type::Box(_)
@@ -1829,20 +1959,30 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 | Type::Arena
                 | Type::ArenaBox(_)
         ) {
-            let value = self.expression_value(place, frame)?;
+            let value = match self.expr(place, frame)? {
+                Flow::Value(value) => value,
+                flow => return Ok(flow.into()),
+            };
             return match value {
-                Value::Owned(id) => Ok(Value::Borrowed(id)),
-                Value::AllocatorContext(state) => Ok(Value::AllocatorContextRef(state)),
-                Value::Arena { state } => Ok(Value::ArenaRef(state)),
-                Value::ArenaBox { state, slot } => Ok(Value::ArenaBoxRef { state, slot }),
+                Value::Owned(id) => Ok(PlaceFlow::Value(Value::Borrowed(id))),
+                Value::AllocatorContext(state) => {
+                    Ok(PlaceFlow::Value(Value::AllocatorContextRef(state)))
+                }
+                Value::Arena { state } => Ok(PlaceFlow::Value(Value::ArenaRef(state))),
+                Value::ArenaBox { state, slot } => {
+                    Ok(PlaceFlow::Value(Value::ArenaBoxRef { state, slot }))
+                }
                 _ => Err(Diagnostic::new(
                     place.span,
                     "internal error: owning field reference has no owned handle",
                 )),
             };
         }
-        let resolved = self.resolve_place(place, frame)?;
-        Ok(match resolved {
+        let resolved = match self.resolve_place(place, frame)? {
+            PlaceFlow::Place(resolved) => resolved,
+            flow => return Ok(flow),
+        };
+        Ok(PlaceFlow::Value(match resolved {
             ResolvedPlace::Cell { root, steps, .. } => Value::PlaceRef { root, steps },
             ResolvedPlace::Element {
                 owner,
@@ -1854,20 +1994,26 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 index,
                 steps,
             },
-        })
+        }))
     }
     /// One vector element reference used by explicit `PlaceIndex` evaluation
     /// (only produced as a borrow operand).
-    fn place_index_reference(&mut self, place: &Expr, frame: &mut Frame) -> Result<Value> {
+    fn place_index_reference(&mut self, place: &Expr, frame: &mut Frame) -> Result<PlaceFlow> {
         let ExprKind::PlaceIndex { base, index } = &place.kind else {
             return Err(Diagnostic::new(
                 place.span,
                 "internal error: expected a place index",
             ));
         };
-        let index = self.expression_value(index, frame)?.scalar();
+        let index = match self.expr(index, frame)? {
+            Flow::Value(value) => value.scalar(),
+            flow => return Ok(flow.into()),
+        };
         if matches!(base.ty, Type::Vec(_)) {
-            let base_value = self.expression_value(base, frame)?;
+            let base_value = match self.expr(base, frame)? {
+                Flow::Value(value) => value,
+                flow => return Ok(flow.into()),
+            };
             let Value::Owned(owner) = base_value else {
                 return Err(Diagnostic::new(
                     place.span,
@@ -1883,14 +2029,17 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             if index < 0 || index as usize >= items.len() {
                 return Err(Diagnostic::new(place.span, "panic: index out of bounds"));
             }
-            return Ok(Value::ElementRef {
+            return Ok(PlaceFlow::Value(Value::ElementRef {
                 owner,
                 index: index as usize,
                 steps: Vec::new(),
-            });
+            }));
         }
-        let resolved = self.resolve_place(place, frame)?;
-        Ok(match resolved {
+        let resolved = match self.resolve_place(place, frame)? {
+            PlaceFlow::Place(resolved) => resolved,
+            flow => return Ok(flow),
+        };
+        Ok(PlaceFlow::Value(match resolved {
             ResolvedPlace::Cell { root, steps, .. } => Value::PlaceRef { root, steps },
             ResolvedPlace::Element {
                 owner,
@@ -1902,7 +2051,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 index,
                 steps,
             },
-        })
+        }))
     }
     fn buffer(&self, reference: &Value, span: Span) -> Result<(usize, Vec<u8>, usize)> {
         let Value::Borrowed(id) = reference else {
@@ -3792,6 +3941,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         let mut slots = Vec::new();
         for statement in &block.statements {
             match statement {
+                Statement::Declare(slot) => {
+                    // Hidden temporary-owner storage. Initialization happens
+                    // at its source evaluation point; cleanup is conditional
+                    // on that initialization having become active.
+                    slots.push(*slot);
+                }
                 Statement::Let(slot, expr) => {
                     let value = value!(self.expr(expr, frame));
                     self.consume(expr, frame);
@@ -5075,57 +5230,21 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
                 self.materialize(frame.locals[*slot].clone())
             }
-            ExprKind::Borrow(slot) => {
-                let ty = self.program.functions[frame.function].locals[*slot].ty;
-                let owner_like = matches!(
-                    ty,
-                    Type::Box(_)
-                        | Type::Arena
-                        | Type::ArenaBox(_)
-                        | Type::Bytes
-                        | Type::String
-                        | Type::Vec(_)
-                        | Type::AllocatorContext
-                        | Type::AllocBox(_)
-                        | Type::AllocVec(_)
-                        | Type::Task(_)
-                );
-                if !owner_like {
-                    // Any addressable inline value (record, array, scalar, or
-                    // enum) is pinned to shared storage so `&x`, `&mut x`, and
-                    // field/index references can alias the live location.
-                    let current = frame.locals[*slot].clone();
-                    let cell = match current {
-                        Value::RecordCell(cell) | Value::ArrayCell(cell) => cell,
-                        value => {
-                            let cell = Arc::new(Mutex::new(value));
-                            let array = ty
-                                .layout()
-                                .is_some_and(|id| self.program.enums[id].array.is_some());
-                            frame.locals[*slot] = if array {
-                                Value::ArrayCell(cell.clone())
-                            } else {
-                                Value::RecordCell(cell.clone())
-                            };
-                            cell
-                        }
-                    };
-                    // The local's ownership resource must alias the pinned
-                    // cell now, so a later replacement through the reference is
-                    // dropped from the live contents rather than a stale
-                    // snapshot taken at binding time.
-                    self.local_active(*slot, frame);
-                    Value::RecordRef(cell)
-                } else {
-                    match frame.locals[*slot].clone() {
-                        Value::Owned(id) => Value::Borrowed(id),
-                        Value::Task(id) => Value::TaskRef(id),
-                        Value::Arena { state } => Value::ArenaRef(state),
-                        Value::ArenaBox { state, slot } => Value::ArenaBoxRef { state, slot },
-                        Value::AllocatorContext(state) => Value::AllocatorContextRef(state),
-                        _ => unreachable!("checked borrow of an owned handle"),
-                    }
-                }
+            ExprKind::Borrow(slot) => self.borrow_local_value(*slot, frame)?,
+            ExprKind::InitOwner { slot, value: init } => {
+                let value = value!(self.expr(init, frame));
+                self.consume(init, frame);
+                self.store_initialized_owner(*slot, value, frame)?;
+                self.materialize(frame.locals[*slot].clone())
+            }
+            ExprKind::BorrowInit { slot, value: init } => {
+                // Initialize at the operand's source position, then borrow the
+                // hidden slot. `value!` propagates panic/return/break/continue
+                // exactly as the un-hoisted initializer would.
+                let value = value!(self.expr(init, frame));
+                self.consume(init, frame);
+                self.store_initialized_owner(*slot, value, frame)?;
+                self.borrow_local_value(*slot, frame)?
             }
             ExprKind::BorrowField(place) => {
                 let value = value!(self.expr(place, frame));
@@ -5134,8 +5253,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 // field's owner keeps its single obligation.
                 Value::RecordRef(Arc::new(Mutex::new(value)))
             }
-            ExprKind::BorrowPlace(place) => self.borrow_place(place, frame)?,
-            ExprKind::PlaceIndex { .. } => self.place_index_reference(expr, frame)?,
+            ExprKind::BorrowPlace(place) => place_value!(self.borrow_place(place, frame)),
+            ExprKind::PlaceIndex { .. } => place_value!(self.place_index_reference(expr, frame)),
             ExprKind::BoxNew(..)
             | ExprKind::BoxTake(..)
             | ExprKind::BoxRead(..)
@@ -5678,7 +5797,11 @@ fn projection_root_slot(expr: &Expr) -> Option<usize> {
     loop {
         match &current.kind {
             ExprKind::Project(base, _) => current = base,
-            ExprKind::Peek(slot) | ExprKind::Local(slot) | ExprKind::Move(slot) => {
+            ExprKind::Peek(slot)
+            | ExprKind::Local(slot)
+            | ExprKind::Move(slot)
+            | ExprKind::InitOwner { slot, .. }
+            | ExprKind::BorrowInit { slot, .. } => {
                 return Some(*slot);
             }
             _ => return None,

@@ -1443,3 +1443,231 @@ fn skipped_short_circuit_operands_do_not_initialize_temporary_owners() {
         "",
     );
 }
+
+/// A checked program whose explicit panic must happen after the expected
+/// output prefix in both backends. The reference failure must be the panic
+/// itself, not an ownership or alias error raised while cleaning up temporary
+/// owners.
+fn panics_after(source: &str, expected_output: &str) {
+    let program = check(source).unwrap();
+    let mut output = Vec::new();
+    let error = program.evaluate(&mut output).unwrap_err();
+    assert!(
+        error.message.contains("panic"),
+        "expected a checked panic, got {error:?}: {source}"
+    );
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        expected_output,
+        "{source}"
+    );
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let program = check(source).unwrap();
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("borrowing-temporary-panic");
+        kush::native::build(&program, &binary).unwrap();
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert!(
+            !output.status.success(),
+            "native program did not panic: {source}"
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            expected_output,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn temporary_field_and_index_places_preserve_argument_order() {
+    agrees(
+        r#"struct P { x: i64, lane: [i64; 2] }
+        fn first() -> i64 ! {io, panic} { print_i64(1); 1 }
+        fn second() -> P ! {io, panic} { print_i64(2); P { x: 40, lane: [7, 8] } }
+        fn read(x: i64, p: &P) -> i64 ! {panic} { x + p.x }
+        fn read_field(x: i64, field: &i64) -> i64 ! {panic} { x + *field }
+        fn read_lane(x: i64, lane: &i64) -> i64 ! {panic} { x + *lane }
+        fn main() -> i64 ! {io, panic} {
+            let a = read(first(), &second());
+            let b = read_field(first(), &second().x);
+            let c = read_lane(first(), &second().lane[1]);
+            a + b + c
+        }"#,
+        91,
+        "1\n2\n1\n2\n1\n2\n",
+    );
+}
+
+#[test]
+fn skipped_short_circuit_or_operands_do_not_initialize_temporary_owners() {
+    agrees(
+        r#"struct P { x: i64 }
+        fn make() -> P ! {io, panic} { print_i64(99); P { x: 1 } }
+        fn read(p: &P) -> Bool ! {} { true }
+        fn main() -> i64 ! {io, panic} {
+            let skipped = true || read(&make());
+            if skipped { 42 } else { 0 }
+        }"#,
+        42,
+        "",
+    );
+}
+
+#[test]
+fn loop_conditions_reinitialize_temporary_owners_with_balanced_cleanup() {
+    // The condition's temporary owner is evaluated once per iteration (and
+    // short-circuit lazily), while the body's separate temporary owner is
+    // cleaned at each body scope exit. `agrees` checks allocations against
+    // deallocations in the reference evaluator.
+    agrees(
+        r#"fn make(n: i64) -> Box<i64> ! {alloc, panic} { Box.new(n) }
+        fn read(b: &Box<i64>) -> i64 ! {panic} { Box.read(b) }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut i = 0;
+            let mut sum = 0;
+            while i < 3 && read(&make(i)) >= 0 {
+                sum = sum + read(&make(i));
+                i = i + 1;
+            }
+            sum
+        }"#,
+        3,
+        "",
+    );
+}
+
+#[test]
+fn temporary_owner_cleanup_survives_loop_continue_and_break() {
+    agrees(
+        r#"fn make(n: i64) -> Box<i64> ! {alloc, panic} { Box.new(n) }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut i = 0;
+            let mut sum = 0;
+            loop {
+                let b = &make(i);
+                if i == 1 {
+                    i = i + 1;
+                    continue;
+                }
+                if i == 2 {
+                    break;
+                }
+                sum = sum + Box.read(b);
+                i = i + 1;
+            }
+            sum
+        }"#,
+        0,
+        "",
+    );
+}
+
+#[test]
+fn owning_temporary_owners_drop_before_a_question_mark_early_exit() {
+    // `&make()` initializes an owning temporary owner before `fail()?` returns
+    // early. The hidden owner must be released exactly once on that path.
+    agrees(
+        r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn make() -> Box<i64> ! {alloc, io, panic} { print_i64(1); Box.new(5) }
+        fn fail() -> Result<i64, i64> ! {io, panic} { print_i64(2); Err(7) }
+        fn read(b: &Box<i64>, x: i64) -> i64 ! {panic} { Box.read(b) + x }
+        fn run() -> Result<i64, i64> ! {alloc, io, panic} {
+            let v = read(&make(), fail()?);
+            Ok(v)
+        }
+        fn main() -> i64 ! {alloc, io, panic} {
+            match run() {
+                Ok(v) => v,
+                Err(e) => e,
+            }
+        }"#,
+        7,
+        "1\n2\n",
+    );
+}
+
+#[test]
+fn panicking_arguments_do_not_initialize_later_temporary_owners() {
+    panics_after(
+        r#"struct P { x: i64 }
+        fn first() -> i64 ! {io, panic} { print_i64(1); panic() }
+        fn second() -> P ! {io, panic} { print_i64(2); P { x: 40 } }
+        fn read(x: i64, p: &P) -> i64 ! {panic} { x + p.x }
+        fn main() -> i64 ! {io, panic} { read(first(), &second()) }"#,
+        "1\n",
+    );
+}
+
+#[test]
+fn panics_after_temporary_owner_initialization_keep_source_order() {
+    panics_after(
+        r#"fn make() -> Box<i64> ! {alloc, io, panic} { print_i64(1); Box.new(5) }
+        fn boom(b: &Box<i64>) -> i64 ! {io, panic} { print_i64(2); panic() }
+        fn main() -> i64 ! {alloc, io, panic} { boom(&make()) }"#,
+        "1\n2\n",
+    );
+}
+
+#[test]
+fn projected_temporary_place_initializers_may_return_early() {
+    // A field place rooted at a temporary whose initializer uses `?` must
+    // propagate the early return rather than report a place-resolution error.
+    agrees(
+        r#"enum Result<T, E> { Ok(T), Err(E) }
+        struct P { x: i64 }
+        fn make(fail: Bool) -> Result<P, i64> ! {panic} {
+            if fail { Err(7) } else { Ok(P { x: 40 }) }
+        }
+        fn read(field: &i64) -> i64 ! {panic} { *field }
+        fn ok() -> Result<i64, i64> ! {panic} {
+            let value = read(&(make(false)?).x);
+            Ok(value)
+        }
+        fn early() -> Result<i64, i64> ! {panic} {
+            let value = read(&(make(true)?).x);
+            Ok(value)
+        }
+        fn main() -> i64 ! {panic} {
+            match ok() {
+                Ok(value) => value + match early() {
+                    Ok(value) => value,
+                    Err(error) => error,
+                },
+                Err(error) => error,
+            }
+        }"#,
+        47,
+        "",
+    );
+}
+
+#[test]
+fn loop_condition_temporary_owners_clean_up_on_continue_and_break() {
+    // The condition's hidden owner is initialized on each re-evaluation. A
+    // continue or break must release the current condition temporary before
+    // the next iteration or loop exit, without double-dropping it later.
+    agrees(
+        r#"fn make(n: i64) -> Box<i64> ! {alloc, panic} { Box.new(n) }
+        fn read(b: &Box<i64>) -> i64 ! {panic} { Box.read(b) }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut i = 0;
+            let mut sum = 0;
+            while i < 4 && read(&make(i)) >= 0 {
+                if i == 1 {
+                    i = i + 1;
+                    continue;
+                }
+                if i == 2 {
+                    break;
+                }
+                sum = sum + read(&make(i));
+                i = i + 1;
+            }
+            sum
+        }"#,
+        0,
+        "",
+    );
+}
