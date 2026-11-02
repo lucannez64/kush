@@ -279,10 +279,11 @@ through generic functions, lambdas, arrow types, trait/method contracts,
 indirect calls, aliases, and adapters, and are matched exactly by subtyping.
 Only `@[1]` is supported: `@[0]`, `> 1`, `many`, and abstract result grades without
 a concrete specialization remain rejected on both owning and copyable results.
-Copyable `@[1]` results are must-use observations, not owning moves. Custom grade
-algebras, general grade inference, grade-zero erasure, and cancellation-time linear
-cleanup are not implemented. Task results that would carry a linear obligation
-remain rejected.
+Copyable `@[1]` results are must-use observations, not owning moves. User-defined
+finite grade algebras are validated by exhaustive law enumeration; see
+[grade algebras](grade-algebras.md). General grade inference, grade-zero erasure,
+and cancellation-time linear cleanup are not implemented. Task results that
+would carry a linear obligation remain rejected.
 
 LLVM, general filesystem/FFI APIs, general automatic effectful fusion, widening reuse, nonblocking task I/O, forced cancellation unwinding, benchmarked
 performance superiority, and kernel/embedded targets remain future work. The

@@ -17,6 +17,23 @@ pub enum BindingKind {
     Local,
     /// A declared static-dispatch trait. Trait names are not runtime types.
     Trait,
+    /// A declared finite grade algebra. Its name is not a runtime type and is
+    /// only meaningful as the qualifier of a grade annotation.
+    GradeAlgebra,
+}
+
+/// One declared finite grade algebra. The carrier and operation tables stay as
+/// source names; the grade pass validates and lowers them to a static runtime
+/// description used by annotations.
+#[derive(Debug, Clone)]
+pub struct GradeAlgebraDecl {
+    pub name: String,
+    pub elements: Vec<String>,
+    pub zero: String,
+    pub one: String,
+    pub add: Vec<GradeEquation>,
+    pub mul: Vec<GradeEquation>,
+    pub span: Span,
 }
 /// Where a generic binder appears. Effect-exclusion constraints are meaningful
 /// only for executable function and method effect rows; every other declaration
@@ -62,6 +79,11 @@ pub struct Resolution {
     /// only by receiver-type dispatch or the explicit `receiver.Trait.method`
     /// spelling.
     pub method_bindings: BTreeMap<usize, BindingId>,
+    /// Declared finite grade algebras, keyed by their source name. Grade
+    /// annotations use `Algebra.Element`; see [the grade documentation].
+    pub algebras: BTreeMap<String, GradeAlgebraDecl>,
+    /// Lowered, law-checked algebra tables used while evaluating annotations.
+    pub(crate) lowered_algebras: BTreeMap<String, &'static crate::grades::Algebra>,
     references_by_span: BTreeMap<(usize, usize), BindingId>,
     binders_by_span: BTreeMap<(usize, usize), BindingId>,
 }
@@ -501,6 +523,7 @@ impl Resolver {
                     ItemKind::Prop { name, .. } => (name, BindingKind::Data),
                     ItemKind::Alias { name, .. } => (name, BindingKind::Alias),
                     ItemKind::Trait { name, .. } => (name, BindingKind::Trait),
+                    ItemKind::GradeAlgebra(algebra) => (&algebra.name, BindingKind::GradeAlgebra),
                     ItemKind::Impl { methods, .. } => {
                         // Methods live in their owning impl, not in module scope.
                         // They still need stable function bindings for checking,
@@ -524,6 +547,44 @@ impl Resolver {
                 let id = self.global(name, kind, item.span)?;
                 if declaration.public {
                     self.result.public.insert(id);
+                }
+                if let ItemKind::GradeAlgebra(algebra) = &item.kind {
+                    let mut elements = Vec::new();
+                    for element in &algebra.elements {
+                        if elements.contains(&element.name) {
+                            return Err(Diagnostic::new(
+                                element.span,
+                                format!(
+                                    "duplicate element '{}' in grade algebra '{}'",
+                                    element.name, algebra.name
+                                ),
+                            ));
+                        }
+                        elements.push(element.name.clone());
+                    }
+                    let name = algebra.name.clone();
+                    let declaration = GradeAlgebraDecl {
+                        name: name.clone(),
+                        elements,
+                        zero: algebra.zero.clone(),
+                        one: algebra.one.clone(),
+                        add: algebra.add.clone(),
+                        mul: algebra.mul.clone(),
+                        span: item.span,
+                    };
+                    if self
+                        .result
+                        .algebras
+                        .insert(name.clone(), declaration)
+                        .is_some()
+                    {
+                        return Err(Diagnostic::new(
+                            item.span,
+                            format!(
+                                "duplicate grade algebra '{name}'; algebra names are program-global in this subset"
+                            ),
+                        ));
+                    }
                 }
                 self.result.declarations.insert(item.span.start, id);
                 // A trait method with a block is a default body. It needs a
@@ -649,6 +710,7 @@ impl Resolver {
                 self.owner = self.result.declarations.get(&item.span.start).copied();
                 self.scoped(|r| match &item.kind {
                     ItemKind::Module(_) | ItemKind::Use(_) => Ok(()),
+                    ItemKind::GradeAlgebra(_) => Ok(()),
                     ItemKind::Function(f) => r.function(f),
                     ItemKind::Trait {
                         generics, methods, ..
@@ -943,7 +1005,10 @@ impl Resolver {
                 }
                 TypeKind::Graded { inner, grade } => {
                     r.ty(inner)?;
-                    r.ty(grade)?;
+                    // Grade expressions may name `Algebra.Element` and use
+                    // arithmetic. Resolve ordinary grade variables where
+                    // possible but leave algebra paths to the grade pass.
+                    r.length(grade)?;
                 }
                 TypeKind::Predicate(proposition) => r.expr(proposition)?,
             }

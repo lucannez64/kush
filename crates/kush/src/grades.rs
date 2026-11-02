@@ -78,40 +78,169 @@ use std::collections::BTreeMap;
 
 type Result<T> = std::result::Result<T, Diagnostic>;
 
-/// The usage semiring: finite natural bounds plus infinity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// A law-checked finite grade algebra. The carrier and both total operations
+/// are explicit. The object is leaked so `Grade` stays `Copy` and carries its
+/// display names and operation tables.
+#[derive(Debug)]
+pub(crate) struct Algebra {
+    pub name: &'static str,
+    pub elements: &'static [&'static str],
+    pub add: &'static [&'static [usize]],
+    pub mul: &'static [&'static [usize]],
+    pub zero: usize,
+    pub one: usize,
+}
+impl Algebra {
+    pub(crate) fn element(&self, name: &str) -> Option<usize> {
+        self.elements.iter().position(|element| *element == name)
+    }
+}
+
+/// The usage semiring: finite natural bounds plus infinity, extended with
+/// finite user-defined algebra elements.
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Grade {
     Finite(u64),
     Many,
+    /// An element of a validated finite algebra, together with its static table
+    /// and element index.
+    Element(&'static Algebra, usize),
+}
+impl PartialEq for Grade {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Finite(a), Self::Finite(b)) => a == b,
+            (Self::Many, Self::Many) => true,
+            (Self::Element(a, x), Self::Element(b, y)) => std::ptr::eq(*a, *b) && x == y,
+            _ => false,
+        }
+    }
+}
+impl Eq for Grade {}
+impl std::hash::Hash for Grade {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Finite(value) => {
+                0u8.hash(state);
+                value.hash(state);
+            }
+            Self::Many => 1u8.hash(state),
+            Self::Element(algebra, element) => {
+                2u8.hash(state);
+                algebra.name.hash(state);
+                element.hash(state);
+            }
+        }
+    }
+}
+impl PartialOrd for Grade {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Grade {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        fn rank(grade: &Grade) -> u8 {
+            match grade {
+                Grade::Finite(_) => 0,
+                Grade::Many => 1,
+                Grade::Element(..) => 2,
+            }
+        }
+        match (self, other) {
+            (Self::Finite(a), Self::Finite(b)) => a.cmp(b),
+            (Self::Many, Self::Many) => Ordering::Equal,
+            (Self::Element(a, x), Self::Element(b, y)) => a.name.cmp(b.name).then(x.cmp(y)),
+            _ => rank(self).cmp(&rank(other)),
+        }
+    }
 }
 impl Grade {
     pub(crate) const ZERO: Self = Self::Finite(0);
     pub(crate) const ONE: Self = Self::Finite(1);
 
     pub(crate) fn is_zero(self) -> bool {
-        self == Self::ZERO
+        match self {
+            Self::Finite(0) => true,
+            Self::Element(algebra, element) => element == algebra.zero,
+            _ => false,
+        }
+    }
+    pub(crate) fn is_one(self) -> bool {
+        match self {
+            Self::Finite(1) => true,
+            Self::Element(algebra, element) => element == algebra.one,
+            _ => false,
+        }
+    }
+    pub(crate) fn is_many(self) -> bool {
+        matches!(self, Self::Many)
+    }
+    pub(crate) fn algebra_zero(algebra: &'static Algebra) -> Self {
+        Self::Element(algebra, algebra.zero)
+    }
+    /// Repeated addition of one algebra element. Bounded so a hostile finite
+    /// demand cannot make the compiler loop for an unbounded time.
+    fn repeated_add(algebra: &'static Algebra, element: usize, times: u64) -> Option<Self> {
+        if times > 1_000_000 {
+            return None;
+        }
+        let mut result = algebra.zero;
+        for _ in 0..times {
+            result = algebra.add[result][element];
+        }
+        Some(Self::Element(algebra, result))
     }
     /// Addition with checked finite overflow. `None` means the mathematical
-    /// finite result does not fit in `u64`; callers that are checking a source
-    /// annotation report an error instead of approximating it.
+    /// finite result does not fit in `u64` or mixes incompatible algebras;
+    /// callers checking a source annotation report an error instead of
+    /// approximating it.
     pub(crate) fn checked_add(self, other: Self) -> Option<Self> {
         match (self, other) {
             (Self::Many, _) | (_, Self::Many) => Some(Self::Many),
             (Self::Finite(a), Self::Finite(b)) => a.checked_add(b).map(Self::Finite),
+            (Self::Element(a, x), Self::Element(b, y)) if std::ptr::eq(a, b) => {
+                Some(Self::Element(a, a.add[x][y]))
+            }
+            (Self::Element(a, x), Self::Finite(n)) => {
+                Self::repeated_add(a, a.one, n).map(|amount| match amount {
+                    Self::Element(_, count) => Self::Element(a, a.add[x][count]),
+                    _ => unreachable!("repeated_add stays in its algebra"),
+                })
+            }
+            (Self::Finite(n), Self::Element(b, y)) => {
+                Self::repeated_add(b, b.one, n).map(|amount| match amount {
+                    Self::Element(_, count) => Self::Element(b, b.add[count][y]),
+                    _ => unreachable!("repeated_add stays in its algebra"),
+                })
+            }
+            _ => None,
         }
     }
-    /// Multiplication with the extended-natural annihilation law
-    /// `0 * many = 0`.
+    /// Multiplication with the extended-natural annihilation law `0 * many = 0`
+    /// and the declared finite algebra table.
     pub(crate) fn checked_mul(self, other: Self) -> Option<Self> {
         match (self, other) {
+            (Self::Finite(0), Self::Element(algebra, _))
+            | (Self::Element(algebra, _), Self::Finite(0)) => {
+                Some(Self::Element(algebra, algebra.zero))
+            }
             (Self::Finite(0), _) | (_, Self::Finite(0)) => Some(Self::ZERO),
             (Self::Many, Self::Many) => Some(Self::Many),
             (Self::Many, Self::Finite(_)) | (Self::Finite(_), Self::Many) => Some(Self::Many),
             (Self::Finite(a), Self::Finite(b)) => a.checked_mul(b).map(Self::Finite),
+            (Self::Element(a, x), Self::Element(b, y)) if std::ptr::eq(a, b) => {
+                Some(Self::Element(a, a.mul[x][y]))
+            }
+            (Self::Element(a, x), Self::Finite(n)) => Self::repeated_add(a, x, n),
+            (Self::Finite(n), Self::Element(b, y)) => Self::repeated_add(b, y, n),
+            _ => None,
         }
     }
     /// Saturating addition for observed usage counts. A count that overflows
-    /// becomes unbounded; a finite exact grade can then never match it.
+    /// or leaves its algebra becomes unbounded; a finite exact grade can then
+    /// never match it.
     fn saturating_add(self, other: Self) -> Self {
         self.checked_add(other).unwrap_or(Self::Many)
     }
@@ -125,6 +254,9 @@ impl std::fmt::Display for Grade {
             Self::Finite(0) => f.write_str("0"),
             Self::Finite(n) => write!(f, "{n}"),
             Self::Many => f.write_str("many"),
+            Self::Element(algebra, element) => {
+                write!(f, "{}.{}", algebra.name, algebra.elements[*element])
+            }
         }
     }
 }
@@ -255,6 +387,206 @@ pub(crate) fn solve_single(
         Ok(None)
     }
 }
+/// Validate and lower every declared finite grade algebra. The operation
+/// tables must be total and are checked by exhaustive enumeration: zero/one
+/// identities, commutativity, associativity, distributivity, and zero
+/// annihilation. A law is never assumed; a failure names the algebra and law.
+pub(crate) fn validate_algebras(resolution: &mut Resolution) -> Result<()> {
+    let names = resolution.algebras.keys().cloned().collect::<Vec<_>>();
+    for name in names {
+        let declaration = resolution.algebras[&name].clone();
+        let algebra = lower_algebra(&declaration)?;
+        resolution.lowered_algebras.insert(name, algebra);
+    }
+    Ok(())
+}
+
+fn lower_algebra(declaration: &crate::resolve::GradeAlgebraDecl) -> Result<&'static Algebra> {
+    let count = declaration.elements.len();
+    if count == 0 {
+        return Err(Diagnostic::new(
+            declaration.span,
+            format!("grade algebra '{}' has no elements", declaration.name),
+        ));
+    }
+    let mut index = BTreeMap::new();
+    for (position, element) in declaration.elements.iter().enumerate() {
+        index.insert(element.clone(), position);
+    }
+    let lookup = |name: &str| {
+        index.get(name).copied().ok_or_else(|| {
+            Diagnostic::new(
+                declaration.span,
+                format!(
+                    "grade algebra '{}' names unknown element '{name}'",
+                    declaration.name
+                ),
+            )
+        })
+    };
+    let zero = lookup(&declaration.zero)?;
+    let one = lookup(&declaration.one)?;
+    let add = algebra_table(declaration, &declaration.add, "add", &index, count)?;
+    let mul = algebra_table(declaration, &declaration.mul, "mul", &index, count)?;
+    let law = |detail: String| {
+        Diagnostic::new(
+            declaration.span,
+            format!(
+                "grade algebra '{}' violates its semiring laws: {detail}",
+                declaration.name
+            ),
+        )
+    };
+    let element = |index: usize| declaration.elements[index].as_str();
+    for element_index in 0..count {
+        if add[zero][element_index] != element_index || add[element_index][zero] != element_index {
+            return Err(law(format!(
+                "'{}' is not an additive identity for '{}'",
+                element(zero),
+                element(element_index)
+            )));
+        }
+        if mul[one][element_index] != element_index || mul[element_index][one] != element_index {
+            return Err(law(format!(
+                "'{}' is not a multiplicative identity for '{}'",
+                element(one),
+                element(element_index)
+            )));
+        }
+        if mul[zero][element_index] != zero || mul[element_index][zero] != zero {
+            return Err(law(format!(
+                "zero does not annihilate '{}'",
+                element(element_index)
+            )));
+        }
+    }
+    for left in 0..count {
+        for right in 0..count {
+            if add[left][right] != add[right][left] {
+                return Err(law(format!(
+                    "addition is not commutative for '{}' and '{}'",
+                    element(left),
+                    element(right)
+                )));
+            }
+            if mul[left][right] != mul[right][left] {
+                return Err(law(format!(
+                    "multiplication is not commutative for '{}' and '{}'",
+                    element(left),
+                    element(right)
+                )));
+            }
+        }
+    }
+    for a in 0..count {
+        for b in 0..count {
+            for c in 0..count {
+                if add[add[a][b]][c] != add[a][add[b][c]] {
+                    return Err(law("addition is not associative".to_owned()));
+                }
+                if mul[mul[a][b]][c] != mul[a][mul[b][c]] {
+                    return Err(law("multiplication is not associative".to_owned()));
+                }
+                if mul[a][add[b][c]] != add[mul[a][b]][mul[a][c]] {
+                    return Err(law(format!(
+                        "multiplication does not distribute over addition for '{}', '{}', '{}'",
+                        element(a),
+                        element(b),
+                        element(c)
+                    )));
+                }
+            }
+        }
+    }
+    let leaked_name: &'static str = Box::leak(declaration.name.clone().into_boxed_str());
+    let leaked_elements: &'static [&'static str] = Box::leak(
+        declaration
+            .elements
+            .iter()
+            .map(|element| Box::leak(element.clone().into_boxed_str()) as &'static str)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    let leak_table = |table: Vec<Vec<usize>>| -> &'static [&'static [usize]] {
+        let rows = table
+            .into_iter()
+            .map(|row| Box::leak(row.into_boxed_slice()) as &'static [usize])
+            .collect::<Vec<_>>();
+        Box::leak(rows.into_boxed_slice())
+    };
+    Ok(Box::leak(Box::new(Algebra {
+        name: leaked_name,
+        elements: leaked_elements,
+        add: leak_table(add),
+        mul: leak_table(mul),
+        zero,
+        one,
+    })))
+}
+
+fn algebra_table(
+    declaration: &crate::resolve::GradeAlgebraDecl,
+    equations: &[crate::ast::GradeEquation],
+    operation: &str,
+    index: &BTreeMap<String, usize>,
+    count: usize,
+) -> Result<Vec<Vec<usize>>> {
+    let mut table = vec![vec![usize::MAX; count]; count];
+    for equation in equations {
+        let Some(&left) = index.get(&equation.left) else {
+            return Err(Diagnostic::new(
+                equation.span,
+                format!(
+                    "grade algebra '{}' {operation} table names unknown element '{}'",
+                    declaration.name, equation.left
+                ),
+            ));
+        };
+        let Some(&right) = index.get(&equation.right) else {
+            return Err(Diagnostic::new(
+                equation.span,
+                format!(
+                    "grade algebra '{}' {operation} table names unknown element '{}'",
+                    declaration.name, equation.right
+                ),
+            ));
+        };
+        let Some(&result) = index.get(&equation.result) else {
+            return Err(Diagnostic::new(
+                equation.span,
+                format!(
+                    "grade algebra '{}' {operation} table names unknown element '{}'",
+                    declaration.name, equation.result
+                ),
+            ));
+        };
+        if table[left][right] != usize::MAX {
+            return Err(Diagnostic::new(
+                equation.span,
+                format!(
+                    "grade algebra '{}' {operation} table repeats the pair '{}' and '{}'",
+                    declaration.name, equation.left, equation.right
+                ),
+            ));
+        }
+        table[left][right] = result;
+    }
+    for (left, row) in table.iter().enumerate() {
+        for (right, result) in row.iter().enumerate() {
+            if *result == usize::MAX {
+                return Err(Diagnostic::new(
+                    declaration.span,
+                    format!(
+                        "grade algebra '{}' {operation} table is missing the pair '{}' and '{}'",
+                        declaration.name, declaration.elements[left], declaration.elements[right]
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(table)
+}
+
 /// Evaluate a grade annotation at compile time. No runtime grade values exist.
 pub(crate) fn evaluate(
     resolution: &Resolution,
@@ -281,13 +613,55 @@ pub(crate) fn evaluate(
                     "usage grades are nonnegative naturals that fit in 64 bits",
                 )
             }),
-            ast::TypeKind::Named { path, arguments } if arguments.is_empty() && path.len() == 1 => {
-                let id = resolution.reference(expr.span).ok_or_else(|| {
-                    Diagnostic::new(expr.span, "internal error: unresolved grade name")
+            ast::TypeKind::Named { path, arguments } if arguments.is_empty() && path.len() == 2 => {
+                let algebra = resolution.lowered_algebras.get(&path[0]).ok_or_else(|| {
+                    Diagnostic::new(
+                        expr.span,
+                        format!(
+                            "unknown grade algebra '{}'; declare it with 'algebra {} {{ ... }}'",
+                            path[0], path[0]
+                        ),
+                    )
                 })?;
+                let element = algebra.element(&path[1]).ok_or_else(|| {
+                    Diagnostic::new(
+                        expr.span,
+                        format!(
+                            "grade algebra '{}' has no element '{}'; declare it in the algebra's elements list",
+                            path[0], path[1]
+                        ),
+                    )
+                })?;
+                Ok(Grade::Element(algebra, element))
+            }
+            ast::TypeKind::Named { path, arguments } if arguments.is_empty() && path.len() == 1 => {
+                let Some(id) = resolution.reference(expr.span) else {
+                    if resolution.lowered_algebras.contains_key(&path[0]) {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            format!(
+                                "grade algebra '{}' requires an element, as in '{}::Element'",
+                                path[0], path[0]
+                            ),
+                        ));
+                    }
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        format!("unknown name '{}' in a usage grade", path[0]),
+                    ));
+                };
                 let binding = &resolution.bindings[id];
                 if binding.kind == crate::resolve::BindingKind::Builtin && binding.name == "many" {
                     return Ok(Grade::Many);
+                }
+                if binding.kind == crate::resolve::BindingKind::GradeAlgebra {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        format!(
+                            "grade algebra '{}' requires an element, as in '{}.Element'",
+                            binding.name, binding.name
+                        ),
+                    ));
                 }
                 variables.get(&id).copied().ok_or_else(|| {
                     Diagnostic::new(
@@ -445,7 +819,7 @@ impl<'a> Checker<'a> {
             ExprKind::Local(slot) | ExprKind::Move(slot) => self.function.locals[*slot].linear,
             ExprKind::Call(Target::Function(index), _) => {
                 self.program.functions.get(*index).is_some_and(|function| {
-                    function.result_grade == Some(Grade::Finite(1)) && self.moves(function.result)
+                    function.result_grade.is_some_and(Grade::is_one) && self.moves(function.result)
                 })
             }
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
@@ -454,7 +828,7 @@ impl<'a> Checker<'a> {
                         .function_types
                         .get(id)
                         .is_some_and(|signature| {
-                            signature.result_grade == Some(Grade::Finite(1))
+                            signature.result_grade.is_some_and(Grade::is_one)
                                 && self.moves(signature.result)
                         })
                 }
@@ -501,19 +875,19 @@ impl<'a> Checker<'a> {
     fn value_has_grade_one(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Local(slot) | ExprKind::Move(slot) => {
-                self.function.locals[*slot].linear || self.grade(*slot) == Some(Grade::Finite(1))
+                self.function.locals[*slot].linear || self.grade(*slot).is_some_and(Grade::is_one)
             }
             ExprKind::Call(Target::Function(index), _) => self
                 .program
                 .functions
                 .get(*index)
-                .is_some_and(|function| function.result_grade == Some(Grade::Finite(1))),
+                .is_some_and(|function| function.result_grade.is_some_and(Grade::is_one)),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
                 Type::Fn(id) | Type::Once(id) => self
                     .program
                     .function_types
                     .get(id)
-                    .is_some_and(|signature| signature.result_grade == Some(Grade::Finite(1))),
+                    .is_some_and(|signature| signature.result_grade.is_some_and(Grade::is_one)),
                 _ => false,
             },
             ExprKind::Block(block) => self.block_value_has_grade_one(block),
@@ -554,7 +928,7 @@ impl<'a> Checker<'a> {
         ty: Option<Type>,
         span: Span,
     ) -> Result<()> {
-        if matches!(grade, Some(Grade::Finite(1))) || ty.is_some_and(|ty| self.is_linear_type(ty)) {
+        if grade.is_some_and(Grade::is_one) || ty.is_some_and(|ty| self.is_linear_type(ty)) {
             return Ok(());
         }
         Err(Diagnostic::new(
@@ -598,12 +972,19 @@ impl<'a> Checker<'a> {
         self.function.locals[slot].grade
     }
     fn is_tracked(&self, slot: usize) -> bool {
-        matches!(self.grade(slot), Some(Grade::Finite(_)))
+        matches!(
+            self.grade(slot),
+            Some(Grade::Finite(_) | Grade::Element(..))
+        )
     }
     fn activate(&mut self, slot: usize) {
         self.active.push(slot);
         if self.is_tracked(slot) {
-            self.counts.insert(slot, Grade::ZERO);
+            let zero = match self.grade(slot) {
+                Some(Grade::Element(algebra, _)) => Grade::algebra_zero(algebra),
+                _ => Grade::ZERO,
+            };
+            self.counts.insert(slot, zero);
         }
     }
     fn deactivate(&mut self, slot: usize) {
@@ -643,19 +1024,22 @@ impl<'a> Checker<'a> {
     }
     fn check_exact(&self, slots: &[usize], span: Span, reason: &str) -> Result<()> {
         for slot in slots {
-            let Some(Grade::Finite(wanted)) = self.grade(*slot) else {
+            let Some(wanted) = self.grade(*slot) else {
                 continue;
             };
+            if !matches!(wanted, Grade::Finite(_) | Grade::Element(..)) {
+                continue;
+            }
             let seen = self.counts.get(slot).copied().unwrap_or(Grade::ZERO);
-            if seen != Grade::Finite(wanted) {
-                let seen = seen.to_string();
-                let detail = if wanted == 0 {
+            if seen != wanted {
+                let seen_text = seen.to_string();
+                let detail = if wanted.is_zero() {
                     format!(
-                        "the value is used {seen} time(s) on this path; grade @[0] forbids runtime observation"
+                        "the value is used {seen_text} time(s) on this path; grade @[{wanted}] forbids runtime observation"
                     )
                 } else {
                     format!(
-                        "the value is used {seen} time(s) on this path; the annotation requires exactly {wanted}"
+                        "the value is used {seen_text} time(s) on this path; the annotation requires exactly {wanted}"
                     )
                 };
                 return Err(self.grade_error(
@@ -949,7 +1333,11 @@ impl<'a> Checker<'a> {
                 }
                 if self.is_tracked(*slot) {
                     self.check_exact(&[*slot], expr.span, "it is replaced by an assignment")?;
-                    self.counts.insert(*slot, Grade::ZERO);
+                    let zero = match self.grade(*slot) {
+                        Some(Grade::Element(algebra, _)) => Grade::algebra_zero(algebra),
+                        _ => Grade::ZERO,
+                    };
+                    self.counts.insert(*slot, zero);
                 }
             }
             ExprKind::Binary(
@@ -1015,7 +1403,8 @@ impl<'a> Checker<'a> {
                         self.check_linear_parameter(grade, ty, argument.span)?;
                     }
                     let demand = match grade {
-                        Some(Grade::Finite(0)) | None => Grade::ONE,
+                        None => Grade::ONE,
+                        Some(grade) if grade.is_zero() => Grade::ONE,
                         Some(grade) => grade,
                     };
                     let nested = multiplier.saturating_mul(demand);
@@ -1263,7 +1652,8 @@ impl<'a> Checker<'a> {
                 .get(function)
                 .and_then(|f| f.parameter_grades.get(index))
                 .map_or(Grade::ONE, |grade| match grade {
-                    Some(Grade::Finite(0)) | None => Grade::ONE,
+                    None => Grade::ONE,
+                    Some(grade) if grade.is_zero() => Grade::ONE,
                     Some(grade) => *grade,
                 }),
             _ => Grade::ONE,

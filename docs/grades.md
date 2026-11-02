@@ -10,8 +10,8 @@ implemented. Result grades are static metadata erased at runtime; they do not
 add a tag, allocation, or ABI change. On an owning value `@[1]` transfers the
 linear resource obligation; on a copyable value it transfers a must-use
 observation obligation. See [copyable result transfer](copyable-result-transfer.md).
-Inference, custom grade semirings, general graded modalities, and grade-zero
-erasure remain out of scope.
+General graded modalities beyond binding, parameter, and result grades remain
+out of scope.
 
 ```sh
 cargo run -p kush -- check examples/grades.kush
@@ -32,6 +32,7 @@ with infinity:
 
 ```text
 g ::= 0 | 1 | 2 | ... | many | G          -- G is an abstract grade parameter
+    | Algebra.Element                     -- a validated finite custom algebra
 ```
 
 Sequential use adds; substitution composes multiplicatively:
@@ -429,8 +430,12 @@ This is deliberately a restricted, usable interface. It does not claim perfect
 memory management or a complete formal soundness proof. Still missing or
 deferred:
 
-- User-defined grade semirings, fractional/ordered custom algebras, and general
-  graded modality introduction/elimination.
+- User-defined finite grade algebras with explicit carriers and operation
+  tables are implemented and law-checked by enumeration; see
+  [grade algebras](grade-algebras.md). Non-finite carriers and custom
+  comparison/join structures beyond that semiring are still missing.
+- General graded modality introduction/elimination beyond binding, parameter,
+  and result grades.
 - A principal grade solver. The implemented solver handles a single-occurrence
   affine fragment from explicitly graded arguments and expected arrows; all
   other abstract grades still require explicit specialization. See

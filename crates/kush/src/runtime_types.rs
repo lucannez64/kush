@@ -1402,7 +1402,7 @@ impl<'a> Types<'a> {
                 .map(|grade| crate::grades::evaluate(self.resolution, &substitution.grades, grade))
                 .transpose()?;
             let result = self.lower(result_inner, substitution, depth + 1)?;
-            if result_grade.is_some() && result_grade != Some(Grade::Finite(1)) {
+            if result_grade.is_some() && !result_grade.is_some_and(Grade::is_one) {
                 return Err(Diagnostic::new(
                     result_ast.span,
                     "callable result grades currently support only exactly @[1]; @[0] would discard the returned value and a larger or unbounded grade could duplicate it",
@@ -2322,7 +2322,7 @@ impl<'a> Types<'a> {
                         .map(|grade| match grade {
                             None => 0u8,
                             Some(Grade::Many) => 1,
-                            Some(Grade::Finite(_)) => 2,
+                            Some(Grade::Finite(_) | Grade::Element(..)) => 2,
                         })
                         .collect::<Vec<_>>()
                 };
@@ -3355,9 +3355,11 @@ fn data_uses_const(
 /// target.
 fn grade_contract_compatible(source: Option<Grade>, target: Option<Grade>) -> bool {
     match (source, target) {
-        (_, None | Some(Grade::Many)) => true,
-        (Some(Grade::Finite(a)), Some(Grade::Finite(b))) => a == b,
-        (None | Some(Grade::Many), Some(Grade::Finite(_))) => false,
+        (_, None) => true,
+        (_, Some(target)) if target.is_many() => true,
+        (Some(source), Some(_)) if source.is_many() => false,
+        (Some(source), Some(target)) => source == target,
+        (None, Some(_)) => false,
     }
 }
 /// Whether a runtime type contains a task handle. Handles are scope-bound and

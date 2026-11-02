@@ -168,6 +168,12 @@ impl Parser {
                     self_ty,
                     methods,
                 }
+            } else if self.word_keyword("algebra") {
+                if total {
+                    return Err(self.error("'total' applies only to fn and enum declarations"));
+                }
+                self.bump();
+                ItemKind::GradeAlgebra(self.grade_algebra()?)
             } else if self.eat(&Kind::Struct) {
                 if total {
                     return Err(self.error("'total' applies only to fn and enum declarations"));
@@ -321,6 +327,72 @@ impl Parser {
             payload,
             result,
             span: self.since(start),
+        })
+    }
+    /// `algebra Name { elements { A, B } zero = A; one = B; add { ... } mul { ... } }`.
+    fn grade_algebra(&mut self) -> Result<GradeAlgebra> {
+        let name = self.ident()?;
+        self.expect(&Kind::LBrace, "'{' before grade algebra body")?;
+        if !self.word_keyword("elements") {
+            return Err(self.error("expected 'elements' in a grade algebra declaration"));
+        }
+        self.bump();
+        self.expect(&Kind::LBrace, "'{' before grade algebra elements")?;
+        let elements = self.separated(Kind::RBrace, |p| {
+            let start = p.current().span;
+            let name = p.ident()?;
+            Ok(GradeElement {
+                name,
+                span: p.since(start),
+            })
+        })?;
+        let zero = self.algebra_identity("zero")?;
+        let one = self.algebra_identity("one")?;
+        let add = self.algebra_table("add", Kind::Plus)?;
+        let mul = self.algebra_table("mul", Kind::Star)?;
+        self.expect(&Kind::RBrace, "'}' after grade algebra")?;
+        Ok(GradeAlgebra {
+            name,
+            elements,
+            zero,
+            one,
+            add,
+            mul,
+        })
+    }
+    fn algebra_identity(&mut self, which: &str) -> Result<String> {
+        if !self.word_keyword(which) {
+            return Err(self.error(format!(
+                "expected '{which}' in a grade algebra declaration"
+            )));
+        }
+        self.bump();
+        self.expect(&Kind::Eq, "'=' after grade algebra identity")?;
+        let name = self.ident()?;
+        self.expect(&Kind::Semi, "';' after grade algebra identity")?;
+        Ok(name)
+    }
+    fn algebra_table(&mut self, which: &str, op: Kind) -> Result<Vec<GradeEquation>> {
+        if !self.word_keyword(which) {
+            return Err(self.error(format!(
+                "expected '{which}' table in a grade algebra declaration"
+            )));
+        }
+        self.bump();
+        self.expect(&Kind::LBrace, "'{' before grade algebra operation table")?;
+        self.separated(Kind::RBrace, |p| {
+            let start = p.current().span;
+            let left = p.ident()?;
+            p.expect(&op, "operation symbol in a grade algebra table")?;
+            let right = p.ident()?;
+            p.expect(&Kind::Eq, "'=' before a grade algebra table result")?;
+            let result = p.ident()?;
+            Ok(GradeEquation {
+                left,
+                right,
+                result,
+                span: p.since(start),
+            })
         })
     }
     /// One method item. Methods use ordinary function syntax with an explicit

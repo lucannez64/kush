@@ -816,20 +816,20 @@ fn validate_result_contract(
 ) -> Result<()> {
     match grade {
         None => Ok(()),
-        Some(Grade::Finite(1)) => Ok(()),
-        Some(Grade::Finite(0)) => Err(Diagnostic::new(
+        Some(grade) if grade.is_one() => Ok(()),
+        Some(grade) if grade.is_zero() => Err(Diagnostic::new(
             span,
             "a result graded @[0] would discard the value it returns; use an owning @[1] result contract or return Unit",
         )),
-        Some(Grade::Finite(n)) => Err(Diagnostic::new(
-            span,
-            format!(
-                "a result graded @[{n}] could duplicate one owning resource; result contracts currently support exactly @[1]"
-            ),
-        )),
-        Some(Grade::Many) => Err(Diagnostic::new(
+        Some(grade) if grade.is_many() => Err(Diagnostic::new(
             span,
             "a result graded 'many' could duplicate one owning resource; result contracts currently support exactly @[1]",
+        )),
+        Some(grade) => Err(Diagnostic::new(
+            span,
+            format!(
+                "a result graded @[{grade}] could duplicate one owning resource; result contracts currently support exactly @[1]"
+            ),
         )),
     }
 }
@@ -1325,6 +1325,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     // binding per (impl, method) pair. Allocate them before `Types` borrows the
     // resolver table: the table cannot be mutated once type lowering holds it.
     let default_bindings = collect_default_bindings(module, &mut resolution)?;
+    crate::grades::validate_algebras(&mut resolution)?;
     let resolution = &resolution;
     // Total functions and aliases are erased and checked by the trusted kernel
     // before any executable body can cite them as proof evidence.
@@ -1390,6 +1391,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             | ast::ItemKind::Struct { .. }
             | ast::ItemKind::Trait { .. }
             | ast::ItemKind::Impl { .. }
+            | ast::ItemKind::GradeAlgebra(_)
             | ast::ItemKind::Use(_) => continue,
             ast::ItemKind::Alias { .. } => continue,
             ast::ItemKind::Function(f) => f,
@@ -1579,7 +1581,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     let slot = checker.bind(p.span, *ty, false)?;
                     checker.locals[slot].grade = *grade;
                     checker.locals[slot].linear =
-                        matches!(grade, Some(Grade::Finite(1))) && checker.owned_type(*ty);
+                        grade.is_some_and(Grade::is_one) && checker.owned_type(*ty);
                     checker.validate_grade(*grade, *ty, p.ty.span)?;
                     let id = resolution.binder(p.span).unwrap();
                     checker.admit_scalar_index(id, *ty)?;
@@ -7607,7 +7609,7 @@ impl Checker<'_, '_> {
                     let must_use = self.observes_copyable_result(&value);
                     if must_use
                         && let Some(annotation) = grade
-                        && annotation != Grade::Finite(1)
+                        && !annotation.is_one()
                     {
                         return Err(Diagnostic::new(
                             pattern.span,
@@ -7618,7 +7620,7 @@ impl Checker<'_, '_> {
                     }
                     self.locals[slot].grade = grade.or(must_use.then_some(Grade::Finite(1)));
                     self.locals[slot].linear = self.value_moves_linear(&value)
-                        || (matches!(self.locals[slot].grade, Some(Grade::Finite(1)))
+                        || (self.locals[slot].grade.is_some_and(Grade::is_one)
                             && self.owned_type(ty));
                     if !diverges {
                         self.validate_grade(grade, ty, pattern.span)?;
@@ -7725,13 +7727,13 @@ impl Checker<'_, '_> {
                 .signatures
                 .get(*index)
                 .is_some_and(|signature| {
-                    signature.result_grade == Some(Grade::Finite(1))
+                    signature.result_grade.is_some_and(Grade::is_one)
                         && !self.owned_type(signature.result)
                 }),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
                 Type::Fn(id) | Type::Once(id) => {
                     self.types.function_types.get(id).is_some_and(|signature| {
-                        signature.result_grade == Some(Grade::Finite(1))
+                        signature.result_grade.is_some_and(Grade::is_one)
                             && !self.owned_type(signature.result)
                     })
                 }
@@ -7774,7 +7776,7 @@ impl Checker<'_, '_> {
     /// contract can carry it; otherwise the caller would receive an ordinary
     /// value with no obligation.
     fn transfers_copyable_result(&self) -> bool {
-        self.result_grade == Some(Grade::Finite(1)) && !self.owned_type(self.result)
+        self.result_grade.is_some_and(Grade::is_one) && !self.owned_type(self.result)
     }
     /// Propagate binding obligations before lambda types and capture slots are
     /// elaborated. The ownership pass independently validates consumption later.
@@ -7796,13 +7798,13 @@ impl Checker<'_, '_> {
                 .signatures
                 .get(*index)
                 .is_some_and(|signature| {
-                    signature.result_grade == Some(Grade::Finite(1))
+                    signature.result_grade.is_some_and(Grade::is_one)
                         && self.owned_type(signature.result)
                 }),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
                 Type::Fn(id) | Type::Once(id) => {
                     self.types.function_types.get(id).is_some_and(|signature| {
-                        signature.result_grade == Some(Grade::Finite(1))
+                        signature.result_grade.is_some_and(Grade::is_one)
                             && self.owned_type(signature.result)
                     })
                 }
@@ -8556,7 +8558,7 @@ impl Checker<'_, '_> {
                         let value = c.expr_expected(right, Some(c.locals[slot].ty))?;
                         c.expect(value.ty, c.locals[slot].ty, right.span)?;
                         if c.observes_copyable_result(&value)
-                            && c.locals[slot].grade != Some(Grade::Finite(1))
+                            && !c.locals[slot].grade.is_some_and(Grade::is_one)
                         {
                             return Err(Diagnostic::new(
                                 right.span,
@@ -9462,26 +9464,27 @@ impl Checker<'_, '_> {
                 )
                 .with_note(self.locals[*slot].span, "task handle declared here"));
             }
-            if matches!(local.grade, Some(Grade::Finite(0))) {
+            if local.grade.is_some_and(Grade::is_zero) {
                 return Err(Diagnostic::new(
                     span,
                     "a lambda cannot capture a value graded @[0]; grade zero forbids every observation, including moving it into a closure environment",
                 )
                 .with_note(local.span, "grade @[0] binding declared here"));
             }
-            if let Some(Grade::Finite(n)) = local.grade
-                && n > 1
+            if let Some(grade) = local.grade
+                && !grade.is_one()
+                && !grade.is_zero()
+                && !grade.is_many()
             {
                 return Err(Diagnostic::new(
                     span,
                     format!(
-                        "a lambda cannot capture a value graded @[{n}]; a closure may be called zero or one time, so the exact use obligation cannot be transferred. Leave the value ungraded or observe it before constructing the closure"
+                        "a lambda cannot capture a value graded @[{grade}]; a closure may be called zero or one time, so the exact use obligation cannot be transferred. Leave the value ungraded or observe it before constructing the closure"
                     ),
                 )
                 .with_note(local.span, "graded binding declared here"));
             }
-            if local.linear || matches!(local.grade, Some(Grade::Finite(1))) || self.linear_type(ty)
-            {
+            if local.linear || local.grade.is_some_and(Grade::is_one) || self.linear_type(ty) {
                 capture_linear = true;
             }
         }
@@ -9869,7 +9872,7 @@ impl Checker<'_, '_> {
                 (
                     local.grade,
                     local.linear
-                        || matches!(local.grade, Some(Grade::Finite(1)))
+                        || local.grade.is_some_and(Grade::is_one)
                         || self.linear_type(local.ty),
                 )
             })
@@ -9942,10 +9945,9 @@ impl Checker<'_, '_> {
             for (parameter, ty) in lambda.parameters.iter().zip(&parameters) {
                 let slot = self.bind(parameter.span, *ty, false)?;
                 self.locals[slot].grade = parameter_grades[slot - captures.len()];
-                self.locals[slot].linear = matches!(
-                    parameter_grades[slot - captures.len()],
-                    Some(Grade::Finite(1))
-                ) && self.owned_type(*ty);
+                self.locals[slot].linear = parameter_grades[slot - captures.len()]
+                    .is_some_and(Grade::is_one)
+                    && self.owned_type(*ty);
                 let id = self.resolution.binder(parameter.span).unwrap();
                 self.admit_scalar_index(id, *ty)?;
             }
@@ -10574,25 +10576,26 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         match grade {
-            None | Some(Grade::Finite(1)) => Ok(()),
-            Some(Grade::Finite(0)) => Err(Diagnostic::new(
+            None => Ok(()),
+            Some(grade) if grade.is_one() => Ok(()),
+            Some(grade) if grade.is_zero() => Err(Diagnostic::new(
                 span,
                 format!(
                     "grade @[0] would silently discard the owning/linear value {}; consume it with grade @[1] or leave it ungraded",
                     self.types.name(ty)
                 ),
             )),
-            Some(Grade::Finite(n)) => Err(Diagnostic::new(
-                span,
-                format!(
-                    "grade @[{n}] would duplicate the owning/linear value {}; owning and linear values support only @[1]",
-                    self.types.name(ty)
-                ),
-            )),
-            Some(Grade::Many) => Err(Diagnostic::new(
+            Some(grade) if grade.is_many() => Err(Diagnostic::new(
                 span,
                 format!(
                     "grade 'many' allows duplication, but {} owns resources or is linear",
+                    self.types.name(ty)
+                ),
+            )),
+            Some(grade) => Err(Diagnostic::new(
+                span,
+                format!(
+                    "grade @[{grade}] would duplicate the owning/linear value {}; owning and linear values support only @[1]",
                     self.types.name(ty)
                 ),
             )),

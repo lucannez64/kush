@@ -71,6 +71,15 @@ pub enum ItemKind {
         generics: Vec<Generic>,
         methods: Vec<Method>,
     },
+    /// `algebra Name { elements { A = 0, B = 1 } zero = A; one = B; }`.
+    ///
+    /// A restricted user-defined grade algebra: a finite set of named grade
+    /// values embedded in the builtin extended-natural usage semiring. Elements
+    /// map to concrete natural/`many` values, so `+` and `*` are the checked
+    /// builtin operations; the checker validates closure, identities,
+    /// associativity, commutativity, distributivity, and annihilation by
+    /// exhaustive enumeration of the declared finite carrier.
+    GradeAlgebra(GradeAlgebra),
     /// `impl Type { ... }` or `impl Trait<Arguments> for Type { ... }`.
     ///
     /// The `trait_path` is a named type node whose arguments are the concrete
@@ -103,6 +112,31 @@ pub struct Generic {
     /// rejected, and the body may still perform every effect its row declares.
     /// Only executable function and method effect binders accept it.
     pub excludes: Option<Type>,
+    pub span: Span,
+}
+/// A `grade algebra` declaration. The finite carrier and both operations are
+/// explicit; the grade pass validates the semiring laws by enumeration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GradeAlgebra {
+    pub name: String,
+    pub elements: Vec<GradeElement>,
+    pub zero: String,
+    pub one: String,
+    pub add: Vec<GradeEquation>,
+    pub mul: Vec<GradeEquation>,
+}
+/// One named element of a `grade algebra` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GradeElement {
+    pub name: String,
+    pub span: Span,
+}
+/// One `left op right = result` row of a grade algebra operation table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GradeEquation {
+    pub left: String,
+    pub right: String,
+    pub result: String,
     pub span: Span,
 }
 /// A declared lifetime parameter. Lifetimes are erased at runtime and are

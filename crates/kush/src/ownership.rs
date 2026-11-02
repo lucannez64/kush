@@ -2488,10 +2488,10 @@ impl Checker<'_> {
                 .get(*index)
                 .copied()
                 .flatten()
-                .is_some_and(|(grade, owning)| grade == Grade::Finite(1) && owning),
+                .is_some_and(|(grade, owning)| grade.is_one() && owning),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
                 Type::Fn(id) | Type::Once(id) => self.functions.get(id).is_some_and(|signature| {
-                    signature.result_grade == Some(Grade::Finite(1))
+                    signature.result_grade.is_some_and(Grade::is_one)
                         && (owns(signature.result, self.owned, self.unions, self.pointees)
                             || is_linear(
                                 signature.result,
@@ -2736,10 +2736,10 @@ impl Checker<'_> {
                     // Elaboration tracks later assignments for capture typing.
                     // Start this binding with its declaration's obligation, not
                     // a flag inherited from a future replacement value.
-                    self.locals[slot].linear = matches!(
-                        self.locals[slot].grade,
-                        Some(crate::grades::Grade::Finite(1))
-                    ) && self.moves(self.locals[slot].ty);
+                    self.locals[slot].linear = self.locals[slot]
+                        .grade
+                        .is_some_and(crate::grades::Grade::is_one)
+                        && self.moves(self.locals[slot].ty);
                     // Moving a linear binding into an ungraded local must not
                     // launder away its consumption obligation.
                     let linear = self.value_moves_linear(expr);
