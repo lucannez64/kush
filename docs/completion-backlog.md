@@ -641,3 +641,5 @@ effects. It found five defects, now fixed with regressions:
   operation result and could swallow errors; it is now rejected like `return`.
 - **Low:** `break`/`continue` for loops inside a continuation were rejected,
   and `let mut x = perform ...` lost `mut` in the continuation. Both fixed.
+Full Boat gate after these fixes (`f44a221`): **946 tests**, formatting, and
+Clippy pass.
