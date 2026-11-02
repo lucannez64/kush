@@ -37,7 +37,7 @@ remains authoritative; local edits are uploaded on the next run.
 
 The existing target directory is ignored. A fresh staging directory prevents
 stale deleted source files from influencing results. Build artifacts stay in
-`/home/user/.cache/kush-target`; staging is removed with Python
+`/home/user/kush-build-cache`; staging is removed with Python
 `shutil.rmtree` when the command ends. The script uses one build job and disables
 debug symbols and incremental storage to fit a small sandbox. These settings
 concern building the Rust compiler, not the language's checked arithmetic or
@@ -66,7 +66,7 @@ the others. The script exits nonzero if any check fails and prints a
 | Lifetime | TTL 3600 s, automatic stop enabled |
 | State | stopped after final validation with a completed verified snapshot; the script resumes it automatically |
 | Environment | `base`, created with `--no-env` (no account secrets) |
-| Build cache | `/home/user/.cache/kush-target` |
+| Build cache | `/home/user/kush-build-cache` |
 | Remote source | `/home/user/kush` (verified mirror; fresh `/home/user/kush-sync-*` staging removed after each run) |
 
 The base image already provides the required toolchain:
@@ -188,7 +188,7 @@ boat stop bx_3m6vs6ah
 ```
 
 The stop snapshots the filesystem, including the Rust toolchain,
-`/home/user/kush`, and `/home/user/.cache/kush-target`. Resume manually with the
+`/home/user/kush`, and `/home/user/kush-build-cache`. Resume manually with the
 same 1-hour TTL and without account environment secrets:
 
 ```sh
@@ -221,3 +221,13 @@ sandbox. The earlier gate passed tests/Clippy but failed two formatting checks;
 those were corrected before the successful full rerun. See the
 [milestone review](milestone-review.md) for the implementation and independent
 review record.
+
+## Snapshot cache location correction
+
+Snapshot-tree inspection after the vector/trait gate showed that Boat excludes
+`/home/user/.cache` entirely. The old `.cache/kush-target` path therefore lost
+its workspace marker and artifacts on every resume, despite the earlier cache
+preservation statements in this document. The script now stores Cargo outputs
+in `/home/user/kush-build-cache`, outside the snapshot-excluded directory.
+The path remains outside the replaced source tree and is never uploaded from
+the local target directory. A stop/resume cache-persistence check is pending.

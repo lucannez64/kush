@@ -293,6 +293,7 @@ calls on immutable locals and retains shared/exclusive receiver loans through
 later arguments. Tests cover nested receiver mutation/replacement, legal
 nested shared reads, stored-reference aliases, and mutable dispatch with
 physically erased parameters/results. The 40 advanced-trait tests pass on
-both backends; library/all-target Clippy and formatting pass locally. The full
-combined remote gate is pending. Open-world membership, nominal-field objects,
-and borrowed owning objects remain unchecked above.
+both backends; library/all-target Clippy and formatting pass locally. The combined remote gate at `059f99c` passed **857 tests, formatting, and
+Clippy**, and the sandbox stopped afterwards. This also validates
+`Vec.try_reserve`. Open-world membership, nominal-field objects, and borrowed
+owning objects remain unchecked above.

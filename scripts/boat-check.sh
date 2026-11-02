@@ -124,7 +124,9 @@ remote_staging="/home/user/kush-sync-$(date -u +%Y%m%dT%H%M%S)-$$"
 remote_command="export KUSH_STAGING='$remote_staging'"$'\n'"export KUSH_STABLE='/home/user/kush'"$'\n'"export KUSH_EXPECTED_MANIFEST='$local_manifest'"$'\n'"export KUSH_SYNC_ONLY='${KUSH_SYNC_ONLY:-0}'"$'\n'"export KUSH_COMMAND=$(printf '%q' "${KUSH_COMMAND:-}")"$'\n'"$(cat <<'REMOTE'
 set -u
 export PATH="$HOME/.cargo/bin:/usr/local/cargo/bin:$PATH"
-export CARGO_TARGET_DIR=/home/user/.cache/kush-target
+# Boat excludes .cache from filesystem snapshots. Keep Cargo artifacts in a
+# normal home directory so automatic stop/resume preserves the build cache.
+export CARGO_TARGET_DIR=/home/user/kush-build-cache
 export CARGO_BUILD_JOBS=1
 export CARGO_INCREMENTAL=0
 export CARGO_PROFILE_DEV_DEBUG=0
