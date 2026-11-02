@@ -42,6 +42,32 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 }
 
 #[test]
+fn reference_annotations_do_not_change_the_caller_visible_type() {
+    // The callee spells the outer and element lifetime with one name; the
+    // caller's container carries its own erased label. Annotation names are
+    // not part of runtime or nominal identity, so the call must still type
+    // check while the element lifetime contract stays enforced.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        fn read<'a>(b: &'a Box<&'a Point>) -> i64 ! {panic} {
+            let r = Box.read(b);
+            r.x + r.y
+        }
+        fn first<'a>(v: &'a Vec<&'a Point>) -> i64 ! {panic} {
+            Vec.get(v, 0).x
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let p = Point { x: 40, y: 2 };
+            let boxed: Box<&Point> = Box.new(&p);
+            let values: Vec<&Point> = [&p];
+            read(&boxed) + first(&values) - 40
+        }"#,
+        42,
+        "",
+    );
+}
+
+#[test]
 fn reference_fields_carry_declared_lifetimes_and_read() {
     agrees(
         r#"struct Point { x: i64, y: i64 }

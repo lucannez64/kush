@@ -2908,6 +2908,18 @@ impl<'a> Types<'a> {
             }
             (Type::Annotated(a, _), _) => return self.subtype(self.pointees[a], expected),
             (_, Type::Annotated(b, _)) => return self.subtype(actual, self.pointees[b]),
+            // Lifetimes are erased, including the checker-only element
+            // annotations inside a pointee. Two references to the same pointee
+            // shape must therefore compare equal regardless of the labels their
+            // nested containers happen to carry. An exclusive reference may
+            // always be used as a shared one, never the reverse.
+            (Type::Ref(a), Type::Ref(b)) | (Type::RefMut(a), Type::RefMut(b)) => {
+                return self.subtype(self.pointees[a], self.pointees[b])
+                    && self.subtype(self.pointees[b], self.pointees[a]);
+            }
+            (Type::RefMut(a), Type::Ref(b)) => {
+                return self.subtype(self.pointees[a], self.pointees[b]);
+            }
             (Type::Box(a), Type::Box(b))
             | (Type::ArenaBox(a), Type::ArenaBox(b))
             | (Type::Vec(a), Type::Vec(b)) => {
@@ -3010,6 +3022,12 @@ impl<'a> Types<'a> {
                 }
                 (Type::Annotated(a, _), _) => self.same_representation(self.pointees[a], expected),
                 (_, Type::Annotated(b, _)) => self.same_representation(actual, self.pointees[b]),
+                (Type::Ref(a), Type::Ref(b)) | (Type::RefMut(a), Type::RefMut(b)) => {
+                    self.same_representation(self.pointees[a], self.pointees[b])
+                }
+                (Type::RefMut(a), Type::Ref(b)) => {
+                    self.same_representation(self.pointees[a], self.pointees[b])
+                }
                 (Type::Box(a), Type::Box(b))
                 | (Type::ArenaBox(a), Type::ArenaBox(b))
                 | (Type::Vec(a), Type::Vec(b)) => {
