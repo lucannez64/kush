@@ -444,3 +444,10 @@ checkout. Arbitrary user alloc/dealloc callbacks, allocator traits, FFI, and
 container-owned general allocators remain absent; the custom-allocator backlog
 item stays unchecked, so this checkpoint does not claim that all memory work is
 complete.
+
+## Merged gate after review fixes and memory remainder
+
+Merge `0f640b5` (review fixes `2f807d5` plus memory remainder `c78c444`)
+passes **896 tests** on the full Boat gate, with formatting and all-targets
+Clippy clean. The trait-object/open-world work is still in progress on a
+separate branch and is not included.
