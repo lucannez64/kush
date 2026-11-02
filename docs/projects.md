@@ -25,9 +25,6 @@ Not implemented yet:
 - a language server, live editor diagnostics, or go-to-definition;
 - package registries, remote dependencies, workspaces, or publish commands;
 - incremental compilation or a build cache;
-- linking native libraries or Rust adapters from `[native]` (the fields are
-  parsed and validated, but project build refuses them until the native bridge
-  lands);
 - a source-level `argv` API in the Kush runtime (arguments are delivered as
   process arguments; see the host-API note below).
 
@@ -58,8 +55,7 @@ test = "tests/main.kush"   # optional; defaults to tests/main.kush when present
 [dependencies]
 words = { path = "deps/words" }
 
-# Reserved for the native bridge. These fields are validated at load time but
-# build/run/test currently report that linking is not implemented yet.
+# Native libraries and Rust staticlib adapters, linked by build/run/test.
 [native]
 libraries = ["m"]
 library-paths = ["native/lib"]
@@ -81,8 +77,8 @@ Rules enforced by the manifest loader:
   different directories claiming the same package name, and a dependency with
   the same name as the root package are rejected.
 - `[native]` library paths must be existing directories, and adapter Cargo
-  manifests must be existing files. `libraries` entries are opaque names/paths
-  for the future bridge.
+  manifests must be existing files. `libraries` entries are bare library names or package-relative archive/shared
+  library paths. Absolute paths and parent traversal are rejected.
 
 ## Module layout and imports
 

@@ -197,3 +197,22 @@ cargo-manifests = ["adapters/rust-adapter/Cargo.toml"]
 - Foreign callbacks into Kush, C variadics, structs by value, and ownership
   transfer of a resource into a foreign function and back are not implemented.
 - Async/task suspension across a foreign call is not supported.
+
+## Foreign effect and cleanup contracts
+
+Only `io` is mandatory on foreign imports. Additional `alloc`, `panic`, or
+`suspend` effects are author-declared and checked at Kush call sites; Kush
+cannot inspect the external implementation to verify them. A `#[noalloc]` or
+`#[nosuspend]` caller therefore relies on the imported contract, not on a proof
+about C/Rust code. Blocking OS work and cooperative task suspension are distinct.
+Foreign release hooks are trusted cleanup and their internal effects are not
+inferred from Rust `Drop`; they must not unwind across the ABI or retain a
+released handle. Panic containment requires Rust adapters built with
+`panic = "unwind"`; a `panic = "abort"` crate cannot return a caught-panic status.
+
+Borrowed foreign results, owned Bytes inputs, and Unit inputs are rejected.
+Opaque resources always occupy one checked word, including in aggregates and
+fallible result slots. Cargo artifacts are selected by the requested manifest
+and staticlib target, not dependency emission order. Link input paths starting
+with `-` or `@` are rejected, and package-native library paths cannot escape
+their package through absolute paths or `..`.

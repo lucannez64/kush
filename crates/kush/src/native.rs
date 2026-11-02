@@ -2115,7 +2115,8 @@ int main(int argc, char **argv) {
 /// argument (no shell interpolation); library names are validated identifiers
 /// for `cc -l<name>`.
 ///
-/// The compiler never invents search paths or downloads anything. A project
+/// The compiler never invents search paths. Explicit Cargo adapters may resolve
+/// their declared dependencies through Cargo. A project
 /// manifest should turn its declared native dependencies into one of these
 /// values and pass it to [`build_with_options`].
 #[derive(Debug, Clone, Default)]

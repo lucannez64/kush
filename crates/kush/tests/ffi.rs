@@ -590,7 +590,11 @@ fn project_native_options_map_to_link_inputs() {
     // A path-shaped library entry is linked explicitly, not as `-l<path>`.
     let links = LinkSpec::from_project_native(
         scratch.path(),
-        &[archive.to_string_lossy().into_owned()],
+        &[archive
+            .strip_prefix(scratch.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()],
         &[],
         &[],
     )
@@ -740,7 +744,7 @@ fn foreign_borrowed_results_and_owned_buffer_inputs_are_rejected() {
             foreign "f" fn f(x: {ty}) -> Result<{ty}, i64> ! {{io}};
             fn main() -> Unit ! {{}} {{}}"#
             ),
-            "foreign Result Ok type",
+            "enums cannot store borrowed",
         );
     }
     for ty in ["Bytes", "Unit"] {
