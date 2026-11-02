@@ -717,6 +717,8 @@ struct LoopState {
     entry_linear: Vec<bool>,
     /// Availability joined over every `break`.
     breaks: Option<Vec<bool>>,
+    /// Snapshots taken at each break, before branch-local metadata changes.
+    result_provenance: Vec<RecordProvenance>,
     /// First expression resource id allocated inside the loop.
     resource_start: usize,
     /// Locals bound inside the loop.
@@ -1499,7 +1501,11 @@ impl Checker<'_> {
             merged.leaves.insert(path, loan);
         }
         self.record_sources[slot] = Some(merged);
-        let mut origins = self.view_sources[slot].clone().unwrap_or_default();
+        let mut origins = if replace {
+            BTreeSet::new()
+        } else {
+            self.view_sources[slot].clone().unwrap_or_default()
+        };
         for loan in provenance.leaves.values() {
             origins.extend(loan.origins.iter().copied());
         }
@@ -3843,6 +3849,7 @@ impl Checker<'_> {
                 .map(|slot| self.slot_linear(slot))
                 .collect(),
             breaks: None,
+            result_provenance: Vec::new(),
             resource_start: self.resources.len(),
             bound: Vec::new(),
         });
@@ -5445,6 +5452,8 @@ impl Checker<'_> {
                     self.loop_end(expr.span, "in the loop body")?;
                 }
                 let state = self.loops.pop().unwrap();
+                self.wrapped_results
+                    .insert(expr_ptr, RecordProvenance::merge(state.result_provenance));
                 if let Some(breaks) = state.breaks {
                     self.available = breaks;
                 } else {
@@ -5458,6 +5467,27 @@ impl Checker<'_> {
                 )?;
                 if let Some(value) = value {
                     self.expr(value)?;
+                    if self.is_carrier_type(value.ty) {
+                        let provenance = self.record_provenance(value);
+                        let bound = &self.loops.last().unwrap().bound;
+                        for loan in provenance.leaves.values() {
+                            if let Some(owner) = loan
+                                .origins
+                                .iter()
+                                .find(|owner| bound.contains(owner) && !self.is_local_view(**owner))
+                            {
+                                return Err(Diagnostic::new(
+                                    value.span,
+                                    "borrowed loop result would outlive the lexical scope of its owner",
+                                ).with_note(self.locals[*owner].span, "owner declared here"));
+                            }
+                        }
+                        self.loops
+                            .last_mut()
+                            .unwrap()
+                            .result_provenance
+                            .push(provenance);
+                    }
                 }
                 let bound = self.loops.last().unwrap().bound.clone();
                 self.exit_check(bound, expr.span, "leaving the loop")?;

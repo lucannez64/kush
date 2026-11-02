@@ -151,3 +151,135 @@ fn reference_assignment_reserves_its_owner_through_the_right_hand_side() {
         "cannot move or drop an owner or view",
     );
 }
+
+#[test]
+fn loop_results_retain_borrowed_records_and_containers() {
+    let declarations = "struct P { x: i64 } struct H<'a> { p: &'a P }";
+    for value in ["H { p: &a }", "[H { p: &a }]", "Box.new(H { p: &a })"] {
+        let read = if value.starts_with('[') {
+            "Vec.get(&r, 0).p.x"
+        } else if value.starts_with("Box") {
+            "Box.read(&r).p.x"
+        } else {
+            "r.p.x"
+        };
+        agrees(
+            &format!(
+                "{declarations} fn main() -> i64 ! {{alloc, panic}} {{
+            let a = P {{ x: 40 }};
+            let r = loop {{ break {value}; }};
+            {read} + 2
+        }}"
+            ),
+            42,
+        );
+        rejects(
+            &format!(
+                "{declarations} fn main() -> i64 ! {{alloc, panic}} {{
+            let mut a = P {{ x: 40 }};
+            let r = loop {{ break {value}; }};
+            a = P {{ x: 9 }};
+            {read}
+        }}"
+            ),
+            "cannot replace an owner",
+        );
+        rejects(
+            &format!(
+                "{declarations} fn main() -> i64 ! {{alloc, panic}} {{
+            let r = loop {{ let a = P {{ x: 40 }}; break {value}; }};
+            {read}
+        }}"
+            ),
+            "loop result would outlive",
+        );
+    }
+    rejects(
+        r#"struct H<'a> { s: &'a [i64] }
+        fn main() -> i64 ! {alloc, panic} {
+            let a: Vec<i64> = [40, 1];
+            let h = H { s: &a[..] };
+            let r = loop { break h; };
+            drop(a);
+            Slice.get(r.s, 0)
+        }"#,
+        "cannot move",
+    );
+}
+
+#[test]
+fn loop_result_assignment_and_all_break_branches_keep_sources() {
+    rejects(
+        r#"struct P { x: i64 } struct H<'a> { p: &'a P }
+        fn main() -> i64 ! {panic} {
+            let mut a = P { x: 40 }; let b = P { x: 2 };
+            let mut r = H { p: &b };
+            r = loop { break H { p: &a }; };
+            a = P { x: 9 }; r.p.x
+        }"#,
+        "cannot replace an owner",
+    );
+    for owner in ["a", "b"] {
+        rejects(
+            &format!(
+                r#"struct P {{ x: i64 }} struct H<'a> {{ p: &'a P }}
+            fn main() -> i64 ! {{panic}} {{
+                let mut a = P {{ x: 40 }}; let mut b = P {{ x: 2 }};
+                let r = loop {{
+                    if true {{ break H {{ p: &a }}; }}
+                    break H {{ p: &b }};
+                }};
+                {owner} = P {{ x: 9 }}; r.p.x
+            }}"#
+            ),
+            "cannot replace an owner",
+        );
+    }
+    agrees(
+        r#"struct P { x: i64 } struct H<'a> { p: &'a P }
+        fn main() -> i64 ! {panic} {
+            let a = P { x: 40 };
+            let r = loop { break loop { break H { p: &a }; }; };
+            r.p.x + 2
+        }"#,
+        42,
+    );
+}
+
+#[test]
+fn replacing_box_element_releases_only_its_previous_loan() {
+    agrees(
+        r#"struct P { x: i64 } struct H<'a> { p: &'a P }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut a = P { x: 40 }; let b = P { x: 2 };
+            let mut boxed = Box.new(H { p: &a });
+            Box.set(&mut boxed, H { p: &b });
+            a = P { x: 9 };
+            Box.read(&boxed).p.x + a.x + b.x
+        }"#,
+        13,
+    );
+    for (read, owner, tail) in [
+        ("", "b", "Box.read(&boxed).p.x"),
+        (
+            "let old = Box.read(&boxed);",
+            "a",
+            "old.p.x + Box.read(&boxed).p.x",
+        ),
+    ] {
+        rejects(
+            &format!(
+                r#"struct P {{ x: i64 }} struct H<'a> {{ p: &'a P }}
+            fn main() -> i64 ! {{alloc, panic}} {{
+                let mut a = P {{ x: 40 }}; let mut b = P {{ x: 2 }};
+                let mut boxed = Box.new(H {{ p: &a }});
+                {read}
+                Box.set(&mut boxed, H {{ p: &b }});
+                {owner} = P {{ x: 9 }};
+                {tail}
+            }}"#
+            ),
+            "cannot replace an owner",
+        );
+    }
+}

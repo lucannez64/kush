@@ -294,6 +294,14 @@ representation while their declared lifetime travels in the same annotation.
   live, and replacing or dropping the owner is rejected. For a borrowed-record
   element the leaves are relative field paths; for a direct reference or text
   element they collapse to the element root.
+- A borrowed record or reference container returned by `loop { break value; }`
+  retains the provenance of every possible break result, including nested loops
+  and assignment. Break results cannot borrow storage declared inside the loop.
+  Each break snapshots its leaves before later branch checking changes local
+  metadata.
+- Direct `Box.set` replacement releases the previous element's owner loans from
+  the box and installs the new element's leaves. A previously read element keeps
+  its own independent loans; replacement cannot invalidate that element.
 - Reference vectors retain the union of every possible element source after
   literals, `push`, and `set`; updating one index does not prove that an old
   source is absent from other indices. This is conservative: source loans end
