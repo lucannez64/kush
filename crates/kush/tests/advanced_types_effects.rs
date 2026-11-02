@@ -134,6 +134,43 @@ fn union_patterns_infer_the_residual_type_variable() {
 }
 
 #[test]
+fn union_patterns_partition_multiple_variables_deterministically() {
+    // `T | U | i64` over `Bool | Unit | i64` leaves the residual `Bool | Unit`.
+    // The bounded partition search hands residual alternatives to unbound
+    // variables in declaration order, so T=Bool and U=Unit.
+    let source = r#"
+        fn pick<T, U>(x: T | U | i64) -> i64 ! {panic} {
+            match x { i64 @ n => n, _ => 42 }
+        }
+        fn three(c: i64) -> Bool | Unit | i64 ! {panic} {
+            if c == 0 { true } else { if c == 1 { () } else { 41 } }
+        }
+        fn main() -> i64 ! {panic} { pick(three(0)) }"#;
+    assert_eq!(value(source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // There is no cross-parameter backtracking: the canonical partition from
+    // the first parameter is committed before the later parameter is checked.
+    // Another partition would fit, but this call stays an explicit boundary.
+    rejects(
+        r#"
+        fn pick<T, U>(x: T | U | i64, first: T) -> i64 ! {panic} { 0 }
+        fn two(c: i64) -> Bool | Unit ! {panic} {
+            if c == 0 { true } else { () }
+        }
+        fn main() -> i64 ! {panic} { pick(two(0), ()) }"#,
+        "type mismatch",
+    );
+    // A single residual alternative cannot bind two unbound variables.
+    rejects(
+        r#"
+        fn pick<T, U>(x: T | U | i64) -> i64 ! {panic} { 0 }
+        fn main() -> i64 ! {panic} { pick(true) }"#,
+        "no partition binds every variable",
+    );
+}
+
+#[test]
 fn structural_literals_accumulate_contextual_union_candidates() {
     let source = r#"
         fn main() -> i64 ! {panic} {
@@ -1301,6 +1338,100 @@ fn structural_record_literals_and_generic_patterns_share_the_canonical_row() {
 }
 
 #[test]
+fn structural_callable_field_adapts_arrow_representation() {
+    // A retained field of pure function type is converted to a `once` arrow.
+    // The calling convention changes (an environment word appears), so the
+    // structural conversion must generate a checked adapter instead of copying
+    // the code pointer.
+    let source = r#"
+        fn widen(value: i64 | Bool) -> i64 ! {panic} {
+            match value { i64 @ n => n, Bool @ _ => 0 }
+        }
+        struct Holder { f: fn(i64 | Bool) -> i64 ! {panic}, tag: Bool }
+        fn call(v: struct { f: once fn(i64) -> i64 ! {panic} }) -> i64 ! {panic} {
+            let struct { f } = v;
+            f(21) * 2
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            call(Holder { f: widen, tag: true })
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // A pure-to-pure conversion that changes a parameter representation cannot
+    // capture the dynamic code pointer in a pure arrow, so it stays rejected.
+    rejects(
+        r#"
+        fn both(value: i64 | Bool) -> i64 ! {panic} {
+            match value { i64 @ n => n, Bool @ _ => 0 }
+        }
+        struct Holder { f: fn(i64 | Bool) -> i64 ! {panic} }
+        fn read(v: struct { f: fn(i64) -> i64 ! {panic} }) -> i64 ! {panic} { v.f(42) }
+        fn main() -> i64 ! {panic} { read(Holder { f: both }) }"#,
+        "pure function has no environment",
+    );
+}
+
+#[test]
+fn structural_callable_field_preserves_borrow_and_linear_obligations() {
+    // A callable field cannot be mixed into a borrowed record, so the
+    // callable adapter cannot hide a borrowed leaf behind its environment. The
+    // ordinary structural borrow-provenance tests cover reordered view fields;
+    // this hostile case keeps the callable path from weakening that rule.
+    rejects(
+        r#"struct Window<'a> { start: i64, view: &'a [i64], f: fn(i64) -> i64 ! {panic} }
+        fn noop(n: i64) -> i64 ! {panic} { n }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut data: Vec<i64> = [40];
+            let w = Window { start: 0, view: &data[..], f: noop };
+            let narrow: struct { f: once fn(i64) -> i64 ! {panic}, view: &[i64] } = w;
+            match narrow { struct { view, .. } => { data = [9]; Slice.get(view, 0) } }
+        }"#,
+        "mixed borrowed record",
+    );
+    // A captured linear callable is moved into the adapter environment exactly
+    // once. Calling the converted field consumes it and releases the
+    // environment exactly once.
+    let source = r#"
+        fn widen(value: i64 | Bool) -> i64 ! {panic} {
+            match value { i64 @ n => n, Bool @ _ => 0 }
+        }
+        struct Holder { f: linear once fn(i64 | Bool) -> i64 ! {panic}, tag: Bool }
+        fn call(v: struct { f: linear once fn(i64) -> i64 ! {panic} }) -> i64 ! {alloc, panic} {
+            let struct { f } = v;
+            f(42)
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let make: linear once fn(i64 | Bool) -> i64 ! {panic} =
+                fn(value: i64 | Bool) -> i64 ! {panic} { widen(value) };
+            call(Holder { f: make, tag: true })
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 42);
+    assert!(stats.allocations == stats.deallocations);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // A linear callable retained by the conversion still imposes its
+    // obligation: the converted record cannot simply be discarded.
+    rejects(
+        r#"fn noop(n: i64) -> i64 ! {panic} { n }
+        struct Holder { f: linear once fn(i64) -> i64 ! {panic} }
+        fn main() -> i64 ! {alloc, panic} {
+            let f: linear once fn(i64) -> i64 ! {panic} =
+                fn(n: i64) -> i64 ! {panic} { noop(n) };
+            let h = Holder { f: f };
+            let narrow: struct { f: linear once fn(i64) -> i64 ! {panic} } = h;
+            drop(narrow);
+            0
+        }"#,
+        "linear",
+    );
+}
+
+#[test]
 fn structural_borrowed_field_transfer_keeps_cleanup_balanced() {
     let source = r#"
         struct View<'a> { view: &'a mut [i64], n: i64, extra: Box<i64> }
@@ -1312,6 +1443,136 @@ fn structural_borrowed_field_transfer_keeps_cleanup_balanced() {
     assert_eq!(value(source), 42);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 42);
+}
+
+#[test]
+fn open_row_parameters_accept_records_with_the_named_fields() {
+    // `..` is an erased open-row contract: the callee sees exactly the named
+    // fields in canonical order and unmentioned fields are dropped once at the
+    // call boundary. It is width subtyping with an explicit spelling, not row
+    // unification that preserves the extra fields.
+    let source = r#"
+        struct Wide { flag: Bool, x: i64, extra: Box<i64> }
+        fn read(v: struct { x: i64, .. }) -> i64 ! {panic} { v.x }
+        fn main() -> i64 ! {alloc, panic} {
+            read(Wide { flag: true, x: 42, extra: Box.new(1) })
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // An empty open row accepts any record whose fields can be erased.
+    let empty = r#"
+        struct Wide { x: i64, extra: Box<i64> }
+        fn ignore(v: struct { .. }) -> i64 ! {panic} { 42 }
+        fn main() -> i64 ! {alloc, panic} {
+            ignore(Wide { x: 1, extra: Box.new(2) })
+        }"#;
+    let (result, stats) = evaluate(empty);
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(empty, 42);
+    // An open row still requires every named field.
+    rejects(
+        r#"
+        struct Point { y: i64 }
+        fn read(v: struct { x: i64, .. }) -> i64 ! {panic} { v.x }
+        fn main() -> i64 ! {panic} { read(Point { y: 1 }) }"#,
+        "no field 'x'",
+    );
+    // Erasing an extra linear field is not allowed: the target cannot consume
+    // it, exactly as for a closed width conversion.
+    rejects(
+        r#"
+        #[linear]
+        struct Token { id: i64 }
+        struct Wide { x: i64, token: Token }
+        fn read(v: struct { x: i64, .. }) -> i64 ! {panic} { v.x }
+        fn main() -> i64 ! {panic} {
+            let token = Token { id: 1 };
+            read(Wide { x: 1, token: token })
+        }"#,
+        "linear obligation",
+    );
+    // Impl headers match one exact canonical row; an open row there would make
+    // dispatch depend on width compatibility, so it stays rejected.
+    rejects(
+        r#"
+        impl struct { x: i64, .. } {
+            fn read_x(self: Self) -> i64 ! {panic} { self.x }
+        }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "open row",
+    );
+}
+
+#[test]
+fn structural_records_are_impl_receivers() {
+    // A concrete structural row is a first-class impl receiver. The nominal
+    // record is coerced once to the canonical structural row and dispatch then
+    // uses that row's type identity.
+    let source = r#"
+        impl struct { x: i64, y: i64 } {
+            fn sum(self: Self) -> i64 ! {panic} { self.x + self.y }
+        }
+        struct Point { x: i64, y: i64, tag: Bool }
+        fn main() -> i64 ! {panic} {
+            let p: struct { x: i64, y: i64 } = Point { x: 20, y: 22, tag: true };
+            p.sum()
+        }"#;
+    assert_eq!(value(source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // An inherent impl may take a borrowed receiver of the structural row.
+    let borrowed = r#"
+        impl struct { x: i64 } {
+            fn twice(self: &Self) -> i64 ! {panic} { self.x * 2 }
+        }
+        fn main() -> i64 ! {panic} {
+            let r: struct { x: i64 } = struct { x: 21 };
+            r.twice()
+        }"#;
+    assert_eq!(value(borrowed), 42);
+    // A generic structural header binds its parameter from the canonical row.
+    let generic = r#"
+        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        impl<T> Tag for struct { value: T } {
+            fn tag(self: Self) -> i64 ! {panic} { 42 }
+        }
+        fn main() -> i64 ! {panic} {
+            let r: struct { value: Bool } = struct { value: true };
+            r.tag()
+        }"#;
+    assert_eq!(value(generic), 42);
+    // Two headers for the same canonical row are not specializing: they
+    // overlap exactly and remain a duplicate-implementation error.
+    rejects(
+        r#"
+        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        impl Tag for struct { value: i64 } { fn tag(self: Self) -> i64 ! {panic} { 1 } }
+        impl Tag for struct { value: i64 } { fn tag(self: Self) -> i64 ! {panic} { 2 } }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "duplicate implementation",
+    );
+    // Structural and nominal impls of the same trait stay disjoint: a
+    // structural header never matches a nominal record implicitly.
+    let disjoint = r#"
+        trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+        struct Point { x: i64 }
+        impl Tag for Point { fn tag(self: Self) -> i64 ! {panic} { 40 } }
+        impl Tag for struct { x: i64 } { fn tag(self: Self) -> i64 ! {panic} { 42 } }
+        fn main() -> i64 ! {panic} {
+            let p = Point { x: 1 };
+            let s: struct { x: i64 } = struct { x: 2 };
+            let a = p.tag();
+            let b = s.tag();
+            if a == 40 { b } else { 0 }
+        }"#;
+    assert_eq!(value(disjoint), 42);
 }
 
 #[test]

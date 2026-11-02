@@ -1162,7 +1162,7 @@ impl Resolver {
                     // possible but leave algebra paths to the grade pass.
                     r.length(grade)?;
                 }
-                TypeKind::Structural(fields) => {
+                TypeKind::Structural { fields, .. } => {
                     for field in fields {
                         r.ty(&field.ty)?;
                     }

@@ -98,7 +98,17 @@ is a real runtime conversion, not a pointer reinterpretation:
   atom-to-union injection; both are checked recursively and still allocate
   nothing. A nested union-to-union repack needs its own control flow and is
   rejected explicitly, so bind/convert that field before the structural
-  coercion.
+  coercion;
+- a retained callable field whose arrow representation changes is rebuilt
+  through a generated checked adapter. The source callable is moved into the
+  adapter environment exactly once, so a `once` or `linear once` field keeps
+  its single consumption and cleanup obligation. Creating that environment
+  allocates, so the enclosing conversion requires `{alloc, panic}`. A
+  pure-to-pure conversion that changes a parameter or result representation
+  stays rejected: a pure arrow has no environment in which to carry the
+  adapter. Convert such a field explicitly first;
+- an atom-to-union injection of a callable field is allowed only when the
+  calling convention and parameter/result representations are unchanged.
 
 Borrowed leaves are invariant. A structural conversion cannot change an
 `&[T]` into `&mut [T]`, drop the mutability of a view, or relabel a borrowed
@@ -139,12 +149,43 @@ structural width conversion, atom-to-union injection, and a nested
 union-to-union repack. The repack is a checked tag remap; it copies only the
 active payload and never duplicates an owner.
 
+A structural type may end with `..`, as in `struct { x: i64, .. }`. This is an
+**erased open-row contract**: the annotation accepts any record that has every
+named field with a compatible type, and fields the annotation does not mention
+are dropped once at the call boundary by the ordinary checked width
+conversion. The callee therefore sees exactly the named canonical row; extra
+fields are not preserved and cannot be returned or forwarded. A dropped field
+that carries a linear obligation, a borrow leaf that would change
+mutability/labels, and any other representation-changing rule above still
+apply. Empty open rows such as `struct { .. }` are accepted as a record-shaped
+parameter with no inspected fields. This is a documented representation, not
+row unification or a row variable.
+
+A structural row may also be an inherent or trait impl receiver:
+
+```rust
+impl struct { x: i64, y: i64 } {
+    fn sum(self: Self) -> i64 ! {panic} { self.x + self.y }
+}
+
+trait Tag { fn tag(self: Self) -> i64 ! {panic}; }
+impl<T> Tag for struct { value: T } {
+    fn tag(self: Self) -> i64 ! {panic} { 42 }
+}
+```
+
+Structural impl headers match **one exact canonical row**: field names and
+types must agree, with generic type parameters allowed in field positions.
+They deliberately do not match nominal records implicitly, so a nominal impl
+and a structural impl of the same trait are disjoint and coherence stays
+decidable. A nominal value reaches a structural impl only after an explicit
+width coercion to that row. Open rows are rejected in impl headers because
+width compatibility there would make dispatch depend on the call site's row.
+
 Structural records are still not a general row-polymorphic record calculus.
-There is no open row variable, no field renaming, and no structural equality.
-An implementation type in an impl header cannot be an anonymous structural
-record; nominal declarations keep coherence decidable. Callable fields whose
-arrow representation changes are still rejected inside a structural coercion:
-adapt the field explicitly first.
+There is no row variable, no field renaming, and no structural equality. Open
+rows are erased as described above, and structural impl dispatch is exact-row
+only.
 
 ## Subtyping and conversions
 
@@ -213,14 +254,26 @@ The supported inference fragment is deliberately first-order and bounded:
   `Vec`, arrays, tuples, arrows, aliases) and never runs user code;
 - union distribution is recursive at inferred positions, with at most the
   normalized 16 alternatives per position;
-- a declared union pattern with exactly one bare type variable and a concrete
-  fixed part, such as `T | i64`, binds `T` to the residual actual alternatives
-  not covered by the fixed part. This is a decidable residual-union rule, not
-  row subtraction. If every alternative is already covered by the fixed part,
-  the residual is not unique and the call is rejected rather than defaulting;
-- there is no backtracking search across multiple parameters, no recursive
-  row/type unification, and no principal inference for two variables that can
-  trade evidence; two variable alternatives in one union pattern are rejected;
+- a declared union pattern with exactly one bare unbound type variable and a
+  concrete fixed part, such as `T | i64`, binds `T` to the residual actual
+  alternatives not covered by the fixed part. This is a decidable
+  residual-union rule, not row subtraction. If every alternative is already
+  covered by the fixed part, the residual is not unique and the call is
+  rejected rather than defaulting;
+- a union pattern with several bare unbound type variables, such as
+  `T | U | i64`, partitions the residual alternatives with a bounded
+  backtracking search (4096 steps). Every variable must receive at least one
+  residual alternative; alternatives already covered by the concrete or
+  previously solved fixed part stay with the fixed part and are never
+  redistributed. The search order is canonical: residual alternatives keep
+  their normalized order and are assigned to variables in declaration order.
+  This is deterministic but not principal, and it is not a cross-parameter
+  search: a later parameter can reject the committed partition even though a
+  different partition would have satisfied both parameters. That rejection is
+  the documented boundary, not a retry. Exhausting the step budget is an
+  explicit diagnostic;
+- there is still no recursive row/type unification and no general principal
+  inference for variables that can trade evidence across parameters;
 - conflicting or incomparable evidence is always an error, never a silently
   chosen arm; explicit annotations/specialization are the escape hatch;
 - type inference does not infer unions from unconstrained literals: an empty
@@ -323,11 +376,13 @@ Deliberately unsupported, with explicit diagnostics:
 
 - **Structural record limits:** anonymous `struct { ... }` rows support width
   subtyping, canonical reordering, recursive nested structural rows,
-  atom-to-union field injection, nested union-to-union repacking, structural
-  literals, and structural patterns, as described above. Callable field
-  adaptation, open rows, field renaming, and structural records in impl headers
-  are rejected. Nominal records remain invariant with respect to other nominal
-  records.
+  atom-to-union field injection, nested union-to-union repacking, checked
+  callable-field adapters, erased `..` open-row annotations, structural
+  literals and patterns, and exact-row structural impl headers, as described
+  above. Field renaming, true row variables that preserve unmentioned fields,
+  structural equality, and open rows in impl headers are rejected. Nominal
+  records remain invariant with respect to other nominal records and do not
+  match structural impl headers implicitly.
 - **Function subtyping:** arrow subtyping is implemented for first-class
   function values (`fn(...)`, owning `once fn(...)`, and `linear once fn(...)`),
   with contravariant parameters, covariant results, effect-row inclusion
@@ -349,11 +404,13 @@ Deliberately unsupported, with explicit diagnostics:
   through a union alternative.
 - **Indexed/dependent unions and principal algebraic inference:** runtime type
   aliases (including unions) are elaborated transparently. Contextual literals
-  and first-order generic matching now accumulate constraints over the finite
-  union row as described above, but general principal inference, indexed
-  unions, and multi-variable backtracking remain explicit-specialization
-  boundaries. Array length variables are a separate compile-time fragment
-  described in [dependent-indices.md](dependent-indices.md).
+  and first-order generic matching accumulate constraints over the finite union
+  row as described above. Multi-variable union patterns now use a bounded,
+  canonical partition search, but general principal inference, cross-parameter
+  backtracking, recursive row unification, and indexed unions remain
+  explicit-specialization boundaries. Array length variables are a separate
+  compile-time fragment described in
+  [dependent-indices.md](dependent-indices.md).
 - **Structural equality or ordering on union values:** no union equality; match
   a member and compare the narrowed scalar.
 - **Implicit numeric widening:** not part of subtyping.

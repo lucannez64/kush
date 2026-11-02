@@ -154,19 +154,26 @@ outstanding implementation item.
   **Partial:** anonymous `struct { ... }` rows, canonical field order,
   width/order subtyping, recursive nested structural field conversions,
   atom-to-union field injection, nested union-to-union repacking,
-  structural record literals and patterns, affine-field cleanup, linear field
-  erasure rejection, and borrowed-leaf/mutability invariance are implemented in
-  both backends. Callable field adaptation, open rows, and structural records
-  in impl headers remain explicitly rejected. See
-  [subtyping.md](subtyping.md#structural-records).
+  representation-changing callable-field adapters (with one-time linear
+  capture and checked effects), erased `..` open-row annotations, structural
+  record literals and patterns, exact-row structural impl headers (including
+  generic patterns), affine-field cleanup, linear field erasure rejection, and
+  borrowed-leaf/mutability invariance are implemented in both backends.
+  Open rows are an erased contract: unmentioned fields are dropped at the call
+  boundary rather than preserved by a row variable. Field renaming, structural
+  equality, true row variables, and open rows in impl headers remain out of
+  scope. See [subtyping.md](subtyping.md#structural-records).
 - [ ] Broader algebraic subtype inference with documented decidability
   boundaries. **Partial:** contextual array/vector/tuple/structural literals
   and first-order generic matching accumulate constraints over every finite
   union alternative instead of choosing the first matching arm. A declared
   union pattern with one bare type variable and a concrete fixed part binds the
-  residual alternatives (`T | i64`). Conflicting, incomparable, and non-unique
-  residual bindings are explicit. General principal inference, indexed unions,
-  and multi-variable backtracking remain out of scope. See
+  residual alternatives (`T | i64`). Several bare variables partition the
+  residual alternatives with a bounded (4096-step) canonical backtracking
+  search (`T | U | i64`), requiring every variable to receive an alternative;
+  conflicting, incomparable, non-unique, and budget-exhausted bindings are
+  explicit. There is no cross-parameter backtracking, recursive row
+  unification, general principal inference, or indexed-union inference. See
   [subtyping.md](subtyping.md#contextual-and-algebraic-inference).
 - [ ] Effect handlers and checked resumption ownership. **Partial:** lexical
   one-shot `handle`/`perform`, nested shadowing, first-class handler callables,

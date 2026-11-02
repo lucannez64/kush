@@ -909,12 +909,6 @@ impl<'a> Types<'a> {
     /// field coercion. Duplicate names are rejected, so the ordering is total.
     pub fn structural(&mut self, mut fields: Vec<(String, Type)>, span: Span) -> Result<Type> {
         fields.sort_by(|left, right| left.0.cmp(&right.0));
-        if fields.is_empty() {
-            return Err(Diagnostic::new(
-                span,
-                "a structural record type must have at least one field",
-            ));
-        }
         if fields.len() > 64 {
             return Err(Diagnostic::new(
                 span,
@@ -1655,7 +1649,7 @@ impl<'a> Types<'a> {
             )?;
             return self.array(element, length, ty.span);
         }
-        if let ast::TypeKind::Structural(fields) = &ty.kind {
+        if let ast::TypeKind::Structural { fields, .. } = &ty.kind {
             let mut lowered = Vec::with_capacity(fields.len());
             for field in fields {
                 let (inner, grade) = crate::grades::split(&field.ty);

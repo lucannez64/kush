@@ -1525,6 +1525,27 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     value: Arc::new(Mutex::new(value)),
                 })
             }
+            Coercion::Callable {
+                function, capture, ..
+            } => {
+                if capture.is_some() {
+                    let environment = self.allocate(Value::Closure {
+                        captures: vec![value],
+                    });
+                    let Value::Owned(environment) = environment else {
+                        unreachable!("closure environment allocation")
+                    };
+                    Ok(Value::Function {
+                        function: *function,
+                        environment: Some(environment),
+                    })
+                } else {
+                    Ok(Value::Function {
+                        function: *function,
+                        environment: None,
+                    })
+                }
+            }
         }
     }
     fn dyn_array_call(
@@ -2602,6 +2623,27 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         Value::DynObject {
                             member: *member,
                             value: Arc::new(Mutex::new(inner)),
+                        }
+                    }
+                    Coercion::Callable {
+                        function, capture, ..
+                    } => {
+                        if capture.is_some() {
+                            let environment = self.allocate(Value::Closure {
+                                captures: vec![inner],
+                            });
+                            let Value::Owned(environment) = environment else {
+                                unreachable!("closure environment allocation")
+                            };
+                            Value::Function {
+                                function: *function,
+                                environment: Some(environment),
+                            }
+                        } else {
+                            Value::Function {
+                                function: *function,
+                                environment: None,
+                            }
                         }
                     }
                 }
