@@ -294,11 +294,10 @@ owners.
 
 ## Deliberate limitations
 
-- `&Record`/`&mut Record` are still call-scoped, but a reference may now be
-  returned from a function or method when its lifetime is tied to a reference
-  parameter. There is no stored reference local, reference field, reference
-  container, or callable arrow carrying a reference. Reborrowing through
-  ordinary calls is supported; an explicit `&mut *p` reborrow spelling is not.
+- A reference may be returned from a function or method when its lifetime is
+  tied to a reference parameter. Stored shared/exclusive reference locals and
+  explicit `&*p`/`&mut *p` reborrows are supported; there is no reference field,
+  reference container, or callable arrow carrying a reference.
 - Borrowed receivers are only for nominal records. Enums, borrowed records with
   an exclusive receiver, and records containing borrowed or exclusive leaves
   are rejected or restricted as described above.
@@ -314,12 +313,15 @@ owners.
   stream, union, callable, task handle or `Box`/`Vec` of a borrowed record.
   Metadata exclusions also apply inside nominal records/enums and owned
   `Box`/`Vec` payloads; wrapping a forbidden field does not bypass them.
-- No records with a borrowed field may be stored in containers, unions, enums,
-  or returned as task results. They may be captured by a scoped borrowed-capture
-  closure or by a scope body/child task when their leaves derive from storage
-  outside the scope; such captures are lexical capabilities and cannot escape.
-  A `Box`/`Vec`/array of a borrowed record stays rejected even when `Box`,
-  `Vec`, `Bytes` or an owning enum is allowed as record metadata.
+- No records with a borrowed field may be stored in containers, unions, or
+  ordinary enums. They may be captured by a scoped borrowed-capture closure or
+  by a scope body/child task when their leaves derive from storage outside the
+  scope; such captures are lexical capabilities and cannot escape. A child task
+  may return one as `Task<T>`; `Task.join` wraps it in the conventional
+  `TaskExit<T>`, whose provenance is checked until the matched record is
+  consumed or dropped. A `Box`/`Vec`/array of a borrowed record stays rejected
+  even when `Box`, `Vec`, `Bytes` or an owning enum is allowed as record
+  metadata.
 - No self-referential records: constructing `R { owner: value, view:
   &value[..] }` (or the reverse order) is rejected by the ordinary move and loan
   checks.

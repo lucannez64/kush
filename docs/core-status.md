@@ -306,8 +306,11 @@ slice/record field, and function arrows now carry borrowed-record parameters
 and results. Borrowed records may be captured by scope bodies and child tasks
 when their leaves derive from storage outside the scope. Nested record-field
 subviews and structurally disjoint mutable field loans are checked, as are
-nominal-record reference returns tied to reference parameters. Task results
-carrying borrowed records and stored reference locals remain rejected. See
+reference returns tied to reference parameters and stored shared/exclusive
+reference locals with explicit reborrows. A child task may return a borrowed
+record; `Task.join` carries per-field provenance through `TaskExit<T>`, and
+cancellation drops owned metadata without touching borrowed storage. Reference
+fields, reference containers, and reference-valued arrows remain rejected. See
 [expanded borrowing contracts](borrowing-extensions.md).
 
 [Effect-row exclusions](effect-constraints.md) permit concrete forbidden-effect

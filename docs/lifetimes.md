@@ -41,7 +41,9 @@ The system covers:
   references, and checked loan retention through later arguments;
 - nominal-record reference **returns** tied to a caller reference parameter,
   including shared/mutable elision, outlives bounds, and reborrow through
-  helper calls. Stored reference locals and reference fields remain rejected;
+  helper calls; stored shared/exclusive reference locals, implicit use
+  reborrow, and explicit `&*p`/`&mut *p` reborrows are checked. Reference fields
+  and reference containers remain rejected;
 - borrowed records in function-arrow parameters and results, scoped closure
   captures, capture-derived slice/record results, and structured-task captures
   from scope-external storage;
@@ -701,10 +703,10 @@ be returned across a task boundary.
   alias-based provenance. Multiple distinct origins are rejected, not unified.
   Borrowed slice returns otherwise require explicit `<'a>` and
   `-> &'a [T]` / `-> &'a mut [T]` annotations.
-- Nominal-record references may be returned when tied to a reference
-  parameter. Owner-reference returns (`&Box<T>`, `&Vec<T>`, `&Bytes`) remain
-  rejected, and stored reference locals, reference fields, and reference
-  containers are still unsupported.
+- References may be returned when tied to a reference parameter. Shared
+  `&Box<T>`, `&Vec<T>`, `&Bytes`, and `&String` results are supported; exclusive
+  owner borrows, reference fields, and reference containers remain unsupported.
+  Stored reference locals and explicit reborrows are supported.
 - Dynamic disjoint-range reasoning is limited to `Slice.split_at_mut` pairs.
   There is no general range algebra, no arbitrary tuple of views, and no
   storage or forwarding of a split pair itself. Two separately written
@@ -717,8 +719,9 @@ be returned across a task boundary.
   potentially overlapping sibling instead of guessing.
 - No stored views in enums, arrays, vectors, boxes, or unions. Records are the
   sole stored-view exception. A borrowed record cannot be stored in an
-  enum/union/array/vector/box, passed through an ordinary generic type
-  parameter, or returned as a task result. It may be captured by a scoped
+  enum/union/array/vector/box or passed through an ordinary generic type
+  parameter, except as a child task result inside the conventional
+  `TaskExit<T>` wrapper produced by `Task.join`. It may be captured by a scoped
   closure or by a scope body/child task when its leaves derive from storage
   outside the scope. A borrowed-capture closure cannot escape its lexical
   `let` binding and cannot be passed to a higher-order helper.

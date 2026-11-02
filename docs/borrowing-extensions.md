@@ -2,11 +2,13 @@
 
 Status: implemented checked contracts for borrowed records in callable
 signatures and scoped captures, capture-derived borrowed results, borrowed
-records in structured-task captures, nested record-field subviews,
-disjoint-field mutable loans, and nominal-record reference escape/reborrow.
-The reference evaluator and the Cranelift native backend agree on every
-positive case in `tests/borrowing_extensions.rs`. This is an engineering
-contract inside the existing capability model, not a formal soundness proof.
+records in structured-task captures and task results, nested record-field
+subviews, disjoint-field mutable loans, stored shared/exclusive reference
+locals with explicit reborrow, and reference escape/reborrow for records and
+owner containers. The reference evaluator and the Cranelift native backend
+agree on every positive case in `tests/borrowing_extensions.rs`. This is an
+engineering contract inside the existing capability model, not a formal
+soundness proof.
 
 This page records the precise additions and the remaining deliberate limits.
 See [borrowing and lifetimes](lifetimes.md),
@@ -108,9 +110,22 @@ Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
   well as slice views.
 - Lending a record leaf retains the record's owners for the rest of the scope,
   with the same split-side and mutability rules as lent slice views.
-- Borrowed records as `Task<T>` results and across `Task.join` remain rejected:
-  cancellation and the `TaskExit` payload would need a separate provenance
-  path that is not implemented here.
+- A child may now return a borrowed record as `Task<T>`. The result leaves are
+  resolved from the child's captured records exactly like a capture-derived
+  closure result; the handle carries that provenance and `Task.join` transfers
+  it to the `TaskExit<T>` value. Matching `TaskExit.Completed(record)` binds
+  the same per-field loans, which stay checked until the record is consumed or
+  dropped. The conventional `TaskExit<T>` shape is the only enum allowed to
+  carry a borrowed payload, and user code cannot construct one: only
+  `Task.join` produces it.
+- A cancelled child that has already computed a result drops that value in the
+  worker. Owned metadata is released exactly once and borrowed slice
+  descriptors are inert, so cancellation never frees caller-owned storage.
+  Cancellation before completion drops the child frame and captured descriptors
+  under the same rules.
+- `Task.scope` results still cannot be borrowed records or borrowed
+  `TaskExit<T>` values, and a borrowed task result cannot cross a function or
+  callable boundary. Match it and read the fields inside the scope.
 
 ## Nested record-field subviews
 
@@ -162,10 +177,11 @@ Slice.set(right, 0, 30);
   when the checker can still identify that binding. A merged or temporary
   record loses field identity and is treated conservatively.
 
-## Nominal-record reference escape and reborrow
+## Reference storage, escape, and reborrow
 
-`&Record` and `&mut Record` may now be returned when the result lifetime is
-tied to a caller reference parameter:
+`&Record` and `&mut Record` may now be stored in a local reference binding, and
+the same escape contract extends to shared references to `Box`, `Vec`, `Bytes`,
+and `String`:
 
 ```rust
 fn identity<'a>(p: &'a Point) -> &'a Point ! {panic} { p }
@@ -183,19 +199,32 @@ fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {panic} {
 - An exclusive `&mut Record` result requires an exclusive `&mut Record`
   parameter whose lifetime outlives the result. Shared storage is never
   upgraded.
-- Only nominal-record pointees may be returned. `&Box`, `&Bytes`, `&Vec`,
-  `&String`, and `&str` results stay rejected because their representation is
-  a call-scoped snapshot or a distinct view type.
-- Returning a reference to a local record, a field, a temporary, or a record
-  value is rejected with a dangling-borrow diagnostic.
+- Shared `&Box<T>`, `&Bytes`, `&Vec<T>`, and `&String` results may be returned
+  from a reference parameter to the same pointee type. `&str` remains a distinct
+  text-view type, and exclusive owner borrows remain unsupported.
+- Returning a reference to a local record, a field, a temporary, a by-value
+  record parameter, or a record value is rejected with a dangling-borrow
+  diagnostic. A stored reference is checked by its storage roots, not by the
+  descriptor binding: reborrowing a caller reference is allowed, while
+  reborrowing a stack local or a by-value parameter is not.
 - The caller keeps the owner loaned while the returned reference is used. A
   reference result retains its origin through the enclosing full expression,
   including later arguments. The checker is conservative here: splitting the
   reference's last use inside one expression (for example `bump(&mut p).x +
   p.y`) is rejected; bind the read to a local first.
-- Reborrowing a reference parameter through ordinary calls is supported. There
-  is still no syntax for an explicit `&mut *p` reborrow, no stored reference
-  local, and no reference field in a record. Those remain outside the subset.
+- A reference local has one static lifetime label and capability ancestry,
+  including its underlying owner roots. Reading it is an implicit reborrow, so
+  a stored `&mut` capability may be used more than once without being moved;
+  moving or dropping the owner remains blocked until the reference's checked
+  last use. Reference bindings themselves are immutable.
+- `&*p` and `&mut *p` are explicit reborrows. They narrow an existing stored or
+  parameter reference for the enclosing expression, cannot upgrade shared
+  storage, and cannot be used to dereference a value that is not a reference.
+  A bare `*p` dereference remains unsupported; use `p.field` for field reads.
+- Reference fields in records, reference element containers (`Box<&T>`,
+  `Vec<&T>`), and reference-valued arrow parameters/results remain rejected.
+  General reference containers still need type-level leaf metadata and checks
+  across generic coercions and every control-flow merge.
 
 ## Lifetime inference boundaries
 
@@ -212,12 +241,15 @@ captures:
 - No inference reads the function body, no inferred outlives bounds, no
   variance annotations, and no general owner-reference inference. Two distinct
   input lifetimes still require an explicit shared lifetime or result binder.
+  Body-based inference and inferred outlives bounds remain outstanding.
 
 ## Remaining deliberate limits
 
-- No stored reference locals (`let r = &owner;`), no reference fields, no
-  reference containers, and no reference-returning function values.
-- No task result carrying a borrowed record; task captures are supported.
+- Reference fields in records, reference containers, and reference-returning
+  function values remain rejected. Stored reference locals and explicit
+  reborrows are supported as described above.
+- A task result may carry a borrowed record, but a `Task.scope` result and any
+  function/callable boundary carrying a borrowed `TaskExit<T>` remain rejected.
 - No general `&Record.field` reference form. Field access is either a copyable
   field read, a slice-field subview, or whole-record reference parameter.
 - Disjoint-field reasoning is structural and path-based, not a general range or

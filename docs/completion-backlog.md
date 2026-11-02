@@ -14,9 +14,11 @@ Integrated on `main` in `401662d` and `342537d`; see
 and remaining limits.
 
 - [ ] General shared/exclusive reference support, including escape and reborrow
-  contracts. **Partial:** nominal-record references may be returned from
-  reference parameters and reborrowed through calls; stored reference locals,
-  reference fields/containers and reference-valued arrows remain rejected.
+  contracts. **Partial:** reference parameters may be returned and reborrowed
+  through calls; stored shared/exclusive reference locals, implicit use
+  reborrow, explicit `&*p`/`&mut *p`, and shared `&Box`/`&Vec`/`&Bytes`/`&String`
+  escape contracts are checked. Reference fields, reference element containers,
+  and reference-valued arrow parameters/results remain rejected.
 - [ ] Broader sound lifetime inference. **Partial:** function/arrow/lambda
   results can be inferred from a single record-field source and ambiguous
   origins are rejected; body-based inference, inferred outlives bounds and
@@ -28,9 +30,14 @@ and remaining limits.
   per-field leaves, indirect calls freshen record lifetimes, and scoped
   closures may capture and return record fields.
 - [ ] Borrowed records in structured tasks with checked scope ownership.
-  **Partial:** scope bodies and child tasks may capture records from scope-external storage;
-  scope-owned storage is rejected. Borrowed-record task results remain
-  rejected explicitly.
+  **Partial:** scope bodies and child tasks may capture records from
+  scope-external storage; scope-owned storage is rejected. A child task may
+  return a borrowed record, and `Task.join` transfers per-field provenance
+  through the conventional `TaskExit<T>` so field loans remain checked until
+  the matched value is consumed or dropped. Cancelled completed results drop
+  owned metadata without freeing borrowed storage. Borrowed `Task.scope`
+  results and borrowed `TaskExit<T>` values across function/callable
+  boundaries remain rejected.
 - [x] Nested record-field borrows and disjoint-field loans. Direct nested
   subviews and structurally disjoint mutable field subviews are checked; whole
   record moves stay blocked and merged records lose field identity.
