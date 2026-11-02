@@ -87,6 +87,34 @@ deliberately not exposed as a source-level query in this milestone; growth
 behavior is observed through subsequent pushes and the stable `buffer-growths`
 counter.
 
+## `Vec.try_reserve`: return the original vector on refusal
+
+`Vec.try_reserve(values, additional)` (also `values.try_reserve(additional)`)
+consumes `Vec<T>` and returns the conventional `Result<Vec<T>, Vec<T>>`.
+`Ok(values)` has room for `len + additional`; `Err(values)` preserves the
+original elements, length, capacity, and allocation. Neither branch drops or
+copies an owning element. Negative requests, size overflow, and allocator
+refusal return `Err`, without an implicit panic or a buffer-growth increment.
+
+Both arguments are evaluated once, left to right. Argument effects and early
+returns retain normal cleanup. The operation requires `{alloc}` even when a
+particular call fits, and is rejected under `#[noalloc]`. A live borrow still
+prevents moving the receiver. A linear owner obligation transfers through the
+result; `clear`, `reserve`, and `try_reserve` cannot erase it.
+
+A successful logical capacity increase increments `buffer-growths` once. If
+the retained physical allocation already covers the request, no allocator
+attempt occurs, even if logical capacity increases. This includes small-block
+rounding and storage retained after map narrowing. Otherwise fallible growth
+uses exact-sized storage and preserves the old allocation on refusal. Logical
+allocation/deallocation counters stay unchanged in either branch.
+
+The reference evaluator models retained physical bytes as well as logical
+capacity, so deterministic allocation-budget tests agree with native
+`KUSH_ALLOC_FAIL_AFTER` probes. Its existing 1Mi-element vector budget remains:
+requests above that limit return `Err` in reference execution, while native
+execution may succeed if the real allocator permits them.
+
 ## `Vec.map_chain_in_place`: explicit interleaved transforms
 
 `Vec.map_chain_in_place(values, f, g)` consumes an owned `Vec<T>` and applies

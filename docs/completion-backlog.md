@@ -188,11 +188,13 @@ outstanding implementation item.
   deliberately not implemented and are not claimed.
 - [ ] Fallible allocation/reuse with exact cleanup on all failure paths. **Partial:**
   **Implemented:** `Box.try_new`, growth-capable `Box.try_reuse`, and
-  `Bytes.try_with_capacity` return the conventional checked `Result`; failures
+  `Bytes.try_with_capacity`, and `Vec.try_reserve` return the conventional
+  checked `Result`; failures
   preserve the old owner and, for `try_new`, the supplied payload. Real native
   malloc refusal and a reference allocation budget are both exercised; no
-  process abort is disguised as `Err`. Fallible arena allocation and
-  `Vec.try_reserve` remain outstanding.
+  process abort is disguised as `Err`. Vector refusal retains every element,
+  length, capacity, and owner obligation; physical-capacity and failure-budget
+  parity are tested. Fallible arena allocation remains outstanding.
 - [x] Reproducible performance and physical-memory benchmarks.
   **Implemented:** `scripts/memory-bench.py` measures allocation counters,
   reference/native parity, wall time, maximum RSS, and native pool retention
@@ -261,3 +263,8 @@ The regression and existing memory/task suites pass locally (33 tests), with
 formatting and library Clippy clean. This focused follow-up does not replace
 the preceding full gate. Earlier branch-only test counts above are historical
 evidence, not evidence that remaining unchecked features are complete.
+
+The match-guard review fix at `3429713` also passed its focused Boat gate:
+33 tests, sandbox confirmed stopped. The later `Vec.try_reserve` change is a
+separate checkpoint: 86 focused local tests passed (memory, vector reuse,
+allocator pool, grades, and linear resources); its remote gate is pending.

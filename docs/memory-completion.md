@@ -111,10 +111,10 @@ let owner: Box<[i64; 2]> = Box.reuse_grow(owner, [20, 22]);
   reuse drops only the current width. Growth copies the old block's `usable`
   capacity before releasing it; the old block is released exactly once.
 
-The reference evaluator models the allocation as one logical identity and
-always "fits"; the native runtime calls the header-aware grow path, which
-returns the same payload when the recorded usable capacity already covers the
-new size. Allocation/deallocation counters are unchanged either way, and the
+The reference evaluator models one logical identity with retained physical
+capacity. Both backends retain the old capacity when the new payload fits;
+otherwise infallible growth uses the native small-block size classes or an
+exact block above the pool limit. Allocation/deallocation counters are unchanged either way, and the
 stable `reuses` counter increments once per successful operation.
 
 ## 3. Fallible allocation and reuse
@@ -127,6 +127,7 @@ there is no process abort disguised as `Err`. They require the exact
 | --- | --- | --- | --- |
 | `Box.try_new(value)` | `Ok(Box<T>)` | `Err(value)`: the untouched payload | `{alloc}` |
 | `Box.try_reuse(owner, payload)` | `Ok(Box<U>)`, possibly grown/moved | `Err(owner)`: the original allocation and payload intact | `{alloc}` |
+| `Vec.try_reserve(values, n)` | `Ok(Vec<T>)`, room for `len + n` | `Err(values)`: untouched elements, length, and capacity | `{alloc}` |
 | `Bytes.try_with_capacity(n)` | `Ok(Bytes)` with exact capacity `n` | `Err(n)`: the requested capacity | `{alloc}` |
 
 - `Box.try_new` moves the payload into the box on success and returns the same
@@ -142,6 +143,12 @@ there is no process abort disguised as `Err`. They require the exact
   a request above that budget is a reference `Err` even if a host allocator
   could satisfy it. Native runs are limited by the real allocator and by
   `KUSH_MAX_CAPACITY`; parity tests use sizes inside the reference budget.
+- `Vec.try_reserve` preserves all owning elements on either branch. Negative
+  or overflowing requests return the original vector without an allocator
+  attempt. Successful logical growth increments `buffer-growths` once; a
+  request fitting retained physical capacity cannot be refused by the probe.
+  The reference retains the existing 1Mi-element modeled limit. See
+  [vector reuse](vector-reuse.md#vectry_reserve-return-the-original-vector-on-refusal).
 - The runtime uses `kush_try_alloc`/`kush_try_grow`, which report system
   allocator refusal instead of calling `kush_panic`. Ordinary `kush_alloc` and
   `kush_grow` still abort. The pool's logical counters change only on success.

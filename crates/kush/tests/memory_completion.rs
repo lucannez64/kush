@@ -796,3 +796,176 @@ fn cancellation_state_reads_in_match_guards_are_not_automatically_fused() {
     assert_eq!(reference(source).0, 42);
     assert_eq!(native_run(source, &[]).exit, Some(42));
 }
+
+fn reserve_budget_agrees(source: &str, budget: usize, expected: i64) -> MemoryStats {
+    let (result, stats) = reference_with_budget(source, budget);
+    assert_eq!(result, expected);
+    let run = native_run(source, &[("KUSH_ALLOC_FAIL_AFTER", &budget.to_string())]);
+    assert_eq!(run.exit, Some((expected & 255) as i32), "{}", run.stderr);
+    assert_eq!(native_stats(&run), stats);
+    stats
+}
+
+#[test]
+fn fallible_vector_reserve_fits_size_class_without_spending_the_budget() {
+    let stats = reserve_budget_agrees(
+        r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = Vec.with_capacity(0);
+            let values = match values.try_reserve(1) {
+                Ok(v) => v, Err(v) => { drop(v); return 1; }
+            };
+            let values = Vec.push(values, 42);
+            let values = match Vec.try_reserve(values, 1) {
+                Ok(v) => { drop(v); return 2; }, Err(v) => v
+            };
+            Vec.get(&values, 0)
+        }"#,
+        0,
+        42,
+    );
+    assert_eq!(stats.buffer_growths, 1);
+    assert_eq!(stats.allocations, 1);
+}
+
+#[test]
+fn fallible_vector_reserve_grows_once_then_preserves_contents_on_refusal() {
+    let stats = reserve_budget_agrees(
+        r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = Vec.with_capacity(0);
+            let values = match Vec.try_reserve(values, 5) {
+                Ok(v) => v, Err(v) => { drop(v); return 1; }
+            };
+            let values = Vec.push(values, 42);
+            let values = match Vec.try_reserve(values, 5) {
+                Ok(v) => { drop(v); return 2; }, Err(v) => v
+            };
+            Vec.get(&values, 0)
+        }"#,
+        1,
+        42,
+    );
+    assert_eq!(stats.buffer_growths, 1);
+}
+
+#[test]
+fn fallible_vector_reserve_rejects_invalid_requests_before_allocation_attempts() {
+    let stats = reserve_budget_agrees(
+        r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = [42];
+            let values = match Vec.try_reserve(values, -1) {
+                Ok(v) => { drop(v); return 1; }, Err(v) => v
+            };
+            let values = match Vec.try_reserve(values, 9223372036854775807) {
+                Ok(v) => { drop(v); return 2; }, Err(v) => v
+            };
+            let values = match Vec.try_reserve(values, 10) {
+                Ok(v) => v, Err(v) => { drop(v); return 3; }
+            };
+            Vec.get(&values, 0)
+        }"#,
+        1,
+        42,
+    );
+    assert_eq!(stats.buffer_growths, 1);
+}
+
+#[test]
+fn fallible_vector_reserve_preserves_owning_elements_and_drops_them_once() {
+    let stats = reserve_budget_agrees(
+        r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<Box<i64>> = [Box.new(42)];
+            let values = match Vec.try_reserve(values, 10) {
+                Ok(v) => { drop(v); return 1; }, Err(v) => v
+            };
+            let length = Vec.len(&values);
+            let values = Vec.clear(values);
+            drop(values);
+            length
+        }"#,
+        0,
+        1,
+    );
+    assert_eq!(stats.allocations, 2);
+    assert_eq!(stats.buffer_growths, 0);
+}
+
+#[test]
+fn fallible_vector_reserve_retains_physical_capacity_after_map_narrowing() {
+    reserve_budget_agrees(
+        r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn first(pair: [i64; 4]) -> i64 ! {} { let [a, b, c, d] = pair; a }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<[i64; 4]> = [[42, 1, 2, 3]];
+            let values = Vec.map_in_place(values, first);
+            let values = match Vec.try_reserve(values, 3) {
+                Ok(v) => v, Err(v) => { drop(v); return 1; }
+            };
+            let values = Vec.push(values, 9);
+            Vec.get(&values, 0)
+        }"#,
+        0,
+        42,
+    );
+}
+
+#[test]
+fn vector_capacity_operations_preserve_linear_owner_obligations() {
+    for operation in [
+        "Vec.try_reserve(values, 0)",
+        "Vec.reserve(values, 0)",
+        "Vec.clear(values)",
+    ] {
+        let source = format!(
+            "enum Result<T, E> {{ Ok(T), Err(E) }}
+             fn make() -> Vec<i64> @[1] ! {{alloc, panic}} {{ [42] }}
+             fn main() -> i64 ! {{alloc, panic}} {{
+                let values = make(); drop({operation}); 0
+             }}"
+        );
+        rejects(&source, "linear");
+    }
+}
+
+#[test]
+fn fallible_vector_reserve_requires_allocation_effect_and_an_owned_receiver() {
+    rejects(
+        "enum Result<T, E> { Ok(T), Err(E) }
+         #[noalloc] fn reserve(v: Vec<i64>) -> Result<Vec<i64>, Vec<i64>> ! {} { Vec.try_reserve(v, 0) }
+         fn main() -> i64 ! {} { 0 }",
+        "alloc",
+    );
+    rejects(
+        "enum Result<T, E> { Ok(T), Err(E) }
+         fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = [42]; drop(Vec.try_reserve(&values, 1)); 0
+         }",
+        "owned Vec",
+    );
+}
+
+#[test]
+fn fallible_vector_reserve_keeps_argument_order_and_early_return_cleanup() {
+    let source = r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn make() -> Vec<i64> ! {alloc, panic, io} { print_i64(1); [42] }
+        fn main() -> i64 ! {alloc, panic, io} {
+            match Vec.try_reserve(make(), { print_i64(2); 0 }) {
+                Ok(v) => { print_i64(3); Vec.get(&v, 0) },
+                Err(v) => { drop(v); 0 }
+            }
+        }"#;
+    agrees(source, 42);
+    assert_eq!(reference(source).2, b"1\n2\n3\n");
+    let stats = agrees(
+        r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<Box<i64>> = [Box.new(42)];
+            drop(Vec.try_reserve(values, { return 42; })); 0
+        }"#,
+        42,
+    );
+    assert_eq!(stats.allocations, 2);
+}

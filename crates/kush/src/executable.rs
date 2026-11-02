@@ -412,6 +412,11 @@ pub(crate) enum VecOp {
     /// `len + additional` elements. Growth happens at most once and only when
     /// the current capacity is insufficient.
     Reserve,
+    /// Return Ok(grown vector) or Err(original vector), never dropping elements.
+    TryReserve {
+        ok_tag: usize,
+        err_tag: usize,
+    },
     Len,
     Get,
     /// Unchecked read; the bound was proved statically.
@@ -7828,6 +7833,7 @@ impl Checker<'_, '_> {
                 | "push_reserved"
                 | "clear"
                 | "reserve"
+                | "try_reserve"
                 | "copy"
                 | "set"
                 | "as_bytes"
@@ -8090,7 +8096,7 @@ impl Checker<'_, '_> {
         if matches!(base, Some(Type::Vec(_))) {
             let (method, borrow) = match name {
                 "len" | "get" | "at" => (name, true),
-                "clear" | "push" | "reserve" | "set" => (name, false),
+                "clear" | "push" | "reserve" | "try_reserve" | "set" => (name, false),
                 _ => return Err(unsupported(self)),
             };
             let first = if borrow {
@@ -12378,6 +12384,12 @@ impl Checker<'_, '_> {
                     signature.result_grade.is_some_and(Grade::is_one)
                         && self.owned_type(signature.result)
                 }),
+            ExprKind::Call(
+                Target::Vec(VecOp::Reserve | VecOp::Clear | VecOp::TryReserve { .. }, _),
+                args,
+            ) => args
+                .first()
+                .is_some_and(|owner| self.value_moves_linear(owner)),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
                 Type::Fn(id) | Type::Once(id) => {
                     self.types.function_types.get(id).is_some_and(|signature| {
@@ -19366,7 +19378,7 @@ impl Checker<'_, '_> {
         let arity = match name {
             "Vec.new" => 0,
             "Vec.with_capacity" | "Vec.len" | "Vec.pop" | "Vec.clear" => 1,
-            "Vec.get" | "Vec.push" | "Vec.map_in_place" | "Vec.reserve" => 2,
+            "Vec.get" | "Vec.push" | "Vec.map_in_place" | "Vec.reserve" | "Vec.try_reserve" => 2,
             "Vec.map_chain_in_place" => 3,
             _ => 3,
         };
@@ -19506,7 +19518,7 @@ impl Checker<'_, '_> {
         };
         let arity = match name {
             "Vec.len" | "Vec.clear" => 0,
-            "Vec.get" | "Vec.push" | "Vec.reserve" => 1,
+            "Vec.get" | "Vec.push" | "Vec.reserve" | "Vec.try_reserve" => 1,
             _ => 2,
         };
         if rest.len() != arity {
@@ -19525,12 +19537,15 @@ impl Checker<'_, '_> {
             {
                 self.types.pointees[p]
             }
-            ("Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve", Type::Vec(_)) => first.ty,
+            (
+                "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" | "Vec.try_reserve",
+                Type::Vec(_),
+            ) => first.ty,
             (_, Type::Never) => return Ok(first),
             _ => {
                 let wanted = match name {
                     "Bytes.at" => "&Bytes",
-                    "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" => {
+                    "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" | "Vec.try_reserve" => {
                         "an owned Vec<T> (it is consumed and returned)"
                     }
                     _ => "&Vec<T>",
@@ -19566,7 +19581,7 @@ impl Checker<'_, '_> {
             }
             values.push(value);
         }
-        if name == "Vec.reserve" {
+        if matches!(name, "Vec.reserve" | "Vec.try_reserve") {
             let additional = self.expr_expected(&rest[0], Some(Type::I64))?;
             self.expect(additional.ty, Type::I64, additional.span)?;
             values.push(additional);
@@ -19584,6 +19599,17 @@ impl Checker<'_, '_> {
             "Vec.len" => (VecOp::Len, 0, Type::I64),
             "Vec.clear" => (VecOp::Clear, 0, buffer),
             "Vec.reserve" => (VecOp::Reserve, ALLOC | PANIC, buffer),
+            "Vec.try_reserve" => {
+                let (result, shape) = self.types.result_type(buffer, buffer, span)?;
+                (
+                    VecOp::TryReserve {
+                        ok_tag: shape.ok_tag,
+                        err_tag: shape.err_tag,
+                    },
+                    ALLOC,
+                    result,
+                )
+            }
             "Vec.get" => (VecOp::Get, PANIC, element),
             "Vec.at" | "Bytes.at" => (VecOp::At, 0, element),
             "Vec.push" => (VecOp::Push, ALLOC | PANIC, buffer),

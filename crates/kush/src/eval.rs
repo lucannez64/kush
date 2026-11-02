@@ -571,6 +571,8 @@ enum Value {
     Vector {
         items: Vec<Value>,
         capacity: usize,
+        /// Retained native allocation bytes, including the three-word header.
+        usable: usize,
     },
     /// An immutable or exclusive slice view: `start` is in elements of the
     /// underlying storage. `array` is a shared cell used when the base is an
@@ -1476,7 +1478,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
         }
     }
-    fn vec_call(&mut self, op: VecOp, args: Vec<Value>, span: Span) -> Result<Value> {
+    fn vec_call(
+        &mut self,
+        op: VecOp,
+        element: Type,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value> {
         const LIMIT: usize = 1 << 20;
         let failure = |message: &str| Diagnostic::new(span, message.to_owned());
         let index_of = |value: &Value, len: usize| {
@@ -1497,6 +1505,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 Ok(self.allocate(Value::Vector {
                     items: Vec::new(),
                     capacity,
+                    usable: box_allocation_capacity(
+                        24 + capacity * self.program.width(element) * 8,
+                    ),
                 }))
             }
             VecOp::Clear => {
@@ -1506,6 +1517,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let Some(Value::Vector {
                     mut items,
                     capacity,
+                    usable,
                 }) = self.heap.take(id)
                 else {
                     return Err(failure("internal ownership error: moved vector"));
@@ -1515,7 +1527,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 while let Some(item) = items.pop() {
                     self.drop_value(item)?;
                 }
-                self.heap.insert(id, Value::Vector { items, capacity });
+                self.heap.insert(
+                    id,
+                    Value::Vector {
+                        items,
+                        capacity,
+                        usable,
+                    },
+                );
                 Ok(Value::Owned(id))
             }
             VecOp::Reserve => {
@@ -1524,7 +1543,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 };
                 let additional = usize::try_from(args[1].scalar())
                     .map_err(|_| failure("panic: negative vector reserve"))?;
-                let Some(Value::Vector { items, capacity }) = self.heap.take(id) else {
+                let Some(Value::Vector {
+                    items,
+                    capacity,
+                    mut usable,
+                }) = self.heap.take(id)
+                else {
                     return Err(failure("internal ownership error: moved vector"));
                 };
                 let needed = items
@@ -1541,10 +1565,66 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 // not speculate capacity beyond `len + additional`.
                 if needed > capacity {
                     capacity = needed;
+                    let requested = 24 + capacity * self.program.width(element) * 8;
+                    if requested > usable {
+                        usable = box_allocation_capacity(requested);
+                    }
                     self.stats.growth();
                 }
-                self.heap.insert(id, Value::Vector { items, capacity });
+                self.heap.insert(
+                    id,
+                    Value::Vector {
+                        items,
+                        capacity,
+                        usable,
+                    },
+                );
                 Ok(Value::Owned(id))
+            }
+            VecOp::TryReserve { ok_tag, err_tag } => {
+                let Value::Owned(id) = args[0] else {
+                    unreachable!()
+                };
+                let Some(Value::Vector {
+                    items,
+                    capacity,
+                    usable,
+                }) = self.heap.get(id)
+                else {
+                    return Err(failure("internal ownership error: moved vector"));
+                };
+                let request = usize::try_from(args[1].scalar())
+                    .ok()
+                    .and_then(|additional| items.len().checked_add(additional))
+                    .filter(|needed| *needed <= LIMIT)
+                    .and_then(|needed| {
+                        needed
+                            .checked_mul(self.program.width(element) * 8)
+                            .and_then(|bytes| bytes.checked_add(24))
+                            .filter(|bytes| *bytes <= i64::MAX as usize)
+                            .map(|bytes| (needed, bytes))
+                    });
+                let success = request.is_some_and(|(needed, bytes)| {
+                    needed <= capacity || bytes <= usable || self.try_charge()
+                });
+                if success {
+                    let (needed, bytes) = request.unwrap();
+                    if needed > capacity {
+                        self.heap.insert(
+                            id,
+                            Value::Vector {
+                                items,
+                                capacity: needed,
+                                usable: usable.max(bytes),
+                            },
+                        );
+                        self.stats.growth();
+                    }
+                }
+                Ok(Value::Enum {
+                    tag: if success { ok_tag } else { err_tag },
+                    fields: vec![Value::Owned(id)],
+                })
             }
             VecOp::Len | VecOp::Get | VecOp::At => {
                 let Value::Borrowed(id) = args[0] else {
@@ -1577,6 +1657,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let Some(Value::Vector {
                     mut items,
                     mut capacity,
+                    mut usable,
                 }) = self.heap.take(id)
                 else {
                     return Err(failure("internal ownership error: moved vector"));
@@ -1584,7 +1665,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 if let Some(index) = index {
                     let index = index_of(&index, items.len())?;
                     let old = std::mem::replace(&mut items[index], value);
-                    self.heap.insert(id, Value::Vector { items, capacity });
+                    self.heap.insert(
+                        id,
+                        Value::Vector {
+                            items,
+                            capacity,
+                            usable,
+                        },
+                    );
                     self.drop_value(old)?;
                     return Ok(Value::Owned(id));
                 }
@@ -1600,10 +1688,21 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         ));
                     }
                     capacity = next;
+                    let requested = 24 + capacity * self.program.width(element) * 8;
+                    if requested > usable {
+                        usable = box_allocation_capacity(requested);
+                    }
                     self.stats.growth();
                 }
                 items.push(value);
-                self.heap.insert(id, Value::Vector { items, capacity });
+                self.heap.insert(
+                    id,
+                    Value::Vector {
+                        items,
+                        capacity,
+                        usable,
+                    },
+                );
                 Ok(Value::Owned(id))
             }
         }
@@ -1616,6 +1715,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         let Some(Value::Vector {
             mut items,
             capacity,
+            usable,
         }) = self.heap.take(id)
         else {
             return Err(Diagnostic::new(
@@ -1640,7 +1740,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
             *item = current;
         }
-        self.heap.insert(id, Value::Vector { items, capacity });
+        self.heap.insert(
+            id,
+            Value::Vector {
+                items,
+                capacity,
+                usable,
+            },
+        );
         Ok(Value::Owned(id))
     }
     fn io_call(
@@ -2822,7 +2929,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Target::Bytes(op) => self.bytes_call(*op, values, expr.span)?,
                     Target::String(op) => self.string_call(*op, values, expr.span)?,
                     Target::Str(op) => self.str_call(*op, values, expr.span)?,
-                    Target::Vec(op, _) => self.vec_call(*op, values, expr.span)?,
+                    Target::Vec(op, element) => self.vec_call(*op, *element, values, expr.span)?,
                     Target::Slice(op, _) => self.slice_call(*op, values, expr.span)?,
                     Target::DynArray(op, element) => {
                         self.dyn_array_call(*op, *element, values, expr.span)?

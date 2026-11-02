@@ -779,6 +779,22 @@ uint64_t kush_vec_reserve(uint64_t handle, int64_t additional) {
     ++kush_buffer_growths;
     return (uint64_t)(uintptr_t)replacement;
 }
+/* On refusal or invalid capacity, the original allocation/header/elements
+   remain untouched. Zero is an out-of-band failure handle, never an owner. */
+uint64_t kush_vec_try_reserve(uint64_t handle, int64_t additional) {
+    KushVec *v = (KushVec *)(uintptr_t)handle;
+    if (additional < 0) return 0;
+    uint64_t needed;
+    if (__builtin_add_overflow(v->length, (uint64_t)additional, &needed)) return 0;
+    if (needed <= v->capacity) return handle;
+    if (v->width == 0 || needed > ((uint64_t)INT64_MAX - sizeof(KushVec)) / 8 / v->width) return 0;
+    uint64_t bytes = sizeof(KushVec) + needed * v->width * 8;
+    KushVec *replacement = (KushVec *)kush_try_grow(v, bytes);
+    if (replacement == NULL) return 0;
+    replacement->capacity = needed;
+    ++kush_buffer_growths;
+    return (uint64_t)(uintptr_t)replacement;
+}
 /* Stackful cooperative tasks. One OS thread; strict handoff. */
 #include <ucontext.h>
 #include <sys/mman.h>
@@ -1326,6 +1342,15 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     for (op, name, params, returns) in [
         (VecOp::WithCapacity, "kush_vec_with_capacity", 2, true),
         (VecOp::Reserve, "kush_vec_reserve", 2, true),
+        (
+            VecOp::TryReserve {
+                ok_tag: 0,
+                err_tag: 0,
+            },
+            "kush_vec_try_reserve",
+            2,
+            true,
+        ),
         (VecOp::Len, "kush_vec_len", 1, true),
         (VecOp::Get, "kush_vec_get", 3, false),
         (VecOp::Push, "kush_vec_push", 2, true),
@@ -4955,6 +4980,22 @@ impl Generator<'_, '_> {
                 call(self, op, &[values[0], w])
             }
             VecOp::Reserve => call(self, op, &[values[0], values[1]]),
+            VecOp::TryReserve { ok_tag, err_tag } => {
+                let grown = call(
+                    self,
+                    VecOp::TryReserve {
+                        ok_tag: 0,
+                        err_tag: 0,
+                    },
+                    &[values[0], values[1]],
+                )[0];
+                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, grown, 0);
+                let ok = self.constant(ok_tag as i64);
+                let error = self.constant(err_tag as i64);
+                let tag = self.builder.ins().select(failed, error, ok);
+                let owner = self.builder.ins().select(failed, values[0], grown);
+                vec![tag, owner]
+            }
             VecOp::Clear => {
                 let handle = values[0];
                 if self.program.owns(element) {

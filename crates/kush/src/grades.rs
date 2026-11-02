@@ -1082,6 +1082,17 @@ impl<'a> Checker<'a> {
                 .functions
                 .get(*index)
                 .is_some_and(|function| function.result_grade.is_some_and(Grade::is_one)),
+            ExprKind::Call(
+                crate::executable::Target::Vec(
+                    crate::executable::VecOp::Reserve
+                    | crate::executable::VecOp::Clear
+                    | crate::executable::VecOp::TryReserve { .. },
+                    _,
+                ),
+                args,
+            ) => args
+                .first()
+                .is_some_and(|owner| self.value_has_grade_one(owner)),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
                 Type::Fn(id) | Type::Once(id) => self
                     .program

@@ -326,6 +326,7 @@ impl Resolver {
             "Vec.map_chain_in_place",
             "Vec.clear",
             "Vec.reserve",
+            "Vec.try_reserve",
             "Slice.len",
             "Slice.get",
             "Slice.try_get",
