@@ -141,7 +141,8 @@ normalized unions are implemented. See
 [dependent array lengths](dependent-indices.md) and
 [borrowed records](borrowed-records.md).
 General borrowed `str`/substring views,
-runtime-sized inline arrays, direct mutable/owning
+runtime-sized `[T; n]` layouts (the separate `DynArray<T, capacity>`
+subset is documented in [dynamic-arrays.md](dynamic-arrays.md)), direct mutable/owning
 record field moves, linear or stream/callable/union metadata in mixed records,
 general lifetime inference beyond signature elision,
 traits, arbitrary FFI, and attributes
@@ -253,7 +254,11 @@ integration needs relevance/erasure checking before it can be connected safely
 to executable code. Heterogeneous union/intersection subtyping is implemented
 for value types; see [subtyping.md](subtyping.md), and first-class
 [functions and closures](functions.md) have checked arrow subtyping and owning
-once closures. Structural record/width subtyping, user-defined graded
-modalities, grade inference, general fusion, forced cancellation unwinding,
-nonblocking task I/O, and LLVM remain future work. The implemented natural/abstract grade fragment is
+once closures. Canonical structural record width subtyping, finite effect-row
+constraints, lexical one-shot tail-resumptive handlers, versioned runtime proof
+indices, and `DynArray<T, capacity>` are implemented restricted fragments; see
+the linked documents. General nested structural conversions, captured
+continuations/multishot handlers, open-row principal inference, user-defined
+graded modalities, general fusion, forced cancellation unwinding, nonblocking
+task I/O, and LLVM remain future work. The implemented natural/abstract grade fragment is
 described in [grades.md](grades.md).

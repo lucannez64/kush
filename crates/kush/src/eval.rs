@@ -1366,10 +1366,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let index = usize::try_from(args[1].scalar())
                     .map_err(|_| Diagnostic::new(span, "panic: DynArray index out of bounds"))?;
                 let Some(value) = items.get(index) else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "panic: DynArray index out of bounds",
-                    ));
+                    return Err(Diagnostic::new(span, "panic: DynArray index out of bounds"));
                 };
                 debug_assert!(!self.program.owns(element));
                 Ok(value.clone())
@@ -2114,9 +2111,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         let mut source = fields.into_iter().map(Some).collect::<Vec<_>>();
                         let mut target = Vec::with_capacity(kept.len());
                         for (_, source_index) in kept {
-                            let Some(field) = source
-                                .get_mut(*source_index)
-                                .and_then(|field| field.take())
+                            let Some(field) =
+                                source.get_mut(*source_index).and_then(|field| field.take())
                             else {
                                 return Err(Diagnostic::new(
                                     expr.span,
@@ -2126,9 +2122,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             target.push(field);
                         }
                         for (source_index, _) in drops {
-                            if let Some(field) = source
-                                .get_mut(*source_index)
-                                .and_then(|field| field.take())
+                            if let Some(field) =
+                                source.get_mut(*source_index).and_then(|field| field.take())
                             {
                                 self.drop_value(field)?;
                             }

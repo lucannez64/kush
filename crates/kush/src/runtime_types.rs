@@ -780,12 +780,7 @@ impl<'a> Types<'a> {
     /// the runtime length; the remaining `capacity * width(T)` words are inline
     /// storage. The capacity is a compile-time bound, so the layout is finite
     /// and a value may be moved or returned without a hidden stack pointer.
-    pub fn dynamic_array(
-        &mut self,
-        element: Type,
-        capacity: usize,
-        span: Span,
-    ) -> Result<Type> {
+    pub fn dynamic_array(&mut self, element: Type, capacity: usize, span: Span) -> Result<Type> {
         if capacity == 0 || capacity > 31 {
             return Err(Diagnostic::new(
                 span,
@@ -860,11 +855,7 @@ impl<'a> Types<'a> {
     /// Intern an anonymous structural record row. Fields are sorted by name:
     /// this is the canonical row representation used for layout, equality, and
     /// field coercion. Duplicate names are rejected, so the ordering is total.
-    pub fn structural(
-        &mut self,
-        mut fields: Vec<(String, Type)>,
-        span: Span,
-    ) -> Result<Type> {
+    pub fn structural(&mut self, mut fields: Vec<(String, Type)>, span: Span) -> Result<Type> {
         fields.sort_by(|left, right| left.0.cmp(&right.0));
         if fields.is_empty() {
             return Err(Diagnostic::new(
@@ -1414,7 +1405,10 @@ impl<'a> Types<'a> {
     }
     fn layout_name(&self, id: usize) -> String {
         let layout = &self.enums[id];
-        if layout.tuple || layout.array.is_some() || layout.dynamic_array.is_some() || layout.structural
+        if layout.tuple
+            || layout.array.is_some()
+            || layout.dynamic_array.is_some()
+            || layout.structural
         {
             return layout.name.clone();
         }
@@ -2687,9 +2681,7 @@ impl<'a> Types<'a> {
                 return self.function_subtype(&self.function_types[a], &self.function_types[b]);
             }
             (Type::Once(_), Type::Fn(_)) => return false,
-            (Type::Enum(a), Type::Enum(b))
-                if self.enums[a].record && self.enums[b].structural =>
-            {
+            (Type::Enum(a), Type::Enum(b)) if self.enums[a].record && self.enums[b].structural => {
                 return self.structural_subtype(a, b);
             }
             (Type::Enum(a), Type::Enum(b)) if self.enums[a].record && self.enums[b].record => {
@@ -2738,11 +2730,7 @@ impl<'a> Types<'a> {
                 }
             }
         }
-        for (index, source_ty) in source_variant
-            .names
-            .iter()
-            .zip(&source_variant.fields)
-        {
+        for (index, source_ty) in source_variant.names.iter().zip(&source_variant.fields) {
             if target_variant.names.contains(index) {
                 continue;
             }

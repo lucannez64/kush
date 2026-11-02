@@ -320,6 +320,20 @@ fn performs_require_a_lexical_handler_and_a_exact_resume_contract() {
     );
     rejects(
         r#"
+        fn main() -> i64 ! {alloc, panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x) } {
+                let f: once fn() -> i64 ! {alloc, panic} =
+                    fn() -> i64 ! {alloc, panic} { perform Op(1) };
+                f()
+            }
+        }"#,
+        "no lexically enclosing handler",
+    );
+    rejects(
+        r#"
         fn main() -> i64 ! {panic} {
             handle Op: i64 -> i64 with fn(
                 x: i64,

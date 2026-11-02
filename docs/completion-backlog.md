@@ -106,11 +106,48 @@ this fix still needs the integrated test/review gate.
 ## Advanced types and effects
 
 - [ ] Structural record subtyping and representation-changing coercions.
-- [ ] Broader algebraic subtype inference with documented decidability boundaries.
-- [ ] Effect handlers and checked resumption ownership.
-- [ ] General row constraints beyond concrete exclusions.
+  **Partial:** anonymous `struct { ... }` rows, canonical field order,
+  width subtyping, checked field-copy coercions, affine-field cleanup, linear
+  field erasure rejection, and borrowed-leaf/mutability invariance are
+  implemented in both backends. Nested field representation changes, open rows,
+  structural record literals, generic structural patterns, and structural
+  records in impl headers are explicitly rejected. See
+  [subtyping.md](subtyping.md#structural-records).
+- [ ] Broader algebraic subtype inference with documented decidability
+  boundaries. **Partial:** contextual array/vector/tuple literals and
+  first-order generic matching now accumulate constraints over every finite
+  union alternative instead of choosing the first matching arm. Conflicting or
+  incomparable bindings are explicit. General principal inference, indexed
+  unions, and multi-variable backtracking remain out of scope. See
+  [subtyping.md](subtyping.md#contextual-and-algebraic-inference).
+- [ ] Effect handlers and checked resumption ownership. **Partial:** lexical
+  one-shot tail-resumptive `handle`/`perform`, nested shadowing, first-class
+  handler callables, a linear identity resumption token, handler-effect
+  propagation, and owning payload/cleanup checks work in both backends.
+  Captured continuations, non-tail resumption, multishot handlers, dynamic
+  handler stacks across calls, and user-defined effect rows are not
+  implemented; `perform` inside a lambda is rejected. See
+  [effect-handlers.md](effect-handlers.md).
+- [ ] General row constraints beyond concrete exclusions. **Partial:** a finite
+  constraint solver accumulates inclusion constraints across every higher-order
+  argument, supports up to three unbound row variables (4096 assignments),
+  unions evidence from repeated row variables, applies exclusion bounds, and
+  rejects ambiguous/nonminimal groups. There are no lower bounds, row
+  subtraction, recursive row unification, or open-row principal inference. See
+  [effect-constraints.md](effect-constraints.md#accumulated-row-constraints).
 - [ ] Broader runtime-dependent proofs with mutation/version tracking.
+  **Partial:** mutable scalar locals index erased proofs at their current
+  version; assignment appends a fresh versioned binder, an old literal proof is
+  rejected against the new value, and a closure capture is an independent
+  frozen snapshot. Proof-valued runtime locals, mutable captures as a live
+  view, and arithmetic proof search remain absent. See
+  [runtime-indices.md](runtime-indices.md#4-freezing-and-mutation).
 - [ ] Runtime-sized inline arrays with checked lifetime/storage layout.
+  **Partial:** `DynArray<T, capacity>` has compile-time capacity, runtime
+  length, inline storage, checked push overflow, checked reads, owning-prefix
+  drop, and native/reference agreement. There is no `pop`/`set`, literal,
+  pattern, view, or runtime `[T; n]`; capacity remains a compile-time bound.
+  See [dynamic-arrays.md](dynamic-arrays.md).
 
 ## Memory and optimization
 

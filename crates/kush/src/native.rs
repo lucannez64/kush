@@ -3531,11 +3531,10 @@ impl Generator<'_, '_> {
                         return Some(out);
                     }
                     Coercion::Struct { kept, drops } => {
-                        let source_id = value
-                            .ty
-                            .layout()
-                            .expect("checked structural source layout");
-                        let source_fields = self.program.enums[source_id].variants[0].fields.clone();
+                        let source_id =
+                            value.ty.layout().expect("checked structural source layout");
+                        let source_fields =
+                            self.program.enums[source_id].variants[0].fields.clone();
                         let mut offsets = Vec::with_capacity(source_fields.len());
                         let mut offset = 1usize;
                         for field in &source_fields {
@@ -3615,11 +3614,10 @@ impl Generator<'_, '_> {
                 // Select the active capacity slot without a runtime index into
                 // the value vector: each slot compares the length once.
                 for slot in 0..*capacity {
-                    let active = self.builder.ins().icmp_imm_s(
-                        IntCC::Equal,
-                        length,
-                        slot as i64,
-                    );
+                    let active = self
+                        .builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, length, slot as i64);
                     for (word, value) in item.iter().take(element_width).enumerate() {
                         let index = 1 + slot * element_width + word;
                         out[index] = self.builder.ins().select(active, *value, out[index]);
@@ -4598,11 +4596,14 @@ impl Generator<'_, '_> {
             DynArrayOp::Len => vec![length],
             DynArrayOp::Get => {
                 let index = values[1];
-                let negative = self.builder.ins().icmp_imm_s(IntCC::SignedLessThan, index, 0);
-                let past_end = self
+                let negative = self
                     .builder
                     .ins()
-                    .icmp(IntCC::UnsignedGreaterThanOrEqual, index, length);
+                    .icmp_imm_s(IntCC::SignedLessThan, index, 0);
+                let past_end =
+                    self.builder
+                        .ins()
+                        .icmp(IntCC::UnsignedGreaterThanOrEqual, index, length);
                 let bad = self.builder.ins().bor(negative, past_end);
                 self.guard(bad);
                 let width = self.program.width(element);

@@ -599,7 +599,10 @@ pub(crate) enum ExprKind {
         target: Type,
     },
     /// Construct an empty runtime-sized inline array with zeroed capacity.
-    DynArrayNew { element: Type, capacity: usize },
+    DynArrayNew {
+        element: Type,
+        capacity: usize,
+    },
     /// Append one element, consuming and returning the same inline storage.
     /// The runtime length check panics before any out-of-capacity store.
     DynArrayPush {
@@ -1043,9 +1046,7 @@ fn collect_body_returns<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
                 collect_body_returns(argument, out);
             }
         }
-        ast::ExprKind::Handle {
-            handler, body, ..
-        } => {
+        ast::ExprKind::Handle { handler, body, .. } => {
             collect_body_returns(handler, out);
             collect_block_returns(body, out);
         }
@@ -7632,9 +7633,9 @@ impl Checker<'_, '_> {
             let (elements, fields) = match accepted.len() {
                 1 => accepted.pop().expect("one accepted tuple alternative"),
                 0 => {
-                    return Err(first_error.expect(
-                        "a tuple literal candidate always attempts one element",
-                    ));
+                    return Err(
+                        first_error.expect("a tuple literal candidate always attempts one element")
+                    );
                 }
                 _ => {
                     return Err(Diagnostic::new(
@@ -10659,6 +10660,9 @@ impl Checker<'_, '_> {
             }
             drops.push((source_index, *source_ty));
         }
+        // Record cleanup is reverse declaration order; keep the width-erased
+        // fields in the same order so observable destruction is deterministic.
+        drops.reverse();
         Ok(Expr {
             kind: ExprKind::Coerce {
                 value: Box::new(value),
@@ -14457,6 +14461,10 @@ impl Checker<'_, '_> {
             .collect::<Vec<_>>();
         let kernel_mark = self.kernel_locals.len();
         let saved_scope_depth = self.scope_depth;
+        // A handler is lexical to direct performs in the enclosing function
+        // body, never to indirect calls. A lambda is a separate callable, so it
+        // cannot capture the hidden handler local by name.
+        let saved_handlers = std::mem::take(&mut self.handlers);
         let checked = (|| {
             self.scope_depth = if scope_root { saved_scope_depth + 1 } else { 0 };
             for (ty, (grade, linear)) in capture_types.iter().zip(&capture_obligations) {
@@ -14523,6 +14531,7 @@ impl Checker<'_, '_> {
         })();
         self.kernel_locals.truncate(kernel_mark);
         self.scope_depth = saved_scope_depth;
+        self.handlers = saved_handlers;
         let locals = std::mem::take(&mut self.locals);
         self.locals = saved_locals;
         self.slots = saved_slots;
@@ -16557,16 +16566,43 @@ impl Checker<'_, '_> {
                         _ => "suspend",
                     })
                     .collect::<Vec<_>>();
+                fn effect_spelling(ty: &ast::Type) -> String {
+                    match &ty.kind {
+                        ast::TypeKind::Named { path, .. } => path.join("."),
+                        ast::TypeKind::Binary {
+                            op: crate::lexer::Kind::Pipe,
+                            left,
+                            right,
+                        } => format!("{} | {}", effect_spelling(left), effect_spelling(right)),
+                        _ => "concrete effects".to_owned(),
+                    }
+                }
                 let variables = first
                     .variables
                     .iter()
                     .map(|variable| format!("'{}'", self.resolution.bindings[*variable].name))
                     .collect::<Vec<_>>()
                     .join(", ");
+                let bound = first.variables.first().and_then(|variable| {
+                    effect_generics
+                        .iter()
+                        .find(|generic| {
+                            self.resolution.binder(generic.span).as_ref() == Some(variable)
+                        })
+                        .and_then(|generic| generic.excludes.as_ref())
+                        .map(|excludes| {
+                            format!(
+                                "<{}: Effects - {}>",
+                                self.resolution.bindings[*variable].name,
+                                effect_spelling(excludes)
+                            )
+                        })
+                });
+                let bound = bound.unwrap_or_else(|| format!("the bound on {variables}"));
                 return Err(Diagnostic::new(
                     first.span,
                     format!(
-                        "effect {} is excluded by the declared bound on row parameter {variables}, but the callable argument requires it",
+                        "effect {} is excluded by '{bound}', but the callable argument requires it",
                         names
                             .iter()
                             .map(|name| format!("'{name}'"))
@@ -16588,9 +16624,9 @@ impl Checker<'_, '_> {
             .filter(|candidate| {
                 !valid.iter().any(|other| {
                     other != *candidate
-                        && other
-                            .iter()
-                            .all(|(variable, bits)| bits & !candidate.get(variable).copied().unwrap_or(0) == 0)
+                        && other.iter().all(|(variable, bits)| {
+                            bits & !candidate.get(variable).copied().unwrap_or(0) == 0
+                        })
                 })
             })
             .collect::<Vec<_>>();
@@ -17838,11 +17874,7 @@ impl Checker<'_, '_> {
     /// Contextual inline-array construction. A union context selects an
     /// alternative array whose length matches the literal; an exact array
     /// context keeps the declared length so the usual mismatch error is clear.
-    fn expected_array(
-        &self,
-        expected: Option<Type>,
-        length: usize,
-    ) -> Vec<(usize, Type, usize)> {
+    fn expected_array(&self, expected: Option<Type>, length: usize) -> Vec<(usize, Type, usize)> {
         let candidates = |expected: Type| -> Vec<(usize, Type, usize)> {
             let Some(id) = expected.layout() else {
                 return Vec::new();
@@ -17924,9 +17956,8 @@ impl Checker<'_, '_> {
                 let (element, checked) = match accepted.len() {
                     1 => accepted.pop().expect("one accepted vector element"),
                     0 => {
-                        return Err(first_error.expect(
-                            "a vector literal candidate always attempts one element",
-                        ));
+                        return Err(first_error
+                            .expect("a vector literal candidate always attempts one element"));
                     }
                     _ => {
                         return Err(Diagnostic::new(
@@ -18579,6 +18610,7 @@ impl Checker<'_, '_> {
     /// twice is a use-after-move, and returning without invoking it is an
     /// unconsumed linear obligation. There is no captured continuation, so a
     /// second resumption (multishot) is unrepresentable.
+    #[allow(clippy::too_many_arguments)]
     fn handle_effect(
         &mut self,
         operation: &str,
@@ -18949,10 +18981,7 @@ impl Checker<'_, '_> {
                         None => Ok(value),
                     };
                 }
-                if self.owned_type(element)
-                    || self.linear_type(element)
-                    || element.is_view()
-                {
+                if self.owned_type(element) || self.linear_type(element) || element.is_view() {
                     return Err(Diagnostic::new(
                         span,
                         "DynArray.get copies its element; owning, linear, and view elements need an explicit consuming operation",
@@ -20349,9 +20378,7 @@ fn collect_expr_refs(resolution: &Resolution, expr: &ast::Expr, out: &mut BTreeS
                 collect_expr_refs(resolution, argument, out);
             }
         }
-        ast::ExprKind::Handle {
-            handler, body, ..
-        } => {
+        ast::ExprKind::Handle { handler, body, .. } => {
             collect_expr_refs(resolution, handler, out);
             collect_lambda_refs(resolution, body, out);
         }

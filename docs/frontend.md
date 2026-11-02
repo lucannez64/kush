@@ -159,8 +159,9 @@ const parameters, admitted total logical applications such as `add<1, 1>`, and
 checked `+`/`-`/`*`/`/`/`%`. It is parsed as a restricted expression and
 evaluated while lowering an executable type (never by running runtime code).
 Symbolic lengths in generic data and explicit const specialization are
-implemented; runtime-sized inline arrays are not. See
-[dependent-indices.md](dependent-indices.md). Function types extend through
+implemented; a runtime-sized `[T; n]` layout is not. The separate
+`DynArray<T, capacity>` builtin provides inline fixed-capacity storage with a
+runtime length; see [dynamic-arrays.md](dynamic-arrays.md). Function types extend through
 their return type and effect
 row. Their parameters can be named, as in `fn(n: Nat) -> Eq<Nat, n, n> ! {}`;
 a name binds in later parameter annotations, the return type, and effect row.

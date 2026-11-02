@@ -3854,9 +3854,7 @@ impl Checker<'_> {
                 }
             }
             ExprKind::DynArrayNew { .. } => {}
-            ExprKind::DynArrayPush {
-                array, value, ..
-            } => {
+            ExprKind::DynArrayPush { array, value, .. } => {
                 // The array is consumed and returned in the same inline
                 // storage; the element is evaluated only after the array.
                 self.expr(array)?;
