@@ -52,6 +52,11 @@ pub(crate) enum Type {
     /// `&mut` reference is moved rather than copied and cannot be stored in a
     /// local, returned, or captured by this call-scoped subset.
     RefMut(usize),
+    /// A transparent wrapper used only inside a container pointee. It carries
+    /// the erased lifetime label declared for a reference element, has exactly
+    /// the inner type's runtime representation, and never appears as the type
+    /// of a user-visible expression.
+    Annotated(usize, u32),
     /// Growable owned vector of a pointee element type.
     Vec(usize),
     /// Immutable borrowed slice view: `(data pointer, length, stride, byte flag)`.
@@ -185,6 +190,11 @@ pub struct Executable {
     pub(crate) pointees: Vec<Type>,
     pub(crate) unions: Vec<crate::runtime_types::UnionType>,
     pub(crate) function_types: Vec<FunctionType>,
+    /// Erased lifetime names for reference elements stored inside containers.
+    /// Checker-only; the runtime representation is one word and carries no
+    /// label. Ownership uses this table to recover a declared element lifetime
+    /// from a container's pointee type.
+    pub(crate) reference_labels: Vec<String>,
     pub(crate) owned_enums: Vec<bool>,
     pub(crate) linear_enums: Vec<bool>,
     pub(crate) certificates: Vec<crate::facts::Certificate>,
@@ -1688,6 +1698,7 @@ fn value_lifetime_candidates(
     resolution: &Resolution,
     expr: &ast::Expr,
     parameter_lifetimes: &BTreeMap<BindingId, String>,
+    parameter_field_lifetimes: &BTreeMap<BindingId, BTreeMap<String, String>>,
     out: &mut BTreeSet<String>,
 ) {
     match &expr.kind {
@@ -1698,10 +1709,33 @@ fn value_lifetime_candidates(
                 out.insert(lifetime.clone());
             }
         }
-        ast::ExprKind::Field { value, .. }
-        | ast::ExprKind::Unary { operand: value, .. }
-        | ast::ExprKind::Try(value) => {
-            value_lifetime_candidates(resolution, value, parameter_lifetimes, out);
+        ast::ExprKind::Field { value, .. } => {
+            // A field projection of a multi-lifetime record parameter inherits
+            // exactly that field's declared lifetime. Nested paths use the
+            // record's field names, not its erased layout indices.
+            if let Some((id, path)) = field_chain(resolution, expr)
+                && let Some(fields) = parameter_field_lifetimes.get(&id)
+                && let Some(lifetime) = fields.get(&path.join("."))
+            {
+                out.insert(lifetime.clone());
+                return;
+            }
+            value_lifetime_candidates(
+                resolution,
+                value,
+                parameter_lifetimes,
+                parameter_field_lifetimes,
+                out,
+            );
+        }
+        ast::ExprKind::Unary { operand: value, .. } | ast::ExprKind::Try(value) => {
+            value_lifetime_candidates(
+                resolution,
+                value,
+                parameter_lifetimes,
+                parameter_field_lifetimes,
+                out,
+            );
         }
         ast::ExprKind::Slice {
             value, start, end, ..
@@ -1709,22 +1743,52 @@ fn value_lifetime_candidates(
             // Only the sliced base supplies the returned storage; endpoints
             // are integers and cannot name a borrow lifetime.
             let _ = (start, end);
-            value_lifetime_candidates(resolution, value, parameter_lifetimes, out);
+            value_lifetime_candidates(
+                resolution,
+                value,
+                parameter_lifetimes,
+                parameter_field_lifetimes,
+                out,
+            );
         }
         ast::ExprKind::Block(block) => {
-            block_value_lifetime_candidates(resolution, block, parameter_lifetimes, out);
+            block_value_lifetime_candidates(
+                resolution,
+                block,
+                parameter_lifetimes,
+                parameter_field_lifetimes,
+                out,
+            );
         }
         ast::ExprKind::If {
             then, otherwise, ..
         } => {
-            block_value_lifetime_candidates(resolution, then, parameter_lifetimes, out);
+            block_value_lifetime_candidates(
+                resolution,
+                then,
+                parameter_lifetimes,
+                parameter_field_lifetimes,
+                out,
+            );
             if let Some(otherwise) = otherwise {
-                value_lifetime_candidates(resolution, otherwise, parameter_lifetimes, out);
+                value_lifetime_candidates(
+                    resolution,
+                    otherwise,
+                    parameter_lifetimes,
+                    parameter_field_lifetimes,
+                    out,
+                );
             }
         }
         ast::ExprKind::Match { arms, .. } => {
             for arm in arms {
-                value_lifetime_candidates(resolution, &arm.body, parameter_lifetimes, out);
+                value_lifetime_candidates(
+                    resolution,
+                    &arm.body,
+                    parameter_lifetimes,
+                    parameter_field_lifetimes,
+                    out,
+                );
             }
         }
         _ => {}
@@ -1734,15 +1798,69 @@ fn block_value_lifetime_candidates(
     resolution: &Resolution,
     block: &ast::Block,
     parameter_lifetimes: &BTreeMap<BindingId, String>,
+    parameter_field_lifetimes: &BTreeMap<BindingId, BTreeMap<String, String>>,
     out: &mut BTreeSet<String>,
 ) {
     let mut returns = Vec::new();
     collect_block_returns(block, &mut returns);
     for returned in returns {
-        value_lifetime_candidates(resolution, returned, parameter_lifetimes, out);
+        value_lifetime_candidates(
+            resolution,
+            returned,
+            parameter_lifetimes,
+            parameter_field_lifetimes,
+            out,
+        );
     }
     if let Some(tail) = &block.tail {
-        value_lifetime_candidates(resolution, tail, parameter_lifetimes, out);
+        value_lifetime_candidates(
+            resolution,
+            tail,
+            parameter_lifetimes,
+            parameter_field_lifetimes,
+            out,
+        );
+    }
+}
+/// The parameter binder and named field path of a projection chain rooted at a
+/// parameter name.
+fn field_chain(resolution: &Resolution, expr: &ast::Expr) -> Option<(BindingId, Vec<String>)> {
+    match &expr.kind {
+        ast::ExprKind::Name(_) => Some((resolution.reference(expr.span)?, Vec::new())),
+        ast::ExprKind::Field { value, name } => {
+            let (id, mut path) = field_chain(resolution, value)?;
+            path.push(name.clone());
+            Some((id, path))
+        }
+        _ => None,
+    }
+}
+/// Map each borrowed field path of a parameter type to its declared lifetime,
+/// using source field names. Container element leaves use the container field's
+/// name; a direct slice or reference field uses its own name.
+fn collect_parameter_field_lifetimes(
+    types: &crate::runtime_types::Types<'_>,
+    ty: Type,
+    out: &mut BTreeMap<String, String>,
+) {
+    fn names(types: &crate::runtime_types::Types<'_>, ty: Type, path: &[usize]) -> Option<String> {
+        let mut current = ty;
+        let mut names = Vec::with_capacity(path.len());
+        for index in path {
+            let id = current.layout().filter(|id| types.enums[*id].record)?;
+            let variant = &types.enums[id].variants[0];
+            names.push(variant.names.get(*index)?.clone());
+            current = *variant.fields.get(*index)?;
+        }
+        Some(names.join("."))
+    }
+    for leaf in crate::runtime_types::borrow_leaves(types, ty) {
+        let Some(lifetime) = leaf.lifetime else {
+            continue;
+        };
+        if let Some(name) = names(types, ty, &leaf.path) {
+            out.insert(name, lifetime);
+        }
     }
 }
 /// Whether `long` outlives `short` under a reflexive-transitive bound set.
@@ -2730,6 +2848,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             locals: Vec::new(),
             slots: BTreeMap::new(),
             result: sig.result,
+            parameter_lifetimes: sig.parameter_lifetimes.clone(),
             result_grade: sig.result_grade,
             effects: sig.effects,
             depth: 0,
@@ -2882,6 +3001,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         pointees: types.pointees,
         unions: types.unions,
         function_types: types.function_types,
+        reference_labels: types.reference_labels,
         owned_enums: vec![],
         linear_enums: vec![],
         logical_definitions: logical.definitions.clone(),
@@ -7047,6 +7167,8 @@ impl<'a> Functions<'a> {
         let mut parameter_grades = Vec::new();
         let mut parameter_lifetimes = Vec::new();
         let mut parameter_binder_lifetimes = BTreeMap::new();
+        let mut parameter_field_lifetimes: BTreeMap<BindingId, BTreeMap<String, String>> =
+            BTreeMap::new();
         let mut declared_lifetimes = BTreeSet::new();
         let mut input_lifetimes: Vec<(String, Span, Option<String>)> = Vec::new();
         for lifetime in &f.lifetimes {
@@ -7106,6 +7228,17 @@ impl<'a> Functions<'a> {
             let binder = resolution.binder(p.span);
             if let (Some(binder), Some(name)) = (binder, &lifetime) {
                 parameter_binder_lifetimes.insert(binder, name.clone());
+            }
+            if let Some(binder) = binder {
+                let mut fields = BTreeMap::new();
+                collect_parameter_field_lifetimes(
+                    types,
+                    parameters.last().copied().unwrap(),
+                    &mut fields,
+                );
+                if !fields.is_empty() {
+                    parameter_field_lifetimes.insert(binder, fields);
+                }
             }
             // A by-value borrowed record contributes one candidate per field
             // lifetime, so elided slice results can be inferred from a single
@@ -7196,6 +7329,7 @@ impl<'a> Functions<'a> {
                                 resolution,
                                 value,
                                 &parameter_binder_lifetimes,
+                                &parameter_field_lifetimes,
                                 &mut body_lifetimes,
                             );
                         }
@@ -7322,7 +7456,19 @@ impl<'a> Functions<'a> {
                             .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
                 })
                 .collect::<Vec<_>>();
-            if matching.is_empty() {
+            // A reference element stored in a by-value container parameter is
+            // backed by caller-owned storage too; its declared element
+            // lifetime supplies the same outlives relation.
+            let container_leaf = parameters.iter().any(|ty| {
+                crate::runtime_types::borrow_leaves(types, *ty)
+                    .iter()
+                    .any(|leaf| {
+                        leaf.lifetime
+                            .as_ref()
+                            .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
+                    })
+            });
+            if matching.is_empty() && !container_leaf {
                 return Err(Diagnostic::new(
                     f.result.span,
                     format!(
@@ -7333,6 +7479,17 @@ impl<'a> Functions<'a> {
             }
             if matches!(result, Type::RefMut(_))
                 && !matching.iter().any(|(_, ty)| matches!(ty, Type::RefMut(_)))
+                && !parameters.iter().any(|ty| {
+                    crate::runtime_types::borrow_leaves(types, *ty)
+                        .iter()
+                        .any(|leaf| {
+                            leaf.mutable
+                                && leaf
+                                    .lifetime
+                                    .as_ref()
+                                    .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
+                        })
+                })
             {
                 return Err(Diagnostic::new(
                     f.result.span,
@@ -7401,14 +7558,6 @@ impl<'a> Functions<'a> {
                 f.result.span,
                 "a function cannot return a task handle; a child handle must not escape its scope",
             ));
-        }
-        for ty in parameters.iter().copied().chain(std::iter::once(result)) {
-            if crate::runtime_types::contains_task_exit_borrow(types, ty) {
-                return Err(Diagnostic::new(
-                    f.result.span,
-                    "TaskExit<T> with a borrowed payload is lexical to the task scope that joined it; match it immediately, or read the borrowed fields inside the scope instead of passing it across a function boundary",
-                ));
-            }
         }
         if parameters.iter().map(|ty| types.width(*ty)).sum::<usize>() > 128 {
             return Err(Diagnostic::new(
@@ -8007,6 +8156,10 @@ struct Checker<'a, 't> {
     locals: Vec<Local>,
     slots: BTreeMap<BindingId, usize>,
     result: Type,
+    /// Declared or freshly elided lifetime of each runtime parameter of the
+    /// function currently being checked. Lambda captures inherit a declared
+    /// parameter lifetime so a captured slice keeps the caller's identity.
+    parameter_lifetimes: Vec<Option<String>>,
     /// Static result-transfer contract of the function/lambda currently being
     /// checked. Distinguishes owning `@[1]` transfers from must-use copyable
     /// transfers when a returned value is observed.
@@ -14684,13 +14837,17 @@ impl Checker<'_, '_> {
                         let (kind, ty) = match name {
                             "Box.new" => {
                                 c.require(ALLOC | PANIC, span)?;
-                                if arg.ty == Type::Never || crate::runtime_types::has_borrow(c.types, arg.ty) { return Err(Diagnostic::new(span, "Box.new cannot store a borrowed/slice/divergent value (including &str text views or borrowed records)")); }
+                                if arg.ty == Type::Never { return Err(Diagnostic::new(span, "Box.new cannot store a divergent value")); }
+                                if crate::runtime_types::has_borrow(c.types, arg.ty) && !arg.ty.is_ref() { return Err(Diagnostic::new(span, "Box.new can store a reference element or an ordinary value, but not a slice view, borrowed record, or text view; keep those in a lexical record")); }
                                 if crate::runtime_types::contains_task(c.types, arg.ty) { return Err(Diagnostic::new(span, "task handles cannot be stored in Box; join them in the scope that owns them")); }
-                                let pointee = c.types.full(arg.ty, span)?;
+                                let pointee = match expected_inner {
+                                    Some(inner) if matches!(inner, Type::Annotated(..)) => inner,
+                                    _ => c.types.full(arg.ty, span)?,
+                                };
                                 let ty = Type::Box(c.types.pointer(pointee)); (ExprKind::BoxNew(Box::new(arg)), ty)
                             }
-                            "Box.take" => { let Type::Box(index) = arg.ty else { return Err(Diagnostic::new(span, "Box.take requires an owned Box<T>")); }; let ty = c.types.pointees[index]; (ExprKind::BoxTake(Box::new(arg)), ty) }
-                            "Box.read" => { let Type::Ref(index) = arg.ty else { return Err(Diagnostic::new(span, "Box.read requires an immutable &Box<T>")); }; let Type::Box(inner) = c.types.pointees[index] else { return Err(Diagnostic::new(span, "Box.read requires an immutable &Box<T>, not another borrow type")); }; let ty = c.types.pointees[inner]; (ExprKind::BoxRead(Box::new(arg)), ty) }
+                            "Box.take" => { let Type::Box(index) = arg.ty else { return Err(Diagnostic::new(span, "Box.take requires an owned Box<T>")); }; let ty = c.unannotate(c.types.pointees[index]); (ExprKind::BoxTake(Box::new(arg)), ty) }
+                            "Box.read" => { let Type::Ref(index) = arg.ty else { return Err(Diagnostic::new(span, "Box.read requires an immutable &Box<T>")); }; let Type::Box(inner) = c.types.pointees[index] else { return Err(Diagnostic::new(span, "Box.read requires an immutable &Box<T>, not another borrow type")); }; let payload = c.types.pointees[inner]; if matches!(c.unannotate(payload), Type::RefMut(_)) { return Err(Diagnostic::new(span, "Box.read cannot copy an exclusive reference element; move it out with Box.take")); } let ty = c.unannotate(payload); (ExprKind::BoxRead(Box::new(arg)), ty) }
                             _ => { if matches!(arg.ty, Type::Ref(_) | Type::RefMut(_)) { return Err(Diagnostic::new(span, "drop consumes owned/copy values, not borrowed handles")); } (ExprKind::Drop(Box::new(arg)), Type::Unit) }
                         };
                         let value = Expr { kind, ty, span, resource: None };
@@ -15317,12 +15474,15 @@ impl Checker<'_, '_> {
             // take a record with borrowed slice fields by value; its per-field
             // contract travels in the callable's borrow signature.
             if !ty.is_slice()
+                && !ty.is_ref()
                 && !crate::runtime_types::is_borrowed_record(self.types, ty)
+                && !crate::runtime_types::is_reference_container(self.types, ty)
+                && !crate::runtime_types::is_borrowed_task_exit(self.types, ty)
                 && crate::runtime_types::has_borrow(self.types, ty)
             {
                 return Err(Diagnostic::new(
                     parameter.ty.span,
-                    "a function value cannot take an owner reference or &str text-view parameter; slice views and records with borrowed slice fields are supported",
+                    "a function value cannot take an owner reference or &str text-view parameter; references, slice views, reference containers, and records with borrowed fields are supported",
                 ));
             }
             self.validate_grade(grade, ty, parameter.ty.span, false)?;
@@ -15338,12 +15498,10 @@ impl Checker<'_, '_> {
             &self.types.name(result),
             lambda.result.span,
         )?;
-        if matches!(result, Type::Ref(_) | Type::RefMut(_))
-            || (result.is_view() && !result.is_slice())
-        {
+        if result.is_view() && !result.is_slice() {
             return Err(Diagnostic::new(
                 lambda.result.span,
-                "a lambda cannot return a borrowed owner reference or &str text view; use a named function, a slice view, or a record with borrowed slice fields",
+                "a lambda cannot return a borrowed '&str' text view; use a named function or a slice view",
             ));
         }
         if crate::runtime_types::contains_task(self.types, result) {
@@ -15351,14 +15509,6 @@ impl Checker<'_, '_> {
                 lambda.result.span,
                 "a function value cannot return a task handle; a child handle must not escape its scope",
             ));
-        }
-        for ty in parameters.iter().copied().chain(std::iter::once(result)) {
-            if crate::runtime_types::contains_task_exit_borrow(self.types, ty) {
-                return Err(Diagnostic::new(
-                    lambda.result.span,
-                    "TaskExit<T> with a borrowed payload is lexical to the task scope that joined it; match it immediately inside that scope instead of passing it through a callable",
-                ));
-            }
         }
         let effects = crate::runtime_types::effect_bits_with(
             self.resolution,
@@ -15368,22 +15518,28 @@ impl Checker<'_, '_> {
         let lambda_lifetimes = parameters
             .iter()
             .enumerate()
-            .map(|(index, ty)| ty.is_slice().then(|| format!("<lambda {index}>")))
+            .map(|(index, ty)| (ty.is_slice() || ty.is_ref()).then(|| format!("<lambda {index}>")))
             .collect::<Vec<_>>();
         let capture_lifetimes = captures
             .iter()
             .enumerate()
             .map(|(index, slot)| {
-                self.locals[*slot]
-                    .ty
-                    .is_slice()
-                    .then(|| format!("<lambda capture {index}>"))
+                self.locals[*slot].ty.is_slice().then(|| {
+                    self.parameter_lifetimes
+                        .get(*slot)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or_else(|| format!("<lambda capture {index}>"))
+                })
             })
             .collect::<Vec<_>>();
         let parameter_leaves = parameters
             .iter()
             .map(|ty| {
-                if crate::runtime_types::is_borrowed_record(self.types, *ty) {
+                if crate::runtime_types::is_borrowed_record(self.types, *ty)
+                    || crate::runtime_types::is_reference_container(self.types, *ty)
+                    || crate::runtime_types::is_borrowed_task_exit(self.types, *ty)
+                {
                     crate::runtime_types::borrow_leaves(self.types, *ty)
                 } else {
                     Vec::new()
@@ -15398,9 +15554,13 @@ impl Checker<'_, '_> {
             .iter()
             .enumerate()
             .filter_map(|(index, label)| {
-                label
-                    .as_ref()
-                    .map(|label| (label.clone(), parameters[index].is_mut_slice()))
+                label.as_ref().map(|label| {
+                    (
+                        label.clone(),
+                        parameters[index].is_mut_slice()
+                            || matches!(parameters[index], Type::RefMut(_)),
+                    )
+                })
             })
             .collect::<BTreeMap<_, _>>();
         let mut parameter_leaf_labels: BTreeMap<String, bool> = BTreeMap::new();
@@ -15563,10 +15723,71 @@ impl Checker<'_, '_> {
                 // lifetime stays empty because the environment is the source.
                 lambda_result_lifetime = Some(lifetime);
             }
-        } else if crate::runtime_types::is_borrowed_record(self.types, result) {
+        } else if result.is_ref() {
+            let explicit = borrow_lifetime(&lambda.result);
+            let lifetime = match explicit {
+                Some(name) => {
+                    if !candidates.contains(&name) {
+                        return Err(Diagnostic::new(
+                            lambda.result.span,
+                            format!(
+                                "the lambda result lifetime '{name}' does not appear on a reference parameter, borrowed container, or borrowed record field"
+                            ),
+                        ));
+                    }
+                    name
+                }
+                None => match candidates.as_slice() {
+                    [only] => only.clone(),
+                    [] => {
+                        return Err(Diagnostic::new(
+                            lambda.result.span,
+                            "a reference-returning lambda needs exactly one borrowed parameter, container, or record field to borrow from",
+                        ));
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            lambda.result.span,
+                            "cannot infer this lambda reference result's lifetime from several borrowed inputs; use a named function or an explicit result lifetime",
+                        ));
+                    }
+                },
+            };
+            if capture_slice_labels.contains_key(&lifetime)
+                || capture_leaf_labels.contains_key(&lifetime)
+            {
+                return Err(Diagnostic::new(
+                    lambda.result.span,
+                    "a lambda cannot return a reference borrowed from a captured local or capture environment; derive the reference from a call parameter instead",
+                ));
+            }
+            let parameter_mutability = parameter_slice_mutability
+                .get(&lifetime)
+                .copied()
+                .into_iter()
+                .chain(parameter_leaf_labels.get(&lifetime).copied());
+            let sources = parameter_mutability.clone().collect::<Vec<_>>();
+            if sources.is_empty() {
+                return Err(Diagnostic::new(
+                    lambda.result.span,
+                    "the lambda reference result is not outlived by any reference parameter or borrowed field",
+                ));
+            }
+            if matches!(result, Type::RefMut(_)) && !sources.iter().any(|mutable| *mutable) {
+                return Err(Diagnostic::new(
+                    lambda.result.span,
+                    "an exclusive reference result requires an exclusive reference parameter or exclusive borrowed field",
+                ));
+            }
+            lambda_result_lifetime = Some(lifetime.clone());
+            borrow_result_lifetime = Some(lifetime);
+        } else if crate::runtime_types::is_borrowed_record(self.types, result)
+            || crate::runtime_types::is_borrowed_task_exit(self.types, result)
+        {
             let leaves = crate::runtime_types::borrow_leaves(self.types, result);
             let mut parameter_leaves = Vec::new();
             let mut capture_leaves = Vec::new();
+            let slice_captures = capture_slice_labels.values().copied().collect::<Vec<_>>();
             for leaf in leaves {
                 let Some(label) = &leaf.lifetime else {
                     return Err(Diagnostic::new(
@@ -15574,13 +15795,22 @@ impl Checker<'_, '_> {
                         "internal error: borrowed lambda result leaf has no lifetime",
                     ));
                 };
-                let parameter_source = parameter_leaf_labels.get(label).copied();
+                let parameter_source = parameter_leaf_labels
+                    .get(label)
+                    .copied()
+                    .or_else(|| parameter_slice_mutability.get(label).copied());
                 let capture_sources = capture_leaf_labels.get(label);
-                if parameter_source.is_some() && capture_sources.is_some() {
+                let capture_slice_source = capture_slice_labels.get(label).copied().or_else(|| {
+                    (slice_captures.len() == 1 && capture_sources.is_none())
+                        .then(|| slice_captures[0])
+                });
+                if parameter_source.is_some()
+                    && (capture_sources.is_some() || capture_slice_source.is_some())
+                {
                     return Err(Diagnostic::new(
                         lambda.result.span,
                         format!(
-                            "the lambda result field lifetime '{label}' has both a call-parameter and a captured-record origin; the two cannot be unified"
+                            "the lambda result field lifetime '{label}' has both a call-parameter and a captured origin; the two cannot be unified"
                         ),
                     ));
                 }
@@ -15595,6 +15825,23 @@ impl Checker<'_, '_> {
                     continue;
                 }
                 let Some(sources) = capture_sources else {
+                    if let Some(capture) = capture_slice_source {
+                        // A payload slice field may be built directly from a
+                        // captured slice view of the same declared lifetime.
+                        let mutable = self.locals[captures[capture]].ty.is_mut_slice();
+                        if leaf.mutable && !mutable {
+                            return Err(Diagnostic::new(
+                                lambda.result.span,
+                                "an exclusive result field cannot be borrowed from a shared captured slice view",
+                            ));
+                        }
+                        capture_leaves.push(crate::runtime_types::CaptureLeafSig {
+                            path: leaf.path,
+                            capture,
+                            mutable,
+                        });
+                        continue;
+                    }
                     return Err(Diagnostic::new(
                         lambda.result.span,
                         format!(
@@ -15693,6 +15940,7 @@ impl Checker<'_, '_> {
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_slots = std::mem::take(&mut self.slots);
         let saved_result = self.result;
+        let saved_parameter_lifetimes = std::mem::take(&mut self.parameter_lifetimes);
         let saved_result_grade = self.result_grade;
         let saved_effects = self.effects;
         let saved_loops = std::mem::take(&mut self.loops);
@@ -15712,8 +15960,11 @@ impl Checker<'_, '_> {
         // body, never to indirect calls. A lambda is a separate callable, so it
         // cannot capture the hidden handler local by name.
         let saved_handlers = std::mem::take(&mut self.handlers);
+        let mut child_parameter_lifetimes = capture_lifetimes.clone();
+        child_parameter_lifetimes.extend(lambda_lifetimes.clone());
         let checked = (|| {
             self.scope_depth = if scope_root { saved_scope_depth + 1 } else { 0 };
+            self.parameter_lifetimes = child_parameter_lifetimes.clone();
             for (ty, (grade, linear)) in capture_types.iter().zip(&capture_obligations) {
                 self.locals.push(Local {
                     ty: *ty,
@@ -15783,6 +16034,7 @@ impl Checker<'_, '_> {
         self.locals = saved_locals;
         self.slots = saved_slots;
         self.result = saved_result;
+        self.parameter_lifetimes = saved_parameter_lifetimes;
         self.result_grade = saved_result_grade;
         self.effects = saved_effects;
         self.loops = saved_loops;
@@ -15980,13 +16232,16 @@ impl Checker<'_, '_> {
             .chain([&signature.result])
             .any(|ty| {
                 !ty.is_slice()
+                    && !ty.is_ref()
                     && !crate::runtime_types::is_borrowed_record(self.types, *ty)
+                    && !crate::runtime_types::is_reference_container(self.types, *ty)
+                    && !crate::runtime_types::is_borrowed_task_exit(self.types, *ty)
                     && crate::runtime_types::has_borrow(self.types, *ty)
             })
         {
             return Err(Diagnostic::new(
                 span,
-                "a function value cannot carry an owner reference or &str text view in its parameter or result type; use slice views or records with borrowed slice fields",
+                "a function value cannot carry an owner reference or &str text view in a parameter or result type; use references, slice views, or records with borrowed fields",
             ));
         }
         let parameter_lifetimes = signature
@@ -15994,7 +16249,7 @@ impl Checker<'_, '_> {
             .iter()
             .enumerate()
             .map(|(i, ty)| {
-                ty.is_slice().then(|| {
+                (ty.is_slice() || ty.is_ref()).then(|| {
                     signature
                         .parameter_lifetimes
                         .get(i)
@@ -16008,7 +16263,10 @@ impl Checker<'_, '_> {
             .parameters
             .iter()
             .map(|ty| {
-                if crate::runtime_types::is_borrowed_record(self.types, *ty) {
+                if crate::runtime_types::is_borrowed_record(self.types, *ty)
+                    || crate::runtime_types::is_reference_container(self.types, *ty)
+                    || crate::runtime_types::is_borrowed_task_exit(self.types, *ty)
+                {
                     crate::runtime_types::borrow_leaves(self.types, *ty)
                 } else {
                     Vec::new()
@@ -16020,8 +16278,16 @@ impl Checker<'_, '_> {
             .is_slice()
             .then(|| signature.result_lifetime.clone())
             .flatten();
+        let result_lifetime = if signature.result.is_ref() {
+            signature.result_lifetime.clone()
+        } else {
+            result_lifetime
+        };
         let result_leaves =
-            if crate::runtime_types::is_borrowed_record(self.types, signature.result) {
+            if crate::runtime_types::is_borrowed_record(self.types, signature.result)
+                || crate::runtime_types::is_reference_container(self.types, signature.result)
+                || crate::runtime_types::is_borrowed_task_exit(self.types, signature.result)
+            {
                 crate::runtime_types::borrow_leaves(self.types, signature.result)
             } else {
                 Vec::new()
@@ -16960,6 +17226,15 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
+    /// Strip the checker-only lifetime annotation from a container element.
+    /// The annotation has no runtime representation and never reaches a
+    /// user-visible expression type.
+    fn unannotate(&self, ty: Type) -> Type {
+        match ty {
+            Type::Annotated(p, _) => self.types.pointees[p],
+            ty => ty,
+        }
+    }
     /// Whether values of `ty` own heap storage (computed from layouts).
     fn carrier_type(&self, ty: Type) -> bool {
         ty.layout().is_some_and(|id| self.types.enums[id].borrowed)
@@ -17015,6 +17290,7 @@ impl Checker<'_, '_> {
                     if self.owned_type(ty)
                         || self.linear_type(ty)
                         || ty.is_view()
+                        || ty.is_ref()
                         || ty.layout().is_some_and(|id| self.types.enums[id].borrowed)
                         || ty
                             .layout()
@@ -17118,6 +17394,7 @@ impl Checker<'_, '_> {
             if self.owned_type(ty)
                 || self.linear_type(ty)
                 || ty.is_view()
+                || ty.is_ref()
                 || ty.layout().is_some_and(|id| self.types.enums[id].borrowed)
                 || ty
                     .layout()
@@ -17159,6 +17436,14 @@ impl Checker<'_, '_> {
                 span,
                 format!(
                     "cannot project exclusive field '{name}' out of a record; destructure the record first, as in 'let R {{ {name}, .. }} = value;', or derive a subview with '&mut value.{name}[..]'"
+                ),
+            ));
+        }
+        if matches!(ty, Type::RefMut(_)) && !self.field_place {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "cannot project exclusive reference field '{name}' out of a record; destructure the record first, as in 'let R {{ {name}, .. }} = value;'"
                 ),
             ));
         }
@@ -18310,22 +18595,16 @@ impl Checker<'_, '_> {
                 }
                 let (body, result, _, result_grade) =
                     self.task_callable(&arguments[0], true, false, "Task.scope", span)?;
-                if self.carrier_type(result) {
+                if crate::runtime_types::is_reference_container(self.types, result) {
                     return Err(Diagnostic::new(
                         span,
-                        "a task scope cannot return a borrowed record; borrowed fields are lexical and cannot cross a task boundary",
+                        "a task scope cannot return a reference element container; keep the container lexical and return the borrowed record it was built from",
                     ));
                 }
                 if crate::runtime_types::contains_task(self.types, result) {
                     return Err(Diagnostic::new(
                         span,
                         "Task.scope cannot return a task handle; a child handle must not escape its scope",
-                    ));
-                }
-                if crate::runtime_types::contains_task_exit_borrow(self.types, result) {
-                    return Err(Diagnostic::new(
-                        span,
-                        "a task scope cannot return TaskExit<T> with a borrowed payload; match the join result and finish reading its fields inside the scope",
                     ));
                 }
                 if result_grade.is_some_and(|grade| !grade.is_one()) {
@@ -19232,10 +19511,13 @@ impl Checker<'_, '_> {
                 "cannot infer the element type of an empty vector; annotate it: let v: Vec<T> = [];",
             ));
         };
-        if matches!(element, Type::Ref(_) | Type::RefMut(_) | Type::Never) || element.is_view() {
+        if matches!(element, Type::RefMut(_) | Type::Never)
+            || matches!(element, Type::Annotated(_, _) if matches!(self.unannotate(element), Type::RefMut(_)))
+            || element.is_view()
+        {
             return Err(Diagnostic::new(
                 span,
-                "vectors cannot store borrowed references or slice views (including &str text views)",
+                "vectors cannot store exclusive references, slice views, or text views; a vector read copies its element, so an exclusive reference element is not admitted",
             ));
         }
         let ty = Type::Vec(self.types.pointer(element));
@@ -20323,11 +20605,13 @@ impl Checker<'_, '_> {
                     ));
                 }
             };
-            if matches!(element, Type::Ref(_) | Type::RefMut(_) | Type::Never) || element.is_view()
+            if matches!(element, Type::RefMut(_) | Type::Never)
+                || matches!(element, Type::Annotated(_, _) if matches!(self.unannotate(element), Type::RefMut(_)))
+                || element.is_view()
             {
                 return Err(Diagnostic::new(
                     span,
-                    "vectors cannot store borrowed references or slice views (including &str text views)",
+                    "vectors cannot store exclusive references, slice views, or text views; a vector read copies its element, so an exclusive reference element is not admitted",
                 ));
             }
             if crate::runtime_types::contains_task(self.types, element) {
@@ -20471,8 +20755,8 @@ impl Checker<'_, '_> {
                     result,
                 )
             }
-            "Vec.get" => (VecOp::Get, PANIC, element),
-            "Vec.at" | "Bytes.at" => (VecOp::At, 0, element),
+            "Vec.get" => (VecOp::Get, PANIC, self.unannotate(element)),
+            "Vec.at" | "Bytes.at" => (VecOp::At, 0, self.unannotate(element)),
             "Vec.push" => (VecOp::Push, ALLOC | PANIC, buffer),
             _ => (VecOp::Set, PANIC, buffer),
         };
@@ -20552,6 +20836,12 @@ impl Checker<'_, '_> {
             ));
         };
         let source = self.types.pointees[index];
+        if crate::runtime_types::has_borrow(self.types, source) {
+            return Err(Diagnostic::new(
+                span,
+                "Vec.map_in_place cannot transform a vector of borrowed reference elements; the in-place callback would repack or copy a loan descriptor",
+            ));
+        }
         if self.linear_type(source) {
             return Err(Diagnostic::new(
                 span,
@@ -20749,6 +21039,12 @@ impl Checker<'_, '_> {
             ));
         };
         let source = self.types.pointees[index];
+        if crate::runtime_types::has_borrow(self.types, source) {
+            return Err(Diagnostic::new(
+                span,
+                "Vec.map_chain_in_place cannot transform a vector of borrowed reference elements; the in-place chain would repack or copy a loan descriptor",
+            ));
+        }
         if self.linear_type(source) {
             return Err(Diagnostic::new(
                 span,

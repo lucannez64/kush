@@ -296,8 +296,9 @@ fn borrowed_records_are_task_results_through_join_and_cancellation() {
         fn main() -> i64 ! {} { 0 }"#,
         "produced only by Task.join",
     );
-    // A joined borrowed result is lexical to the scope that owns the loans.
-    rejects(
+    // A joined borrowed result may cross a function boundary when its
+    // declared element lifetime is supplied by the caller.
+    agrees(
         r#"use std.task.TaskExit;
         struct Window<'a> { view: &'a [i64] }
         fn forward<'a>(exit: TaskExit<Window<'a>>) -> i64 ! {panic} {
@@ -306,8 +307,21 @@ fn borrowed_records_are_task_results_through_join_and_cancellation() {
                 TaskExit.Cancelled => 0,
             }
         }
-        fn main() -> i64 ! {alloc, panic} { 0 }"#,
-        "lexical to the task scope",
+        fn make<'a>(view: &'a [i64]) -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
+            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
+                let t: Task<Window<'a>> = Task.spawn(fn() -> Window<'a> ! {panic, suspend} {
+                    Task.yield();
+                    Window { view: view }
+                });
+                Task.join(t)
+            })
+        }
+        fn main() -> i64 ! {alloc, panic, suspend} {
+            let data: [i64; 2] = [40, 2];
+            forward(make(&data[..]))
+        }"#,
+        40,
+        "",
     );
 }
 
@@ -546,10 +560,27 @@ fn result_lifetime_elision_counts_a_single_record_field_source() {
         42,
         "",
     );
-    rejects(
+    // A per-field body origin selects the returned field's lifetime even when
+    // the record type carries several distinct field lifetimes.
+    agrees(
         r#"struct Two<'a, 'b> { first: &'a [i64], second: &'b [i64] }
         fn pick<'a, 'b>(two: Two<'a, 'b>) -> &[i64] ! {panic} { two.first }
+        fn main() -> i64 ! {panic} {
+            let a: [i64; 2] = [40, 2];
+            let b: [i64; 2] = [9, 9];
+            let view = pick(Two { first: &a[..], second: &b[..] });
+            Slice.get(view, 0) + Slice.get(view, 1)
+        }"#,
+        42,
+        "",
+    );
+    // Returning both fields from one result is still an explicit ambiguity.
+    rejects(
+        r#"struct Two<'a, 'b> { first: &'a [i64], second: &'b [i64] }
+        fn pick<'a, 'b>(two: Two<'a, 'b>, flag: Bool) -> &[i64] ! {panic} {
+            if flag { two.first } else { two.second }
+        }
         fn main() -> Unit ! {} {}"#,
-        "does not return one directly",
+        "return positions mention",
     );
 }

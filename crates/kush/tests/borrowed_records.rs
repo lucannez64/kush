@@ -632,7 +632,10 @@ fn borrowed_record_rejects_unsafe_storage_generic_and_callable_escapes() {
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
         fn run<'a>(view: &'a [i64]) -> Unit ! {alloc, panic, suspend} {
-            Task.scope(fn() -> Window<'a> ! {panic} { Window { view: view } });
+            Task.scope(fn() -> Window<'a> ! {panic} {
+                let local: [i64; 1] = [5];
+                Window { view: &local[..] }
+            });
         }
         fn main() -> Unit ! {} {}"#,
         "not outlived by any borrowed parameter or captured record field",

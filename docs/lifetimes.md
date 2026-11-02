@@ -42,11 +42,13 @@ The system covers:
 - nominal-record reference **returns** tied to a caller reference parameter,
   including shared/mutable elision, outlives bounds, and reborrow through
   helper calls; stored shared/exclusive reference locals, implicit use
-  reborrow, and explicit `&*p`/`&mut *p` reborrows are checked. Reference fields
-  and reference containers remain rejected;
+  reborrow, and explicit `&*p`/`&mut *p` reborrows are checked. Records may
+  store direct shared/exclusive reference fields, and `Box<&T>`/`Vec<&T>`
+  element containers carry explicit element lifetimes;
 - borrowed records in function-arrow parameters and results, scoped closure
   captures, capture-derived slice/record results, and structured-task captures
-  from scope-external storage;
+  from scope-external storage; reference-valued arrow parameters/results and
+  borrowed `Task.scope`/`TaskExit<T>` boundaries are checked too;
 - nested record-field subviews and structurally disjoint mutable field loans
   for direct local records.
 
@@ -700,14 +702,15 @@ be returned across a task boundary.
   exactly one distinct lifetime. Borrowed record parameters contribute one
   candidate per field lifetime, and arrows/lambdas count record leaves. When a
   function result has several input candidates, the body may resolve them when
-  its return positions are rooted in exactly one parameter lifetime; several
-  return-position lifetimes are rejected, not unified. There are no inferred
-  outlives bounds and no helper-call or alias-based body inference. Borrowed
-  slice returns otherwise require explicit `<'a>` and
+  its return positions are rooted in exactly one parameter lifetime or one
+  named record field path; several return-position lifetimes are rejected, not
+  unified. There are no inferred outlives bounds and no helper-call body
+  inference. Borrowed slice returns otherwise require explicit `<'a>` and
   `-> &'a [T]` / `-> &'a mut [T]` annotations.
 - References may be returned when tied to a reference parameter. Shared
-  `&Box<T>`, `&Vec<T>`, `&Bytes`, and `&String` results are supported; exclusive
-  owner borrows, reference fields, and reference containers remain unsupported.
+  `&Box<T>`, `&Vec<T>`, `&Bytes`, and `&String` results are supported; records
+  may store reference fields and `Box<&T>`/`Vec<&T>` reference elements.
+  Exclusive owner borrows and `&str` fields/containers remain unsupported.
   Stored reference locals and explicit reborrows are supported.
 - Dynamic disjoint-range reasoning is limited to `Slice.split_at_mut` pairs.
   There is no general range algebra, no arbitrary tuple of views, and no

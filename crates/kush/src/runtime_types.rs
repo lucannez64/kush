@@ -513,6 +513,10 @@ pub(crate) struct Types<'a> {
     /// local record construction and call-argument freshening. These names are
     /// not surface syntax and cannot collide with declared lifetimes.
     inferred_lifetimes: usize,
+    /// Erased lifetime names attached to reference elements stored in
+    /// containers. Index 0 is the empty/elided label, so an unannotated
+    /// container element contributes no declared lifetime.
+    pub reference_labels: Vec<String>,
 }
 impl<'a> Types<'a> {
     pub fn new(
@@ -723,6 +727,7 @@ impl<'a> Types<'a> {
             dyn_objects: BTreeMap::new(),
             dyn_errors: BTreeMap::new(),
             inferred_lifetimes: 0,
+            reference_labels: vec![String::new()],
         };
         let monomorphic = result
             .definitions
@@ -1228,6 +1233,20 @@ impl<'a> Types<'a> {
                 (Type::Box(a), Type::Box(b)) | (Type::Vec(a), Type::Vec(b)) => {
                     go(types, types.pointees[a], types.pointees[b], depth + 1, seen)
                 }
+                (Type::Annotated(a, _), b) => go(types, types.pointees[a], b, depth + 1, seen),
+                (a, Type::Annotated(b, _)) => go(types, a, types.pointees[b], depth + 1, seen),
+                (Type::Enum(a), Type::Enum(b))
+                    if types.enums[a].name == "TaskExit" && types.enums[b].name == "TaskExit" =>
+                {
+                    let (a, b) = (&types.enums[a], &types.enums[b]);
+                    a.definition == b.definition
+                        && a.consts == b.consts
+                        && a.arguments.len() == b.arguments.len()
+                        && a.arguments
+                            .iter()
+                            .zip(&b.arguments)
+                            .all(|(left, right)| go(types, *left, *right, depth + 1, seen))
+                }
                 (Type::Union(a), Type::Union(b)) => {
                     types.unions[a].members.len() == types.unions[b].members.len()
                         && types.unions[a]
@@ -1335,6 +1354,7 @@ impl<'a> Types<'a> {
             Type::Vec(p) => format!("Vec<{}>", self.name(self.pointees[p])),
             Type::Ref(p) => format!("&{}", self.name(self.pointees[p])),
             Type::RefMut(p) => format!("&mut {}", self.name(self.pointees[p])),
+            Type::Annotated(p, _) => self.name(self.pointees[p]),
             Type::Slice(p) => format!("&[{}]", self.name(self.pointees[p])),
             Type::SliceMut(p) => format!("&mut [{}]", self.name(self.pointees[p])),
             Type::Enum(id) => self.layout_name(id),
@@ -1663,7 +1683,7 @@ impl<'a> Types<'a> {
                     ));
                 }
                 let mut leaves = Vec::new();
-                let lifetime = if ty.is_slice() {
+                let lifetime = if ty.is_slice() || ty.is_ref() {
                     Some(arrow_lifetime(
                         inner,
                         &declared,
@@ -1673,6 +1693,8 @@ impl<'a> Types<'a> {
                 } else if ty
                     .layout()
                     .is_some_and(|id| self.enums[id].record && self.enums[id].borrowed)
+                    || is_reference_container(self, ty)
+                    || is_borrowed_task_exit(self, ty)
                 {
                     // A by-value borrowed record parameter carries one erased
                     // lifetime per borrowed field. Every field lifetime must be
@@ -1706,7 +1728,7 @@ impl<'a> Types<'a> {
                 } else {
                     None
                 };
-                parameter_mutable.push(ty.is_mut_slice());
+                parameter_mutable.push(ty.is_mut_slice() || matches!(ty, Type::RefMut(_)));
                 parameter_lifetimes.push(lifetime);
                 parameter_leaves.push(leaves);
                 grades.push(
@@ -1816,9 +1838,66 @@ impl<'a> Types<'a> {
                     ));
                 }
                 result_lifetime = Some(lifetime);
+            } else if result.is_ref() {
+                let (inner, _) = crate::grades::split(&result_ast);
+                let lifetime = match arrow_explicit_lifetime(inner, &declared)? {
+                    Some(name) => name,
+                    None => match input_candidates.as_slice() {
+                        [only] => only.clone(),
+                        [] => {
+                            return Err(Diagnostic::new(
+                                result_ast.span,
+                                "this arrow type returns a borrowed reference but takes no borrowed parameter or record field it could borrow from",
+                            ));
+                        }
+                        _ => {
+                            return Err(Diagnostic::new(
+                                result_ast.span,
+                                "cannot infer this arrow result's lifetime from several borrowed inputs; name them, as in fn<'a, 'b>(&'a T, &'b U) -> &'a T",
+                            ));
+                        }
+                    },
+                };
+                let sources = parameter_lifetimes
+                    .iter()
+                    .zip(&parameter_mutable)
+                    .filter(|(p, _)| {
+                        p.as_ref()
+                            .is_some_and(|p| crate::executable::outlives(&bounds, p, &lifetime))
+                    })
+                    .collect::<Vec<_>>();
+                let record_sources = parameter_leaves
+                    .iter()
+                    .flat_map(|leaves| leaves.iter())
+                    .filter(|leaf| {
+                        leaf.lifetime.as_ref().is_some_and(|name| {
+                            crate::executable::outlives(&bounds, name, &lifetime)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if sources.is_empty() && record_sources.is_empty() {
+                    return Err(Diagnostic::new(
+                        result_ast.span,
+                        format!(
+                            "the arrow result lifetime '{lifetime}' is not outlived by any reference parameter or borrowed record field, so no call could produce it"
+                        ),
+                    ));
+                }
+                if matches!(result, Type::RefMut(_))
+                    && !sources.iter().any(|(_, mutable)| **mutable)
+                    && !record_sources.iter().any(|leaf| leaf.mutable)
+                {
+                    return Err(Diagnostic::new(
+                        result_ast.span,
+                        "an exclusive '&mut T' arrow result needs an exclusive reference parameter or exclusive record field whose lifetime outlives it",
+                    ));
+                }
+                result_lifetime = Some(lifetime);
             } else if result
                 .layout()
                 .is_some_and(|id| self.enums[id].record && self.enums[id].borrowed)
+                || is_reference_container(self, result)
+                || is_borrowed_task_exit(self, result)
             {
                 result_leaves = borrow_leaves(self, result);
                 for leaf in &result_leaves {
@@ -2089,12 +2168,15 @@ impl<'a> Types<'a> {
                 }
                 let inner = self.lower(arguments[0], substitution, depth + 1)?;
                 let inner = self.full(inner, ty.span)?;
+                let direct_reference = matches!(inner, Type::Ref(_) | Type::RefMut(_))
+                    && matches!(arguments[0].kind, ast::TypeKind::Borrow { .. });
                 let task_borrowed_record = b.name == "Task" && is_borrowed_record(self, inner);
                 if (matches!(
                     inner,
                     Type::Ref(_) | Type::RefMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::Str
                 ) || has_borrow(self, inner))
                     && !task_borrowed_record
+                    && !direct_reference
                 {
                     return Err(Diagnostic::new(
                         ty.span,
@@ -2123,6 +2205,7 @@ impl<'a> Types<'a> {
                         "task handles cannot be stored inside Box, ArenaBox, or Vec; join them in the scope that owns them",
                     ));
                 }
+                let inner = self.annotate_container_element(inner, arguments[0], substitution);
                 let pointer = self.pointer(inner);
                 return Ok(match b.name.as_str() {
                     "Box" => Type::Box(pointer),
@@ -2755,12 +2838,32 @@ impl<'a> Types<'a> {
             return false;
         }
         match (actual, expected) {
+            (Type::Annotated(a, _), Type::Annotated(b, _)) => {
+                return self.subtype(self.pointees[a], self.pointees[b])
+                    && self.subtype(self.pointees[b], self.pointees[a]);
+            }
+            (Type::Annotated(a, _), _) => return self.subtype(self.pointees[a], expected),
+            (_, Type::Annotated(b, _)) => return self.subtype(actual, self.pointees[b]),
+            (Type::Box(a), Type::Box(b))
+            | (Type::ArenaBox(a), Type::ArenaBox(b))
+            | (Type::Vec(a), Type::Vec(b)) => {
+                return self.subtype(self.pointees[a], self.pointees[b])
+                    && self.subtype(self.pointees[b], self.pointees[a]);
+            }
+            _ => {}
+        }
+        match (actual, expected) {
             (Type::Fn(a), Type::Fn(b))
             | (Type::Fn(a), Type::Once(b))
             | (Type::Once(a), Type::Once(b)) => {
                 return self.function_subtype(&self.function_types[a], &self.function_types[b]);
             }
             (Type::Once(_), Type::Fn(_)) => return false,
+            (Type::Enum(a), Type::Enum(b))
+                if self.enums[a].name == "TaskExit" && self.enums[b].name == "TaskExit" =>
+            {
+                return self.same_erased_shape(actual, expected);
+            }
             (Type::Enum(a), Type::Enum(b)) if self.enums[a].record && self.enums[b].structural => {
                 return self.structural_subtype(a, b);
             }
@@ -2837,9 +2940,23 @@ impl<'a> Types<'a> {
     /// only in erased record lifetime labels.
     pub fn same_representation(&self, actual: Type, expected: Type) -> bool {
         actual == expected
-            || (actual.layout().is_some()
-                && expected.layout().is_some()
-                && self.same_erased_shape(actual, expected))
+            || match (actual, expected) {
+                (Type::Annotated(a, _), Type::Annotated(b, _)) => {
+                    self.same_representation(self.pointees[a], self.pointees[b])
+                }
+                (Type::Annotated(a, _), _) => self.same_representation(self.pointees[a], expected),
+                (_, Type::Annotated(b, _)) => self.same_representation(actual, self.pointees[b]),
+                (Type::Box(a), Type::Box(b))
+                | (Type::ArenaBox(a), Type::ArenaBox(b))
+                | (Type::Vec(a), Type::Vec(b)) => {
+                    self.same_representation(self.pointees[a], self.pointees[b])
+                }
+                _ => {
+                    actual.layout().is_some()
+                        && expected.layout().is_some()
+                        && self.same_erased_shape(actual, expected)
+                }
+            }
     }
     /// Deterministic representative for two atoms that are mutual subtypes.
     /// Mutually subtype arrows differ only in representation-free parts such
@@ -2918,6 +3035,51 @@ impl<'a> Types<'a> {
         let index = self.pointees.len();
         self.pointees.push(ty);
         index
+    }
+    /// Intern an erased lifetime name for a reference element stored inside a
+    /// container. The empty name is the elided/unknown label at index zero.
+    pub fn reference_label_id(&mut self, name: Option<&str>) -> u32 {
+        let Some(name) = name.filter(|name| !name.is_empty()) else {
+            return 0;
+        };
+        if let Some(index) = self.reference_labels.iter().position(|label| label == name) {
+            return index as u32;
+        }
+        let index = self.reference_labels.len();
+        self.reference_labels.push(name.to_owned());
+        index as u32
+    }
+    pub fn reference_label_name(&self, id: u32) -> Option<String> {
+        self.reference_labels
+            .get(id as usize)
+            .filter(|label| !label.is_empty())
+            .cloned()
+    }
+    /// Attach the declared element lifetime to a direct reference element.
+    /// Other pointees are unchanged; a nested container has already annotated
+    /// its own direct reference leaf.
+    fn annotate_container_element(
+        &mut self,
+        inner: Type,
+        inner_ast: &ast::Type,
+        substitution: &Subst,
+    ) -> Type {
+        if !matches!(inner, Type::Ref(_) | Type::RefMut(_)) {
+            return inner;
+        }
+        let label = match &inner_ast.kind {
+            ast::TypeKind::Borrow { lifetime, .. } => lifetime.as_ref().map(|name| {
+                substitution
+                    .lifetimes
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone())
+            }),
+            _ => None,
+        };
+        let inner_index = self.pointer(inner);
+        let label = self.reference_label_id(label.as_deref());
+        Type::Annotated(inner_index, label)
     }
     pub fn instantiate(
         &mut self,
@@ -3067,11 +3229,11 @@ impl<'a> Types<'a> {
                             lifetime,
                             mutable: _,
                             inner,
-                        } if matches!(inner.kind, ast::TypeKind::Slice(_)) => {
+                        } => {
                             let Some(name) = lifetime else {
                                 return Err(Diagnostic::new(
                                     field.span,
-                                    "a borrowed record field must name a declared lifetime, as in 'view: &'a [T]'",
+                                    "a borrowed record field must name a declared lifetime, as in 'view: &'a [T]' or 'point: &'a Point'",
                                 ));
                             };
                             let Some(actual) = substitution.lifetimes.get(name) else {
@@ -3083,14 +3245,19 @@ impl<'a> Types<'a> {
                                     ),
                                 ));
                             };
-                            Some(actual.clone())
+                            if !matches!(inner.kind, ast::TypeKind::Slice(_)) && is_str_type(inner)
+                            {
+                                None
+                            } else {
+                                Some(actual.clone())
+                            }
                         }
                         _ => None,
                     };
-                    if matches!(ty, Type::Ref(_) | Type::RefMut(_)) {
+                    if matches!(ty, Type::Ref(_) | Type::RefMut(_)) && direct.is_none() {
                         return Err(Diagnostic::new(
                             field.span,
-                            "records cannot store borrowed owner or record references; use a slice field or pass the owner directly",
+                            "a borrowed reference field must be written directly as '&'a T' or '&'a mut T' with a declared lifetime; aliases and generic substitution do not supply field provenance",
                         ));
                     }
                     if ty == Type::Str {
@@ -3109,10 +3276,13 @@ impl<'a> Types<'a> {
                         if ty.is_slice() {
                             borrowed = true;
                             mutable_borrow |= ty.is_mut_slice();
+                        } else if matches!(ty, Type::Ref(_) | Type::RefMut(_)) {
+                            borrowed = true;
+                            mutable_borrow |= matches!(ty, Type::RefMut(_));
                         } else {
                             return Err(Diagnostic::new(
                                 field.span,
-                                "internal error: a declared borrow field did not lower to a slice view",
+                                "internal error: a declared borrow field did not lower to a slice view or reference",
                             ));
                         }
                         field_lifetimes.push(Some(label.clone()));
@@ -3167,10 +3337,11 @@ impl<'a> Types<'a> {
                                 | Type::Bytes
                                 | Type::String
                         ) && has_borrow(self, *ty)
+                            && !is_reference_container(self, *ty)
                         {
                             return Err(Diagnostic::new(
                                 field.span,
-                                "an owning mixed record field must not hide a borrowed value; Box/Vec of a borrowed record are rejected",
+                                "an owning mixed record field must not hide a borrowed value; only direct reference elements are admitted in Box/Vec",
                             ));
                         }
                     }
@@ -3301,6 +3472,9 @@ impl<'a> Types<'a> {
             } else {
                 None
             };
+            if borrowed_payload.is_some() {
+                borrowed = true;
+            }
             Ok(Enum {
                 definition: id,
                 name: def.name.to_owned(),
@@ -4055,11 +4229,11 @@ fn validate_record_declaration(
                 lifetime,
                 mutable: _,
                 inner,
-            } if matches!(inner.kind, ast::TypeKind::Slice(_)) => {
+            } if !is_str_type(inner) => {
                 let Some(name) = lifetime else {
                     return Err(Diagnostic::new(
                         field.span,
-                        "records cannot store borrowed references or slice views without a declared lifetime; write 'struct R<'a> { view: &'a [T] }' or 'struct R<'a> { view: &'a mut [T] }'",
+                        "records cannot store borrowed references or slice views without a declared lifetime; write 'struct R<'a> { view: &'a [T] }', 'struct R<'a> { point: &'a Point }', or 'struct R<'a> { point: &'a mut Point }'",
                     ));
                 };
                 if !declared.contains(name) {
@@ -4078,12 +4252,6 @@ fn validate_record_declaration(
                 return Err(Diagnostic::new(
                     field.span,
                     "records cannot store borrowed text views ('&'a str'); keep a text view in a lexical binding or pass it directly to a function",
-                ));
-            }
-            ast::TypeKind::Borrow { .. } => {
-                return Err(Diagnostic::new(
-                    field.span,
-                    "records cannot store borrowed owner references (&Box/&Vec/&Bytes); use a slice field or pass the owner directly",
                 ));
             }
             _ => {}
@@ -4154,6 +4322,7 @@ pub(crate) fn has_borrow(types: &Types<'_>, ty: Type) -> bool {
         }
         match ty {
             Type::Ref(_) | Type::RefMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::Str => true,
+            Type::Annotated(p, _) => go(types, types.pointees[p], seen),
             Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => {
                 types.enums[id].borrowed
@@ -4212,7 +4381,8 @@ pub(crate) fn has_mutable_borrow(types: &Types<'_>, ty: Type) -> bool {
             return false;
         }
         match ty {
-            Type::SliceMut(_) => true,
+            Type::SliceMut(_) | Type::RefMut(_) => true,
+            Type::Annotated(p, _) => go(types, types.pointees[p], seen),
             Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => {
                 types.enums[id].mutable_borrow
@@ -4241,6 +4411,7 @@ pub(crate) fn contains_linear(types: &Types<'_>, ty: Type) -> bool {
         }
         match ty {
             Type::Once(id) => types.function_types[id].linear,
+            Type::Annotated(p, _) => go(types, types.pointees[p], seen),
             Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => {
                 types.enums[id].linear
@@ -4269,6 +4440,11 @@ fn collect_borrow_lifetimes(types: &Types<'_>, ty: Type, out: &mut BTreeSet<Stri
         }
         match ty {
             Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::Ref(_) | Type::RefMut(_) => {}
+            Type::Annotated(_, label) => {
+                if let Some(name) = types.reference_label_name(label) {
+                    out.insert(name);
+                }
+            }
             Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
                 go(types, types.pointees[p], out, seen)
             }
@@ -4306,6 +4482,31 @@ pub(crate) struct BorrowLeaf {
 pub(crate) fn is_borrowed_record(types: &Types<'_>, ty: Type) -> bool {
     ty.layout()
         .is_some_and(|id| types.enums[id].record && types.enums[id].borrowed)
+}
+/// Whether `ty` is the conventional `TaskExit<T>` whose payload carries
+/// borrowed storage. Only `Task.join` constructs such a value, but it may be
+/// passed through a function or callable boundary when its leaves are declared.
+pub(crate) fn is_borrowed_task_exit(types: &Types<'_>, ty: Type) -> bool {
+    ty.layout().is_some_and(|id| {
+        types.enums[id].name == "TaskExit"
+            && types.enums[id]
+                .variants
+                .iter()
+                .flat_map(|variant| variant.fields.iter())
+                .any(|field| has_borrow(types, *field))
+    })
+}
+/// Whether `ty` is an owning container whose element is (or contains) a
+/// directly declared reference leaf. Such a value carries borrow provenance
+/// even though its immediate type is not a reference or borrowed record.
+pub(crate) fn is_reference_container(types: &Types<'_>, ty: Type) -> bool {
+    match ty {
+        Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => match types.pointees[p] {
+            Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) => true,
+            inner => is_reference_container(types, inner),
+        },
+        _ => false,
+    }
 }
 /// Whether a type transitively contains a conventional `TaskExit<T>` whose
 /// payload carries borrowed storage. Such a value is produced only by
@@ -4354,43 +4555,73 @@ pub(crate) fn contains_task_exit_borrow(types: &Types<'_>, ty: Type) -> bool {
 }
 
 pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {
-    fn go(types: &Types<'_>, ty: Type, path: &mut Vec<usize>, out: &mut Vec<BorrowLeaf>) {
+    fn go(
+        types: &Types<'_>,
+        ty: Type,
+        hint: Option<String>,
+        path: &mut Vec<usize>,
+        out: &mut Vec<BorrowLeaf>,
+    ) {
         match ty {
             Type::Slice(_) => out.push(BorrowLeaf {
                 path: path.clone(),
-                lifetime: None,
+                lifetime: hint,
                 mutable: false,
             }),
             Type::SliceMut(_) => out.push(BorrowLeaf {
                 path: path.clone(),
-                lifetime: None,
+                lifetime: hint,
                 mutable: true,
             }),
             Type::Str => out.push(BorrowLeaf {
                 path: path.clone(),
-                lifetime: None,
+                lifetime: hint,
                 mutable: false,
             }),
-            Type::Enum(id) | Type::Variants(id, _) if types.enums[id].record => {
-                for (index, field) in types.enums[id].variants[0].fields.iter().enumerate() {
-                    path.push(index);
-                    if matches!(field, Type::Slice(_) | Type::SliceMut(_)) {
-                        out.push(BorrowLeaf {
-                            path: path.clone(),
-                            lifetime: types.enums[id].field_lifetimes[index].clone(),
-                            mutable: matches!(field, Type::SliceMut(_)),
-                        });
-                    } else {
-                        go(types, *field, path, out);
+            Type::Ref(_) => out.push(BorrowLeaf {
+                path: path.clone(),
+                lifetime: hint,
+                mutable: false,
+            }),
+            Type::RefMut(_) => out.push(BorrowLeaf {
+                path: path.clone(),
+                lifetime: hint,
+                mutable: true,
+            }),
+            Type::Annotated(p, label) => out.push(BorrowLeaf {
+                path: path.clone(),
+                lifetime: types.reference_label_name(label),
+                mutable: matches!(types.pointees[p], Type::RefMut(_)),
+            }),
+            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
+                go(types, types.pointees[p], None, path, out)
+            }
+            Type::Enum(id) | Type::Variants(id, _)
+                if types.enums[id].record || types.enums[id].name == "TaskExit" =>
+            {
+                if types.enums[id].record {
+                    for (index, field) in types.enums[id].variants[0].fields.iter().enumerate() {
+                        path.push(index);
+                        let field_hint = types.enums[id].field_lifetimes[index].clone();
+                        go(types, *field, field_hint, path, out);
+                        path.pop();
                     }
-                    path.pop();
+                } else {
+                    // A borrowed `TaskExit<T>` payload travels at the same paths
+                    // as `T`: matching `Completed(value)` rebinds those leaves
+                    // directly to the inner value.
+                    for variant in &types.enums[id].variants {
+                        for field in &variant.fields {
+                            go(types, *field, None, path, out);
+                        }
+                    }
                 }
             }
             _ => {}
         }
     }
     let mut out = Vec::new();
-    go(types, ty, &mut Vec::new(), &mut out);
+    go(types, ty, None, &mut Vec::new(), &mut out);
     out
 }
 
@@ -4435,6 +4666,7 @@ pub(crate) fn contains_task(types: &Types<'_>, ty: Type) -> bool {
         }
         match ty {
             Type::Task(_) => true,
+            Type::Annotated(p, _) => go(types, types.pointees[p], seen),
             Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => types.enums[id]
                 .variants
@@ -4467,6 +4699,9 @@ pub(crate) fn width(
             .map(|member| width(enums, unions, functions, *member))
             .max()
             .unwrap_or(0)
+    } else if let Type::Annotated(_, _) = ty {
+        // Container element annotations wrap only a one-word reference.
+        1
     } else if matches!(ty, Type::Slice(_) | Type::SliceMut(_) | Type::Str) {
         // (data pointer, length, stride, byte-elements flag)
         4

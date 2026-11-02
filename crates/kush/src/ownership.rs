@@ -75,7 +75,12 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                         mutable: matches!(local.ty, Type::RefMut(_)),
                     }]);
                 } else {
-                    parameters.push(leaves_of(&program.enums, local.ty));
+                    parameters.push(leaves_of(
+                        &program.enums,
+                        &program.pointees,
+                        &program.reference_labels,
+                        local.ty,
+                    ));
                 }
             }
             let result = if function.result.is_view() {
@@ -93,7 +98,12 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                 .layout()
                 .is_some_and(|layout| program.enums[layout].borrowed)
             {
-                CallResult::Record(leaves_of(&program.enums, function.result))
+                CallResult::Record(leaves_of(
+                    &program.enums,
+                    &program.pointees,
+                    &program.reference_labels,
+                    function.result,
+                ))
             } else {
                 CallResult::None
             };
@@ -107,7 +117,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
     let liveness = program
         .functions
         .iter()
-        .map(|function| loan_liveness(function, &program.enums))
+        .map(|function| loan_liveness(function, &program.enums, &program.pointees))
         .collect::<Vec<_>>();
     let result_grades = program
         .functions
@@ -139,6 +149,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             linear: &program.linear_enums,
             unions: &program.unions,
             pointees: &program.pointees,
+            reference_labels: &program.reference_labels,
             functions: &program.function_types,
             result_grades: &result_grades,
             calls: &calls,
@@ -313,6 +324,17 @@ impl FieldBorrow {
 fn path_prefix(prefix: &[usize], path: &[usize]) -> bool {
     path.len() >= prefix.len() && path[..prefix.len()] == *prefix
 }
+/// Whether an owning container directly or transitively stores a reference
+/// element. Borrowed records are handled separately by their layout flag.
+fn container_carries_borrow(pointees: &[Type], ty: Type) -> bool {
+    match ty {
+        Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => match pointees[p] {
+            Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) => true,
+            inner => container_carries_borrow(pointees, inner),
+        },
+        _ => false,
+    }
+}
 /// Per-leaf provenance of a record value. Paths are field indices from the
 /// record root; a slice field is a leaf, and a nested borrowed record extends
 /// the path. Ordinary copyable metadata contributes no leaf.
@@ -390,45 +412,74 @@ enum CallResult {
 }
 fn leaves_of(
     enums: &[crate::runtime_types::Enum],
+    pointees: &[Type],
+    labels: &[String],
     ty: Type,
 ) -> Vec<crate::runtime_types::BorrowLeaf> {
     fn go(
         enums: &[crate::runtime_types::Enum],
+        pointees: &[Type],
+        labels: &[String],
         ty: Type,
+        hint: Option<String>,
         path: &mut Vec<usize>,
         out: &mut Vec<crate::runtime_types::BorrowLeaf>,
     ) {
         match ty {
             Type::Slice(_) => out.push(crate::runtime_types::BorrowLeaf {
                 path: path.clone(),
-                lifetime: None,
+                lifetime: hint,
                 mutable: false,
             }),
             Type::SliceMut(_) => out.push(crate::runtime_types::BorrowLeaf {
                 path: path.clone(),
-                lifetime: None,
+                lifetime: hint,
                 mutable: true,
             }),
-            Type::Enum(id) | Type::Variants(id, _) if enums[id].record => {
-                for (index, field) in enums[id].variants[0].fields.iter().enumerate() {
-                    path.push(index);
-                    if matches!(field, Type::Slice(_) | Type::SliceMut(_)) {
-                        out.push(crate::runtime_types::BorrowLeaf {
-                            path: path.clone(),
-                            lifetime: enums[id].field_lifetimes[index].clone(),
-                            mutable: matches!(field, Type::SliceMut(_)),
-                        });
-                    } else {
-                        go(enums, *field, path, out);
+            Type::Ref(_) => out.push(crate::runtime_types::BorrowLeaf {
+                path: path.clone(),
+                lifetime: hint,
+                mutable: false,
+            }),
+            Type::RefMut(_) => out.push(crate::runtime_types::BorrowLeaf {
+                path: path.clone(),
+                lifetime: hint,
+                mutable: true,
+            }),
+            Type::Annotated(p, label) => out.push(crate::runtime_types::BorrowLeaf {
+                path: path.clone(),
+                lifetime: labels
+                    .get(label as usize)
+                    .filter(|label| !label.is_empty())
+                    .cloned(),
+                mutable: matches!(pointees[p], Type::RefMut(_)),
+            }),
+            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
+                go(enums, pointees, labels, pointees[p], None, path, out)
+            }
+            Type::Enum(id) | Type::Variants(id, _)
+                if enums[id].record || enums[id].name == "TaskExit" =>
+            {
+                if enums[id].record {
+                    for (index, field) in enums[id].variants[0].fields.iter().enumerate() {
+                        path.push(index);
+                        let field_hint = enums[id].field_lifetimes[index].clone();
+                        go(enums, pointees, labels, *field, field_hint, path, out);
+                        path.pop();
                     }
-                    path.pop();
+                } else {
+                    for variant in &enums[id].variants {
+                        for field in &variant.fields {
+                            go(enums, pointees, labels, *field, None, path, out);
+                        }
+                    }
                 }
             }
             _ => {}
         }
     }
     let mut out = Vec::new();
-    go(enums, ty, &mut Vec::new(), &mut out);
+    go(enums, pointees, labels, ty, None, &mut Vec::new(), &mut out);
     out
 }
 /// A callee lifetime for diagnostics; canonical callable lifetimes `#k`
@@ -569,6 +620,7 @@ struct Checker<'a> {
     linear: &'a [bool],
     unions: &'a [crate::runtime_types::UnionType],
     pointees: &'a [Type],
+    reference_labels: &'a [String],
     functions: &'a [crate::runtime_types::FunctionType],
     /// Static result contract of each checked function, by instance index:
     /// `(grade, owning)`. `owning` distinguishes an owning `@[1]` transfer
@@ -723,10 +775,15 @@ impl Checker<'_> {
     }
     fn is_carrier_type(&self, ty: Type) -> bool {
         ty.layout().is_some_and(|id| self.enums[id].borrowed)
+            || container_carries_borrow(self.pointees, ty)
+    }
+    fn is_task_exit(&self, ty: Type) -> bool {
+        ty.layout()
+            .is_some_and(|id| self.enums[id].name == "TaskExit")
     }
     fn parameter_record_provenance(&self, slot: usize, ty: Type) -> RecordProvenance {
         let mut provenance = RecordProvenance::default();
-        for leaf in leaves_of(self.enums, ty) {
+        for leaf in leaves_of(self.enums, self.pointees, self.reference_labels, ty) {
             let field = FieldBorrow {
                 root: slot,
                 path: leaf.path.clone(),
@@ -980,9 +1037,58 @@ impl Checker<'_> {
                     }
                 }
                 provenance.leaves.insert(vec![index], loan);
+            } else if field_ty.is_ref() {
+                let declared = layout.field_lifetimes[index].clone();
+                let loan = self.view_loan(expr);
+                let mutable_field = matches!(field_ty, Type::RefMut(_));
+                if loan.mutable != mutable_field {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        if mutable_field {
+                            format!(
+                                "field '{}' is an exclusive '&mut T' field, but its source is a shared reference; shared storage cannot be upgraded",
+                                variant.names[index]
+                            )
+                        } else {
+                            format!(
+                                "field '{}' is a shared '&T' field, but its source is an exclusive reference",
+                                variant.names[index]
+                            )
+                        },
+                    ));
+                }
+                match &declared {
+                    Some(lifetime) if !is_internal_lifetime(lifetime) => {
+                        let carried = loan
+                            .lifetime
+                            .as_deref()
+                            .is_some_and(|source| self.actual_outlives(source, lifetime));
+                        if !carried {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                format!(
+                                    "field '{}' must be borrowed for lifetime '{lifetime}' or a lifetime that outlives it, but its source has lifetime {}",
+                                    variant.names[index],
+                                    loan.lifetime
+                                        .as_deref()
+                                        .unwrap_or("a temporary or local owner")
+                                ),
+                            ));
+                        }
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "internal error: borrowed reference field has no declared lifetime",
+                        ));
+                    }
+                }
+                provenance.leaves.insert(vec![index], loan);
             } else if self.is_carrier_type(field_ty) {
                 let nested = self.record_provenance(expr);
-                let expected = leaves_of(self.enums, field_ty);
+                let expected =
+                    leaves_of(self.enums, self.pointees, self.reference_labels, field_ty);
                 for leaf in expected {
                     let Some(loan) = nested.leaves.get(&leaf.path) else {
                         return Err(Diagnostic::new(
@@ -1040,9 +1146,35 @@ impl Checker<'_> {
         }
         Ok(provenance)
     }
+    /// Provenance of a container value reached through a place or borrow. A
+    /// `&Box<&T>`/`&Vec<&T>` receiver names the container binding, whose
+    /// element loans were recorded when it was constructed or bound.
+    fn container_provenance(&self, expr: &Expr) -> RecordProvenance {
+        let base = through_coerce(expr);
+        match &base.kind {
+            ExprKind::Borrow(slot)
+            | ExprKind::Local(slot)
+            | ExprKind::Peek(slot)
+            | ExprKind::Move(slot)
+                if self.is_carrier_type(self.locals[*slot].ty) =>
+            {
+                self.record_sources[*slot].clone().unwrap_or_default()
+            }
+            _ => self.record_provenance(expr),
+        }
+    }
+    /// The borrow leaf of one reference value stored in a container. A direct
+    /// reference expression carries its own loan; a nested borrowed record is
+    /// not admitted as a container element.
+    fn reference_element_loan(&self, expr: &Expr) -> Option<Loan> {
+        expr.ty.is_ref().then(|| self.view_loan(expr))
+    }
     /// Per-field provenance of any checked record expression.
     fn record_provenance(&self, expr: &Expr) -> RecordProvenance {
         let ptr = expr as *const Expr as usize;
+        if let Some(provenance) = self.wrapped_results.get(&ptr) {
+            return provenance.clone();
+        }
         if let Some(provenance) = self.call_records.get(&ptr) {
             return provenance.clone();
         }
@@ -1051,6 +1183,9 @@ impl Checker<'_> {
         }
         match &expr.kind {
             ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot) => {
+                if let Some(provenance) = &self.wrapped_locals[*slot] {
+                    return provenance.clone();
+                }
                 self.record_sources[*slot].clone().unwrap_or_default()
             }
             ExprKind::Project(base, offset) => {
@@ -1582,7 +1717,10 @@ impl Checker<'_> {
                         },
                     );
                 }
-                self.call_records.insert(expr_ptr, provenance);
+                self.call_records.insert(expr_ptr, provenance.clone());
+                if self.is_task_exit(ty) {
+                    self.wrapped_results.insert(expr_ptr, provenance);
+                }
             }
         }
         Ok(())
@@ -1709,6 +1847,22 @@ impl Checker<'_> {
                         loan.lifetime,
                         field,
                     );
+                } else if ty.is_ref() {
+                    let loan = provenance
+                        .leaves
+                        .get(&Vec::new())
+                        .cloned()
+                        .unwrap_or_default();
+                    let lifetime = loan.lifetime.clone();
+                    self.acquire_view(
+                        *slot,
+                        matches!(ty, Type::RefMut(_)),
+                        loan.origins,
+                        loan.splits,
+                        loan.lifetime,
+                        loan.field,
+                    );
+                    self.reference_lifetimes[*slot] = lifetime;
                 } else if self.is_carrier_type(ty) {
                     let splits = provenance
                         .leaves
@@ -2113,13 +2267,16 @@ impl Checker<'_> {
                     self.view_mut[*origin]
                 } else {
                     self.locals[*origin].ty.is_mut_slice()
+                        || matches!(self.locals[*origin].ty, Type::RefMut(_))
                 };
-                if self.locals[*origin].ty.is_slice() && !is_mut {
+                if (self.locals[*origin].ty.is_slice() || self.locals[*origin].ty.is_ref())
+                    && !is_mut
+                {
                     return Err(Diagnostic::new(
                         span,
-                        "cannot create an exclusive '&mut [T]' view from a shared '&[T]' view; shared views cannot be upgraded",
+                        "cannot create an exclusive borrow from a shared borrow; shared storage cannot be upgraded",
                     )
-                    .with_note(self.locals[*origin].span, "shared view declared here"));
+                    .with_note(self.locals[*origin].span, "shared borrow declared here"));
                 }
             }
         }
@@ -2307,7 +2464,10 @@ impl Checker<'_> {
                     .with_note(self.locals[*origin].span, "shared reference declared here"));
                 }
                 for root in self.roots_of(*origin) {
-                    if root >= self.parameter_count || !self.locals[root].ty.is_ref() {
+                    if root >= self.parameter_count
+                        || (!self.locals[root].ty.is_ref()
+                            && !self.is_carrier_type(self.locals[root].ty))
+                    {
                         return Err(Diagnostic::new(
                             span,
                             "returned reference would dangle: it is reborrowed from a stack local, a by-value parameter, or another non-reference place",
@@ -2328,7 +2488,10 @@ impl Checker<'_> {
                 }
                 continue;
             }
-            if *origin >= self.parameter_count || !self.locals[*origin].ty.is_ref() {
+            if *origin >= self.parameter_count
+                || (!self.locals[*origin].ty.is_ref()
+                    && !self.is_carrier_type(self.locals[*origin].ty))
+            {
                 return Err(Diagnostic::new(
                     span,
                     "returned reference would dangle: it borrows a stack local, a record value, or another non-reference place",
@@ -2354,7 +2517,12 @@ impl Checker<'_> {
     /// exactly the declared lifetime, and every origin must be a parameter
     /// carrying that lifetime.
     fn check_return_record(&self, provenance: &RecordProvenance, span: Span) -> Result<()> {
-        let expected = leaves_of(self.enums, self.result_type);
+        let expected = leaves_of(
+            self.enums,
+            self.pointees,
+            self.reference_labels,
+            self.result_type,
+        );
         for leaf in &expected {
             let Some(loan) = provenance.leaves.get(&leaf.path) else {
                 return Err(Diagnostic::new(
@@ -2427,12 +2595,14 @@ impl Checker<'_> {
                 && (!mutable || local.ty.is_mut_slice());
         }
         if self.is_carrier_type(local.ty) {
-            return leaves_of(self.enums, local.ty).iter().any(|leaf| {
-                leaf.lifetime
-                    .as_deref()
-                    .is_some_and(|name| self.actual_outlives(name, lifetime))
-                    && (!mutable || leaf.mutable)
-            });
+            return leaves_of(self.enums, self.pointees, self.reference_labels, local.ty)
+                .iter()
+                .any(|leaf| {
+                    leaf.lifetime
+                        .as_deref()
+                        .is_some_and(|name| self.actual_outlives(name, lifetime))
+                        && (!mutable || leaf.mutable)
+                });
         }
         false
     }
@@ -3191,8 +3361,29 @@ impl Checker<'_> {
             }
             ExprKind::Block(block) => self.block(block)?,
             ExprKind::Coerce { value, .. } => self.expr(value)?,
-            ExprKind::Unary(_, value) | ExprKind::BoxNew(value) | ExprKind::BoxTake(value) => {
-                self.expr(value)?
+            ExprKind::Unary(_, value) => self.expr(value)?,
+            ExprKind::BoxTake(value) => {
+                self.expr(value)?;
+                if expr.ty.is_ref() {
+                    let loan = self
+                        .container_provenance(value)
+                        .leaves
+                        .get(&Vec::new())
+                        .cloned()
+                        .unwrap_or_default();
+                    self.call_views.insert(expr_ptr, loan.clone());
+                    self.call_origins.insert(expr_ptr, loan.origins);
+                    self.call_splits.insert(expr_ptr, loan.splits);
+                }
+            }
+            ExprKind::BoxNew(value) => {
+                self.expr(value)?;
+                if value.ty.is_ref() {
+                    let loan = self.view_loan(value);
+                    let mut provenance = RecordProvenance::default();
+                    provenance.leaves.insert(Vec::new(), loan);
+                    self.call_records.insert(expr_ptr, provenance);
+                }
             }
             ExprKind::BoxReuse { owner, payload }
             | ExprKind::BoxReuseGrow { owner, payload }
@@ -3324,6 +3515,17 @@ impl Checker<'_> {
                 let loans = self.loans.clone();
                 self.expr(value)?;
                 self.loans = loans;
+                if expr.ty.is_ref() {
+                    let loan = self
+                        .container_provenance(value)
+                        .leaves
+                        .get(&Vec::new())
+                        .cloned()
+                        .unwrap_or_default();
+                    self.call_views.insert(expr_ptr, loan.clone());
+                    self.call_origins.insert(expr_ptr, loan.origins);
+                    self.call_splits.insert(expr_ptr, loan.splits);
+                }
             }
             ExprKind::Assign(slot, value) => {
                 let slot = *slot;
@@ -3504,6 +3706,46 @@ impl Checker<'_> {
                     }
                 }
                 self.loans = loans;
+                if let crate::executable::Target::Vec(op, element) = target {
+                    let element = *element;
+                    let mut provenance = RecordProvenance::default();
+                    match op {
+                        crate::executable::VecOp::WithCapacity
+                        | crate::executable::VecOp::Clear => {}
+                        crate::executable::VecOp::Push | crate::executable::VecOp::Set => {
+                            provenance = self.record_provenance(&args[0]);
+                            if crate::runtime_types::width(
+                                self.enums,
+                                self.unions,
+                                self.functions,
+                                element,
+                            ) == 1
+                                && let Some(loan) = self.reference_element_loan(&args[1])
+                            {
+                                provenance.leaves.insert(Vec::new(), loan);
+                            }
+                        }
+                        crate::executable::VecOp::Reserve | crate::executable::VecOp::Len => {
+                            provenance = self.record_provenance(&args[0]);
+                        }
+                        crate::executable::VecOp::Get | crate::executable::VecOp::At => {
+                            if expr.ty.is_ref() {
+                                let loan = self
+                                    .container_provenance(&args[0])
+                                    .leaves
+                                    .get(&Vec::new())
+                                    .cloned()
+                                    .unwrap_or_default();
+                                self.call_views.insert(expr_ptr, loan.clone());
+                                self.call_origins.insert(expr_ptr, loan.origins);
+                                self.call_splits.insert(expr_ptr, loan.splits);
+                            }
+                        }
+                    }
+                    if self.is_carrier_type(expr.ty) {
+                        self.call_records.insert(expr_ptr, provenance);
+                    }
+                }
                 if let Some(index) = func {
                     let parameters = self.calls[index].parameters.clone();
                     let result = self.calls[index].result.clone();
@@ -3615,6 +3857,12 @@ impl Checker<'_> {
                                         lifetime: borrows.parameters.get(i).cloned().flatten(),
                                         mutable: ty.is_mut_slice(),
                                     }]
+                                } else if ty.is_ref() {
+                                    vec![crate::runtime_types::BorrowLeaf {
+                                        path: vec![],
+                                        lifetime: borrows.parameters.get(i).cloned().flatten(),
+                                        mutable: matches!(ty, Type::RefMut(_)),
+                                    }]
                                 } else {
                                     Vec::new()
                                 };
@@ -3634,6 +3882,11 @@ impl Checker<'_> {
                             CallResult::Slice {
                                 lifetime: borrows.result.clone(),
                                 mutable: signature.result.is_mut_slice(),
+                            }
+                        } else if signature.result.is_ref() {
+                            CallResult::Reference {
+                                lifetime: borrows.result.clone(),
+                                mutable: matches!(signature.result, Type::RefMut(_)),
                             }
                         } else if self.is_carrier_type(signature.result) {
                             CallResult::Record(
@@ -3684,6 +3937,16 @@ impl Checker<'_> {
                     self.call_views.insert(expr_ptr, loan.clone());
                     self.call_origins.insert(expr_ptr, loan.origins.clone());
                     self.call_splits.insert(expr_ptr, loan.splits.clone());
+                } else if self.is_carrier_type(expr.ty) {
+                    let provenance = self
+                        .borrowed_values
+                        .get(&site_ptr)
+                        .and_then(|info| info.result_record.clone())
+                        .ok_or_else(|| Diagnostic::new(
+                            expr.span,
+                            "a borrowed-record Task.scope result requires checked capture-result provenance",
+                        ))?;
+                    self.call_records.insert(expr_ptr, provenance);
                 }
             }
             ExprKind::TaskSpawn { body, .. } => {
@@ -3894,12 +4157,15 @@ impl Checker<'_> {
                         let mut provenance = RecordProvenance::default();
                         for leaf in &result.leaves {
                             let capture = &captures[leaf.capture];
-                            let Some(loan) = self
-                                .record_provenance(capture)
-                                .leaves
-                                .get(&leaf.path)
-                                .cloned()
-                            else {
+                            let loan = if capture.ty.is_slice() {
+                                Some(self.view_loan(capture))
+                            } else {
+                                self.record_provenance(capture)
+                                    .leaves
+                                    .get(&leaf.path)
+                                    .cloned()
+                            };
+                            let Some(loan) = loan else {
                                 return Err(Diagnostic::new(
                                     expr.span,
                                     "internal error: scoped closure result field has no captured provenance",
@@ -4006,7 +4272,11 @@ impl Checker<'_> {
                     .wrapped_results
                     .get(&wrapped_site)
                     .cloned()
-                    .or(wrapped_before);
+                    .or(wrapped_before)
+                    .or_else(|| {
+                        self.is_task_exit(value.ty)
+                            .then(|| self.record_provenance(value))
+                    });
                 // Pattern bindings now hold the scrutinee's obligations.
                 self.pending_linear.truncate(pending_linear);
                 let scrutinee = value.ty;
@@ -4509,6 +4779,7 @@ pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
 fn loan_liveness(
     function: &Function,
     enums: &[crate::runtime_types::Enum],
+    pointees: &[Type],
 ) -> BTreeMap<usize, BTreeSet<usize>> {
     let views = function
         .locals
@@ -4518,7 +4789,8 @@ fn loan_liveness(
             (local.ty.is_view()
                 || local.ty.is_ref()
                 || matches!(local.ty, Type::Once(_))
-                || local.ty.layout().is_some_and(|id| enums[id].borrowed))
+                || local.ty.layout().is_some_and(|id| enums[id].borrowed)
+                || container_carries_borrow(pointees, local.ty))
             .then_some(slot)
         })
         .collect::<BTreeSet<_>>();

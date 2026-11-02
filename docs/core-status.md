@@ -394,8 +394,13 @@ subviews and structurally disjoint mutable field loans are checked, as are
 reference returns tied to reference parameters and stored shared/exclusive
 reference locals with explicit reborrows. A child task may return a borrowed
 record; `Task.join` carries per-field provenance through `TaskExit<T>`, and
-cancellation drops owned metadata without touching borrowed storage. Reference
-fields, reference containers, and reference-valued arrows remain rejected. See
+cancellation drops owned metadata without touching borrowed storage. Records
+may store direct reference fields, `Box<&T>`/`Vec<&T>` element containers keep
+type-level element lifetimes, and reference-valued arrows are checked across
+direct and indirect calls. Borrowed `Task.scope` results and borrowed
+`TaskExit<T>` values may cross function/callable boundaries. Mutable owner
+borrows, `&str` fields/containers, and reference-field reads through `&Record`
+remain rejected. See
 [expanded borrowing contracts](borrowing-extensions.md).
 
 [Effect-row exclusions](effect-constraints.md) permit concrete forbidden-effect

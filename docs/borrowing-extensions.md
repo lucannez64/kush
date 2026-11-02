@@ -4,11 +4,14 @@ Status: implemented checked contracts for borrowed records in callable
 signatures and scoped captures, capture-derived borrowed results, borrowed
 records in structured-task captures and task results, nested record-field
 subviews, disjoint-field mutable loans, stored shared/exclusive reference
-locals with explicit reborrow, and reference escape/reborrow for records and
-owner containers. The reference evaluator and the Cranelift native backend
-agree on every positive case in `tests/borrowing_extensions.rs`. This is an
-engineering contract inside the existing capability model, not a formal
-soundness proof.
+locals with explicit reborrow, reference escape/reborrow for records and owner
+containers, reference fields, reference element containers, reference-valued
+arrows, borrowed `Task.scope` records and `TaskExit` values across
+function/callable boundaries, and per-field body lifetime inference. The
+reference evaluator and the Cranelift native backend agree on every positive
+case in `tests/borrowing_extensions.rs` and `tests/borrowing_references.rs`.
+This is an engineering contract inside the existing capability model, not a
+formal soundness proof.
 
 This page records the precise additions and the remaining deliberate limits.
 See [borrowing and lifetimes](lifetimes.md),
@@ -118,14 +121,21 @@ Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
   dropped. The conventional `TaskExit<T>` shape is the only enum allowed to
   carry a borrowed payload, and user code cannot construct one: only
   `Task.join` produces it.
+- A borrowed `Task.scope` result keeps the capture-result provenance of the
+  scope closure. The conventional `TaskExit<T>` may cross a function or
+  callable boundary when the payload's declared field lifetimes are supplied
+  by the caller; matching it there rebinds the same per-field loans. A child
+  task still cannot return a borrowed `TaskExit<T>`, and a lambda or task
+  cannot hide a borrowed `TaskExit<T>` in its environment: match it in the
+  scope that joined it before storing it in a closure or spawning a child.
+- The conventional `TaskExit<T>` shape is the only enum allowed to carry a
+  borrowed payload, and user code cannot construct one: only `Task.join`
+  produces it.
 - A cancelled child that has already computed a result drops that value in the
   worker. Owned metadata is released exactly once and borrowed slice
   descriptors are inert, so cancellation never frees caller-owned storage.
   Cancellation before completion drops the child frame and captured descriptors
   under the same rules.
-- `Task.scope` results still cannot be borrowed records or borrowed
-  `TaskExit<T>` values, and a borrowed task result cannot cross a function or
-  callable boundary. Match it and read the fields inside the scope.
 
 ## Nested record-field subviews
 
@@ -221,10 +231,101 @@ fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {panic} {
   parameter reference for the enclosing expression, cannot upgrade shared
   storage, and cannot be used to dereference a value that is not a reference.
   A bare `*p` dereference remains unsupported; use `p.field` for field reads.
-- Reference fields in records, reference element containers (`Box<&T>`,
-  `Vec<&T>`), and reference-valued arrow parameters/results remain rejected.
-  General reference containers still need type-level leaf metadata and checks
-  across generic coercions and every control-flow merge.
+## Reference fields in records
+
+A nominal record may store a direct shared or exclusive reference field:
+
+```rust
+struct Holder<'a> { point: &'a Point, note: i64 }
+struct MutHolder<'a> { point: &'a mut Point, note: i64 }
+```
+
+- Every reference field must name a declared record lifetime directly. A
+  reference supplied only through an alias or generic substitution has no
+  field provenance and is rejected.
+- Construction checks the source's actual lifetime against the declared field
+  lifetime, and rejects a shared source for an exclusive field. A `&mut`
+  reference field is affine and must be destructured before use; projecting it
+  as a value is rejected rather than duplicating the exclusive capability.
+- Projecting a reference field from an owning record yields a checked
+  reference whose loan retains the field's origins, mutability, and split
+  labels. Nested records and reference containers extend the same per-field
+  path. Reading a reference field through `&Record` remains outside the
+  lexical field-read subset and is rejected explicitly.
+- Reference fields participate in record construction, destructuring, helper
+  returns, callable parameters/results, and task captures exactly like slice
+  fields. Mixed owning metadata is dropped once; the reference descriptor is
+  inert.
+
+## Reference element containers
+
+`Box<&'a T>`, `Box<&'a mut T>`, and `Vec<&'a T>` may store a direct reference
+element. The element type carries a checker-only lifetime annotation
+(`Type::Annotated`) with the same one-word runtime representation; the
+annotation never appears in a user-visible expression type.
+
+- `Box.new`, `Box.read`, `Box.take`, vector literals, `Vec.get`, and `Vec.at`
+  preserve the element leaf. Reading a shared reference is a copy; an
+  exclusive element cannot be copied out (`Box.read` rejects it) and must be
+  moved with `Box.take`. Vectors admit only shared elements because a vector
+  read copies.
+- Container provenance is tracked exactly like a record's per-field
+  provenance: the owner stays loaned while the container or a read reference is
+  live, and replacing or dropping the owner is rejected. Containers of
+  borrowed records (rather than direct references) remain rejected.
+- A record may store a reference container. Because owner references require a
+  direct local receiver, destructure the container field into a local before
+  borrowing it for `Box.read`/`Vec.get`.
+- Containers may appear in function parameters/results and in arrows. The
+  declared element lifetime travels in the callable's leaf list and is related
+  to the caller's actual element provenance at every direct or indirect call.
+
+## Reference-valued callables
+
+Arrow parameters and results may be `&'a T` / `&'a mut T` in addition to slice
+views and borrowed records:
+
+```rust
+fn apply<'a>(f: fn<'b>(&'b Point) -> &'b Point ! {panic}, p: &'a Point) -> &'a Point ! {panic} {
+    f(p)
+}
+```
+
+- The arrow must bind every reference lifetime. A result needs a reference or
+  borrowed-field source whose lifetime outlives it; an exclusive result needs
+  an exclusive source. Named functions, lambdas, and stored callables obey the
+  same contract, and indirect calls freshen the source provenance exactly like
+  direct calls.
+- A lambda may take reference, borrowed-record, reference-container, or
+  borrowed-`TaskExit` parameters. A lambda may return a reference derived from
+  one call parameter (or one borrowed field); returning a reference derived
+  from a captured local remains a checked rejection.
+
+## Borrowed scope results and TaskExit boundaries
+
+`Task.scope` may return a borrowed record, and the conventional
+`TaskExit<T>` may travel across function and callable boundaries:
+
+```rust
+fn make<'a>(window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
+    Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
+        Task.join(Task.spawn(fn() -> Window<'a> ! {panic, suspend} { window }))
+    })
+}
+```
+
+- A scope result keeps the scope closure's capture-result provenance. Its
+  original storage stays loaned until the returned record or `TaskExit` value
+  is consumed; block-local storage cannot escape.
+- `TaskExit<T>` leaves are payload-relative, so matching `Completed(value)`
+  rebinds the same per-field origins in the caller. Passing the value through a
+  helper or callable keeps those origins live and still rejects replacing the
+  owner while the joined value is used.
+- A child task still cannot return a borrowed `TaskExit<T>`, and a lambda or
+  task cannot hide a borrowed `TaskExit<T>` in its environment: match it in the
+  scope that joined it before capturing it.
+- `Task.scope` cannot return a reference element container directly; return
+  the borrowed record it was built from, or keep the container lexical.
 
 ## Lifetime inference boundaries
 
@@ -240,30 +341,36 @@ captures:
   unified.
 - When an elided function result has several input-lifetime candidates, the
   function body is inspected for returned values rooted in a parameter. A
-  direct name, field projection, or slice of one parameter resolves the result
-  to that parameter's lifetime; block, `if`, and `match` value positions keep
-  only the branches that produce the result. Return positions that mention
-  several parameter lifetimes remain an explicit ambiguity error, and the
-  ownership pass still checks every returned origin against the selected
-  lifetime.
+  direct name, field projection (including nested field paths), or slice of one
+  parameter resolves the result to that parameter's or field's lifetime. A
+  multi-lifetime record therefore supports per-field inference: returning
+  `two.first` selects `'a` even when the same record also carries `'b`. Block,
+  `if`, and `match` value positions keep only the branches that produce the
+  result. Return positions that mention several parameter lifetimes remain an
+  explicit ambiguity error, and the ownership pass still checks every returned
+  origin against the selected lifetime.
 - No inferred outlives bounds, no variance annotations, and no general
-  owner-reference inference. Body inference does not follow helper calls or
-  infer a per-field lifetime from a record parameter with several leaf
-  lifetimes; those still require explicit annotations or one shared lifetime.
+  owner-reference inference. Body inference does not yet follow helper-call
+  results or perform general unification; those still require explicit
+  annotations or a direct field/parameter source.
 
 ## Remaining deliberate limits
 
-- Reference fields in records, reference containers, and reference-returning
-  function values remain rejected. Stored reference locals and explicit
-  reborrows are supported as described above.
-- A task result may carry a borrowed record, but a `Task.scope` result and any
-  function/callable boundary carrying a borrowed `TaskExit<T>` remain rejected.
+- Mutable owner borrows (`&mut Box<T>`/`&mut Vec<T>`/`&mut Bytes`/`&mut
+  String`) and `&str` fields/containers remain outside the subset. Shared
+  owner references and `&mut` nominal records are supported as described
+  above.
+- A child task cannot return a borrowed `TaskExit<T>`, and a lambda or task
+  cannot capture a borrowed `TaskExit<T>` in its environment. Match it in the
+  scope that joined it before hiding it in a callable or child task.
 - No general `&Record.field` reference form. Field access is either a copyable
-  field read, a slice-field subview, or whole-record reference parameter.
+  field read, a reference/slice field projection, or a whole-record reference
+  parameter.
 - Disjoint-field reasoning is structural and path-based, not a general range or
   alias algebra. Merged record values lose field identity.
 - Capture-result lambdas cannot mix environment and parameter origins, and
-  cannot be coerced or passed on.
+  cannot be coerced or passed on unless the target contract is exactly
+  compatible.
 - The analysis remains path-insensitive and conservative. Both backends and
   the runtime are trusted implementation components.
 
@@ -272,7 +379,8 @@ captures:
 A slice returned from `Task.scope` retains the scope closure's capture-result
 provenance. Its original storage remains borrowed through the returned view's
 last use, and block-local storage cannot escape. Borrowed-record scope results
-and borrowed `TaskExit` values across function boundaries remain restricted.
+and borrowed `TaskExit` values across function boundaries keep the same
+per-leaf provenance and are checked until their last use.
 
 A borrowed `TaskExit<T>` cannot be hidden in a closure/task environment: match
 it within the joining scope. Reading a stored reference for a field access is

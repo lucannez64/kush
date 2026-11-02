@@ -13,35 +13,42 @@ Integrated on `main` in `401662d` and `342537d`; see
 [expanded borrowing contracts](borrowing-extensions.md) for the exact contract
 and remaining limits.
 
-- [ ] General shared/exclusive reference support, including escape and reborrow
-  contracts. **Partial:** reference parameters may be returned and reborrowed
-  through calls; stored shared/exclusive reference locals, implicit use
-  reborrow, explicit `&*p`/`&mut *p`, and shared `&Box`/`&Vec`/`&Bytes`/`&String`
-  escape contracts are checked. Reference fields, reference element containers,
-  and reference-valued arrow parameters/results remain rejected.
+- [x] General shared/exclusive reference support, including escape and reborrow
+  contracts. Reference parameters may be returned and reborrowed through calls;
+  stored shared/exclusive reference locals, implicit use reborrow, explicit
+  `&*p`/`&mut *p`, shared `&Box`/`&Vec`/`&Bytes`/`&String` escape contracts, and
+  direct reference fields in nominal records are checked. `Box<&T>` and
+  `Vec<&T>` element containers carry explicit type-level lifetime annotations
+  and preserve owner loans through construction, reads, calls, records, and
+  arrows. Reference-valued arrow parameters/results are checked for direct and
+  indirect calls, including lambda parameters and single-parameter reference
+  results. Mutable owner borrows (`&mut Box`/`&mut Vec`/`&mut Bytes`/`&mut
+  String`), `&str` fields/containers, and reading a reference field through
+  `&Record` remain deliberate exclusions. See
+  [borrowing-extensions.md](borrowing-extensions.md).
 - [ ] Broader sound lifetime inference. **Partial:** function/arrow/lambda
-  results can be inferred from a single record-field source and ambiguous
-  origins are rejected. Elided function results with several input lifetimes
-  now use a conservative body-origin seed: a direct parameter name, field,
-  slice, or one branch of a block/`if`/`match` value selects that parameter's
-  lifetime, while several return-position lifetimes remain rejected. Inferred
-  outlives bounds, helper-call body inference, per-field inference from a
-  multi-lifetime record, and general unification are still absent.
+  results can be inferred from a single record-field source or a per-field body
+  origin. A multi-lifetime record now supports per-field selection, including
+  nested field paths; several returned lifetimes remain explicitly ambiguous.
+  Inferred outlives bounds, helper-call body inference, and general unification
+  are still absent.
 - [x] Capturing lambdas returning borrowed slices with represented provenance.
   The capture index and field path travel in the callable contract and the
   result is resolved against the capture's outer provenance.
 - [x] Borrowed records in callable parameters/results/captures. Arrows carry
   per-field leaves, indirect calls freshen record lifetimes, and scoped
   closures may capture and return record fields.
-- [ ] Borrowed records in structured tasks with checked scope ownership.
-  **Partial:** scope bodies and child tasks may capture records from
-  scope-external storage; scope-owned storage is rejected. A child task may
-  return a borrowed record, and `Task.join` transfers per-field provenance
-  through the conventional `TaskExit<T>` so field loans remain checked until
-  the matched value is consumed or dropped. Cancelled completed results drop
-  owned metadata without freeing borrowed storage. Borrowed `Task.scope`
-  results and borrowed `TaskExit<T>` values across function/callable
-  boundaries remain rejected.
+- [x] Borrowed records in structured tasks with checked scope ownership.
+  Scope bodies and child tasks may capture records from scope-external storage;
+  scope-owned storage is rejected. A child task may return a borrowed record,
+  and `Task.join` transfers per-field provenance through the conventional
+  `TaskExit<T>` so field loans remain checked until the matched value is
+  consumed or dropped. `Task.scope` may return a borrowed record, and a
+  borrowed `TaskExit<T>` may cross a function or callable boundary when its
+  payload lifetimes are supplied by the caller. Cancelled completed results
+  drop owned metadata without freeing borrowed storage. A child task still
+  cannot return a borrowed `TaskExit<T>`, and a lambda/task environment cannot
+  hide one.
 - [x] Nested record-field borrows and disjoint-field loans. Direct nested
   subviews and structurally disjoint mutable field subviews are checked; whole
   record moves stay blocked and merged records lose field identity.
@@ -297,3 +304,31 @@ both backends; library/all-target Clippy and formatting pass locally. The combin
 Clippy**, and the sandbox stopped afterwards. This also validates
 `Vec.try_reserve`. Open-world membership, nominal-field objects, and borrowed
 owning objects remain unchecked above.
+
+## Borrowing branch validation checkpoint
+
+At this branch's borrowing integration, the remaining reference and task
+borrow items above are implemented on top of `d6b559f`. Local Linux x86-64
+validation used `target/borrow-refs` with debug information disabled and two
+Cargo jobs:
+
+- Full locked workspace suite: **840 passed, 0 failed** across 61 test
+  binaries.
+- All-targets Clippy with warnings denied: passed.
+- Formatting: `cargo fmt --all -- --check` passed.
+- `tests/borrowing_safety.rs` still passes unchanged; the new positive and
+  hostile cases live in `tests/borrowing_references.rs` and cover reference
+  fields, reference element containers, reference-valued arrows, borrowed
+  `Task.scope` records, and borrowed `TaskExit<T>` boundaries with
+  native/reference agreement and balanced cleanup.
+
+Still deliberately outside the contract: mutable owner borrows (`&mut Box`,
+`&mut Vec`, `&mut Bytes`, `&mut String`), `&str` fields/containers, reading a
+reference field through `&Record`, child tasks returning a borrowed
+`TaskExit<T>`, capturing a borrowed `TaskExit<T>` in a lambda/task environment,
+and helper-call or general lifetime unification. These are actual limits, not
+silently relabelled successes.
+
+The new borrowing integration gate and independent review are pending. Earlier
+branch-only test counts above are historical evidence, not evidence that the
+remaining unchecked features are complete.

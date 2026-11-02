@@ -42,10 +42,13 @@ A child task result may be a record with borrowed slice fields when those leaves
 derive from storage the scope body captured from outside the scope. `Task.join`
 carries the per-field provenance through the conventional `TaskExit<T>` value;
 matching `Completed(record)` keeps each loan checked until the record is
-consumed or dropped. A borrowed `TaskExit<T>` is lexical to the joining scope
-and cannot cross a function or callable boundary. If a cancelled child has
-already computed a result, that value is dropped in the worker: owned metadata
-is freed exactly once and borrowed descriptors never free caller storage.
+consumed or dropped. A borrowed `TaskExit<T>` may cross a function or callable
+boundary when its payload lifetimes are supplied by the caller; the caller
+keeps the same loans live until the matched value is consumed. A child task
+cannot return a borrowed `TaskExit<T>`, and a closure/task environment cannot
+hide one. If a cancelled child has already computed a result, that value is
+dropped in the worker: owned metadata is freed exactly once and borrowed
+descriptors never free caller storage.
 
 `TaskExit<T>` is the conventional enum required by `Task.join`:
 

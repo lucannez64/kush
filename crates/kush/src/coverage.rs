@@ -223,6 +223,7 @@ fn useful(
             | Type::ArenaBox(_)
             | Type::Ref(_)
             | Type::RefMut(_)
+            | Type::Annotated(_, _)
             | Type::Vec(_)
             | Type::Slice(_)
             | Type::SliceMut(_)
