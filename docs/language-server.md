@@ -141,9 +141,11 @@ keyword function type namespace enum enumMember string number comment operator v
 ```
 
 Names after `fn`/`enum`/`struct`/`type`/`trait`/`impl`, identification after
-`let`, dotted module headers and `use` paths, strings, characters, numbers,
-lifetimes, and comments are colored; ordinary identifiers, punctuation, and
-effect markers are left to the client's fallback. Tokens use relative
+`let` and `let mut`, dotted module headers and `use` paths, statement keywords
+(`match`, `if`, `return`, the loop family), primitive and well-known type
+names (`i64`, `Unit`, `Bytes`, ...), strings, characters, numbers, lifetimes,
+and comments are colored; ordinary identifiers, punctuation, and effect
+markers are left to the client's fallback. Tokens use relative
 `deltaLine`/`deltaStart` positions in UTF-16 units.
 
 
