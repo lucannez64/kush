@@ -396,9 +396,9 @@ checked signatures:
   explicit rejection. There is no implicit conversion of a capturing `once`
   closure into these reusable callbacks; an allocator instance is a trait
   implementor, not a captured closure.
-- `AllocatorContext.new(instance)` moves one concrete record instance into
-  compiler-owned reference-counted storage. The concrete type must be an owned
-  record with stable inline layout. Borrowed leaves, task handles, linear
+- `AllocatorContext.new(instance)` requires `{alloc, panic}` and moves one
+  concrete record instance into compiler-owned reference-counted storage. The
+  concrete type must be an owned record with stable inline layout. Borrowed leaves, task handles, linear
   obligations, and nested allocator contexts are rejected with an explicit
   diagnostic; there is no unproven lifetime provenance for packed state.
 - The context records the concrete state and checked method functions for its

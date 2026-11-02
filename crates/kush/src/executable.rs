@@ -21387,6 +21387,7 @@ impl Checker<'_, '_> {
             Some((trait_id, TraitArguments::default())),
             span,
         )?;
+        self.check_method_visibility(definition, name, span)?;
         let index = self.functions.instance(
             self.types,
             self.resolution,
@@ -21425,7 +21426,9 @@ impl Checker<'_, '_> {
     /// statically for that concrete type and validated before the context is
     /// constructed.
     fn allocator_context_new(&mut self, value: &ast::Expr, span: Span) -> Result<Expr> {
-        self.require(ALLOC, span)?;
+        // Creating a context allocates compiler-owned metadata and a state
+        // block, either of which can refuse through the ordinary panic path.
+        self.require(ALLOC | PANIC, span)?;
         let value = self.expr(value)?;
         if value.ty == Type::Never {
             return Ok(Expr {

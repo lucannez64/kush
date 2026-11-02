@@ -958,7 +958,7 @@ fn hostile_allocator_context_shapes_are_rejected() {
     // A context needs an owned record with no borrowed leaves.
     rejects(
         r#"
-        fn main() -> Unit ! {alloc} {
+        fn main() -> Unit ! {alloc, panic} {
             let context = AllocatorContext.new(5);
         }"#,
         "owned record instance",
@@ -1091,4 +1091,21 @@ fn stateful_growth_hook_cannot_overwrite_typed_vector_elements_or_owners() {
     assert_eq!(value(source), 86);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 86);
+}
+
+#[test]
+fn allocator_context_and_container_cross_a_function_boundary() {
+    let source = format!(
+        r#"{STATEFUL_ALLOCATOR}
+        fn build() -> AllocBox<i64> ! {{alloc, panic}} {{
+            let context = AllocatorContext.new(Counting {{ calls: 0, live: 0, limit: 0 }});
+            AllocBox.new(context, 7)
+        }}
+        fn main() -> i64 ! {{alloc, panic}} {{
+            AllocBox.take(build())
+        }}"#
+    );
+    assert_eq!(value(&source), 7);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&source, 7);
 }
