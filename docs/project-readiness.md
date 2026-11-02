@@ -176,6 +176,24 @@ extensions. Eleven focused host/helper tests and all-targets Clippy pass on
 Boat. Log: `/tmp/kush-boat-http-helper-review-fixes.log`. Sandbox stopped.
 
 Still unresolved: evaluator-wide TCP/process deadline behavior, secure todo
-file replacement and permissions, generated-adapter helper symbol collisions
-and validation, full LSP support, and the other documented readiness limits.
-These passing tests do not erase the outstanding review findings.
+file replacement and permissions, full LSP support, and the other documented
+readiness limits. These passing tests do not erase outstanding review findings.
+
+## Declarative Rust adapter integration
+
+Compiler checkpoint `21c566d` integrates `kush bindgen Bridge.toml [--check]`:
+a strict config generates Rust C-ABI shims and matching Kush declarations.
+Module-derived helper namespaces allow multiple generated adapters to link;
+generated Rust works through `include!` and rejects panic-abort builds. Output
+writes use exclusive temporary creation, preserve existing permissions, and
+refuse unmarked files and symlink output paths. The legacy library generator's
+default helper prefix remains appropriate for one adapter; multiple adapters
+must use distinct configured prefixes.
+
+Boat focused validation passes **47 workspace tests** (bindgen 8, CLI 9,
+FFI 15, project 15), formatting, and workspace/all-targets Clippy with warnings
+denied. Generated example files pass drift checking. The Rust SHA-256 project
+runs correctly and its **two app tests** pass, including exactly-once resource
+release and error text. Log: `/tmp/kush-boat-bindgen-integration.log`
+(machine-local). A full integrated workspace gate and independent bindgen
+review are pending; this focused result does not claim either is complete.
