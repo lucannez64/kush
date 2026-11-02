@@ -686,3 +686,8 @@ regressions:
   rejecting linear elements.
 - **Low:** `DynArray.pop` was accepted while a slice view of the array was
   live, contrary to the documented contract; it is now rejected.
+
+## Gate after all review follow-ups
+
+`dedb144` (all four implementation merges plus every review fix) passes the
+full Boat gate: **953 tests**, formatting, and Clippy.
