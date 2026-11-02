@@ -2829,8 +2829,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         "internal error: whole-value reference read has no inline storage",
                     ));
                 };
-                let value = cell.lock().unwrap().clone();
-                value
+                cell.lock().unwrap().clone()
             }
             ExprKind::RefWrite(reference_expr, replacement_expr) => {
                 let reference = value!(self.expr(reference_expr, frame));

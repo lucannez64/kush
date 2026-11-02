@@ -9593,7 +9593,7 @@ impl Checker<'_, '_> {
     ) -> Result<(usize, Type)> {
         let key = (trait_id, trait_arguments.clone(), name.to_owned());
         if let Some(entry) = self.functions.dynamic_dispatch.get(&key) {
-            return Ok(entry.clone());
+            return Ok(*entry);
         }
         let definition = self.functions.traits[&trait_id].clone();
         let method = definition

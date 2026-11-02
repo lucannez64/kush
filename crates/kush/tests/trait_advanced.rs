@@ -782,6 +782,41 @@ fn borrowed_trait_object_boundaries_are_explicit() {
 }
 
 #[test]
+fn mutable_object_dispatch_preserves_owning_member_cleanup() {
+    let stats = agrees(
+        r#"
+        struct Text { name: String, count: i64 }
+        struct Blob { name: String, count: i64 }
+        trait Bump {
+            fn bump(self: &mut Self) -> i64 ! {panic};
+            fn make(self: &mut Self) -> Box<i64> ! {alloc, panic};
+        }
+        impl Bump for Text {
+            fn bump(self: &mut Self) -> i64 ! {panic} { self.count = self.count + 1; self.count }
+            fn make(self: &mut Self) -> Box<i64> ! {alloc, panic} { Box.new(self.count) }
+        }
+        impl Bump for Blob {
+            fn bump(self: &mut Self) -> i64 ! {panic} { self.count = self.count + 2; self.count }
+            fn make(self: &mut Self) -> Box<i64> ! {alloc, panic} { Box.new(self.count) }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut text: dyn Bump = Text { name: "x", count: 1 };
+            print_i64(text.bump());
+            print_i64(Box.take(text.make()));
+            let mut blob: dyn Bump = Blob { name: "y", count: 3 };
+            print_i64(blob.bump());
+            0
+        }"#,
+        0,
+        "2
+2
+5
+",
+    );
+    assert_eq!(stats.allocations, 3, "{}", stats.allocations);
+}
+
+#[test]
 fn closed_world_trait_objects_dispatch_and_clean_up_ownership() {
     let stats = agrees(
         r#"

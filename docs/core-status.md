@@ -9,7 +9,7 @@ memory/performance superiority over Rust.
 | Modules | Imports, visibility, cross-file spans, embedded library modules |
 | Generic data/functions | Type, natural-const, grade and effect specialization; nominal records/enums; transparent aliases |
 | Collections | Owning vectors and bytes, const-length inline arrays, shared and exclusive slice views |
-| Basic values | Checked `i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64` arithmetic and explicit conversions, Unicode `Char`, inline tuples of 2–16 elements with positional projection/destructuring, validated UTF-8 `String` over owning buffers, immutable borrowed `&str` text views with checked byte-offset substrings, builtin method spellings, and statically dispatched user-defined inherent/trait methods, generic traits with explicit type/`Nat`/`Grade` specializations, generic and blanket impls with coherence and deterministic specialization, associated types and scalar associated constants, generic methods, inherited default method bodies, compile-time bounded-generic obligations, and closed-world trait objects with checked object safety |
+| Basic values | Checked `i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64` arithmetic and explicit conversions, Unicode `Char`, inline tuples of 2–16 elements with positional projection/destructuring, validated UTF-8 `String` over owning buffers, immutable borrowed `&str` text views with checked byte-offset substrings, builtin method spellings, and statically dispatched user-defined inherent/trait methods, generic traits with explicit type/`Nat`/`Grade` specializations, generic and blanket impls with coherence and deterministic specialization, associated types (including defaults) and scalar associated constants, generic methods, inherited default method bodies, compile-time bounded-generic obligations, and closed-world owned/shared/mutable/borrowed trait objects with checked object safety |
 | Control flow | Exhaustive matching, guards, loops, early returns, Result propagation |
 | Dependent core | Universes, dependent functions, equality/transport/J, positive indexed logical data and elimination |
 | Propositions | Impredicative Prop, proof irrelevance with restricted elimination, constructor-local indices |
@@ -191,9 +191,10 @@ bodies. Borrowed `&self`/`&mut self` receivers keep their one-evaluation order
 and loan retention; references still cannot pass through a generic parameter.
 Calls lower to ordinary `Target::Function` calls, so the existing effect,
 proof, ownership, and cleanup checks apply unchanged. At that stage there were
-no trait objects, associated types, blanket impls, effect-row trait parameters,
+no trait objects, associated items, blanket impls, effect-row trait parameters,
 or escaping/general reference receivers; the [advanced-trait
-stage](#advanced-traits) adds the first three. The full Boat run passed **602
+stage](#advanced-traits) adds associated items, blanket impls, and closed-world
+objects, including mutable and stored borrowed dispatch. The full Boat run passed **602
 tests**, formatting, and Clippy with warnings denied. See
 [static traits and user-defined methods](traits.md).
 
@@ -243,50 +244,63 @@ exits with status 0 in both backends. See [usage grades](grades.md) and
 ## Advanced traits
 
 The advanced-trait stage adds associated types and compile-time scalar
-associated constants, generic and blanket impl headers with first-order
-matching and per-instantiation body checking, deterministic most-specific
-specialization with incomparable-overlap rejection, and closed-world trait
-objects.
+associated constants, associated type defaults, generic and blanket impl
+headers (including `Nat` and `Grade` parameters) with first-order matching and
+per-instantiation body checking, deterministic most-specific specialization
+with incomparable-overlap rejection, and closed-world trait objects.
 
 Associated types project through `Self::Out` in trait/impl signatures (written
 `Self.Out` in source) and through a bounded generic parameter `T.Out`. The impl
 supplies the value, which participates in the same capture-avoiding
 substitution as `Self`; missing, extra, and mistyped associated items are
-rejected. Associated constants accept `i8`/`i16`/`i32`/`i64`, unsigned
+rejected. A trait associated type may declare a default, substituted with the
+impl's trait arguments and allowed to chain through `Self::Other`; unknown
+projections and direct or transitive default cycles are rejected when the trait
+is declared. Associated constants accept `i8`/`i16`/`i32`/`i64`, unsigned
 widths, `Bool`, and `Char`, with required values, declaration-ordered defaults,
 and checked compile-time arithmetic. They lower to literals and have no runtime
 storage or accessor.
 
 Generic impls (`impl<T> Show for Wrapper<T>`) and blanket impls
 (`impl<T: Show> Loud for Wrapper<T>`) bind their parameters from the concrete
-receiver and trait specialization. Bounds are discharged at selection time, and
-every impl parameter must be constrained. Coherence compares self-type and
-trait-argument patterns: disjoint or specialization-comparable headers coexist,
-duplicate headers are rejected, and incomparable overlaps are rejected rather
-than resolved by declaration order. The unique most-specific applicable impl
-wins; a concrete impl outranks a blanket one.
+receiver and trait specialization. Impl headers may also declare `N: Nat` and
+`G: Grade`; dispatch binds a natural from an array length or `Nat` trait
+argument and a grade from a `Grade` trait argument. Header array lengths are
+literals or bare natural parameters, keeping coherence decidable. Bounds are
+discharged at selection time, and every impl parameter must be constrained.
+Coherence compares self-type and trait-argument patterns: disjoint or
+specialization-comparable headers coexist, duplicate headers are rejected, and
+incomparable overlaps are rejected rather than resolved by declaration order.
+The unique most-specific applicable impl wins; a concrete impl outranks a
+blanket one.
 
 `dyn Trait` is represented by the normalized union of its concrete impl targets.
 Dispatch matches the alternative and calls the ordinary checked impl method, so
 there is no vtable, fat pointer, erasure, or extra allocation, and native and
-reference cleanup agree. Object safety requires a finite closed member set,
-ordinary type parameters, no `Self` in non-receiver parameters/results, no
-generic or lifetime method parameters, no erased proof parameters, and
-consistent associated values. Owned receivers are always object-safe when the
-other rules hold; a shared `&self` receiver is accepted only when every member
-is copyable. `&mut self`, generic methods, open/blanket member sets, owning
-members behind a shared receiver, and unspecified associated values are
-rejected with explicit diagnostics. Two traits with identical member sets share
-one representation; an unqualified name that both declare is ambiguous and
-requires `object.Trait.method(...)`.
+reference cleanup agree. Owned receivers consume the object once. A shared
+`&self` receiver is accepted only when every member is copyable. A mutable
+`&mut self` receiver dispatches through a synthesized function returning
+`(updated object, result)`, and the caller writes the updated object back into
+a direct object local; temporary receivers are consumed. A stored `&dyn Trait`
+is a reference to the same union and copies a copyable object; `&mut dyn Trait`
+also writes the mutated object back through its exclusive reference. Object
+safety requires a finite closed member set, ordinary type parameters, no `Self`
+in non-receiver parameters/results, no generic or lifetime method parameters,
+no erased proof parameters, and consistent associated values (including
+defaults). Borrowed objects additionally require copyable members, and
+owning/linear members remain usable through owned objects or `Box<dyn Trait>`.
+Two traits with identical member sets share one representation; an unqualified
+name that both declare is ambiguous and requires `object.Trait.method(...)`.
 
-Stored `&dyn Trait`/`&mut dyn Trait` values, associated type defaults, const,
-grade, and effect impl parameters, lifetime-parameterized impls, `default fn`,
-negative impls, and arbitrary-overlap specialization remain outside this
-subset. Nominal record/enum declarations are laid out before impl collection,
-so `dyn Trait` is supported in function signatures, `Box`/`Vec`, tuples, and
-arrays but not as a declared nominal field. See [static traits](traits.md) and
-the focused `crates/kush/tests/trait_advanced.rs` regression file.
+Open/generic object member sets, direct `dyn Trait` nominal fields, borrowed
+objects with owning/linear members, object methods with lifetime or exact-use
+contracts, associated constants that are non-scalar or depend on an impl type
+parameter, effect/lifetime impl parameters, `default fn`, negative impls, and
+arbitrary-overlap specialization remain outside this subset. Nominal record/enum
+declarations are laid out before impl collection, so `dyn Trait` is supported in
+function signatures, `Box`/`Vec`, tuples, and arrays but not as a declared
+nominal field. See [static traits](traits.md) and the focused
+`crates/kush/tests/trait_advanced.rs` regression file.
 
 The advanced-trait changes were validated locally on Linux x86-64 with the
 shared Cargo cache at `/home/hirew/Projects/kush/target/traits`: **705

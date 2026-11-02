@@ -49,29 +49,41 @@ and remaining limits.
 ## Traits
 
 - [x] Associated types and constants with checked projection/substitution.
-  Scalar compile-time constants, required/default values, `Self` and bounded
-  `T` projections, per-impl substitution, and missing/extra/type mismatch
-  diagnostics are implemented and tested.
-- [x] Generic and blanket implementations with coherent overlap rules. Type
-  patterns, parameter solving, bound discharge, unconstrained-parameter
-  rejection, duplicate detection, and per-instantiation method checking are
-  implemented and tested.
-- [ ] Trait objects and checked dynamic dispatch/object safety. **Partial:** Closed-world
-  union representation, owned and copyable shared receivers, object-argument
-  dispatch, owning cleanup, associated-item agreement, and explicit rejection
-  of open sets, mutable/generic/borrowing-ownership cases are implemented and
-  tested. Stored `&dyn Trait`/`&mut dyn Trait` values remain outside the
-  subset.
+  Scalar compile-time constants, required/default values, associated type
+  defaults with trait-argument substitution, chained `Self::Other` projections,
+  cycle/unknown/bare-`Self` rejection, object-member agreement, `Self` and
+  bounded `T` projections, per-impl substitution, and missing/extra/type
+  mismatch diagnostics are implemented and tested. Non-scalar associated
+  constants remain outside the subset.
+- [x] Generic and blanket implementations with coherent overlap rules. Type,
+  natural (`Nat`), and grade impl-header parameters; array-length and trait
+  argument solving; bound discharge; unconstrained-parameter rejection;
+  duplicate detection; and per-instantiation method checking are implemented
+  and tested. Effect parameters have no determining position in an impl header
+  and are rejected as unconstrained; lifetime parameters remain rejected by the
+  parser.
+- [ ] Trait objects and checked dynamic dispatch/object safety. **Partial:**
+  Closed-world union representation, owned, copyable shared, and mutable
+  receivers with write-back to a direct object local, temporary mutable
+  receivers, stored copyable `&dyn Trait`/`&mut dyn Trait` values with
+  reference write-back, object-argument dispatch, owning cleanup, associated
+  item/default agreement, and explicit rejection of open sets,
+  non-copyable borrowed objects, owning-through-borrowed calls,
+  mutable-through-shared calls, generic methods, and direct nominal fields are
+  implemented and tested. Open/generic member sets and borrowed objects with
+  owning/linear members remain outside the subset.
 - [x] Specialization with an explicit deterministic coherence contract. Unique
   most-specific resolution, concrete-over-generic preference, duplicate
   rejection, and incomparable-overlap rejection are implemented and tested.
   `default fn`, negative impls, and arbitrary overlap remain rejected.
 
-Open trait work still includes mutable dynamic dispatch and stored borrowed
-trait objects, open/generic object member sets, const/grade/effect/lifetime impl
-parameters, associated type defaults, and non-scalar associated constants. The
-implemented closed-world union dispatch is not a claim of general vtable-based
-trait-object support. See [trait contracts](traits.md).
+Open trait work still includes open/generic object member sets, direct
+`dyn Trait` nominal fields, borrowed objects with owning/linear members,
+object methods with lifetime or exact-use contracts, non-scalar associated
+constants and associated constants depending on an impl type parameter, and
+lifetime/effect impl parameters. The implemented closed-world union dispatch is
+not a claim of general vtable-based trait-object support. See
+[trait contracts](traits.md).
 
 ## Grades and linear resources
 

@@ -90,7 +90,9 @@ The executable checker supports:
   `wrapping_add`/`checked_add`/conversions, and similar). Statically dispatched
   inherent and trait methods, bounded `T: Trait` helpers, and explicit
   `receiver.Trait.method(...)` qualification are documented in
-  [traits.md](traits.md); there are no vtables or dynamic trait objects.
+  [traits.md](traits.md). `dyn Trait` uses a checked closed-world union with
+  owned, shared, mutable, and stored borrowed dispatch; there are no vtables or
+  open-world trait objects.
 - Forward calls, current-module-qualified calls, and ordinary general recursion.
 - Immutable/mutable single-name locals, optional local type annotations, shadowing,
   assignment, nested blocks, tail expressions, and early `return`.
