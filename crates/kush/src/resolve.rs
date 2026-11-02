@@ -87,6 +87,12 @@ pub struct Resolution {
     pub algebras: BTreeMap<String, GradeAlgebraDecl>,
     /// Lowered, law-checked algebra tables used while evaluating annotations.
     pub(crate) lowered_algebras: BTreeMap<String, std::sync::Arc<crate::grades::Algebra>>,
+    /// Concrete rows bits for declared effect operations. A declared
+    /// `effect Op: P -> R;` also names an effect row entry, so `! {Op}` is
+    /// checked like the built-in `io`/`alloc`/`suspend`/`panic` vocabulary.
+    /// Built-ins occupy bits 0..4; declared effects take the following bits in
+    /// declaration order.
+    pub effect_bits: BTreeMap<String, u16>,
     references_by_span: BTreeMap<(usize, usize), BindingId>,
     binders_by_span: BTreeMap<(usize, usize), BindingId>,
 }
@@ -548,6 +554,28 @@ impl Resolver {
         }
     }
     fn run(mut self, items: &[Declaration], units: &[UnitInfo]) -> Result<Resolution> {
+        // Declared effect operations extend the finite effect-row vocabulary.
+        // Four built-in bits are reserved, so the 16-bit row universe admits
+        // twelve declared operations. Assignment follows source declaration
+        // order across modules, which is also the order used for operation ids.
+        for info in units {
+            for declaration in &items[info.items.clone()] {
+                if let ItemKind::Effect { name, .. } = &declaration.item.kind
+                    && !self.result.effect_bits.contains_key(name)
+                {
+                    let bit = 1u16
+                        .checked_shl(4u32 + self.result.effect_bits.len() as u32)
+                        .unwrap_or(0);
+                    if bit == 0 {
+                        return Err(Diagnostic::new(
+                            declaration.item.span,
+                            "at most twelve declared effect operations are supported, because an effect row is a finite 16-bit set",
+                        ));
+                    }
+                    self.result.effect_bits.insert(name.clone(), bit);
+                }
+            }
+        }
         for info in units {
             for declaration in &items[info.items.clone()] {
                 match &declaration.item.kind {
@@ -1005,13 +1033,14 @@ impl Resolver {
                     ));
                 };
                 let binding = &self.result.bindings[id];
-                if binding.kind != BindingKind::Builtin
-                    || !matches!(binding.name.as_str(), "io" | "alloc" | "suspend" | "panic")
-                {
+                let concrete = (binding.kind == BindingKind::Builtin
+                    && matches!(binding.name.as_str(), "io" | "alloc" | "suspend" | "panic"))
+                    || binding.kind == BindingKind::Effect;
+                if !concrete {
                     return Err(Diagnostic::new(
                         ty.span,
                         format!(
-                            "'{}' is not a concrete effect; excluding an effect variable, type, or declaration is not supported",
+                            "'{}' is not a concrete effect; excluding an effect variable or an ordinary type is not supported",
                             binding.name
                         ),
                     ));

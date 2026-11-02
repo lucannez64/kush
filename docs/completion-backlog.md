@@ -199,23 +199,34 @@ outstanding implementation item.
   never collapsed to an invariant `Option<i64 | Bool>`). General indexed-union
   inference is still missing, so this item stays unchecked. See
   [subtyping.md](subtyping.md#contextual-and-algebraic-inference).
-- [ ] Effect handlers and checked resumption ownership. **Partial:** lexical
-  one-shot `handle`/`perform`, nested shadowing, first-class handler callables,
-  a linear resumption token, handler-effect propagation, owning payload/cleanup
-  checks, and declared `effect` operations with a dynamic one-shot handler
-  stack across called functions work in both backends. A tail `perform` keeps
-  the allocation-free identity token; a `perform` that is the whole value of a
-  top-level statement now lowers to a real one-shot continuation closure, so
-  the handler can run code after `resume(x)` returns. The continuation fragment
-  requires exactly one such perform, the body result to equal the operation
-  result, no `return`/`break`/`continue` through the resumption, and rejects
-  mutable/borrowed captures; a capturing continuation requires `alloc`. The
-  dynamic stack stores pure noncapturing `fn` handlers and restores its depth
-  on early returns. A dynamically resolved `perform` requires `panic`, since a
-  missing handler aborts. General expression-context and multi-prompt
-  continuations, non-tail dynamic resumption, multishot handlers, capturing
-  dynamic handlers, task-crossing dynamic frames, and user-defined effect-row
-  names are not implemented. See [effect-handlers.md](effect-handlers.md).
+- [ ] Effect handlers and checked resumption ownership. **Partial, still
+  open:** lexical one-shot `handle`/`perform`, nested shadowing, first-class
+  handler callables, a linear resumption token, handler-effect propagation,
+  owning payload/cleanup checks, and declared `effect` operations with a
+  dynamic one-shot handler stack across called functions work in both backends.
+  A tail `perform` keeps the allocation-free identity token; a `perform` that is
+  the whole value of a top-level statement lowers to a real one-shot
+  continuation closure, so the handler can run code after `resume(x)` returns.
+  The continuation fragment requires exactly one such perform, the body result
+  to equal the operation result, no `return`/`break`/`continue` through the
+  resumption, and rejects mutable/borrowed captures; a capturing continuation
+  requires `alloc`. A dynamically resolved `perform` requires `panic`, since a
+  missing handler aborts. New since the previous checkpoint: a declared
+  `effect Op` is also a concrete effect-row entry checked like
+  `io`/`alloc`/`panic`/`suspend` (a perform requires `Op`; a lexical handle
+  discharges it for its body), with a finite sixteen-bit row universe (at most
+  twelve declared operations). Dynamic frames accept pure capturing `once`
+  handlers and own/drop their environment exactly once on pop or early exit; a
+  child task inherits the longest bottom prefix of copyable noncapturing
+  frames while capturing/one-shot frames are an isolation boundary. A
+  capture-free continuation may use the copyable `fn(R) -> R` multishot token
+  and be resumed zero or more times. Still missing and explicitly rejected:
+  general expression-context continuations and multiple non-tail performs per
+  handled body (a single top-level statement perform only), non-tail
+  resumption of a dynamically resolved perform across the call stack (dynamic
+  performs remain tail-resumptive identity), and multishot for continuations
+  with nonempty (even copyable) captures, which keep an owned environment.
+  See [effect-handlers.md](effect-handlers.md).
 - [ ] General row constraints beyond concrete exclusions. **Partial:** a finite
   Boolean constraint solver accumulates inclusion constraints across every
   higher-order argument, supports up to three unbound row variables (4096
@@ -732,3 +743,39 @@ partitions are deterministic but not principal. Borrowed structural results,
 nested field renaming, row subtraction/aliasing, first-class row values, and
 bare `..` impl headers remain explicit, tested rejections. See
 [subtyping.md](subtyping.md#structural-records).
+
+## Declared effect rows, owned dynamic frames, and task inheritance
+
+`6c6b08e` and `c55ccbf` extend the effect-handler fragment on top of
+`15f62d3`:
+
+- `6c6b08e` makes `effect Op: P -> R;` a concrete effect-row entry and widens
+  the finite row universe from eight to sixteen bits (four built-ins plus up to
+  twelve declared operations). A dynamic `perform Op` requires `Op` like
+  `io`/`alloc`/`panic`/`suspend`; a lexical `handle Op` discharges it for its
+  body. The constraint solver now enumerates only the effects a minimal
+  solution can need, so declared rows stay within the 4096-assignment budget.
+- `c55ccbf` lets a declared operation's dynamic frame own a pure capturing
+  `once` handler environment. The environment is transferred to the first
+  perform, or dropped exactly once by pop, early `return`, `break`, or
+  `continue`. A one-shot frame is skipped by later performs instead of being
+  reused. A child task inherits the longest bottom prefix of copyable
+  noncapturing frames; capturing and one-shot frames are the isolation
+  boundary. A capture-free continuation may use the copyable
+  `fn(R) -> R` multishot token; continuations with any captures stay one-shot.
+
+Local Linux x86-64 validation used
+`CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/close-effects` with debug
+information disabled and two Cargo jobs:
+
+- Full `cargo test -p kush --offline -j 2`: **958 passed, 0 failed** across 62
+  test binaries.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p kush --all-targets --offline -j 2 -- -D warnings`: passed.
+
+The effect backlog item stays **unchecked**. Still explicitly rejected and
+tested: general expression-context continuations, more than one non-tail
+`perform` per handled body, non-tail resumption of a dynamically resolved
+perform across the call stack, multishot with nonempty captures, and multishot
+handlers for declared operations (their dynamic perform always supplies the
+one-shot token). The remote Boat gate was not run from this checkout.

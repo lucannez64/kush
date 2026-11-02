@@ -143,6 +143,7 @@ impl Executable {
                 None,
                 Vec::new(),
                 false,
+                Vec::new(),
             );
             ready.push_back(root);
             loop {
@@ -176,6 +177,7 @@ impl Executable {
                         function,
                         environment,
                         preserve,
+                        handlers,
                     } => {
                         let child = self.start_task(
                             scope,
@@ -189,6 +191,7 @@ impl Executable {
                             environment,
                             Vec::new(),
                             preserve,
+                            handlers,
                         );
                         let _ = records[id].commands.send(TaskCommand::Spawned(child));
                         records[child].state = TaskState::Ready;
@@ -297,6 +300,7 @@ impl Executable {
         environment: Option<usize>,
         arguments: Vec<Value>,
         preserve: bool,
+        handlers: Vec<(usize, usize)>,
     ) -> usize {
         let id = records.len();
         let (commands, command_receiver) = mpsc::channel();
@@ -318,7 +322,17 @@ impl Executable {
             heap: heap.clone(),
             stats: stats.clone(),
             task: Some(comm),
-            dynamic_handlers: Vec::new(),
+            dynamic_handlers: handlers
+                .into_iter()
+                .map(|(operation, function)| HandlerFrame {
+                    operation,
+                    handler: Some(Value::Function {
+                        function,
+                        environment: None,
+                    }),
+                    consume: false,
+                })
+                .collect(),
             try_budget: try_budget.clone(),
         };
         stats.allocation();
@@ -715,6 +729,10 @@ enum TaskEvent {
         function: usize,
         environment: Option<usize>,
         preserve: bool,
+        /// Inheritable dynamic handler frames: `(operation, function)` pairs
+        /// for copyable noncapturing `fn` handlers. Capturing or one-shot
+        /// frames are a task boundary and are not inherited.
+        handlers: Vec<(usize, usize)>,
     },
     Join(usize),
     Cancel(usize),
@@ -774,6 +792,7 @@ impl TaskComm {
         function: usize,
         environment: Option<usize>,
         preserve: bool,
+        handlers: Vec<(usize, usize)>,
     ) -> Result<usize> {
         let Some(scope) = self.scopes.last_mut() else {
             return Err(Diagnostic::new(
@@ -786,6 +805,7 @@ impl TaskComm {
                 function,
                 environment,
                 preserve,
+                handlers,
             })
             .map_err(|_| Diagnostic::new(Span::default(), "task scheduler disconnected"))?;
         match self.commands.recv() {
@@ -862,6 +882,16 @@ impl TaskComm {
             .collect())
     }
 }
+/// One dynamic handler frame. `handler` is `None` after a one-shot handler has
+/// been consumed by a `perform`; the frame stays until its lexical pop so an
+/// inner consumed frame correctly uncovers an outer handler.
+struct HandlerFrame {
+    operation: usize,
+    handler: Option<Value>,
+    /// A `once` handler owns its environment and can be consumed only once.
+    /// A copyable `fn` handler serves any number of performs.
+    consume: bool,
+}
 struct Evaluator<'a, R: Read, W: Write> {
     program: &'a Executable,
     input: R,
@@ -871,10 +901,10 @@ struct Evaluator<'a, R: Read, W: Write> {
     heap: SharedHeap,
     stats: StatsHandle,
     task: Option<TaskComm>,
-    /// Dynamically scoped handlers for declared effect operations. Entries are
-    /// copyable noncapturing function values; the stack is unwound on every
-    /// normal or early exit from the handled body.
-    dynamic_handlers: Vec<(usize, Value)>,
+    /// Dynamically scoped handlers for declared effect operations. The stack is
+    /// unwound on every normal or early exit from the handled body, dropping an
+    /// unconsumed owning handler exactly once.
+    dynamic_handlers: Vec<HandlerFrame>,
     /// Remaining successful fallible allocation attempts for deterministic
     /// failure probes. `None` means unlimited.
     try_budget: Option<Arc<AtomicUsize>>,
@@ -2628,6 +2658,28 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
         Ok(())
     }
+    /// Dynamic frames a child task may inherit at spawn. Only copyable
+    /// noncapturing `fn` handlers cross the boundary; the longest such bottom
+    /// prefix is copied. A capturing or one-shot frame is a barrier, because
+    /// its environment is owned by the parent's dynamic extent and must not be
+    /// shared or duplicated.
+    fn inheritable_handlers(&self) -> Vec<(usize, usize)> {
+        let mut inherited = Vec::new();
+        for frame in &self.dynamic_handlers {
+            if frame.consume {
+                break;
+            }
+            let Some(Value::Function {
+                function,
+                environment: None,
+            }) = frame.handler.as_ref()
+            else {
+                break;
+            };
+            inherited.push((frame.operation, *function));
+        }
+        inherited
+    }
     fn task_comm(&mut self) -> Result<&mut TaskComm> {
         self.task.as_mut().ok_or_else(|| {
             Diagnostic::new(
@@ -2884,18 +2936,21 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             } => {
                 let handler_value = value!(self.expr(handler, frame));
                 self.consume(handler, frame);
-                let Value::Function {
-                    environment: None, ..
-                } = handler_value
-                else {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "internal error: dynamic effect handler must be a noncapturing function",
-                    ));
-                };
-                self.dynamic_handlers.push((*operation, handler_value));
+                let consume = matches!(handler.ty, Type::Once(_));
+                self.dynamic_handlers.push(HandlerFrame {
+                    operation: *operation,
+                    handler: Some(handler_value),
+                    consume,
+                });
                 let flow = self.block(body, frame);
-                self.dynamic_handlers.pop();
+                let popped = self.dynamic_handlers.pop();
+                if let Some(HandlerFrame {
+                    handler: Some(value),
+                    ..
+                }) = popped
+                {
+                    self.drop_value(value)?;
+                }
                 match flow? {
                     Flow::Value(value) => value,
                     returned => return Ok(returned),
@@ -2907,12 +2962,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 resume,
                 ..
             } => {
-                let Some((_, handler)) = self
+                let Some(index) = self
                     .dynamic_handlers
                     .iter()
-                    .rev()
-                    .find(|(candidate, _)| candidate == operation)
-                    .cloned()
+                    .rposition(|frame| frame.operation == *operation && frame.handler.is_some())
                 else {
                     return Err(Diagnostic::new(
                         expr.span,
@@ -2923,17 +2976,28 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let resume_value = value!(self.expr(resume, frame));
                 self.consume(payload, frame);
                 self.consume(resume, frame);
-                let Value::Function {
-                    function,
-                    environment: None,
-                } = handler
-                else {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "internal error: dynamic effect handler must be a noncapturing function",
-                    ));
-                };
-                self.call(function, vec![payload_value, resume_value])?
+                let consume = self.dynamic_handlers[index].consume;
+                if consume {
+                    let handler = self.dynamic_handlers[index]
+                        .handler
+                        .take()
+                        .expect("handler presence checked above");
+                    self.call_value(handler, vec![payload_value, resume_value])?
+                } else {
+                    let function = match self.dynamic_handlers[index].handler.as_ref() {
+                        Some(Value::Function {
+                            function,
+                            environment: None,
+                        }) => *function,
+                        _ => {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal error: copyable dynamic effect handler must be a noncapturing function",
+                            ));
+                        }
+                    };
+                    self.call(function, vec![payload_value, resume_value])?
+                }
             }
             ExprKind::Constant(n) => Value::Scalar(*n),
             // Only synthesized adapters use this placeholder, and the callee's
@@ -3024,9 +3088,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ));
                 };
                 self.consume(body, frame);
+                let handlers = self.inheritable_handlers();
                 let id = self
                     .task_comm()?
-                    .spawn(function, environment, *obligation)?;
+                    .spawn(function, environment, *obligation, handlers)?;
                 Value::Task(id)
             }
             ExprKind::TaskScope { body, failure, .. } => {

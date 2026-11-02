@@ -1060,6 +1060,8 @@ typedef struct {
     int64_t operation;
     int64_t code;
     int64_t environment;
+    int64_t once;
+    int64_t consumed;
 } kush_handler_frame;
 typedef struct {
     kush_handler_frame frames[KUSH_HANDLER_MAX];
@@ -1071,33 +1073,62 @@ static kush_handler_context *kush_handlers(void) {
     if (id < 0 || id >= KUSH_MAX_TASKS) id = 0;
     return &kush_handler_contexts[id];
 }
+/* Drop an unconsumed owning handler environment. The closure environment
+   header stores its drop function at offset zero, exactly like a `once`
+   closure value produced by the checked backend. */
+static void kush_handler_drop_frame(kush_handler_frame *frame) {
+    if (frame->environment != 0) {
+        void (*drop)(void *) =
+            *(void (**)(void *))(uintptr_t)frame->environment;
+        int64_t environment = frame->environment;
+        frame->environment = 0;
+        drop((void *)(uintptr_t)environment);
+    }
+}
 int64_t kush_handler_depth(void) {
     return kush_handlers()->depth;
 }
 void kush_handler_restore(int64_t depth) {
     if (depth < 0) depth = 0;
-    if (depth < kush_handlers()->depth) kush_handlers()->depth = depth;
+    kush_handler_context *handlers = kush_handlers();
+    while (handlers->depth > depth) {
+        handlers->depth -= 1;
+        kush_handler_drop_frame(&handlers->frames[handlers->depth]);
+    }
 }
-void kush_handler_push(int64_t operation, int64_t code, int64_t environment) {
+void kush_handler_push(int64_t operation, int64_t code, int64_t environment,
+                       int64_t once) {
     kush_handler_context *handlers = kush_handlers();
     if (handlers->depth >= KUSH_HANDLER_MAX) kush_panic();
     handlers->frames[handlers->depth].operation = operation;
     handlers->frames[handlers->depth].code = code;
     handlers->frames[handlers->depth].environment = environment;
+    handlers->frames[handlers->depth].once = once;
+    handlers->frames[handlers->depth].consumed = 0;
     handlers->depth += 1;
 }
 void kush_handler_pop(void) {
     kush_handler_context *handlers = kush_handlers();
-    if (handlers->depth > 0) handlers->depth -= 1;
+    if (handlers->depth > 0) {
+        handlers->depth -= 1;
+        kush_handler_drop_frame(&handlers->frames[handlers->depth]);
+    }
 }
 int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
     kush_handler_context *handlers = kush_handlers();
     for (int64_t index = handlers->depth - 1; index >= 0; --index) {
-        if (handlers->frames[index].operation == operation) {
-            out[0] = handlers->frames[index].code;
-            out[1] = handlers->frames[index].environment;
-            return 1;
+        kush_handler_frame *frame = &handlers->frames[index];
+        if (frame->operation != operation || frame->consumed) continue;
+        out[0] = frame->code;
+        out[1] = frame->environment;
+        out[2] = frame->once;
+        if (frame->once) {
+            /* A once handler transfers its environment to this call. The
+               callee frees it, so the frame must never drop it again. */
+            frame->consumed = 1;
+            frame->environment = 0;
         }
+        return 1;
     }
     return 0;
 }
@@ -1183,6 +1214,21 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
                 (unsigned int)(pointer >> 32));
     t->state = KUSH_READY;
     kush_tasks[id] = t;
+    /* Inherit the parent's copyable noncapturing dynamic handler frames.
+       A capturing or one-shot frame is a task boundary: its environment is
+       owned by the parent's dynamic extent, so only the longest inheritable
+       bottom prefix crosses. */
+    {
+        kush_handler_context *parent = kush_handlers();
+        kush_handler_context *child = &kush_handler_contexts[id];
+        child->depth = 0;
+        for (int i = 0; i < parent->depth; ++i) {
+            if (parent->frames[i].environment != 0 || parent->frames[i].once)
+                break;
+            child->frames[i] = parent->frames[i];
+            child->depth += 1;
+        }
+    }
     kush_ready_push(id);
     int depth = kush_current->scope_depth - 1;
     if (kush_current->scope_counts[depth] >= KUSH_MAX_CHILDREN) kush_panic();
@@ -1821,7 +1867,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let mut handler_push_sig = module.make_signature();
     handler_push_sig
         .params
-        .extend((0..3).map(|_| AbiParam::new(I64)));
+        .extend((0..4).map(|_| AbiParam::new(I64)));
     let handler_push = module
         .declare_function("kush_handler_push", Linkage::Import, &handler_push_sig)
         .map_err(error)?;
@@ -3511,6 +3557,13 @@ impl Generator<'_, '_> {
         }
     }
     fn indirect_signature(&self, id: usize) -> ir::Signature {
+        let once = self.program.function_types[id].once;
+        self.indirect_signature_mode(id, once)
+    }
+    /// Build the indirect call ABI for a callable signature, overriding whether
+    /// the environment word is part of the call. A dynamic handler frame picks
+    /// the copyable `fn` shape or the owning `once` shape at run time.
+    fn indirect_signature_mode(&self, id: usize, once: bool) -> ir::Signature {
         let signature = &self.program.function_types[id];
         let mut result = self.module.make_signature();
         let aggregate =
@@ -3518,7 +3571,7 @@ impl Generator<'_, '_> {
         if aggregate {
             result.params.push(AbiParam::new(I64));
         }
-        if signature.once {
+        if once {
             result.params.push(AbiParam::new(I64));
         }
         for (index, parameter) in signature.parameters.iter().enumerate() {
@@ -3718,11 +3771,17 @@ impl Generator<'_, '_> {
                 handler,
                 body,
             } => {
-                let code = lower!(self.scalar(handler));
+                let values = lower!(self.expr(handler));
+                let code = values[0];
+                let (environment, once) = if matches!(handler.ty, Type::Once(_)) {
+                    let environment = values.get(1).copied().unwrap_or_else(|| self.constant(0));
+                    (environment, self.constant(1))
+                } else {
+                    (self.constant(0), self.constant(0))
+                };
                 self.consume(handler);
-                let zero = self.constant(0);
                 let op = self.constant(*operation as i64);
-                self.runtime_void(self.handler_push, &[op, code, zero]);
+                self.runtime_void(self.handler_push, &[op, code, environment, once]);
                 if let Some(values) = self.block(body) {
                     self.runtime_void(self.handler_pop, &[]);
                     return Some(values);
@@ -3739,7 +3798,7 @@ impl Generator<'_, '_> {
                 let resume_values = lower!(self.expr(resume));
                 self.consume(payload);
                 self.consume(resume);
-                let out = self.stack_words(2);
+                let out = self.stack_words(3);
                 let op = self.constant(*operation as i64);
                 let found = self.runtime_call(self.handler_lookup, &[op, out]);
                 let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
@@ -3748,6 +3807,14 @@ impl Generator<'_, '_> {
                     .builder
                     .ins()
                     .load(I64, ir::MemFlagsData::new(), out, 0);
+                let environment = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), out, 8);
+                let once = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), out, 16);
                 let signature = self.program.function_types[*handler].clone();
                 let result = signature.result;
                 let pointer = if aggregate_result(self.program, result) {
@@ -3760,18 +3827,34 @@ impl Generator<'_, '_> {
                 } else {
                     None
                 };
-                let mut values = Vec::new();
-                if let Some(pointer) = pointer {
-                    values.push(pointer);
-                }
-                values.extend(payload_values);
-                values.extend(resume_values);
-                let signature = self.indirect_signature(*handler);
-                let signature = self.builder.import_signature(signature);
-                let call = self.builder.ins().call_indirect(signature, code, &values);
-                if let Some(pointer) = pointer {
-                    return Some(
-                        (0..self.program.width(result))
+                // A dynamic frame may hold either a copyable noncapturing `fn`
+                // (no environment word in its ABI) or an owning `once` handler
+                // (an environment word). The runtime frame records which, so
+                // generate both checked call shapes and select at run time.
+                let once_block = self.builder.create_block();
+                let fn_block = self.builder.create_block();
+                let Some(join) = self.join(result) else {
+                    unreachable!("a declared effect result is never Never")
+                };
+                self.builder
+                    .ins()
+                    .brif(once, once_block, &[], fn_block, &[]);
+                for (call_once, block) in [(false, fn_block), (true, once_block)] {
+                    self.builder.switch_to_block(block);
+                    let mut values = Vec::new();
+                    if let Some(pointer) = pointer {
+                        values.push(pointer);
+                    }
+                    if call_once {
+                        values.push(environment);
+                    }
+                    values.extend(payload_values.iter().copied());
+                    values.extend(resume_values.iter().copied());
+                    let signature = self.indirect_signature_mode(*handler, call_once);
+                    let signature = self.builder.import_signature(signature);
+                    let call = self.builder.ins().call_indirect(signature, code, &values);
+                    let results = match pointer {
+                        Some(pointer) => (0..self.program.width(result))
                             .map(|i| {
                                 self.builder.ins().load(
                                     I64,
@@ -3780,10 +3863,13 @@ impl Generator<'_, '_> {
                                     (i * 8) as i32,
                                 )
                             })
-                            .collect(),
-                    );
+                            .collect::<Vec<_>>(),
+                        None => self.builder.inst_results(call).to_vec(),
+                    };
+                    self.jump(join, &results);
                 }
-                return Some(self.builder.inst_results(call).to_vec());
+                self.builder.switch_to_block(join);
+                return Some(self.builder.block_params(join).to_vec());
             }
             ExprKind::BytesLiteral(bytes) => {
                 let gv = self
