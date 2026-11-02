@@ -68,11 +68,11 @@ and remaining limits.
   move; `let`, assignment, return, blocks, branches, match arms, loops, `?`,
   captures, aggregates, and every tested discard position are checked. See
   `docs/copyable-result-transfer.md`.
-- [x] Grade-zero runtime erasure with relevance/effect guarantees. Local
+- [ ] Grade-zero runtime erasure with relevance/effect guarantees. **Partial:** local
   `@[0]` bindings are not materialized in either backend; initializer effects,
   order, and allocation balance are preserved. Parameter slots remain ABI-bound
   but unobservable, and result `@[0]` is still rejected. See
-  `docs/grade-zero-erasure.md`.
+  `docs/grade-zero-erasure.md`. Parameter/result erasure is still outstanding.
 - [x] Cancellation cleanup of linear resources and linear task results.
   Cooperative cancellation transfers a completed owning/linear payload as
   `Completed` instead of dropping it; such task handles are linear and must be

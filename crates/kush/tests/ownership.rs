@@ -59,7 +59,7 @@ fn borrows_cannot_outlive_or_be_invalidated_by_later_arguments() {
         "escapes",
     );
     rejects(
-        "fn main()->Unit ! {alloc,panic} {let b=Box.new(1);let r=&b;drop(Box.take(b));}",
+        "fn main()->Unit ! {alloc,panic} {let b=Box.new(1);let r=&b;drop(Box.take(b));drop(Box.read(r));}",
         "while it is borrowed",
     );
     rejects(
