@@ -6,6 +6,11 @@ including while Boat access is being migrated. Check available RAM and CPU load
 first, use conservative build concurrency (start with two jobs), and move heavier
 workloads to Boat when local capacity is constrained.
 
+- For local builds, prefer `mbx build` / `mbx test` / `mbx clippy` (Mr.
+  Boxington, installed in `~/.cargo/bin`) over plain `cargo`, so worktrees share
+  compiled dependencies through `~/.cache/mbx`. Keep a target directory on one
+  tool: mbx hard-links read-only cached outputs, which plain `cargo` cannot
+  overwrite. The Cargo shim is intentionally not on `PATH`.
 - Use `scripts/boat-check.sh` for source upload and remote checks. With no
   argument it takes the sandbox from `~/.config/kush/boat.json`, resumes it when
   stopped, verifies the uploaded tree matches this checkout, runs the checks, and
