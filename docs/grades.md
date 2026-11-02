@@ -5,10 +5,13 @@ is a usable, tested grade interface, not a formal soundness proof and not the
 complete dependent graded calculus described by the [v0.1 specification](spec-v0.1.md#71-graded-modalities).
 
 Parameter and local binding grades, together with the restricted result-transfer
-contract `-> T @[1]` on owning or intrinsically linear results, are implemented.
-Result grades are static metadata erased at runtime; they do not add a tag,
-allocation, or ABI change. Inference, custom grade semirings, general graded
-modalities, and grade-zero erasure remain out of scope.
+contract `-> T @[1]` on owning, intrinsically linear, or copyable results, are
+implemented. Result grades are static metadata erased at runtime; they do not
+add a tag, allocation, or ABI change. On an owning value `@[1]` transfers the
+linear resource obligation; on a copyable value it transfers a must-use
+observation obligation. See [copyable result transfer](copyable-result-transfer.md).
+Inference, custom grade semirings, general graded modalities, and grade-zero
+erasure remain out of scope.
 
 ```sh
 cargo run -p kush -- check examples/grades.kush
@@ -62,11 +65,12 @@ T @[G * 2]
 
 Grades are a separate grammar from ordinary types. They are meaningful on a
 function parameter, a simple `let` binding, and a function result. On a result
-only exactly `@[1]` is accepted, and only for an owning or intrinsically linear
-result type; `@[0]`, finite `n > 1`, `many`, abstract grades without a concrete
-specialization, and copyable results are rejected explicitly. A grade on a
-stored field, a nested type argument, an array element, an erased proof
-parameter, or a destructuring binder is rejected explicitly.
+only exactly `@[1]` is accepted. It transfers an owning linear obligation for an
+owning or intrinsically linear result, and a must-use observation obligation for
+a copyable result; `@[0]`, finite `n > 1`, `many`, and abstract grades without a
+concrete specialization are rejected explicitly. A grade on a stored field, a
+nested type argument, an array element, an erased proof parameter, or a
+destructuring binder is rejected explicitly.
 
 ## Binding rules
 
@@ -108,10 +112,11 @@ fn main() -> i64 ! {alloc, panic} {
 }
 ```
 
-- The result contract requires an owning or intrinsically linear result:
-  `Box<T>`, `Bytes`, `Vec<T>`, `String`, owning records/enums/unions, or
-  `#[linear]` data. A copyable scalar or a borrowed view is rejected rather
-  than promising an obligation the checker cannot track.
+- The result contract requires an owning, intrinsically linear, or copyable
+  result. On an owning result it transfers a resource obligation. On a copyable
+  scalar, tuple, record, or borrowed view it transfers a must-use observation
+  obligation, tracked by the grade pass; see
+  [copyable result transfer](copyable-result-transfer.md).
 - Exactly `@[1]` is implemented. `@[0]` would discard the returned value,
   finite `n > 1` and `many` could duplicate one owner, and abstract result
   grades must be specialized to a concrete `1` before the instance is checked.
@@ -127,10 +132,13 @@ fn main() -> i64 ! {alloc, panic} {
   metadata only, and no runtime tag, allocation, or check is emitted for it.
 
 The body must satisfy the contract on every normal return, and the caller must
-consume the returned resource exactly once. A call result with `@[1]` is a
-linear value at its use site: binding it marks the binding linear, passing it
-to an ungraded parameter is rejected, and dropping it, wildcard-binding it,
-storing it in an affine container, or leaving it at scope end is an error.
+consume or observe the returned value exactly once. An owning call result with
+`@[1]` is a linear value at its use site: binding it marks the binding linear,
+passing it to an ungraded parameter is rejected, and dropping it,
+wildcard-binding it, storing it in an affine container, or leaving it at scope
+end is an error. A copyable call result with `@[1]` is a must-use value:
+binding it marks the binding `@[1]`, an expression statement or wildcard cannot
+discard it, and returning it needs a matching copyable `@[1]` result.
 
 A binding-based linear obligation must not be returned through an *ungraded*
 result of a non-linear type. The following is rejected, because the caller
@@ -426,9 +434,9 @@ deferred:
   as `1` from an expected `@[1]` arrow; all other abstract grades still require
   explicit specialization. There is no principal grade solver. See
   [bounded result-grade inference](result-grade-inference.md).
-- Result grades beyond the implemented `@[1]` owning/intrinsic-linear subset:
-  general inference, custom algebras, or unrestricted grade polymorphism;
-  copyable-result transfer; and grade-zero result erasure.
+- Result grades beyond the implemented `@[1]` owning/intrinsic-linear and
+  copyable must-use subsets: general inference, custom algebras, or
+  unrestricted grade polymorphism; and grade-zero result erasure.
 - General dependent grade indices, grades mentioning runtime values, and
   erasure/relevance interaction with graded dependent types.
 - Full dependent algebraic subtyping combined with grades, general borrowed-return

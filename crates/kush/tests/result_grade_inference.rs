@@ -178,19 +178,33 @@ fn unsupported_result_grades_through_aliases_are_still_rejected() {
 }
 
 #[test]
-fn copyable_and_borrowed_results_through_aliases_are_still_rejected() {
+fn copyable_results_through_aliases_carry_a_must_use_contract() {
+    agrees(
+        r#"type Handle<G: Grade, T> = T @[G];
+        fn make() -> Handle<1, i64> ! {} { 42 }
+        fn observe(x: i64 @[1]) -> i64 ! {panic} { x + 1 }
+        fn main() -> i64 ! {panic} { observe(make()) }"#,
+        43,
+        "",
+    );
     rejects(
         r#"type Handle<G: Grade, T> = T @[G];
         fn make() -> Handle<1, i64> ! {} { 42 }
-        fn main() -> i64 ! {} { make() }"#,
-        "requires an owning",
+        fn main() -> i64 ! {} { make(); 0 }"#,
+        "must-use `@[1]`",
     );
-    rejects(
-        r#"type Handle<G: Grade, T> = T @[G];
-        fn view(s: &[i64]) -> Handle<1, &[i64]> ! {} { s }
+    // A borrowed view may carry the copyable must-use contract; it is still a
+    // view and never becomes an owning value.
+    accepts(
+        r#"fn view<'a>(s: &'a [i64]) -> &'a [i64] @[1] ! {} { s }
         fn main() -> i64 ! {} { 0 }"#,
-        "requires an owning",
     );
+}
+
+fn accepts(source: &str) {
+    if let Err(error) = check(source) {
+        panic!("expected acceptance, got {error:?}: {source}");
+    }
 }
 
 #[test]

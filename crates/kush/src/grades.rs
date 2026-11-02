@@ -320,21 +320,26 @@ impl<'a> Checker<'a> {
     }
     /// Whether the value of `expr` is a move of a binding carrying a linear
     /// obligation, including through value-position blocks, `if`, `match`,
-    /// constructors, and `Box.new`.
+    /// constructors, and `Box.new`. A copyable `@[1]` result is a must-use
+    /// obligation, not an owning move, so its result type must own storage.
     fn value_moves_linear(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Local(slot) | ExprKind::Move(slot) => self.function.locals[*slot].linear,
-            ExprKind::Call(Target::Function(index), _) => self
-                .program
-                .functions
-                .get(*index)
-                .is_some_and(|function| function.result_grade == Some(Grade::Finite(1))),
+            ExprKind::Call(Target::Function(index), _) => {
+                self.program.functions.get(*index).is_some_and(|function| {
+                    function.result_grade == Some(Grade::Finite(1)) && self.moves(function.result)
+                })
+            }
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
-                Type::Fn(id) | Type::Once(id) => self
-                    .program
-                    .function_types
-                    .get(id)
-                    .is_some_and(|signature| signature.result_grade == Some(Grade::Finite(1))),
+                Type::Fn(id) | Type::Once(id) => {
+                    self.program
+                        .function_types
+                        .get(id)
+                        .is_some_and(|signature| {
+                            signature.result_grade == Some(Grade::Finite(1))
+                                && self.moves(signature.result)
+                        })
+                }
                 _ => false,
             },
             ExprKind::Block(block) => self.block_value_moves_linear(block),

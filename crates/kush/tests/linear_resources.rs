@@ -22,6 +22,12 @@ fn rejects(source: &str, fragment: &str) {
     );
 }
 
+fn check_ok(source: &str) {
+    if let Err(error) = check(source) {
+        panic!("expected acceptance, got {error:?}: {source}");
+    }
+}
+
 #[test]
 fn factories_and_annotated_identity_transfer_exactly_once() {
     // A factory constructs the resource and hands the obligation to its caller.
@@ -70,16 +76,16 @@ fn unsupported_result_grades_are_rejected_explicitly() {
             "result",
         );
     }
-    // Copyable results are not tracked by the ownership checker.
+    // A copyable result now transfers a must-use @[1] obligation. Returning it
+    // through an ungraded result is still rejected because the caller would
+    // lose the obligation.
     rejects(
         "fn f() -> i64 @[1] ! {} { 1 } fn main() -> i64 ! {} { f() }",
-        "requires an owning",
+        "must-use `@[1]` contract",
     );
-    // A borrowed view is copyable: a result grade must not make it owning.
-    rejects(
-        "fn f(s: &[i64]) -> &[i64] @[1] ! {} { s } fn main() -> i64 ! {} { 0 }",
-        "requires an owning",
-    );
+    // A borrowed view is copyable and keeps its owning status unchanged; its
+    // @[1] result is a must-use observation contract, not a move.
+    check_ok("fn f<'a>(s: &'a [i64]) -> &'a [i64] @[1] ! {} { s } fn main() -> i64 ! {} { 0 }");
     // An abstract result grade is only meaningful with a concrete
     // specialization; @[1] is then accepted, @[2] is rejected.
     value(
@@ -396,9 +402,10 @@ fn question_mark_and_aggregates_preserve_transfer_obligations() {
         ),
         13,
     );
-    // A copyable success payload cannot carry the obligation, so `?` is
-    // rejected rather than silently making it affine.
-    rejects(
+    // A copyable success payload is observed by `?` itself: the graded Result
+    // value is consumed exactly once, and the extracted scalar is an ordinary
+    // copyable value with no residual obligation.
+    value(
         &format!(
             "{RESULT}
              fn produce() -> Result<i64, Box<i64>> @[1] ! {{alloc, panic}} {{ Ok(1) }}
@@ -406,9 +413,11 @@ fn question_mark_and_aggregates_preserve_transfer_obligations() {
                 let n = produce()?;
                 Ok(n + 1)
              }}
-             fn main() -> i64 ! {{alloc, panic}} {{ 0 }}"
+             fn main() -> i64 ! {{alloc, panic}} {{
+                match consume() {{ Ok(n) => n, Err(b) => Box.take(b) }}
+             }}"
         ),
-        "cannot be preserved",
+        2,
     );
     // An owning aggregate can carry the contract, and destructuring transfers
     // the obligation to its owning fields.

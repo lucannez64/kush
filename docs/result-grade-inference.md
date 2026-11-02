@@ -91,9 +91,11 @@ The following remain errors:
 - an expected arrow with no result contract, or no expected arrow at all;
 - result grades other than exactly `@[1]` (`0`, `2`, `many`), whether written
   directly or through an alias argument;
-- copyable and borrowed results with a result grade, including through an
-  alias (`Handle<1, i64>`, `Handle<1, &[i64]>`);
 - task results and effect-constraint inference (unchanged/out of scope).
+
+Copyable and borrowed results may carry an explicit `@[1]` must-use contract;
+see [copyable result transfer](copyable-result-transfer.md). Inference of that
+contract is still governed by the same single bare outer result-grade rule.
 
 ## Tests
 

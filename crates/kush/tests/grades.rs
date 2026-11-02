@@ -87,7 +87,7 @@ fn grade_expressions_and_annotated_positions_are_checked() {
     );
     rejects(
         "fn f() -> i64 @[1] ! {} { 1 } fn main() -> i64 ! {} { f() }",
-        "requires an owning",
+        "must-use `@[1]` contract",
     );
     rejects(
         "struct S { x: i64 @[1] } fn main() -> i64 ! {} { 0 }",

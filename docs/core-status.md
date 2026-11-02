@@ -14,7 +14,7 @@ memory/performance superiority over Rust.
 | Dependent core | Universes, dependent functions, equality/transport/J, positive indexed logical data and elimination |
 | Propositions | Impredicative Prop, proof irrelevance with restricted elimination, constructor-local indices |
 | Runtime bridge | Checked erased evidence, dependent erased binders, immutable scalar indices, kernel-normalized const lengths |
-| Usage grades | Natural/many usage, grade arithmetic and specialization, exact branch/loop/call checking, owning `@[1]` result-transfer contracts (static metadata, no runtime representation) |
+| Usage grades | Natural/many usage, grade arithmetic and specialization, exact branch/loop/call checking, owning `@[1]` result-transfer contracts and copyable must-use `@[1]` result contracts (static metadata, no runtime representation) |
 | Subtyping | Normalized heterogeneous unions/intersections, coherent coercions, exhaustive narrowing, effect/grade-aware arrows |
 | Higher-order code | Function values, typed lambdas, affine/linear once closures, scoped borrowed-capture once closures, effect-polymorphic calls |
 | Memory/backend | Affine/linear checking, deterministic cleanup, checked box reuse, allocation-preserving in-place vector transforms, conservative pure-map fusion, independent evaluator, Cranelift native Linux x86-64 |
@@ -215,10 +215,10 @@ run**; the new tests pass locally on Linux x86-64 in both the reference
 evaluator and the Cranelift backend, but the workspace-wide
 formatting/Clippy/test gate is still outstanding.
 
-The linear-resource milestone adds explicit `@[1]` result contracts for owning
-and intrinsically linear results. A factory or annotated identity transfers its
-obligation to the caller, and the caller must consume the returned resource
-exactly once. The contract is threaded through named and generic functions,
+The linear-resource milestone adds explicit `@[1]` result contracts for owning,
+intrinsically linear, and copyable results. An owning contract transfers a
+resource obligation; a copyable contract transfers a must-use observation
+obligation. The contracts are threaded through named and generic functions,
 typed lambdas, callable arrow types and aliases, static trait and method
 signatures, indirect calls, checked adapters, `let` aliases, assignment,
 branches, loop back-edge fixed points and break results, `?` owning success
@@ -229,7 +229,7 @@ the former acceptance is replaced by an explicit diagnostic and graded
 replacement tests. Task and scope results that would carry a linear obligation
 stay rejected. The grade is static metadata erased at runtime: payload types,
 allocation counts, and the ABI are unchanged. General result-grade inference, custom
-grade semirings, copyable-result transfer, grade-zero erasure, and
+grade semirings, grade-zero erasure, and
 cancellation-time linear cleanup remain future work. The full Boat run passes
 **618 tests**, formatting, and Clippy with warnings denied; the new
 `examples/linear-resources.kush` prints `20`, `21`, `21`, `7`, and `42` and
@@ -277,8 +277,9 @@ caller, and an ungraded result can no longer make a binding-based `@[1]` owner
 affine. Result grades are static metadata erased at runtime, are threaded
 through generic functions, lambdas, arrow types, trait/method contracts,
 indirect calls, aliases, and adapters, and are matched exactly by subtyping.
-Only `@[1]` is supported: `@[0]`, `> 1`, `many`, abstract result grades without
-a concrete specialization, and copyable results are rejected. Custom grade
+Only `@[1]` is supported: `@[0]`, `> 1`, `many`, and abstract result grades without
+a concrete specialization remain rejected on both owning and copyable results.
+Copyable `@[1]` results are must-use observations, not owning moves. Custom grade
 algebras, general grade inference, grade-zero erasure, and cancellation-time linear
 cleanup are not implemented. Task results that would carry a linear obligation
 remain rejected.

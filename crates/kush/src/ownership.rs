@@ -112,7 +112,25 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
     let result_grades = program
         .functions
         .iter()
-        .map(|function| function.result_grade)
+        .map(|function| {
+            function.result_grade.map(|grade| {
+                (
+                    grade,
+                    owns(
+                        function.result,
+                        &program.owned_enums,
+                        &program.unions,
+                        &program.pointees,
+                    ) || is_linear(
+                        function.result,
+                        &program.linear_enums,
+                        &program.unions,
+                        &program.pointees,
+                        &program.function_types,
+                    ),
+                )
+            })
+        })
         .collect::<Vec<_>>();
     for (function_index, function) in program.functions.iter_mut().enumerate() {
         let mut checker = Checker {
@@ -548,9 +566,12 @@ struct Checker<'a> {
     unions: &'a [crate::runtime_types::UnionType],
     pointees: &'a [Type],
     functions: &'a [crate::runtime_types::FunctionType],
-    /// Static `@[1]` result contract of each checked function, by instance
-    /// index. Kept as metadata only; runtime payloads and the ABI are unchanged.
-    result_grades: &'a [Option<Grade>],
+    /// Static result contract of each checked function, by instance index:
+    /// `(grade, owning)`. `owning` distinguishes an owning `@[1]` transfer
+    /// (which is a move) from a copyable must-use `@[1]` contract (which the
+    /// grade pass enforces). Metadata only; runtime payloads and the ABI are
+    /// unchanged.
+    result_grades: &'a [Option<(Grade, bool)>],
     calls: &'a [CallLifetime],
     result_lifetime: Option<String>,
     result_type: Type,
@@ -2467,12 +2488,19 @@ impl Checker<'_> {
                 .get(*index)
                 .copied()
                 .flatten()
-                .is_some_and(|grade| grade == Grade::Finite(1)),
+                .is_some_and(|(grade, owning)| grade == Grade::Finite(1) && owning),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
-                Type::Fn(id) | Type::Once(id) => self
-                    .functions
-                    .get(id)
-                    .is_some_and(|signature| signature.result_grade == Some(Grade::Finite(1))),
+                Type::Fn(id) | Type::Once(id) => self.functions.get(id).is_some_and(|signature| {
+                    signature.result_grade == Some(Grade::Finite(1))
+                        && (owns(signature.result, self.owned, self.unions, self.pointees)
+                            || is_linear(
+                                signature.result,
+                                self.linear,
+                                self.unions,
+                                self.pointees,
+                                self.functions,
+                            ))
+                }),
                 _ => false,
             },
             ExprKind::Block(block) => self.block_value_moves_linear(block),

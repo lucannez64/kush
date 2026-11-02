@@ -1402,22 +1402,11 @@ impl<'a> Types<'a> {
                 .map(|grade| crate::grades::evaluate(self.resolution, &substitution.grades, grade))
                 .transpose()?;
             let result = self.lower(result_inner, substitution, depth + 1)?;
-            if result_grade.is_some() {
-                if result_grade != Some(Grade::Finite(1)) {
-                    return Err(Diagnostic::new(
-                        result_ast.span,
-                        "callable result grades currently support only exactly @[1]; @[0] would discard the returned value and a larger or unbounded grade could duplicate it",
-                    ));
-                }
-                if !type_owns(&self.enums, &self.unions, result, 0) {
-                    return Err(Diagnostic::new(
-                        result_ast.span,
-                        format!(
-                            "a callable result grade @[1] requires an owning or intrinsically linear result; '{}' is copyable, so its transfer cannot be tracked",
-                            self.name(result)
-                        ),
-                    ));
-                }
+            if result_grade.is_some() && result_grade != Some(Grade::Finite(1)) {
+                return Err(Diagnostic::new(
+                    result_ast.span,
+                    "callable result grades currently support only exactly @[1]; @[0] would discard the returned value and a larger or unbounded grade could duplicate it",
+                ));
             }
             let mut result_lifetime = None;
             let mut result_leaves: Vec<BorrowLeaf> = Vec::new();

@@ -796,24 +796,23 @@ fn result_contract(
     Ok((inner.clone(), grade))
 }
 
-/// Validate a static result-transfer contract. Only exactly `@[1]` on an
-/// owning/linear result is representable; copyable results are deliberately
-/// rejected because their transfer is not tracked.
+/// Validate a static result-transfer contract.
+///
+/// Exactly `@[1]` is representable. On an owning or intrinsically linear
+/// result it transfers an owning linear obligation. On a copyable result it
+/// transfers a *must-use* obligation: the caller must observe the returned
+/// value exactly once on every normal path. The two obligations are distinct
+/// even though both use the same `@[1]` surface syntax; `result_grade` alone
+/// never makes a copyable value move-owning.
 fn validate_result_contract(
     grade: Option<Grade>,
-    owning: bool,
-    name: &str,
+    _owning: bool,
+    _name: &str,
     span: Span,
 ) -> Result<()> {
     match grade {
         None => Ok(()),
-        Some(Grade::Finite(1)) if owning => Ok(()),
-        Some(Grade::Finite(1)) => Err(Diagnostic::new(
-            span,
-            format!(
-                "a result graded @[1] requires an owning or intrinsically linear result; '{name}' is copyable, so the returned obligation cannot be tracked. Use a copyable parameter grade for usage counts, or return an owning resource"
-            ),
-        )),
+        Some(Grade::Finite(1)) => Ok(()),
         Some(Grade::Finite(0)) => Err(Diagnostic::new(
             span,
             "a result graded @[0] would discard the value it returns; use an owning @[1] result contract or return Unit",
@@ -1549,6 +1548,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             locals: Vec::new(),
             slots: BTreeMap::new(),
             result: sig.result,
+            result_grade: sig.result_grade,
             effects: sig.effects,
             depth: 0,
             loops: Vec::new(),
@@ -1583,6 +1583,16 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             }
             let body = checker.block(f.body.as_ref().unwrap(), Some(sig.result))?;
             checker.expect(body.ty, sig.result, sig.span)?;
+            if body.ty != Type::Never
+                && let Some(tail) = &body.tail
+                && checker.observes_copyable_result(tail)
+                && !checker.transfers_copyable_result()
+            {
+                return Err(Diagnostic::new(
+                    tail.span,
+                    "this function returns a copyable result with the must-use `@[1]` contract through an ungraded result; annotate the result as '@[1]' so every caller inherits exactly one observation, or observe the value inside the function",
+                ));
+            }
             Ok(body)
         })();
         let body = body.map_err(|mut e: Diagnostic| {
@@ -3205,11 +3215,12 @@ impl<'a> Functions<'a> {
         // alias-expanded runtime type, so an alias result keeps the existing
         // explicit-lifetime requirement. Result *grades* are separate metadata
         // and are already split above.
-        let explicit_result_lifetime = borrow_lifetime(&f.result);
+        let written_result = split_grade(&f.result).0;
+        let explicit_result_lifetime = borrow_lifetime(written_result);
         let result_lifetime = match explicit_result_lifetime {
             Some(lifetime) => Some(lifetime),
             None if (result.is_view() || result.is_ref())
-                && matches!(&f.result.kind, ast::TypeKind::Borrow { .. }) =>
+                && matches!(&written_result.kind, ast::TypeKind::Borrow { .. }) =>
             {
                 // Conservative elision: infer only when the input side names
                 // exactly one distinct borrow lifetime. Independent anonymous
@@ -4016,6 +4027,10 @@ struct Checker<'a, 't> {
     locals: Vec<Local>,
     slots: BTreeMap<BindingId, usize>,
     result: Type,
+    /// Static result-transfer contract of the function/lambda currently being
+    /// checked. Distinguishes owning `@[1]` transfers from must-use copyable
+    /// transfers when a returned value is observed.
+    result_grade: Option<Grade>,
     effects: u8,
     depth: usize,
     loops: Vec<Loop>,
@@ -7585,9 +7600,22 @@ impl Checker<'_, '_> {
                         self.admit_scalar_index(id, ty)?;
                     }
                     self.facts.define(slot, &value);
-                    self.locals[slot].grade = grade;
+                    let must_use = self.observes_copyable_result(&value);
+                    if must_use
+                        && let Some(annotation) = grade
+                        && annotation != Grade::Finite(1)
+                    {
+                        return Err(Diagnostic::new(
+                            pattern.span,
+                            format!(
+                                "a copyable result with the must-use `@[1]` contract cannot be bound to a local graded @[{annotation}]; bind it ungraded or as @[1]"
+                            ),
+                        ));
+                    }
+                    self.locals[slot].grade = grade.or(must_use.then_some(Grade::Finite(1)));
                     self.locals[slot].linear = self.value_moves_linear(&value)
-                        || (matches!(grade, Some(Grade::Finite(1))) && self.owned_type(ty));
+                        || (matches!(self.locals[slot].grade, Some(Grade::Finite(1)))
+                            && self.owned_type(ty));
                     if !diverges {
                         self.validate_grade(grade, ty, pattern.span)?;
                     }
@@ -7596,6 +7624,12 @@ impl Checker<'_, '_> {
                 ast::Statement::Expr(expr) => {
                     let before = self.facts.clone();
                     let expr = self.expr(expr)?;
+                    if expr.ty != Type::Never && self.observes_copyable_result(&expr) {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "this copyable result has the must-use `@[1]` contract and its value is discarded by an expression statement; bind it with 'let' and observe it exactly once, or pass it to a call",
+                        ));
+                    }
                     diverges = expr.ty == Type::Never;
                     // `if c { return; }` establishes `!c` for the rest of the block.
                     if let ExprKind::If(condition, yes, no) = &expr.kind
@@ -7638,55 +7672,81 @@ impl Checker<'_, '_> {
             .reference(pattern.span)
             .is_some_and(|id| self.resolution.bindings[id].kind == BindingKind::Constructor)
     }
-    /// Whether this expression's value is a call result carrying an explicit
-    /// `@[1]` transfer contract. This is deliberately narrower than
-    /// `value_moves_linear`: it identifies the graded source so `?` and closure
-    /// capture checks can reason about the transfer itself.
-    fn graded_result(&self, expr: &Expr) -> bool {
+
+    /// Whether this expression evaluates to a copyable result carrying the
+    /// must-use `@[1]` contract. The obligation is transferred through value
+    /// positions (`let`, assignment, `return`, blocks, branches, match arms,
+    /// loop break values, and coercions) and is discharged by an observation:
+    /// a call argument, aggregate field, read, match scrutinee, or `?` operand.
+    /// It is never an owning/linear move, even though it uses the same literal
+    /// `@[1]` surface grade.
+    fn copyable_result_obligation(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Call(Target::Function(index), _) => self
                 .functions
                 .signatures
                 .get(*index)
-                .is_some_and(|signature| signature.result_grade == Some(Grade::Finite(1))),
+                .is_some_and(|signature| {
+                    signature.result_grade == Some(Grade::Finite(1))
+                        && !self.owned_type(signature.result)
+                }),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
-                Type::Fn(id) | Type::Once(id) => self
-                    .types
-                    .function_types
-                    .get(id)
-                    .is_some_and(|signature| signature.result_grade == Some(Grade::Finite(1))),
+                Type::Fn(id) | Type::Once(id) => {
+                    self.types.function_types.get(id).is_some_and(|signature| {
+                        signature.result_grade == Some(Grade::Finite(1))
+                            && !self.owned_type(signature.result)
+                    })
+                }
                 _ => false,
             },
-            ExprKind::Coerce { value, .. } => self.graded_result(value),
+            ExprKind::Coerce { value, .. } => self.copyable_result_obligation(value),
             ExprKind::Block(block) => block
                 .tail
                 .as_ref()
-                .is_some_and(|tail| self.graded_result(tail)),
+                .is_some_and(|tail| self.copyable_result_obligation(tail)),
             ExprKind::If(_, yes, no) => {
                 (yes.ty != Type::Never
                     && yes
                         .tail
                         .as_ref()
-                        .is_some_and(|tail| self.graded_result(tail)))
+                        .is_some_and(|tail| self.copyable_result_obligation(tail)))
                     || (no.ty != Type::Never
                         && no
                             .tail
                             .as_ref()
-                            .is_some_and(|tail| self.graded_result(tail)))
+                            .is_some_and(|tail| self.copyable_result_obligation(tail)))
             }
-            ExprKind::Match(_, arms) => arms
-                .iter()
-                .any(|arm| arm.body.ty != Type::Never && self.graded_result(&arm.body)),
+            ExprKind::Match(_, arms) => arms.iter().any(|arm| {
+                arm.body.ty != Type::Never && self.copyable_result_obligation(&arm.body)
+            }),
+            ExprKind::Loop(body) => crate::ownership::loop_break_values(body)
+                .into_iter()
+                .any(|value| self.copyable_result_obligation(value)),
             _ => false,
         }
+    }
+    /// Whether a returned value would observe a copyable must-use obligation.
+    /// An owning `@[1]` result is a move instead and is handled by the
+    /// ownership pass.
+    fn observes_copyable_result(&self, expr: &Expr) -> bool {
+        self.copyable_result_obligation(expr) && !self.owned_type(expr.ty)
+    }
+    /// Whether a returned copyable must-use obligation may be transferred to
+    /// the current function result. Only a matching `@[1]` copyable result
+    /// contract can carry it; otherwise the caller would receive an ordinary
+    /// value with no obligation.
+    fn transfers_copyable_result(&self) -> bool {
+        self.result_grade == Some(Grade::Finite(1)) && !self.owned_type(self.result)
     }
     /// Propagate binding obligations before lambda types and capture slots are
     /// elaborated. The ownership pass independently validates consumption later.
     ///
     /// A call whose checked signature declares a `@[1]` result contract returns
-    /// a linear resource obligation even though its runtime type is merely
-    /// owning. The obligation is derived from the already-created signature, so
-    /// it is known before closure capture typing and synthetic capture locals.
+    /// an owning linear resource obligation even though its runtime type is
+    /// merely owning. The obligation is derived from the already-created
+    /// signature, so it is known before closure capture typing and synthetic
+    /// capture locals. A copyable `@[1]` result is a must-use obligation, not a
+    /// move, and is tracked by the grade pass instead.
     fn value_moves_linear(&self, expr: &Expr) -> bool {
         if self.linear_type(expr.ty) {
             return true;
@@ -7697,13 +7757,17 @@ impl Checker<'_, '_> {
                 .functions
                 .signatures
                 .get(*index)
-                .is_some_and(|signature| signature.result_grade == Some(Grade::Finite(1))),
+                .is_some_and(|signature| {
+                    signature.result_grade == Some(Grade::Finite(1))
+                        && self.owned_type(signature.result)
+                }),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
-                Type::Fn(id) | Type::Once(id) => self
-                    .types
-                    .function_types
-                    .get(id)
-                    .is_some_and(|signature| signature.result_grade == Some(Grade::Finite(1))),
+                Type::Fn(id) | Type::Once(id) => {
+                    self.types.function_types.get(id).is_some_and(|signature| {
+                        signature.result_grade == Some(Grade::Finite(1))
+                            && self.owned_type(signature.result)
+                    })
+                }
                 _ => false,
             },
             ExprKind::Block(b) => b.tail.as_ref().is_some_and(|e| self.value_moves_linear(e)),
@@ -7856,6 +7920,12 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
     ) -> Result<Block> {
         let pattern_ir = self.pattern(pattern, ty, &mut BTreeMap::new())?;
+        if self.observes_copyable_result(&value) {
+            return Err(Diagnostic::new(
+                pattern.span,
+                "a copyable result with the must-use `@[1]` contract must be bound to a simple name or observed directly; destructuring would split off the obligation without a tracked destination",
+            ));
+        }
         self.linear_pattern(&pattern_ir, self.value_moves_linear(&value));
         let mut coverage = Coverage::new(pattern.span);
         coverage.add(&pattern_ir);
@@ -8447,6 +8517,14 @@ impl Checker<'_, '_> {
                         }
                         let value = c.expr_expected(right, Some(c.locals[slot].ty))?;
                         c.expect(value.ty, c.locals[slot].ty, right.span)?;
+                        if c.observes_copyable_result(&value)
+                            && c.locals[slot].grade != Some(Grade::Finite(1))
+                        {
+                            return Err(Diagnostic::new(
+                                right.span,
+                                "this copyable result has the must-use `@[1]` contract; assigning it to an ungraded binding would lose the obligation. Bind it with `let` or assign it to a @[1] binding",
+                            ));
+                        }
                         c.locals[slot].linear |= c.value_moves_linear(&value);
                         c.facts.assign(slot, &value);
                         let ty = if value.ty == Type::Never {
@@ -8896,6 +8974,12 @@ impl Checker<'_, '_> {
                         c.coerce(unit, c.result, span)?
                     };
                     c.expect(value.ty, c.result, span)?;
+                    if c.observes_copyable_result(&value) && !c.transfers_copyable_result() {
+                        return Err(Diagnostic::new(
+                            value.span,
+                            "this returns a copyable result with the must-use `@[1]` contract through an ungraded result; annotate the function result as '@[1]' so every caller inherits exactly one observation, or observe the value here",
+                        ));
+                    }
                     (ExprKind::Return(Box::new(value)), Type::Never)
                 }
                 ast::ExprKind::If {
@@ -8964,15 +9048,6 @@ impl Checker<'_, '_> {
                         return Err(Diagnostic::new(
                             span,
                             "'?' cannot repack a heterogeneous error type; widen the operand explicitly or match the error before returning",
-                        ));
-                    }
-                    if c.graded_result(&value) && !c.owned_type(input.ok) {
-                        return Err(Diagnostic::new(
-                            span,
-                            format!(
-                                "'?' would extract the success payload of a graded @[1] result, but that payload is '{}' and copyable, so the transfer obligation cannot be preserved; return an owning success payload or consume the result with a match",
-                                c.types.name(input.ok)
-                            ),
                         ));
                     }
                     let ty = input.ok;
@@ -9778,6 +9853,7 @@ impl Checker<'_, '_> {
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_slots = std::mem::take(&mut self.slots);
         let saved_result = self.result;
+        let saved_result_grade = self.result_grade;
         let saved_effects = self.effects;
         let saved_loops = std::mem::take(&mut self.loops);
         let saved_facts = std::mem::take(&mut self.facts);
@@ -9836,11 +9912,22 @@ impl Checker<'_, '_> {
                 self.admit_scalar_index(id, *ty)?;
             }
             self.result = result;
+            self.result_grade = result_grade;
             self.effects = effects;
             self.loops.clear();
             self.facts = crate::facts::Facts::default();
             let body = self.block(&lambda.body, Some(result))?;
             self.expect(body.ty, result, span)?;
+            if body.ty != Type::Never
+                && let Some(tail) = &body.tail
+                && self.observes_copyable_result(tail)
+                && !self.transfers_copyable_result()
+            {
+                return Err(Diagnostic::new(
+                    tail.span,
+                    "this lambda returns a copyable result with the must-use `@[1]` contract through an ungraded result; annotate the result as '@[1]' so every caller inherits exactly one observation, or observe the value inside the lambda",
+                ));
+            }
             // The lambda's own locals are in scope here, so the result-transfer
             // obligation is derived before restoring the outer checker state.
             let obligation = self.return_obligation(&body);
@@ -9852,6 +9939,7 @@ impl Checker<'_, '_> {
         self.locals = saved_locals;
         self.slots = saved_slots;
         self.result = saved_result;
+        self.result_grade = saved_result_grade;
         self.effects = saved_effects;
         self.loops = saved_loops;
         self.facts = saved_facts;
