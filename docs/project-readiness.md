@@ -193,8 +193,13 @@ semantic tokens, incremental sync, type-directed method dispatch in
 go-to-definition, or a real pretty-printer. Builtins and virtual standard
 modules return no definition instead of a bogus file path. See
 [language-server.md](language-server.md) for protocol details, UTF-16 handling,
-and the exact limits. Local focused tests pass; the full integrated/Boat gate
-remains parent-owned.
+and the exact limits. Integrated Boat validation at compiler checkpoint
+`772b1f6` passes **56 focused tests** (library, language server, project, CLI,
+and bindgen), formatting, and workspace/all-targets Clippy with warnings denied.
+Log: `/tmp/kush-boat-lsp-integration.log` (machine-local). The VS Code client's
+server-disable fix at `18577f7` also passes `node --check`; editor UI behavior
+has not been exercised inside VS Code. A full workspace gate and independent
+language-server review remain pending.
 
 Still unresolved: evaluator-wide TCP/process deadline behavior, secure todo
 file replacement and permissions, fuller editor features, and the other documented
