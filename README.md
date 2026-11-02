@@ -205,8 +205,20 @@ Single-file commands are unchanged. See [project workflow, tests, formatting,
 and editor support](docs/projects.md) for the manifest and module layout,
 lockfile rules, `#[test]`/`std.test` assertions, `--locked`, program-argument
 forwarding after `--`, formatter limits, the grammar-only VS Code highlighting
-extension, and the validated-but-pending native bridge manifest fields. There is
-no language server or go-to-definition yet.
+extension, and the native Rust/C adapter manifest fields. There is no language
+server or go-to-definition yet.
+
+Reuse safe Rust crates without hand-written wrappers through a strict
+`Bridge.toml`:
+
+```sh
+kush bindgen Bridge.toml          # generate Rust shims + Kush module
+kush bindgen Bridge.toml --check  # fail on drift, write nothing
+```
+
+The [Rust adapter example](examples/rust-adapter) reuses `sha2` through
+`kush run` and `kush test`. See [native interop](docs/native-interop.md) for the
+schema, supported ABI, cleanup/error/panic behavior, and exact limits.
 
 The standalone [project demo](examples/project-demo) exercises a local module, a
 local dependency, tests, and formatting.

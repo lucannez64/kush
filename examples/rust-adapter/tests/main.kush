@@ -1,0 +1,38 @@
+module rust_adapter_example.tests.main;
+
+use std.result.Result;
+use std.test;
+use rust_adapter_example.sha256_adapter;
+
+#[test]
+fn hashing_and_error_text_work() -> Unit ! {io, alloc, panic} {
+    let input = Bytes.from("abc");
+    let digest = match sha256_adapter.sha256(&input) {
+        Ok(value) => value,
+        Err(_) => Bytes.from(""),
+    };
+    test.is_true(Bytes.len(&digest) == 64);
+    test.equal_i64(match sha256_adapter.fail(&input) { Ok(_) => 0, Err(code) => code }, 1);
+    let message = match sha256_adapter.last_error() {
+        Ok(value) => value,
+        Err(_) => Bytes.from(""),
+    };
+    test.is_true(Bytes.len(&message) > 0);
+}
+
+#[test]
+fn hasher_is_released_exactly_once() -> Unit ! {io, alloc, panic} {
+    let digest = {
+        let hasher = sha256_adapter.hasher_new();
+        let _ = match sha256_adapter.hasher_update(&hasher, &Bytes.from("abc")) {
+            Ok(count) => count,
+            Err(_) => 0,
+        };
+        match sha256_adapter.hasher_finish(&hasher) {
+            Ok(value) => value,
+            Err(_) => Bytes.from(""),
+        }
+    };
+    test.is_true(Bytes.len(&digest) == 64);
+    test.equal_i64(sha256_adapter.live(), 0);
+}

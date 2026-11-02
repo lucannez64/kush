@@ -1,6 +1,7 @@
 //! Kush frontend and bootstrap logical kernel. Parsing is syntax-only;
 //! `check` elaborates only the documented, restricted total logical subset.
 pub mod ast;
+pub mod bindgen;
 pub mod check;
 mod coverage;
 mod eval;

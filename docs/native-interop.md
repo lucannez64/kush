@@ -87,33 +87,118 @@ Deliberately unsupported, with an exact diagnostic rather than a guess:
 
 ## Generated Rust adapters
 
-`kush::interop::AdapterSpec` emits a self-contained Rust file with:
+`kush::interop::AdapterSpec` emits a self-contained Rust item sequence with:
 
 - one `#[unsafe(no_mangle)] extern "C"` shim per declared function;
 - `catch_unwind` at every boundary. A fallible shim maps `Err(String)` to
   status `1` and a caught panic to status `2`; the message is retrievable via
-  the generated `kush_bridge_last_error(out, capacity)` symbol. An infallible
-  shim records the panic and aborts instead of returning a half-written value;
+  `<support-prefix>_last_error(out, capacity)`. An infallible shim records the
+  panic and aborts instead of returning a half-written value;
+- `<support-prefix>_last_error_bytes(out)` for Kush code. It returns status `0`
+  and writes an owned Kush `Bytes` handle for the latest message, `1` when there
+  is no error, `2` for a null out pointer, and `3` when the runtime cannot
+  allocate the buffer. The generated Kush module declares this as
+  `last_error() -> Result<Bytes, i64>`, so error text is callable without a
+  writable byte view;
 - pointer/length checks for borrowed buffers, UTF-8 validation for `&str`, null
   handle checks, and canonical one-word encodings;
 - one release shim per resource that consumes `Box::from_raw` exactly once;
 - `kush_bytes_from` calls (resolved from the Kush runtime in the final binary)
   for owned `Bytes` results.
 
+The support prefix is configurable through
+`AdapterSpec::generate_with_options(AdapterOptions { support_symbol_prefix })`.
+`kush bindgen` derives it deterministically from the Kush module path, so two
+generated adapters can be linked into one executable without colliding on the
+error helpers. The generated file contains only items: no `#![inner]`
+attributes. It works as a normal module file and through `include!` inside a
+module.
+
+Generated adapters require `panic = "unwind"` so the boundary can report status
+`2`. A `panic = "abort"` build fails at compile time with an explicit
+`compile_error!` instead of silently aborting the process later.
+
 The Rust implementation remains ordinary safe code. See
 `examples/rust-adapter/` for a complete crate using the existing `sha2` 0.10
-dependency: `src/ffi.rs` is generated, `src/bridge.rs` is hand-written safe
-Rust, and `sha256.kush` is the checked Kush program. Build and run:
+dependency: `Bridge.toml` is the source of truth, `src/ffi.rs` and
+`src/sha256_adapter.kush` are generated, `src/bridge.rs` is hand-written safe
+Rust, and `sha256.kush` is the checked Kush program.
 
 ```sh
 cd examples/rust-adapter
+kush bindgen Bridge.toml
 kush run
-
+kush test
 ```
 
-Expected output includes the SHA-256 hex of `abc` twice, then `42`, `0`, `1`,
-`2`. The `0` is the live resource count after the owned `Hasher` was released
-exactly once; `1`/`2` are a checked `Err` and a contained panic status.
+Expected `kush run` output is the SHA-256 hex of `abc` twice, then `42`, `0`,
+`1`, `requested adapter failure`, `2`, and
+`kush_example_boom panicked: example adapter panic`. The `0` is the live
+resource count after the owned `Hasher` was released exactly once; `1`/`2` are
+a checked `Err` and a contained panic status. `kush test` runs two project tests
+covering hashing/error text and exactly-once release. The Rust panic hook still
+prints the expected message on stderr; unwinding is contained and the program
+exits successfully.
+
+### `kush bindgen`
+
+```sh
+kush bindgen <Bridge.toml> [--check]
+```
+
+The configuration is strict TOML. Unknown tables and fields are errors; paths
+are resolved relative to the configuration file and may not be absolute or use
+`..`. A complete declaration has this shape:
+
+```toml
+[adapter]
+module = "app.generated"             # generated Kush module header
+rust-output = "src/ffi.rs"           # generated Rust items
+kush-output = "src/generated.kush"   # generated public Kush module
+
+[[resource]]
+name = "Hasher"                      # Kush resource type
+rust-type = "crate::bridge::Hasher"  # safe Rust type stored behind the handle
+release-symbol = "kush_example_hasher_release"
+
+[[function]]
+name = "sha256"                      # Kush function name
+symbol = "kush_example_sha256"       # exact exported C symbol
+rust-path = "crate::bridge::sha256"  # safe Rust function
+fallible = true                      # Rust Result<T, String>
+parameters = [{ name = "data", type = "bytes" }]
+result = "bytes"
+```
+
+Parameters use exactly one of:
+
+| Form | Kush parameter | Rust parameter |
+| --- | --- | --- |
+| `{ name = "x", type = "i64" }` (also `i8`/`i16`/`i32`/`u8`/`u16`/`u32`/`u64`/`f32`/`f64`/`bool`) | scalar | scalar |
+| `{ name = "x", type = "text" }` | `&str` | `&str` |
+| `{ name = "x", type = "bytes" }` | `&Bytes` | `&[u8]` |
+| `{ name = "x", resource = "Hasher" }` | `&Hasher` | `&Hasher` |
+
+Results are `"unit"`, a scalar type, `"bytes"` (Rust `Vec<u8>` to an owned Kush
+`Bytes`), or `{ resource = "Hasher" }`. With `fallible = true` the Kush
+declaration becomes `Result<T, i64>` and the Rust function must return
+`Result<T, String>`. Owned text results are deliberately not inferred: return
+bytes and encode explicitly.
+
+Generator validation rejects unknown keys, malformed or reserved symbols,
+duplicate resource/function names, duplicate generated C parameters, undeclared
+resources, Rust keywords and `_` in generated Rust names, and collisions with
+the generated `last_error` accessor, `kush_out`, `<name>_data`, and `<name>_len`
+parameter slots. The names `last_error`, `kush_bytes_from`, and the derived
+support helper symbols are reserved.
+
+Generated files start with a marker. `kush bindgen` refuses to replace an
+existing file without that marker and refuses output symlinks. Writes use a
+temporary file in the destination directory followed by a rename. `--check`
+writes nothing; it reports each missing or changed output and exits non-zero
+when the generated files are stale. Outputs are deterministic for the same
+configuration. Paths and arguments are passed as filesystem paths, never
+through a shell.
 
 ## Build and project-manifest integration
 
@@ -186,7 +271,20 @@ cargo-manifests = ["adapters/rust-adapter/Cargo.toml"]
 - generated Rust shim compilation with `rustc`, checked errors, caught panic
   status `2`, owned byte results, and resource release;
 - the project-manifest mapping, including a freshly built Cargo staticlib;
-- generator rejection of malformed symbols and Rust paths.
+- generator rejection of malformed symbols and Rust paths, Rust keywords,
+  `_`, duplicate resources, `kush_out`, and generated `_data`/`_len` slots.
+
+`crates/kush/tests/bindgen.rs` covers the declarative workflow:
+
+- strict config parsing, unknown keys, reserved/generated symbol collisions,
+  duplicate names/symbols/resources, and output/config path collisions;
+- `--check` drift without writes, deterministic regeneration, unmarked-file
+  refusal, and output/parent symlink refusal;
+- a paths-with-spaces project that generates both files, compiles the generated
+  Rust staticlib, builds/runs the Kush program, and runs two project tests;
+- a two-adapter link where each generated file has distinct error helpers and
+  one adapter is compiled through `include!` inside a module;
+- a `panic = "abort"` build that is rejected with the explicit compile error.
 
 ## Remaining boundaries
 
@@ -194,8 +292,12 @@ cargo-manifests = ["adapters/rust-adapter/Cargo.toml"]
   host worker's area; this bridge only links and calls supplied native code.
 - The CLI has a small isolated `build --link <archive>` / `--link-lib <name>`
   hook for examples; the project workflow should use the library API above.
-- Foreign callbacks into Kush, C variadics, structs by value, and ownership
-  transfer of a resource into a foreign function and back are not implemented.
+- Foreign callbacks into Kush, C variadics, structs by value, borrowed foreign
+  results, mutable byte views, and ownership transfer of a resource into a
+  foreign function and back are not implemented.
+- `kush bindgen` supports safe function paths and safe high-level glue, not
+  arbitrary Rust ABI/type compatibility. The foreign implementation remains
+  trusted code; Kush does not prove its memory safety.
 - Async/task suspension across a foreign call is not supported.
 
 ## Foreign effect and cleanup contracts

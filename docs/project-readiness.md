@@ -114,6 +114,25 @@ compatibility. Interpreter foreign calls are rejected explicitly. Independent
 interop review remains pending; host APIs and fuller editor/library support
 remain in progress.
 
+### Declarative adapter generation
+
+`kush bindgen <Bridge.toml> [--check]` turns a strict declarative adapter
+configuration into both generated sides: Rust `extern "C"` shims through
+`AdapterSpec` and a matching public Kush module with resource releases and a
+callable owned-`Bytes` error accessor. It supports borrowed text/bytes, fixed
+scalars, `Bool`, borrowed resources, owned bytes/resource results, `Unit`, and
+`Result<T, i64>` fallibility. Paths are configuration-relative and may contain
+spaces; unknown keys, Rust keywords, reserved/generated symbol collisions,
+duplicate resources, `kush_out`, and `<name>_data`/`<name>_len` collisions are
+rejected. Generated files are deterministic and marker-protected; `--check`
+reports drift without writing, and output symlinks are refused. Generated Rust
+requires `panic = "unwind"` and works through `include!`; each adapter derives
+distinct error-helper symbols so two adapters can link together. The
+`examples/rust-adapter` project reuses `sha2` and now demonstrates
+`bindgen -> kush run -> kush test`. See [native interop](native-interop.md).
+Callbacks, arbitrary Rust ABI, borrowed results, structs/variadics, and
+resource ownership transfer into foreign code remain outside the boundary.
+
 ## Host integration and reviewed project fixes
 
 Host API checkpoint `d6ba475` merges filesystem, argv/environment, clocks,
