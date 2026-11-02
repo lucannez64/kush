@@ -339,16 +339,115 @@ let growing = Allocator.with_realloc(block_alloc, block_free, block_grow);
   element returned, `pop`, owning elements, balanced reference and native
   counters, and hostile signature/effect/short-block rejections.
 
-Remaining boundary for this item: there is no user-defined `Allocator` trait and
-no allocator generic parameter on `AllocBox`/`AllocVec`. Containers accept the
-copyable code-pointer value, not an arbitrary type implementing `alloc`/`free`.
-An instance-carrying allocator cannot be represented by the code-pointer value
-because that value owns no environment, and the language has no FFI, raw
-pointers, or `unsafe`; adding such a representation would need an owned callable
-environment and a lifetime-safe vtable, neither of which is part of this
-subset. A checked allocator value therefore remains the explicit composition
-mechanism: package noncapturing functions, pass the copyable value, and let
-every container store its own copy.
+#### Instance-carrying allocator protocol
+
+The copyable code-pointer value is not the only checked allocator. An ordinary
+trait declares the stateful protocol, and a user record carries the instance
+state:
+
+```rust
+struct Counting { calls: i64, limit: i64 }
+
+impl AllocatorProtocol for Counting {
+    fn alloc(self: &mut Self, bytes: i64) -> Bytes ! {alloc, panic} {
+        self.calls = self.calls + 1;
+        if self.limit > 0 && self.calls > self.limit {
+            Bytes.with_capacity(0)
+        } else {
+            Bytes.with_capacity(bytes)
+        }
+    }
+    fn free(self: &mut Self, block: Bytes) -> Unit ! {} {
+        drop(block)
+    }
+    fn grow(self: &mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes ! {alloc, panic} {
+        let mut out = Bytes.with_capacity(bytes);
+        let mut i = 0;
+        while i < old_bytes {
+            out = Bytes.push(out, Bytes.get(&block, i));
+            i = i + 1;
+        }
+        drop(block);
+        out
+    }
+}
+
+let context = AllocatorContext.new(Counting { calls: 0, limit: 0 });
+let first = AllocBox.new(AllocatorContext.share(&context), 41);
+let second = AllocBox.new(AllocatorContext.share(&context), 42);
+drop(context); // the boxes retain the instance
+AllocBox.take(first) + AllocBox.take(second)
+```
+
+`AllocatorProtocol` is injected by the compiler ahead of user items and is
+nameable from every module without an import. Its three methods have fixed
+checked signatures:
+
+| Method | Signature | Effects |
+| --- | --- | --- |
+| `alloc` | `fn(&mut Self, bytes: i64) -> Bytes` | `{alloc, panic}` |
+| `free` | `fn(&mut Self, block: Bytes) -> Unit` | empty |
+| `grow` | `fn(&mut Self, block: Bytes, old_bytes: i64, bytes: i64) -> Bytes` | `{alloc, panic}` |
+
+- An impl is checked by the ordinary exact trait-signature rule: receiver mode,
+  parameter/result layouts, grades, lifetimes, and effect rows must match.
+  `free` is pure because the last context reference runs it during implicit
+  drop. A missing method, a wrong signature, or an effect mismatch is an
+  explicit rejection. There is no implicit conversion of a capturing `once`
+  closure into these reusable callbacks; an allocator instance is a trait
+  implementor, not a captured closure.
+- `AllocatorContext.new(instance)` moves one concrete record instance into
+  compiler-owned reference-counted storage. The concrete type must be an owned
+  record with stable inline layout. Borrowed leaves, task handles, linear
+  obligations, and nested allocator contexts are rejected with an explicit
+  diagnostic; there is no unproven lifetime provenance for packed state.
+- The context records the concrete state and checked method functions for its
+  three protocol operations. Native code additionally synthesizes one private
+  drop thunk for the state type; the thunk runs the ordinary checked drop glue
+  and then releases the state block. No user code receives a raw pointer, no
+  FFI is involved, and the thunks are compiler-generated from checked methods.
+- `AllocatorContext.share(&context)` adds one explicit reference because the
+  context value is **affine**, not copyable. Implicit copying is rejected like
+  any other move of an owning value. Every container stores a retained
+  reference, so a container may outlive the binding that created the context,
+  cross function boundaries, and move into a structured task. The last
+  reference destroys the instance exactly once, after every container block has
+  been released.
+- `AllocBox.new`, `AllocBox.try_new`, and `AllocVec.new`/
+  `AllocVec.with_capacity` accept either the legacy `Allocator` value or an
+  `AllocatorContext`. The container records which form it received. Allocation,
+  growth, and release then invoke the same instance's methods; a context is
+  never silently replaced by a different allocator.
+- `AllocBox.try_new` and `AllocVec.try_push` keep their exact refusal contract
+  with a context: the untouched payload or element is returned, and a refused
+  box construction releases the operation's context reference so the instance
+  is still destroyed exactly once. A refusal block is released through the same
+  instance. `AllocVec.try_push` still uses the fresh-block path, because a
+  context `grow` that cannot honor a request has already consumed the old
+  block.
+- Growth through a context uses the same private typed-payload preservation as
+  the legacy realloc hook: the compiler saves the live typed prefix, presents
+  only zeroed readable old bytes to the user hook, validates the returned block,
+  and restores the typed prefix. A hook can therefore replace or zero storage
+  without corrupting element values or owning handles. The temporary private
+  copy is not a logical source allocation.
+- Tests exercise state-dependent success and refusal, sharing, dropping the
+  context before containers, an owning state value dropped exactly once,
+  context-backed vector growth, fallible refusal with payload/vector
+  preservation, typed payload integrity against a hostile hook, affine-move
+  rejection, borrowed-state rejection, the task boundary, and balanced
+  reference/native counters.
+
+Remaining boundary for this item: the containers are *runtime*
+allocator-parameterized — they accept a checked allocator value or context —
+but `AllocBox<T>`/`AllocVec<T>` do not take a static allocator type parameter.
+The context erases the concrete instance type behind compiler-owned thunks, so
+there is no per-allocator monomorphized container layout. A context cannot hold
+borrowed state (there is no checked lifetime provenance for packed state), and
+there is still no FFI/raw-pointer callback, no user-supplied per-container
+metadata allocation, and no `dyn AllocatorProtocol` instance accepted where a
+concrete state record is required. The legacy copyable code-pointer APIs remain
+supported and unchanged.
 
 ### 4.2 The built-in `Arena`
 
