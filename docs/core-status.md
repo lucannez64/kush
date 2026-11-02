@@ -190,10 +190,11 @@ grades/effects/erasure/lifetimes, and enforce method bounds even in unused
 bodies. Borrowed `&self`/`&mut self` receivers keep their one-evaluation order
 and loan retention; references still cannot pass through a generic parameter.
 Calls lower to ordinary `Target::Function` calls, so the existing effect,
-proof, ownership, and cleanup checks apply unchanged. There are no vtables,
-trait objects, associated types, blanket impls, effect-row
-trait parameters, or escaping/general reference receivers. The full Boat run
-passes **602 tests**, formatting, and Clippy with warnings denied. See
+proof, ownership, and cleanup checks apply unchanged. At that stage there were
+no trait objects, associated types, blanket impls, effect-row trait parameters,
+or escaping/general reference receivers; the [advanced-trait
+stage](#advanced-traits) adds the first three. The full Boat run passed **602
+tests**, formatting, and Clippy with warnings denied. See
 [static traits and user-defined methods](traits.md).
 
 The default-method extension lets a trait method declare a body. An impl that
