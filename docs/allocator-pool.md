@@ -115,6 +115,11 @@ operation has the `alloc` effect, and does not relax `#[noalloc]`: those are
 checked from source and effects, not from allocator behavior. `Box.reuse` and
 in-place vector transforms keep their existing "same allocation" guarantees.
 
+The source-level allocator strategy and fallible allocation contracts are in
+[memory-completion.md](memory-completion.md). The pool remains an internal
+physical optimization; `Arena` chunks are intentionally outside its logical
+counting and fallible operations use separate non-aborting runtime entry points.
+
 ## Limits
 
 - The pool is small-block-only and single-threaded, matching the runtime's one

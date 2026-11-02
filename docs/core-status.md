@@ -348,9 +348,12 @@ task results in [linear task results](linear-task-results.md). Copyable must-use
 task results remain rejected, and forced cancellation unwinding is not
 implemented.
 
-LLVM, general filesystem/FFI APIs, general automatic effectful fusion, widening reuse, nonblocking task I/O, forced cancellation unwinding, benchmarked
+LLVM, general filesystem/FFI APIs, general automatic effectful fusion, vector-element widening reuse, nonblocking task I/O, forced cancellation unwinding, benchmarked
 performance superiority, and kernel/embedded targets remain future work. The
-implemented reuse fragment is explicit and checked; see [reuse.md](reuse.md).
+implemented reuse fragment is explicit and checked; see [reuse.md](reuse.md)
+and [memory-completion.md](memory-completion.md) for justified alloc-only
+fusion, box widening/fallible reuse, the built-in arena strategy, and measured
+benchmarks.
 The task system is cooperative on one OS thread; see
 [async.md](async.md) for its exact scheduling, cancellation, ownership, and
 allocation boundaries.
@@ -390,6 +393,11 @@ maps retain their original observable order. [Native allocator pooling](allocato
 reuses small blocks under a 1 MiB physical retention cap, with normal-exit drain
 and unchanged logical allocation diagnostics. The pool adds 32 bytes of header
 per allocation and has no benchmarked latency or memory superiority claim.
+[Memory completion](memory-completion.md) adds a conservative post-check
+fusion analysis for trace-free total callbacks, `Box.reuse_grow`, checked
+fallible box/byte allocation, the reference-retained `Arena`/`ArenaBox`
+strategy, and `scripts/memory-bench.py` for measured allocations, RSS, timing,
+and pool retention.
 
 [General grade inference](grade-inference.md) solves a single-occurrence affine
 fragment from explicitly graded arguments and expected arrows, including

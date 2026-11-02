@@ -218,10 +218,15 @@ source effect rows, never from whether reserve happened to avoid a reallocation.
 
 ## Explicit boundaries
 
-Not implemented or guaranteed by this milestone:
+The memory-completion work adds a built-in `Arena` strategy, fallible box/byte
+allocation, and `Box.reuse_grow`; see
+[memory-completion.md](memory-completion.md). Not implemented or guaranteed by
+this milestone:
 
-- an allocator, allocator-level free lists, arenas, or a bounded pool;
-- fallible reserve (`try_reserve`) or a custom `#[noalloc]` allocator path;
+- a pluggable user-defined allocator or allocator callbacks (the `Arena`
+  strategy and the native [pool](allocator-pool.md) are built in);
+- fallible `Vec.reserve` specifically (fallible `Box.try_new`,
+  `Box.try_reuse`, and `Bytes.try_with_capacity` are available);
 - widening a vector element in place, including widening the final chain
   result;
 - automatic flattening or general fusion of effectful maps and chains;
@@ -235,19 +240,11 @@ Not implemented or guaranteed by this milestone:
 that allocation and only transiently widens SSA values. Any operation that
 needs a wider final element or a different allocation must build a new vector.
 
-## NEXT milestone: allocator-level bounded pool
+## Allocator-level follow-up
 
-Suggested follow-up, **not implemented here**:
-
-Introduce a bounded per-process pool for same-layout vector storage, so that
-`Vec.clear` plus later pushes or an explicit reuse operation can retain
-capacity across vector owners without consulting the system allocator. A useful
-first design is a small, bounded free list keyed by element width with an
-explicit maximum retained byte budget, so pooled memory cannot grow without
-bound and `#[noalloc]` behavior stays decidable from source effects.
-
-The pool must preserve every rule above: the stable diagnostics format,
-balanced deallocation counts, non-increasing element width, reverse element
-destruction, checked negative/overflow reserve, and reference/native parity.
-It should be scoped to a separate native allocator change rather than folded
-into this explicit-operation milestone.
+The bounded native pool is now implemented in [allocator-pool.md](allocator-pool.md),
+and the source-level `Arena` strategy plus fallible allocation are described in
+[memory-completion.md](memory-completion.md). Neither relaxes the rules above:
+the stable diagnostics format, balanced deallocation counts, non-increasing
+element width, reverse element destruction, checked negative/overflow reserve,
+and reference/native parity remain required.

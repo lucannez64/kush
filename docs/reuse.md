@@ -184,13 +184,18 @@ superiority are claimed.
 
 ## Explicit boundaries
 
-Not implemented or guaranteed:
+The completion work extends this milestone with widening reuse, fallible
+allocation, the built-in `Arena` strategy, and a narrower automatic-fusion
+analysis; see [memory-completion.md](memory-completion.md). Still not
+implemented or guaranteed here:
 
-- user-defined allocators or fallible box reuse (the native runtime does have a
-  [bounded small-block pool](allocator-pool.md));
-- widening a box payload or a vector element in place;
-- general compiler fusion of arbitrary expressions, effectful callbacks, or
-  callable arguments with observable evaluation;
+- arbitrary user-defined allocator callbacks or an FFI allocator interface
+  (the native runtime has a [bounded small-block pool](allocator-pool.md) and
+  the source-level `Arena` strategy; neither is a pluggable user allocator);
+- widening a vector element in place (widening a **box** payload is available
+  through the explicit `Box.reuse_grow` contract);
+- general compiler fusion of arbitrary expressions, effectful callbacks with
+  I/O/panic/suspend, or callable arguments with observable evaluation;
 - in-place transformation of borrowed, shared, or aliased storage;
 - reassociation or vectorization, LLVM, forced cancellation unwinding, or
   nonblocking task I/O;

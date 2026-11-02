@@ -100,7 +100,9 @@ inference, general automatic effectful fusion, nonblocking task
 I/O, forced cancellation unwinding, and LLVM remain future work. See
 [checked reuse and allocation diagnostics](docs/reuse.md) for the implemented
 storage-reuse fragment, [vector capacity reuse and explicit effectful map chains](docs/vector-reuse.md),
-[bounded native allocator pooling](docs/allocator-pool.md), and [structured async and cooperative
+[bounded native allocator pooling](docs/allocator-pool.md), [memory-completion contracts](docs/memory-completion.md)
+for justified automatic fusion, widening/fallible reuse, the built-in arena
+allocator, and the reproducible benchmark harness, and [structured async and cooperative
 cancellation](docs/async.md) for the task system.
 
 An interactive [todo terminal app](docs/todo.md) is available in
@@ -163,6 +165,7 @@ See [inline arrays](docs/arrays.md),
 [byte buffers and the expression parser](docs/bytes.md),
 [owning boxes and borrowing](docs/ownership.md),
 [checked reuse and allocation diagnostics](docs/reuse.md),
+[memory completion: fusion, reuse, fallible allocation, arenas, benchmarks](docs/memory-completion.md),
 [structured async and cooperative cancellation](docs/async.md),
 [usage grades](docs/grades.md),
 [first-class functions and closures](docs/functions.md),

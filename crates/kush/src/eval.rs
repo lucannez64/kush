@@ -7,7 +7,7 @@ use std::{
     io::{self, Cursor, Read, Write},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread,
@@ -31,8 +31,29 @@ impl Executable {
         input: &mut dyn Read,
         output: &mut dyn Write,
     ) -> Result<(i64, MemoryStats)> {
+        self.evaluate_with_io_limits(input, output, None)
+    }
+    /// Reference evaluation with a deterministic budget for **fallible**
+    /// allocation attempts. Normal allocation is unaffected. A budget of zero
+    /// makes `Box.try_new`, a growth-capable `Box.try_reuse`, and
+    /// `Bytes.try_with_capacity` fail with their checked error value. This is
+    /// a test/tooling probe for failure paths, not a language effect or a
+    /// native allocator limit.
+    pub fn evaluate_with_alloc_budget(
+        &self,
+        output: &mut dyn Write,
+        budget: usize,
+    ) -> Result<(i64, MemoryStats)> {
+        self.evaluate_with_io_limits(&mut io::empty(), output, Some(budget))
+    }
+    fn evaluate_with_io_limits(
+        &self,
+        input: &mut dyn Read,
+        output: &mut dyn Write,
+        alloc_budget: Option<usize>,
+    ) -> Result<(i64, MemoryStats)> {
         if self.uses_tasks {
-            return self.evaluate_tasks(input, output);
+            return self.evaluate_tasks(input, output, alloc_budget);
         }
         let entry = self.entry()?;
         let heap = SharedHeap::new();
@@ -46,6 +67,7 @@ impl Executable {
             heap: heap.clone(),
             stats: stats.clone(),
             task: None,
+            try_budget: alloc_budget.map(|budget| Arc::new(AtomicUsize::new(budget))),
         };
         let result = evaluator.call(entry, vec![])?.scalar();
         if heap.len() != 0 {
@@ -63,6 +85,7 @@ impl Executable {
         &self,
         input: &mut dyn Read,
         output: &mut dyn Write,
+        alloc_budget: Option<usize>,
     ) -> Result<(i64, MemoryStats)> {
         let entry = self.entry()?;
         let mut bytes = Vec::new();
@@ -73,7 +96,14 @@ impl Executable {
         let stats = StatsHandle::new(self.fusions);
         let source = SharedInput(Arc::new(Mutex::new(Cursor::new(bytes))));
         let sink = SharedWriter(Arc::new(Mutex::new(Vec::new())));
-        let result = self.run_scheduler(entry, heap.clone(), stats.clone(), source, sink.clone());
+        let result = self.run_scheduler(
+            entry,
+            heap.clone(),
+            stats.clone(),
+            source,
+            sink.clone(),
+            alloc_budget.map(|budget| Arc::new(AtomicUsize::new(budget))),
+        );
         let output_bytes = std::mem::take(&mut *sink.0.lock().unwrap());
         output
             .write_all(&output_bytes)
@@ -94,6 +124,7 @@ impl Executable {
         stats: StatsHandle,
         source: SharedInput,
         sink: SharedWriter,
+        try_budget: Option<Arc<AtomicUsize>>,
     ) -> Result<i64> {
         let mut records: Vec<TaskRecord> = Vec::new();
         let mut ready: VecDeque<usize> = VecDeque::new();
@@ -106,6 +137,7 @@ impl Executable {
                 &stats,
                 &source,
                 &sink,
+                &try_budget,
                 entry,
                 None,
                 Vec::new(),
@@ -151,6 +183,7 @@ impl Executable {
                             &stats,
                             &source,
                             &sink,
+                            &try_budget,
                             function,
                             environment,
                             Vec::new(),
@@ -234,6 +267,7 @@ impl Executable {
                     heap,
                     stats,
                     task: None,
+                    try_budget: try_budget.clone(),
                 };
                 let scalar = value.scalar();
                 evaluator.drop_value(value)?;
@@ -256,6 +290,7 @@ impl Executable {
         stats: &StatsHandle,
         source: &SharedInput,
         sink: &SharedWriter,
+        try_budget: &Option<Arc<AtomicUsize>>,
         function: usize,
         environment: Option<usize>,
         arguments: Vec<Value>,
@@ -281,6 +316,7 @@ impl Executable {
             heap: heap.clone(),
             stats: stats.clone(),
             task: Some(comm),
+            try_budget: try_budget.clone(),
         };
         stats.allocation();
         stats.allocation();
@@ -475,6 +511,12 @@ impl Write for SharedWriter {
         Ok(())
     }
 }
+#[derive(Debug, Default)]
+struct ArenaState {
+    slots: Vec<Option<Value>>,
+    /// One owner plus one reference per live `ArenaBox`.
+    references: usize,
+}
 #[derive(Debug, Clone)]
 enum Value {
     Scalar(i64),
@@ -484,6 +526,23 @@ enum Value {
     },
     Owned(usize),
     Borrowed(usize),
+    /// An owning bump-allocator region handle. Payloads live in `slots`; every
+    /// `ArenaBox` keeps one explicit region reference and destroys its own
+    /// payload exactly once.
+    Arena {
+        state: Arc<Mutex<ArenaState>>,
+    },
+    ArenaBox {
+        state: Arc<Mutex<ArenaState>>,
+        slot: usize,
+    },
+    /// A call-scoped `&Arena` borrow. It owns no reference.
+    ArenaRef(Arc<Mutex<ArenaState>>),
+    /// A call-scoped `&ArenaBox<T>` borrow. It owns no reference.
+    ArenaBoxRef {
+        state: Arc<Mutex<ArenaState>>,
+        slot: usize,
+    },
     Buffer {
         data: Vec<u8>,
         capacity: usize,
@@ -727,6 +786,9 @@ struct Evaluator<'a, R: Read, W: Write> {
     heap: SharedHeap,
     stats: StatsHandle,
     task: Option<TaskComm>,
+    /// Remaining successful fallible allocation attempts for deterministic
+    /// failure probes. `None` means unlimited.
+    try_budget: Option<Arc<AtomicUsize>>,
 }
 macro_rules! value {
     ($e:expr) => {
@@ -741,6 +803,59 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         let id = self.heap.allocate(payload);
         self.stats.allocation();
         Value::Owned(id)
+    }
+    fn arena_new_value(&mut self) -> Value {
+        self.stats.allocation();
+        Value::Arena {
+            state: Arc::new(Mutex::new(ArenaState {
+                slots: Vec::new(),
+                references: 1,
+            })),
+        }
+    }
+    fn arena_allocate(&mut self, state: &Arc<Mutex<ArenaState>>, payload: Value) -> Value {
+        let mut arena = state.lock().unwrap();
+        let slot = arena.slots.len();
+        arena.slots.push(Some(payload));
+        arena.references += 1;
+        Value::ArenaBox {
+            state: state.clone(),
+            slot,
+        }
+    }
+    /// Drop one region reference. The last reference releases the region's
+    /// logical allocation and any payload still stored in it.
+    fn arena_release(&mut self, state: &Arc<Mutex<ArenaState>>) -> Result<()> {
+        let remaining = {
+            let mut arena = state.lock().unwrap();
+            if arena.references == 0 {
+                return Err(Diagnostic::new(
+                    Span::default(),
+                    "internal ownership error: arena reference underflow",
+                ));
+            }
+            arena.references -= 1;
+            (arena.references == 0).then(|| arena.slots.drain(..).flatten().collect::<Vec<Value>>())
+        };
+        if let Some(remaining) = remaining {
+            self.stats.deallocation();
+            for value in remaining {
+                self.drop_value(value)?;
+            }
+        }
+        Ok(())
+    }
+    /// Consume one unit of the deterministic fallible-allocation budget.
+    /// Without an explicit budget, fallible allocations always succeed.
+    fn try_charge(&self) -> bool {
+        let Some(budget) = &self.try_budget else {
+            return true;
+        };
+        budget
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
     }
     /// Read an inline-array local. A pinned cell is cloned so ordinary array
     /// values keep copy semantics; views retain the shared cell identity.
@@ -1542,6 +1657,19 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     self.drop_value(item)?;
                 }
             }
+            Value::Arena { state } => self.arena_release(&state)?,
+            Value::ArenaBox { state, slot } => {
+                let payload = state
+                    .lock()
+                    .unwrap()
+                    .slots
+                    .get_mut(slot)
+                    .and_then(|slot| slot.take());
+                if let Some(payload) = payload {
+                    self.drop_value(payload)?;
+                }
+                self.arena_release(&state)?;
+            }
             // A slice view borrows its base and owns nothing.
             Value::Slice { .. } => {}
             _ => {}
@@ -2079,6 +2207,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     match frame.locals[*slot].clone() {
                         Value::Owned(id) => Value::Borrowed(id),
                         Value::Task(id) => Value::TaskRef(id),
+                        Value::Arena { state } => Value::ArenaRef(state),
+                        Value::ArenaBox { state, slot } => Value::ArenaBoxRef { state, slot },
                         _ => unreachable!("checked borrow of an owned handle"),
                     }
                 }
@@ -2123,6 +2253,149 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.heap.insert(id, new);
                 self.stats.reuse();
                 Value::Owned(id)
+            }
+            ExprKind::BoxReuseGrow { owner, payload } => {
+                let Value::Owned(id) = value!(self.expr(owner, frame)) else {
+                    unreachable!("checked Box.reuse_grow owner")
+                };
+                let new = value!(self.expr(payload, frame));
+                // Both arguments are evaluated before the old payload is
+                // destroyed. The reference model always has logical room, so
+                // growth never moves the reference allocation id.
+                self.consume(owner, frame);
+                self.consume(payload, frame);
+                let old = self.heap.take(id).ok_or_else(|| {
+                    Diagnostic::new(expr.span, "internal ownership error: stale reuse box")
+                })?;
+                self.drop_value(old)?;
+                self.heap.insert(id, new);
+                self.stats.reuse();
+                Value::Owned(id)
+            }
+            ExprKind::ArenaNew => self.arena_new_value(),
+            ExprKind::ArenaAlloc { arena, value } => {
+                let Value::ArenaRef(state) = value!(self.expr(arena, frame)) else {
+                    unreachable!("checked arena borrow")
+                };
+                let payload = value!(self.expr(value, frame));
+                self.consume(arena, frame);
+                self.consume(value, frame);
+                self.arena_allocate(&state, payload)
+            }
+            ExprKind::ArenaBoxRead(argument) => {
+                let Value::ArenaBoxRef { state, slot } = value!(self.expr(argument, frame)) else {
+                    unreachable!("checked arena box borrow")
+                };
+                state
+                    .lock()
+                    .unwrap()
+                    .slots
+                    .get(slot)
+                    .and_then(|slot| slot.clone())
+                    .ok_or_else(|| {
+                        Diagnostic::new(expr.span, "internal ownership error: stale arena box")
+                    })?
+            }
+            ExprKind::ArenaBoxTake(argument) => {
+                let Value::ArenaBox { state, slot } = value!(self.expr(argument, frame)) else {
+                    unreachable!("checked arena box take")
+                };
+                self.consume(argument, frame);
+                let payload = state
+                    .lock()
+                    .unwrap()
+                    .slots
+                    .get_mut(slot)
+                    .and_then(|slot| slot.take())
+                    .ok_or_else(|| {
+                        Diagnostic::new(expr.span, "internal ownership error: stale arena box")
+                    })?;
+                self.arena_release(&state)?;
+                payload
+            }
+            ExprKind::BoxTryNew {
+                value: argument,
+                shape,
+            } => {
+                let value = value!(self.expr(argument, frame));
+                self.consume(argument, frame);
+                if self.try_charge() {
+                    let owner = self.allocate(value);
+                    Value::Enum {
+                        tag: shape.ok_tag,
+                        fields: vec![owner],
+                    }
+                } else {
+                    Value::Enum {
+                        tag: shape.err_tag,
+                        fields: vec![value],
+                    }
+                }
+            }
+            ExprKind::BoxTryReuse {
+                owner,
+                payload,
+                shape,
+            } => {
+                let Value::Owned(id) = value!(self.expr(owner, frame)) else {
+                    unreachable!("checked Box.try_reuse owner")
+                };
+                let new = value!(self.expr(payload, frame));
+                self.consume(owner, frame);
+                self.consume(payload, frame);
+                let Type::Box(old_index) = owner.ty else {
+                    unreachable!("checked Box.try_reuse owner type")
+                };
+                let old_width = self.program.width(self.program.pointees[old_index]);
+                let new_width = self.program.width(payload.ty);
+                // A non-widening reuse needs no allocator action and therefore
+                // cannot fail. Only a growth attempt consumes the probe budget.
+                if new_width <= old_width || self.try_charge() {
+                    let previous = self.heap.take(id).ok_or_else(|| {
+                        Diagnostic::new(expr.span, "internal ownership error: stale reuse box")
+                    })?;
+                    self.drop_value(previous)?;
+                    self.heap.insert(id, new);
+                    self.stats.reuse();
+                    Value::Enum {
+                        tag: shape.ok_tag,
+                        fields: vec![Value::Owned(id)],
+                    }
+                } else {
+                    // The payload is checked non-owning, so discarding it
+                    // loses no supplied owner; the original owner is intact.
+                    self.drop_value(new)?;
+                    Value::Enum {
+                        tag: shape.err_tag,
+                        fields: vec![Value::Owned(id)],
+                    }
+                }
+            }
+            ExprKind::BytesTryWithCapacity { capacity, shape } => {
+                const LIMIT: usize = 16 * 1024 * 1024;
+                let requested = value!(self.expr(capacity, frame)).scalar();
+                self.consume(capacity, frame);
+                let attempt = usize::try_from(requested)
+                    .ok()
+                    .filter(|capacity| *capacity <= LIMIT && self.try_charge())
+                    .and_then(|capacity| {
+                        let mut data = Vec::new();
+                        data.try_reserve_exact(capacity).ok()?;
+                        Some((capacity, data))
+                    });
+                match attempt {
+                    Some((capacity, data)) => {
+                        let buffer = self.allocate(Value::Buffer { data, capacity });
+                        Value::Enum {
+                            tag: shape.ok_tag,
+                            fields: vec![buffer],
+                        }
+                    }
+                    None => Value::Enum {
+                        tag: shape.err_tag,
+                        fields: vec![Value::Scalar(requested)],
+                    },
+                }
             }
             ExprKind::Drop(arg) => {
                 let value = value!(self.expr(arg, frame));

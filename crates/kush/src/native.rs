@@ -277,16 +277,22 @@ static uint64_t kush_block_bytes(uint64_t usable) {
     if (__builtin_add_overflow(padded, KUSH_ALLOC_ALIGN - 1, &padded)) kush_panic();
     return padded & ~(KUSH_ALLOC_ALIGN - 1);
 }
-/* One system block, checked for overflow in header + payload + padding. */
-static KushAllocHeader *kush_system_block(uint64_t usable) {
+/* One system block, checked for overflow in header + payload + padding.
+   `kush_try_system_block` reports refusal to its caller instead of aborting. */
+static KushAllocHeader *kush_try_system_block(uint64_t usable) {
     uint64_t total = kush_block_bytes(usable);
     KushAllocHeader *header =
         (KushAllocHeader *)aligned_alloc((size_t)KUSH_ALLOC_ALIGN, (size_t)total);
-    if (header == NULL) kush_panic();
+    if (header == NULL) return NULL;
     header->magic = KUSH_ALLOC_MAGIC;
     header->usable = usable;
     header->pooled = usable <= KUSH_POOL_MAX ? 1 : 0;
     header->next = NULL;
+    return header;
+}
+static KushAllocHeader *kush_system_block(uint64_t usable) {
+    KushAllocHeader *header = kush_try_system_block(usable);
+    if (header == NULL) kush_panic();
     return header;
 }
 /* Physical allocation. It never touches the logical allocation counters. */
@@ -359,7 +365,7 @@ void kush_free(uint64_t handle) {
    as diagnostics are concerned: the logical allocation counters are untouched
    and the caller keeps its own logical growth counter. The payload contents
    and alignment are preserved, and the old block is released once. */
-static void *kush_grow(void *payload, uint64_t bytes) {
+void *kush_grow(void *payload, uint64_t bytes) {
     KushAllocHeader *header = (KushAllocHeader *)payload - 1;
     if (header->magic != KUSH_ALLOC_MAGIC) kush_panic();
     uint64_t copy = header->usable;
@@ -369,13 +375,176 @@ static void *kush_grow(void *payload, uint64_t bytes) {
     kush_block_release(header);
     return (void *)(replacement + 1);
 }
+/* ---- Checked fallible allocation -----------------------------------------
+   Fallible operations never call kush_panic on allocator refusal. A payload
+   request that the system allocator or the configured probe rejects returns
+   handle 0, which the generated code turns into the checked `Err` value.
+   `KUSH_ALLOC_FAIL_AFTER=<n>` is a deterministic test probe: the first n
+   growth-capable attempts succeed and later ones report refusal. It is only
+   consulted by fallible operations; ordinary allocation still aborts. */
+static uint64_t kush_try_attempts = 0;
+static uint64_t kush_try_fail_after = UINT64_MAX;
+static int kush_try_probe_initialized = 0;
+static int kush_try_refuses(void) {
+    if (!kush_try_probe_initialized) {
+        const char *text = getenv("KUSH_ALLOC_FAIL_AFTER");
+        if (text != NULL && *text != '\0') {
+            char *end = NULL;
+            unsigned long long limit = strtoull(text, &end, 10);
+            if (end != text && *end == '\0') kush_try_fail_after = (uint64_t)limit;
+        }
+        kush_try_probe_initialized = 1;
+    }
+    if (kush_try_attempts >= kush_try_fail_after) {
+        ++kush_try_attempts;
+        return 1;
+    }
+    ++kush_try_attempts;
+    return 0;
+}
+uint64_t kush_try_alloc(uint64_t bytes) {
+    if (kush_try_refuses()) return 0;
+    if (bytes > KUSH_POOL_MAX) {
+        KushAllocHeader *header = kush_try_system_block(bytes);
+        if (header == NULL) return 0;
+        kush_note_allocation();
+        return (uint64_t)(uintptr_t)(header + 1);
+    }
+    uint64_t usable = bytes, class_size;
+    if (__builtin_add_overflow(bytes, KUSH_ALLOC_ALIGN - 1, &usable)) return 0;
+    class_size = usable & ~(KUSH_ALLOC_ALIGN - 1);
+    if (class_size == 0) class_size = KUSH_ALLOC_ALIGN;
+    size_t class = kush_pool_class(class_size);
+    KushAllocHeader *header = kush_pool_lists[class];
+    if (header == NULL) {
+        ++kush_pool_misses;
+        header = kush_try_system_block(class_size);
+        if (header == NULL) return 0;
+    } else {
+        kush_pool_lists[class] = header->next;
+        kush_pool_retained -= kush_block_bytes(header->usable);
+        header->magic = KUSH_ALLOC_MAGIC;
+        header->usable = class_size;
+        header->next = NULL;
+        ++kush_pool_hits;
+    }
+    kush_note_allocation();
+    return (uint64_t)(uintptr_t)(header + 1);
+}
+/* Fallible header-aware growth. A request that already fits the existing
+   usable capacity returns the same payload without touching the probe or the
+   allocator, so a same-allocation reuse cannot fail. On refusal the old block
+   is left completely untouched for the checked error path. */
+void *kush_try_grow(void *payload, uint64_t bytes) {
+    KushAllocHeader *header = (KushAllocHeader *)payload - 1;
+    if (header->magic != KUSH_ALLOC_MAGIC) return NULL;
+    uint64_t copy = header->usable;
+    if (bytes <= copy) return payload;
+    if (kush_try_refuses()) return NULL;
+    KushAllocHeader *replacement = kush_try_system_block(bytes);
+    if (replacement == NULL) return NULL;
+    if (copy != 0) memcpy((void *)(replacement + 1), payload, (size_t)copy);
+    kush_block_release(header);
+    return (void *)(replacement + 1);
+}
 int64_t kush_note_reuse(void) { ++kush_reuses; return 0; }
+/* ---- Scoped bump-allocator regions ---------------------------------------
+   `Arena.new()` is one logical allocation (the region descriptor). Chunks are
+   physical storage obtained directly from the system allocator and are not
+   counted as separate logical allocations. Every `ArenaBox` retains one
+   region reference, so dropping the arena value while boxes live is safe; the
+   last reference releases every chunk and the descriptor. Payloads are word
+   aligned. The eight-byte box header stores the region pointer. */
+typedef struct KushArenaChunk KushArenaChunk;
+struct KushArenaChunk {
+    KushArenaChunk *next;
+    uint64_t used;
+    uint64_t capacity;
+    uint64_t padding;
+    unsigned char data[];
+};
+_Static_assert(sizeof(KushArenaChunk) % KUSH_ALLOC_ALIGN == 0,
+               "arena chunk data must preserve alignment");
+typedef struct KushArena {
+    uint64_t references;
+    KushArenaChunk *chunks;
+} KushArena;
+static uint64_t kush_arena_round(uint64_t bytes) {
+    uint64_t rounded, total;
+    if (__builtin_add_overflow(bytes, (uint64_t)8, &total)) kush_panic();
+    if (__builtin_add_overflow(total, KUSH_ALLOC_ALIGN - 1, &rounded)) kush_panic();
+    return rounded & ~(KUSH_ALLOC_ALIGN - 1);
+}
+static void kush_arena_free_chunks(KushArena *arena) {
+    KushArenaChunk *chunk = arena->chunks;
+    while (chunk != NULL) {
+        KushArenaChunk *next = chunk->next;
+        free(chunk);
+        chunk = next;
+    }
+    arena->chunks = NULL;
+}
+static void kush_arena_release_pointer(KushArena *arena) {
+    if (arena->references == 0) kush_panic();
+    --arena->references;
+    if (arena->references == 0) {
+        kush_arena_free_chunks(arena);
+        kush_free((uint64_t)(uintptr_t)arena);
+    }
+}
+uint64_t kush_arena_new(void) {
+    KushArena *arena = (KushArena *)(uintptr_t)kush_alloc(sizeof(KushArena));
+    arena->references = 1;
+    arena->chunks = NULL;
+    return (uint64_t)(uintptr_t)arena;
+}
+uint64_t kush_arena_alloc(uint64_t handle, uint64_t bytes) {
+    KushArena *arena = (KushArena *)(uintptr_t)handle;
+    uint64_t need = kush_arena_round(bytes);
+    KushArenaChunk *chunk = arena->chunks;
+    if (chunk == NULL || chunk->capacity - chunk->used < need) {
+        uint64_t capacity = need < 4096 ? 4096 : need;
+        uint64_t total;
+        if (__builtin_add_overflow(sizeof(KushArenaChunk), capacity, &total)) kush_panic();
+        if (__builtin_add_overflow(total, KUSH_ALLOC_ALIGN - 1, &total)) kush_panic();
+        total &= ~(KUSH_ALLOC_ALIGN - 1);
+        KushArenaChunk *fresh =
+            (KushArenaChunk *)aligned_alloc((size_t)KUSH_ALLOC_ALIGN, (size_t)total);
+        if (fresh == NULL) kush_panic();
+        fresh->next = arena->chunks;
+        fresh->used = 0;
+        fresh->capacity = capacity;
+        fresh->padding = 0;
+        arena->chunks = fresh;
+        chunk = fresh;
+    }
+    unsigned char *start = chunk->data + chunk->used;
+    chunk->used += need;
+    *(KushArena **)(void *)start = arena;
+    ++arena->references;
+    return (uint64_t)(uintptr_t)(start + 8);
+}
+void kush_arena_release(uint64_t handle) {
+    kush_arena_release_pointer((KushArena *)(uintptr_t)handle);
+}
+void kush_arena_box_release(uint64_t payload) {
+    KushArena *arena = *(KushArena **)(void *)(uintptr_t)(payload - 8);
+    kush_arena_release_pointer(arena);
+}
 typedef struct { uint64_t length; uint64_t capacity; unsigned char data[]; } KushBytes;
 #define KUSH_MAX_CAPACITY ((uint64_t)INT64_MAX - (uint64_t)sizeof(KushBytes))
 uint64_t kush_bytes_with_capacity(int64_t capacity) {
     if (capacity < 0 || (uint64_t)capacity > KUSH_MAX_CAPACITY) kush_panic();
     KushBytes *b = (KushBytes *)(uintptr_t)kush_alloc(sizeof(KushBytes) + (uint64_t)capacity);
     b->length = 0; b->capacity = (uint64_t)capacity; return (uint64_t)(uintptr_t)b;
+}
+uint64_t kush_try_bytes_with_capacity(int64_t capacity) {
+    if (capacity < 0 || (uint64_t)capacity > KUSH_MAX_CAPACITY) return 0;
+    uint64_t handle = kush_try_alloc(sizeof(KushBytes) + (uint64_t)capacity);
+    if (handle == 0) return 0;
+    KushBytes *b = (KushBytes *)(uintptr_t)handle;
+    b->length = 0; b->capacity = (uint64_t)capacity;
+    return handle;
 }
 uint64_t kush_bytes_from(const unsigned char *source, int64_t length) {
     uint64_t handle = kush_bytes_with_capacity(length); KushBytes *b = (KushBytes *)(uintptr_t)handle;
@@ -1048,10 +1217,41 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let allocate = module
         .declare_function("kush_alloc", Linkage::Import, &alloc_sig)
         .map_err(error)?;
+    let try_allocate = module
+        .declare_function("kush_try_alloc", Linkage::Import, &alloc_sig)
+        .map_err(error)?;
+    let mut grow_sig = module.make_signature();
+    grow_sig
+        .params
+        .extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    grow_sig.returns.push(AbiParam::new(I64));
+    let grow = module
+        .declare_function("kush_grow", Linkage::Import, &grow_sig)
+        .map_err(error)?;
+    let try_grow = module
+        .declare_function("kush_try_grow", Linkage::Import, &grow_sig)
+        .map_err(error)?;
+    let try_bytes_with_capacity = module
+        .declare_function("kush_try_bytes_with_capacity", Linkage::Import, &alloc_sig)
+        .map_err(error)?;
     let mut free_sig = module.make_signature();
     free_sig.params.push(AbiParam::new(I64));
     let free = module
         .declare_function("kush_free", Linkage::Import, &free_sig)
+        .map_err(error)?;
+    let mut arena_new_sig = module.make_signature();
+    arena_new_sig.returns.push(AbiParam::new(I64));
+    let arena_new = module
+        .declare_function("kush_arena_new", Linkage::Import, &arena_new_sig)
+        .map_err(error)?;
+    let arena_alloc = module
+        .declare_function("kush_arena_alloc", Linkage::Import, &grow_sig)
+        .map_err(error)?;
+    let arena_release = module
+        .declare_function("kush_arena_release", Linkage::Import, &free_sig)
+        .map_err(error)?;
+    let arena_box_release = module
+        .declare_function("kush_arena_box_release", Linkage::Import, &free_sig)
         .map_err(error)?;
     let mut reuse_sig = module.make_signature();
     reuse_sig.returns.push(AbiParam::new(I64));
@@ -1225,7 +1425,8 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
         module.define_data(id, &desc).map_err(error)?;
         literal_data.insert(start, id);
     }
-    let (drops, closure_drops) = synthesize_drops(&mut module, program, free)?;
+    let (drops, closure_drops) =
+        synthesize_drops(&mut module, program, free, arena_release, arena_box_release)?;
     let task_types = collect_task_types(program);
     let (task_wrappers, task_pointer_drops) =
         synthesize_task_wrappers(&mut module, program, &task_types, &drops)?;
@@ -1293,7 +1494,14 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             result: f.result,
             return_pointer: None,
             allocate,
+            try_allocate,
+            grow,
+            try_grow,
+            try_bytes_with_capacity,
             free,
+            arena_new,
+            arena_alloc,
+            arena_box_release,
             note_reuse,
             drops: &drops,
             tracked: vec![],
@@ -1457,11 +1665,18 @@ fn collect_expr_literals<'a>(expr: &'a Expr, out: &mut Vec<(usize, &'a [u8])>) {
         | ExprKind::BoxNew(v)
         | ExprKind::BoxTake(v)
         | ExprKind::BoxRead(v)
+        | ExprKind::ArenaBoxRead(v)
+        | ExprKind::ArenaBoxTake(v)
         | ExprKind::Drop(v)
         | ExprKind::Project(v, _)
         | ExprKind::Coerce { value: v, .. }
         | ExprKind::Break(Some(v), _)
         | ExprKind::Assign(_, v) => collect_expr_literals(v, out),
+        ExprKind::ArenaAlloc { arena, value } => {
+            collect_expr_literals(arena, out);
+            collect_expr_literals(value, out);
+        }
+        ExprKind::ArenaNew => {}
         ExprKind::RefAssign(reference, _, value) => {
             collect_expr_literals(reference, out);
             collect_expr_literals(value, out);
@@ -1570,11 +1785,18 @@ fn collect_closure_types(program: &Executable) -> Vec<Vec<Type>> {
             | ExprKind::BoxNew(value)
             | ExprKind::BoxTake(value)
             | ExprKind::BoxRead(value)
+            | ExprKind::ArenaBoxRead(value)
+            | ExprKind::ArenaBoxTake(value)
             | ExprKind::Drop(value)
             | ExprKind::Project(value, _)
             | ExprKind::Coerce { value, .. }
             | ExprKind::Break(Some(value), _)
             | ExprKind::Assign(_, value) => walk(program, value, out),
+            ExprKind::ArenaAlloc { arena, value } => {
+                walk(program, arena, out);
+                walk(program, value, out);
+            }
+            ExprKind::ArenaNew => {}
             ExprKind::RefAssign(reference, _, value) => {
                 walk(program, reference, out);
                 walk(program, value, out);
@@ -1677,11 +1899,15 @@ fn synthesize_drops(
     module: &mut ObjectModule,
     program: &Executable,
     free: FuncId,
+    arena_release: FuncId,
+    arena_box_release: FuncId,
 ) -> Result<DropTables> {
     let mut types = (0..program.pointees.len())
         .map(Type::Box)
+        .chain((0..program.pointees.len()).map(Type::ArenaBox))
         .chain((0..program.pointees.len()).map(Type::Vec))
         .chain((0..program.pointees.len()).map(Type::Task))
+        .chain([Type::Arena])
         .chain((0..program.enums.len()).map(Type::Enum))
         .chain((0..program.unions.len()).map(Type::Union))
         .chain(
@@ -1745,7 +1971,7 @@ fn synthesize_drops(
                 emit_drop(&mut builder, module, free, &args);
                 builder.ins().return_(&[]);
             }
-            Type::Box(index) => {
+            Type::Box(index) | Type::ArenaBox(index) => {
                 let pointee = program.pointees[index];
                 if program.owns(pointee) {
                     let fields = (0..program.width(pointee))
@@ -1760,7 +1986,15 @@ fn synthesize_drops(
                         .collect::<Vec<_>>();
                     emit_drop(&mut builder, module, ids[&pointee.full()], &fields);
                 }
-                emit_drop(&mut builder, module, free, &args);
+                if matches!(ty, Type::ArenaBox(_)) {
+                    emit_drop(&mut builder, module, arena_box_release, &args);
+                } else {
+                    emit_drop(&mut builder, module, free, &args);
+                }
+                builder.ins().return_(&[]);
+            }
+            Type::Arena => {
+                emit_drop(&mut builder, module, arena_release, &args);
                 builder.ins().return_(&[]);
             }
             Type::Vec(index) => {
@@ -1942,11 +2176,18 @@ fn collect_task_types(program: &Executable) -> Vec<usize> {
             | ExprKind::BoxNew(value)
             | ExprKind::BoxTake(value)
             | ExprKind::BoxRead(value)
+            | ExprKind::ArenaBoxRead(value)
+            | ExprKind::ArenaBoxTake(value)
             | ExprKind::Drop(value)
             | ExprKind::Project(value, _)
             | ExprKind::Coerce { value, .. }
             | ExprKind::Break(Some(value), _)
             | ExprKind::Assign(_, value) => walk(value, out),
+            ExprKind::ArenaAlloc { arena, value } => {
+                walk(arena, out);
+                walk(value, out);
+            }
+            ExprKind::ArenaNew => {}
             ExprKind::RefAssign(reference, _, value) => {
                 walk(reference, out);
                 walk(value, out);
@@ -2197,7 +2438,14 @@ struct Generator<'a, 'b> {
     loops: Vec<(ir::Block, ir::Block, bool)>,
     literal_data: &'b BTreeMap<usize, DataId>,
     allocate: FuncId,
+    try_allocate: FuncId,
+    grow: FuncId,
+    try_grow: FuncId,
+    try_bytes_with_capacity: FuncId,
     free: FuncId,
+    arena_new: FuncId,
+    arena_alloc: FuncId,
+    arena_box_release: FuncId,
     note_reuse: FuncId,
     drops: &'b BTreeMap<Type, FuncId>,
     closure_drops: &'b BTreeMap<Vec<Type>, FuncId>,
@@ -2898,6 +3146,333 @@ impl Generator<'_, '_> {
                 }
                 let _ = self.runtime_call(self.note_reuse, &[]);
                 pointer
+            }
+            ExprKind::BoxReuseGrow { owner, payload } => {
+                let pointer = lower!(self.scalar(owner));
+                let old = match owner.ty {
+                    Type::Box(index) => self.program.pointees[index],
+                    _ => unreachable!("checked Box.reuse_grow owner"),
+                };
+                let old_width = self.program.width(old);
+                let new = lower!(self.expr(payload));
+                self.consume(owner);
+                self.consume(payload);
+                let previous = self.load_words(pointer, 0, old_width);
+                self.drop_value(old, &previous);
+                let new_width = self.program.width(payload.ty);
+                let pointer = if new_width > old_width {
+                    let bytes = self.constant((new_width * 8) as i64);
+                    self.runtime_call(self.grow, &[pointer, bytes])
+                } else {
+                    pointer
+                };
+                for (index, value) in new.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *value,
+                        pointer,
+                        (index * 8) as i32,
+                    );
+                }
+                let _ = self.runtime_call(self.note_reuse, &[]);
+                pointer
+            }
+            ExprKind::ArenaNew => self.runtime_call(self.arena_new, &[]),
+            ExprKind::ArenaAlloc { arena, value } => {
+                let reference = lower!(self.scalar(arena));
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                let payload = lower!(self.expr(value));
+                self.consume(arena);
+                self.consume(value);
+                let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
+                let pointer = self.runtime_call(self.arena_alloc, &[handle, bytes]);
+                for (index, word) in payload.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        pointer,
+                        (index * 8) as i32,
+                    );
+                }
+                pointer
+            }
+            ExprKind::ArenaBoxRead(argument) => {
+                let reference = lower!(self.scalar(argument));
+                let pointer = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                return Some(
+                    (0..self.program.width(expr.ty))
+                        .map(|index| {
+                            self.builder.ins().load(
+                                I64,
+                                ir::MemFlagsData::new(),
+                                pointer,
+                                (index * 8) as i32,
+                            )
+                        })
+                        .collect(),
+                );
+            }
+            ExprKind::ArenaBoxTake(argument) => {
+                let pointer = lower!(self.scalar(argument));
+                self.consume(argument);
+                let values = (0..self.program.width(expr.ty))
+                    .map(|index| {
+                        self.builder.ins().load(
+                            I64,
+                            ir::MemFlagsData::new(),
+                            pointer,
+                            (index * 8) as i32,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                self.runtime_void(self.arena_box_release, &[pointer]);
+                return Some(values);
+            }
+            ExprKind::BoxTryNew { value, shape } => {
+                let payload = lower!(self.expr(value));
+                self.consume(value);
+                let width = self.program.width(value.ty);
+                let bytes = self.constant((width * 8) as i64);
+                let handle = self.runtime_call(self.try_allocate, &[bytes]);
+                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, handle, 0);
+                let ok = self.builder.create_block();
+                let error = self.builder.create_block();
+                let done = self.builder.create_block();
+                let result_width = self.program.width(expr.ty);
+                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    (result_width * 8).max(1) as u32,
+                    3,
+                ));
+                let destination = self.builder.ins().stack_addr(I64, slot, 0);
+                self.builder.ins().brif(failed, error, &[], ok, &[]);
+                self.builder.switch_to_block(ok);
+                for (index, word) in payload.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        handle,
+                        (index * 8) as i32,
+                    );
+                }
+                let tag = self.constant(shape.ok_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), handle, destination, 8);
+                let zero = self.constant(0);
+                for index in 2..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(error);
+                let tag = self.constant(shape.err_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                for (index, word) in payload.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        destination,
+                        ((index + 1) * 8) as i32,
+                    );
+                }
+                let zero = self.constant(0);
+                for index in (payload.len() + 1)..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(done);
+                let _ = shape;
+                return Some(
+                    (0..result_width)
+                        .map(|index| {
+                            self.builder.ins().load(
+                                I64,
+                                ir::MemFlagsData::new(),
+                                destination,
+                                (index * 8) as i32,
+                            )
+                        })
+                        .collect(),
+                );
+            }
+            ExprKind::BoxTryReuse {
+                owner,
+                payload,
+                shape,
+            } => {
+                let pointer = lower!(self.scalar(owner));
+                let old = match owner.ty {
+                    Type::Box(index) => self.program.pointees[index],
+                    _ => unreachable!("checked Box.try_reuse owner"),
+                };
+                let old_width = self.program.width(old);
+                let new = lower!(self.expr(payload));
+                self.consume(owner);
+                self.consume(payload);
+                let previous = self.load_words(pointer, 0, old_width);
+                let new_width = self.program.width(payload.ty);
+                let bytes = self.constant((new_width * 8) as i64);
+                let grown = self.runtime_call(self.try_grow, &[pointer, bytes]);
+                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, grown, 0);
+                let ok = self.builder.create_block();
+                let error = self.builder.create_block();
+                let done = self.builder.create_block();
+                let result_width = self.program.width(expr.ty);
+                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    (result_width * 8).max(1) as u32,
+                    3,
+                ));
+                let destination = self.builder.ins().stack_addr(I64, slot, 0);
+                self.builder.ins().brif(failed, error, &[], ok, &[]);
+                self.builder.switch_to_block(ok);
+                self.drop_value(old, &previous);
+                for (index, word) in new.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        grown,
+                        (index * 8) as i32,
+                    );
+                }
+                let _ = self.runtime_call(self.note_reuse, &[]);
+                let tag = self.constant(shape.ok_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), grown, destination, 8);
+                let zero = self.constant(0);
+                for index in 2..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(error);
+                let tag = self.constant(shape.err_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), pointer, destination, 8);
+                let zero = self.constant(0);
+                for index in 2..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(done);
+                let _ = shape;
+                return Some(
+                    (0..result_width)
+                        .map(|index| {
+                            self.builder.ins().load(
+                                I64,
+                                ir::MemFlagsData::new(),
+                                destination,
+                                (index * 8) as i32,
+                            )
+                        })
+                        .collect(),
+                );
+            }
+            ExprKind::BytesTryWithCapacity { capacity, shape } => {
+                let requested = lower!(self.scalar(capacity));
+                self.consume(capacity);
+                let handle = self.runtime_call(self.try_bytes_with_capacity, &[requested]);
+                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, handle, 0);
+                let ok = self.builder.create_block();
+                let error = self.builder.create_block();
+                let done = self.builder.create_block();
+                let result_width = self.program.width(expr.ty);
+                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    (result_width * 8).max(1) as u32,
+                    3,
+                ));
+                let destination = self.builder.ins().stack_addr(I64, slot, 0);
+                self.builder.ins().brif(failed, error, &[], ok, &[]);
+                self.builder.switch_to_block(ok);
+                let tag = self.constant(shape.ok_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), handle, destination, 8);
+                let zero = self.constant(0);
+                for index in 2..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(error);
+                let tag = self.constant(shape.err_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), requested, destination, 8);
+                let zero = self.constant(0);
+                for index in 2..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(done);
+                let _ = shape;
+                return Some(
+                    (0..result_width)
+                        .map(|index| {
+                            self.builder.ins().load(
+                                I64,
+                                ir::MemFlagsData::new(),
+                                destination,
+                                (index * 8) as i32,
+                            )
+                        })
+                        .collect(),
+                );
             }
             ExprKind::Drop(arg) => {
                 let value = lower!(self.expr(arg));

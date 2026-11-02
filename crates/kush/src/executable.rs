@@ -77,6 +77,14 @@ pub(crate) enum Type {
     /// An opaque, affine structured-task handle. One word. Handles are created
     /// only inside a `Task.scope` and may not escape it through data or results.
     Task(usize),
+    /// Owning bump-allocator region handle, one word. Values allocated through
+    /// `Arena.alloc` retain the region, so the arena value may be dropped while
+    /// its boxes remain live.
+    Arena,
+    /// An owning box allocated inside an `Arena`. One word: a payload pointer
+    /// whose preceding header retains the region. Its payload is destroyed
+    /// before the region reference is released.
+    ArenaBox(usize),
 }
 impl Type {
     /// The admitted symbolic scalar carrier of a runtime type, if any. Only
@@ -459,6 +467,49 @@ pub(crate) enum ExprKind {
         owner: Box<Expr>,
         payload: Box<Expr>,
     },
+    /// Consume an owned box and store `payload`, reusing the allocation when
+    /// its capacity already fits and otherwise growing/moving exactly once.
+    /// Unlike `BoxReuse`, a wider payload is accepted. The checked effect row
+    /// is `{alloc, panic}`: a growth may allocate and aborts on exhaustion.
+    BoxReuseGrow {
+        owner: Box<Expr>,
+        payload: Box<Expr>,
+    },
+    /// Fallible `Box.new`: allocate `value` and return `Ok(Box<T>)`, or return
+    /// the untouched value in `Err(T)` when the allocator refuses. The runtime
+    /// never converts a checked failure into a process abort.
+    BoxTryNew {
+        value: Box<Expr>,
+        shape: ResultShape,
+    },
+    /// Fallible growth-capable reuse. On failure the original owner is
+    /// returned in `Err(Box<T>)` without destroying its payload; because the
+    /// new payload must be non-owning, no supplied owner is lost.
+    BoxTryReuse {
+        owner: Box<Expr>,
+        payload: Box<Expr>,
+        shape: ResultShape,
+    },
+    /// Fallible byte-buffer construction. `Ok` carries a buffer with the exact
+    /// requested capacity; `Err` returns the requested capacity unchanged.
+    BytesTryWithCapacity {
+        capacity: Box<Expr>,
+        shape: ResultShape,
+    },
+    /// Create an owning bump-allocator region. The region descriptor is one
+    /// logical allocation; its internal chunks are not separately counted.
+    ArenaNew,
+    /// Allocate `value` in the borrowed arena. The returned box retains the
+    /// region until its payload has been dropped.
+    ArenaAlloc {
+        arena: Box<Expr>,
+        value: Box<Expr>,
+    },
+    /// Read a copyable payload through an `&ArenaBox<T>`.
+    ArenaBoxRead(Box<Expr>),
+    /// Move a payload out of an owning `ArenaBox<T>` and release its region
+    /// reference exactly once.
+    ArenaBoxTake(Box<Expr>),
     Drop(Box<Expr>),
     Block(Block),
     Unary(Kind, Box<Expr>),
@@ -1009,6 +1060,472 @@ fn collect_block_returns<'a>(block: &'a ast::Block, out: &mut Vec<&'a ast::Expr>
         collect_body_returns(tail, out);
     }
 }
+/// Automatic fusion equivalence analysis.
+///
+/// A callback is eligible only when:
+///
+/// * it is a noncapturing `fn(...)` value;
+/// * its declared effect row contains neither `io`, `suspend`, nor `panic`;
+/// * its body is structurally total: no loops, no direct or indirect recursion,
+///   no indirect calls, and no task operations;
+/// * every direct callee is itself eligible.
+///
+/// With only `alloc` (or no effects) left, callback execution is trace-free:
+/// it cannot print, suspend, cancel, or choose a panic site. Allocation is a
+/// resource event, not an observable trace; a refused fallible allocation is a
+/// checked value and an aborting allocation ends the process in both orders.
+/// The pass is deliberately conservative: it does not try to prove termination
+/// for loops, and it rejects indirect calls and recursion outright.
+fn fusion_function_safe(
+    index: usize,
+    signatures: &[Signature],
+    bodies: &[Option<Function>],
+    memo: &mut Vec<Option<bool>>,
+    visiting: &mut Vec<bool>,
+) -> bool {
+    if let Some(result) = memo.get(index).copied().flatten() {
+        return result;
+    }
+    if visiting.get(index).copied().unwrap_or(false) {
+        // Recursion (direct or mutual) has no checked termination argument.
+        return false;
+    }
+    let Some(signature) = signatures.get(index) else {
+        return false;
+    };
+    if signature.effects & !ALLOC != 0 {
+        return false;
+    }
+    let Some(Some(body)) = bodies.get(index) else {
+        return false;
+    };
+    if visiting.len() <= index {
+        visiting.resize(index + 1, false);
+    }
+    visiting[index] = true;
+    let safe = fusion_block_safe(&body.body, signatures, bodies, memo, visiting);
+    visiting[index] = false;
+    if memo.len() <= index {
+        memo.resize(index + 1, None);
+    }
+    memo[index] = Some(safe);
+    safe
+}
+
+fn fusion_block_safe(
+    block: &Block,
+    signatures: &[Signature],
+    bodies: &[Option<Function>],
+    memo: &mut Vec<Option<bool>>,
+    visiting: &mut Vec<bool>,
+) -> bool {
+    block.statements.iter().all(|statement| match statement {
+        Statement::Let(_, value) | Statement::Expr(value) => {
+            fusion_expr_safe(value, signatures, bodies, memo, visiting)
+        }
+    }) && block
+        .tail
+        .as_ref()
+        .is_none_or(|tail| fusion_expr_safe(tail, signatures, bodies, memo, visiting))
+}
+
+fn fusion_expr_safe(
+    expr: &Expr,
+    signatures: &[Signature],
+    bodies: &[Option<Function>],
+    memo: &mut Vec<Option<bool>>,
+    visiting: &mut Vec<bool>,
+) -> bool {
+    let safe = |value: &Expr,
+                signatures: &[Signature],
+                bodies: &[Option<Function>],
+                memo: &mut Vec<Option<bool>>,
+                visiting: &mut Vec<bool>| {
+        fusion_expr_safe(value, signatures, bodies, memo, visiting)
+    };
+    match &expr.kind {
+        ExprKind::Constant(_)
+        | ExprKind::BytesLiteral(_)
+        | ExprKind::Local(_)
+        | ExprKind::Move(_)
+        | ExprKind::Borrow(_)
+        | ExprKind::Peek(_)
+        | ExprKind::ArenaNew
+        | ExprKind::TaskYield
+        | ExprKind::TaskCheckCancel => true,
+        // No loop has a checked termination argument here.
+        ExprKind::While(..) | ExprKind::Loop(_) => false,
+        ExprKind::Call(Target::Function(index), arguments) => {
+            fusion_function_safe(*index, signatures, bodies, memo, visiting)
+                && arguments
+                    .iter()
+                    .all(|argument| safe(argument, signatures, bodies, memo, visiting))
+        }
+        ExprKind::Call(
+            Target::Io(..)
+            | Target::Print
+            | Target::PrintInt(_)
+            | Target::PrintFloat(_)
+            | Target::Panic,
+            _,
+        ) => false,
+        ExprKind::Call(_, arguments) => arguments
+            .iter()
+            .all(|argument| safe(argument, signatures, bodies, memo, visiting)),
+        // An opaque callable can select an effectful or divergent body.
+        ExprKind::CallIndirect { .. } => false,
+        ExprKind::TaskSpawn { .. }
+        | ExprKind::TaskScope { .. }
+        | ExprKind::TaskCancel(_)
+        | ExprKind::TaskJoin { .. } => false,
+        ExprKind::FnValue { function, captures } => {
+            captures
+                .iter()
+                .all(|capture| safe(capture, signatures, bodies, memo, visiting))
+                && fusion_function_safe(*function, signatures, bodies, memo, visiting)
+        }
+        ExprKind::Coerce { value, .. }
+        | ExprKind::Try { value, .. }
+        | ExprKind::BoxNew(value)
+        | ExprKind::BoxTake(value)
+        | ExprKind::BoxRead(value)
+        | ExprKind::BoxTryNew { value, .. }
+        | ExprKind::ArenaBoxRead(value)
+        | ExprKind::ArenaBoxTake(value)
+        | ExprKind::BytesTryWithCapacity {
+            capacity: value, ..
+        }
+        | ExprKind::Drop(value)
+        | ExprKind::Unary(_, value)
+        | ExprKind::Assign(_, value)
+        | ExprKind::Return(value)
+        | ExprKind::Project(value, _) => safe(value, signatures, bodies, memo, visiting),
+        ExprKind::ArenaAlloc { arena, value } => {
+            safe(arena, signatures, bodies, memo, visiting)
+                && safe(value, signatures, bodies, memo, visiting)
+        }
+        ExprKind::BoxReuse { owner, payload }
+        | ExprKind::BoxReuseGrow { owner, payload }
+        | ExprKind::BoxTryReuse { owner, payload, .. } => {
+            safe(owner, signatures, bodies, memo, visiting)
+                && safe(payload, signatures, bodies, memo, visiting)
+        }
+        ExprKind::RefAssign(reference, _, value) => {
+            safe(reference, signatures, bodies, memo, visiting)
+                && safe(value, signatures, bodies, memo, visiting)
+        }
+        ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
+            safe(left, signatures, bodies, memo, visiting)
+                && safe(right, signatures, bodies, memo, visiting)
+        }
+        ExprKind::Construct { fields, .. } => fields
+            .iter()
+            .all(|field| safe(field, signatures, bodies, memo, visiting)),
+        ExprKind::Block(block) => fusion_block_safe(block, signatures, bodies, memo, visiting),
+        ExprKind::If(condition, yes, no) => {
+            safe(condition, signatures, bodies, memo, visiting)
+                && fusion_block_safe(yes, signatures, bodies, memo, visiting)
+                && fusion_block_safe(no, signatures, bodies, memo, visiting)
+        }
+        ExprKind::Match(value, arms) => {
+            safe(value, signatures, bodies, memo, visiting)
+                && arms
+                    .iter()
+                    .all(|arm| fusion_expr_safe(&arm.body, signatures, bodies, memo, visiting))
+        }
+        ExprKind::VecMap {
+            vector, callbacks, ..
+        } => {
+            safe(vector, signatures, bodies, memo, visiting)
+                && callbacks
+                    .iter()
+                    .all(|callback| safe(callback, signatures, bodies, memo, visiting))
+        }
+        ExprKind::Slice {
+            base, start, end, ..
+        } => {
+            safe(base, signatures, bodies, memo, visiting)
+                && start
+                    .as_ref()
+                    .is_none_or(|start| safe(start, signatures, bodies, memo, visiting))
+                && end
+                    .as_ref()
+                    .is_none_or(|end| safe(end, signatures, bodies, memo, visiting))
+        }
+        ExprKind::Break(value, _) => value
+            .as_ref()
+            .is_none_or(|value| safe(value, signatures, bodies, memo, visiting)),
+        // `Continue` carries no expression children.
+        ExprKind::Continue(_) => true,
+    }
+}
+
+/// Select automatic nested in-place map fusion after every body has been
+/// checked. A merge is allowed only when every callback in both steps is
+/// fusion-safe and the intermediate layout agrees. For a step with a non-empty
+/// (alloc-only) effect row, the intermediate must also be non-owning: the
+/// fused traversal keeps one intermediate live at a time instead of all of
+/// them, and this restriction keeps every drop-order observation identical.
+fn automatic_fusion(types: &Types<'_>, functions: &mut Functions<'_>) -> usize {
+    let mut memo: Vec<Option<bool>> = vec![None; functions.bodies.len()];
+    let mut visiting = vec![false; functions.bodies.len()];
+    let mut safety = vec![false; functions.bodies.len()];
+    for (index, entry) in safety.iter_mut().enumerate() {
+        *entry = fusion_function_safe(
+            index,
+            &functions.signatures,
+            &functions.bodies,
+            &mut memo,
+            &mut visiting,
+        );
+    }
+    let signatures = &functions.signatures;
+    let mut fusions = 0;
+    for body in functions.bodies.iter_mut().flatten() {
+        fuse_block(&mut body.body, types, signatures, &safety, &mut fusions);
+    }
+    fusions
+}
+
+fn fuse_block(
+    block: &mut Block,
+    types: &Types<'_>,
+    signatures: &[Signature],
+    safety: &[bool],
+    fusions: &mut usize,
+) {
+    for statement in &mut block.statements {
+        match statement {
+            Statement::Let(_, value) | Statement::Expr(value) => {
+                fuse_expr(value, types, signatures, safety, fusions)
+            }
+        }
+    }
+    if let Some(tail) = &mut block.tail {
+        fuse_expr(tail, types, signatures, safety, fusions);
+    }
+}
+
+fn fuse_expr(
+    expr: &mut Expr,
+    types: &Types<'_>,
+    signatures: &[Signature],
+    safety: &[bool],
+    fusions: &mut usize,
+) {
+    let safe_callback = |callback: &Expr| -> bool {
+        matches!(
+            &callback.kind,
+            ExprKind::FnValue { function, captures }
+                if captures.is_empty() && safety.get(*function).copied().unwrap_or(false)
+        )
+    };
+    match &mut expr.kind {
+        ExprKind::Coerce { value, .. }
+        | ExprKind::Try { value, .. }
+        | ExprKind::BoxNew(value)
+        | ExprKind::BoxTake(value)
+        | ExprKind::BoxRead(value)
+        | ExprKind::BoxTryNew { value, .. }
+        | ExprKind::ArenaBoxRead(value)
+        | ExprKind::ArenaBoxTake(value)
+        | ExprKind::BytesTryWithCapacity {
+            capacity: value, ..
+        }
+        | ExprKind::Drop(value)
+        | ExprKind::Unary(_, value)
+        | ExprKind::Assign(_, value)
+        | ExprKind::Return(value)
+        | ExprKind::Project(value, _) => fuse_expr(value, types, signatures, safety, fusions),
+        ExprKind::ArenaAlloc { arena, value } => {
+            fuse_expr(arena, types, signatures, safety, fusions);
+            fuse_expr(value, types, signatures, safety, fusions);
+        }
+        ExprKind::BoxReuse { owner, payload }
+        | ExprKind::BoxReuseGrow { owner, payload }
+        | ExprKind::BoxTryReuse { owner, payload, .. } => {
+            fuse_expr(owner, types, signatures, safety, fusions);
+            fuse_expr(payload, types, signatures, safety, fusions);
+        }
+        ExprKind::RefAssign(reference, _, value) => {
+            fuse_expr(reference, types, signatures, safety, fusions);
+            fuse_expr(value, types, signatures, safety, fusions);
+        }
+        ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
+            fuse_expr(left, types, signatures, safety, fusions);
+            fuse_expr(right, types, signatures, safety, fusions);
+        }
+        ExprKind::Construct { fields, .. } => {
+            for field in fields {
+                fuse_expr(field, types, signatures, safety, fusions);
+            }
+        }
+        ExprKind::Call(_, arguments) => {
+            for argument in arguments {
+                fuse_expr(argument, types, signatures, safety, fusions);
+            }
+        }
+        ExprKind::Block(block) => fuse_block(block, types, signatures, safety, fusions),
+        ExprKind::If(condition, yes, no) => {
+            fuse_expr(condition, types, signatures, safety, fusions);
+            fuse_block(yes, types, signatures, safety, fusions);
+            fuse_block(no, types, signatures, safety, fusions);
+        }
+        ExprKind::Match(value, arms) => {
+            fuse_expr(value, types, signatures, safety, fusions);
+            for arm in arms {
+                fuse_expr(&mut arm.body, types, signatures, safety, fusions);
+            }
+        }
+        ExprKind::FnValue { captures, .. } => {
+            for capture in captures {
+                fuse_expr(capture, types, signatures, safety, fusions);
+            }
+        }
+        ExprKind::CallIndirect { callee, arguments } => {
+            fuse_expr(callee, types, signatures, safety, fusions);
+            for argument in arguments {
+                fuse_expr(argument, types, signatures, safety, fusions);
+            }
+        }
+        ExprKind::TaskSpawn { body, .. } | ExprKind::TaskScope { body, .. } => {
+            fuse_expr(body, types, signatures, safety, fusions)
+        }
+        ExprKind::TaskCancel(value) => fuse_expr(value, types, signatures, safety, fusions),
+        ExprKind::TaskJoin { task, .. } => fuse_expr(task, types, signatures, safety, fusions),
+        ExprKind::Slice {
+            base, start, end, ..
+        } => {
+            fuse_expr(base, types, signatures, safety, fusions);
+            if let Some(start) = start {
+                fuse_expr(start, types, signatures, safety, fusions);
+            }
+            if let Some(end) = end {
+                fuse_expr(end, types, signatures, safety, fusions);
+            }
+        }
+        ExprKind::Break(value, _) => {
+            if let Some(value) = value {
+                fuse_expr(value, types, signatures, safety, fusions);
+            }
+        }
+        ExprKind::VecMap {
+            vector,
+            callbacks,
+            source,
+            target: _,
+        } => {
+            fuse_expr(vector, types, signatures, safety, fusions);
+            for callback in callbacks.iter_mut() {
+                fuse_expr(callback, types, signatures, safety, fusions);
+            }
+            let mut merged = Vec::new();
+            std::mem::swap(callbacks, &mut merged);
+            let mut cursor = std::mem::replace(vector, placeholder_expr(expr.span));
+            loop {
+                let compatible = match &cursor.kind {
+                    ExprKind::VecMap {
+                        target: inner_target,
+                        callbacks: inner_callbacks,
+                        ..
+                    } => {
+                        *inner_target == *source
+                            && inner_callbacks
+                                .iter()
+                                .chain(merged.iter())
+                                .all(safe_callback)
+                    }
+                    _ => false,
+                };
+                if !compatible {
+                    break;
+                }
+                let old = std::mem::replace(
+                    &mut *cursor,
+                    Expr {
+                        kind: ExprKind::Constant(0),
+                        ty: Type::Unit,
+                        span: expr.span,
+                        resource: None,
+                    },
+                );
+                let old_ty = old.ty;
+                let old_span = old.span;
+                let old_resource = old.resource;
+                let ExprKind::VecMap {
+                    vector: inner_vector,
+                    callbacks: mut inner_callbacks,
+                    source: inner_source,
+                    target: inner_target,
+                } = old.kind
+                else {
+                    unreachable!("checked compatible map")
+                };
+                let nonempty = inner_callbacks
+                    .iter()
+                    .chain(merged.iter())
+                    .any(|callback| callback_effects(types, callback) != 0);
+                if nonempty
+                    && crate::runtime_types::type_owns(&types.enums, &types.unions, inner_target, 0)
+                {
+                    // Restore the untouched layer and stop: an effectful step
+                    // must not change when an owning intermediate is dropped.
+                    cursor = Box::new(Expr {
+                        kind: ExprKind::VecMap {
+                            vector: inner_vector,
+                            callbacks: inner_callbacks,
+                            source: inner_source,
+                            target: inner_target,
+                        },
+                        ty: old_ty,
+                        span: old_span,
+                        resource: old_resource,
+                    });
+                    break;
+                }
+                inner_callbacks.append(&mut merged);
+                merged = inner_callbacks;
+                *source = inner_source;
+                cursor = inner_vector;
+                *fusions += 1;
+            }
+            *callbacks = merged;
+            *vector = cursor;
+        }
+        ExprKind::Constant(_)
+        | ExprKind::BytesLiteral(_)
+        | ExprKind::Local(_)
+        | ExprKind::Move(_)
+        | ExprKind::Borrow(_)
+        | ExprKind::Peek(_)
+        | ExprKind::ArenaNew
+        | ExprKind::TaskYield
+        | ExprKind::TaskCheckCancel
+        | ExprKind::Continue(_) => {}
+        ExprKind::While(condition, body) => {
+            fuse_expr(condition, types, signatures, safety, fusions);
+            fuse_block(body, types, signatures, safety, fusions);
+        }
+        ExprKind::Loop(body) => fuse_block(body, types, signatures, safety, fusions),
+    }
+}
+
+fn callback_effects(types: &Types<'_>, callback: &Expr) -> u8 {
+    match callback.ty {
+        Type::Fn(id) => types.function_types[id].effects,
+        _ => u8::MAX,
+    }
+}
+
+fn placeholder_expr(span: Span) -> Box<Expr> {
+    Box::new(Expr {
+        kind: ExprKind::Constant(0),
+        ty: Type::Unit,
+        span,
+        resource: None,
+    })
+}
+
 /// Parameter lifetimes that the returned value syntactically derives from. A
 /// direct name, field projection, or slice of a parameter carries that
 /// parameter's lifetime; block/if/match value positions keep the branches that
@@ -2015,6 +2532,11 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             ),
         ));
     }
+    // Fusion selection runs only after every body exists, so it can inspect
+    // callee effect rows and structural termination instead of guessing from
+    // source types while bodies are still being checked.
+    let automatic = automatic_fusion(&types, &mut functions);
+    functions.fusions += automatic;
     let mut executable = Executable {
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,
@@ -11221,9 +11743,18 @@ impl Checker<'_, '_> {
             | ExprKind::Coerce { value: e, .. } => self.value_moves_linear(e),
             ExprKind::BoxTake(e) if self.owned_type(expr.ty) => self.value_moves_linear(e),
             // Reuse returns an owner carrying the old binding obligation.
-            ExprKind::BoxReuse { owner, payload } => {
-                self.value_moves_linear(owner) || self.value_moves_linear(payload)
+            ExprKind::BoxReuse { owner, payload }
+            | ExprKind::BoxReuseGrow { owner, payload }
+            | ExprKind::BoxTryReuse { owner, payload, .. }
+            | ExprKind::ArenaAlloc {
+                arena: owner,
+                value: payload,
+            } => self.value_moves_linear(owner) || self.value_moves_linear(payload),
+            ExprKind::BoxTryNew { value, .. }
+            | ExprKind::BytesTryWithCapacity {
+                capacity: value, ..
             }
+            | ExprKind::ArenaBoxTake(value) => self.value_moves_linear(value),
             // In-place map returns the same vector owner it consumed.
             ExprKind::VecMap { vector, .. } => self.value_moves_linear(vector),
             // A task/scope whose result carries an owning or linear obligation
@@ -11285,6 +11816,12 @@ impl Checker<'_, '_> {
                 | ExprKind::BoxNew(inner)
                 | ExprKind::BoxTake(inner)
                 | ExprKind::BoxRead(inner)
+                | ExprKind::BoxTryNew { value: inner, .. }
+                | ExprKind::BytesTryWithCapacity {
+                    capacity: inner, ..
+                }
+                | ExprKind::ArenaBoxRead(inner)
+                | ExprKind::ArenaBoxTake(inner)
                 | ExprKind::Drop(inner)
                 | ExprKind::Project(inner, _)
                 | ExprKind::Coerce { value: inner, .. }
@@ -11299,9 +11836,12 @@ impl Checker<'_, '_> {
                 ExprKind::RefAssign(reference, _, value) => {
                     find(checker, reference).or_else(|| find(checker, value))
                 }
-                ExprKind::BoxReuse { owner, payload } => {
-                    find(checker, owner).or_else(|| find(checker, payload))
-                }
+                ExprKind::BoxReuse { owner, payload }
+                | ExprKind::ArenaAlloc {
+                    arena: owner,
+                    value: payload,
+                } => find(checker, owner).or_else(|| find(checker, payload)),
+                ExprKind::ArenaNew => None,
                 ExprKind::VecMap {
                     vector, callbacks, ..
                 } => find(checker, vector).or_else(|| {
@@ -11978,10 +12518,18 @@ impl Checker<'_, '_> {
                                 "mutable owner borrows are not supported; borrow records with '&mut name', or use '&mut name[..]' for a mutable slice view",
                             ));
                         }
-                        if !matches!(ty, Type::Box(_) | Type::Bytes | Type::String | Type::Vec(_)) {
+                        if !matches!(
+                            ty,
+                            Type::Box(_)
+                                | Type::Arena
+                                | Type::ArenaBox(_)
+                                | Type::Bytes
+                                | Type::String
+                                | Type::Vec(_)
+                        ) {
                             return Err(Diagnostic::new(
                                 span,
-                                "borrowing supports immutable &Box<T>, &Bytes, &String, &Vec<T>, &Record, and &[T] slice views",
+                                "borrowing supports immutable &Box<T>, &Arena, &Bytes, &String, &Vec<T>, &Record, and &[T] slice views",
                             ));
                         }
                         (ExprKind::Borrow(slot), Type::Ref(c.types.pointer(ty)))
@@ -12397,6 +12945,44 @@ impl Checker<'_, '_> {
                     if explicit.is_some() {
                         return Err(Diagnostic::new(callee.span, "this callee takes no type arguments"));
                     }
+                    if binding.kind == BindingKind::Builtin
+                        && matches!(
+                            binding.name.as_str(),
+                            "Arena.new" | "Arena.alloc" | "ArenaBox.read" | "ArenaBox.take"
+                        )
+                    {
+                        let name = binding.name.as_str();
+                        let arity = match name {
+                            "Arena.new" => 0,
+                            "Arena.alloc" => 2,
+                            _ => 1,
+                        };
+                        if arguments.len() != arity {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!("{name} requires exactly {arity} argument(s)"),
+                            ));
+                        }
+                        match name {
+                            "Arena.new" => return c.arena_new(span),
+                            "Arena.alloc" => {
+                                return c.arena_alloc(&arguments[0], &arguments[1], expected, span);
+                            }
+                            "ArenaBox.read" => {
+                                return c.arena_box_read(&arguments[0], span);
+                            }
+                            _ => return c.arena_box_take(&arguments[0], span),
+                        }
+                    }
+                    if binding.kind == BindingKind::Builtin && binding.name == "Bytes.try_with_capacity" {
+                        if arguments.len() != 1 {
+                            return Err(Diagnostic::new(
+                                span,
+                                "Bytes.try_with_capacity takes exactly one capacity argument",
+                            ));
+                        }
+                        return c.bytes_try_with_capacity(&arguments[0], expected, span);
+                    }
                     if binding.kind == BindingKind::Builtin && binding.name == "Bytes.from" {
                         if let [ast::Node { kind: ast::ExprKind::String(text), .. }] = arguments.as_slice() {
                             c.require(ALLOC | PANIC, span)?;
@@ -12408,11 +12994,17 @@ impl Checker<'_, '_> {
                         }
                         return Err(Diagnostic::new(span, "Bytes.from requires exactly one string literal; general runtime strings are deferred"));
                     }
-                    if binding.kind == BindingKind::Builtin && matches!(binding.name.as_str(), "Box.new" | "Box.take" | "Box.read" | "Box.reuse" | "drop") {
+                    if binding.kind == BindingKind::Builtin && matches!(binding.name.as_str(), "Box.new" | "Box.take" | "Box.read" | "Box.reuse" | "Box.reuse_grow" | "Box.try_new" | "Box.try_reuse" | "drop") {
                         let name = binding.name.as_str();
-                        let arity = if name == "Box.reuse" { 2 } else { 1 };
+                        let arity = if matches!(name, "Box.reuse" | "Box.reuse_grow" | "Box.try_reuse") { 2 } else { 1 };
                         if arguments.len() != arity { return Err(Diagnostic::new(span, format!("{name} requires exactly {arity} argument(s)"))); }
-                        if name == "Box.reuse" { return c.box_reuse(&arguments[0], &arguments[1], expected, span); }
+                        match name {
+                            "Box.reuse" => return c.box_reuse(&arguments[0], &arguments[1], expected, span),
+                            "Box.reuse_grow" => return c.box_reuse_grow(&arguments[0], &arguments[1], expected, span),
+                            "Box.try_new" => return c.box_try_new(&arguments[0], expected, span),
+                            "Box.try_reuse" => return c.box_try_reuse(&arguments[0], &arguments[1], expected, span),
+                            _ => {}
+                        }
                         let expected_inner = if name == "Box.new" { expected.and_then(|ty| if let Type::Box(index) = ty { Some(c.types.pointees[index]) } else { None }) } else { None };
                         let arg = c.expr_expected(&arguments[0], expected_inner)?;
                         let (kind, ty) = match name {
@@ -14213,6 +14805,444 @@ impl Checker<'_, '_> {
             None => Ok(value),
         }
     }
+    /// Checked widening reuse. This is the explicit allocating fallback: a
+    /// payload wider than the old one may grow and move the allocation. It
+    /// requires `{alloc, panic}` and is therefore illegal under `#[noalloc]`.
+    /// The old payload is still destroyed exactly once before any new storage
+    /// is written, and the returned owner keeps every obligation of the old
+    /// owner and of the new payload.
+    fn box_reuse_grow(
+        &mut self,
+        owner: &ast::Expr,
+        payload: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        let owner = self.expr(owner)?;
+        if owner.ty == Type::Never {
+            let payload = self.expr(payload)?;
+            return Ok(Expr {
+                kind: ExprKind::BoxReuseGrow {
+                    owner: Box::new(owner),
+                    payload: Box::new(payload),
+                },
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        let Type::Box(old_index) = owner.ty else {
+            return Err(Diagnostic::new(
+                owner.span,
+                "Box.reuse_grow requires an owned Box<T> as its first argument",
+            ));
+        };
+        let old = self.types.pointees[old_index];
+        if self.linear_type(old) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "Box.reuse_grow cannot implicitly drop the linear payload {}; take it out and consume it explicitly",
+                    self.types.name(old)
+                ),
+            ));
+        }
+        if self.value_moves_linear(&owner) && self.owned_type(old) {
+            return Err(Diagnostic::new(
+                span,
+                "Box.reuse_grow cannot discard an owned payload that may carry a propagated linear obligation; take and consume it explicitly",
+            ));
+        }
+        self.require(ALLOC | PANIC, span)?;
+        let expected_inner = expected.and_then(|ty| {
+            if let Type::Box(index) = ty {
+                Some(self.types.pointees[index])
+            } else {
+                None
+            }
+        });
+        let payload = self.expr_expected(payload, expected_inner)?;
+        if payload.ty == Type::Never {
+            return Ok(Expr {
+                kind: ExprKind::BoxReuseGrow {
+                    owner: Box::new(owner),
+                    payload: Box::new(payload),
+                },
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        if matches!(payload.ty, Type::Ref(_) | Type::RefMut(_)) || payload.ty.is_view() {
+            return Err(Diagnostic::new(
+                span,
+                "Box.reuse_grow cannot store a borrowed reference or slice view (including &str text views)",
+            ));
+        }
+        if crate::runtime_types::contains_task(self.types, payload.ty) {
+            return Err(Diagnostic::new(
+                span,
+                "task handles cannot be stored in Box; join them in the scope that owns them",
+            ));
+        }
+        let new = match expected_inner {
+            Some(expected) => expected,
+            None => self.types.full(payload.ty, span)?,
+        };
+        let payload = self.coerce(payload, new, span)?;
+        let ty = Type::Box(self.types.pointer(new));
+        let value = Expr {
+            kind: ExprKind::BoxReuseGrow {
+                owner: Box::new(owner),
+                payload: Box::new(payload),
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(value, expected, span),
+            None => Ok(value),
+        }
+    }
+    /// Fallible box construction. The payload is moved into the `Ok` box on
+    /// success and returned unchanged in `Err` on failure, so no owner is
+    /// destroyed or silently duplicated by a rejected allocation.
+    fn box_try_new(
+        &mut self,
+        value: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        self.require(ALLOC, span)?;
+        let expected_shape = expected.and_then(|ty| self.types.result(ty, span).ok());
+        let expected_inner = expected_shape.and_then(|shape| match shape.ok {
+            Type::Box(index) => Some(self.types.pointees[index]),
+            _ => None,
+        });
+        let value = self.expr_expected(value, expected_inner)?;
+        if value.ty == Type::Never {
+            let shape = expected_shape.unwrap_or(ResultShape {
+                ok_tag: 0,
+                err_tag: 1,
+                ok: Type::Unit,
+                error: Type::Unit,
+            });
+            return Ok(Expr {
+                kind: ExprKind::BoxTryNew {
+                    value: Box::new(value),
+                    shape,
+                },
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        if matches!(value.ty, Type::Ref(_) | Type::RefMut(_)) || value.ty.is_view() {
+            return Err(Diagnostic::new(
+                span,
+                "Box.try_new cannot store a borrowed reference or slice view (including &str text views)",
+            ));
+        }
+        if crate::runtime_types::contains_task(self.types, value.ty) {
+            return Err(Diagnostic::new(
+                span,
+                "task handles cannot be stored in Box; join them in the scope that owns them",
+            ));
+        }
+        let pointee = self.types.full(value.ty, span)?;
+        let value = self.coerce(value, pointee, span)?;
+        let ok = Type::Box(self.types.pointer(pointee));
+        let (ty, shape) = self.types.result_type(ok, pointee, span)?;
+        let expression = Expr {
+            kind: ExprKind::BoxTryNew {
+                value: Box::new(value),
+                shape,
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(expression, expected, span),
+            None => Ok(expression),
+        }
+    }
+    /// Fallible growth-capable reuse. On allocation failure the old owner is
+    /// returned untouched in `Err`. The new payload must be non-owning, so the
+    /// failure path preserves every supplied owner exactly.
+    fn box_try_reuse(
+        &mut self,
+        owner: &ast::Expr,
+        payload: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        let owner = self.expr(owner)?;
+        if owner.ty == Type::Never {
+            let payload = self.expr(payload)?;
+            let shape = ResultShape {
+                ok_tag: 0,
+                err_tag: 1,
+                ok: Type::Unit,
+                error: Type::Unit,
+            };
+            return Ok(Expr {
+                kind: ExprKind::BoxTryReuse {
+                    owner: Box::new(owner),
+                    payload: Box::new(payload),
+                    shape,
+                },
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        let Type::Box(old_index) = owner.ty else {
+            return Err(Diagnostic::new(
+                owner.span,
+                "Box.try_reuse requires an owned Box<T> as its first argument",
+            ));
+        };
+        let old = self.types.pointees[old_index];
+        if self.linear_type(old) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "Box.try_reuse cannot implicitly drop the linear payload {}; take it out and consume it explicitly",
+                    self.types.name(old)
+                ),
+            ));
+        }
+        if self.value_moves_linear(&owner) && self.owned_type(old) {
+            return Err(Diagnostic::new(
+                span,
+                "Box.try_reuse cannot discard an owned payload that may carry a propagated linear obligation; take and consume it explicitly",
+            ));
+        }
+        self.require(ALLOC, span)?;
+        let expected_shape = expected.and_then(|ty| self.types.result(ty, span).ok());
+        let expected_inner = expected_shape.and_then(|shape| match shape.ok {
+            Type::Box(index) => Some(self.types.pointees[index]),
+            _ => None,
+        });
+        let payload = self.expr_expected(payload, expected_inner)?;
+        if payload.ty == Type::Never {
+            let shape = expected_shape.unwrap_or(ResultShape {
+                ok_tag: 0,
+                err_tag: 1,
+                ok: Type::Unit,
+                error: Type::Unit,
+            });
+            return Ok(Expr {
+                kind: ExprKind::BoxTryReuse {
+                    owner: Box::new(owner),
+                    payload: Box::new(payload),
+                    shape,
+                },
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        if matches!(payload.ty, Type::Ref(_) | Type::RefMut(_)) || payload.ty.is_view() {
+            return Err(Diagnostic::new(
+                span,
+                "Box.try_reuse cannot store a borrowed reference or slice view (including &str text views)",
+            ));
+        }
+        if crate::runtime_types::contains_task(self.types, payload.ty) {
+            return Err(Diagnostic::new(
+                span,
+                "task handles cannot be stored in Box; join them in the scope that owns them",
+            ));
+        }
+        let new = match expected_inner {
+            Some(expected) => expected,
+            None => self.types.full(payload.ty, span)?,
+        };
+        if self.owned_type(new) || self.linear_type(new) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "Box.try_reuse requires a non-owning new payload so a failed allocation can preserve every supplied owner; {} owns resources. Use Box.reuse_grow for an aborting swap, or consume the owner first",
+                    self.types.name(new)
+                ),
+            ));
+        }
+        let payload = self.coerce(payload, new, span)?;
+        let ok = Type::Box(self.types.pointer(new));
+        let error = Type::Box(self.types.pointer(old));
+        let (ty, shape) = self.types.result_type(ok, error, span)?;
+        let expression = Expr {
+            kind: ExprKind::BoxTryReuse {
+                owner: Box::new(owner),
+                payload: Box::new(payload),
+                shape,
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(expression, expected, span),
+            None => Ok(expression),
+        }
+    }
+    /// Fallible byte-buffer construction with an exact requested capacity.
+    fn bytes_try_with_capacity(
+        &mut self,
+        capacity: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        self.require(ALLOC, span)?;
+        let capacity = self.expr_expected(capacity, Some(Type::I64))?;
+        self.expect(capacity.ty, Type::I64, capacity.span)?;
+        let (ty, shape) = self.types.result_type(Type::Bytes, Type::I64, span)?;
+        let expression = Expr {
+            kind: ExprKind::BytesTryWithCapacity {
+                capacity: Box::new(capacity),
+                shape,
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(expression, expected, span),
+            None => Ok(expression),
+        }
+    }
+    /// Create one owning bump-allocator region.
+    fn arena_new(&mut self, span: Span) -> Result<Expr> {
+        self.require(ALLOC | PANIC, span)?;
+        Ok(Expr {
+            kind: ExprKind::ArenaNew,
+            ty: Type::Arena,
+            span,
+            resource: None,
+        })
+    }
+    /// Check `Arena.alloc(&arena, value)`. The borrow keeps the arena value
+    /// live for the duration of the call; the returned `ArenaBox` carries its
+    /// own region reference, so dropping the arena binding does not invalidate
+    /// it.
+    fn arena_alloc(
+        &mut self,
+        arena: &ast::Expr,
+        value: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        self.require(ALLOC | PANIC, span)?;
+        let expected_inner = expected.and_then(|ty| {
+            if let Type::ArenaBox(index) = ty {
+                Some(self.types.pointees[index])
+            } else {
+                None
+            }
+        });
+        let pointer = self.types.pointer(Type::Arena);
+        let arena = self.expr_expected(arena, Some(Type::Ref(pointer)))?;
+        self.expect(arena.ty, Type::Ref(pointer), arena.span)?;
+        let value = self.expr_expected(value, expected_inner)?;
+        if value.ty == Type::Never {
+            return Ok(Expr {
+                kind: ExprKind::ArenaAlloc {
+                    arena: Box::new(arena),
+                    value: Box::new(value),
+                },
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        if matches!(value.ty, Type::Ref(_) | Type::RefMut(_)) || value.ty.is_view() {
+            return Err(Diagnostic::new(
+                span,
+                "Arena.alloc cannot store a borrowed reference or slice view (including &str text views)",
+            ));
+        }
+        if crate::runtime_types::contains_task(self.types, value.ty) {
+            return Err(Diagnostic::new(
+                span,
+                "task handles cannot be stored in Arena; join them in the scope that owns them",
+            ));
+        }
+        let pointee = self.types.full(value.ty, span)?;
+        if self.linear_type(pointee) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "Arena.alloc cannot place the linear value {} in a region that destroys its contents implicitly; consume it inside the region scope instead",
+                    self.types.name(pointee)
+                ),
+            ));
+        }
+        if self.value_moves_linear(&value) && self.owned_type(pointee) {
+            return Err(Diagnostic::new(
+                span,
+                "Arena.alloc cannot store an owned payload that may carry a propagated linear obligation; consume it explicitly",
+            ));
+        }
+        let value = self.coerce(value, pointee, span)?;
+        let ty = Type::ArenaBox(self.types.pointer(pointee));
+        let expression = Expr {
+            kind: ExprKind::ArenaAlloc {
+                arena: Box::new(arena),
+                value: Box::new(value),
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(expression, expected, span),
+            None => Ok(expression),
+        }
+    }
+    /// Read a copyable payload through `&ArenaBox<T>`. Ownership rejects
+    /// copying an owning payload, exactly as for `Box.read`.
+    fn arena_box_read(&mut self, value: &ast::Expr, span: Span) -> Result<Expr> {
+        let value = self.expr_expected(value, None)?;
+        let Type::Ref(index) = value.ty else {
+            return Err(Diagnostic::new(
+                span,
+                "ArenaBox.read requires an immutable &ArenaBox<T>",
+            ));
+        };
+        let Type::ArenaBox(inner) = self.types.pointees[index] else {
+            return Err(Diagnostic::new(
+                span,
+                "ArenaBox.read requires an immutable &ArenaBox<T>, not another borrow type",
+            ));
+        };
+        let ty = self.types.pointees[inner];
+        Ok(Expr {
+            kind: ExprKind::ArenaBoxRead(Box::new(value)),
+            ty,
+            span,
+            resource: None,
+        })
+    }
+    /// Move the payload out of an owning `ArenaBox<T>`.
+    fn arena_box_take(&mut self, value: &ast::Expr, span: Span) -> Result<Expr> {
+        let value = self.expr(value)?;
+        let Type::ArenaBox(index) = value.ty else {
+            return Err(Diagnostic::new(
+                span,
+                "ArenaBox.take requires an owned ArenaBox<T>",
+            ));
+        };
+        let ty = self.types.pointees[index];
+        Ok(Expr {
+            kind: ExprKind::ArenaBoxTake(Box::new(value)),
+            ty,
+            span,
+            resource: None,
+        })
+    }
     /// Whether values of `ty` own heap storage (computed from layouts).
     fn carrier_type(&self, ty: Type) -> bool {
         ty.layout().is_some_and(|id| self.types.enums[id].borrowed)
@@ -14221,6 +15251,8 @@ impl Checker<'_, '_> {
         fn go(types: &Types<'_>, ty: Type, depth: usize) -> bool {
             match ty {
                 Type::Box(_)
+                | Type::Arena
+                | Type::ArenaBox(_)
                 | Type::Bytes
                 | Type::String
                 | Type::Vec(_)
@@ -17143,31 +18175,10 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
-        let pure = |expr: &Expr| {
-            matches!(&expr.kind, ExprKind::FnValue { captures, .. } if captures.is_empty())
-                && matches!(expr.ty, Type::Fn(id) if self.types.function_types[id].effects == 0)
-        };
-        // Merge a nested pure map into this traversal. Both callbacks must be
-        // noncapturing values with the empty effect row; this excludes I/O,
-        // allocation, panic, and reordering any effectful call. The check is
-        // conservative: an effect-polymorphic callback specialized to a
-        // nonempty row is never fused.
-        let (vector, mut callbacks, source) = match vector {
-            Expr {
-                kind:
-                    ExprKind::VecMap {
-                        vector,
-                        callbacks,
-                        source: inner_source,
-                        target: inner_target,
-                    },
-                ..
-            } if pure(&callback) && callbacks.iter().all(pure) && inner_target == source => {
-                self.functions.fusions += 1;
-                (vector, callbacks, inner_source)
-            }
-            other => (Box::new(other), Vec::new(), source),
-        };
+        // Automatic fusion is selected after all bodies are checked, where the
+        // analysis can inspect callee effect rows, recursion, and loops. The
+        // operation still records the explicit nested map structure here.
+        let (vector, mut callbacks, source) = (Box::new(vector), Vec::new(), source);
         callbacks.push(callback);
         let ty = Type::Vec(self.types.pointer(target));
         let value = Expr {
@@ -17864,6 +18875,8 @@ impl Executable {
     pub(crate) fn owns(&self, ty: Type) -> bool {
         match ty {
             Type::Box(_)
+            | Type::Arena
+            | Type::ArenaBox(_)
             | Type::Bytes
             | Type::String
             | Type::Vec(_)
@@ -17969,9 +18982,9 @@ pub(crate) fn substitute_alias_type(
     ast::Type::new(kind, ty.span)
 }
 
-/// Whether a checked function body returns a value that moves a binding-based
-/// linear obligation. Task results reject this because `TaskExit.Cancelled`
-/// would otherwise discard the obligation.
+/// Whether a synthesized adapter body creates a capturing closure
+/// environment. Such a body allocates when the adapter is called, so the
+/// adapter's declared effect row must include `alloc` and `panic`.
 fn block_allocates(block: &Block) -> bool {
     fn expr(node: &Expr) -> bool {
         match &node.kind {
@@ -17983,11 +18996,22 @@ fn block_allocates(block: &Block) -> bool {
             | ExprKind::BoxNew(value)
             | ExprKind::BoxTake(value)
             | ExprKind::BoxRead(value)
+            | ExprKind::ArenaBoxRead(value)
+            | ExprKind::ArenaBoxTake(value)
             | ExprKind::Drop(value)
             | ExprKind::Project(value, _)
             | ExprKind::Coerce { value, .. }
             | ExprKind::Break(Some(value), _)
             | ExprKind::Assign(_, value) => expr(value),
+            ExprKind::BoxReuseGrow { owner, payload }
+            | ExprKind::BoxTryReuse { owner, payload, .. }
+            | ExprKind::ArenaAlloc {
+                arena: owner,
+                value: payload,
+            } => expr(owner) || expr(payload),
+            ExprKind::ArenaNew
+            | ExprKind::BoxTryNew { .. }
+            | ExprKind::BytesTryWithCapacity { .. } => true,
             ExprKind::Loop(block) => block_allocates(block),
             ExprKind::While(condition, block) => expr(condition) || block_allocates(block),
             ExprKind::BytesAt(a, b) | ExprKind::Binary(_, a, b) => expr(a) || expr(b),

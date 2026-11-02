@@ -114,16 +114,42 @@ this fix still needs the integrated test/review gate.
 
 ## Memory and optimization
 
-- [ ] Automatic fusion where effect/order/termination analysis proves equivalence.
-- [ ] Widening reuse with explicit allocation/capacity guarantees.
-- [ ] Custom allocators and lifetime-safe allocator ownership.
-- [ ] Fallible allocation/reuse with exact cleanup on all failure paths.
-- [ ] Reproducible performance and physical-memory benchmarks.
+- [x] Automatic fusion where effect/order/termination analysis proves
+  equivalence. **Implemented** in `docs/memory-completion.md`: a post-check
+  analysis merges only noncapturing callbacks whose effect row is empty or
+  `alloc`-only and whose checked bodies are structurally total (no loops,
+  recursion, indirect calls, task operations, I/O, or panic). Effectful
+  drop-order is guarded by a non-owning intermediate requirement. Arbitrary
+  effectful interleaving remains rejected; the explicit chain chooses that
+  order at source level.
+- [x] Widening reuse with explicit allocation/capacity guarantees.
+  **Implemented for box payloads:** `Box.reuse_grow` checks the old owner and
+  payload obligations, destroys the old payload once, and either keeps the
+  allocation or grows/moves it under an explicit `{alloc, panic}` contract.
+  `#[noalloc]` rejects it; `Box.reuse` keeps its no-allocating-fallback
+  contract. Widening a vector element in place remains explicitly unsupported.
+- [x] Custom allocators and lifetime-safe allocator ownership. **Implemented as
+  a documented built-in allocator strategy:** `Arena`/`ArenaBox` with
+  reference-retained regions, deterministic drop, function/task escape, and
+  checked provenance. Arbitrary user-defined allocator callbacks and FFI are
+  deliberately not implemented and are not claimed.
+- [x] Fallible allocation/reuse with exact cleanup on all failure paths.
+  **Implemented:** `Box.try_new`, growth-capable `Box.try_reuse`, and
+  `Bytes.try_with_capacity` return the conventional checked `Result`; failures
+  preserve the old owner and, for `try_new`, the supplied payload. Real native
+  malloc refusal and a reference allocation budget are both exercised; no
+  process abort is disguised as `Err`.
+- [x] Reproducible performance and physical-memory benchmarks.
+  **Implemented:** `scripts/memory-bench.py` measures allocation counters,
+  reference/native parity, wall time, maximum RSS, and native pool retention
+  for deterministic workloads. It reports measurements, not superiority.
 
 Arbitrary effectful callback interleaving is not semantics-preserving: callback
 output, panic, and scheduling order can differ. Existing explicit map chains
-select that order deliberately. Automatic fusion must prove equivalence rather
-than silently changing the language's evaluation semantics.
+select that order deliberately. Automatic fusion proves the documented
+trace-free/total equivalence rather than silently changing the language's
+evaluation semantics; the unresolved general cases are listed in
+[memory-completion.md](memory-completion.md#unresolved-generality).
 
 ## Completion evidence
 

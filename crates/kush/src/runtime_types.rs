@@ -1074,6 +1074,8 @@ impl<'a> Types<'a> {
             Type::Stdin => "Stdin".into(),
             Type::Stdout => "Stdout".into(),
             Type::Box(p) => format!("Box<{}>", self.name(self.pointees[p])),
+            Type::Arena => "Arena".into(),
+            Type::ArenaBox(p) => format!("ArenaBox<{}>", self.name(self.pointees[p])),
             Type::Vec(p) => format!("Vec<{}>", self.name(self.pointees[p])),
             Type::Ref(p) => format!("&{}", self.name(self.pointees[p])),
             Type::RefMut(p) => format!("&mut {}", self.name(self.pointees[p])),
@@ -1308,7 +1310,7 @@ impl<'a> Types<'a> {
             }
             if !matches!(
                 inner,
-                Type::Box(_) | Type::Bytes | Type::String | Type::Vec(_)
+                Type::Box(_) | Type::Arena | Type::Bytes | Type::String | Type::Vec(_)
             ) {
                 return Err(Diagnostic::new(
                     ty.span,
@@ -1743,7 +1745,9 @@ impl<'a> Types<'a> {
                     ty.span,
                 );
             }
-            if b.kind == BindingKind::Builtin && matches!(b.name.as_str(), "Box" | "Vec" | "Task") {
+            if b.kind == BindingKind::Builtin
+                && matches!(b.name.as_str(), "Box" | "Vec" | "Task" | "ArenaBox")
+            {
                 if !lifetime_arguments.is_empty() {
                     return Err(Diagnostic::new(
                         ty.span,
@@ -1789,14 +1793,14 @@ impl<'a> Types<'a> {
                 if contains_task(self, inner) {
                     return Err(Diagnostic::new(
                         ty.span,
-                        "task handles cannot be stored inside Box or Vec; join them in the scope that owns them",
+                        "task handles cannot be stored inside Box, ArenaBox, or Vec; join them in the scope that owns them",
                     ));
                 }
                 let pointer = self.pointer(inner);
-                return Ok(if b.name == "Box" {
-                    Type::Box(pointer)
-                } else {
-                    Type::Vec(pointer)
+                return Ok(match b.name.as_str() {
+                    "Box" => Type::Box(pointer),
+                    "ArenaBox" => Type::ArenaBox(pointer),
+                    _ => Type::Vec(pointer),
                 });
             }
             if b.kind == BindingKind::Constructor && arguments.is_empty() {
@@ -1872,6 +1876,7 @@ impl<'a> Types<'a> {
                         "Unit" => return Ok(Type::Unit),
                         "Bytes" => return Ok(Type::Bytes),
                         "String" => return Ok(Type::String),
+                        "Arena" => return Ok(Type::Arena),
                         "str" => {
                             return Err(Diagnostic::new(
                                 ty.span,
@@ -2768,8 +2773,14 @@ impl<'a> Types<'a> {
                                 "a mixed borrowed record cannot contain a linear field or an owned payload with a linear obligation; consume linear values outside the record",
                             ));
                         }
-                        if matches!(ty, Type::Box(_) | Type::Vec(_) | Type::Bytes | Type::String)
-                            && has_borrow(self, *ty)
+                        if matches!(
+                            ty,
+                            Type::Box(_)
+                                | Type::ArenaBox(_)
+                                | Type::Vec(_)
+                                | Type::Bytes
+                                | Type::String
+                        ) && has_borrow(self, *ty)
                         {
                             return Err(Diagnostic::new(
                                 field.span,
@@ -3746,7 +3757,7 @@ pub(crate) fn has_borrow(types: &Types<'_>, ty: Type) -> bool {
         }
         match ty {
             Type::Ref(_) | Type::RefMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::Str => true,
-            Type::Box(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
+            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => {
                 types.enums[id].borrowed
                     || types.enums[id]
@@ -3781,7 +3792,7 @@ fn has_forbidden_record_metadata(types: &Types<'_>, ty: Type) -> bool {
             | Type::Fn(_)
             | Type::Once(_)
             | Type::Task(_) => return true,
-            Type::Box(p) | Type::Vec(p) => pending.push(types.pointees[p]),
+            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => pending.push(types.pointees[p]),
             Type::Enum(id) | Type::Variants(id, _) => pending.extend(
                 types.enums[id]
                     .variants
@@ -3805,7 +3816,7 @@ pub(crate) fn has_mutable_borrow(types: &Types<'_>, ty: Type) -> bool {
         }
         match ty {
             Type::SliceMut(_) => true,
-            Type::Box(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
+            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => {
                 types.enums[id].mutable_borrow
                     || types.enums[id]
@@ -3833,7 +3844,7 @@ pub(crate) fn contains_linear(types: &Types<'_>, ty: Type) -> bool {
         }
         match ty {
             Type::Once(id) => types.function_types[id].linear,
-            Type::Box(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
+            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => {
                 types.enums[id].linear
                     || types.enums[id]
@@ -3861,7 +3872,9 @@ fn collect_borrow_lifetimes(types: &Types<'_>, ty: Type, out: &mut BTreeSet<Stri
         }
         match ty {
             Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::Ref(_) | Type::RefMut(_) => {}
-            Type::Box(p) | Type::Vec(p) => go(types, types.pointees[p], out, seen),
+            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
+                go(types, types.pointees[p], out, seen)
+            }
             Type::Enum(id) | Type::Variants(id, _) => {
                 let layout = &types.enums[id];
                 out.extend(layout.lifetimes.iter().cloned());
@@ -3924,7 +3937,9 @@ pub(crate) fn contains_task_exit_borrow(types: &Types<'_>, ty: Type) -> bool {
                     .flat_map(|variant| variant.fields.iter())
                     .any(|field| go(types, *field, seen))
             }
-            Type::Box(p) | Type::Vec(p) | Type::Task(p) => go(types, types.pointees[p], seen),
+            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) | Type::Task(p) => {
+                go(types, types.pointees[p], seen)
+            }
             Type::Union(id) => types.unions[id]
                 .members
                 .iter()
@@ -3993,6 +4008,8 @@ pub(crate) fn type_owns(enums: &[Enum], unions: &[UnionType], ty: Type, depth: u
     }
     match ty {
         Type::Box(_)
+        | Type::Arena
+        | Type::ArenaBox(_)
         | Type::Bytes
         | Type::String
         | Type::Vec(_)
@@ -4021,7 +4038,7 @@ pub(crate) fn contains_task(types: &Types<'_>, ty: Type) -> bool {
         }
         match ty {
             Type::Task(_) => true,
-            Type::Box(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
+            Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => go(types, types.pointees[p], seen),
             Type::Enum(id) | Type::Variants(id, _) => types.enums[id]
                 .variants
                 .iter()

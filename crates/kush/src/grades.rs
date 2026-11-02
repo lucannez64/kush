@@ -1316,13 +1316,42 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
-            ExprKind::BoxReuse { owner, payload } => {
+            ExprKind::BoxReuse { owner, payload }
+            | ExprKind::BoxReuseGrow { owner, payload }
+            | ExprKind::BoxTryReuse { owner, payload, .. } => {
                 // Both arguments are evaluated exactly once. The returned
                 // owner inherits any binding-based obligation from either.
                 if !self.expr(owner, Grade::ONE)? {
                     return Ok(false);
                 }
                 if !self.expr(payload, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::BoxTryNew { value, .. }
+            | ExprKind::BytesTryWithCapacity {
+                capacity: value, ..
+            } => {
+                if !self.expr(value, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::ArenaNew => {}
+            ExprKind::ArenaAlloc { arena, value } => {
+                if !self.expr(arena, Grade::ONE)? {
+                    return Ok(false);
+                }
+                if !self.expr(value, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::ArenaBoxRead(value) => {
+                if !self.expr(value, multiplier)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::ArenaBoxTake(value) => {
+                if !self.expr(value, Grade::ONE)? {
                     return Ok(false);
                 }
             }

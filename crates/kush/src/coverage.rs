@@ -219,6 +219,8 @@ fn useful(
                 Ok(false)
             }
             Type::Box(_)
+            | Type::Arena
+            | Type::ArenaBox(_)
             | Type::Ref(_)
             | Type::RefMut(_)
             | Type::Vec(_)

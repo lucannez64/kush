@@ -469,6 +469,8 @@ fn owns(
     let _ = pointees;
     match ty {
         Type::Box(_)
+        | Type::Arena
+        | Type::ArenaBox(_)
         | Type::Bytes
         | Type::String
         | Type::Vec(_)
@@ -490,7 +492,9 @@ fn is_linear(
     functions: &[crate::runtime_types::FunctionType],
 ) -> bool {
     match ty {
-        Type::Box(p) | Type::Vec(p) => is_linear(pointees[p], enums, unions, pointees, functions),
+        Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) => {
+            is_linear(pointees[p], enums, unions, pointees, functions)
+        }
         Type::Enum(id) | Type::Variants(id, _) => enums[id],
         Type::Union(id) => unions[id]
             .members
@@ -2524,9 +2528,17 @@ impl Checker<'_> {
             ExprKind::Try { value, .. } => self.value_moves_linear(value),
             ExprKind::BoxTake(value) if self.moves(expr.ty) => self.value_moves_linear(value),
             ExprKind::BoxNew(value) => self.value_moves_linear(value),
-            ExprKind::BoxReuse { owner, payload } => {
+            ExprKind::BoxReuse { owner, payload }
+            | ExprKind::BoxReuseGrow { owner, payload }
+            | ExprKind::BoxTryReuse { owner, payload, .. } => {
                 self.value_moves_linear(owner) || self.value_moves_linear(payload)
             }
+            ExprKind::BoxTryNew { value, .. }
+            | ExprKind::BytesTryWithCapacity {
+                capacity: value, ..
+            }
+            | ExprKind::ArenaBoxTake(value) => self.value_moves_linear(value),
+            ExprKind::ArenaAlloc { value, .. } => self.value_moves_linear(value),
             ExprKind::VecMap { vector, .. } => self.value_moves_linear(vector),
             ExprKind::TaskSpawn { obligation, .. }
             | ExprKind::TaskScope { obligation, .. }
@@ -3162,14 +3174,16 @@ impl Checker<'_> {
             ExprKind::Unary(_, value) | ExprKind::BoxNew(value) | ExprKind::BoxTake(value) => {
                 self.expr(value)?
             }
-            ExprKind::BoxReuse { owner, payload } => {
+            ExprKind::BoxReuse { owner, payload }
+            | ExprKind::BoxReuseGrow { owner, payload }
+            | ExprKind::BoxTryReuse { owner, payload, .. } => {
                 if let Type::Box(p) = owner.ty
                     && self.value_moves_linear(owner)
                     && self.moves(self.pointees[p])
                 {
                     return Err(Diagnostic::new(
                         expr.span,
-                        "Box.reuse cannot discard an owned payload with a propagated linear obligation",
+                        "in-place box reuse cannot discard an owned payload with a propagated linear obligation",
                     ));
                 }
                 let loans = self.loans.clone();
@@ -3177,6 +3191,33 @@ impl Checker<'_> {
                 self.expr(payload)?;
                 self.loans = loans;
             }
+            ExprKind::BoxTryNew { value, .. }
+            | ExprKind::BytesTryWithCapacity {
+                capacity: value, ..
+            } => {
+                self.expr(value)?;
+            }
+            ExprKind::ArenaNew => {}
+            ExprKind::ArenaAlloc { arena, value } => {
+                // The arena borrow lasts for the call only; the returned box
+                // carries its own region reference.
+                let loans = self.loans.clone();
+                self.expr(arena)?;
+                self.expr(value)?;
+                self.loans = loans;
+            }
+            ExprKind::ArenaBoxRead(value) => {
+                if self.moves(expr.ty) {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "ArenaBox.read cannot copy an owned payload (or a linear one); consume it with ArenaBox.take",
+                    ));
+                }
+                let loans = self.loans.clone();
+                self.expr(value)?;
+                self.loans = loans;
+            }
+            ExprKind::ArenaBoxTake(value) => self.expr(value)?,
             ExprKind::VecMap {
                 vector, callbacks, ..
             } => {
@@ -4308,14 +4349,25 @@ pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
             | ExprKind::BoxNew(v)
             | ExprKind::BoxRead(v)
             | ExprKind::BoxTake(v)
+            | ExprKind::BoxTryNew { value: v, .. }
+            | ExprKind::BytesTryWithCapacity { capacity: v, .. }
+            | ExprKind::ArenaBoxRead(v)
+            | ExprKind::ArenaBoxTake(v)
             | ExprKind::Drop(v)
             | ExprKind::Project(v, _)
             | ExprKind::Try { value: v, .. }
             | ExprKind::Coerce { value: v, .. } => walk(v, out),
-            ExprKind::BoxReuse { owner, payload } => {
+            ExprKind::BoxReuse { owner, payload }
+            | ExprKind::BoxReuseGrow { owner, payload }
+            | ExprKind::BoxTryReuse { owner, payload, .. }
+            | ExprKind::ArenaAlloc {
+                arena: owner,
+                value: payload,
+            } => {
                 walk(owner, out);
                 walk(payload, out);
             }
+            ExprKind::ArenaNew => {}
             ExprKind::VecMap {
                 vector, callbacks, ..
             } => {
@@ -4447,6 +4499,12 @@ fn expr_live(
         | ExprKind::BoxNew(value)
         | ExprKind::BoxTake(value)
         | ExprKind::BoxRead(value)
+        | ExprKind::BoxTryNew { value, .. }
+        | ExprKind::BytesTryWithCapacity {
+            capacity: value, ..
+        }
+        | ExprKind::ArenaBoxRead(value)
+        | ExprKind::ArenaBoxTake(value)
         | ExprKind::Drop(value)
         | ExprKind::Return(value)
         | ExprKind::Project(value, _)
@@ -4458,10 +4516,17 @@ fn expr_live(
             // continuation live to be conservative about loan lifetimes.
             live = expr_live(value, live_after, views, heads, exits, out);
         }
-        ExprKind::BoxReuse { owner, payload } => {
+        ExprKind::BoxReuse { owner, payload }
+        | ExprKind::BoxReuseGrow { owner, payload }
+        | ExprKind::BoxTryReuse { owner, payload, .. }
+        | ExprKind::ArenaAlloc {
+            arena: owner,
+            value: payload,
+        } => {
             live = expr_live(payload, live_after, views, heads, exits, out);
             live = expr_live(owner, &live, views, heads, exits, out);
         }
+        ExprKind::ArenaNew => {}
         ExprKind::Binary(_, left, right) | ExprKind::BytesAt(left, right) => {
             live = expr_live(right, live_after, views, heads, exits, out);
             live = expr_live(left, &live, views, heads, exits, out);
