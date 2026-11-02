@@ -38,8 +38,17 @@ The system covers:
 - a call-scoped nominal-record reference subset: `&self`/`&mut self` methods,
   `self: &Self`/`self: &mut Self`, and ordinary `&Record`/`&mut Record`
   parameters, with copyable field reads, copyable field writes through exclusive
-  references, and checked loan retention through later arguments. Stored,
-  returned, captured, and general reference reborrows remain rejected.
+  references, and checked loan retention through later arguments;
+- nominal-record reference **returns** tied to a caller reference parameter,
+  including shared/mutable elision, outlives bounds, and reborrow through
+  helper calls. Stored reference locals and reference fields remain rejected;
+- borrowed records in function-arrow parameters and results, scoped closure
+  captures, capture-derived slice/record results, and structured-task captures
+  from scope-external storage;
+- nested record-field subviews and structurally disjoint mutable field loans
+  for direct local records.
+
+See [expanded borrowing contracts](borrowing-extensions.md).
 
 See also [borrowed and mixed records](borrowed-records.md),
 [immutable slice operations](slices.md), [ownership and cleanup](ownership.md),
@@ -685,12 +694,17 @@ be returned across a task boundary.
 
 ## Deliberate remaining limitations
 
-- Elision is limited to a borrowed slice result whose syntactic input borrows
-  name exactly one distinct lifetime. There is no general lifetime inference,
-  no inference from the body, no inferred outlives bounds, and no alias-based
-  provenance. Borrowed slice returns otherwise require explicit
-  `<'a>` and `-> &'a [T]` / `-> &'a mut [T]` annotations.
-- No borrowed owner-reference returns (`&Box<T>`, `&Vec<T>`, `&Bytes`).
+- Elision is limited to a borrowed slice result whose input borrows name
+  exactly one distinct lifetime. Borrowed record parameters contribute one
+  candidate per field lifetime, and arrows/lambdas count record leaves, but
+  there is no inference from the body, no inferred outlives bounds, and no
+  alias-based provenance. Multiple distinct origins are rejected, not unified.
+  Borrowed slice returns otherwise require explicit `<'a>` and
+  `-> &'a [T]` / `-> &'a mut [T]` annotations.
+- Nominal-record references may be returned when tied to a reference
+  parameter. Owner-reference returns (`&Box<T>`, `&Vec<T>`, `&Bytes`) remain
+  rejected, and stored reference locals, reference fields, and reference
+  containers are still unsupported.
 - Dynamic disjoint-range reasoning is limited to `Slice.split_at_mut` pairs.
   There is no general range algebra, no arbitrary tuple of views, and no
   storage or forwarding of a split pair itself. Two separately written
@@ -701,28 +715,32 @@ be returned across a task boundary.
 - Split-side provenance is conservative through branch-selected views and
   helper results: when the checker cannot prove one side, it rejects a
   potentially overlapping sibling instead of guessing.
-- No stored views in enums, arrays, vectors, boxes, unions, or closure
-  environments outside the scoped borrowed-capture form above. Records are the
+- No stored views in enums, arrays, vectors, boxes, or unions. Records are the
   sole stored-view exception. A borrowed record cannot be stored in an
-  enum/union/array/vector/box/task, passed through an ordinary generic type
-  parameter, or captured by a callable or task. A borrowed capture cannot escape
-  its lexical `let` binding and cannot be passed to a higher-order helper. A
-  spawned task may capture slice views from outside its scope, but not a
-  borrowed-capture closure.
+  enum/union/array/vector/box, passed through an ordinary generic type
+  parameter, or returned as a task result. It may be captured by a scoped
+  closure or by a scope body/child task when its leaves derive from storage
+  outside the scope. A borrowed-capture closure cannot escape its lexical
+  `let` binding and cannot be passed to a higher-order helper.
 - Record fields may be shared or exclusive slice views plus ordinary owned
   metadata that cannot hide a borrow. Borrowed owner references, streams, unions,
   callables, task handles, linear fields, and `Box`/`Vec`/array storage of a
   borrowed record remain rejected. Direct projection of an exclusive field or of
-  a nested record containing one is rejected; destructure first. Field
-  sub-slicing requires binding the field to a local view first. Self-referential
-  record construction remains rejected.
-- Arrow types describe borrows of their arguments only. A borrowed capture
-  is not part of an arrow type, so the checker rejects capture escapes instead
-  of erasing one. Lambdas cannot return slices.
+  a nested record containing one is rejected as a value; derive a subview with
+  `&mut record.field[..]` instead. Structurally disjoint field subviews of one
+  local record may coexist, while the whole record stays suspended for moves.
+  Self-referential record construction remains rejected.
+- Arrow types describe borrowed slice parameters/results and borrowed record
+  field leaves. A capture-derived result is described by the scoped closure's
+  capture contract, not by an ordinary arrow; the checker rejects capture
+  escapes instead of erasing one. Capturing lambdas may return borrowed slices
+  and records only from exactly one capture origin; parameter and capture
+  origins cannot be mixed.
 - Slice destructuring patterns remain array-only; there is no richer borrowed
   or runtime-slice pattern matching.
-- Arrow types may relate slice lifetimes they bind themselves; they cannot
-  mention an enclosing function's lifetimes or borrowed records.
+- Arrow types may relate slice lifetimes and record field lifetimes they bind
+  themselves; they cannot mention an enclosing function's lifetimes, inferred
+  local identities, or owner references.
 - No higher-kinded or generic lifetime parameters, no outlives bounds on
   records or aliases, no variance annotations on records, and no
   lifetime integration with dependent proofs. Function outlives bounds are the

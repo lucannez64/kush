@@ -294,32 +294,42 @@ owners.
 
 ## Deliberate limitations
 
-- `&Record`/`&mut Record` are call-scoped only. There is no general `&T` or
-  `&mut T` lifetime system, no stored references, no reference reborrow
-  ancestry, and no reference-returning methods or functions.
+- `&Record`/`&mut Record` are still call-scoped, but a reference may now be
+  returned from a function or method when its lifetime is tied to a reference
+  parameter. There is no stored reference local, reference field, reference
+  container, or callable arrow carrying a reference. Reborrowing through
+  ordinary calls is supported; an explicit `&mut *p` reborrow spelling is not.
 - Borrowed receivers are only for nominal records. Enums, borrowed records with
   an exclusive receiver, and records containing borrowed or exclusive leaves
   are rejected or restricted as described above.
-- A mutable slice field may only be extracted by destructuring first. Direct
-  mutable field projection, direct field sub-slicing, and partial direct moves of
-  owning fields are rejected.
+- A mutable slice field can be derived as a subview with
+  `&mut record.field[..]` or `&mut outer.inner.field[..]` without copying the
+  descriptor. Direct projection of a mutable field as a value, and partial
+  direct moves of owning fields, remain rejected. Structurally disjoint field
+  subviews of one local record may be live together; the whole record still
+  cannot be moved or used while they are. See
+  [expanded borrowing contracts](borrowing-extensions.md).
 - A record with a borrowed field cannot be `#[linear]`, cannot contain a linear
   field or an owned payload with a linear obligation, and cannot contain a
   stream, union, callable, task handle or `Box`/`Vec` of a borrowed record.
   Metadata exclusions also apply inside nominal records/enums and owned
   `Box`/`Vec` payloads; wrapping a forbidden field does not bypass them.
 - No records with a borrowed field may be stored in containers, unions, enums,
-  callable environments or tasks. Borrowed records are lexical values. A
-  `Box`/`Vec`/array of a borrowed record stays rejected even when `Box`, `Vec`,
-  `Bytes` or an owning enum is allowed as record metadata.
+  or returned as task results. They may be captured by a scoped borrowed-capture
+  closure or by a scope body/child task when their leaves derive from storage
+  outside the scope; such captures are lexical capabilities and cannot escape.
+  A `Box`/`Vec`/array of a borrowed record stays rejected even when `Box`,
+  `Vec`, `Bytes` or an owning enum is allowed as record metadata.
 - No self-referential records: constructing `R { owner: value, view:
   &value[..] }` (or the reverse order) is rejected by the ordinary move and loan
   checks.
 - Outlives bounds are supported only on executable function signatures. Record
   and alias lifetime parameters keep exact agreement; no variance annotations,
   higher-kinded lifetimes, or lifetime inference from function bodies.
-- No general per-field lifetime polymorphism inside function-pointer types.
-  Callable arrows deliberately reject borrowed records.
+- Function arrows may carry borrowed record parameters/results and closure
+  captures may return fields with represented provenance. A scoped closure
+  result must have exactly one parameter or capture origin; mixing or unifying
+  origins is rejected. See [expanded borrowing contracts](borrowing-extensions.md).
 - Elided slice-field lifetimes are not inferred; write `&'a [T]` or
   `&'a mut [T]` with a declared lifetime. Signature result elision remains the
   conservative slice rule.

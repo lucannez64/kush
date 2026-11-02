@@ -9,12 +9,31 @@ changing a diagnostic or deleting an explicit rejection is not completion.
 
 ## Borrowing
 
-- [ ] General shared/exclusive reference support, including escape and reborrow contracts.
-- [ ] Broader sound lifetime inference.
-- [ ] Capturing lambdas returning borrowed slices with represented provenance.
-- [ ] Borrowed records in callable parameters/results/captures.
-- [ ] Borrowed records in structured tasks with checked scope ownership.
-- [ ] Nested record-field borrows and disjoint-field loans.
+Implemented in the expanded-borrowing branch; see
+[expanded borrowing contracts](borrowing-extensions.md) for the exact contract
+and remaining limits.
+
+- [ ] General shared/exclusive reference support, including escape and reborrow
+  contracts. **Partial:** nominal-record references may be returned from
+  reference parameters and reborrowed through calls; stored reference locals,
+  reference fields/containers and reference-valued arrows remain rejected.
+- [ ] Broader sound lifetime inference. **Partial:** function/arrow/lambda
+  results can be inferred from a single record-field source and ambiguous
+  origins are rejected; body-based inference, inferred outlives bounds and
+  general unification are still absent.
+- [x] Capturing lambdas returning borrowed slices with represented provenance.
+  The capture index and field path travel in the callable contract and the
+  result is resolved against the capture's outer provenance.
+- [x] Borrowed records in callable parameters/results/captures. Arrows carry
+  per-field leaves, indirect calls freshen record lifetimes, and scoped
+  closures may capture and return record fields.
+- [x] Borrowed records in structured tasks with checked scope ownership. Scope
+  bodies and child tasks may capture records from scope-external storage;
+  scope-owned storage is rejected. Borrowed-record task results remain
+  rejected explicitly.
+- [x] Nested record-field borrows and disjoint-field loans. Direct nested
+  subviews and structurally disjoint mutable field subviews are checked; whole
+  record moves stay blocked and merged records lose field identity.
 
 ## Traits
 

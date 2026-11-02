@@ -300,8 +300,15 @@ for the dependencies of filesystem, FFI and nonblocking I/O work.
 ## Expanded borrowing, effects, and memory reuse
 
 Noncapturing lambdas can return a slice borrowed from their single slice input;
-indirect calls retain the source lifetime and checked split metadata. Captured
-slice returns and borrowed records in callables/tasks remain restricted.
+indirect calls retain the source lifetime and checked split metadata. Scoped
+closures may also return a slice or borrowed record from exactly one captured
+slice/record field, and function arrows now carry borrowed-record parameters
+and results. Borrowed records may be captured by scope bodies and child tasks
+when their leaves derive from storage outside the scope. Nested record-field
+subviews and structurally disjoint mutable field loans are checked, as are
+nominal-record reference returns tied to reference parameters. Task results
+carrying borrowed records and stored reference locals remain rejected. See
+[expanded borrowing contracts](borrowing-extensions.md).
 
 [Effect-row exclusions](effect-constraints.md) permit concrete forbidden-effect
 sets on executable function/method binders. Checked specializations enforce the
@@ -327,3 +334,14 @@ tests**, formatting, and Clippy with warnings denied. Independent review of
 implementation commit `29674d2` found no blocking defects in source inspection
 and six focused native/reference probes. See the [milestone review](milestone-review.md)
 for scope, evidence, and remaining boundaries.
+
+The expanded-borrowing milestone adds borrowed records in callable parameters
+and results, scoped capture-derived slice/record results, borrowed-record
+captures in scope bodies and child tasks, nested field subviews, disjoint-field
+mutable loans, record-reference escape/reborrow, and lifetime inference from
+record leaves with explicit ambiguity rejection. Local validation on Linux
+x86-64 passes **690 automated tests**, formatting, and Clippy with warnings
+denied, including native/reference agreement for every positive case in
+`tests/borrowing_extensions.rs`. This sub-milestone ran locally under the shared
+Cargo cache; an integrated Boat gate remains for the parent milestone. See
+[expanded borrowing contracts](borrowing-extensions.md).
