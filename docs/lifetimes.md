@@ -43,8 +43,9 @@ The system covers:
   including shared/mutable elision, outlives bounds, and reborrow through
   helper calls; stored shared/exclusive reference locals, implicit use
   reborrow, and explicit `&*p`/`&mut *p` reborrows are checked. Records may
-  store direct shared/exclusive reference fields, and `Box<&T>`/`Vec<&T>`
-  element containers carry explicit element lifetimes;
+  store direct shared/exclusive reference fields and `&str` fields, and
+  `Box<&T>`/`Vec<&T>`/`Box<&str>`/`Vec<&str>` element containers carry explicit
+  element lifetimes;
 - borrowed records in function-arrow parameters and results, scoped closure
   captures, capture-derived slice/record results, and structured-task captures
   from scope-external storage; reference-valued arrow parameters/results and
@@ -133,6 +134,15 @@ The accepted subset is deliberately explicit:
   accept a source lifetime that outlives the declared field lifetime. Direction
   stays per field, so `Two<'short, 'long>` cannot be built from
   `(&'long, &'short)`.
+
+A missing relation may also be inferred. When an explicit result lifetime is
+not already outlived by a returned direct parameter borrow, the function gains
+an inferred `source: result` bound, closed transitively with any declared
+bounds. The inference is limited to direct parameter lifetimes: selecting a
+different field lifetime of a multi-lifetime record remains an explicit error,
+and a result lifetime longer than the returned source is rejected. A body that
+delegates to a helper follows the helper's declared result source, so an elided
+multi-input result remains inferable through helper chains.
 
 At a call site the caller must establish the callee's relation; the checker
 never trusts an annotation. Every callee lifetime mentioned by an argument is
@@ -704,14 +714,19 @@ be returned across a task boundary.
   function result has several input candidates, the body may resolve them when
   its return positions are rooted in exactly one parameter lifetime or one
   named record field path; several return-position lifetimes are rejected, not
-  unified. There are no inferred outlives bounds and no helper-call body
-  inference. Borrowed slice returns otherwise require explicit `<'a>` and
-  `-> &'a [T]` / `-> &'a mut [T]` annotations.
-- References may be returned when tied to a reference parameter. Shared
-  `&Box<T>`, `&Vec<T>`, `&Bytes`, and `&String` results are supported; records
-  may store reference fields and `Box<&T>`/`Vec<&T>` reference elements.
-  Exclusive owner borrows and `&str` fields/containers remain unsupported.
-  Stored reference locals and explicit reborrows are supported.
+  unified. A helper call in the returned position follows the helper's
+  declared result source. Missing outlives bounds between a direct parameter
+  lifetime and an explicit result lifetime are inferred and checked at each
+  call site. Inference through local destructuring bindings and general
+  unification are still absent; those require explicit annotations.
+- References may be returned when tied to a reference parameter. Shared and
+  exclusive `&Box<T>`, `&Vec<T>`, `&Bytes`, and `&String` results are
+  supported; records may store shared reference fields, shared slice fields,
+  and text fields, and `Box<&T>`/`Vec<&T>`/`Box<&str>`/`Vec<&str>` reference
+  elements. Shared reference and text fields are readable through `&Record`.
+  Stored reference locals and explicit reborrows are supported. Mutable owner
+  borrows of temporaries, fields, and index results, `&mut str`, and containers
+  of borrowed records remain unsupported.
 - Dynamic disjoint-range reasoning is limited to `Slice.split_at_mut` pairs.
   There is no general range algebra, no arbitrary tuple of views, and no
   storage or forwarding of a split pair itself. Two separately written

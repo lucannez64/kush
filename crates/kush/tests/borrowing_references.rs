@@ -42,6 +42,160 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 }
 
 #[test]
+fn reference_annotations_do_not_change_the_caller_visible_type() {
+    // The callee spells the outer and element lifetime with one name; the
+    // caller's container carries its own erased label. Annotation names are
+    // not part of runtime or nominal identity, so the call must still type
+    // check while the element lifetime contract stays enforced.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        fn read<'a>(b: &'a Box<&'a Point>) -> i64 ! {panic} {
+            let r = Box.read(b);
+            r.x + r.y
+        }
+        fn first<'a>(v: &'a Vec<&'a Point>) -> i64 ! {panic} {
+            Vec.get(v, 0).x
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let p = Point { x: 40, y: 2 };
+            let boxed: Box<&Point> = Box.new(&p);
+            let values: Vec<&Point> = [&p];
+            read(&boxed) + first(&values) - 40
+        }"#,
+        42,
+        "",
+    );
+}
+
+#[test]
+fn mutable_owner_references_update_the_callers_container() {
+    agrees(
+        r#"fn grow(values: &mut Vec<i64>, value: i64) -> i64 ! {alloc, panic} {
+            Vec.push(values, value);
+            Vec.len(values)
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut values: Vec<i64> = [1, 2];
+            let length = grow(&mut values, 40);
+            Vec.reserve(&mut values, 1);
+            Vec.set(&mut values, 0, 40);
+            let answer = Vec.get(&values, 0);
+            Vec.clear(&mut values);
+            answer + length + Vec.len(&values)
+        }"#,
+        43,
+        "",
+    );
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        fn replace<'a>(b: &mut Box<&'a Point>, p: &'a Point) -> i64 ! {panic} {
+            Box.set(b, p);
+            Box.read(b).x
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let first = Point { x: 1, y: 1 };
+            let second = Point { x: 40, y: 2 };
+            let mut boxed: Box<&Point> = Box.new(&first);
+            replace(&mut boxed, &second) + second.y
+        }"#,
+        42,
+        "",
+    );
+    agrees(
+        r#"fn read_bytes(bytes: &mut Bytes) -> i64 ! {panic} { Bytes.get(bytes, 0) }
+        fn read_text(text: &mut String) -> i64 ! {panic} { String.len(text) }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut bytes = Bytes.from("abcd");
+            let mut text = "wxyz";
+            print_i64(read_bytes(&mut bytes));
+            print_i64(read_text(&mut text));
+            0
+        }"#,
+        0,
+        "97\n4\n",
+    );
+}
+
+#[test]
+fn mutable_container_writes_keep_written_owners_loaned() {
+    // A reference stored through `&mut Vec<&Point>` keeps its owner loaned
+    // after the call returns.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn add<'a>(values: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc, panic} {
+            Vec.push(values, p);
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let first = Point { x: 40, y: 2 };
+            let mut second = Point { x: 1, y: 1 };
+            let mut values: Vec<&Point> = [];
+            add(&mut values, &second);
+            second = Point { x: 9, y: 9 };
+            Vec.get(&values, 0).x
+        }"#,
+        "cannot replace an owner",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn replace<'a>(b: &mut Box<&'a Point>, p: &'a Point) -> Unit ! {panic} {
+            Box.set(b, p);
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let first = Point { x: 40, y: 2 };
+            let mut second = Point { x: 1, y: 1 };
+            let mut boxed: Box<&Point> = Box.new(&first);
+            replace(&mut boxed, &second);
+            second = Point { x: 9, y: 9 };
+            Box.read(&boxed).x
+        }"#,
+        "cannot replace an owner",
+    );
+    // A block-local owner cannot be written into a longer-lived container.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn add<'a>(values: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc, panic} {
+            Vec.push(values, p);
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut values: Vec<&Point> = [];
+            {
+                let local = Point { x: 1, y: 1 };
+                add(&mut values, &local);
+            }
+            Vec.get(&values, 0).x
+        }"#,
+        "borrow escapes the lexical scope",
+    );
+    // The written source must outlive the declared element lifetime.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn add<'a, 'b>(values: &mut Vec<&'a Point>, p: &'b Point) -> Unit ! {alloc, panic} {
+            Vec.push(values, p);
+        }
+        fn main() -> Unit ! {alloc, panic} { }"#,
+        "does not outlive its declared element lifetime",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn replace<'a, 'b>(b: &mut Box<&'a Point>, p: &'b Point) -> Unit ! {panic} {
+            Box.set(b, p);
+        }
+        fn main() -> Unit ! {alloc, panic} { }"#,
+        "does not outlive its declared element lifetime",
+    );
+    // An exclusive owner borrow still excludes shared aliases.
+    rejects(
+        r#"fn main() -> Unit ! {alloc, panic} {
+            let mut values: Vec<i64> = [1, 2];
+            let alias = &values;
+            Vec.push(&mut values, 3);
+            Vec.len(alias);
+        }"#,
+        "borrow",
+    );
+}
+
+#[test]
 fn reference_fields_carry_declared_lifetimes_and_read() {
     agrees(
         r#"struct Point { x: i64, y: i64 }
@@ -167,16 +321,78 @@ fn reference_field_escapes_and_owner_moves_are_rejected() {
         }"#,
         "cannot move or drop an owner or view",
     );
-    // A reference field reached through a record reference is deliberately
-    // outside the lexical field-read subset.
-    rejects(
+    // A shared reference field can be read through a shared record
+    // reference; the field's owner stays loaned through the projection.
+    agrees(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point }
+        fn read<'a>(holder: &'a Holder<'a>) -> i64 ! {panic} {
+            holder.point.x + holder.point.y
+        }
+        fn main() -> i64 ! {panic} {
+            let p = Point { x: 40, y: 2 };
+            let holder = Holder { point: &p };
+            read(&holder)
+        }"#,
+        42,
+        "",
+    );
+    // Returning the field through the record reference keeps the pointed-to
+    // owner loaned after the call returns.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point }
+        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {panic} {
+            holder.point
+        }
+        fn main() -> i64 ! {panic} {
+            let p = Point { x: 40, y: 2 };
+            let holder = Holder { point: &p };
+            get(&holder).x + p.y
+        }"#,
+        42,
+        "",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a mut Point }
         fn read<'a>(holder: &'a Holder<'a>) -> i64 ! {panic} {
             holder.point.x
         }
         fn main() -> i64 ! {panic} { 0 }"#,
         "cannot be read through a record reference",
+    );
+    // The projected field keeps the pointed-to owner loaned after the call.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point }
+        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {panic} {
+            holder.point
+        }
+        fn main() -> i64 ! {panic} {
+            let mut p = Point { x: 40, y: 2 };
+            let holder = Holder { point: &p };
+            let r = get(&holder);
+            p = Point { x: 1, y: 1 };
+            r.x
+        }"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    // Nor may the record itself be replaced while the projection is live.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point }
+        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {panic} {
+            holder.point
+        }
+        fn main() -> i64 ! {panic} {
+            let p = Point { x: 40, y: 2 };
+            let mut holder = Holder { point: &p };
+            let r = get(&holder);
+            holder = Holder { point: &p };
+            r.x
+        }"#,
+        "cannot replace an owner",
     );
 }
 

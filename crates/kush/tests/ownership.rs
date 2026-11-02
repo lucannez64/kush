@@ -146,5 +146,9 @@ fn allocation_effect_and_noalloc_contracts_are_checked() {
         "requires effects {alloc}",
     );
     check("#[noalloc] #[nosuspend] fn f(b:Box<i64>)->i64 ! {} {Box.take(b)}").unwrap();
-    rejects("fn f(b:&mut Box<i64>)->Unit ! {} {}", "immutable &Box");
+    check("fn f(b:&mut Box<i64>)->Unit ! {} {}").unwrap();
+    rejects(
+        "fn main()->Unit ! {alloc, panic} { let b = Box.new(1); let r = &mut b; }",
+        "cannot mutably borrow an immutable binding",
+    );
 }

@@ -1951,7 +1951,9 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
-            ExprKind::RefAssign(reference, _, value) | ExprKind::RefWrite(reference, value) => {
+            ExprKind::RefAssign(reference, _, value)
+            | ExprKind::RefWrite(reference, value)
+            | ExprKind::BoxWrite(reference, value) => {
                 if !self.expr(reference, Grade::ONE)? {
                     return Ok(false);
                 }

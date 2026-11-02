@@ -1086,7 +1086,13 @@ impl<'a> Types<'a> {
         Ok(Type::Enum(id))
     }
     pub fn width(&self, ty: Type) -> usize {
-        width(&self.enums, &self.unions, &self.function_types, ty)
+        width(
+            &self.pointees,
+            &self.enums,
+            &self.unions,
+            &self.function_types,
+            ty,
+        )
     }
     /// Whether dropping this value can release storage or a linear obligation.
     /// Mirrors the executable checker's ownership predicate for the checked
@@ -1623,18 +1629,34 @@ impl<'a> Types<'a> {
                 });
             }
             if *mutable {
-                return Err(Diagnostic::new(
-                    ty.span,
-                    "mutable owner borrows are not supported; borrowing supports immutable &Box<T>, &Bytes, &Vec<T>, &Record, and slice views (use '&mut [T]' for a mutable slice view or '&mut Record' for a nominal record)",
-                ));
+                if !matches!(
+                    inner,
+                    Type::Box(_)
+                        | Type::Arena
+                        | Type::ArenaBox(_)
+                        | Type::Bytes
+                        | Type::String
+                        | Type::Vec(_)
+                ) {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "mutable owner borrows support Box<T>, Arena, ArenaBox<T>, Bytes, String, Vec<T>, records, and mutable slice views",
+                    ));
+                }
+                return Ok(Type::RefMut(self.pointer(inner)));
             }
             if !matches!(
                 inner,
-                Type::Box(_) | Type::Arena | Type::Bytes | Type::String | Type::Vec(_)
+                Type::Box(_)
+                    | Type::Arena
+                    | Type::ArenaBox(_)
+                    | Type::Bytes
+                    | Type::String
+                    | Type::Vec(_)
             ) {
                 return Err(Diagnostic::new(
                     ty.span,
-                    "borrowing supports immutable &Box<T>, &Bytes, &Vec<T>, &Record, and &[T] slice views",
+                    "borrowing supports immutable &Box<T>, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &Record, and &[T] slice views",
                 ));
             }
             return Ok(Type::Ref(self.pointer(inner)));
@@ -2229,7 +2251,7 @@ impl<'a> Types<'a> {
                 }
                 let inner = self.lower(arguments[0], substitution, depth + 1)?;
                 let inner = self.full(inner, ty.span)?;
-                let direct_reference = matches!(inner, Type::Ref(_) | Type::RefMut(_))
+                let direct_reference = matches!(inner, Type::Ref(_) | Type::RefMut(_) | Type::Str)
                     && matches!(arguments[0].kind, ast::TypeKind::Borrow { .. });
                 let task_borrowed_record = b.name == "Task" && is_borrowed_record(self, inner);
                 if (matches!(
@@ -2929,6 +2951,18 @@ impl<'a> Types<'a> {
             }
             (Type::Annotated(a, _), _) => return self.subtype(self.pointees[a], expected),
             (_, Type::Annotated(b, _)) => return self.subtype(actual, self.pointees[b]),
+            // Lifetimes are erased, including the checker-only element
+            // annotations inside a pointee. Two references to the same pointee
+            // shape must therefore compare equal regardless of the labels their
+            // nested containers happen to carry. An exclusive reference may
+            // always be used as a shared one, never the reverse.
+            (Type::Ref(a), Type::Ref(b)) | (Type::RefMut(a), Type::RefMut(b)) => {
+                return self.subtype(self.pointees[a], self.pointees[b])
+                    && self.subtype(self.pointees[b], self.pointees[a]);
+            }
+            (Type::RefMut(a), Type::Ref(b)) => {
+                return self.subtype(self.pointees[a], self.pointees[b]);
+            }
             (Type::Box(a), Type::Box(b))
             | (Type::ArenaBox(a), Type::ArenaBox(b))
             | (Type::Vec(a), Type::Vec(b)) => {
@@ -3033,6 +3067,12 @@ impl<'a> Types<'a> {
                 }
                 (Type::Annotated(a, _), _) => self.same_representation(self.pointees[a], expected),
                 (_, Type::Annotated(b, _)) => self.same_representation(actual, self.pointees[b]),
+                (Type::Ref(a), Type::Ref(b)) | (Type::RefMut(a), Type::RefMut(b)) => {
+                    self.same_representation(self.pointees[a], self.pointees[b])
+                }
+                (Type::RefMut(a), Type::Ref(b)) => {
+                    self.same_representation(self.pointees[a], self.pointees[b])
+                }
                 (Type::Box(a), Type::Box(b))
                 | (Type::ArenaBox(a), Type::ArenaBox(b))
                 | (Type::Vec(a), Type::Vec(b)) => {
@@ -3151,7 +3191,7 @@ impl<'a> Types<'a> {
         inner_ast: &ast::Type,
         substitution: &Subst,
     ) -> Type {
-        if !matches!(inner, Type::Ref(_) | Type::RefMut(_)) {
+        if !matches!(inner, Type::Ref(_) | Type::RefMut(_) | Type::Str) {
             return inner;
         }
         let label = match &inner_ast.kind {
@@ -3312,11 +3352,7 @@ impl<'a> Types<'a> {
                 for field in fields {
                     let ty = self.lower(&field.ty, &substitution, 0).map(Type::full)?;
                     let direct = match &field.ty.kind {
-                        ast::TypeKind::Borrow {
-                            lifetime,
-                            mutable: _,
-                            inner,
-                        } => {
+                        ast::TypeKind::Borrow { lifetime, .. } => {
                             let Some(name) = lifetime else {
                                 return Err(Diagnostic::new(
                                     field.span,
@@ -3332,12 +3368,7 @@ impl<'a> Types<'a> {
                                     ),
                                 ));
                             };
-                            if !matches!(inner.kind, ast::TypeKind::Slice(_)) && is_str_type(inner)
-                            {
-                                None
-                            } else {
-                                Some(actual.clone())
-                            }
+                            Some(actual.clone())
                         }
                         _ => None,
                     };
@@ -3345,12 +3376,6 @@ impl<'a> Types<'a> {
                         return Err(Diagnostic::new(
                             field.span,
                             "a borrowed reference field must be written directly as '&'a T' or '&'a mut T' with a declared lifetime; aliases and generic substitution do not supply field provenance",
-                        ));
-                    }
-                    if ty == Type::Str {
-                        return Err(Diagnostic::new(
-                            field.span,
-                            "records cannot store borrowed text views ('&'a str'); keep a text view in a lexical binding or pass it directly to a function",
                         ));
                     }
                     if ty.is_slice() && direct.is_none() {
@@ -3366,6 +3391,8 @@ impl<'a> Types<'a> {
                         } else if matches!(ty, Type::Ref(_) | Type::RefMut(_)) {
                             borrowed = true;
                             mutable_borrow |= matches!(ty, Type::RefMut(_));
+                        } else if ty == Type::Str {
+                            borrowed = true;
                         } else {
                             return Err(Diagnostic::new(
                                 field.span,
@@ -4426,11 +4453,26 @@ fn validate_record_declaration(
                 direct_borrows += 1;
                 borrowed = true;
             }
-            ast::TypeKind::Borrow { inner, .. } if is_str_type(inner) => {
-                return Err(Diagnostic::new(
-                    field.span,
-                    "records cannot store borrowed text views ('&'a str'); keep a text view in a lexical binding or pass it directly to a function",
-                ));
+            ast::TypeKind::Borrow {
+                lifetime, inner, ..
+            } if is_str_type(inner) => {
+                let Some(name) = lifetime else {
+                    return Err(Diagnostic::new(
+                        field.span,
+                        "records cannot store borrowed text views without a declared lifetime; write 'struct R<'a> { text: &'a str }'",
+                    ));
+                };
+                if !declared.contains(name) {
+                    return Err(Diagnostic::new(
+                        field.span,
+                        format!(
+                            "borrowed field lifetime '{name}' is not declared by this record; declare it in the record's lifetime parameter list"
+                        ),
+                    ));
+                }
+                used.insert(name.clone());
+                direct_borrows += 1;
+                borrowed = true;
             }
             _ => {}
         }
@@ -4889,6 +4931,7 @@ pub(crate) fn contains_task(types: &Types<'_>, ty: Type) -> bool {
 }
 
 pub(crate) fn width(
+    pointees: &[Type],
     enums: &[Enum],
     unions: &[UnionType],
     functions: &[FunctionType],
@@ -4901,12 +4944,14 @@ pub(crate) fn width(
         1 + unions[id]
             .members
             .iter()
-            .map(|member| width(enums, unions, functions, *member))
+            .map(|member| width(pointees, enums, unions, functions, *member))
             .max()
             .unwrap_or(0)
-    } else if let Type::Annotated(_, _) = ty {
-        // Container element annotations wrap only a one-word reference.
-        1
+    } else if let Type::Annotated(p, _) = ty {
+        // A container element annotation is representation-free: it has the
+        // same width as the annotated element (a one-word reference or a
+        // four-word text view).
+        width(pointees, enums, unions, functions, pointees[p])
     } else if matches!(ty, Type::Slice(_) | Type::SliceMut(_) | Type::Str) {
         // (data pointer, length, stride, byte-elements flag)
         4

@@ -5,13 +5,15 @@ signatures and scoped captures, capture-derived borrowed results, borrowed
 records in structured-task captures and task results, nested record-field
 subviews, disjoint-field mutable loans, stored shared/exclusive reference
 locals with explicit reborrow, reference escape/reborrow for records and owner
-containers, reference fields, reference element containers, reference-valued
+containers, shared reference fields and their projection through `&Record`,
+reference element containers (including `&str` elements), reference-valued
 arrows, borrowed `Task.scope` records and `TaskExit` values across
-function/callable boundaries, and per-field body lifetime inference. The
-reference evaluator and the Cranelift native backend agree on every positive
-case in `tests/borrowing_extensions.rs` and `tests/borrowing_references.rs`.
-This is an engineering contract inside the existing capability model, not a
-formal soundness proof.
+function/callable boundaries, mutable owner references with in-place container
+writes, per-field body lifetime inference, inferred outlives bounds, and
+helper-call body inference. The reference evaluator and the Cranelift native
+backend agree on every positive case in `tests/borrowing_extensions.rs`,
+`tests/borrowing_references.rs`, and `tests/strings.rs`. This is an engineering
+contract inside the existing capability model, not a formal soundness proof.
 
 This page records the precise additions and the remaining deliberate limits.
 See [borrowing and lifetimes](lifetimes.md),
@@ -211,7 +213,9 @@ fn bump<'a>(p: &'a mut Point) -> &'a mut Point ! {panic} {
   upgraded.
 - Shared `&Box<T>`, `&Bytes`, `&Vec<T>`, and `&String` results may be returned
   from a reference parameter to the same pointee type. `&str` remains a distinct
-  text-view type, and exclusive owner borrows remain unsupported.
+  text-view type. Exclusive owner references (`&mut Box`, `&mut Vec`, `&mut
+  Bytes`, `&mut String`) may also be stored and returned from a matching
+  `&mut` parameter; a shared source is never upgraded.
 - Returning a reference to a local record, a field, a temporary, a by-value
   record parameter, or a record value is rejected with a dangling-borrow
   diagnostic. A stored reference is checked by its storage roots, not by the
@@ -250,8 +254,11 @@ struct MutHolder<'a> { point: &'a mut Point, note: i64 }
 - Projecting a reference field from an owning record yields a checked
   reference whose loan retains the field's origins, mutability, and split
   labels. Nested records and reference containers extend the same per-field
-  path. Reading a reference field through `&Record` remains outside the
-  lexical field-read subset and is rejected explicitly.
+  path. A shared reference field, shared slice field, or `&str` field may also
+  be read through `&Record`; the projection aliases the record's stored
+  pointer and keeps the pointed-to owner loaned. Exclusive reference fields
+  and mutable slice fields are still rejected through a shared record
+  reference rather than copying an exclusive capability.
 - Reference fields participate in record construction, destructuring, helper
   returns, callable parameters/results, and task captures exactly like slice
   fields. Mixed owning metadata is dropped once; the reference descriptor is
@@ -259,10 +266,12 @@ struct MutHolder<'a> { point: &'a mut Point, note: i64 }
 
 ## Reference element containers
 
-`Box<&'a T>`, `Box<&'a mut T>`, and `Vec<&'a T>` may store a direct reference
-element. The element type carries a checker-only lifetime annotation
-(`Type::Annotated`) with the same one-word runtime representation; the
-annotation never appears in a user-visible expression type.
+`Box<&'a T>`, `Box<&'a mut T>`, `Vec<&'a T>`, `Box<&'a str>`, and
+`Vec<&'a str>` may store a direct reference or text element. A reference
+element carries a checker-only lifetime annotation (`Type::Annotated`) with the
+same runtime representation as the element; the annotation never appears in a
+user-visible expression type. Text elements keep their four-word view
+representation while their declared lifetime travels in the same annotation.
 
 - `Box.new`, `Box.read`, `Box.take`, vector literals, `Vec.get`, and `Vec.at`
   preserve the element leaf. Reading a shared reference is a copy; an
@@ -287,6 +296,41 @@ annotation never appears in a user-visible expression type.
 - Containers may appear in function parameters/results and in arrows. The
   declared element lifetime travels in the callable's leaf list and is related
   to the caller's actual element provenance at every direct or indirect call.
+
+## Mutable owner references and container writes
+
+`&mut Box<T>`, `&mut Vec<T>`, `&mut Bytes`, and `&mut String` are checked owner
+references with the same one-word runtime representation as their shared form:
+
+```rust
+fn replace<'a>(b: &mut Box<&'a Point>, p: &'a Point) -> Unit ! {panic} {
+    Box.set(b, p);
+}
+
+fn add<'a>(v: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc, panic} {
+    Vec.push(v, p);
+}
+```
+
+- `Box.read`, `Vec.len`/`get`/`at`, `Bytes.get`/`len`, and `String` read
+  builtins accept a `&mut` receiver by reborrowing it shared for the call.
+- `Box.set(reference, value)`, `Vec.push`, `Vec.set`, `Vec.clear`, and
+  `Vec.reserve` accept `&mut` receivers and update the caller's allocation in
+  place. Vector growth writes the new handle back into the caller's slot.
+  `Box.set` replaces a reference or copyable payload only; an owning payload
+  must be replaced with `Box.reuse` on an owned box.
+- A reference written into a container whose element type declares a lifetime
+  must outlive that lifetime. Writing `&'b T` into `Vec<&'a T>` requires a
+  declared or inferred `'b: 'a` relation; using the same lifetime, or a bound,
+  satisfies it. An unannotated local container keeps the union of its element
+  sources instead.
+- At a call, the callee may write any reference argument whose lifetime can
+  flow into the container's declared element lifetime. The caller conservatively
+  merges those loans into the container binding, so replacing, moving, or
+  dropping a written owner after the call is rejected. A block-local owner
+  written into a longer-lived outer container is rejected at block exit.
+- `Vec.try_reserve` through `&mut`, `&mut str`, and mutable owner borrows of
+  temporaries, fields, or index results remain explicit exclusions.
 
 ## Reference-valued callables
 
@@ -357,23 +401,36 @@ captures:
   result. Return positions that mention several parameter lifetimes remain an
   explicit ambiguity error, and the ownership pass still checks every returned
   origin against the selected lifetime.
-- No inferred outlives bounds, no variance annotations, and no general
-  owner-reference inference. Body inference does not yet follow helper-call
-  results or perform general unification; those still require explicit
-  annotations or a direct field/parameter source.
+- A body that returns a helper call follows the helper's declared result
+  source: an explicit result lifetime selects the helper parameter carrying
+  that lifetime, and an elided helper result must have one unambiguous input
+  borrow. The corresponding caller argument is inspected recursively, so
+  `fn alias(a: &[T], b: &[T]) -> &[T] { tail(a) }` infers the result from `a`.
+- When an explicit result lifetime is not already related to a returned direct
+  parameter borrow, the function's outlives bounds are inferred (`source:
+  result`) and closed transitively. Calling such a function requires the same
+  relation between the caller's actual lifetimes; validation reuses the normal
+  call-site outlives check. Inference is limited to direct parameter lifetimes:
+  selecting a different field lifetime of a multi-lifetime record remains an
+  explicit error, and a result lifetime longer than the returned source is
+  rejected rather than inferred.
+- No variance annotations, no inference through local destructuring bindings,
+  and no general unification. A value returned through a local binding still
+  needs an explicit bound or annotation.
 
 ## Remaining deliberate limits
 
-- Mutable owner borrows (`&mut Box<T>`/`&mut Vec<T>`/`&mut Bytes`/`&mut
-  String`) and `&str` fields/containers remain outside the subset. Shared
-  owner references and `&mut` nominal records are supported as described
-  above.
+- Mutable owner borrows of temporaries, fields, or index results, `&mut str`,
+  and `Vec.try_reserve` through `&mut Vec<T>` remain outside the subset.
+  `&mut Bytes`/`&mut String` provide read access but no mutating builtins.
+  Shared and exclusive owner references, `&str` fields/containers, and `&mut`
+  nominal records are supported as described above.
 - A child task cannot return a borrowed `TaskExit<T>`, and a lambda or task
   cannot capture a borrowed `TaskExit<T>` in its environment. Match it in the
   scope that joined it before hiding it in a callable or child task.
-- No general `&Record.field` reference form. Field access is either a copyable
-  field read, a reference/slice field projection, or a whole-record reference
-  parameter.
+- There is no general `&record.field` reference-taking form. Shared reference,
+  shared slice, and text fields are readable through `&Record`; exclusive
+  reference/slice fields and arbitrary field addresses are not.
 - Disjoint-field reasoning is structural and path-based, not a general range or
   alias algebra. Merged record values lose field identity.
 - Capture-result lambdas cannot mix environment and parameter origins, and

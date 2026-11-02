@@ -433,6 +433,75 @@ fn borrowed_text_helpers_infer_elide_and_shorten_lifetimes() {
 }
 
 #[test]
+fn borrowed_text_fields_and_record_references_keep_their_source_borrowed() {
+    agrees(
+        r#"struct Text<'a> { text: &'a str, note: i64 }
+        fn make<'a>(text: &'a str, note: i64) -> Text<'a> ! {panic} {
+            Text { text: text, note: note }
+        }
+        fn read<'a>(text: Text<'a>) -> i64 ! {panic} {
+            Str.len(text.text) + text.note
+        }
+        fn read_ref<'a>(text: &'a Text<'a>) -> i64 ! {panic} {
+            Str.len(text.text) + text.note
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let source = "abcd";
+            let text = make(source.as_str(), 2);
+            read(text) + read_ref(&text) - 6
+        }"#,
+        6,
+        "",
+    );
+    // Returning the text view keeps the original String borrowed.
+    agrees(
+        r#"struct Text<'a> { text: &'a str }
+        fn get<'a>(text: &'a Text<'a>) -> &'a str ! {panic} { text.text }
+        fn main() -> i64 ! {alloc, panic} {
+            let source = "abcd";
+            let text = Text { text: source.as_str() };
+            Str.len(get(&text))
+        }"#,
+        4,
+        "",
+    );
+}
+
+#[test]
+fn borrowed_text_containers_carry_element_lifetimes() {
+    agrees(
+        r#"fn read_box<'a>(text: &'a Box<&'a str>) -> i64 ! {panic} {
+            Str.len(Box.read(text))
+        }
+        fn read_vec<'a>(text: &'a Vec<&'a str>) -> i64 ! {panic} {
+            Str.len(Vec.get(text, 0)) + Str.len(Vec.get(text, 1))
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let a = "abcd";
+            let b = "wxyz";
+            let boxed: Box<&str> = Box.new(a.as_str());
+            let values: Vec<&str> = [a.as_str(), b.as_str()];
+            print_i64(read_box(&boxed));
+            print_i64(read_vec(&values));
+            0
+        }"#,
+        0,
+        "4\n8\n",
+    );
+    // The element owner stays loaned while a read view is live.
+    rejects(
+        r#"fn main() -> i64 ! {alloc, panic} {
+            let mut a = "abcd";
+            let boxed: Box<&str> = Box.new(a.as_str());
+            let view = Box.read(&boxed);
+            a = "wxyz";
+            Str.len(view)
+        }"#,
+        "cannot replace an owner",
+    );
+}
+
+#[test]
 fn borrowed_text_escape_positions_are_rejected() {
     rejects(
         "fn main() -> Unit ! {alloc, panic} { let view: &str = &\"abc\"; }",
@@ -455,12 +524,7 @@ fn borrowed_text_escape_positions_are_rejected() {
             let owned = text.to_string();
             owned.as_str()
         }",
-        "borrowed return would dangle",
-    );
-    rejects(
-        "struct Holder<'a> { text: &'a str }
-        fn main() -> Unit ! {alloc, panic} { let s = \"abc\"; let h = Holder { text: s.as_str() }; }",
-        "records cannot store borrowed text views",
+        "outlive",
     );
     rejects(
         "fn main() -> Unit ! {alloc, panic} {
@@ -471,23 +535,16 @@ fn borrowed_text_escape_positions_are_rejected() {
         "tuples cannot store references, slice views, or borrowed records",
     );
     rejects(
+        "fn main() -> Unit ! {alloc, panic} { let view = String.as_str(&\"abc\"); }",
+        "temporary borrows are not supported",
+    );
+    rejects(
         "fn main() -> Unit ! {alloc, panic} {
             let s = \"abc\";
             let view = s.as_str();
             let mixed = if true { 1 } else { view };
         }",
         "unions cannot contain borrowed references or slice views",
-    );
-    rejects(
-        "fn main() -> Unit ! {alloc} { let values: Vec<&str> = Vec.new(); }",
-        "containers cannot store borrowed references or slice views",
-    );
-    rejects(
-        "fn main() -> Unit ! {alloc, panic} {
-            let s = \"abc\";
-            let boxed: Box<&str> = Box.new(s.as_str());
-        }",
-        "containers cannot store borrowed references or slice views",
     );
     rejects(
         "fn main() -> Unit ! {alloc, panic} {
@@ -723,10 +780,9 @@ fn borrowed_text_task_and_generic_positions_are_rejected() {
         }",
         "borrowed record cannot be passed through an ordinary generic type parameter",
     );
-    rejects(
-        "fn escape<'a, 'b>(text: &'a str) -> &'b str ! {} { text }",
-        "result lifetime 'b' does not appear on any parameter that outlives it",
-    );
+    // An explicit shorter text result infers its outlives bound from the
+    // returned text parameter.
+    check("fn escape<'a, 'b>(text: &'a str) -> &'b str ! {} { text }").unwrap();
     rejects(
         "fn ambiguous(first: &str, second: &str) -> &str ! {} { if true { first } else { second } }",
         "cannot infer this borrowed slice result's lifetime",

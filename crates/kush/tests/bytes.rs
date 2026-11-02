@@ -105,7 +105,7 @@ fn buffers_are_affine_and_borrows_cannot_be_invalidated() {
     check("fn f<'a>(b:&'a Bytes)->&'a Bytes ! {} {b}").unwrap();
     rejects(
         &main_program(r#"let b=Bytes.from("x");Box.read(&b);"#),
-        "requires an immutable &Box",
+        "Box.read requires a &Box<T> or &mut Box<T>",
     );
     rejects(
         &main_program(r#"let b=Box.new(Bytes.from("x"));Box.read(&b);"#),

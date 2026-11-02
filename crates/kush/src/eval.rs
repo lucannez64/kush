@@ -1664,6 +1664,73 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ),
                 }))
             }
+            VecOp::ClearBorrowed => {
+                let Value::Borrowed(id) = args[0] else {
+                    unreachable!()
+                };
+                let Some(Value::Vector {
+                    mut items,
+                    capacity,
+                    usable,
+                }) = self.heap.take(id)
+                else {
+                    return Err(failure("internal ownership error: borrowed vector"));
+                };
+                while let Some(item) = items.pop() {
+                    self.drop_value(item)?;
+                }
+                self.heap.insert(
+                    id,
+                    Value::Vector {
+                        items,
+                        capacity,
+                        usable,
+                    },
+                );
+                Ok(Value::Scalar(0))
+            }
+            VecOp::ReserveBorrowed => {
+                let Value::Borrowed(id) = args[0] else {
+                    unreachable!()
+                };
+                let additional = usize::try_from(args[1].scalar())
+                    .map_err(|_| failure("panic: negative vector reserve"))?;
+                let Some(Value::Vector {
+                    items,
+                    capacity,
+                    mut usable,
+                }) = self.heap.take(id)
+                else {
+                    return Err(failure("internal ownership error: borrowed vector"));
+                };
+                let needed = items
+                    .len()
+                    .checked_add(additional)
+                    .ok_or_else(|| failure("panic: vector reserve length overflow"))?;
+                if needed > LIMIT {
+                    return Err(failure(
+                        "reference vector capacity budget exhausted (1Mi elements)",
+                    ));
+                }
+                let mut capacity = capacity;
+                if needed > capacity {
+                    capacity = needed;
+                    let requested = 24 + capacity * self.program.width(element) * 8;
+                    if requested > usable {
+                        usable = box_allocation_capacity(requested);
+                    }
+                    self.stats.growth();
+                }
+                self.heap.insert(
+                    id,
+                    Value::Vector {
+                        items,
+                        capacity,
+                        usable,
+                    },
+                );
+                Ok(Value::Scalar(0))
+            }
             VecOp::Clear => {
                 let Value::Owned(id) = args[0] else {
                     unreachable!()
@@ -1797,6 +1864,65 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             failure("internal error: proved vector index out of bounds")
                         }),
                 }
+            }
+            VecOp::PushBorrowed | VecOp::SetBorrowed => {
+                let Value::Borrowed(id) = args[0] else {
+                    unreachable!()
+                };
+                let mut args = args.into_iter().skip(1);
+                let (index, value) = if op == VecOp::SetBorrowed {
+                    (Some(args.next().unwrap()), args.next().unwrap())
+                } else {
+                    (None, args.next().unwrap())
+                };
+                let Some(Value::Vector {
+                    mut items,
+                    mut capacity,
+                    mut usable,
+                }) = self.heap.take(id)
+                else {
+                    return Err(failure("internal ownership error: borrowed vector"));
+                };
+                if let Some(index) = index {
+                    let index = index_of(&index, items.len())?;
+                    let old = std::mem::replace(&mut items[index], value);
+                    self.heap.insert(
+                        id,
+                        Value::Vector {
+                            items,
+                            capacity,
+                            usable,
+                        },
+                    );
+                    self.drop_value(old)?;
+                    return Ok(Value::Scalar(0));
+                }
+                if items.len() == capacity {
+                    let next = if capacity == 0 {
+                        4
+                    } else {
+                        capacity.saturating_mul(2)
+                    };
+                    if next > LIMIT {
+                        return Err(failure(
+                            "reference vector capacity budget exhausted (1Mi elements)",
+                        ));
+                    }
+                    capacity = next;
+                    usable =
+                        box_allocation_capacity(24 + capacity * self.program.width(element) * 8);
+                    self.stats.growth();
+                }
+                items.push(value);
+                self.heap.insert(
+                    id,
+                    Value::Vector {
+                        items,
+                        capacity,
+                        usable,
+                    },
+                );
+                Ok(Value::Scalar(0))
             }
             VecOp::Push | VecOp::Set => {
                 let Value::Owned(id) = args[0] else {
@@ -2757,6 +2883,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     value => (base.ty, value),
                 };
                 project(
+                    &self.program.pointees,
                     &self.program.enums,
                     &self.program.unions,
                     &self.program.function_types,
@@ -2964,6 +3091,25 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.heap.get(id).ok_or_else(|| {
                     Diagnostic::new(expr.span, "internal ownership error: dangling borrow")
                 })?
+            }
+            ExprKind::BoxWrite(reference, replacement) => {
+                let reference = value!(self.expr(reference, frame));
+                let Value::Borrowed(id) = reference else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal ownership error: box write has no borrowed box",
+                    ));
+                };
+                let value = value!(self.expr(replacement, frame));
+                self.consume(replacement, frame);
+                if self.heap.get(id).is_none() {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal ownership error: dangling box write",
+                    ));
+                }
+                self.heap.insert(id, value);
+                Value::Scalar(0)
             }
             ExprKind::BoxReuse { owner, payload } => {
                 let Value::Owned(id) = value!(self.expr(owner, frame)) else {
@@ -3281,6 +3427,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let ty = self.program.pointees[pointer];
                 let mut whole = cell.lock().unwrap();
                 if !assign_project(
+                    &self.program.pointees,
                     &self.program.enums,
                     &self.program.unions,
                     &self.program.function_types,
@@ -3713,6 +3860,7 @@ fn pattern_matches(pattern: &Pattern, value: &Value, locals: &mut [Value]) -> bo
 
 /// Copy the field at a word offset out of a record value.
 fn project(
+    pointees: &[Type],
     enums: &[crate::runtime_types::Enum],
     unions: &[crate::runtime_types::UnionType],
     functions: &[crate::runtime_types::FunctionType],
@@ -3729,14 +3877,16 @@ fn project(
         if at == offset {
             return field;
         }
-        at += crate::runtime_types::width(enums, unions, functions, *field_ty);
+        at += crate::runtime_types::width(pointees, enums, unions, functions, *field_ty);
     }
     unreachable!("checked field offset")
 }
 /// Store a checked copyable field through a record reference. `offset` is a
 /// word offset from the record tag; nested copyable record paths are handled by
 /// recursing instead of flattening or copying the whole owner.
+#[allow(clippy::too_many_arguments)]
 fn assign_project(
+    pointees: &[Type],
     enums: &[crate::runtime_types::Enum],
     unions: &[crate::runtime_types::UnionType],
     functions: &[crate::runtime_types::FunctionType],
@@ -3751,13 +3901,14 @@ fn assign_project(
     let id = ty.layout().unwrap();
     let mut at = 1;
     for (index, field_ty) in enums[id].variants[0].fields.iter().enumerate() {
-        let width = crate::runtime_types::width(enums, unions, functions, *field_ty);
+        let width = crate::runtime_types::width(pointees, enums, unions, functions, *field_ty);
         if at == offset {
             fields[index] = replacement;
             return true;
         }
         if offset >= at && offset < at + width {
             return assign_project(
+                pointees,
                 enums,
                 unions,
                 functions,

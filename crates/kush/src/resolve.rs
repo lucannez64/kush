@@ -349,6 +349,7 @@ impl Resolver {
             "Box.new",
             "Box.take",
             "Box.read",
+            "Box.set",
             "Box.reuse",
             "Box.reuse_grow",
             "Box.try_new",
