@@ -275,6 +275,13 @@ pub(crate) enum Target {
     /// type used to widen the loaded words.
     DynArray(DynArrayOp, Type),
     Function(usize),
+    /// A synthesized borrowed object call reserves its source place while
+    /// later arguments evaluate. Mutable calls also return it for write-back.
+    ObjectFunction {
+        function: usize,
+        receiver: Option<usize>,
+        mutable: bool,
+    },
     Print,
     /// Print any fixed-width integer in decimal.
     PrintInt(crate::int::IntKind),
@@ -1237,6 +1244,7 @@ fn fusion_expr_safe(
         ExprKind::RefRead(_) | ExprKind::RefWrite(_, _) => false,
         // No loop has a checked termination argument here.
         ExprKind::While(..) | ExprKind::Loop(_) => false,
+        ExprKind::Call(Target::ObjectFunction { .. }, _) => false,
         ExprKind::Call(Target::Function(index), arguments) => {
             fusion_function_safe(*index, signatures, bodies, memo, visiting)
                 && arguments
@@ -9526,6 +9534,16 @@ impl Checker<'_, '_> {
                 resource: None,
             };
         }
+        if receiver_mode == ReceiverMode::Mutable
+            && borrowed_object.is_none()
+            && let ExprKind::Local(slot) = receiver.kind
+            && !self.locals[slot].mutable
+        {
+            return Err(Diagnostic::new(
+                span,
+                "a mutable dynamic method requires a mutable object binding; declare it with 'let mut'",
+            ));
+        }
         let mut values = vec![receiver];
         for (argument, ty) in arguments.iter().zip(&signature.parameters[1..]) {
             let value = self.expr_expected(argument, Some(*ty))?;
@@ -9548,7 +9566,14 @@ impl Checker<'_, '_> {
             let tmp = self.temp(tuple_ty, span)?;
             let extracted = self.temp(result_ty, span)?;
             let call = Expr {
-                kind: ExprKind::Call(Target::Function(dispatcher), values),
+                kind: ExprKind::Call(
+                    Target::ObjectFunction {
+                        function: dispatcher,
+                        receiver: direct_slot.or(reference_slot.map(|(slot, _)| slot)),
+                        mutable: true,
+                    },
+                    values,
+                ),
                 ty: tuple_ty,
                 span,
                 resource: None,
@@ -9682,7 +9707,18 @@ impl Checker<'_, '_> {
             };
         }
         let value = Expr {
-            kind: ExprKind::Call(Target::Function(dispatcher), values),
+            kind: ExprKind::Call(
+                if receiver_mode == ReceiverMode::Shared {
+                    Target::ObjectFunction {
+                        function: dispatcher,
+                        receiver: reference_slot.map(|(slot, _)| slot),
+                        mutable: false,
+                    }
+                } else {
+                    Target::Function(dispatcher)
+                },
+                values,
+            ),
             ty: call_result_type(&signature),
             span,
             resource: None,
@@ -13110,13 +13146,17 @@ impl Checker<'_, '_> {
     /// `@[1]` surface grade.
     fn copyable_result_grade(&self, expr: &Expr) -> Option<Grade> {
         match &expr.kind {
-            ExprKind::Call(Target::Function(index), _) => {
-                self.functions.signatures.get(*index).and_then(|signature| {
-                    signature
-                        .result_grade
-                        .filter(|grade| grade.is_one() && !self.owned_type(signature.result))
-                })
-            }
+            ExprKind::Call(
+                Target::Function(index)
+                | Target::ObjectFunction {
+                    function: index, ..
+                },
+                _,
+            ) => self.functions.signatures.get(*index).and_then(|signature| {
+                signature
+                    .result_grade
+                    .filter(|grade| grade.is_one() && !self.owned_type(signature.result))
+            }),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
                 Type::Fn(id) | Type::Once(id) => {
                     self.types.function_types.get(id).and_then(|signature| {
@@ -13202,7 +13242,13 @@ impl Checker<'_, '_> {
         }
         match &expr.kind {
             ExprKind::Local(slot) | ExprKind::Move(slot) => self.locals[*slot].linear,
-            ExprKind::Call(Target::Function(index), _) => self
+            ExprKind::Call(
+                Target::Function(index)
+                | Target::ObjectFunction {
+                    function: index, ..
+                },
+                _,
+            ) => self
                 .functions
                 .signatures
                 .get(*index)

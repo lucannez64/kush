@@ -520,6 +520,15 @@ Three receiver modes dispatch dynamically:
   can observe it. This preserves ordinary field-write visibility without a
   borrowed-object vtable or allocation.
 
+A mutable call on a direct object local requires `let mut`; a temporary
+receiver needs no writable source place. The checker reserves the receiver
+through every later argument, so a nested argument cannot replace, mutate, or
+read a receiver reserved by an exclusive call. Shared calls retain a shared
+loan through their arguments: nested shared reads are legal, while replacing
+or mutably borrowing the object is rejected. Stored references retain the
+corresponding child loan for the same interval. These reservations end before
+mutable write-back and before subsequent calls.
+
 A stored `&dyn Trait` is a reference to the same union. A shared reference reads
 a copy through the reference and dispatches a shared method; it is permitted
 only when the object union is copyable. A stored `&mut dyn Trait` additionally

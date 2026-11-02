@@ -1150,3 +1150,142 @@ fn native_program(program: &kush::executable::Executable) -> Option<std::process
     #[allow(unreachable_code)]
     None
 }
+
+#[test]
+fn mutable_dynamic_receivers_require_mutable_places_and_exclude_argument_aliases() {
+    let definitions = r#"
+        struct Counter { value: i64 }
+        struct Other { value: i64 }
+        trait Bump {
+            fn bump(self: &mut Self, by: i64) -> Unit ! {panic};
+            fn current(self: &Self) -> i64 ! {panic};
+        }
+        impl Bump for Counter {
+            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by; }
+            fn current(self: &Self) -> i64 ! {panic} { self.value }
+        }
+        impl Bump for Other {
+            fn bump(self: &mut Self, by: i64) -> Unit ! {panic} { self.value = self.value + by; }
+            fn current(self: &Self) -> i64 ! {panic} { self.value }
+        }
+    "#;
+    rejects(
+        &format!(
+            "{definitions}
+            fn main() -> i64 ! {{panic}} {{
+                let object: dyn Bump = Counter {{value: 1}};
+                object.bump(2); object.current()
+            }}"
+        ),
+        "mutable object binding",
+    );
+    for later in [
+        "object.bump(10); 2",
+        "object = Other {value: 10}; 2",
+        "object.current()",
+    ] {
+        rejects(
+            &format!(
+                "{definitions}
+                fn main() -> i64 ! {{panic}} {{
+                    let mut object: dyn Bump = Counter {{value: 1}};
+                    object.bump({{{later}}}); object.current()
+                }}"
+            ),
+            "while",
+        );
+    }
+    rejects(
+        &format!(
+            "{definitions}
+            fn main() -> i64 ! {{panic}} {{
+                let mut object: dyn Bump = Counter {{value: 1}};
+                let reference: &mut dyn Bump = &mut object;
+                reference.bump({{reference.bump(10); 2}});
+                object.current()
+            }}"
+        ),
+        "live",
+    );
+    agrees(
+        &format!(
+            "{definitions}
+            fn main() -> i64 ! {{panic}} {{
+                let mut object: dyn Bump = Counter {{value: 1}};
+                object.bump({{let amount = 2; amount}});
+                let reference: &mut dyn Bump = &mut object;
+                reference.bump(3);
+                object.current()
+            }}"
+        ),
+        6,
+        "",
+    );
+}
+
+#[test]
+fn shared_dynamic_receivers_remain_borrowed_through_later_arguments() {
+    let definitions = r#"
+        struct Counter { value: i64 }
+        struct Other { value: i64 }
+        trait Read { fn inspect(self: &Self, extra: i64) -> i64 ! {panic}; }
+        impl Read for Counter { fn inspect(self: &Self, extra: i64) -> i64 ! {panic} { self.value + extra } }
+        impl Read for Other { fn inspect(self: &Self, extra: i64) -> i64 ! {panic} { self.value + extra } }
+    "#;
+    for receiver in ["object", "reference"] {
+        rejects(
+            &format!(
+                "{definitions}
+                fn main() -> i64 ! {{panic}} {{
+                    let mut object: dyn Read = Counter {{value: 1}};
+                    let reference: &dyn Read = &object;
+                    {receiver}.inspect({{object = Other {{value: 10}}; 0}})
+                }}"
+            ),
+            "borrow",
+        );
+    }
+    agrees(
+        &format!(
+            "{definitions}
+            fn main() -> i64 ! {{panic}} {{
+                let object: dyn Read = Counter {{value: 1}};
+                object.inspect(object.inspect(0))
+            }}"
+        ),
+        2,
+        "",
+    );
+}
+
+#[test]
+fn mutable_dynamic_dispatch_preserves_erased_argument_effects_and_writeback() {
+    agrees(
+        r#"
+        struct Counter { value: i64 }
+        struct Other { value: i64 }
+        trait Bump {
+            fn bump(self: &mut Self, ignored: i64 @[0], by: i64) -> i64 @[0] ! {io, panic};
+            fn current(self: &Self) -> i64 ! {panic};
+        }
+        impl Bump for Counter {
+            fn bump(self: &mut Self, ignored: i64 @[0], by: i64) -> i64 @[0] ! {io, panic} {
+                self.value = self.value + by; print_i64(3); self.value
+            }
+            fn current(self: &Self) -> i64 ! {panic} { self.value }
+        }
+        impl Bump for Other {
+            fn bump(self: &mut Self, ignored: i64 @[0], by: i64) -> i64 @[0] ! {io, panic} {
+                self.value = self.value + by; print_i64(3); self.value
+            }
+            fn current(self: &Self) -> i64 ! {panic} { self.value }
+        }
+        fn main() -> i64 ! {io, panic} {
+            let mut object: dyn Bump = Counter {value: 40};
+            object.bump({print_i64(1); 99}, {print_i64(2); 2});
+            object.current()
+        }"#,
+        42,
+        "1\n2\n3\n",
+    );
+}

@@ -2488,7 +2488,13 @@ impl Checker<'_> {
     fn value_moves_linear(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Local(slot) | ExprKind::Move(slot) => self.locals[*slot].linear,
-            ExprKind::Call(crate::executable::Target::Function(index), _) => self
+            ExprKind::Call(
+                crate::executable::Target::Function(index)
+                | crate::executable::Target::ObjectFunction {
+                    function: index, ..
+                },
+                _,
+            ) => self
                 .result_grades
                 .get(*index)
                 .copied()
@@ -3429,7 +3435,10 @@ impl Checker<'_> {
             }
             ExprKind::Call(target, args) => {
                 let func = match target {
-                    crate::executable::Target::Function(index) => Some(*index),
+                    crate::executable::Target::Function(index)
+                    | crate::executable::Target::ObjectFunction {
+                        function: index, ..
+                    } => Some(*index),
                     _ => None,
                 };
                 let loans = self.loans.clone();
@@ -3451,9 +3460,48 @@ impl Checker<'_> {
                     }
                     self.reborrow = old;
                 }
-                for arg in args.iter_mut().skip(usize::from(reborrow)) {
+                for (position, arg) in args.iter_mut().enumerate().skip(usize::from(reborrow)) {
                     self.expr(arg)?;
                     self.hold_reference_argument(arg)?;
+                    if position == 0
+                        && let crate::executable::Target::ObjectFunction {
+                            receiver: Some(slot),
+                            mutable,
+                            ..
+                        } = target
+                    {
+                        let slot = *slot;
+                        if self.locals[slot].ty.is_ref() {
+                            self.hold_reference_argument(&Expr {
+                                kind: ExprKind::Peek(slot),
+                                ty: if !*mutable {
+                                    Type::Ref(self.locals[slot].ty.ref_pointee().unwrap())
+                                } else {
+                                    self.locals[slot].ty
+                                },
+                                span: arg.span,
+                                resource: None,
+                            })?;
+                        } else {
+                            let conflict = if *mutable {
+                                self.any_loan_at(slot, expr_ptr) || self.loans.contains(&slot)
+                            } else {
+                                self.exclusive_loaned_at(slot, expr_ptr)
+                            };
+                            if conflict {
+                                return Err(Diagnostic::new(
+                                    arg.span,
+                                    "cannot call a dynamic method while its object has a conflicting borrow",
+                                ));
+                            }
+                            self.loans.insert(slot);
+                            if *mutable {
+                                self.temporary_exclusive.insert(slot);
+                            } else {
+                                self.temporary_shared.insert(slot);
+                            }
+                        }
+                    }
                 }
                 self.loans = loans;
                 if let Some(index) = func {

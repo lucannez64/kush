@@ -4371,7 +4371,10 @@ impl Generator<'_, '_> {
             }
             ExprKind::Call(target, args) => {
                 let erased_parameters = match target {
-                    Target::Function(index) => {
+                    Target::Function(index)
+                    | Target::ObjectFunction {
+                        function: index, ..
+                    } => {
                         let function = &self.program.functions[*index];
                         (0..args.len())
                             .map(|position| {
@@ -4497,7 +4500,10 @@ impl Generator<'_, '_> {
                         }
                     }
                     Target::Str(op) => return Some(self.str_call(*op, values)),
-                    Target::Function(index) => return Some(self.function_call(*index, values)),
+                    Target::Function(index)
+                    | Target::ObjectFunction {
+                        function: index, ..
+                    } => return Some(self.function_call(*index, values)),
                     Target::Vec(op, element) => return Some(self.vec_call(*op, *element, values)),
                     Target::Slice(op, element) => {
                         return Some(self.slice_call(*op, *element, values));

@@ -1014,11 +1014,15 @@ impl<'a> Checker<'a> {
     fn value_moves_linear(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Local(slot) | ExprKind::Move(slot) => self.function.locals[*slot].linear,
-            ExprKind::Call(Target::Function(index), _) => {
-                self.program.functions.get(*index).is_some_and(|function| {
-                    function.result_grade.is_some_and(Grade::is_one) && self.moves(function.result)
-                })
-            }
+            ExprKind::Call(
+                Target::Function(index)
+                | Target::ObjectFunction {
+                    function: index, ..
+                },
+                _,
+            ) => self.program.functions.get(*index).is_some_and(|function| {
+                function.result_grade.is_some_and(Grade::is_one) && self.moves(function.result)
+            }),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
                 Type::Fn(id) | Type::Once(id) => {
                     self.program
@@ -1077,7 +1081,13 @@ impl<'a> Checker<'a> {
             ExprKind::Local(slot) | ExprKind::Move(slot) => {
                 self.function.locals[*slot].linear || self.grade(*slot).is_some_and(Grade::is_one)
             }
-            ExprKind::Call(Target::Function(index), _) => self
+            ExprKind::Call(
+                Target::Function(index)
+                | Target::ObjectFunction {
+                    function: index, ..
+                },
+                _,
+            ) => self
                 .program
                 .functions
                 .get(*index)
@@ -1159,7 +1169,7 @@ impl<'a> Checker<'a> {
                 span,
                 "this string conversion would return a linear @[1] owner through an ungraded result; consume it through an explicitly graded parameter instead",
             )),
-            Target::Function(function) => {
+            Target::Function(function) | Target::ObjectFunction { function, .. } => {
                 let Some(function) = self.program.functions.get(function) else {
                     return Ok(());
                 };
@@ -1905,7 +1915,7 @@ impl<'a> Checker<'a> {
     /// one evaluation; only `@[n]` and `@[many]` duplicate the resulting value.
     fn demand(&self, target: Target, index: usize) -> Grade {
         match target {
-            Target::Function(function) => self
+            Target::Function(function) | Target::ObjectFunction { function, .. } => self
                 .program
                 .functions
                 .get(function)

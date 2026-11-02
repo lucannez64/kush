@@ -2959,7 +2959,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Target::DynArray(op, element) => {
                         self.dyn_array_call(*op, *element, values, expr.span)?
                     }
-                    Target::Function(index) => {
+                    Target::Function(index)
+                    | Target::ObjectFunction {
+                        function: index, ..
+                    } => {
                         let function = &self.program.functions[*index];
                         let mut physical = Vec::with_capacity(values.len());
                         for (position, value) in values.into_iter().enumerate() {

@@ -283,3 +283,16 @@ The match-guard review fix at `3429713` also passed its focused Boat gate:
 33 tests, sandbox confirmed stopped. The later `Vec.try_reserve` change is a
 separate checkpoint: 86 focused local tests passed (memory, vector reuse,
 allocator pool, grades, and linear resources); its remote gate is pending.
+
+## Trait follow-up integration
+
+Associated type defaults, `Nat`/`Grade` impl parameters, mutable dynamic
+write-back, stored copyable borrowed objects, and tuple/array associated
+constants are integrated. Parent integration additionally rejects mutable
+calls on immutable locals and retains shared/exclusive receiver loans through
+later arguments. Tests cover nested receiver mutation/replacement, legal
+nested shared reads, stored-reference aliases, and mutable dispatch with
+physically erased parameters/results. The 40 advanced-trait tests pass on
+both backends; library/all-target Clippy and formatting pass locally. The full
+combined remote gate is pending. Open-world membership, nominal-field objects,
+and borrowed owning objects remain unchecked above.
