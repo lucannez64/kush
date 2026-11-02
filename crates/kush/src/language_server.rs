@@ -70,6 +70,7 @@ struct Server<W: Write> {
     /// Files the client closed. Their diagnostics stay cleared until a later
     /// didOpen explicitly opens them again, even if they remain imported.
     closed: BTreeSet<PathBuf>,
+    initialized: bool,
     shutdown_requested: bool,
     exit_received: bool,
 }
@@ -83,6 +84,7 @@ impl<W: Write> Server<W> {
             project: None,
             published: BTreeMap::new(),
             closed: BTreeSet::new(),
+            initialized: false,
             shutdown_requested: false,
             exit_received: false,
         }
@@ -106,7 +108,7 @@ impl<W: Write> Server<W> {
                     // Header bytes cannot be resynchronised reliably. Report on
                     // stderr and stop; stdout never receives diagnostics text.
                     eprintln!("kush lsp: invalid message header: {message}");
-                    break;
+                    return Ok(1);
                 }
             }
         }
@@ -130,8 +132,26 @@ impl<W: Write> Server<W> {
         let id = message.get("id").cloned();
         let params = message.get("params").cloned().unwrap_or(Value::Null);
 
+        if method != "exit" {
+            let error = if self.shutdown_requested {
+                Some((-32600, "Invalid Request: server has shut down"))
+            } else if !self.initialized && method != "initialize" {
+                Some((-32002, "Server not initialized"))
+            } else if self.initialized && method == "initialize" {
+                Some((-32600, "Invalid Request: server already initialized"))
+            } else {
+                None
+            };
+            if let Some((code, message)) = error {
+                if let Some(id) = id {
+                    self.respond_error(Some(&id), code, message)?;
+                }
+                return Ok(false);
+            }
+        }
         match method {
             "initialize" => {
+                self.initialized = true;
                 self.initialize_project(&params);
                 if let Some(id) = id {
                     self.respond(
@@ -174,7 +194,8 @@ impl<W: Write> Server<W> {
             "textDocument/didSave" => {}
             "textDocument/definition" => {
                 if let Some(id) = id {
-                    let result = self.definition(&params);
+                    let mut result = self.definition(&params);
+                    self.remap_location_uris(&mut result);
                     self.respond(&id, result)?;
                 }
             }
@@ -356,6 +377,11 @@ impl<W: Write> Server<W> {
                     None,
                 )
             };
+            if let Some(previous) = self.published.get(&path).cloned()
+                && previous != uri
+            {
+                self.publish_diagnostics(&path, &previous, None, Vec::new())?;
+            }
             self.publish_diagnostics(&path, &uri, version, diagnostics.clone())?;
             if diagnostics.is_empty() {
                 self.published.remove(&path);
@@ -401,6 +427,19 @@ impl<W: Write> Server<W> {
             Some(text) => text,
             None => return Analysis::default(),
         };
+        if let Some(project) = &self.project
+            && root == normalize_path(&project.package.entry_path())
+            && let Ok(module) = crate::parser::parse(&text)
+            && !matches!(module.items.first().map(|item| &item.item.kind),
+                Some(ItemKind::Module(parts)) if parts == std::slice::from_ref(&project.package.name))
+        {
+            let mut analysis = Analysis::default();
+            analysis.add_local_diagnostic(&root, &text, &Diagnostic::new(
+                module.items.first().map_or(Span::default(), |item| item.item.span),
+                format!("entry module must be declared as 'module {};': header does not match the package", project.package.name),
+            ));
+            return analysis;
+        }
         let modules = OverlayModules {
             project: self.project.as_ref(),
             documents: &self.documents,
@@ -594,13 +633,41 @@ impl<W: Write> Server<W> {
         )
     }
 
+    fn remap_location_uris(&self, value: &mut Value) {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    self.remap_location_uris(value);
+                }
+            }
+            Value::Object(fields) => {
+                if let Some(path) = fields
+                    .get("uri")
+                    .and_then(Value::as_str)
+                    .and_then(file_uri_to_path)
+                    .map(|path| normalize_path(&path))
+                    && let Some(document) = self.documents.get(&path)
+                {
+                    fields.insert("uri".to_owned(), json!(document.uri));
+                }
+                for value in fields.values_mut() {
+                    self.remap_location_uris(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn publish_diagnostics(
         &mut self,
         _path: &Path,
         uri: &str,
         version: Option<i64>,
-        diagnostics: Vec<Value>,
+        mut diagnostics: Vec<Value>,
     ) -> io::Result<()> {
+        for diagnostic in &mut diagnostics {
+            self.remap_location_uris(diagnostic);
+        }
         let mut params = json!({
             "uri": uri,
             "diagnostics": diagnostics
@@ -871,16 +938,26 @@ fn use_definition(
 }
 
 fn module_anchor(program: &Program, unit: usize) -> Span {
-    program
-        .module
-        .items
-        .get(program.units[unit].items.start)
-        .map_or(Span::default(), |declaration| {
-            local_span(
-                declaration.item.span,
-                program.sources.files[program.units[unit].file].base,
-            )
+    let file = &program.sources.files[program.units[unit].file];
+    let Some(declaration) = program.module.items.get(program.units[unit].items.start) else {
+        return Span::default();
+    };
+    let local = local_span(declaration.item.span, file.base);
+    let Ok(tokens) = crate::lexer::lex(&file.text) else {
+        return local;
+    };
+    let names = tokens
+        .iter()
+        .filter(|token| {
+            token.span.start >= local.start
+                && token.span.end <= local.end
+                && matches!(token.kind, Kind::Ident(_))
         })
+        .collect::<Vec<_>>();
+    match (names.first(), names.last()) {
+        (Some(first), Some(last)) => Span::new(first.span.start, last.span.end),
+        _ => local,
+    }
 }
 
 fn named_item_span(program: &Program, unit: usize, name: &str) -> Option<Span> {
@@ -898,7 +975,18 @@ fn named_item_span(program: &Program, unit: usize, name: &str) -> Option<Span> {
             _ => false,
         };
         if matches {
-            return Some(declaration.item.span);
+            let file = &program.sources.files[program.units[unit].file];
+            let local = local_span(declaration.item.span, file.base);
+            let tokens = crate::lexer::lex(&file.text).ok()?;
+            let token = tokens.iter().find(|token| {
+                token.span.start >= local.start
+                    && token.span.end <= local.end
+                    && matches!(&token.kind, Kind::Ident(candidate) if candidate == name)
+            })?;
+            return Some(Span::new(
+                token.span.start + file.base,
+                token.span.end + file.base,
+            ));
         }
     }
     None
@@ -1009,6 +1097,9 @@ fn source_file_path(file: &SourceFile) -> Option<PathBuf> {
 fn normalize_path(path: &Path) -> PathBuf {
     if let Ok(canonical) = fs::canonicalize(path) {
         return canonical;
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        return normalize_path(parent).join(name);
     }
     if path.is_absolute() {
         return path.to_path_buf();
@@ -1388,5 +1479,39 @@ mod tests {
         let input = frame(r#"{"jsonrpc":"2.0","method":"exit"}"#);
         let status = server.serve(&mut BufReader::new(input.as_slice())).unwrap();
         assert_eq!(status, 1);
+    }
+    #[test]
+    fn lifecycle_rejects_requests_outside_initialized_session() {
+        let mut out = Vec::new();
+        let input = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"textDocument/definition"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"shutdown"}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"textDocument/definition"}"#,
+            r#"{"jsonrpc":"2.0","method":"exit"}"#,
+        ]
+        .into_iter()
+        .flat_map(frame)
+        .collect::<Vec<_>>();
+        let status = Server::new(&mut out, PathBuf::from("."))
+            .serve(&mut BufReader::new(input.as_slice()))
+            .unwrap();
+        assert_eq!(status, 0);
+        let messages = read_all(&out);
+        assert_eq!(messages[0]["error"]["code"], -32002);
+        assert_eq!(messages[2]["error"]["code"], -32600);
+        assert_eq!(messages[4]["error"]["code"], -32600);
+    }
+
+    #[test]
+    fn malformed_framing_returns_failure_status() {
+        let mut out = Vec::new();
+        let input = b"Content-Length: nope\r\n\r\n";
+        let status = Server::new(&mut out, PathBuf::from("."))
+            .serve(&mut BufReader::new(input.as_slice()))
+            .unwrap();
+        assert_eq!(status, 1);
+        assert!(out.is_empty());
     }
 }

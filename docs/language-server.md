@@ -39,6 +39,9 @@ notifications do not receive responses.
 
 `exit` ends the process. A normal client sequence is `shutdown` followed by
 `exit`, which exits with status 0. `exit` without `shutdown` exits with status 1.
+Requests before initialization receive `ServerNotInitialized`; repeated
+initialization and requests after shutdown receive `InvalidRequest`. Malformed
+framing exits with status 1, while clean EOF exits with status 0.
 End of stdin also stops the process.
 
 Positions use LSP's UTF-16 code units. Byte-to-position conversion counts UTF-16
@@ -115,10 +118,9 @@ enough to lex, it returns `null` rather than inventing edits.
 `vscode-languageclient` client. Settings:
 
 - `kush.server.enabled` (default `true`);
-- `kush.server.path` (default `kush`);
-- `kush.server.extraArgs` (default `[]`).
+- `kush.server.path` (default `kush`).
 
-The extension starts `kush.server.path` with `lsp` plus extra arguments, over
+The extension starts `kush.server.path` with `lsp`, over
 stdio. Use **Kush: Restart Language Server** after changing the binary. No
 global editor installation or automatic PATH modification is performed by the
 Kush repository.
@@ -131,3 +133,12 @@ URI escaping, shutdown, and unknown methods. Stdio integration tests spawn
 local definitions, imported module definitions, stale versions, Unicode
 columns, `didClose` clearing, JSON escaping, malformed input, unknown methods,
 and the absence of disk mutations, `Kush.lock`, or a native `target/` directory.
+
+## Review corrections
+
+The initial advertised extra-arguments setting was removed because the server
+accepts only `kush lsp`. Open-document locations use the client's URI, and old
+published diagnostics under another URI alias are cleared. Canonicalization of
+existing parent directories keeps new unsaved paths stable when saved through
+a symlinked workspace. Unsaved entry module headers receive package-name
+validation, and named-import navigation selects the declaration name.

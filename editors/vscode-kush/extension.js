@@ -12,8 +12,7 @@ let outputChannel;
 function serverOptions() {
   const configuration = vscode.workspace.getConfiguration('kush');
   const command = configuration.get('server.path', 'kush');
-  const extraArgs = configuration.get('server.extraArgs', []);
-  const args = ['lsp', ...extraArgs];
+  const args = ['lsp'];
   return {
     run: { command, args, transport: TransportKind.stdio },
     debug: { command, args, transport: TransportKind.stdio },
@@ -88,7 +87,6 @@ async function activate(context) {
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       if (
         event.affectsConfiguration('kush.server.path') ||
-        event.affectsConfiguration('kush.server.extraArgs') ||
         event.affectsConfiguration('kush.server.enabled')
       ) {
         await startClient();

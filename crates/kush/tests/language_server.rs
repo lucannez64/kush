@@ -694,3 +694,110 @@ fn malformed_json_and_unknown_methods_keep_the_protocol_stream_clean() {
 
     client.shutdown();
 }
+
+#[test]
+fn unsaved_entry_headers_and_named_import_name_ranges_match_project_checks() {
+    let (_scratch, root, main, util) = project();
+    let main_uri = path_to_uri(&main);
+    let mut client = Client::spawn(&root);
+    client.initialize(&root);
+    client.open(&main_uri, 1, "module other;\nfn main() -> i64 { 0 }\n");
+    let diagnostic = client.receive_diagnostics_for(&main_uri);
+    assert!(
+        diagnostic["params"]["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("entry module must be declared")
+    );
+    client.change(&main_uri, 2, "fn main() -> i64 { 0 }\n");
+    let diagnostic = client.receive_diagnostics_for(&main_uri);
+    assert!(
+        diagnostic["params"]["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("entry module must be declared")
+    );
+    client.change(
+        &main_uri,
+        3,
+        "module demo;\nuse demo.util.answer;\nfn main() -> i64 ! {panic} { answer() }\n",
+    );
+    assert_eq!(
+        client.receive_diagnostics_for(&main_uri)["params"]["diagnostics"],
+        json!([])
+    );
+    client.send(&json!({"jsonrpc":"2.0","id":8,"method":"textDocument/definition","params":{"textDocument":{"uri":main_uri},"position":{"line":1,"character":18}}}));
+    let response = client.receive();
+    assert_eq!(response["result"]["uri"], path_to_uri(&util));
+    assert_eq!(
+        response["result"]["range"],
+        json!({"start":{"line":2,"character":7},"end":{"line":2,"character":13}})
+    );
+    client.shutdown();
+}
+
+#[test]
+fn symlink_aliases_clear_old_diagnostics_and_keep_unsaved_document_identity() {
+    use std::os::unix::fs::symlink;
+    let (scratch, root, main, util) = project();
+    let alias = scratch.path.join("linked");
+    symlink(&root, &alias).unwrap();
+    let main_uri = path_to_uri(&alias.join("src/main.kush"));
+    let util_uri = path_to_uri(&alias.join("src/util.kush"));
+    let real_util_uri = path_to_uri(&util);
+    let clean = fs::read_to_string(&util).unwrap();
+    fs::write(
+        &util,
+        "module demo.util;\npub fn answer() -> i64 { missing() }\n",
+    )
+    .unwrap();
+    let mut client = Client::spawn(&alias);
+    client.initialize(&alias);
+    client.open(&main_uri, 1, &fs::read_to_string(&main).unwrap());
+    assert!(
+        !client.receive_diagnostics_for(&real_util_uri)["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    client.open(&util_uri, 1, &clean);
+    assert_eq!(
+        client.receive_diagnostics_for(&real_util_uri)["params"]["diagnostics"],
+        json!([])
+    );
+    assert_eq!(
+        client.receive_diagnostics_for(&util_uri)["params"]["diagnostics"],
+        json!([])
+    );
+    client.send(&json!({"jsonrpc":"2.0","id":8,"method":"textDocument/definition","params":{"textDocument":{"uri":main_uri},"position":{"line":5,"character":12}}}));
+    assert_eq!(client.receive()["result"]["uri"], util_uri);
+
+    let new_path = alias.join("src/new.kush");
+    let new_uri = path_to_uri(&new_path);
+    let new_text = "module demo.new;\npub fn value() -> i64 { 42 }\n";
+    client.open(&new_uri, 1, new_text);
+    client.receive_diagnostics_for(&new_uri);
+    fs::write(&new_path, new_text).unwrap();
+    client.change(
+        &new_uri,
+        2,
+        "module demo.new;\npub fn value() -> i64 { missing() }\n",
+    );
+    let diagnostic = client.receive_diagnostics_for(&new_uri);
+    assert_eq!(diagnostic["params"]["version"], 2);
+    assert!(
+        diagnostic["params"]["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing")
+    );
+    client.send(&json!({"jsonrpc":"2.0","id":9,"method":"textDocument/formatting","params":{"textDocument":{"uri":new_uri},"options":{}}}));
+    loop {
+        let response = client.receive();
+        if response["id"] == 9 {
+            assert!(response["result"].is_array());
+            break;
+        }
+    }
+    client.shutdown();
+}

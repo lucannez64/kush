@@ -31,7 +31,6 @@ The TextMate grammar works even if the language server is not available.
 | --- | --- | --- |
 | `kush.server.enabled` | `true` | Start the LSP client for `.kush` files. |
 | `kush.server.path` | `kush` | Path to the Kush executable. |
-| `kush.server.extraArgs` | `[]` | Extra arguments after `kush lsp`. |
 
 Use **Kush: Restart Language Server** after changing the binary path or
 rebuilding Kush. Diagnostics appear for unsaved text as you type; save is not

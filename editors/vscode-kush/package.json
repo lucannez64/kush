@@ -57,14 +57,6 @@
           "type": "string",
           "default": "kush",
           "description": "Path to the kush executable. The extension runs it with the 'lsp' argument over stdio."
-        },
-        "kush.server.extraArgs": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra arguments appended after 'kush lsp'."
         }
       }
     }
