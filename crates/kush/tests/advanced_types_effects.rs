@@ -1754,3 +1754,124 @@ fn runtime_sized_array_patterns_are_rejected_explicitly() {
         "DynArray patterns are not supported",
     );
 }
+
+#[test]
+fn match_arms_join_scalar_proof_indices() {
+    rejects(
+        r#"
+        fn pick() -> Bool ! {} { false }
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n = 0;
+            n = 6;
+            match pick() {
+                true => { n = 7; 0 },
+                false => { keep(n, refl::<i64>(7)) },
+            }
+        }"#,
+        "proof does not establish",
+    );
+    rejects(
+        r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n = 0; n = 6;
+            match false { true => { n = 7; }, false => { } }
+            keep(n, refl::<i64>(7))
+        }"#,
+        "proof does not establish",
+    );
+    assert_eq!(
+        value(
+            r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n = 0;
+            match false { true => { n = 7; }, false => { n = 7; } }
+            keep(n, refl::<i64>(7))
+        }"#
+        ),
+        7
+    );
+}
+
+#[test]
+fn nested_block_mutation_does_not_alias_scalar_proof_indices() {
+    rejects(
+        r#"
+        fn same(a: i64, b: i64, erased p: Eq<i64, a, b>) -> i64 ! {panic} { a - b }
+        fn main() -> i64 ! {panic} {
+            let mut n = 6;
+            { n = n + 1; }
+            let m = 5;
+            same(n, m, refl::<i64>(m))
+        }"#,
+        "proof does not establish",
+    );
+    assert_eq!(
+        value(
+            r#"
+        fn get() -> i64 ! {panic} { 7 }
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {panic} {
+            let mut n = 6;
+            { n = get(); }
+            keep(n, refl::<i64>(n))
+        }"#
+        ),
+        7
+    );
+}
+
+#[test]
+fn non_tail_continuations_reject_try_but_allow_local_loops_and_mut_results() {
+    rejects(
+        r#"
+        enum Result<T, E> { Ok(T), Err(E) }
+        fn work() -> i64 ! {panic} {
+            let r = handle Op: i64 -> Result<i64, i64> with fn(
+                x: i64, resume: linear once fn(Result<i64, i64>) -> Result<i64, i64> ! {},
+            ) -> Result<i64, i64> ! {panic} { resume(Err(7)) } {
+                let a = perform Op(1);
+                let v = a?;
+                Ok(v + 1)
+            };
+            match r { Ok(v) => v, Err(e) => e }
+        }
+        fn main() -> i64 ! {panic} { work() }"#,
+        "cannot use '?'",
+    );
+    assert_eq!(
+        value(
+            r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {})
+                -> i64 ! {panic} { resume(x) } {
+                let a = perform Op(1);
+                let mut i = 0; let mut s = 0;
+                while i < 3 {
+                    i = i + 1;
+                    if i == 2 { continue; }
+                    s = s + i;
+                }
+                a + s
+            }
+        }"#
+        ),
+        5
+    );
+    assert_eq!(
+        value(
+            r#"
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {})
+                -> i64 ! {panic} { resume(x) + 10 } {
+                let mut a = perform Op(1);
+                a = a + 1;
+                a
+            }
+        }"#
+        ),
+        12
+    );
+}

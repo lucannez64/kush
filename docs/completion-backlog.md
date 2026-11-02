@@ -623,3 +623,21 @@ borrow discipline across records, trait objects, and owning handles, and
 extended dynamic-object and borrowed-element checks to `AllocBox`/`AllocVec`.
 The full Boat gate passes **943 tests**, formatting, and Clippy. Independent
 reviews of these two merges are pending.
+
+## Resumption/proof review follow-up
+
+An independent review of `a296e01` found no leaks or double drops in
+continuation captures, and confirmed row subtraction cannot hide performed
+effects. It found five defects, now fixed with regressions:
+
+- **High:** `match` arms did not join scalar proof indices (each arm saw the
+  previous arm's state), so a proof about one arm's literal was accepted in
+  another arm or after the match. Arms now start from one baseline and are
+  joined N-way like `if`.
+- **High:** leaving a nested block truncated the proof context but left scalar
+  indices pointing past it, so two different locals could share a binder and a
+  false `Eq` was accepted. Every scope exit now re-binds such scalars.
+- **Medium:** `?` inside a non-tail continuation was checked against the
+  operation result and could swallow errors; it is now rejected like `return`.
+- **Low:** `break`/`continue` for loops inside a continuation were rejected,
+  and `let mut x = perform ...` lost `mut` in the continuation. Both fixed.

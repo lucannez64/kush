@@ -144,8 +144,12 @@ The non-tail fragment is deliberately explicit:
   is rejected instead of silently falling back to identity semantics;
 - the handled body's result type must be the operation result type, because
   that is what the continuation returns;
-- `return`, `break`, and `continue` inside the continuation are rejected; they
-  would cross the resumption boundary;
+- `return` and `?` inside the continuation are rejected; they would return
+  across the resumption boundary. `break`/`continue` are allowed for loops
+  written inside the continuation, but cannot target a loop outside it.
+  Lambdas defined in the continuation are separate functions and may use
+  `return`/`?` normally;
+- `let mut a = perform Op(x);` keeps its `mut` binding in the continuation;
 - the continuation captures values live at the perform point by value. It
   rejects mutable, borrowed, reference, task, and `@[0]` captures rather than
   inventing aliasing or lifetime rules. A capturing continuation allocates its
@@ -204,7 +208,7 @@ This is a usable handler fragment, not a general algebraic-effect runtime:
   handlers. Capturing/`once` handlers stay lexical, and dynamic frames do not
   cross structured-task boundaries;
 - there is no multishot, no handler reinterpretation of arbitrary control
-  effects, and no `return`/`break`/`continue` through a resumption;
+  effects, and no `return`/`?`/`break`/`continue` through a resumption;
 - effect-row names remain the fixed `{panic, io, alloc, suspend}` vocabulary;
   `effect Name` declares an operation signature, not a new row name, and there
   is no effect-polymorphic handler type over operation names;

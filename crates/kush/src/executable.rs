@@ -14217,6 +14217,33 @@ impl Checker<'_, '_> {
         *self.scalar_epochs.entry(id).or_insert(0) += 1;
         Ok(())
     }
+    /// Leave a nested scope by truncating the kernel telescope to `mark`. A
+    /// scalar whose current index pointed at a truncated binder would
+    /// otherwise dangle and alias whatever binder is appended next, so it gets
+    /// a fresh opaque binder at the outer level (its value is unknown here).
+    fn truncate_kernel(&mut self, mark: usize) {
+        self.kernel_locals.truncate(mark);
+        self.kernel_aliases.retain(|_, position| *position < mark);
+        let stale = self
+            .scalar_values
+            .iter()
+            .filter(|(_, state)| matches!(state, ScalarValue::Position(p) if *p >= mark))
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in stale {
+            let ty = self
+                .slots
+                .get(&id)
+                .and_then(|slot| self.locals.get(*slot))
+                .map(|local| local.ty);
+            match ty {
+                Some(ty) if ty.scalar_carrier().is_some() => self.fresh_scalar_value(id, ty),
+                _ => {
+                    self.scalar_values.remove(&id);
+                }
+            }
+        }
+    }
     /// Append a fresh unconstrained binder for a scalar whose value changed on
     /// only some path or across a loop iteration. The old binder stays in the
     /// proof prefix; later uses denote the new opaque value.
@@ -14303,6 +14330,31 @@ impl Checker<'_, '_> {
         left_diverges: bool,
         right_diverges: bool,
     ) {
+        self.join_scalar_arms(
+            baseline,
+            &[(left, left_diverges), (right, right_diverges)],
+            live,
+        );
+    }
+    /// N-way scalar join over `match` arms (and the two `if` branches). Only
+    /// arms that reach the join point count; if every arm diverges, all of
+    /// them are used. A literal survives only when every reaching arm agrees.
+    fn join_scalar_arms(
+        &mut self,
+        baseline: &BTreeMap<BindingId, ScalarValue>,
+        arms: &[(&BTreeMap<BindingId, ScalarValue>, bool)],
+        live: usize,
+    ) {
+        let reaching = arms
+            .iter()
+            .filter(|(_, diverges)| !diverges)
+            .map(|(map, _)| *map)
+            .collect::<Vec<_>>();
+        let reaching = if reaching.is_empty() {
+            arms.iter().map(|(map, _)| *map).collect()
+        } else {
+            reaching
+        };
         for (id, base) in baseline {
             let slot = self
                 .slots
@@ -14315,29 +14367,31 @@ impl Checker<'_, '_> {
             if ty.scalar_carrier().is_none() {
                 continue;
             }
-            let left_state = if left_diverges && !right_diverges {
-                Self::map_scalar_state(right, *id, live)
+            let states = reaching
+                .iter()
+                .map(|map| Self::map_scalar_state(map, *id, live))
+                .collect::<Vec<_>>();
+            let joined = if states.iter().all(Option::is_none) {
+                base.clone()
             } else {
-                Self::map_scalar_state(left, *id, live)
-            };
-            let right_state = if right_diverges && !left_diverges {
-                Self::map_scalar_state(left, *id, live)
-            } else {
-                Self::map_scalar_state(right, *id, live)
-            };
-            let joined = match (&left_state, &right_state) {
-                (Some(ScalarValue::Literal(left)), Some(ScalarValue::Literal(right)))
-                    if left == right =>
-                {
-                    ScalarValue::Literal(left.clone())
+                match states.first().cloned().flatten() {
+                    Some(ScalarValue::Literal(term))
+                        if states
+                            .iter()
+                            .all(|s| s.as_ref() == Some(&ScalarValue::Literal(term.clone()))) =>
+                    {
+                        ScalarValue::Literal(term)
+                    }
+                    Some(ScalarValue::Position(position))
+                        if position < live
+                            && states
+                                .iter()
+                                .all(|s| s.as_ref() == Some(&ScalarValue::Position(position))) =>
+                    {
+                        ScalarValue::Position(position)
+                    }
+                    _ => ScalarValue::Unknown,
                 }
-                (Some(ScalarValue::Position(left)), Some(ScalarValue::Position(right)))
-                    if left == right && *left < live =>
-                {
-                    ScalarValue::Position(*left)
-                }
-                _ if left_state.is_none() && right_state.is_none() => base.clone(),
-                _ => ScalarValue::Unknown,
             };
             match joined {
                 ScalarValue::Unknown => self.fresh_scalar_value(*id, ty),
@@ -14741,7 +14795,7 @@ impl Checker<'_, '_> {
                 expected,
             );
             c.facts.reset(mark);
-            c.kernel_locals.truncate(kernel_mark);
+            c.truncate_kernel(kernel_mark);
             result
         })
     }
@@ -15559,7 +15613,7 @@ impl Checker<'_, '_> {
         let body = {
             let kernel_mark = self.kernel_locals.len();
             let body = self.statements(rest.0, rest.1, span, expected);
-            self.kernel_locals.truncate(kernel_mark);
+            self.truncate_kernel(kernel_mark);
             body
         }?;
         let result = body.ty;
@@ -16166,12 +16220,6 @@ impl Checker<'_, '_> {
                     (ExprKind::Loop(body), state.value.unwrap())
                 }
                 ast::ExprKind::Break(value) => {
-                    if c.continuation_depth != 0 {
-                        return Err(Diagnostic::new(
-                            span,
-                            "a non-tail resumption continuation cannot 'break' or 'continue' out of the handled body",
-                        ));
-                    }
                     let Some(state) = c.loops.last() else {
                         return Err(Diagnostic::new(span, "'break' outside of a loop"));
                     };
@@ -16224,12 +16272,6 @@ impl Checker<'_, '_> {
                     (ExprKind::Break(value, vec![]), Type::Never)
                 }
                 ast::ExprKind::Continue => {
-                    if c.continuation_depth != 0 {
-                        return Err(Diagnostic::new(
-                            span,
-                            "a non-tail resumption continuation cannot 'break' or 'continue' out of the handled body",
-                        ));
-                    }
                     if c.loops.is_empty() {
                         return Err(Diagnostic::new(span, "'continue' outside of a loop"));
                     }
@@ -17171,6 +17213,12 @@ impl Checker<'_, '_> {
                     (ExprKind::If(Box::new(condition), then, otherwise), ty)
                 }
                 ast::ExprKind::Try(value) => {
+                    if c.continuation_depth != 0 {
+                        return Err(Diagnostic::new(
+                            span,
+                            "a non-tail resumption continuation cannot use '?': it would return across the resumption; match on the result instead",
+                        ));
+                    }
                     let value = c.expr(value)?;
                     let input = c.types.result(value.ty, span)?;
                     let output = c.types.result(c.result, span)?;
@@ -17213,9 +17261,15 @@ impl Checker<'_, '_> {
                     }
                     let mut result = Type::Never;
                     let mut checked = Vec::new();
+                    // Every arm starts from the scalar state before the match,
+                    // and the reaching arms are joined afterwards.
+                    let scalar_baseline = c.scalar_values.clone();
+                    let scalar_live = c.kernel_locals.len();
+                    let mut arm_scalars = Vec::new();
                     // Variants still possible after earlier unguarded arms.
                     let mut remaining = c.mask(value.ty);
                     for arm in arms {
+                        c.scalar_values = scalar_baseline.clone();
                         let pattern = c.pattern_refined(&arm.pattern, value.ty, remaining)?;
                         c.linear_pattern(&pattern, c.value_moves_linear(&value));
                         if !coverage.useful(&pattern, value.ty, &c.types.enums, &c.types.unions)? {
@@ -17238,6 +17292,7 @@ impl Checker<'_, '_> {
                         let body = c.expr_expected_result(&arm.body, context);
                         c.facts.reset(mark);
                         let body = body?;
+                        arm_scalars.push((c.scalar_values.clone(), body.ty == Type::Never));
                         result = c.join(result, body.ty, body.span)?;
                         if guard.is_none() {
                             remaining &= !covered_variants(&pattern);
@@ -17257,6 +17312,12 @@ impl Checker<'_, '_> {
                             "non-exhaustive match; add missing cases or an unguarded catch-all",
                         ));
                     }
+                    c.scalar_values = scalar_baseline.clone();
+                    let arm_refs = arm_scalars
+                        .iter()
+                        .map(|(map, diverges)| (map, *diverges))
+                        .collect::<Vec<_>>();
+                    c.join_scalar_arms(&scalar_baseline, &arm_refs, scalar_live);
                     if c.erased_result_context(expected)
                         && (checked.iter().any(|arm| {
                             arm.body.ty == Type::Unit || arm.body.ty == Type::Never
@@ -18125,6 +18186,9 @@ impl Checker<'_, '_> {
         // body, never to indirect calls. A lambda is a separate callable, so it
         // cannot capture the hidden handler local by name.
         let saved_handlers = std::mem::take(&mut self.handlers);
+        // A lambda body is its own function: `return`/`?` inside it never
+        // crosses an enclosing resumption.
+        let saved_continuation_depth = std::mem::replace(&mut self.continuation_depth, 0);
         let mut child_parameter_lifetimes = capture_lifetimes.clone();
         child_parameter_lifetimes.extend(lambda_lifetimes.clone());
         let checked = (|| {
@@ -18192,7 +18256,8 @@ impl Checker<'_, '_> {
             let obligation = self.return_obligation(&body);
             Ok((body, obligation))
         })();
-        self.kernel_locals.truncate(kernel_mark);
+        self.truncate_kernel(kernel_mark);
+        self.continuation_depth = saved_continuation_depth;
         self.scope_depth = saved_scope_depth;
         self.handlers = saved_handlers;
         let locals = std::mem::take(&mut self.locals);
@@ -23664,6 +23729,7 @@ impl Checker<'_, '_> {
             captures,
             result_id,
             result_ty,
+            mutable,
             suffix,
             body.tail.as_deref(),
             span,
@@ -23705,6 +23771,7 @@ impl Checker<'_, '_> {
         captures: Vec<usize>,
         result_id: Option<crate::resolve::BindingId>,
         result_ty: Type,
+        result_mutable: bool,
         statements: &[ast::Statement],
         tail: Option<&ast::Expr>,
         span: Span,
@@ -23807,7 +23874,7 @@ impl Checker<'_, '_> {
             let result_slot = locals.len();
             locals.push(Local {
                 ty: result_ty,
-                mutable: false,
+                mutable: result_mutable,
                 linear: false,
                 grade: None,
                 span,
@@ -23836,7 +23903,7 @@ impl Checker<'_, '_> {
             self.expect(body.ty, result_ty, span)?;
             Ok(body)
         })();
-        self.kernel_locals.truncate(kernel_mark);
+        self.truncate_kernel(kernel_mark);
         self.continuation_depth -= 1;
         self.scope_depth = saved_scope_depth;
         self.handlers = saved_handlers;

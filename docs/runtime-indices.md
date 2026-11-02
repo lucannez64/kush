@@ -142,7 +142,12 @@ Implemented consequences:
   branch changes the value and the other does not, or the branches disagree,
   the joined index is a fresh opaque binder. A proof about an older value is
   rejected against the new binder. The join also handles one branch that
-  diverges with `return`/`panic`.
+  diverges with `return`/`panic`. A `match` joins all of its reaching arms the
+  same way; every arm is checked from the scalar state before the match.
+- **Leaving a nested scope** (block, `let`-pattern body, lambda, continuation)
+  truncates the proof context. A scalar whose current index was introduced in
+  that scope gets a fresh opaque binder at the outer level, so it can never
+  alias a binder appended later for a different local.
 - A **loop join** keeps a scalar index only when the body never changes it. Any
   scalar the body may assign becomes a fresh opaque binder after the loop, so a
   literal proof cannot survive a loop iteration that might have replaced the
