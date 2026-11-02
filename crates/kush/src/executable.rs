@@ -4239,7 +4239,7 @@ fn method_contract_key(
 /// mirrors function instance keys. Trait arguments are static identity, never
 /// runtime values.
 #[allow(clippy::too_many_arguments)]
-fn evaluate_trait_arguments(
+pub(crate) fn evaluate_trait_arguments(
     types: &mut Types<'_>,
     resolution: &Resolution,
     logical: &crate::check::LogicalEnvironment,
@@ -4342,7 +4342,7 @@ fn insert_trait_arguments(
     }
 }
 /// Render one trait specialization for diagnostics, in declared parameter order.
-fn trait_specialization_name(
+pub(crate) fn trait_specialization_name(
     resolution: &Resolution,
     types: &Types<'_>,
     generics: &[ast::Generic],
@@ -5645,15 +5645,10 @@ fn prepare_trait_objects<'a>(
         let trait_name = resolution.bindings[trait_id].name.clone();
         let dynamic = types.dynamic_traits.contains(&trait_id);
         let mut reason: Option<String> = None;
-        for generic in &definition.generics {
-            if generic_category(resolution, generic) != GenericCategory::Type {
-                reason = Some(format!(
-                    "trait parameter '{}' is not an ordinary type; dyn objects support type parameters only",
-                    generic.name
-                ));
-                break;
-            }
-        }
+        // Trait parameters may be type, natural, grade, or effect arguments.
+        // The dynamic representation stores the checked specialization, so a
+        // non-type argument is identity like a type argument; it never changes
+        // the two-word object layout.
         let associated_type_names = definition
             .associated
             .iter()
@@ -5763,7 +5758,12 @@ fn prepare_trait_objects<'a>(
             }
             if reason.is_none() {
                 if concrete.is_empty() {
-                    reason = Some(format!("trait '{trait_name}' has no concrete impls"));
+                    // An open dynamic object may have no concrete impl at
+                    // declaration time: every member can come from a generic
+                    // or blanket impl and is registered at its coercion site.
+                    if !dynamic {
+                        reason = Some(format!("trait '{trait_name}' has no concrete impls"));
+                    }
                 } else {
                     let mut associated_consts: BTreeMap<
                         TraitArguments,
@@ -10761,6 +10761,90 @@ impl Checker<'_, '_> {
         }
         Ok(out)
     }
+    /// Associated-type values supplied by the impl selected for one concrete
+    /// member, lowered with that impl's parameters. The dynamic representation
+    /// has one fixed ABI per object specialization, so the first registered
+    /// member fixes these projections and every later member must agree.
+    fn member_associated_projections(
+        &mut self,
+        member: Type,
+        selected: MethodDefinition,
+        trait_id: BindingId,
+        trait_arguments: &TraitArguments,
+        span: Span,
+    ) -> Result<BTreeMap<String, Type>> {
+        let Some(index) = selected.impl_arguments else {
+            return Ok(BTreeMap::new());
+        };
+        let declared = self.functions.declared[&selected.binding].clone();
+        let Some(associated_index) = declared.impl_associated else {
+            return Ok(BTreeMap::new());
+        };
+        let associated = self.functions.impl_associated[associated_index].clone();
+        let instantiation = self.functions.impl_instantiations[index].clone();
+        let header = self.functions.impl_headers[instantiation.header].clone();
+        let mut substitution = crate::runtime_types::Subst {
+            self_type: Some(member),
+            associated_types: associated.types.clone(),
+            ..Default::default()
+        };
+        let mut consts = BTreeMap::new();
+        let mut grades = BTreeMap::new();
+        let mut effects = BTreeMap::new();
+        let mut type_index = 0;
+        let mut const_index = 0;
+        let mut grade_index = 0;
+        let mut effect_index = 0;
+        for generic in &header.generics {
+            let binder = self.resolution.binder(generic.span).unwrap();
+            match generic_category(self.resolution, generic) {
+                GenericCategory::Type => {
+                    substitution
+                        .types
+                        .insert(binder, instantiation.arguments.types[type_index]);
+                    type_index += 1;
+                }
+                GenericCategory::Const => {
+                    consts.insert(binder, instantiation.arguments.consts[const_index]);
+                    const_index += 1;
+                }
+                GenericCategory::Grade => {
+                    grades.insert(binder, instantiation.arguments.grades[grade_index]);
+                    grade_index += 1;
+                }
+                GenericCategory::Effect => {
+                    effects.insert(binder, instantiation.arguments.effects[effect_index]);
+                    effect_index += 1;
+                }
+            }
+        }
+        substitution.consts = consts;
+        substitution.grades = grades;
+        substitution.effects = effects;
+        let definition = self.functions.traits[&trait_id].clone();
+        let mut trait_consts = BTreeMap::new();
+        let mut trait_grades = BTreeMap::new();
+        let mut trait_effects = BTreeMap::new();
+        insert_trait_arguments(
+            self.resolution,
+            &definition.generics,
+            trait_arguments,
+            &mut substitution,
+            &mut trait_consts,
+            &mut trait_grades,
+            &mut trait_effects,
+        );
+        substitution.consts.extend(trait_consts);
+        substitution.grades.extend(trait_grades);
+        substitution.effects.extend(trait_effects);
+        let mut out = BTreeMap::new();
+        for (name, value) in &associated.types {
+            let lowered = self.types.ty_in(value, &substitution)?;
+            out.insert(name.clone(), lowered);
+        }
+        let _ = span;
+        Ok(out)
+    }
     /// Register the concrete member `member` in the dynamic vtable of
     /// `object`. Every object-safe trait method is selected and instantiated
     /// for this member, including generic/blanket impls and inherited
@@ -10806,6 +10890,42 @@ impl Checker<'_, '_> {
             methods: BTreeMap::new(),
         });
         let definition = self.functions.traits[&info.trait_id].clone();
+        if let Some(first_name) = definition.methods.keys().next().cloned() {
+            let selected = self.lookup_method(
+                member,
+                &first_name,
+                Some((info.trait_id, info.arguments.clone())),
+                span,
+            )?;
+            let projections = self.member_associated_projections(
+                member,
+                selected,
+                info.trait_id,
+                &info.arguments,
+                span,
+            )?;
+            let entry = self
+                .functions
+                .object_associated
+                .entry((info.trait_id, info.arguments.clone()))
+                .or_default();
+            for (name, lowered) in projections {
+                if let Some(previous) = entry.get(&name)
+                    && *previous != lowered
+                {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "concrete member '{}' projects associated type '{name}' as {}, but this object specialization already fixed it as {}; a dyn object has one fixed ABI",
+                            self.types.name(member),
+                            self.types.name(lowered),
+                            self.types.name(*previous)
+                        ),
+                    ));
+                }
+                entry.insert(name, lowered);
+            }
+        }
         let mut methods = BTreeMap::new();
         for name in definition.methods.keys() {
             let selected = self.lookup_method(

@@ -1852,3 +1852,100 @@ fn single_impl_objects_dispatch_through_stored_references() {
         "3\n",
     );
 }
+
+#[test]
+fn traits_whose_only_impls_are_generic_are_usable_as_dyn() {
+    let stats = agrees(
+        r#"
+        struct W<T> { value: T }
+        struct Boxed<T> { value: Box<T> }
+        trait Size { fn size(self: &Self) -> i64 ! {panic}; }
+        impl<T> Size for W<T> { fn size(self: &Self) -> i64 ! {panic} { 4 } }
+        impl<T> Size for Boxed<T> { fn size(self: &Self) -> i64 ! {panic} { 9 } }
+        fn read(object: &dyn Size) -> i64 ! {panic} { object.size() }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let a: dyn Size = W { value: true };
+            let b: dyn Size = Boxed { value: Box.new(3) };
+            print_i64(read(&a));
+            print_i64(read(&b));
+            print_i64(a.size());
+            0
+        }"#,
+        0,
+        "4\n9\n4\n",
+    );
+    // One payload allocation per coercion; the boxed payload is released once.
+    assert_eq!(stats.allocations, 3, "{}", stats.allocations);
+
+    rejects(
+        r#"
+        struct W<T> { value: T }
+        trait Size { fn size(self: Self) -> i64 ! {panic}; }
+        impl<T> Size for W<T> { fn size(self: Self) -> i64 ! {panic} { 4 } }
+        fn main() -> i64 ! {alloc, panic} {
+            let object: dyn Size = 7;
+            object.size()
+        }"#,
+        "does not implement trait",
+    );
+}
+
+#[test]
+fn parameter_dependent_generic_associated_projection_is_fixed_by_the_member() {
+    let stats = agrees(
+        r#"
+        struct W<T> { value: T }
+        trait Show { type Out; fn show(self: &Self) -> Self.Out ! {panic}; }
+        impl<T> Show for W<T> { type Out = T; fn show(self: &Self) -> T ! {panic} { self.value } }
+        fn read(object: &dyn Show) -> i64 ! {panic} { object.show() }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let object: dyn Show = W { value: 5 };
+            print_i64(read(&object));
+            print_i64(object.show());
+            0
+        }"#,
+        0,
+        "5\n5\n",
+    );
+    assert_eq!(stats.allocations, 1, "{}", stats.allocations);
+
+    rejects(
+        r#"
+        struct W<T> { value: T }
+        trait Show { type Out; fn show(self: &Self) -> Self.Out ! {panic}; }
+        impl<T> Show for W<T> { type Out = T; fn show(self: &Self) -> T ! {panic} { self.value } }
+        fn main() -> i64 ! {alloc, panic} {
+            let a: dyn Show = W { value: 5 };
+            let b: dyn Show = W { value: true };
+            print_i64(a.show());
+            0
+        }"#,
+        "already fixed it as i64",
+    );
+}
+
+#[test]
+fn non_type_trait_arguments_dispatch_through_dyn() {
+    agrees(
+        r#"
+        struct Buffer<N: Nat> { data: [i64; N] }
+        trait First<N: Nat> { fn first(self: Self) -> i64 ! {panic}; }
+        impl<N: Nat> First<N> for Buffer<N> {
+            fn first(self: Self) -> i64 ! {panic} { self.data[0] }
+        }
+        struct Point { x: i64 }
+        trait Weighted<G: Grade> { fn weighted(self: Self) -> i64 ! {panic}; }
+        impl<G: Grade> Weighted<G> for Point {
+            fn weighted(self: Self) -> i64 ! {panic} { self.x }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let buffer: dyn First<3> = Buffer { data: [7, 8, 9] };
+            print_i64(buffer.first());
+            let point: dyn Weighted<1> = Point { x: 6 };
+            print_i64(point.weighted());
+            0
+        }"#,
+        0,
+        "7\n6\n",
+    );
+}
