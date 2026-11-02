@@ -2902,6 +2902,83 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
         Ok(Flow::Value(value))
     }
+    #[inline(never)]
+    fn handler_push(
+        &mut self,
+        operation: usize,
+        handler: &Expr,
+        body: &Block,
+        frame: &mut Frame,
+    ) -> Result<Flow> {
+        let handler_value = value!(self.expr(handler, frame));
+        self.consume(handler, frame);
+        let consume = matches!(handler.ty, Type::Once(_));
+        self.dynamic_handlers.push(HandlerFrame {
+            operation,
+            handler: Some(handler_value),
+            consume,
+        });
+        let flow = self.block(body, frame);
+        let popped = self.dynamic_handlers.pop();
+        if let Some(HandlerFrame {
+            handler: Some(value),
+            ..
+        }) = popped
+        {
+            self.drop_value(value)?;
+        }
+        flow
+    }
+    #[inline(never)]
+    fn dynamic_perform(
+        &mut self,
+        expr: &Expr,
+        operation: usize,
+        payload: &Expr,
+        resume: &Expr,
+        frame: &mut Frame,
+    ) -> Result<Flow> {
+        let Some(index) = self
+            .dynamic_handlers
+            .iter()
+            .rposition(|frame| frame.operation == operation && frame.handler.is_some())
+        else {
+            return Err(Diagnostic::new(
+                expr.span,
+                "no dynamically active handler for this operation",
+            ));
+        };
+        let payload_value = value!(self.expr(payload, frame));
+        let resume_value = value!(self.expr(resume, frame));
+        self.consume(payload, frame);
+        self.consume(resume, frame);
+        let consume = self.dynamic_handlers[index].consume;
+        if consume {
+            let handler = self.dynamic_handlers[index]
+                .handler
+                .take()
+                .expect("handler presence checked above");
+            Ok(Flow::Value(
+                self.call_value(handler, vec![payload_value, resume_value])?,
+            ))
+        } else {
+            let function = match self.dynamic_handlers[index].handler.as_ref() {
+                Some(Value::Function {
+                    function,
+                    environment: None,
+                }) => *function,
+                _ => {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: copyable dynamic effect handler must be a noncapturing function",
+                    ));
+                }
+            };
+            Ok(Flow::Value(
+                self.call(function, vec![payload_value, resume_value])?,
+            ))
+        }
+    }
     fn expr(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Flow> {
         if self.depth >= 128 {
             return Err(Diagnostic::new(
@@ -2919,6 +2996,574 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
         result
     }
+    // Keep allocation temporaries out of the frame used by every expression.
+    // Debug builds otherwise exhaust ordinary test-thread stacks while parsing
+    // valid nested JSON before the evaluator's checked depth limit is reached.
+    #[inline(never)]
+    fn expression_allocations(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Flow> {
+        let value = match &expr.kind {
+            ExprKind::BoxNew(arg) => {
+                let value = value!(self.expr(arg, frame));
+                self.consume(arg, frame);
+                self.allocate_box(value, self.program.width(arg.ty))
+            }
+            ExprKind::BoxTake(arg) => {
+                let Value::Owned(id) = value!(self.expr(arg, frame)) else {
+                    unreachable!()
+                };
+                self.consume(arg, frame);
+                let value = self.heap.take(id).ok_or_else(|| {
+                    Diagnostic::new(expr.span, "internal ownership error: stale box")
+                })?;
+                self.stats.deallocation();
+                value
+            }
+            ExprKind::BoxRead(arg) => {
+                let Value::Borrowed(id) = value!(self.expr(arg, frame)) else {
+                    unreachable!()
+                };
+                self.heap.get(id).ok_or_else(|| {
+                    Diagnostic::new(expr.span, "internal ownership error: dangling borrow")
+                })?
+            }
+            ExprKind::BoxWrite(reference, replacement) => {
+                let reference = value!(self.expr(reference, frame));
+                let Value::Borrowed(id) = reference else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal ownership error: box write has no borrowed box",
+                    ));
+                };
+                let value = value!(self.expr(replacement, frame));
+                self.consume(replacement, frame);
+                if self.heap.get(id).is_none() {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal ownership error: dangling box write",
+                    ));
+                }
+                self.heap.insert(id, value);
+                Value::Scalar(0)
+            }
+            ExprKind::BoxReuse { owner, payload } => {
+                let Value::Owned(id) = value!(self.expr(owner, frame)) else {
+                    unreachable!("checked Box.reuse owner")
+                };
+                let new = value!(self.expr(payload, frame));
+                let capacity = self.heap.box_capacity(id);
+                // Both arguments have been evaluated. Only now is the old
+                // affine payload destroyed. The outer allocation is preserved.
+                self.consume(owner, frame);
+                self.consume(payload, frame);
+                let old = self.heap.take(id).ok_or_else(|| {
+                    Diagnostic::new(expr.span, "internal ownership error: stale reuse box")
+                })?;
+                self.drop_value(old)?;
+                self.heap.insert(id, new);
+                self.heap.set_box_capacity(id, capacity);
+                self.stats.reuse();
+                Value::Owned(id)
+            }
+            ExprKind::BoxReuseGrow { owner, payload } => {
+                let Value::Owned(id) = value!(self.expr(owner, frame)) else {
+                    unreachable!("checked Box.reuse_grow owner")
+                };
+                let new = value!(self.expr(payload, frame));
+                let retained = self.heap.box_capacity(id);
+                let requested = self.program.width(payload.ty) * 8;
+                let capacity = if requested > retained {
+                    box_allocation_capacity(requested)
+                } else {
+                    retained
+                };
+                // Both arguments are evaluated before the old payload is
+                // destroyed. The reference model always has logical room, so
+                // growth never moves the reference allocation id.
+                self.consume(owner, frame);
+                self.consume(payload, frame);
+                let old = self.heap.take(id).ok_or_else(|| {
+                    Diagnostic::new(expr.span, "internal ownership error: stale reuse box")
+                })?;
+                self.drop_value(old)?;
+                self.heap.insert(id, new);
+                self.heap.set_box_capacity(id, capacity);
+                self.stats.reuse();
+                Value::Owned(id)
+            }
+            ExprKind::ArenaNew => self.arena_new_value(None),
+            ExprKind::ArenaNewWith { strategy } => {
+                let strategy = value!(self.expr(strategy, frame));
+                let Value::Function {
+                    function,
+                    environment: None,
+                } = strategy
+                else {
+                    unreachable!("checked arena strategy is a noncapturing function")
+                };
+                self.arena_new_value(Some(function))
+            }
+            ExprKind::ArenaAlloc { arena, value } => {
+                let Value::ArenaRef(state) = value!(self.expr(arena, frame)) else {
+                    unreachable!("checked arena borrow")
+                };
+                let payload = value!(self.expr(value, frame));
+                let bytes = self.program.width(value.ty) * 8;
+                self.consume(arena, frame);
+                self.consume(value, frame);
+                self.arena_allocate(&state, payload, bytes)?
+            }
+            ExprKind::ArenaTryAlloc {
+                arena,
+                value: argument,
+                shape,
+            } => {
+                let Value::ArenaRef(state) = value!(self.expr(arena, frame)) else {
+                    unreachable!("checked arena borrow")
+                };
+                let payload = value!(self.expr(argument, frame));
+                let bytes = self.program.width(argument.ty) * 8;
+                self.consume(arena, frame);
+                self.consume(argument, frame);
+                match self.arena_try_allocate(&state, payload, bytes)? {
+                    Ok(owner) => Value::Enum {
+                        tag: shape.ok_tag,
+                        fields: vec![owner],
+                    },
+                    Err(payload) => Value::Enum {
+                        tag: shape.err_tag,
+                        fields: vec![payload],
+                    },
+                }
+            }
+            ExprKind::ArenaBoxRead(argument) => {
+                let Value::ArenaBoxRef { state, slot } = value!(self.expr(argument, frame)) else {
+                    unreachable!("checked arena box borrow")
+                };
+                state
+                    .lock()
+                    .unwrap()
+                    .slots
+                    .get(slot)
+                    .and_then(|slot| slot.clone())
+                    .ok_or_else(|| {
+                        Diagnostic::new(expr.span, "internal ownership error: stale arena box")
+                    })?
+            }
+            ExprKind::ArenaBoxTake(argument) => {
+                let Value::ArenaBox { state, slot } = value!(self.expr(argument, frame)) else {
+                    unreachable!("checked arena box take")
+                };
+                self.consume(argument, frame);
+                let payload = state
+                    .lock()
+                    .unwrap()
+                    .slots
+                    .get_mut(slot)
+                    .and_then(|slot| slot.take())
+                    .ok_or_else(|| {
+                        Diagnostic::new(expr.span, "internal ownership error: stale arena box")
+                    })?;
+                self.arena_release(&state)?;
+                payload
+            }
+            ExprKind::AllocatorNew { alloc, free } => {
+                let alloc = value!(self.expr(alloc, frame));
+                let free = value!(self.expr(free, frame));
+                let Value::Function {
+                    function: alloc_function,
+                    environment: None,
+                } = alloc
+                else {
+                    unreachable!("checked allocator allocation callback")
+                };
+                let Value::Function {
+                    function: free_function,
+                    environment: None,
+                } = free
+                else {
+                    unreachable!("checked allocator release callback")
+                };
+                Value::Allocator {
+                    alloc: alloc_function,
+                    free: free_function,
+                }
+            }
+            ExprKind::AllocBoxNew { allocator, value } => {
+                let allocator = value!(self.expr(allocator, frame));
+                let payload = value!(self.expr(value, frame));
+                let bytes = self.program.width(value.ty) * 8;
+                self.consume(value, frame);
+                self.eval_alloc_box_new(allocator, payload, bytes, expr.span)?
+            }
+            ExprKind::AllocBoxTryNew {
+                allocator,
+                value: argument,
+                shape,
+            } => {
+                let allocator = value!(self.expr(allocator, frame));
+                let payload = value!(self.expr(argument, frame));
+                let bytes = self.program.width(argument.ty) * 8;
+                self.consume(argument, frame);
+                self.eval_alloc_box_try_new(allocator, payload, bytes, *shape, expr.span)?
+            }
+            ExprKind::AllocBoxRead(argument) => {
+                let Value::Borrowed(id) = value!(self.expr(argument, frame)) else {
+                    unreachable!("checked allocator box borrow")
+                };
+                let Some(Value::AllocBox(state)) = self.heap.get(id) else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal ownership error: dangling allocator box borrow",
+                    ));
+                };
+                state.payload
+            }
+            ExprKind::AllocBoxTake(argument) => {
+                let Value::Owned(id) = value!(self.expr(argument, frame)) else {
+                    unreachable!("checked allocator box take")
+                };
+                self.consume(argument, frame);
+                let Some(Value::AllocBox(state)) = self.heap.take(id) else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal ownership error: stale allocator box",
+                    ));
+                };
+                self.stats.deallocation();
+                self.allocator_release(state.free, state.block, expr.span)?;
+                state.payload
+            }
+            ExprKind::AllocVecNew {
+                allocator,
+                capacity,
+                element,
+            } => {
+                let allocator = value!(self.expr(allocator, frame));
+                let capacity = match capacity {
+                    Some(capacity) => {
+                        let requested = value!(self.expr(capacity, frame)).scalar();
+                        Some(usize::try_from(requested).map_err(|_| {
+                            Diagnostic::new(expr.span, "panic: negative AllocVec capacity")
+                        })?)
+                    }
+                    None => None,
+                };
+                self.eval_alloc_vec_new(
+                    allocator,
+                    capacity,
+                    self.program.width(*element),
+                    expr.span,
+                )?
+            }
+            ExprKind::BoxTryNew {
+                value: argument,
+                shape,
+            } => {
+                let value = value!(self.expr(argument, frame));
+                self.consume(argument, frame);
+                if self.try_charge() {
+                    let owner = self.allocate_box(value, self.program.width(argument.ty));
+                    Value::Enum {
+                        tag: shape.ok_tag,
+                        fields: vec![owner],
+                    }
+                } else {
+                    Value::Enum {
+                        tag: shape.err_tag,
+                        fields: vec![value],
+                    }
+                }
+            }
+            ExprKind::BoxTryReuse {
+                owner,
+                payload,
+                shape,
+            } => {
+                let Value::Owned(id) = value!(self.expr(owner, frame)) else {
+                    unreachable!("checked Box.try_reuse owner")
+                };
+                let new = value!(self.expr(payload, frame));
+                self.consume(owner, frame);
+                self.consume(payload, frame);
+                let retained = self.heap.box_capacity(id);
+                let requested = self.program.width(payload.ty) * 8;
+                // Capacity includes native size-class rounding and survives
+                // narrowing reuse. Only a physical growth spends the budget.
+                let grows = requested > retained;
+                if !grows || self.try_charge() {
+                    let previous = self.heap.take(id).ok_or_else(|| {
+                        Diagnostic::new(expr.span, "internal ownership error: stale reuse box")
+                    })?;
+                    self.drop_value(previous)?;
+                    self.heap.insert(id, new);
+                    // Native fallible growth uses an exact-sized system block
+                    // rather than the infallible path's size-class rounding.
+                    self.heap
+                        .set_box_capacity(id, if grows { requested } else { retained });
+                    self.stats.reuse();
+                    Value::Enum {
+                        tag: shape.ok_tag,
+                        fields: vec![Value::Owned(id)],
+                    }
+                } else {
+                    // The payload is checked non-owning, so discarding it
+                    // loses no supplied owner; the original owner is intact.
+                    self.drop_value(new)?;
+                    Value::Enum {
+                        tag: shape.err_tag,
+                        fields: vec![Value::Owned(id)],
+                    }
+                }
+            }
+            ExprKind::BytesTryWithCapacity { capacity, shape } => {
+                const LIMIT: usize = 16 * 1024 * 1024;
+                let requested = value!(self.expr(capacity, frame)).scalar();
+                self.consume(capacity, frame);
+                let attempt = usize::try_from(requested)
+                    .ok()
+                    .filter(|capacity| *capacity <= LIMIT && self.try_charge())
+                    .and_then(|capacity| {
+                        let mut data = Vec::new();
+                        data.try_reserve_exact(capacity).ok()?;
+                        Some((capacity, data))
+                    });
+                match attempt {
+                    Some((capacity, data)) => {
+                        let buffer = self.allocate(Value::Buffer { data, capacity });
+                        Value::Enum {
+                            tag: shape.ok_tag,
+                            fields: vec![buffer],
+                        }
+                    }
+                    None => Value::Enum {
+                        tag: shape.err_tag,
+                        fields: vec![Value::Scalar(requested)],
+                    },
+                }
+            }
+            _ => unreachable!("expression dispatched to the wrong evaluator helper"),
+        };
+        Ok(Flow::Value(value))
+    }
+    #[inline(never)]
+    fn expression_call(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Flow> {
+        let panic = || Diagnostic::new(expr.span, "panic: checked arithmetic failed");
+        let value = match &expr.kind {
+            ExprKind::Call(target, args) => {
+                let mut values = Vec::new();
+                for arg in args {
+                    values.push(value!(self.expr(arg, frame)));
+                }
+                for arg in args {
+                    self.consume(arg, frame);
+                }
+                match target {
+                    Target::Io(op, shape) => self.io_call(*op, *shape, values, expr.span)?,
+                    Target::Bytes(op) => self.bytes_call(*op, values, expr.span)?,
+                    Target::String(op) => self.string_call(*op, values, expr.span)?,
+                    Target::Str(op) => self.str_call(*op, values, expr.span)?,
+                    Target::Vec(op, element) => self.vec_call(*op, *element, values, expr.span)?,
+                    Target::Slice(op, _) => self.slice_call(*op, values, expr.span)?,
+                    Target::DynArray(op, element) => {
+                        self.dyn_array_call(*op, *element, values, expr.span)?
+                    }
+                    Target::AllocVec(op, element) => {
+                        self.alloc_vec_call(*op, *element, values, expr.span)?
+                    }
+                    Target::Function(index)
+                    | Target::ObjectFunction {
+                        function: index, ..
+                    } => {
+                        let function = &self.program.functions[*index];
+                        let mut physical = Vec::with_capacity(values.len());
+                        for (position, value) in values.into_iter().enumerate() {
+                            if !function
+                                .parameter_grades
+                                .get(position)
+                                .copied()
+                                .flatten()
+                                .is_some_and(Grade::is_zero)
+                            {
+                                physical.push(value);
+                            }
+                        }
+                        self.call(*index, physical)?
+                    }
+                    Target::DynCall { spec, .. } => {
+                        let spec = self.program.dyn_calls[*spec].clone();
+                        let first = values.remove(0);
+                        let (member, receiver) = match spec.mode {
+                            ReceiverMode::Owned => match first {
+                                Value::DynObject { member, value } => {
+                                    let payload = match Arc::try_unwrap(value) {
+                                        Ok(cell) => cell.into_inner().unwrap(),
+                                        Err(cell) => cell.lock().unwrap().clone(),
+                                    };
+                                    self.stats.deallocation();
+                                    (member, payload)
+                                }
+                                other => {
+                                    return Err(Diagnostic::new(
+                                        expr.span,
+                                        format!(
+                                            "internal error: dynamic dispatch expected an owned trait object, found {other:?}"
+                                        ),
+                                    ));
+                                }
+                            },
+                            ReceiverMode::Shared | ReceiverMode::Mutable => {
+                                let Value::RecordRef(cell) = first else {
+                                    return Err(Diagnostic::new(
+                                        expr.span,
+                                        "internal error: borrowed dynamic dispatch expected a trait-object reference",
+                                    ));
+                                };
+                                let object = cell.lock().unwrap().clone();
+                                let Value::DynObject { member, value } = object else {
+                                    return Err(Diagnostic::new(
+                                        expr.span,
+                                        "internal error: borrowed dynamic dispatch reference does not point at a trait object",
+                                    ));
+                                };
+                                (member, Value::RecordRef(value))
+                            }
+                        };
+                        values.insert(0, receiver);
+                        self.call_dyn_member(&spec, member, values, expr.span)?
+                    }
+
+                    Target::UnionBorrowCall { spec, .. } => {
+                        let spec = self.program.union_calls[*spec].clone();
+                        let first = values.remove(0);
+                        let Value::RecordRef(cell) = first else {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal error: borrowed union dispatch expected a union reference",
+                            ));
+                        };
+                        let mutable = spec.mode == ReceiverMode::Mutable;
+                        let (tag, payload) = {
+                            let mut whole = cell.lock().unwrap();
+                            let Value::Union { tag, value } = &mut *whole else {
+                                return Err(Diagnostic::new(
+                                    expr.span,
+                                    "internal error: borrowed union dispatch reference does not point at a union",
+                                ));
+                            };
+                            let tag = *tag;
+                            if mutable {
+                                (tag, std::mem::replace(&mut **value, Value::Scalar(0)))
+                            } else {
+                                (tag, (**value).clone())
+                            }
+                        };
+                        let (_, _, function) = spec
+                            .members
+                            .iter()
+                            .find(|(member_tag, _, _)| *member_tag == tag)
+                            .copied()
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    expr.span,
+                                    "internal error: union member tag is not registered for this dispatch",
+                                )
+                            })?;
+                        let payload_cell = Arc::new(Mutex::new(payload));
+                        let mut args = vec![Value::RecordRef(payload_cell.clone())];
+                        for (index, value) in values.into_iter().enumerate() {
+                            if !spec
+                                .parameter_grades
+                                .get(index)
+                                .copied()
+                                .flatten()
+                                .is_some_and(Grade::is_zero)
+                            {
+                                args.push(value);
+                            }
+                        }
+                        let result = self.call(function, args)?;
+                        if mutable {
+                            let updated = match Arc::try_unwrap(payload_cell) {
+                                Ok(cell) => cell.into_inner().unwrap(),
+                                Err(cell) => cell.lock().unwrap().clone(),
+                            };
+                            *cell.lock().unwrap() = Value::Union {
+                                tag,
+                                value: Box::new(updated),
+                            };
+                        }
+                        result
+                    }
+                    Target::Panic => return Err(panic()),
+                    Target::Print => {
+                        writeln!(self.output, "{}", values[0].scalar()).map_err(|e| {
+                            Diagnostic::new(expr.span, format!("output failed: {e}"))
+                        })?;
+                        Value::Scalar(0)
+                    }
+                    Target::PrintInt(kind) => {
+                        writeln!(self.output, "{}", kind.decode(values[0].scalar())).map_err(
+                            |e| Diagnostic::new(expr.span, format!("output failed: {e}")),
+                        )?;
+                        Value::Scalar(0)
+                    }
+                    Target::PrintFloat(kind) => {
+                        writeln!(
+                            self.output,
+                            "{}",
+                            crate::float::format(*kind, values[0].scalar())
+                        )
+                        .map_err(|e| Diagnostic::new(expr.span, format!("output failed: {e}")))?;
+                        Value::Scalar(0)
+                    }
+                    Target::Float(op) => {
+                        let words = values.iter().map(Value::scalar).collect::<Vec<_>>();
+                        let (present, word) = crate::float::builtin(*op, &words);
+                        use crate::float::FloatOp;
+                        match op {
+                            FloatOp::TryFromInt {
+                                some_tag, none_tag, ..
+                            }
+                            | FloatOp::TryToF32 {
+                                some_tag, none_tag, ..
+                            }
+                            | FloatOp::TryToInt {
+                                some_tag, none_tag, ..
+                            } => Value::Enum {
+                                tag: if present { *some_tag } else { *none_tag },
+                                fields: if present {
+                                    vec![Value::Scalar(word)]
+                                } else {
+                                    vec![]
+                                },
+                            },
+                            _ => Value::Scalar(word),
+                        }
+                    }
+                    Target::Int(op, source, target) => {
+                        let words = values.iter().map(Value::scalar).collect::<Vec<_>>();
+                        let (present, word) = crate::int::builtin(*op, *source, *target, &words);
+                        use crate::int::IntOp;
+                        match op {
+                            IntOp::TryConvert { some_tag, none_tag }
+                            | IntOp::Checked(_, some_tag, none_tag)
+                            | IntOp::CharFromCode { some_tag, none_tag } => Value::Enum {
+                                tag: if present { *some_tag } else { *none_tag },
+                                fields: if present {
+                                    vec![Value::Scalar(word)]
+                                } else {
+                                    vec![]
+                                },
+                            },
+                            _ => Value::Scalar(word),
+                        }
+                    }
+                }
+            }
+            _ => unreachable!("expression dispatched to the wrong evaluator helper"),
+        };
+        Ok(Flow::Value(value))
+    }
     fn expression(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Flow> {
         if self.fuel == 0 {
             return Err(Diagnostic::new(
@@ -2929,76 +3574,19 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         self.fuel -= 1;
         let panic = || Diagnostic::new(expr.span, "panic: checked arithmetic failed");
         let result = match &expr.kind {
+            // Handler arms live in separate non-inlined methods so their
+            // locals do not enlarge every recursive `expr` frame.
             ExprKind::HandlerPush {
                 operation,
                 handler,
                 body,
-            } => {
-                let handler_value = value!(self.expr(handler, frame));
-                self.consume(handler, frame);
-                let consume = matches!(handler.ty, Type::Once(_));
-                self.dynamic_handlers.push(HandlerFrame {
-                    operation: *operation,
-                    handler: Some(handler_value),
-                    consume,
-                });
-                let flow = self.block(body, frame);
-                let popped = self.dynamic_handlers.pop();
-                if let Some(HandlerFrame {
-                    handler: Some(value),
-                    ..
-                }) = popped
-                {
-                    self.drop_value(value)?;
-                }
-                match flow? {
-                    Flow::Value(value) => value,
-                    returned => return Ok(returned),
-                }
-            }
+            } => value!(self.handler_push(*operation, handler, body, frame)),
             ExprKind::DynamicPerform {
                 operation,
                 payload,
                 resume,
                 ..
-            } => {
-                let Some(index) = self
-                    .dynamic_handlers
-                    .iter()
-                    .rposition(|frame| frame.operation == *operation && frame.handler.is_some())
-                else {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "no dynamically active handler for this operation",
-                    ));
-                };
-                let payload_value = value!(self.expr(payload, frame));
-                let resume_value = value!(self.expr(resume, frame));
-                self.consume(payload, frame);
-                self.consume(resume, frame);
-                let consume = self.dynamic_handlers[index].consume;
-                if consume {
-                    let handler = self.dynamic_handlers[index]
-                        .handler
-                        .take()
-                        .expect("handler presence checked above");
-                    self.call_value(handler, vec![payload_value, resume_value])?
-                } else {
-                    let function = match self.dynamic_handlers[index].handler.as_ref() {
-                        Some(Value::Function {
-                            function,
-                            environment: None,
-                        }) => *function,
-                        _ => {
-                            return Err(Diagnostic::new(
-                                expr.span,
-                                "internal error: copyable dynamic effect handler must be a noncapturing function",
-                            ));
-                        }
-                    };
-                    self.call(function, vec![payload_value, resume_value])?
-                }
-            }
+            } => value!(self.dynamic_perform(expr, *operation, payload, resume, frame)),
             ExprKind::Constant(n) => Value::Scalar(*n),
             // Only synthesized adapters use this placeholder, and the callee's
             // erased parameter position drops it. It is never observable.
@@ -3535,344 +4123,28 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     }
                 }
             }
-            ExprKind::BoxNew(arg) => {
-                let value = value!(self.expr(arg, frame));
-                self.consume(arg, frame);
-                self.allocate_box(value, self.program.width(arg.ty))
-            }
-            ExprKind::BoxTake(arg) => {
-                let Value::Owned(id) = value!(self.expr(arg, frame)) else {
-                    unreachable!()
-                };
-                self.consume(arg, frame);
-                let value = self.heap.take(id).ok_or_else(|| {
-                    Diagnostic::new(expr.span, "internal ownership error: stale box")
-                })?;
-                self.stats.deallocation();
-                value
-            }
-            ExprKind::BoxRead(arg) => {
-                let Value::Borrowed(id) = value!(self.expr(arg, frame)) else {
-                    unreachable!()
-                };
-                self.heap.get(id).ok_or_else(|| {
-                    Diagnostic::new(expr.span, "internal ownership error: dangling borrow")
-                })?
-            }
-            ExprKind::BoxWrite(reference, replacement) => {
-                let reference = value!(self.expr(reference, frame));
-                let Value::Borrowed(id) = reference else {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "internal ownership error: box write has no borrowed box",
-                    ));
-                };
-                let value = value!(self.expr(replacement, frame));
-                self.consume(replacement, frame);
-                if self.heap.get(id).is_none() {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "internal ownership error: dangling box write",
-                    ));
-                }
-                self.heap.insert(id, value);
-                Value::Scalar(0)
-            }
-            ExprKind::BoxReuse { owner, payload } => {
-                let Value::Owned(id) = value!(self.expr(owner, frame)) else {
-                    unreachable!("checked Box.reuse owner")
-                };
-                let new = value!(self.expr(payload, frame));
-                let capacity = self.heap.box_capacity(id);
-                // Both arguments have been evaluated. Only now is the old
-                // affine payload destroyed. The outer allocation is preserved.
-                self.consume(owner, frame);
-                self.consume(payload, frame);
-                let old = self.heap.take(id).ok_or_else(|| {
-                    Diagnostic::new(expr.span, "internal ownership error: stale reuse box")
-                })?;
-                self.drop_value(old)?;
-                self.heap.insert(id, new);
-                self.heap.set_box_capacity(id, capacity);
-                self.stats.reuse();
-                Value::Owned(id)
-            }
-            ExprKind::BoxReuseGrow { owner, payload } => {
-                let Value::Owned(id) = value!(self.expr(owner, frame)) else {
-                    unreachable!("checked Box.reuse_grow owner")
-                };
-                let new = value!(self.expr(payload, frame));
-                let retained = self.heap.box_capacity(id);
-                let requested = self.program.width(payload.ty) * 8;
-                let capacity = if requested > retained {
-                    box_allocation_capacity(requested)
-                } else {
-                    retained
-                };
-                // Both arguments are evaluated before the old payload is
-                // destroyed. The reference model always has logical room, so
-                // growth never moves the reference allocation id.
-                self.consume(owner, frame);
-                self.consume(payload, frame);
-                let old = self.heap.take(id).ok_or_else(|| {
-                    Diagnostic::new(expr.span, "internal ownership error: stale reuse box")
-                })?;
-                self.drop_value(old)?;
-                self.heap.insert(id, new);
-                self.heap.set_box_capacity(id, capacity);
-                self.stats.reuse();
-                Value::Owned(id)
-            }
-            ExprKind::ArenaNew => self.arena_new_value(None),
-            ExprKind::ArenaNewWith { strategy } => {
-                let strategy = value!(self.expr(strategy, frame));
-                let Value::Function {
-                    function,
-                    environment: None,
-                } = strategy
-                else {
-                    unreachable!("checked arena strategy is a noncapturing function")
-                };
-                self.arena_new_value(Some(function))
-            }
-            ExprKind::ArenaAlloc { arena, value } => {
-                let Value::ArenaRef(state) = value!(self.expr(arena, frame)) else {
-                    unreachable!("checked arena borrow")
-                };
-                let payload = value!(self.expr(value, frame));
-                let bytes = self.program.width(value.ty) * 8;
-                self.consume(arena, frame);
-                self.consume(value, frame);
-                self.arena_allocate(&state, payload, bytes)?
-            }
-            ExprKind::ArenaTryAlloc {
-                arena,
-                value: argument,
-                shape,
-            } => {
-                let Value::ArenaRef(state) = value!(self.expr(arena, frame)) else {
-                    unreachable!("checked arena borrow")
-                };
-                let payload = value!(self.expr(argument, frame));
-                let bytes = self.program.width(argument.ty) * 8;
-                self.consume(arena, frame);
-                self.consume(argument, frame);
-                match self.arena_try_allocate(&state, payload, bytes)? {
-                    Ok(owner) => Value::Enum {
-                        tag: shape.ok_tag,
-                        fields: vec![owner],
-                    },
-                    Err(payload) => Value::Enum {
-                        tag: shape.err_tag,
-                        fields: vec![payload],
-                    },
-                }
-            }
-            ExprKind::ArenaBoxRead(argument) => {
-                let Value::ArenaBoxRef { state, slot } = value!(self.expr(argument, frame)) else {
-                    unreachable!("checked arena box borrow")
-                };
-                state
-                    .lock()
-                    .unwrap()
-                    .slots
-                    .get(slot)
-                    .and_then(|slot| slot.clone())
-                    .ok_or_else(|| {
-                        Diagnostic::new(expr.span, "internal ownership error: stale arena box")
-                    })?
-            }
-            ExprKind::ArenaBoxTake(argument) => {
-                let Value::ArenaBox { state, slot } = value!(self.expr(argument, frame)) else {
-                    unreachable!("checked arena box take")
-                };
-                self.consume(argument, frame);
-                let payload = state
-                    .lock()
-                    .unwrap()
-                    .slots
-                    .get_mut(slot)
-                    .and_then(|slot| slot.take())
-                    .ok_or_else(|| {
-                        Diagnostic::new(expr.span, "internal ownership error: stale arena box")
-                    })?;
-                self.arena_release(&state)?;
-                payload
-            }
-            ExprKind::AllocatorNew { alloc, free } => {
-                let alloc = value!(self.expr(alloc, frame));
-                let free = value!(self.expr(free, frame));
-                let Value::Function {
-                    function: alloc_function,
-                    environment: None,
-                } = alloc
-                else {
-                    unreachable!("checked allocator allocation callback")
-                };
-                let Value::Function {
-                    function: free_function,
-                    environment: None,
-                } = free
-                else {
-                    unreachable!("checked allocator release callback")
-                };
-                Value::Allocator {
-                    alloc: alloc_function,
-                    free: free_function,
-                }
-            }
-            ExprKind::AllocBoxNew { allocator, value } => {
-                let allocator = value!(self.expr(allocator, frame));
-                let payload = value!(self.expr(value, frame));
-                let bytes = self.program.width(value.ty) * 8;
-                self.consume(value, frame);
-                self.eval_alloc_box_new(allocator, payload, bytes, expr.span)?
-            }
-            ExprKind::AllocBoxTryNew {
-                allocator,
-                value: argument,
-                shape,
-            } => {
-                let allocator = value!(self.expr(allocator, frame));
-                let payload = value!(self.expr(argument, frame));
-                let bytes = self.program.width(argument.ty) * 8;
-                self.consume(argument, frame);
-                self.eval_alloc_box_try_new(allocator, payload, bytes, *shape, expr.span)?
-            }
-            ExprKind::AllocBoxRead(argument) => {
-                let Value::Borrowed(id) = value!(self.expr(argument, frame)) else {
-                    unreachable!("checked allocator box borrow")
-                };
-                let Some(Value::AllocBox(state)) = self.heap.get(id) else {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "internal ownership error: dangling allocator box borrow",
-                    ));
-                };
-                state.payload
-            }
-            ExprKind::AllocBoxTake(argument) => {
-                let Value::Owned(id) = value!(self.expr(argument, frame)) else {
-                    unreachable!("checked allocator box take")
-                };
-                self.consume(argument, frame);
-                let Some(Value::AllocBox(state)) = self.heap.take(id) else {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "internal ownership error: stale allocator box",
-                    ));
-                };
-                self.stats.deallocation();
-                self.allocator_release(state.free, state.block, expr.span)?;
-                state.payload
-            }
-            ExprKind::AllocVecNew {
-                allocator,
-                capacity,
-                element,
-            } => {
-                let allocator = value!(self.expr(allocator, frame));
-                let capacity = match capacity {
-                    Some(capacity) => {
-                        let requested = value!(self.expr(capacity, frame)).scalar();
-                        Some(usize::try_from(requested).map_err(|_| {
-                            Diagnostic::new(expr.span, "panic: negative AllocVec capacity")
-                        })?)
-                    }
-                    None => None,
-                };
-                self.eval_alloc_vec_new(
-                    allocator,
-                    capacity,
-                    self.program.width(*element),
-                    expr.span,
-                )?
-            }
-            ExprKind::BoxTryNew {
-                value: argument,
-                shape,
-            } => {
-                let value = value!(self.expr(argument, frame));
-                self.consume(argument, frame);
-                if self.try_charge() {
-                    let owner = self.allocate_box(value, self.program.width(argument.ty));
-                    Value::Enum {
-                        tag: shape.ok_tag,
-                        fields: vec![owner],
-                    }
-                } else {
-                    Value::Enum {
-                        tag: shape.err_tag,
-                        fields: vec![value],
-                    }
-                }
-            }
-            ExprKind::BoxTryReuse {
-                owner,
-                payload,
-                shape,
-            } => {
-                let Value::Owned(id) = value!(self.expr(owner, frame)) else {
-                    unreachable!("checked Box.try_reuse owner")
-                };
-                let new = value!(self.expr(payload, frame));
-                self.consume(owner, frame);
-                self.consume(payload, frame);
-                let retained = self.heap.box_capacity(id);
-                let requested = self.program.width(payload.ty) * 8;
-                // Capacity includes native size-class rounding and survives
-                // narrowing reuse. Only a physical growth spends the budget.
-                let grows = requested > retained;
-                if !grows || self.try_charge() {
-                    let previous = self.heap.take(id).ok_or_else(|| {
-                        Diagnostic::new(expr.span, "internal ownership error: stale reuse box")
-                    })?;
-                    self.drop_value(previous)?;
-                    self.heap.insert(id, new);
-                    // Native fallible growth uses an exact-sized system block
-                    // rather than the infallible path's size-class rounding.
-                    self.heap
-                        .set_box_capacity(id, if grows { requested } else { retained });
-                    self.stats.reuse();
-                    Value::Enum {
-                        tag: shape.ok_tag,
-                        fields: vec![Value::Owned(id)],
-                    }
-                } else {
-                    // The payload is checked non-owning, so discarding it
-                    // loses no supplied owner; the original owner is intact.
-                    self.drop_value(new)?;
-                    Value::Enum {
-                        tag: shape.err_tag,
-                        fields: vec![Value::Owned(id)],
-                    }
-                }
-            }
-            ExprKind::BytesTryWithCapacity { capacity, shape } => {
-                const LIMIT: usize = 16 * 1024 * 1024;
-                let requested = value!(self.expr(capacity, frame)).scalar();
-                self.consume(capacity, frame);
-                let attempt = usize::try_from(requested)
-                    .ok()
-                    .filter(|capacity| *capacity <= LIMIT && self.try_charge())
-                    .and_then(|capacity| {
-                        let mut data = Vec::new();
-                        data.try_reserve_exact(capacity).ok()?;
-                        Some((capacity, data))
-                    });
-                match attempt {
-                    Some((capacity, data)) => {
-                        let buffer = self.allocate(Value::Buffer { data, capacity });
-                        Value::Enum {
-                            tag: shape.ok_tag,
-                            fields: vec![buffer],
-                        }
-                    }
-                    None => Value::Enum {
-                        tag: shape.err_tag,
-                        fields: vec![Value::Scalar(requested)],
-                    },
-                }
+            ExprKind::BoxNew(..)
+            | ExprKind::BoxTake(..)
+            | ExprKind::BoxRead(..)
+            | ExprKind::BoxWrite(..)
+            | ExprKind::BoxReuse { .. }
+            | ExprKind::BoxReuseGrow { .. }
+            | ExprKind::ArenaNew
+            | ExprKind::ArenaNewWith { .. }
+            | ExprKind::ArenaAlloc { .. }
+            | ExprKind::ArenaTryAlloc { .. }
+            | ExprKind::ArenaBoxRead(..)
+            | ExprKind::ArenaBoxTake(..)
+            | ExprKind::AllocatorNew { .. }
+            | ExprKind::AllocBoxNew { .. }
+            | ExprKind::AllocBoxTryNew { .. }
+            | ExprKind::AllocBoxRead(..)
+            | ExprKind::AllocBoxTake(..)
+            | ExprKind::AllocVecNew { .. }
+            | ExprKind::BoxTryNew { .. }
+            | ExprKind::BoxTryReuse { .. }
+            | ExprKind::BytesTryWithCapacity { .. } => {
+                return self.expression_allocations(expr, frame);
             }
             ExprKind::Drop(arg) => {
                 let value = value!(self.expr(arg, frame));
@@ -4079,217 +4351,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     .vec_map_call(id, functions, *grow, self.program.width(*target), expr.span)
                     .map(Flow::Value);
             }
-            ExprKind::Call(target, args) => {
-                let mut values = Vec::new();
-                for arg in args {
-                    values.push(value!(self.expr(arg, frame)));
-                }
-                for arg in args {
-                    self.consume(arg, frame);
-                }
-                match target {
-                    Target::Io(op, shape) => self.io_call(*op, *shape, values, expr.span)?,
-                    Target::Bytes(op) => self.bytes_call(*op, values, expr.span)?,
-                    Target::String(op) => self.string_call(*op, values, expr.span)?,
-                    Target::Str(op) => self.str_call(*op, values, expr.span)?,
-                    Target::Vec(op, element) => self.vec_call(*op, *element, values, expr.span)?,
-                    Target::Slice(op, _) => self.slice_call(*op, values, expr.span)?,
-                    Target::DynArray(op, element) => {
-                        self.dyn_array_call(*op, *element, values, expr.span)?
-                    }
-                    Target::AllocVec(op, element) => {
-                        self.alloc_vec_call(*op, *element, values, expr.span)?
-                    }
-                    Target::Function(index)
-                    | Target::ObjectFunction {
-                        function: index, ..
-                    } => {
-                        let function = &self.program.functions[*index];
-                        let mut physical = Vec::with_capacity(values.len());
-                        for (position, value) in values.into_iter().enumerate() {
-                            if !function
-                                .parameter_grades
-                                .get(position)
-                                .copied()
-                                .flatten()
-                                .is_some_and(Grade::is_zero)
-                            {
-                                physical.push(value);
-                            }
-                        }
-                        self.call(*index, physical)?
-                    }
-                    Target::DynCall { spec, .. } => {
-                        let spec = self.program.dyn_calls[*spec].clone();
-                        let first = values.remove(0);
-                        let (member, receiver) = match spec.mode {
-                            ReceiverMode::Owned => match first {
-                                Value::DynObject { member, value } => {
-                                    let payload = match Arc::try_unwrap(value) {
-                                        Ok(cell) => cell.into_inner().unwrap(),
-                                        Err(cell) => cell.lock().unwrap().clone(),
-                                    };
-                                    self.stats.deallocation();
-                                    (member, payload)
-                                }
-                                other => {
-                                    return Err(Diagnostic::new(
-                                        expr.span,
-                                        format!(
-                                            "internal error: dynamic dispatch expected an owned trait object, found {other:?}"
-                                        ),
-                                    ));
-                                }
-                            },
-                            ReceiverMode::Shared | ReceiverMode::Mutable => {
-                                let Value::RecordRef(cell) = first else {
-                                    return Err(Diagnostic::new(
-                                        expr.span,
-                                        "internal error: borrowed dynamic dispatch expected a trait-object reference",
-                                    ));
-                                };
-                                let object = cell.lock().unwrap().clone();
-                                let Value::DynObject { member, value } = object else {
-                                    return Err(Diagnostic::new(
-                                        expr.span,
-                                        "internal error: borrowed dynamic dispatch reference does not point at a trait object",
-                                    ));
-                                };
-                                (member, Value::RecordRef(value))
-                            }
-                        };
-                        values.insert(0, receiver);
-                        self.call_dyn_member(&spec, member, values, expr.span)?
-                    }
-
-                    Target::UnionBorrowCall { spec, .. } => {
-                        let spec = self.program.union_calls[*spec].clone();
-                        let first = values.remove(0);
-                        let Value::RecordRef(cell) = first else {
-                            return Err(Diagnostic::new(
-                                expr.span,
-                                "internal error: borrowed union dispatch expected a union reference",
-                            ));
-                        };
-                        let mutable = spec.mode == ReceiverMode::Mutable;
-                        let (tag, payload) = {
-                            let mut whole = cell.lock().unwrap();
-                            let Value::Union { tag, value } = &mut *whole else {
-                                return Err(Diagnostic::new(
-                                    expr.span,
-                                    "internal error: borrowed union dispatch reference does not point at a union",
-                                ));
-                            };
-                            let tag = *tag;
-                            if mutable {
-                                (tag, std::mem::replace(&mut **value, Value::Scalar(0)))
-                            } else {
-                                (tag, (**value).clone())
-                            }
-                        };
-                        let (_, _, function) = spec
-                            .members
-                            .iter()
-                            .find(|(member_tag, _, _)| *member_tag == tag)
-                            .copied()
-                            .ok_or_else(|| {
-                                Diagnostic::new(
-                                    expr.span,
-                                    "internal error: union member tag is not registered for this dispatch",
-                                )
-                            })?;
-                        let payload_cell = Arc::new(Mutex::new(payload));
-                        let mut args = vec![Value::RecordRef(payload_cell.clone())];
-                        for (index, value) in values.into_iter().enumerate() {
-                            if !spec
-                                .parameter_grades
-                                .get(index)
-                                .copied()
-                                .flatten()
-                                .is_some_and(Grade::is_zero)
-                            {
-                                args.push(value);
-                            }
-                        }
-                        let result = self.call(function, args)?;
-                        if mutable {
-                            let updated = match Arc::try_unwrap(payload_cell) {
-                                Ok(cell) => cell.into_inner().unwrap(),
-                                Err(cell) => cell.lock().unwrap().clone(),
-                            };
-                            *cell.lock().unwrap() = Value::Union {
-                                tag,
-                                value: Box::new(updated),
-                            };
-                        }
-                        result
-                    }
-                    Target::Panic => return Err(panic()),
-                    Target::Print => {
-                        writeln!(self.output, "{}", values[0].scalar()).map_err(|e| {
-                            Diagnostic::new(expr.span, format!("output failed: {e}"))
-                        })?;
-                        Value::Scalar(0)
-                    }
-                    Target::PrintInt(kind) => {
-                        writeln!(self.output, "{}", kind.decode(values[0].scalar())).map_err(
-                            |e| Diagnostic::new(expr.span, format!("output failed: {e}")),
-                        )?;
-                        Value::Scalar(0)
-                    }
-                    Target::PrintFloat(kind) => {
-                        writeln!(
-                            self.output,
-                            "{}",
-                            crate::float::format(*kind, values[0].scalar())
-                        )
-                        .map_err(|e| Diagnostic::new(expr.span, format!("output failed: {e}")))?;
-                        Value::Scalar(0)
-                    }
-                    Target::Float(op) => {
-                        let words = values.iter().map(Value::scalar).collect::<Vec<_>>();
-                        let (present, word) = crate::float::builtin(*op, &words);
-                        use crate::float::FloatOp;
-                        match op {
-                            FloatOp::TryFromInt {
-                                some_tag, none_tag, ..
-                            }
-                            | FloatOp::TryToF32 {
-                                some_tag, none_tag, ..
-                            }
-                            | FloatOp::TryToInt {
-                                some_tag, none_tag, ..
-                            } => Value::Enum {
-                                tag: if present { *some_tag } else { *none_tag },
-                                fields: if present {
-                                    vec![Value::Scalar(word)]
-                                } else {
-                                    vec![]
-                                },
-                            },
-                            _ => Value::Scalar(word),
-                        }
-                    }
-                    Target::Int(op, source, target) => {
-                        let words = values.iter().map(Value::scalar).collect::<Vec<_>>();
-                        let (present, word) = crate::int::builtin(*op, *source, *target, &words);
-                        use crate::int::IntOp;
-                        match op {
-                            IntOp::TryConvert { some_tag, none_tag }
-                            | IntOp::Checked(_, some_tag, none_tag)
-                            | IntOp::CharFromCode { some_tag, none_tag } => Value::Enum {
-                                tag: if present { *some_tag } else { *none_tag },
-                                fields: if present {
-                                    vec![Value::Scalar(word)]
-                                } else {
-                                    vec![]
-                                },
-                            },
-                            _ => Value::Scalar(word),
-                        }
-                    }
-                }
-            }
+            ExprKind::Call(..) => return self.expression_call(expr, frame),
             ExprKind::Return(arg) => {
                 let value = value!(self.expr(arg, frame));
                 self.consume(arg, frame);

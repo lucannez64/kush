@@ -779,3 +779,17 @@ tested: general expression-context continuations, more than one non-tail
 perform across the call stack, multishot with nonempty captures, and multishot
 handlers for declared operations (their dynamic perform always supplies the
 one-shot token). The remote Boat gate was not run from this checkout.
+
+## Evaluator stack regression after owned dynamic handlers
+
+The full Boat gate for `97e0cd1` failed in the JSON depth-limit suite with a
+host stack overflow. The evaluator's handler, allocation, and direct-call
+branches now live in non-inlined helpers, so their temporaries do not enlarge
+every recursive expression frame. Fuel and depth limits, JSON inputs, and
+cleanup behavior are unchanged.
+
+Local validation used `mbx` exclusively with `target/mbx-main` and two jobs:
+full locked workspace tests **963 passed, 0 failed**, all-targets Clippy with
+warnings denied passed, formatting passed. The previously overflowing JSON
+suite passes with the default test-thread stack. Remote validation is pending.
+The effect-row/proof branch `t3/7dc078f9` remains unmerged at this checkpoint.
