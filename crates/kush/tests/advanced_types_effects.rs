@@ -1977,3 +1977,29 @@ fn union_partition_follows_declaration_order_not_operand_order() {
     assert_eq!(value(&source("A | B | i64")), 0);
     assert_eq!(value(&source("B | A | i64")), 0);
 }
+
+#[test]
+fn dynarray_pop_waits_for_live_views() {
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [1, 2];
+            let v: &[i64] = &a[..];
+            let (a, x) = DynArray.pop(a);
+            Slice.len(v) + x
+        }"#,
+        "cannot pop from a DynArray while a slice view",
+    );
+    assert_eq!(
+        value(
+            r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1, 2];
+            let n = { let v: &[i64] = &a[..]; Slice.len(v) };
+            let (a, x) = DynArray.pop(a);
+            n + x
+        }"#
+        ),
+        4
+    );
+}

@@ -925,3 +925,63 @@ fn shared_reference_container_parameters_read_their_elements() {
         "reference result lifetime",
     );
 }
+
+#[test]
+fn writes_through_a_stored_mutable_reference_reach_the_owner_scope_check() {
+    let escape = "borrow escapes the lexical scope";
+    rejects(
+        r#"fn add<'a>(v: &mut Vec<&'a str>, s: &'a str) -> Unit ! {alloc, panic} { Vec.push(v, s); }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut v: Vec<&str> = [];
+            {
+                let r = &mut v;
+                let s = "abcd";
+                add(r, s.as_str());
+            }
+            Str.len(Vec.get(&v, 0))
+        }"#,
+        escape,
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        fn add<'a>(v: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc, panic} { Vec.push(v, p); }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut v: Vec<&Point> = [];
+            {
+                let r = &mut v;
+                let p = Point { x: 40, y: 2 };
+                add(r, &p);
+            }
+            Vec.get(&v, 0).x
+        }"#,
+        escape,
+    );
+    rejects(
+        r#"fn put<'a>(b: &mut Box<&'a str>, s: &'a str) -> Unit ! {alloc, panic} { Box.set(b, s); }
+        fn main() -> i64 ! {alloc, panic} {
+            let keep = "zz";
+            let mut b: Box<&str> = Box.new(keep.as_str());
+            {
+                let r = &mut b;
+                let s = "abcd";
+                put(r, s.as_str());
+            }
+            Str.len(Box.read(&b))
+        }"#,
+        escape,
+    );
+    agrees(
+        r#"fn add<'a>(v: &mut Vec<&'a str>, s: &'a str) -> Unit ! {alloc, panic} { Vec.push(v, s); }
+        fn main() -> i64 ! {alloc, panic} {
+            let s = "abcd";
+            let mut v: Vec<&str> = [];
+            {
+                let r = &mut v;
+                add(r, s.as_str());
+            }
+            Str.len(Vec.get(&v, 0))
+        }"#,
+        4,
+        "",
+    );
+}

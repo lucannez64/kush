@@ -344,3 +344,50 @@ fn alloc_vec_growth_releases_the_previous_owning_block() {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(&source, 5);
 }
+
+#[test]
+fn alloc_containers_reject_borrowed_and_linear_elements() {
+    rejects(
+        &format!(
+            r#"{ALLOCATOR}
+            fn main() -> i64 ! {{alloc, panic}} {{
+                let allocator = Allocator.new(block_alloc, block_free);
+                let mut v: AllocVec<&str> = AllocVec.new(allocator);
+                {{
+                    let s = "abcd";
+                    v = AllocVec.push(v, s.as_str());
+                }}
+                let t: &str = AllocVec.get(&v, 0);
+                Str.len(t)
+            }}"#
+        ),
+        "cannot hold a borrowed reference",
+    );
+    rejects(
+        &format!(
+            r#"{ALLOCATOR}
+            struct Point {{ x: i64 }}
+            fn main() -> i64 ! {{alloc, panic}} {{
+                let allocator = Allocator.new(block_alloc, block_free);
+                let p = Point {{ x: 40 }};
+                let mut v: AllocVec<&Point> = AllocVec.new(allocator);
+                v = AllocVec.push(v, &p);
+                0
+            }}"#
+        ),
+        "cannot hold a borrowed reference",
+    );
+    rejects(
+        &format!(
+            r#"{ALLOCATOR}
+            #[linear]
+            enum Ticket {{ Live }}
+            fn main() -> i64 ! {{alloc, panic}} {{
+                let allocator = Allocator.new(block_alloc, block_free);
+                let v: AllocVec<Ticket> = AllocVec.new(allocator);
+                0
+            }}"#
+        ),
+        "linear",
+    );
+}

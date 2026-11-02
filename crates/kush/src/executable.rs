@@ -20077,6 +20077,12 @@ impl Checker<'_, '_> {
                 "cannot infer the AllocVec element type; annotate the binding as AllocVec<T>",
             ));
         };
+        if crate::runtime_types::has_borrow(self.types, element) {
+            return Err(Diagnostic::new(
+                span,
+                "AllocVec cannot hold a borrowed reference, slice view, or borrowed record (including &str text views)",
+            ));
+        }
         let allocator = self.expr_expected(allocator, Some(Type::Allocator))?;
         self.expect(allocator.ty, Type::Allocator, allocator.span)?;
         let capacity = match capacity {

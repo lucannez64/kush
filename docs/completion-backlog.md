@@ -665,3 +665,24 @@ defects, fixed with regressions:
   internal error; it is now a clean rejection.
 - **Low:** multi-variable union partitions followed pattern operand order;
   they now follow generic declaration order as documented.
+
+## Mutable-owner/allocator/DynArray review follow-up
+
+An independent review of `6d48059` and `d111733` confirmed aliasing
+rejections (`f(&mut v, &mut v)`, `&mut` under live views), direct container
+write escape checks, lifetime inference against smuggling, `&Record` text
+fields, allocator growth/release through the recorded allocator, and DynArray
+view rules for push/set/assignment. It found three defects, fixed with
+regressions:
+
+- **High:** a reference written into a container through a stored `&mut`
+  reference local was recorded only on that local, so the owner escaped the
+  block-exit check and natively read a freed `String` (also `Box.set` and
+  `Vec<&Record>`). The element loan is now also recorded on the referenced
+  owner.
+- **High:** `AllocVec<T>` accepted reference/text elements without tracking
+  their provenance. `AllocBox`/`AllocVec` element types may no longer carry
+  borrows (at annotation and at `AllocVec.new`), and `AllocVec` joins `Vec` in
+  rejecting linear elements.
+- **Low:** `DynArray.pop` was accepted while a slice view of the array was
+  live, contrary to the documented contract; it is now rejected.

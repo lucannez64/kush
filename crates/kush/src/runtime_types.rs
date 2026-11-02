@@ -2297,6 +2297,14 @@ impl<'a> Types<'a> {
                         "task handles cannot be stored inside Box, ArenaBox, AllocBox, Vec, or AllocVec; join them in the scope that owns them",
                     ));
                 }
+                // User-allocator containers track no element provenance, so
+                // they hold only owned values (like `AllocBox.new` payloads).
+                if matches!(b.name.as_str(), "AllocBox" | "AllocVec") && has_borrow(self, inner) {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "AllocBox and AllocVec cannot hold a borrowed reference, slice view, or borrowed record (including &str text views)",
+                    ));
+                }
                 let inner = self.annotate_container_element(inner, arguments[0], substitution);
                 let pointer = self.pointer(inner);
                 return Ok(match b.name.as_str() {

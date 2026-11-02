@@ -59,7 +59,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
         }
     }
     for pointee in &program.pointees {
-        if let Type::Vec(p) = pointee
+        if let Type::Vec(p) | Type::AllocVec(p) = pointee
             && is_linear(
                 program.pointees[*p],
                 &linear,
@@ -1369,6 +1369,24 @@ impl Checker<'_> {
             | ExprKind::Move(slot) => *slot,
             _ => return,
         };
+        // Writing through a stored `&mut` reference local changes the
+        // container it points to. Record the element loan on that owner too,
+        // so scope-exit checks on the owner see the new source even after
+        // the reference binding itself goes out of scope.
+        if self.locals[slot].ty.is_ref() {
+            let owners = self
+                .view_loan(base)
+                .origins
+                .into_iter()
+                .filter(|owner| *owner != slot && self.is_carrier_type(self.locals[*owner].ty))
+                .collect::<Vec<_>>();
+            for owner in owners {
+                self.merge_container_slot(owner, loan.clone(), replace);
+            }
+        }
+        self.merge_container_slot(slot, loan, replace);
+    }
+    fn merge_container_slot(&mut self, slot: usize, loan: Loan, replace: bool) {
         let mut provenance = self.record_sources[slot].clone().unwrap_or_default();
         let existing = provenance.leaves.remove(&Vec::new());
         let merged = if replace {
@@ -4818,7 +4836,22 @@ impl Checker<'_> {
                 self.expr(index)?;
                 self.expr(value)?;
             }
-            ExprKind::DynArrayPop { array, .. } => self.expr(array)?,
+            ExprKind::DynArrayPop { array, .. } => {
+                // `pop` returns a shorter array value; while a slice view of
+                // the owner is live the owner must stay unchanged, as for
+                // push, set, and assignment.
+                if let ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot) =
+                    &through_coerce(array).kind
+                    && self.any_loan_at(*slot, expr_ptr)
+                {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "cannot pop from a DynArray while a slice view of it is live",
+                    )
+                    .with_note(self.locals[*slot].span, "owner declared here"));
+                }
+                self.expr(array)?;
+            }
             ExprKind::HandlerPush { handler, body, .. } => {
                 self.expr(handler)?;
                 self.block(body)?;
