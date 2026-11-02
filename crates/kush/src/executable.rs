@@ -7886,7 +7886,27 @@ impl<'a> Functions<'a> {
                             .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
                     })
             });
-            if matching.is_empty() && !container_leaf {
+            // A shared reference field stored inside the referent of a
+            // reference parameter is caller-owned storage too. Its declared
+            // field lifetime was instantiated in the parameter's record type,
+            // so projecting it through the reference keeps that relation.
+            let referent_field_leaf = |wanted_mutable: bool| {
+                parameters.iter().any(|ty| {
+                    ty.is_ref()
+                        && ty.ref_pointee().is_some_and(|pointer| {
+                            crate::runtime_types::borrow_leaves(types, types.pointees[pointer])
+                                .iter()
+                                .any(|leaf| {
+                                    leaf.mutable == wanted_mutable
+                                        && leaf.lifetime.as_ref().is_some_and(|name| {
+                                            outlives(&lifetime_bounds, name, lifetime)
+                                        })
+                                })
+                        })
+                })
+            };
+            let mutable_result = matches!(result, Type::RefMut(_));
+            if matching.is_empty() && !container_leaf && !referent_field_leaf(mutable_result) {
                 return Err(Diagnostic::new(
                     f.result.span,
                     format!(
@@ -7895,8 +7915,9 @@ impl<'a> Functions<'a> {
                     ),
                 ));
             }
-            if matches!(result, Type::RefMut(_))
+            if mutable_result
                 && !matching.iter().any(|(_, ty)| matches!(ty, Type::RefMut(_)))
+                && !referent_field_leaf(true)
                 && !parameters.iter().any(|ty| {
                     crate::runtime_types::borrow_leaves(types, *ty)
                         .iter()
@@ -18590,7 +18611,7 @@ impl Checker<'_, '_> {
                     if self.owned_type(ty)
                         || self.linear_type(ty)
                         || ty.is_view()
-                        || ty.is_ref()
+                        || matches!(ty, Type::RefMut(_))
                         || ty.layout().is_some_and(|id| self.types.enums[id].borrowed)
                         || ty
                             .layout()
@@ -18694,7 +18715,7 @@ impl Checker<'_, '_> {
             if self.owned_type(ty)
                 || self.linear_type(ty)
                 || ty.is_view()
-                || ty.is_ref()
+                || matches!(ty, Type::RefMut(_))
                 || ty.layout().is_some_and(|id| self.types.enums[id].borrowed)
                 || ty
                     .layout()

@@ -953,13 +953,27 @@ impl Checker<'_> {
             return loan.clone();
         }
         match &expr.kind {
-            ExprKind::Borrow(slot) if expr.ty.is_ref() => Loan {
-                origins: BTreeSet::from([*slot]),
-                mutable: matches!(expr.ty, Type::RefMut(_)),
-                splits: SplitLabels::default(),
-                lifetime: None,
-                field: self.projection_field(expr),
-            },
+            ExprKind::Borrow(slot) if expr.ty.is_ref() => {
+                // A reference to a borrowed record or reference container
+                // keeps every leaf that record already borrows loaned as well.
+                // Passing `&holder` to a helper therefore cannot outlive the
+                // storage behind `holder`'s reference fields.
+                let mut origins = BTreeSet::from([*slot]);
+                if self.is_carrier_type(self.locals[*slot].ty) {
+                    if let Some(provenance) = &self.record_sources[*slot] {
+                        for leaf in provenance.leaves.values() {
+                            origins.extend(leaf.origins.iter().copied());
+                        }
+                    }
+                }
+                Loan {
+                    origins,
+                    mutable: matches!(expr.ty, Type::RefMut(_)),
+                    splits: SplitLabels::default(),
+                    lifetime: None,
+                    field: self.projection_field(expr),
+                }
+            }
             ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot)
                 if expr.ty.is_ref() =>
             {
@@ -1020,6 +1034,30 @@ impl Checker<'_> {
                 },
             },
             ExprKind::Project(base, offset) => {
+                if base.ty.is_ref() {
+                    // A shared reference field projected through `&Record`
+                    // reads the stored pointer; it aliases the same storage as
+                    // the record's construction did. The field's declared
+                    // lifetime is already instantiated in the record type.
+                    let Some(pointer) = base.ty.ref_pointee() else {
+                        return Loan::default();
+                    };
+                    let referent = self.pointees[pointer];
+                    let Some(index) = self.field_index(referent, *offset) else {
+                        return Loan::default();
+                    };
+                    let declared = referent
+                        .layout()
+                        .and_then(|id| self.enums[id].field_lifetimes.get(index).cloned())
+                        .flatten();
+                    return Loan {
+                        origins: self.view_origins(base),
+                        mutable: false,
+                        splits: SplitLabels::default(),
+                        lifetime: declared.or_else(|| self.view_loan(base).lifetime),
+                        field: None,
+                    };
+                }
                 let Some(index) = self.field_index(base.ty, *offset) else {
                     return Loan::default();
                 };
@@ -2221,6 +2259,15 @@ impl Checker<'_> {
                     out.extend(origins.iter().copied());
                 }
             }
+            ExprKind::Borrow(slot) if self.is_carrier_type(self.locals[*slot].ty) => {
+                // `&record` also exposes the record's own borrowed leaves.
+                out.insert(*slot);
+                if let Some(provenance) = &self.record_sources[*slot] {
+                    for leaf in provenance.leaves.values() {
+                        out.extend(leaf.origins.iter().copied());
+                    }
+                }
+            }
             ExprKind::Peek(slot)
             | ExprKind::Borrow(slot)
             | ExprKind::Local(slot)
@@ -2228,7 +2275,7 @@ impl Checker<'_> {
                 out.insert(*slot);
             }
             ExprKind::Slice { base, .. } => self.collect_view_origins(base, out),
-            ExprKind::Project(..) if expr.ty.is_slice() => {
+            ExprKind::Project(..) if expr.ty.is_slice() || expr.ty.is_ref() => {
                 out.extend(self.view_loan(expr).origins.iter().copied());
             }
             ExprKind::Coerce { value, .. } => self.collect_view_origins(value, out),

@@ -193,16 +193,78 @@ fn reference_field_escapes_and_owner_moves_are_rejected() {
         }"#,
         "cannot move or drop an owner or view",
     );
-    // A reference field reached through a record reference is deliberately
-    // outside the lexical field-read subset.
-    rejects(
+    // A shared reference field can be read through a shared record
+    // reference; the field's owner stays loaned through the projection.
+    agrees(
         r#"struct Point { x: i64, y: i64 }
         struct Holder<'a> { point: &'a Point }
+        fn read<'a>(holder: &'a Holder<'a>) -> i64 ! {panic} {
+            holder.point.x + holder.point.y
+        }
+        fn main() -> i64 ! {panic} {
+            let p = Point { x: 40, y: 2 };
+            let holder = Holder { point: &p };
+            read(&holder)
+        }"#,
+        42,
+        "",
+    );
+    // Returning the field through the record reference keeps the pointed-to
+    // owner loaned after the call returns.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point }
+        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {panic} {
+            holder.point
+        }
+        fn main() -> i64 ! {panic} {
+            let p = Point { x: 40, y: 2 };
+            let holder = Holder { point: &p };
+            get(&holder).x + p.y
+        }"#,
+        42,
+        "",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a mut Point }
         fn read<'a>(holder: &'a Holder<'a>) -> i64 ! {panic} {
             holder.point.x
         }
         fn main() -> i64 ! {panic} { 0 }"#,
         "cannot be read through a record reference",
+    );
+    // The projected field keeps the pointed-to owner loaned after the call.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point }
+        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {panic} {
+            holder.point
+        }
+        fn main() -> i64 ! {panic} {
+            let mut p = Point { x: 40, y: 2 };
+            let holder = Holder { point: &p };
+            let r = get(&holder);
+            p = Point { x: 1, y: 1 };
+            r.x
+        }"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    // Nor may the record itself be replaced while the projection is live.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point }
+        fn get<'a>(holder: &'a Holder<'a>) -> &'a Point ! {panic} {
+            holder.point
+        }
+        fn main() -> i64 ! {panic} {
+            let p = Point { x: 40, y: 2 };
+            let mut holder = Holder { point: &p };
+            let r = get(&holder);
+            holder = Holder { point: &p };
+            r.x
+        }"#,
+        "cannot replace an owner",
     );
 }
 
