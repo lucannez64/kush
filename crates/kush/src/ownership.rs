@@ -2811,7 +2811,8 @@ impl Checker<'_> {
                 "a borrowed slice return requires a declared result lifetime",
             ));
         };
-        if !view_lifetime.is_some_and(|view| self.actual_outlives(view, lifetime)) {
+        let internal = is_internal_lifetime(lifetime);
+        if !internal && !view_lifetime.is_some_and(|view| self.actual_outlives(view, lifetime)) {
             return Err(Diagnostic::new(
                 span,
                 format!(
@@ -2827,6 +2828,62 @@ impl Checker<'_> {
             ));
         }
         for origin in origins {
+            if internal {
+                // An inferred multi-source result has no caller-nameable
+                // lifetime. It may return any parameter-derived view; the call
+                // site unions every source loan, so no owner can be moved while
+                // the result is live, and the view cannot be named as a caller
+                // lifetime.
+                if *origin < self.parameter_count {
+                    if !self.parameter_has_borrow_capability(*origin) {
+                        return Err(Diagnostic::new(
+                            span,
+                            "borrowed return would dangle: the returned view does not name a borrowed parameter",
+                        )
+                        .with_note(self.locals[*origin].span, "borrowed storage declared here"));
+                    }
+                    if mutable && !self.parameter_is_mutable_capability(*origin) {
+                        return Err(Diagnostic::new(
+                            span,
+                            "an exclusive '&mut [T]' return cannot derive from a shared parameter",
+                        )
+                        .with_note(self.locals[*origin].span, "shared storage declared here"));
+                    }
+                } else if self.is_local_view(*origin) {
+                    if mutable && !self.view_mut[*origin] {
+                        return Err(Diagnostic::new(
+                            span,
+                            "an exclusive '&mut [T]' return cannot derive from a shared child view",
+                        )
+                        .with_note(self.locals[*origin].span, "shared view declared here"));
+                    }
+                    for root in self.roots_of(*origin) {
+                        if root >= self.parameter_count
+                            || !self.parameter_has_borrow_capability(root)
+                        {
+                            return Err(Diagnostic::new(
+                                span,
+                                "borrowed return would dangle: the returned view borrows a stack local or temporary",
+                            )
+                            .with_note(self.locals[root].span, "borrowed storage declared here"));
+                        }
+                        if mutable && !self.parameter_is_mutable_capability(root) {
+                            return Err(Diagnostic::new(
+                                span,
+                                "an exclusive '&mut [T]' return cannot derive from shared parameter storage",
+                            )
+                            .with_note(self.locals[root].span, "shared storage declared here"));
+                        }
+                    }
+                } else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "borrowed return would dangle: the returned view borrows a stack local or temporary",
+                    )
+                    .with_note(self.locals[*origin].span, "borrowed storage declared here"));
+                }
+                continue;
+            }
             if *origin < self.parameter_count {
                 let element = &self.locals[*origin];
                 if !self.parameter_carries_lifetime(*origin, lifetime, mutable) {
@@ -2876,7 +2933,8 @@ impl Checker<'_> {
                 "a returned borrowed reference requires a declared result lifetime",
             ));
         };
-        if !view_lifetime.is_some_and(|view| self.actual_outlives(view, lifetime)) {
+        let internal = is_internal_lifetime(lifetime);
+        if !internal && !view_lifetime.is_some_and(|view| self.actual_outlives(view, lifetime)) {
             return Err(Diagnostic::new(
                 span,
                 format!(
@@ -2892,6 +2950,60 @@ impl Checker<'_> {
             ));
         }
         for origin in origins {
+            if internal {
+                // Inferred multi-source reference result: any parameter-derived
+                // reference is allowed, and the caller keeps every source
+                // loaned. The anonymous result cannot name a caller lifetime.
+                if *origin < self.parameter_count {
+                    if !self.parameter_has_borrow_capability(*origin) {
+                        return Err(Diagnostic::new(
+                            span,
+                            "returned reference would dangle: it does not name a borrowed parameter",
+                        )
+                        .with_note(self.locals[*origin].span, "borrowed storage declared here"));
+                    }
+                    if mutable && !self.parameter_is_mutable_capability(*origin) {
+                        return Err(Diagnostic::new(
+                            span,
+                            "an exclusive reference return cannot derive from a shared parameter",
+                        )
+                        .with_note(self.locals[*origin].span, "shared storage declared here"));
+                    }
+                } else if self.is_local_view(*origin) {
+                    if mutable && !self.view_mut[*origin] {
+                        return Err(Diagnostic::new(
+                            span,
+                            "an exclusive reference return cannot derive from a shared stored reference",
+                        )
+                        .with_note(self.locals[*origin].span, "shared reference declared here"));
+                    }
+                    for root in self.roots_of(*origin) {
+                        if root >= self.parameter_count
+                            || !self.parameter_has_borrow_capability(root)
+                        {
+                            return Err(Diagnostic::new(
+                                span,
+                                "returned reference would dangle: it is reborrowed from a stack local or by-value parameter",
+                            )
+                            .with_note(self.locals[root].span, "borrowed storage declared here"));
+                        }
+                        if mutable && !self.parameter_is_mutable_capability(root) {
+                            return Err(Diagnostic::new(
+                                span,
+                                "an exclusive reference return cannot derive from shared parameter storage",
+                            )
+                            .with_note(self.locals[root].span, "shared storage declared here"));
+                        }
+                    }
+                } else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "returned reference would dangle: it borrows a stack local, a record value, or another non-reference place",
+                    )
+                    .with_note(self.locals[*origin].span, "borrowed storage declared here"));
+                }
+                continue;
+            }
             if *origin >= self.parameter_count && self.is_local_view(*origin) {
                 // A stored reference local is a lexical child of the reference
                 // it was derived from. Nothing here owns storage, so every
@@ -3015,6 +3127,22 @@ impl Checker<'_> {
             ));
         }
         Ok(())
+    }
+    /// Whether a parameter can supply a borrow at all. Used for inferred
+    /// anonymous results, which are not tied to a named lifetime.
+    fn parameter_has_borrow_capability(&self, slot: usize) -> bool {
+        let ty = self.locals[slot].ty;
+        ty.is_view() || ty.is_ref() || self.is_carrier_type(ty)
+    }
+    /// Whether a parameter supplies exclusive storage.
+    fn parameter_is_mutable_capability(&self, slot: usize) -> bool {
+        let ty = self.locals[slot].ty;
+        ty.is_mut_slice()
+            || matches!(ty, Type::RefMut(_))
+            || (self.is_carrier_type(ty)
+                && leaves_of(self.enums, self.pointees, self.reference_labels, ty)
+                    .iter()
+                    .any(|leaf| leaf.mutable))
     }
     /// Whether a parameter carries `lifetime` with a compatible capability for
     /// a returned view. An exclusive result requires an exclusive parameter or

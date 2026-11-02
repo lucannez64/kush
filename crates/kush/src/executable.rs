@@ -2341,6 +2341,278 @@ fn value_lifetime_candidates<'a>(
         _ => {}
     }
 }
+/// Record lifetimes introduced by local `let` bindings, so result inference can
+/// follow a borrow through destructuring and simple aliases. This is a
+/// conservative syntactic propagation: a binding receives a lifetime only when
+/// its initializer has exactly one candidate lifetime. Anything ambiguous keeps
+/// the existing explicit-annotation error.
+fn collect_local_lifetimes<'a>(
+    resolution: &Resolution,
+    declared: &BTreeMap<BindingId, Declared<'a>>,
+    block: &ast::Block,
+    parameter_lifetimes: &mut BTreeMap<BindingId, String>,
+    parameter_field_lifetimes: &mut BTreeMap<BindingId, BTreeMap<String, String>>,
+) {
+    for statement in &block.statements {
+        match statement {
+            ast::Statement::Let { pattern, value, .. } => {
+                bind_local_lifetime(
+                    resolution,
+                    declared,
+                    pattern,
+                    value,
+                    parameter_lifetimes,
+                    parameter_field_lifetimes,
+                );
+                collect_expr_local_lifetimes(
+                    resolution,
+                    declared,
+                    value,
+                    parameter_lifetimes,
+                    parameter_field_lifetimes,
+                );
+            }
+            ast::Statement::Expr(expr) => collect_expr_local_lifetimes(
+                resolution,
+                declared,
+                expr,
+                parameter_lifetimes,
+                parameter_field_lifetimes,
+            ),
+        }
+    }
+    if let Some(tail) = &block.tail {
+        collect_expr_local_lifetimes(
+            resolution,
+            declared,
+            tail,
+            parameter_lifetimes,
+            parameter_field_lifetimes,
+        );
+    }
+}
+
+fn collect_expr_local_lifetimes<'a>(
+    resolution: &Resolution,
+    declared: &BTreeMap<BindingId, Declared<'a>>,
+    expr: &ast::Expr,
+    parameter_lifetimes: &mut BTreeMap<BindingId, String>,
+    parameter_field_lifetimes: &mut BTreeMap<BindingId, BTreeMap<String, String>>,
+) {
+    match &expr.kind {
+        ast::ExprKind::Block(block) => collect_local_lifetimes(
+            resolution,
+            declared,
+            block,
+            parameter_lifetimes,
+            parameter_field_lifetimes,
+        ),
+        ast::ExprKind::If {
+            then, otherwise, ..
+        } => {
+            collect_local_lifetimes(
+                resolution,
+                declared,
+                then,
+                parameter_lifetimes,
+                parameter_field_lifetimes,
+            );
+            if let Some(otherwise) = otherwise {
+                collect_expr_local_lifetimes(
+                    resolution,
+                    declared,
+                    otherwise,
+                    parameter_lifetimes,
+                    parameter_field_lifetimes,
+                );
+            }
+        }
+        ast::ExprKind::Match { arms, .. } => {
+            for arm in arms {
+                collect_expr_local_lifetimes(
+                    resolution,
+                    declared,
+                    &arm.body,
+                    parameter_lifetimes,
+                    parameter_field_lifetimes,
+                );
+            }
+        }
+        ast::ExprKind::While { body, .. } | ast::ExprKind::Loop(body) => {
+            collect_local_lifetimes(
+                resolution,
+                declared,
+                body,
+                parameter_lifetimes,
+                parameter_field_lifetimes,
+            );
+        }
+        // A lambda body is a separate callable scope; its own inference runs
+        // when that body is checked.
+        ast::ExprKind::Lambda(_) => {}
+        _ => {}
+    }
+}
+
+fn bind_local_lifetime<'a>(
+    resolution: &Resolution,
+    declared: &BTreeMap<BindingId, Declared<'a>>,
+    pattern: &ast::Pattern,
+    value: &ast::Expr,
+    parameter_lifetimes: &mut BTreeMap<BindingId, String>,
+    parameter_field_lifetimes: &mut BTreeMap<BindingId, BTreeMap<String, String>>,
+) {
+    let chain = field_chain(resolution, value);
+    match &pattern.kind {
+        ast::PatternKind::Name(_) => {
+            let Some(id) = resolution.binder(pattern.span) else {
+                return;
+            };
+            let mut candidates = BTreeSet::new();
+            value_lifetime_candidates(
+                resolution,
+                declared,
+                value,
+                parameter_lifetimes,
+                parameter_field_lifetimes,
+                &mut candidates,
+            );
+            if candidates.len() == 1 {
+                parameter_lifetimes.insert(id, candidates.into_iter().next().unwrap());
+            }
+            // A plain alias of a borrowed record keeps the same field paths.
+            if let Some((root, path)) = chain
+                && let Some(fields) = parameter_field_lifetimes.get(&root).cloned()
+            {
+                let prefix = path.join(".");
+                let mut copied = BTreeMap::new();
+                for (name, lifetime) in fields {
+                    let stripped = if prefix.is_empty() {
+                        Some(name.as_str())
+                    } else {
+                        name.strip_prefix(&format!("{prefix}."))
+                    };
+                    if let Some(stripped) = stripped {
+                        copied.insert(stripped.to_owned(), lifetime);
+                    }
+                }
+                if !copied.is_empty() {
+                    parameter_field_lifetimes.insert(id, copied);
+                }
+            }
+        }
+        ast::PatternKind::Record { fields, .. } | ast::PatternKind::Structural { fields, .. } => {
+            let Some((root, base)) = chain else {
+                return;
+            };
+            for (name, subpattern) in fields {
+                let mut path = base.clone();
+                path.push(name.clone());
+                let lifetime = parameter_field_lifetimes
+                    .get(&root)
+                    .and_then(|fields| fields.get(&path.join(".")).cloned());
+                if let Some(lifetime) = lifetime {
+                    if let ast::PatternKind::Name(_) = subpattern.kind
+                        && let Some(id) = resolution.binder(subpattern.span)
+                    {
+                        parameter_lifetimes.insert(id, lifetime);
+                    }
+                }
+                if let ast::PatternKind::Name(_) = subpattern.kind
+                    && let Some(id) = resolution.binder(subpattern.span)
+                    && let Some(fields) = parameter_field_lifetimes.get(&root).cloned()
+                {
+                    // The binding may itself be a nested borrowed record; keep
+                    // its child field lifetimes for a later destructuring.
+                    let prefix = format!("{}.", path.join("."));
+                    let mut copied = BTreeMap::new();
+                    for (name, lifetime) in fields {
+                        if let Some(stripped) = name.strip_prefix(&prefix) {
+                            copied.insert(stripped.to_owned(), lifetime);
+                        }
+                    }
+                    if !copied.is_empty() {
+                        parameter_field_lifetimes.insert(id, copied);
+                    }
+                }
+                if matches!(
+                    subpattern.kind,
+                    ast::PatternKind::Record { .. } | ast::PatternKind::Structural { .. }
+                ) {
+                    // Nested destructuring needs a synthetic root for the
+                    // sub-record. Reuse the original root and extend the path
+                    // through each nested field below.
+                    bind_nested_record_lifetime(
+                        resolution,
+                        subpattern,
+                        &root,
+                        &path,
+                        parameter_lifetimes,
+                        parameter_field_lifetimes,
+                    );
+                }
+            }
+        }
+        ast::PatternKind::Type { inner, .. } => bind_local_lifetime(
+            resolution,
+            declared,
+            inner,
+            value,
+            parameter_lifetimes,
+            parameter_field_lifetimes,
+        ),
+        ast::PatternKind::Or(patterns) => {
+            for pattern in patterns {
+                bind_local_lifetime(
+                    resolution,
+                    declared,
+                    pattern,
+                    value,
+                    parameter_lifetimes,
+                    parameter_field_lifetimes,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn bind_nested_record_lifetime(
+    resolution: &Resolution,
+    pattern: &ast::Pattern,
+    root: &BindingId,
+    base: &[String],
+    parameter_lifetimes: &mut BTreeMap<BindingId, String>,
+    parameter_field_lifetimes: &mut BTreeMap<BindingId, BTreeMap<String, String>>,
+) {
+    let (ast::PatternKind::Record { fields, .. } | ast::PatternKind::Structural { fields, .. }) =
+        &pattern.kind
+    else {
+        return;
+    };
+    for (name, subpattern) in fields {
+        let mut path = base.to_vec();
+        path.push(name.clone());
+        let lifetime = parameter_field_lifetimes
+            .get(root)
+            .and_then(|fields| fields.get(&path.join(".")).cloned());
+        if let Some(lifetime) = lifetime
+            && let ast::PatternKind::Name(_) = subpattern.kind
+            && let Some(id) = resolution.binder(subpattern.span)
+        {
+            parameter_lifetimes.insert(id, lifetime);
+        }
+        bind_nested_record_lifetime(
+            resolution,
+            subpattern,
+            root,
+            &path,
+            parameter_lifetimes,
+            parameter_field_lifetimes,
+        );
+    }
+}
+
 /// Parameter indices of `callee` whose written borrow lifetime supplies its
 /// result. An explicit result lifetime selects every parameter that mentions
 /// it; an elided borrowed result selects the single input lifetime, if any.
@@ -8195,6 +8467,18 @@ impl<'a> Functions<'a> {
                 }
             }
         }
+        if let Some(body) = &f.body {
+            // Local destructuring and simple aliases can carry a parameter
+            // lifetime into the return position. Propagate them before the
+            // result lifetime seed is chosen.
+            collect_local_lifetimes(
+                resolution,
+                &self.declared,
+                body,
+                &mut parameter_binder_lifetimes,
+                &mut parameter_field_lifetimes,
+            );
+        }
         let (result_ty, result_grade) =
             result_contract(resolution, types, &grade_substitution, &f.result)?;
         let result = types.ty_in(&result_ty, &substitution)?;
@@ -8265,6 +8549,16 @@ impl<'a> Functions<'a> {
                         let inferred = body_lifetimes.iter().cloned().collect::<Vec<_>>();
                         if let [only] = inferred.as_slice() {
                             Some(only.clone())
+                        } else if inferred.len() > 1 {
+                            // The body can return a borrow from several input
+                            // lifetimes. The result is an anonymous internal
+                            // lifetime: it is outlived by every contributing
+                            // source, so both backends still retain all owners
+                            // through the result's last use. At a call site the
+                            // shortest provable caller lifetime is selected, or
+                            // the result stays anonymous when no order can be
+                            // proved (see instantiate_result_lifetime).
+                            Some(self.fresh_elided_lifetime())
                         } else {
                             let mut diagnostic = Diagnostic::new(
                                 f.result.span,
@@ -8308,7 +8602,10 @@ impl<'a> Functions<'a> {
         // more than one parameter borrow. The inferred edges are closed
         // transitively and used by the same call-site validation as explicit
         // bounds.
-        if result_was_explicit
+        let inferred_internal_result = result_lifetime
+            .as_deref()
+            .is_some_and(|name| name.starts_with('<'));
+        if (result_was_explicit || inferred_internal_result)
             && (result.is_view() || result.is_ref())
             && let Some(result_lifetime) = &result_lifetime
             && let Some(body) = &f.body
@@ -8329,15 +8626,23 @@ impl<'a> Functions<'a> {
                     &mut sources,
                 );
             }
-            // Infer only between a parameter's own declared lifetime and the
-            // result. A record field's lifetime is already an explicit part of
-            // the parameter type, so selecting a different field lifetime
-            // remains an explicit error rather than silently adding a bound.
-            let parameter_bound_lifetimes = parameter_lifetimes
-                .iter()
-                .flatten()
-                .cloned()
-                .collect::<BTreeSet<_>>();
+            // An explicit result may only receive bounds from a parameter's
+            // own declared lifetime: selecting a different field lifetime of a
+            // multi-lifetime record stays an explicit error. An inferred
+            // anonymous result may also be bounded by record-field lifetimes,
+            // which is exactly the multi-source intersection case.
+            let parameter_bound_lifetimes = if inferred_internal_result {
+                input_lifetimes
+                    .iter()
+                    .map(|(name, _, _)| name.clone())
+                    .collect::<BTreeSet<_>>()
+            } else {
+                parameter_lifetimes
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            };
             sources.retain(|source| parameter_bound_lifetimes.contains(source));
             for source in sources {
                 if source == *result_lifetime
