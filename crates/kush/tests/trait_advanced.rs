@@ -452,6 +452,111 @@ fn coherence_rejects_duplicate_and_incomparable_overlaps() {
 }
 
 #[test]
+fn associated_type_defaults_are_inherited_and_can_chain() {
+    agrees(
+        r#"
+        struct Point { x: i64 }
+        trait Scaled {
+            type Base = i64;
+            type Out = Self.Base;
+            fn scaled(self: Self) -> Self.Out ! {panic};
+        }
+        impl Scaled for Point {
+            type Base = i64;
+            fn scaled(self: Self) -> i64 ! {panic} { self.x * 3 }
+        }
+        fn main() -> i64 ! {io, panic} {
+            let point = Point { x: 4 };
+            print_i64(point.scaled());
+            0
+        }"#,
+        0,
+        "12\n",
+    );
+}
+
+#[test]
+fn associated_type_defaults_substitute_trait_arguments_and_may_be_overridden() {
+    agrees(
+        r#"
+        struct Point { x: i64 }
+        trait Convert<T> {
+            type Out = T;
+            fn render(self: Self) -> Self.Out ! {panic};
+        }
+        impl Convert<i64> for Point {
+            fn render(self: Self) -> i64 ! {panic} { self.x }
+        }
+        trait Flagged {
+            type Out = i64;
+            fn flagged(self: Self) -> Self.Out ! {panic};
+        }
+        impl Flagged for Point {
+            type Out = Bool;
+            fn flagged(self: Self) -> Bool ! {panic} { self.x == 0 }
+        }
+        fn main() -> i64 ! {io, panic} {
+            let point = Point { x: 9 };
+            print_i64(point.Convert::<i64>.render());
+            if point.flagged() { print_i64(1); } else { print_i64(0); }
+            0
+        }"#,
+        0,
+        "9\n0\n",
+    );
+}
+
+#[test]
+fn associated_type_defaults_agree_across_trait_object_members() {
+    agrees(
+        r#"
+        struct A { x: i64 }
+        struct B { y: i64 }
+        trait Show {
+            type Out = i64;
+            fn show(self: Self) -> Self.Out ! {panic};
+        }
+        impl Show for A { fn show(self: Self) -> i64 ! {panic} { self.x } }
+        impl Show for B { fn show(self: Self) -> i64 ! {panic} { self.y } }
+        fn main() -> i64 ! {io, panic} {
+            let object: dyn Show = B { y: 7 };
+            print_i64(object.show());
+            0
+        }"#,
+        0,
+        "7\n",
+    );
+}
+
+#[test]
+fn associated_type_default_cycles_and_invalid_defaults_are_rejected() {
+    rejects(
+        r#"
+        struct Point { x: i64 }
+        trait Bad { type A = Self.B; type B = Self.A; fn value(self: Self) -> Self.A ! {panic}; }
+        impl Bad for Point { fn value(self: Self) -> i64 ! {panic} { self.x } }
+        fn main() -> i64 ! {} { 0 }"#,
+        "associated type default cycle",
+    );
+    rejects(
+        r#"
+        struct Point { x: i64 }
+        trait Bad { type A = Self.Missing; fn value(self: Self) -> Self.A ! {panic}; }
+        impl Bad for Point { fn value(self: Self) -> i64 ! {panic} { self.x } }
+        fn main() -> i64 ! {} { 0 }"#,
+        "not a declared associated type",
+    );
+    rejects(
+        r#"
+        struct Point { x: i64 }
+        trait Bad { type A = Self; }
+        impl Bad for Point { }
+        fn main() -> i64 ! {} { 0 }"#,
+        "may not mention bare 'Self'",
+    );
+}
+
+#[test]
 fn closed_world_trait_objects_dispatch_and_clean_up_ownership() {
     let stats = agrees(
         r#"

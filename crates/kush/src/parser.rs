@@ -484,14 +484,7 @@ impl Parser {
         if self.eat(&Kind::Type) {
             let name = self.ident()?;
             let value = if self.eat(&Kind::Eq) {
-                let value = self.ty()?;
-                if declaration {
-                    return Err(Diagnostic::new(
-                        value.span,
-                        "an associated type declaration in a trait may not provide a default type; every impl must define it",
-                    ));
-                }
-                Some(value)
+                Some(self.ty()?)
             } else {
                 if !declaration {
                     return Err(Diagnostic::new(

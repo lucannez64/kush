@@ -1884,7 +1884,14 @@ struct TraitMethod<'a> {
 /// One associated item declared by a trait.
 #[derive(Debug, Clone)]
 enum TraitAssociated {
-    Type,
+    /// An associated type declaration, optionally with a default type that an
+    /// impl inherits when it omits `type Name = ...`.
+    Type {
+        /// A default type, substituted with the impl's trait arguments and
+        /// materialized per impl. It may mention the trait's parameters but
+        /// not `Self`; `Self::Other` is permitted and checked for cycles.
+        default: Option<ast::Type>,
+    },
     Const {
         ty: ast::Type,
         /// A default value inherited by impls that omit the constant.
@@ -3369,6 +3376,144 @@ fn checked_method_receiver(
     }
     Ok(expected_receiver)
 }
+/// Collect every `Self::Name` projection mentioned by a type. Used to validate
+/// associated type defaults and reject cyclic default chains before lowering.
+fn type_self_associations(ty: &ast::Type, out: &mut BTreeSet<String>) {
+    match &ty.kind {
+        ast::TypeKind::Named { path, arguments } => {
+            if path.len() == 2 && path[0] == "Self" {
+                out.insert(path[1].clone());
+            }
+            for argument in arguments {
+                type_self_associations(argument, out);
+            }
+        }
+        ast::TypeKind::Tuple(items) => {
+            for item in items {
+                type_self_associations(item, out);
+            }
+        }
+        ast::TypeKind::Structural(fields) => {
+            for field in fields {
+                type_self_associations(&field.ty, out);
+            }
+        }
+        ast::TypeKind::Slice(inner)
+        | ast::TypeKind::Graded { inner, .. }
+        | ast::TypeKind::Borrow { inner, .. }
+        | ast::TypeKind::Dyn(inner) => type_self_associations(inner, out),
+        ast::TypeKind::Array(inner, length) => {
+            type_self_associations(inner, out);
+            type_self_associations(length, out);
+        }
+        ast::TypeKind::Binary { left, right, .. } => {
+            type_self_associations(left, out);
+            type_self_associations(right, out);
+        }
+        ast::TypeKind::Function {
+            parameters,
+            result,
+            effects,
+            ..
+        } => {
+            for parameter in parameters {
+                type_self_associations(&parameter.ty, out);
+            }
+            type_self_associations(result, out);
+            for effect in effects {
+                type_self_associations(effect, out);
+            }
+        }
+        ast::TypeKind::Integer(_)
+        | ast::TypeKind::Bool(_)
+        | ast::TypeKind::Lifetime(_)
+        | ast::TypeKind::SelfType
+        | ast::TypeKind::Predicate(_) => {}
+    }
+}
+
+/// Validate an associated type default graph: every `Self::Name` must name a
+/// declared associated type, and no default may depend on itself directly or
+/// transitively. A cycle has no finite lowered representation, so it is
+/// rejected at the trait declaration instead of surfacing as a depth error at
+/// an arbitrary use site.
+fn validate_associated_type_defaults(associated: &[ast::Associated]) -> Result<()> {
+    let declared = associated
+        .iter()
+        .filter_map(|item| match item {
+            ast::Associated::Type { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut defaults: BTreeMap<String, (ast::Type, Span)> = BTreeMap::new();
+    for item in associated {
+        let ast::Associated::Type {
+            name,
+            value: Some(default),
+            span,
+        } = item
+        else {
+            continue;
+        };
+        let mut references = BTreeSet::new();
+        type_self_associations(default, &mut references);
+        for reference in &references {
+            if !declared.contains(reference) {
+                return Err(Diagnostic::new(
+                    default.span,
+                    format!(
+                        "associated type default references 'Self::{reference}', which is not a declared associated type"
+                    ),
+                ));
+            }
+        }
+        defaults.insert(name.clone(), (default.clone(), *span));
+    }
+    // Depth-first search with an explicit color map: 1 = on the current path,
+    // 2 = finished. A back edge names the cycle.
+    let mut color: BTreeMap<String, u8> = BTreeMap::new();
+    fn visit(
+        name: &str,
+        defaults: &BTreeMap<String, (ast::Type, Span)>,
+        color: &mut BTreeMap<String, u8>,
+        path: &mut Vec<String>,
+    ) -> Result<()> {
+        match color.get(name).copied().unwrap_or(0) {
+            2 => return Ok(()),
+            1 => {
+                let start = path.iter().position(|item| item == name).unwrap_or(0);
+                let mut cycle = path[start..].to_vec();
+                cycle.push(name.to_owned());
+                let (_, span) = defaults.get(name).expect("cycle node has a default");
+                return Err(Diagnostic::new(
+                    *span,
+                    format!(
+                        "associated type default cycle: {}; each default must resolve to a finite type",
+                        cycle.join(" -> ")
+                    ),
+                ));
+            }
+            _ => {}
+        }
+        let Some((default, _)) = defaults.get(name) else {
+            return Ok(());
+        };
+        color.insert(name.to_owned(), 1);
+        path.push(name.to_owned());
+        let mut references = BTreeSet::new();
+        type_self_associations(default, &mut references);
+        for reference in references {
+            visit(&reference, defaults, color, path)?;
+        }
+        path.pop();
+        color.insert(name.to_owned(), 2);
+        Ok(())
+    }
+    for name in defaults.keys() {
+        visit(name, &defaults, &mut color, &mut Vec::new())?;
+    }
+    Ok(())
+}
 fn type_mentions_self(ty: &ast::Type) -> bool {
     match &ty.kind {
         ast::TypeKind::SelfType => true,
@@ -3550,11 +3695,45 @@ fn collect_methods<'a>(
             continue;
         };
         let id = resolution.declarations[&declaration.item.span.start];
+        validate_associated_type_defaults(associated)?;
         let mut associated_items = BTreeMap::new();
         for item in associated {
             match item {
-                ast::Associated::Type { name, .. } => {
-                    associated_items.insert(name.clone(), TraitAssociated::Type);
+                ast::Associated::Type { name, value, .. } => {
+                    if let Some(default) = value {
+                        let associated_names = associated
+                            .iter()
+                            .filter_map(|item| {
+                                matches!(item, ast::Associated::Type { .. })
+                                    .then_some(item.name().to_owned())
+                            })
+                            .collect();
+                        if type_mentions_self_outside_assoc(default, &associated_names) {
+                            return Err(Diagnostic::new(
+                                default.span,
+                                "an associated type default may not mention bare 'Self'; write a concrete type, a trait parameter, or a projection 'Self::Other'",
+                            ));
+                        }
+                        // Validate the default's own syntax now. Trait
+                        // parameters are still symbolic here, so only
+                        // structurally invalid defaults are rejected at the
+                        // declaration; per-impl lowering validates concrete
+                        // substitutions.
+                        let consts = generics
+                            .iter()
+                            .filter(|generic| {
+                                crate::runtime_types::is_const_generic(resolution, generic)
+                            })
+                            .filter_map(|generic| resolution.binder(generic.span))
+                            .collect::<BTreeSet<_>>();
+                        validate_type_template(resolution, default, &consts, false, true)?;
+                    }
+                    associated_items.insert(
+                        name.clone(),
+                        TraitAssociated::Type {
+                            default: value.clone(),
+                        },
+                    );
                 }
                 ast::Associated::Const {
                     name, ty, value, ..
@@ -3852,7 +4031,10 @@ fn collect_methods<'a>(
                         ));
                     }
                     if trait_id.is_some()
-                        && !matches!(trait_associated.get(name), Some(TraitAssociated::Type))
+                        && !matches!(
+                            trait_associated.get(name),
+                            Some(TraitAssociated::Type { .. })
+                        )
                     {
                         return Err(Diagnostic::new(
                             *span,
@@ -3961,16 +4143,19 @@ fn collect_methods<'a>(
                     continue;
                 };
                 match item {
-                    TraitAssociated::Type => {
+                    TraitAssociated::Type { default } => {
                         if !impl_associated.types.contains_key(name) {
-                            return Err(Diagnostic::new(
-                                span,
-                                format!(
-                                    "missing associated type '{name}' for trait '{}' on {}",
-                                    resolution.bindings[trait_id].name,
-                                    types.name(self_key)
-                                ),
-                            ));
+                            let Some(default) = default else {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    format!(
+                                        "missing associated type '{name}' for trait '{}' on {}",
+                                        resolution.bindings[trait_id].name,
+                                        types.name(self_key)
+                                    ),
+                                ));
+                            };
+                            impl_associated.types.insert(name.clone(), default.clone());
                         }
                     }
                     TraitAssociated::Const { ty, default } => {
@@ -4402,7 +4587,7 @@ fn prepare_trait_objects<'a>(
             .associated
             .iter()
             .filter_map(|(name, item)| {
-                matches!(item, TraitAssociated::Type).then_some(name.clone())
+                matches!(item, TraitAssociated::Type { .. }).then_some(name.clone())
             })
             .collect::<BTreeSet<_>>();
         if reason.is_none() {
@@ -4498,10 +4683,31 @@ fn prepare_trait_objects<'a>(
                     > = BTreeMap::new();
                     for (arguments, member, associated) in &concrete {
                         groups.entry(arguments.clone()).or_default().push(*member);
+                        // A default associated type may mention the trait's
+                        // type, Nat, Grade, or effect parameters. Lower it with
+                        // this specialization's arguments, exactly like a
+                        // method signature, so two impls using the same
+                        // default do not spuriously disagree.
+                        let mut member_substitution = crate::runtime_types::Subst::default();
+                        let mut member_consts = BTreeMap::new();
+                        let mut member_grades = BTreeMap::new();
+                        let mut member_effects = BTreeMap::new();
+                        insert_trait_arguments(
+                            resolution,
+                            &definition.generics,
+                            arguments,
+                            &mut member_substitution,
+                            &mut member_consts,
+                            &mut member_grades,
+                            &mut member_effects,
+                        );
+                        member_substitution.consts = member_consts;
+                        member_substitution.grades = member_grades;
+                        member_substitution.effects = member_effects;
+                        member_substitution.associated_types = associated.types.clone();
                         let types_entry = object_associated.entry(arguments.clone()).or_default();
                         for (name, value) in &associated.types {
-                            let lowered =
-                                types.ty_in(value, &crate::runtime_types::Subst::default())?;
+                            let lowered = types.ty_in(value, &member_substitution)?;
                             if let Some(previous) = types_entry.get(name)
                                 && *previous != lowered
                             {
@@ -5373,7 +5579,10 @@ fn collect_generic_impl<'a>(
                     ));
                 };
                 if trait_id.is_some()
-                    && !matches!(trait_associated.get(name), Some(TraitAssociated::Type))
+                    && !matches!(
+                        trait_associated.get(name),
+                        Some(TraitAssociated::Type { .. })
+                    )
                 {
                     return Err(Diagnostic::new(
                         *span,
@@ -5488,15 +5697,18 @@ fn collect_generic_impl<'a>(
                 continue;
             };
             match item {
-                TraitAssociated::Type => {
+                TraitAssociated::Type { default } => {
                     if !impl_associated.types.contains_key(name) {
-                        return Err(Diagnostic::new(
-                            span,
-                            format!(
-                                "missing associated type '{name}' for trait '{}' on this impl",
-                                resolution.bindings[trait_id].name
-                            ),
-                        ));
+                        let Some(default) = default else {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!(
+                                    "missing associated type '{name}' for trait '{}' on this impl",
+                                    resolution.bindings[trait_id].name
+                                ),
+                            ));
+                        };
+                        impl_associated.types.insert(name.clone(), default.clone());
                     }
                 }
                 TraitAssociated::Const { ty, default } => {
