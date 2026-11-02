@@ -784,9 +784,12 @@ fn borrowed_text_task_and_generic_positions_are_rejected() {
     // returned text parameter.
     check("fn escape<'a, 'b>(text: &'a str) -> &'b str ! {} { text }").unwrap();
     rejects(
-        "fn ambiguous(first: &str, second: &str) -> &str ! {} { if true { first } else { second } }",
-        "cannot infer this borrowed slice result's lifetime",
+        "fn ambiguous<'a, 'b>(first: &'a str, second: &'b str) -> &'b str ! {} { if true { first } else { second } }",
+        "borrowed return would dangle",
     );
+    // An elided text result with several sources is an anonymous intersection
+    // outlived by every source; it cannot be named as a caller lifetime.
+    check("fn ambiguous(first: &str, second: &str) -> &str ! {} { if true { first } else { second } }").unwrap();
     rejects(
         "fn main() -> Unit ! {alloc, panic} {
             let text = \"abc\";

@@ -574,13 +574,21 @@ fn result_lifetime_elision_counts_a_single_record_field_source() {
         42,
         "",
     );
-    // Returning both fields from one result is still an explicit ambiguity.
-    rejects(
+    // Returning both fields from one result is an inferred anonymous
+    // intersection: the result is outlived by both field lifetimes, so both
+    // owners stay loaned through its last use.
+    agrees(
         r#"struct Two<'a, 'b> { first: &'a [i64], second: &'b [i64] }
         fn pick<'a, 'b>(two: Two<'a, 'b>, flag: Bool) -> &[i64] ! {panic} {
             if flag { two.first } else { two.second }
         }
-        fn main() -> Unit ! {} {}"#,
-        "return positions mention",
+        fn main() -> i64 ! {panic} {
+            let a: [i64; 2] = [40, 2];
+            let b: [i64; 2] = [9, 9];
+            let view = pick(Two { first: &a[..], second: &b[..] }, true);
+            Slice.get(view, 0) + Slice.get(view, 1)
+        }"#,
+        42,
+        "",
     );
 }

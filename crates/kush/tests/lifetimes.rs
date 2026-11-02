@@ -1100,18 +1100,19 @@ fn elided_result_lifetimes_use_body_origins_and_reject_ambiguity() {
         40,
         "",
     );
-    // Two return positions keep both candidates ambiguous. The diagnostic
-    // points at every candidate input.
-    let error = check(
-        "fn bad(a: &[i64], b: &[i64]) -> &[i64] ! {panic} { if true { a } else { b } }
-         fn main() -> Unit ! {} {}",
-    )
-    .unwrap_err();
-    assert!(
-        error.message.contains("distinct parameter lifetimes"),
-        "{error:?}"
+    // Two return positions produce an anonymous intersection result: every
+    // source owner stays loaned, and the result cannot be named as a caller
+    // lifetime.
+    agrees(
+        "fn pick(a: &[i64], b: &[i64]) -> &[i64] ! {panic} { if true { a } else { b } }
+         fn main() -> i64 ! {panic} {
+            let x: [i64; 2] = [40, 1];
+            let y: [i64; 1] = [2];
+            Slice.get(pick(&x[..], &y[..]), 0)
+         }",
+        40,
+        "",
     );
-    assert_eq!(error.notes.len(), 2, "{error:?}");
     // An unrelated owner-reference input participates in the candidate list,
     // but a body returning only the slice input resolves to that slice.
     check(
@@ -1233,15 +1234,22 @@ fn helper_calls_and_explicit_results_infer_lifetime_bounds() {
         8,
         "",
     );
-    rejects(
+    // A helper call in either branch contributes its source; the two sources
+    // form an anonymous intersection result.
+    agrees(
         r#"
         fn tail(view: &[i64]) -> &[i64] ! {panic} { view[1..] }
         fn alias(a: &[i64], b: &[i64]) -> &[i64] ! {panic} {
             if true { tail(a) } else { tail(b) }
         }
-        fn main() -> Unit ! {} {}
+        fn main() -> i64 ! {panic} {
+            let x: [i64; 3] = [40, 1, 2];
+            let y: [i64; 2] = [7, 8];
+            Slice.get(alias(&x[..], &y[..]), 0)
+        }
         "#,
-        "distinct parameter lifetimes",
+        1,
+        "",
     );
 }
 
@@ -1883,7 +1891,10 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
         fn main() -> Unit ! {} {}"#,
     )
     .unwrap();
-    rejects(
+    // Returning a child of the other parameter is accepted only with an
+    // inferred outlives bound; a call whose actual lifetimes cannot establish
+    // that bound is still rejected.
+    check(
         r#"fn bad<'a, 'b>(
             a: &'a mut [i64],
             b: &'b mut [i64],
@@ -1892,7 +1903,22 @@ fn mutable_child_views_are_ancestry_checked_not_root_flattened() {
             child
         }
         fn main() -> Unit ! {} {}"#,
-        "not a slice parameter with the declared result lifetime",
+    )
+    .unwrap();
+    rejects(
+        r#"fn bad<'a, 'b>(
+            a: &'a mut [i64],
+            b: &'b mut [i64],
+        ) -> &'a mut [i64] ! {panic} {
+            let child = &mut b[1..];
+            child
+        }
+        fn main() -> Unit ! {panic} {
+            let mut x: [i64; 2] = [1, 2];
+            let mut y: [i64; 2] = [3, 4];
+            bad(&mut x[..], &mut y[..]);
+        }"#,
+        "cannot establish the callee's outlives constraint",
     );
     // Mutable views stay move-only: there is no implicit alias duplication.
     rejects(
@@ -3083,6 +3109,115 @@ fn result_lifetime_claims_the_shortest_provable_source() {
         }
         fn main() -> Unit ! {} {}"#,
         "outlive",
+    );
+}
+
+#[test]
+fn multiple_result_sources_form_an_anonymous_intersection() {
+    agrees(
+        r#"fn pick<'a, 'b>(left: &'a [i64], right: &'b [i64], first: i64) -> &[i64] ! {panic} {
+            if first == 0 { left } else { right }
+        }
+        fn main() -> i64 ! {panic} {
+            let a: [i64; 2] = [40, 1];
+            let b: [i64; 2] = [2, 3];
+            Slice.get(pick(&a[..], &b[..], 0), 0)
+        }"#,
+        40,
+        "",
+    );
+    agrees(
+        r#"struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+        fn pick<'a, 'b>(pair: Pair<'a, 'b>, first: i64) -> &[i64] ! {panic} {
+            if first == 0 { pair.left } else { pair.right }
+        }
+        fn main() -> i64 ! {panic} {
+            let a: [i64; 2] = [40, 1];
+            let b: [i64; 2] = [2, 3];
+            Slice.get(pick(Pair { left: &a[..], right: &b[..] }, 0), 0)
+        }"#,
+        40,
+        "",
+    );
+    // Either source owner is still loaned while the anonymous result is live.
+    rejects(
+        r#"fn pick<'a, 'b>(left: &'a [i64], right: &'b [i64], first: i64) -> &[i64] ! {panic} {
+            if first == 0 { left } else { right }
+        }
+        fn main() -> i64 ! {panic} {
+            let mut a: [i64; 2] = [40, 1];
+            let mut b: [i64; 2] = [2, 3];
+            let view = pick(&a[..], &b[..], 0);
+            b = [9, 9];
+            Slice.get(view, 0)
+        }"#,
+        "cannot replace an owner",
+    );
+    // An explicit caller result can still select one source when the caller
+    // proves the outlives relation.
+    agrees(
+        r#"fn pick<'a, 'b>(left: &'a [i64], right: &'b [i64], first: i64) -> &[i64] ! {panic} {
+            if first == 0 { left } else { right }
+        }
+        fn choose<'a, 'b: 'a>(left: &'a [i64], right: &'b [i64]) -> &'a [i64] ! {panic} {
+            pick(left, right, 0)
+        }
+        fn main() -> i64 ! {panic} {
+            let a: [i64; 2] = [40, 1];
+            Slice.get(choose(&a[..], &a[..]), 0)
+        }"#,
+        40,
+        "",
+    );
+}
+
+#[test]
+fn destructuring_bindings_carry_result_lifetime_sources() {
+    agrees(
+        r#"struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+        fn pick<'a, 'b>(pair: Pair<'a, 'b>, first: i64) -> &[i64] ! {panic} {
+            let Pair { left, right } = pair;
+            if first == 0 { left } else { right }
+        }
+        fn main() -> i64 ! {panic} {
+            let a: [i64; 2] = [40, 1];
+            let b: [i64; 2] = [2, 3];
+            Slice.get(pick(Pair { left: &a[..], right: &b[..] }, 0), 0)
+        }"#,
+        40,
+        "",
+    );
+    agrees(
+        r#"struct Inner<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+        struct Outer<'a, 'b> { inner: Inner<'a, 'b>, note: i64 }
+        fn pick<'a, 'b>(outer: Outer<'a, 'b>, first: i64) -> &[i64] ! {panic} {
+            let Outer { inner, .. } = outer;
+            let Inner { left, right } = inner;
+            if first == 0 { left } else { right }
+        }
+        fn main() -> i64 ! {panic} {
+            let a: [i64; 2] = [40, 1];
+            let b: [i64; 2] = [2, 3];
+            let outer = Outer { inner: Inner { left: &a[..], right: &b[..] }, note: 0 };
+            Slice.get(pick(outer, 1), 1)
+        }"#,
+        3,
+        "",
+    );
+    // A record-field reference result follows a destructuring binding too.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        fn pick<'a>(holder: Holder<'a>) -> &Point ! {panic} {
+            let Holder { point, .. } = holder;
+            point
+        }
+        fn main() -> i64 ! {panic} {
+            let p = Point { x: 40, y: 1 };
+            pick(Holder { point: &p, note: 0 }).x
+        }"#,
+        40,
+        "",
     );
 }
 

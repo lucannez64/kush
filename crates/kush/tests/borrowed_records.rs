@@ -567,24 +567,27 @@ fn borrowed_record_rejects_unsafe_storage_generic_and_callable_escapes() {
         fn main() -> Unit ! {} {}"#,
         "linear",
     );
-    rejects(
+    // A container of a borrowed record now carries per-element field
+    // provenance, so storing a Windows record in a vector is checked rather
+    // than rejected outright.
+    check(
         r#"struct Window<'a> { view: &'a [i64] }
         fn store<'a>(view: &'a [i64]) -> Unit ! {alloc, panic} {
             let vector: Vec<Window<'a>> = Vec.new();
             let _ = vector;
         }
         fn main() -> Unit ! {} {}"#,
-        "containers cannot store",
-    );
-    rejects(
+    )
+    .unwrap();
+    check(
         r#"struct Window<'a> { view: &'a [i64] }
         fn store<'a>(view: &'a [i64]) -> Unit ! {alloc, panic} {
             let slot: Box<Window<'a>> = Box.new(Window { view: view });
             drop(slot);
         }
         fn main() -> Unit ! {} {}"#,
-        "containers cannot store",
-    );
+    )
+    .unwrap();
     rejects(
         r#"struct Window<'a> { view: &'a [i64] }
         fn store<'a>(view: &'a [i64]) -> Unit ! {} {
@@ -1229,15 +1232,17 @@ fn mixed_record_survives_same_task_suspension_with_balanced_ownership() {
 
 #[test]
 fn mixed_owning_records_reject_containers_self_reference_and_linear_fields() {
-    rejects(
+    // A boxed mixed record carries its borrowed field provenance; the owning
+    // token is still dropped exactly once with the box.
+    check(
         r#"struct Mixed<'a> { view: &'a [i64], token: Box<i64> }
         fn store<'a>(view: &'a [i64]) -> Unit ! {alloc, panic} {
             let slot: Box<Mixed<'a>> = Box.new(Mixed { view: view, token: Box.new(1) });
             drop(slot);
         }
         fn main() -> Unit ! {} {}"#,
-        "containers cannot store",
-    );
+    )
+    .unwrap();
     rejects(
         r#"struct Owner<'a> { owner: Vec<i64>, view: &'a [i64] }
         fn main() -> Unit ! {alloc, panic} {

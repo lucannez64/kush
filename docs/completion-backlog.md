@@ -22,23 +22,35 @@ and remaining limits.
   `&Record` are checked. `Box<&T>`, `Vec<&T>`, `Box<&str>`, and `Vec<&str>`
   element containers carry explicit type-level lifetime annotations and
   preserve owner loans through construction, reads, calls, records, and arrows.
-  Mutable owner borrows are supported for `&mut Box`/`&mut Vec`/`&mut Bytes`/
-  `&mut String`: `Box.set` and `Vec.push`/`set`/`clear`/`reserve` update the
-  caller's container, and a written reference must outlive the declared element
-  lifetime. A call that mutates a `&mut` container also merges the written
-  reference's owner loan into the caller's container provenance. Remaining
-  exclusions: mutable owner borrows of temporaries and field/index results,
-  `&mut str`, containers of borrowed records, general `&record.field`
-  reference-taking, and some borrowed-`TaskExit` boundaries. See
+  `Vec<Holder<'a>>` and `Box<Holder<'a>>` store borrowed records with per-field
+  element provenance; construction, indexed reads, `push`/`set`/`clear`, box
+  reads/takes, `&mut` writes, records, and direct/indirect calls keep every
+  field owner loaned. Mutable owner borrows are supported for `&mut Box`/`&mut
+  Vec`/`&mut Bytes`/`&mut String`: `Box.set` and
+  `Vec.push`/`set`/`clear`/`reserve` update the caller's container, and a
+  written reference must outlive the declared element lifetime. A call that
+  mutates a `&mut` container also merges the written reference's owner loan into
+  the caller's container provenance. Remaining exclusions: mutable owner
+  borrows of temporaries, record fields, and index results, general
+  `&record.field` reference-taking, `&mut str`, and a child task returning a
+  borrowed `TaskExit`. See
   [borrowing-extensions.md](borrowing-extensions.md).
 - [ ] Broader sound lifetime inference. **Partial:** function/arrow/lambda
   results can be inferred from a single record-field source or a per-field body
   origin. A multi-lifetime record supports per-field selection, including
-  nested field paths. Missing outlives bounds between a returned direct
-  parameter lifetime and an explicit result lifetime are inferred and validated
-  at call sites, and a body that delegates to a helper follows the helper's
-  declared result source. Several returned lifetimes, inference through local
-  destructuring bindings, and general unification remain explicitly absent.
+  nested field paths. Several returned sources now form an anonymous
+  intersection: the result is outlived by every source, all owners stay loaned,
+  and a call site selects the shortest provable actual lifetime or keeps the
+  anonymous identity. Inference follows local destructuring bindings and simple
+  aliases (`let Pair { left, right } = pair;`, nested record patterns). Missing
+  outlives bounds between a returned source and an explicit result lifetime are
+  inferred and validated at call sites, including through destructured bindings;
+  a body that delegates to a helper follows the helper's declared result
+  source. This is a finite, closed constraint graph over one function's
+  declared lifetimes with a documented reachability decision procedure (see
+  [borrowing-extensions.md](borrowing-extensions.md#lifetime-constraints-and-decidability)).
+  Principal unification for recursive lifetime constraints, variance, and row
+  variables remains explicitly absent.
 - [x] Capturing lambdas returning borrowed slices with represented provenance.
   The capture index and field path travel in the callable contract and the
   result is resolved against the capture's outer provenance.
@@ -869,3 +881,42 @@ both blocked lookup and a valid copyable frame above the barrier in both
 backends. Handler ownership comments and declared-effect diagnostics are
 updated. Local mbx validation: 98 focused tests, formatting, all-targets Clippy
 passed. The combined remote gate with later queued branches remains pending.
+
+## Borrowing closure follow-up
+
+Three commits on top of `15f62d3` broaden the borrowing contract:
+
+- `f8f371b` stores borrowed records in `Box`/`Vec` containers with per-field
+  element provenance. Construction, indexed reads, `push`/`set`/`clear`, box
+  reads/takes, `&mut` container writes, containing records, direct calls, and
+  indirect calls preserve every field's owner loan. Hostile cases cover owner
+  replacement, block-local escapes, `&mut Vec<Holder>` writes, and clearing a
+  vector before using a previously read element.
+- `c043b22` infers anonymous intersection results when a body returns several
+  distinct input lifetimes. Every source owner stays loaned, a caller may
+  select the shortest provable actual lifetime, and inference now follows local
+  destructuring bindings, nested record patterns, and simple aliases before
+  choosing result sources. Explicit results receive the same inferred outlives
+  edges, including through a destructured binding. The constraint closure is
+  documented with its finite reachability decision procedure.
+- `a017173` documents and tests the exact remaining boundaries: mutable owner
+  borrows of temporaries, record fields, and index results; general
+  `&record.field`; `&mut str`; and a child task returning a borrowed
+  `TaskExit<T>`. `Task<TaskExit<...>>` now has a specific diagnostic instead of
+  the generic container rejection.
+
+None of these closes the two Borrowing backlog items completely, so both stay
+unchecked. In particular item 1 still lacks mutable field/index/temporary
+borrows and general field addresses, and item 2 still lacks principal
+unification for recursive lifetime constraints, variance, and rows.
+
+Local Linux x86-64 validation used
+`CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/close-refs` with debug
+information disabled and two Cargo jobs:
+
+- Full `cargo test -p kush --offline -j 2`: **959 passed, 0 failed** across 62
+  test binaries.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p kush --all-targets --offline -j 2 -- -D warnings`: passed.
+
+No Boat run or credential access was used for this checkout.

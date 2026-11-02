@@ -2318,12 +2318,21 @@ impl<'a> Types<'a> {
                 let direct_reference = matches!(inner, Type::Ref(_) | Type::RefMut(_) | Type::Str)
                     && matches!(arguments[0].kind, ast::TypeKind::Borrow { .. });
                 let task_borrowed_record = b.name == "Task" && is_borrowed_record(self, inner);
+                if b.name == "Task" && is_borrowed_task_exit(self, inner) {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "a child task cannot return a borrowed TaskExit<T>; join the child in the scope that owns the borrowed storage and match the exit there",
+                    ));
+                }
+                let borrowed_record_element =
+                    matches!(b.name.as_str(), "Box" | "Vec") && is_borrowed_record(self, inner);
                 if (matches!(
                     inner,
                     Type::Ref(_) | Type::RefMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::Str
                 ) || has_borrow(self, inner))
                     && !task_borrowed_record
                     && !direct_reference
+                    && !borrowed_record_element
                 {
                     return Err(Diagnostic::new(
                         ty.span,
@@ -4945,6 +4954,10 @@ pub(crate) fn is_reference_container(types: &Types<'_>, ty: Type) -> bool {
         Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) | Type::AllocBox(p) | Type::AllocVec(p) => {
             match types.pointees[p] {
                 Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) => true,
+                // A container of a borrowed record carries per-field element
+                // provenance exactly like a container of direct references.
+                // The record type itself holds the declared element lifetimes.
+                inner if is_borrowed_record(types, inner) => true,
                 inner => is_reference_container(types, inner),
             }
         }
