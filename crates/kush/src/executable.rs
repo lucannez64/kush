@@ -17201,7 +17201,7 @@ impl Checker<'_, '_> {
                             "Box.new" => {
                                 c.require(ALLOC | PANIC, span)?;
                                 if arg.ty == Type::Never { return Err(Diagnostic::new(span, "Box.new cannot store a divergent value")); }
-                                if crate::runtime_types::has_borrow(c.types, arg.ty) && !arg.ty.is_ref() && arg.ty != Type::Str { return Err(Diagnostic::new(span, "Box.new can store a reference element, a text view, or an ordinary value, but not a slice view or borrowed record; keep those in a lexical record")); }
+                                if crate::runtime_types::has_borrow(c.types, arg.ty) && !arg.ty.is_ref() && arg.ty != Type::Str && !crate::runtime_types::is_borrowed_record(c.types, arg.ty) { return Err(Diagnostic::new(span, "Box.new can store a reference element, a text view, a borrowed record, or an ordinary value, but not a slice view; keep slice views in a lexical record")); }
                                 if crate::runtime_types::contains_task(c.types, arg.ty) { return Err(Diagnostic::new(span, "task handles cannot be stored in Box; join them in the scope that owns them")); }
                                 let pointee = match expected_inner {
                                     Some(inner) if matches!(inner, Type::Annotated(..)) => inner,

@@ -99,8 +99,10 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                     // well, so a call that mutates the caller's container can
                     // relate every written reference to the declared element
                     // lifetime.
-                    if let Some(container) = referent_of(&program.pointees, local.ty)
-                        .filter(|container| container_carries_borrow(&program.pointees, *container))
+                    if let Some(container) =
+                        referent_of(&program.pointees, local.ty).filter(|container| {
+                            container_carries_borrow(&program.enums, &program.pointees, *container)
+                        })
                     {
                         for leaf in leaves_of(
                             &program.enums,
@@ -141,7 +143,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                 .result
                 .layout()
                 .is_some_and(|layout| program.enums[layout].borrowed)
-                || container_carries_borrow(&program.pointees, function.result)
+                || container_carries_borrow(&program.enums, &program.pointees, function.result)
             {
                 CallResult::Record(leaves_of(
                     &program.enums,
@@ -311,7 +313,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                 // at this parameter with the element's declared lifetime.
                 if let Some(container) = checker
                     .referent(local.ty)
-                    .filter(|ty| container_carries_borrow(checker.pointees, *ty))
+                    .filter(|ty| container_carries_borrow(checker.enums, checker.pointees, *ty))
                 {
                     checker.record_sources[index] =
                         Some(checker.parameter_record_provenance(index, container));
@@ -427,12 +429,17 @@ fn referent_of(pointees: &[Type], ty: Type) -> Option<Type> {
 }
 /// Whether an owning container directly or transitively stores a reference
 /// element. Borrowed records are handled separately by their layout flag.
-fn container_carries_borrow(pointees: &[Type], ty: Type) -> bool {
+fn container_carries_borrow(
+    enums: &[crate::runtime_types::Enum],
+    pointees: &[Type],
+    ty: Type,
+) -> bool {
     match ty {
         Type::Box(p) | Type::ArenaBox(p) | Type::Vec(p) | Type::AllocBox(p) | Type::AllocVec(p) => {
             match pointees[p] {
                 Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) | Type::Str => true,
-                inner => container_carries_borrow(pointees, inner),
+                Type::Enum(id) | Type::Variants(id, _) if enums[id].borrowed => true,
+                inner => container_carries_borrow(enums, pointees, inner),
             }
         }
         _ => false,
@@ -905,7 +912,7 @@ impl Checker<'_> {
     }
     fn is_carrier_type(&self, ty: Type) -> bool {
         ty.layout().is_some_and(|id| self.enums[id].borrowed)
-            || container_carries_borrow(self.pointees, ty)
+            || container_carries_borrow(self.enums, self.pointees, ty)
     }
     /// The referent of a shared or exclusive reference type, through lifetime
     /// labels.
@@ -1407,11 +1414,12 @@ impl Checker<'_> {
         (expr.ty.is_ref() || expr.ty.is_view()).then(|| self.view_loan(expr))
     }
     /// Whether a container element itself carries borrowed storage. Container
-    /// provenance applies to reference elements and text views; shared slice
-    /// views and borrowed records remain outside the container subset.
+    /// provenance applies to reference elements, text views, and borrowed
+    /// record elements.
     fn element_carries_borrow(&self, ty: Type) -> bool {
         match ty {
             Type::Annotated(..) | Type::Ref(_) | Type::RefMut(_) | Type::Str => true,
+            Type::Enum(id) | Type::Variants(id, _) if self.enums[id].borrowed => true,
             Type::Box(p)
             | Type::ArenaBox(p)
             | Type::Vec(p)
@@ -1419,6 +1427,77 @@ impl Checker<'_> {
             | Type::AllocVec(p) => self.element_carries_borrow(self.pointees[p]),
             _ => false,
         }
+    }
+    /// Provenance of one borrowed-record container element. A direct reference
+    /// element has a single leaf at the element root; a borrowed record carries
+    /// one leaf per declared borrowed field, addressed relative to the element.
+    fn borrowed_element_provenance(&self, expr: &Expr) -> RecordProvenance {
+        self.record_provenance(expr)
+    }
+    /// Merge a whole element provenance into a container binding. Paths are
+    /// relative to one element. `replace` is used only where the container
+    /// provably holds one element (`Box.set`); vector writes always keep the
+    /// union of every possible element source.
+    fn merge_container_provenance(
+        &mut self,
+        receiver: &Expr,
+        provenance: RecordProvenance,
+        replace: bool,
+    ) {
+        let base = through_coerce(receiver);
+        let slot = match &base.kind {
+            ExprKind::Borrow(slot)
+            | ExprKind::Local(slot)
+            | ExprKind::Peek(slot)
+            | ExprKind::Move(slot) => *slot,
+            _ => return,
+        };
+        if self.locals[slot].ty.is_ref() {
+            let owners = self
+                .view_loan(base)
+                .origins
+                .into_iter()
+                .filter(|owner| *owner != slot && self.is_carrier_type(self.locals[*owner].ty))
+                .collect::<Vec<_>>();
+            for owner in owners {
+                self.merge_container_provenance_slot(owner, provenance.clone(), replace);
+            }
+        }
+        self.merge_container_provenance_slot(slot, provenance, replace);
+    }
+    fn merge_container_provenance_slot(
+        &mut self,
+        slot: usize,
+        provenance: RecordProvenance,
+        replace: bool,
+    ) {
+        let existing = if replace {
+            RecordProvenance::default()
+        } else {
+            self.record_sources[slot].clone().unwrap_or_default()
+        };
+        let mut merged = RecordProvenance::default();
+        let paths = existing
+            .leaves
+            .keys()
+            .chain(provenance.leaves.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for path in paths {
+            let loan = match (existing.leaves.get(&path), provenance.leaves.get(&path)) {
+                (Some(old), Some(new)) => self.merge_loans([old.clone(), new.clone()]),
+                (Some(old), None) => old.clone(),
+                (None, Some(new)) => new.clone(),
+                (None, None) => continue,
+            };
+            merged.leaves.insert(path, loan);
+        }
+        self.record_sources[slot] = Some(merged);
+        let mut origins = self.view_sources[slot].clone().unwrap_or_default();
+        for loan in provenance.leaves.values() {
+            origins.extend(loan.origins.iter().copied());
+        }
+        self.view_sources[slot] = Some(origins);
     }
     /// Per-field provenance of any checked record expression.
     fn record_provenance(&self, expr: &Expr) -> RecordProvenance {
@@ -2035,62 +2114,68 @@ impl Checker<'_> {
             {
                 continue;
             }
-            let Some(element) = leaves
+            let element_leaves = leaves
                 .iter()
-                .find(|leaf| leaf.path.first() == Some(&CONTAINER_LEAF))
-            else {
+                .filter(|leaf| leaf.path.first() == Some(&CONTAINER_LEAF))
+                .collect::<Vec<_>>();
+            if element_leaves.is_empty() {
                 continue;
-            };
-            let Some(declared) = element.lifetime.clone() else {
-                continue;
-            };
-            let existing = self
-                .container_provenance(argument)
-                .leaves
-                .get(&Vec::new())
-                .cloned()
-                .unwrap_or_default();
-            let element_actual = existing.lifetime.clone();
-            let mut merged = existing.clone();
-            for (other_leaves, other) in parameters.iter().zip(args.iter()) {
-                for leaf in other_leaves {
-                    let Some(other_declared) = &leaf.lifetime else {
-                        continue;
-                    };
-                    if !Self::callee_flows(bounds, other_declared, &declared) {
-                        continue;
-                    }
-                    let Some(loan) = self.argument_leaf_loan(other, &leaf.path) else {
-                        continue;
-                    };
-                    if let Some(actual) = &element_actual
-                        && !is_internal_lifetime(actual)
-                    {
-                        let written = loan.lifetime.clone().or_else(|| {
-                            (!loan.origins.is_empty())
-                                .then(|| self.anonymous_lifetime(&loan.origins))
-                        });
-                        if !written
-                            .as_deref()
-                            .is_some_and(|written| self.actual_outlives(written, actual))
-                        {
-                            return Err(Diagnostic::new(
-                                span,
-                                format!(
-                                    "this call would write {} into a container whose declared element lifetime is {}; the written reference must outlive the container's element lifetime",
-                                    written
-                                        .as_deref()
-                                        .map(describe_actual)
-                                        .unwrap_or_else(|| "a temporary or local owner".to_owned()),
-                                    describe_actual(actual)
-                                ),
-                            ));
-                        }
-                    }
-                    merged = self.merge_loans([merged, loan]);
-                }
             }
-            self.merge_container_element(argument, merged, false);
+            let existing = self.container_provenance(argument);
+            let mut merged = existing.clone();
+            for element_leaf in element_leaves {
+                let Some(declared) = element_leaf.lifetime.clone() else {
+                    continue;
+                };
+                let relative = element_leaf.path[1..].to_vec();
+                let element_actual = existing
+                    .leaves
+                    .get(&relative)
+                    .and_then(|loan| loan.lifetime.clone());
+                let mut element = existing.leaves.get(&relative).cloned().unwrap_or_default();
+                for (other_leaves, other) in parameters.iter().zip(args.iter()) {
+                    for leaf in other_leaves {
+                        if leaf.path.first() == Some(&CONTAINER_LEAF) {
+                            continue;
+                        }
+                        let Some(other_declared) = &leaf.lifetime else {
+                            continue;
+                        };
+                        if !Self::callee_flows(bounds, other_declared, &declared) {
+                            continue;
+                        }
+                        let Some(loan) = self.argument_leaf_loan(other, &leaf.path) else {
+                            continue;
+                        };
+                        if let Some(actual) = &element_actual
+                            && !is_internal_lifetime(actual)
+                        {
+                            let written = loan.lifetime.clone().or_else(|| {
+                                (!loan.origins.is_empty())
+                                    .then(|| self.anonymous_lifetime(&loan.origins))
+                            });
+                            if !written
+                                .as_deref()
+                                .is_some_and(|written| self.actual_outlives(written, actual))
+                            {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    format!(
+                                        "this call would write {} into a container whose declared element lifetime is {}; the written reference must outlive the container's element lifetime",
+                                        written.as_deref().map(describe_actual).unwrap_or_else(
+                                            || "a temporary or local owner".to_owned()
+                                        ),
+                                        describe_actual(actual)
+                                    ),
+                                ));
+                            }
+                        }
+                        element = self.merge_loans([element, loan]);
+                    }
+                }
+                merged.leaves.insert(relative, element);
+            }
+            self.merge_container_provenance(argument, merged, false);
         }
         Ok(())
     }
@@ -3417,7 +3502,7 @@ impl Checker<'_> {
                         self.reference_lifetimes[slot] = lifetime;
                         if self.referent(self.locals[slot].ty).is_some_and(|referent| {
                             self.is_carrier_type(referent)
-                                || container_carries_borrow(self.pointees, referent)
+                                || container_carries_borrow(self.enums, self.pointees, referent)
                         }) {
                             self.record_sources[slot] = Some(self.container_provenance(expr));
                         }
@@ -3796,7 +3881,12 @@ impl Checker<'_> {
             ExprKind::Unary(_, value) => self.expr(value)?,
             ExprKind::BoxTake(value) => {
                 self.expr(value)?;
-                if expr.ty.is_ref() || expr.ty.is_view() {
+                if self.is_carrier_type(expr.ty) {
+                    // A boxed borrowed record transfers its per-field element
+                    // provenance to the consumed value.
+                    self.call_records
+                        .insert(expr_ptr, self.container_provenance(value));
+                } else if expr.ty.is_ref() || expr.ty.is_view() {
                     let loan = self
                         .container_provenance(value)
                         .leaves
@@ -3815,6 +3905,9 @@ impl Checker<'_> {
                     let mut provenance = RecordProvenance::default();
                     provenance.leaves.insert(Vec::new(), loan);
                     self.call_records.insert(expr_ptr, provenance);
+                } else if self.is_carrier_type(value.ty) {
+                    self.call_records
+                        .insert(expr_ptr, self.borrowed_element_provenance(value));
                 }
             }
             ExprKind::BoxReuse { owner, payload }
@@ -3991,7 +4084,10 @@ impl Checker<'_> {
                 let loans = self.loans.clone();
                 self.expr(value)?;
                 self.loans = loans;
-                if expr.ty.is_ref() || expr.ty.is_view() {
+                if self.is_carrier_type(expr.ty) {
+                    self.call_records
+                        .insert(expr_ptr, self.container_provenance(value));
+                } else if expr.ty.is_ref() || expr.ty.is_view() {
                     let loan = self
                         .container_provenance(value)
                         .leaves
@@ -4012,7 +4108,45 @@ impl Checker<'_> {
                 }
                 self.expr(reference)?;
                 self.expr(value)?;
-                if self.element_carries_borrow(value.ty)
+                if self.is_carrier_type(value.ty) {
+                    // Replacing the single boxed element replaces every
+                    // per-field loan with the new value's provenance.
+                    let incoming = self.borrowed_element_provenance(value);
+                    let existing = self.container_provenance(reference);
+                    for (path, loan) in &incoming.leaves {
+                        let Some(declared) = existing
+                            .leaves
+                            .get(path)
+                            .and_then(|leaf| leaf.lifetime.clone())
+                        else {
+                            continue;
+                        };
+                        if is_internal_lifetime(&declared) {
+                            continue;
+                        }
+                        let written = loan.lifetime.clone().or_else(|| {
+                            (!loan.origins.is_empty())
+                                .then(|| self.anonymous_lifetime(&loan.origins))
+                        });
+                        if !written
+                            .as_deref()
+                            .is_some_and(|written| self.actual_outlives(written, &declared))
+                        {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                format!(
+                                    "the borrowed record written into this box has a field with {}, which does not outlive its declared element lifetime {}; declare the written source with that lifetime or an outlives bound",
+                                    written
+                                        .as_deref()
+                                        .map(describe_actual)
+                                        .unwrap_or_else(|| "a temporary or local owner".to_owned()),
+                                    describe_lifetime(&declared)
+                                ),
+                            ));
+                        }
+                    }
+                    self.merge_container_provenance(reference, incoming, true);
+                } else if self.element_carries_borrow(value.ty)
                     && let Some(loan) = self.reference_element_loan(value)
                 {
                     if let Some(declared) = self
@@ -4242,9 +4376,72 @@ impl Checker<'_> {
                                 crate::executable::VecOp::Set
                                     | crate::executable::VecOp::SetBorrowed
                             );
-                            if self.element_carries_borrow(element)
-                                && let Some(loan) =
-                                    self.reference_element_loan(&args[if setting { 2 } else { 1 }])
+                            let value_index = if setting { 2 } else { 1 };
+                            if self.is_carrier_type(element) {
+                                // A borrowed-record element carries one leaf per
+                                // borrowed field. Validate every written field
+                                // against the container's declared element
+                                // lifetime, then keep the union of all possible
+                                // element sources.
+                                let incoming = self.borrowed_element_provenance(&args[value_index]);
+                                for (path, loan) in &incoming.leaves {
+                                    let Some(declared) = provenance
+                                        .leaves
+                                        .get(path)
+                                        .and_then(|leaf| leaf.lifetime.clone())
+                                    else {
+                                        continue;
+                                    };
+                                    if is_internal_lifetime(&declared) {
+                                        continue;
+                                    }
+                                    let written = loan.lifetime.clone().or_else(|| {
+                                        (!loan.origins.is_empty())
+                                            .then(|| self.anonymous_lifetime(&loan.origins))
+                                    });
+                                    if !written.as_deref().is_some_and(|written| {
+                                        self.actual_outlives(written, &declared)
+                                    }) {
+                                        return Err(Diagnostic::new(
+                                            expr.span,
+                                            format!(
+                                                "the borrowed record written into this container has field {} with {}, which does not outlive its declared element lifetime {}; declare the pushed source with that lifetime or an outlives bound",
+                                                path.iter()
+                                                    .map(usize::to_string)
+                                                    .collect::<Vec<_>>()
+                                                    .join("."),
+                                                written
+                                                    .as_deref()
+                                                    .map(describe_actual)
+                                                    .unwrap_or_else(|| {
+                                                        "a temporary or local owner".to_owned()
+                                                    }),
+                                                describe_lifetime(&declared)
+                                            ),
+                                        ));
+                                    }
+                                }
+                                for (path, loan) in incoming.leaves {
+                                    match provenance.leaves.get(&path) {
+                                        Some(existing) => {
+                                            let merged = self.merge_loans([existing.clone(), loan]);
+                                            provenance.leaves.insert(path, merged);
+                                        }
+                                        None => {
+                                            provenance.leaves.insert(path, loan);
+                                        }
+                                    }
+                                }
+                                if matches!(
+                                    op,
+                                    crate::executable::VecOp::PushBorrowed
+                                        | crate::executable::VecOp::SetBorrowed
+                                ) {
+                                    let updated = provenance.clone();
+                                    self.merge_container_provenance(&args[0], updated, false);
+                                }
+                            } else if self.element_carries_borrow(element)
+                                && let Some(loan) = self.reference_element_loan(&args[value_index])
                             {
                                 // A reference written into a container whose
                                 // element type declares a lifetime must outlive
@@ -4305,7 +4502,9 @@ impl Checker<'_> {
                             provenance = self.container_provenance(&args[0]);
                         }
                         crate::executable::VecOp::Get | crate::executable::VecOp::At => {
-                            if expr.ty.is_ref() || expr.ty.is_view() {
+                            if self.is_carrier_type(expr.ty) {
+                                provenance = self.container_provenance(&args[0]);
+                            } else if expr.ty.is_ref() || expr.ty.is_view() {
                                 let loan = self
                                     .container_provenance(&args[0])
                                     .leaves
@@ -5527,7 +5726,7 @@ fn loan_liveness(
                 || local.ty.is_ref()
                 || matches!(local.ty, Type::Once(_))
                 || local.ty.layout().is_some_and(|id| enums[id].borrowed)
-                || container_carries_borrow(pointees, local.ty))
+                || container_carries_borrow(enums, pointees, local.ty))
             .then_some(slot)
         })
         .collect::<BTreeSet<_>>();

@@ -542,6 +542,173 @@ fn reference_element_containers_reject_aliasing_and_escapes() {
 }
 
 #[test]
+fn borrowed_record_containers_preserve_per_field_element_provenance() {
+    // A vector element that is itself a borrowed record keeps every field
+    // leaf: construction, indexed reads, append, replacement, and clearing all
+    // preserve the owners behind the record's reference fields.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let p = Point { x: 40, y: 2 };
+            let holders = [Holder { point: &p, note: 0 }];
+            let h = Vec.get(&holders, 0);
+            h.point.x + h.point.y
+        }"#,
+        42,
+        "",
+    );
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        fn keep<'a>(values: Vec<Holder<'a>>) -> Vec<Holder<'a>> ! {alloc} { values }
+        fn main() -> i64 ! {alloc, panic} {
+            let a = Point { x: 1, y: 0 };
+            let b = Point { x: 40, y: 2 };
+            let values = [Holder { point: &a, note: 0 }];
+            let values = Vec.push(values, Holder { point: &b, note: 1 });
+            let values = Vec.set(values, 0, Holder { point: &b, note: 0 });
+            let values = keep(values);
+            Vec.get(&values, 0).point.x + Vec.get(&values, 1).point.y
+        }"#,
+        42,
+        "",
+    );
+    // A borrowed-record element inside a nominal record keeps its per-field
+    // path through destructuring and a helper boundary.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        struct Bundle<'a> { holders: Vec<Holder<'a>>, note: i64 }
+        fn read<'a>(bundle: Bundle<'a>) -> i64 ! {panic} {
+            let Bundle { holders, note } = bundle;
+            Vec.get(&holders, 0).point.x + note
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let p = Point { x: 40, y: 2 };
+            read(Bundle { holders: [Holder { point: &p, note: 0 }], note: 2 }) + p.y
+        }"#,
+        44,
+        "",
+    );
+    // Box<Holder> supports read and take with the same field leaves.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        fn wrap<'a>(holder: Holder<'a>) -> Box<Holder<'a>> ! {alloc, panic} { Box.new(holder) }
+        fn read<'a>(holder: Holder<'a>) -> i64 ! {panic} { holder.point.x + holder.note }
+        fn main() -> i64 ! {alloc, panic} {
+            let p = Point { x: 40, y: 2 };
+            let boxed = wrap(Holder { point: &p, note: 0 });
+            let copied = Box.read(&boxed);
+            read(Box.take(boxed)) + copied.point.y
+        }"#,
+        42,
+        "",
+    );
+    // Writing a new borrowed record through `&mut Box<Holder>` replaces the
+    // element loan only after the written record's own owners are checked.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        fn replace<'a>(boxed: &mut Box<Holder<'a>>, holder: Holder<'a>) -> i64 ! {panic} {
+            Box.set(boxed, holder);
+            Box.read(boxed).point.x
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let a = Point { x: 1, y: 0 };
+            let b = Point { x: 40, y: 2 };
+            let mut boxed = Box.new(Holder { point: &a, note: 0 });
+            replace(&mut boxed, Holder { point: &b, note: 1 }) + b.y
+        }"#,
+        42,
+        "",
+    );
+}
+
+#[test]
+fn borrowed_record_containers_reject_owner_moves_and_block_escapes() {
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut p = Point { x: 40, y: 2 };
+            let holders = [Holder { point: &p, note: 0 }];
+            let h = Vec.get(&holders, 0);
+            p = Point { x: 1, y: 1 };
+            h.point.x
+        }"#,
+        "cannot replace an owner",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let q = Point { x: 0, y: 0 };
+            let mut values = [Holder { point: &q, note: 0 }];
+            {
+                let p = Point { x: 40, y: 2 };
+                values = Vec.push(values, Holder { point: &p, note: 0 });
+            }
+            Vec.get(&values, 1).point.x
+        }"#,
+        "borrow escapes the lexical scope",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        fn add<'a>(values: &mut Vec<Holder<'a>>, holder: Holder<'a>) -> Unit ! {alloc, panic} {
+            Vec.push(values, holder);
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut values: Vec<Holder<'_>> = [];
+            {
+                let p = Point { x: 40, y: 2 };
+                add(&mut values, Holder { point: &p, note: 0 });
+            }
+            Vec.get(&values, 0).point.x
+        }"#,
+        "borrow escapes the lexical scope",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        fn leak<'a>() -> Vec<Holder<'a>> ! {alloc, panic} {
+            let local = Point { x: 1, y: 2 };
+            [Holder { point: &local, note: 0 }]
+        }
+        fn main() -> i64 ! {alloc, panic} { 0 }"#,
+        "does not appear on any parameter",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut p = Point { x: 40, y: 2 };
+            let boxed = Box.new(Holder { point: &p, note: 0 });
+            let h = Box.read(&boxed);
+            p = Point { x: 1, y: 1 };
+            h.point.x
+        }"#,
+        "cannot replace an owner",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+        struct Holder<'a> { point: &'a Point, note: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut p = Point { x: 40, y: 2 };
+            let values = [Holder { point: &p, note: 0 }];
+            let h = Vec.get(&values, 0);
+            let values = Vec.clear(values);
+            drop(values);
+            p = Point { x: 1, y: 1 };
+            h.point.x
+        }"#,
+        "cannot replace an owner",
+    );
+}
+
+#[test]
 fn borrowed_scope_records_and_task_exits_cross_boundaries() {
     // A borrowed record returned directly from Task.scope keeps its declared
     // per-field lifetime and owner loan.
