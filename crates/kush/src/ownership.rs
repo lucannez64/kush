@@ -1041,9 +1041,11 @@ impl Checker<'_> {
                 Some((root, path))
             }
             ExprKind::Coerce { value, .. } => self.place_ident(value),
-            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
-                Some((*slot, Vec::new()))
-            }
+            ExprKind::Local(slot)
+            | ExprKind::Peek(slot)
+            | ExprKind::Move(slot)
+            | ExprKind::InitOwner { slot, .. }
+            | ExprKind::BorrowInit { slot, .. } => Some((*slot, Vec::new())),
             _ => None,
         }
     }
@@ -1079,7 +1081,7 @@ impl Checker<'_> {
             return loan.clone();
         }
         match &expr.kind {
-            ExprKind::Borrow(slot) if expr.ty.is_ref() => {
+            ExprKind::Borrow(slot) | ExprKind::BorrowInit { slot, .. } if expr.ty.is_ref() => {
                 // A reference to a borrowed record or reference container
                 // keeps every leaf that record already borrows loaned as well.
                 // Passing `&holder` to a helper therefore cannot outlive the
@@ -1096,6 +1098,24 @@ impl Checker<'_> {
                 Loan {
                     origins,
                     mutable: matches!(expr.ty, Type::RefMut(_)),
+                    splits: SplitLabels::default(),
+                    lifetime: None,
+                    field: self.projection_field(expr),
+                }
+            }
+            ExprKind::InitOwner { slot, .. } if self.is_carrier_type(self.locals[*slot].ty) => {
+                // A temporary record owner keeps every borrowed field it
+                // contains loaned, exactly like a shared borrow of a local
+                // record.
+                let mut origins = BTreeSet::from([*slot]);
+                if let Some(provenance) = &self.record_sources[*slot] {
+                    for leaf in provenance.leaves.values() {
+                        origins.extend(leaf.origins.iter().copied());
+                    }
+                }
+                Loan {
+                    origins,
+                    mutable: false,
                     splits: SplitLabels::default(),
                     lifetime: None,
                     field: self.projection_field(expr),
@@ -1437,6 +1457,8 @@ impl Checker<'_> {
         let base = through_coerce(expr);
         match &base.kind {
             ExprKind::Borrow(slot)
+            | ExprKind::BorrowInit { slot, .. }
+            | ExprKind::InitOwner { slot, .. }
             | ExprKind::Local(slot)
             | ExprKind::Peek(slot)
             | ExprKind::Move(slot)
@@ -1455,6 +1477,8 @@ impl Checker<'_> {
         let base = through_coerce(receiver);
         let slot = match &base.kind {
             ExprKind::Borrow(slot)
+            | ExprKind::BorrowInit { slot, .. }
+            | ExprKind::InitOwner { slot, .. }
             | ExprKind::Local(slot)
             | ExprKind::Peek(slot)
             | ExprKind::Move(slot) => *slot,
@@ -1600,7 +1624,10 @@ impl Checker<'_> {
             return provenance.clone();
         }
         match &expr.kind {
-            ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot) => {
+            ExprKind::Local(slot)
+            | ExprKind::Move(slot)
+            | ExprKind::Peek(slot)
+            | ExprKind::InitOwner { slot, .. } => {
                 if let Some(provenance) = &self.wrapped_locals[*slot] {
                     return provenance.clone();
                 }
@@ -2632,7 +2659,11 @@ impl Checker<'_> {
             return;
         }
         match &expr.kind {
-            ExprKind::Peek(slot) | ExprKind::Local(slot) | ExprKind::Move(slot)
+            ExprKind::Peek(slot)
+            | ExprKind::Borrow(slot)
+            | ExprKind::BorrowInit { slot, .. }
+            | ExprKind::Local(slot)
+            | ExprKind::Move(slot)
                 if expr.ty.is_ref() =>
             {
                 out.insert(*slot);
@@ -2642,6 +2673,7 @@ impl Checker<'_> {
             }
             ExprKind::Peek(slot)
             | ExprKind::Borrow(slot)
+            | ExprKind::BorrowInit { slot, .. }
             | ExprKind::Local(slot)
             | ExprKind::Move(slot)
                 if self.locals[*slot].ty.is_view() =>
@@ -2651,7 +2683,7 @@ impl Checker<'_> {
                     out.extend(origins.iter().copied());
                 }
             }
-            ExprKind::Borrow(slot)
+            ExprKind::Borrow(slot) | ExprKind::BorrowInit { slot, .. }
                 if matches!(expr.ty, Type::Ref(_))
                     && self.is_carrier_type(self.locals[*slot].ty) =>
             {
@@ -2665,6 +2697,8 @@ impl Checker<'_> {
             }
             ExprKind::Peek(slot)
             | ExprKind::Borrow(slot)
+            | ExprKind::BorrowInit { slot, .. }
+            | ExprKind::InitOwner { slot, .. }
             | ExprKind::Local(slot)
             | ExprKind::Move(slot) => {
                 out.insert(*slot);
@@ -2723,6 +2757,7 @@ impl Checker<'_> {
             | ExprKind::Move(slot)
             | ExprKind::Peek(slot)
             | ExprKind::Borrow(slot)
+            | ExprKind::BorrowInit { slot, .. }
                 if self.locals[*slot].ty.is_view() =>
             {
                 self.view_splits[*slot].clone()
@@ -2730,7 +2765,8 @@ impl Checker<'_> {
             ExprKind::Local(slot)
             | ExprKind::Move(slot)
             | ExprKind::Peek(slot)
-            | ExprKind::Borrow(slot) => {
+            | ExprKind::Borrow(slot)
+            | ExprKind::BorrowInit { slot, .. } => {
                 let _ = slot;
                 SplitLabels::default()
             }
@@ -3473,6 +3509,197 @@ impl Checker<'_> {
             state.bound.push(slot);
         }
     }
+    /// Establish a freshly initialized binding: check its initializer, carry
+    /// linear obligations, acquire view/record/reference provenance, and make
+    /// the slot available. Shared by ordinary `let` statements and hidden
+    /// temporary-owner initialization, which must behave the same way even
+    /// though its initializer runs inside an expression.
+    fn establish_local(&mut self, slot: usize, expr: &mut Expr) -> Result<()> {
+        // Elaboration tracks later assignments for capture typing. Start this
+        // binding with its declaration's obligation, not a flag inherited from
+        // a future replacement value.
+        self.locals[slot].linear = self.locals[slot]
+            .grade
+            .is_some_and(crate::grades::Grade::is_one)
+            && self.moves(self.locals[slot].ty);
+        // Moving a linear binding into an ungraded local must not launder away
+        // its consumption obligation.
+        let linear = self.value_moves_linear(expr);
+        // A borrowed-capture closure is only constructed directly as this
+        // binding's initializer.
+        let site = through_coerce(expr);
+        let site_pointer = site as *const Expr as usize;
+        let capture_site = matches!(site.kind, ExprKind::FnValue { .. }).then_some(site_pointer);
+        let inherited_wrapped = match &site.kind {
+            ExprKind::Local(source) | ExprKind::Move(source) => {
+                self.wrapped_locals[*source].clone()
+            }
+            _ => None,
+        };
+        let old_capture_site = self.capture_site;
+        let old_callee_site = self.callee_site;
+        self.capture_site = capture_site;
+        self.callee_site = None;
+        let checked = self.full(expr);
+        self.capture_site = old_capture_site;
+        self.callee_site = old_callee_site;
+        checked?;
+        if linear || self.value_moves_linear(expr) {
+            self.locals[slot].linear = true;
+        }
+        if self.locals[slot].ty.is_view() {
+            let origins = self.view_origins(expr);
+            let mutable = self.locals[slot].ty.is_mut_slice();
+            let splits = self.split_labels(expr);
+            let loan = self.view_loan(expr);
+            let lifetime = loan.lifetime;
+            let field = loan.field;
+            self.acquire_view(slot, mutable, origins, splits, lifetime, field);
+        } else if self.is_carrier_type(self.locals[slot].ty) {
+            let provenance = self.record_provenance(expr);
+            let splits = provenance
+                .leaves
+                .values()
+                .map(|loan| loan.splits.clone())
+                .reduce(|left, right| intersect_splits(&left, &right))
+                .unwrap_or_default();
+            self.acquire_record(slot, provenance, splits);
+        } else if self.locals[slot].ty.is_ref() {
+            // A stored reference is a lexical capability over its source
+            // storage. It owns nothing at runtime: the one-word pointer is the
+            // checked runtime value. The lifetime is the source's declared
+            // lifetime when the reference came from a parameter or a call
+            // result, and a frame-local identity otherwise so an escape remains
+            // a checked dangling-borrow error.
+            let loan = self.view_loan(expr);
+            let origins = if loan.origins.is_empty() {
+                self.view_origins(expr)
+            } else {
+                loan.origins.clone()
+            };
+            if origins.is_empty() {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    "internal error: stored reference has no capability provenance",
+                ));
+            }
+            let lifetime = loan
+                .lifetime
+                .clone()
+                .or_else(|| Some(self.anonymous_lifetime(&origins)));
+            let mutable = matches!(self.locals[slot].ty, Type::RefMut(_));
+            let field = loan.field.clone();
+            self.acquire_view(
+                slot,
+                mutable,
+                origins,
+                SplitLabels::default(),
+                lifetime.clone(),
+                field,
+            );
+            self.reference_lifetimes[slot] = lifetime;
+            if self.referent(self.locals[slot].ty).is_some_and(|referent| {
+                self.is_carrier_type(referent)
+                    || container_carries_borrow(self.enums, self.pointees, referent)
+            }) {
+                self.record_sources[slot] = Some(self.container_provenance(expr));
+            }
+        } else if let Some(provenance) = self.task_results.get(&site_pointer).cloned() {
+            // A child task's borrowed-record result is still loaned to the
+            // scope; the handle carries the provenance until Task.join
+            // transfers it to the TaskExit value.
+            self.task_sources[slot] = Some(provenance);
+        } else if let Some(provenance) = self
+            .wrapped_results
+            .get(&site_pointer)
+            .cloned()
+            .or(inherited_wrapped)
+        {
+            // Copying or moving a TaskExit value that wraps a borrowed record
+            // keeps the same loan provenance.
+            self.wrapped_locals[slot] = Some(provenance);
+        } else if let Some(capture) = self.borrowed_values.get(&site_pointer).cloned() {
+            // The closure value is now a scoped loan holder. Its captures point
+            // at the original owners, and the backward liveness pass keeps this
+            // capability live until its last call or enclosing-scope end.
+            self.acquire_view(
+                slot,
+                capture.mutable,
+                capture.origins.clone(),
+                capture.splits.clone(),
+                None,
+                None,
+            );
+            self.borrowed_closures.insert(slot, capture);
+        }
+        self.available[slot] = true;
+        self.moved_at[slot] = None;
+        self.bound(slot);
+        Ok(())
+    }
+    /// Check one direct local borrow after its storage is available.
+    fn check_local_borrow(
+        &mut self,
+        slot: usize,
+        reference: Type,
+        expr_ptr: usize,
+        span: Span,
+    ) -> Result<()> {
+        if !self.available[slot] {
+            return Err(self.use_after_move(slot, span, "cannot borrow a moved owner"));
+        }
+        self.check_owner_access(slot, expr_ptr, span, "borrow")?;
+        let owner_ty = self.locals[slot].ty;
+        let record = owner_ty.layout().is_some_and(|id| self.enums[id].record)
+            || matches!(owner_ty, Type::DynObj(_) | Type::Union(_));
+        // Records, trait objects (open or closed-union), and owning handles all
+        // have stable caller-visible storage borrowed in place, so a `&mut`
+        // borrow suspends the owner and a shared borrow blocks exclusive
+        // aliases.
+        let owner = record
+            || matches!(
+                owner_ty,
+                Type::Box(_)
+                    | Type::Arena
+                    | Type::ArenaBox(_)
+                    | Type::Bytes
+                    | Type::String
+                    | Type::Vec(_)
+            );
+        if owner {
+            if matches!(reference, Type::RefMut(_)) {
+                if self.loans.contains(&slot)
+                    || self.temporary_shared.contains(&slot)
+                    || self.temporary_exclusive.contains(&slot)
+                    || self.any_loan_at(slot, expr_ptr)
+                {
+                    return Err(Diagnostic::new(
+                        span,
+                        "cannot create an exclusive '&mut Record' (or '&mut dyn') borrow while another borrow or view of the same owner is live",
+                    )
+                    .with_note(self.locals[slot].span, "owner declared here"));
+                }
+                self.temporary_exclusive.insert(slot);
+                if record {
+                    self.exclusive_loans.insert(slot);
+                }
+            } else {
+                if self.exclusive_loaned_at(slot, expr_ptr) {
+                    return Err(Diagnostic::new(
+                        span,
+                        "cannot create a shared '&Record' (or '&dyn') borrow while an exclusive borrow of the same owner is live",
+                    )
+                    .with_note(self.locals[slot].span, "owner declared here"));
+                }
+                self.temporary_shared.insert(slot);
+                if record {
+                    self.shared_record_loans.insert(slot);
+                }
+            }
+        }
+        self.loans.insert(slot);
+        Ok(())
+    }
     /// Linear locals among `slots` that are still unconsumed are errors.
     fn exit_check(
         &self,
@@ -3667,131 +3894,17 @@ impl Checker<'_> {
             match statement {
                 Statement::Let(slot, expr) => {
                     let slot = *slot;
-                    // Elaboration tracks later assignments for capture typing.
-                    // Start this binding with its declaration's obligation, not
-                    // a flag inherited from a future replacement value.
-                    self.locals[slot].linear = self.locals[slot]
-                        .grade
-                        .is_some_and(crate::grades::Grade::is_one)
-                        && self.moves(self.locals[slot].ty);
-                    // Moving a linear binding into an ungraded local must not
-                    // launder away its consumption obligation.
-                    let linear = self.value_moves_linear(expr);
-                    // A borrowed-capture closure is only constructed directly
-                    // as this binding's initializer.
-                    let site = through_coerce(expr);
-                    let site_pointer = site as *const Expr as usize;
-                    let capture_site =
-                        matches!(site.kind, ExprKind::FnValue { .. }).then_some(site_pointer);
-                    let inherited_wrapped = match &site.kind {
-                        ExprKind::Local(source) | ExprKind::Move(source) => {
-                            self.wrapped_locals[*source].clone()
-                        }
-                        _ => None,
-                    };
-                    let old_capture_site = self.capture_site;
-                    let old_callee_site = self.callee_site;
-                    self.capture_site = capture_site;
-                    self.callee_site = None;
-                    let checked = self.full(expr);
-                    self.capture_site = old_capture_site;
-                    self.callee_site = old_callee_site;
-                    checked?;
-                    if linear || self.value_moves_linear(expr) {
-                        self.locals[slot].linear = true;
-                    }
-                    if self.locals[slot].ty.is_view() {
-                        let origins = self.view_origins(expr);
-                        let mutable = self.locals[slot].ty.is_mut_slice();
-                        let splits = self.split_labels(expr);
-                        let loan = self.view_loan(expr);
-                        let lifetime = loan.lifetime;
-                        let field = loan.field;
-                        self.acquire_view(slot, mutable, origins, splits, lifetime, field);
-                    } else if self.is_carrier_type(self.locals[slot].ty) {
-                        let provenance = self.record_provenance(expr);
-                        let splits = provenance
-                            .leaves
-                            .values()
-                            .map(|loan| loan.splits.clone())
-                            .reduce(|left, right| intersect_splits(&left, &right))
-                            .unwrap_or_default();
-                        self.acquire_record(slot, provenance, splits);
-                    } else if self.locals[slot].ty.is_ref() {
-                        // A stored reference is a lexical capability over its
-                        // source storage. It owns nothing at runtime: the
-                        // one-word pointer is the checked runtime value. The
-                        // lifetime is the source's declared lifetime when the
-                        // reference came from a parameter or a call result, and
-                        // a frame-local identity otherwise so an escape remains
-                        // a checked dangling-borrow error.
-                        let loan = self.view_loan(expr);
-                        let origins = if loan.origins.is_empty() {
-                            self.view_origins(expr)
-                        } else {
-                            loan.origins.clone()
-                        };
-                        if origins.is_empty() {
-                            return Err(Diagnostic::new(
-                                expr.span,
-                                "internal error: stored reference has no capability provenance",
-                            ));
-                        }
-                        let lifetime = loan
-                            .lifetime
-                            .clone()
-                            .or_else(|| Some(self.anonymous_lifetime(&origins)));
-                        let mutable = matches!(self.locals[slot].ty, Type::RefMut(_));
-                        let field = loan.field.clone();
-                        self.acquire_view(
-                            slot,
-                            mutable,
-                            origins,
-                            SplitLabels::default(),
-                            lifetime.clone(),
-                            field,
-                        );
-                        self.reference_lifetimes[slot] = lifetime;
-                        if self.referent(self.locals[slot].ty).is_some_and(|referent| {
-                            self.is_carrier_type(referent)
-                                || container_carries_borrow(self.enums, self.pointees, referent)
-                        }) {
-                            self.record_sources[slot] = Some(self.container_provenance(expr));
-                        }
-                    } else if let Some(provenance) = self.task_results.get(&site_pointer).cloned() {
-                        // A child task's borrowed-record result is still loaned
-                        // to the scope; the handle carries the provenance until
-                        // Task.join transfers it to the TaskExit value.
-                        self.task_sources[slot] = Some(provenance);
-                    } else if let Some(provenance) = self
-                        .wrapped_results
-                        .get(&site_pointer)
-                        .cloned()
-                        .or(inherited_wrapped)
-                    {
-                        // Copying or moving a TaskExit value that wraps a
-                        // borrowed record keeps the same loan provenance.
-                        self.wrapped_locals[slot] = Some(provenance);
-                    } else if let Some(capture) = self.borrowed_values.get(&site_pointer).cloned() {
-                        // The closure value is now a scoped loan holder. Its
-                        // captures point at the original owners, and the
-                        // backward liveness pass keeps this capability live
-                        // until its last call or enclosing-scope end.
-                        self.acquire_view(
-                            slot,
-                            capture.mutable,
-                            capture.origins.clone(),
-                            capture.splits.clone(),
-                            None,
-                            None,
-                        );
-                        self.borrowed_closures.insert(slot, capture);
-                    }
+                    self.establish_local(slot, expr)?;
                     if borrowed_temporaries.contains(&slot) {
                         self.retain_local(slot);
                     }
-                    self.available[slot] = true;
-                    self.moved_at[slot] = None;
+                    slots.push(slot);
+                }
+                Statement::Declare(slot) => {
+                    // Hidden temporary-owner storage. The initializer runs
+                    // later, at its source position; declaration contributes
+                    // lexical cleanup and loop-break cleanup only.
+                    let slot = *slot;
                     self.bound(slot);
                     slots.push(slot);
                 }
@@ -3858,6 +3971,7 @@ impl Checker<'_> {
             .first()
             .map(|statement| match statement {
                 Statement::Let(_, expr) | Statement::Expr(expr) => expr.span.start,
+                Statement::Declare(_) => 0,
             })
             .or_else(|| block.tail.as_ref().map(|tail| tail.span.start))
             .unwrap_or(0);
@@ -4071,63 +4185,18 @@ impl Checker<'_> {
                 }
             }
             ExprKind::Borrow(slot) => {
-                if !self.available[*slot] {
-                    return Err(self.use_after_move(
-                        *slot,
-                        expr.span,
-                        "cannot borrow a moved owner",
-                    ));
-                }
-                self.check_owner_access(*slot, expr_ptr, expr.span, "borrow")?;
-                let owner_ty = self.locals[*slot].ty;
-                let record = owner_ty.layout().is_some_and(|id| self.enums[id].record)
-                    || matches!(owner_ty, Type::DynObj(_) | Type::Union(_));
-                // Records, trait objects (open or closed-union), and owning
-                // handles all have stable caller-visible storage borrowed in
-                // place, so a `&mut` borrow suspends the owner and a shared
-                // borrow blocks exclusive aliases.
-                let owner = record
-                    || matches!(
-                        owner_ty,
-                        Type::Box(_)
-                            | Type::Arena
-                            | Type::ArenaBox(_)
-                            | Type::Bytes
-                            | Type::String
-                            | Type::Vec(_)
-                    );
-                if owner {
-                    if matches!(expr.ty, Type::RefMut(_)) {
-                        if self.loans.contains(slot)
-                            || self.temporary_shared.contains(slot)
-                            || self.temporary_exclusive.contains(slot)
-                            || self.any_loan_at(*slot, expr_ptr)
-                        {
-                            return Err(Diagnostic::new(
-                                expr.span,
-                                "cannot create an exclusive '&mut Record' (or '&mut dyn') borrow while another borrow or view of the same owner is live",
-                            )
-                            .with_note(self.locals[*slot].span, "owner declared here"));
-                        }
-                        self.temporary_exclusive.insert(*slot);
-                        if record {
-                            self.exclusive_loans.insert(*slot);
-                        }
-                    } else {
-                        if self.exclusive_loaned_at(*slot, expr_ptr) {
-                            return Err(Diagnostic::new(
-                                expr.span,
-                                "cannot create a shared '&Record' (or '&dyn') borrow while an exclusive borrow of the same owner is live",
-                            )
-                            .with_note(self.locals[*slot].span, "owner declared here"));
-                        }
-                        self.temporary_shared.insert(*slot);
-                        if record {
-                            self.shared_record_loans.insert(*slot);
-                        }
-                    }
-                }
-                self.loans.insert(*slot);
+                self.check_local_borrow(*slot, expr.ty, expr_ptr, expr.span)?;
+            }
+            ExprKind::InitOwner { slot, value } => {
+                // Hidden backing storage is initialized exactly once at this
+                // source position; the slot then behaves like a local place.
+                self.establish_local(*slot, value)?;
+            }
+            ExprKind::BorrowInit { slot, value } => {
+                // A temporary owner is initialized at the operand position and
+                // then borrowed with the same rules as a direct local.
+                self.establish_local(*slot, value)?;
+                self.check_local_borrow(*slot, expr.ty, expr_ptr, expr.span)?;
             }
             ExprKind::BorrowField(place) => {
                 self.expr(place)?;
@@ -5939,6 +6008,7 @@ fn block_span(block: &Block) -> Span {
         .or_else(|| {
             block.statements.last().map(|s| match s {
                 Statement::Let(_, e) | Statement::Expr(e) => e.span,
+                Statement::Declare(_) => Span::default(),
             })
         })
         .unwrap_or_default()
@@ -5980,8 +6050,10 @@ pub(crate) fn pattern_bindings(pattern: &Pattern, slots: &mut BTreeSet<usize>) {
 pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
     fn walk_block<'a>(block: &'a Block, out: &mut Vec<&'a Expr>) {
         for statement in &block.statements {
-            let (Statement::Let(_, e) | Statement::Expr(e)) = statement;
-            walk(e, out);
+            match statement {
+                Statement::Let(_, e) | Statement::Expr(e) => walk(e, out),
+                Statement::Declare(_) => {}
+            }
         }
         if let Some(e) = &block.tail {
             walk(e, out);
@@ -6190,6 +6262,10 @@ fn block_live(
                 live = expr_live(expr, &after, views, heads, exits, out);
                 live.remove(slot);
             }
+            Statement::Declare(_) => {
+                // The matching InitOwner/BorrowInit expression records the
+                // hidden storage's use at its source position.
+            }
             Statement::Expr(expr) => {
                 live = expr_live(expr, &live, views, heads, exits, out);
             }
@@ -6211,6 +6287,12 @@ fn expr_live(
         | ExprKind::Peek(slot)
         | ExprKind::Borrow(slot)
         | ExprKind::Move(slot) => add_use(&mut live, *slot, views),
+        ExprKind::InitOwner { slot, value: init } | ExprKind::BorrowInit { slot, value: init } => {
+            let mut after = live.clone();
+            after.remove(slot);
+            live = expr_live(init, &after, views, heads, exits, out);
+            add_use(&mut live, *slot, views);
+        }
         ExprKind::Erased(_) => {}
         ExprKind::Assign(slot, value) => {
             let mut after = live.clone();

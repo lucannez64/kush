@@ -1239,4 +1239,52 @@ a second regression requires skipped short-circuit operands not to initialize
 their temporary owner. The full Boat gate is deliberately held until temporary
 initialization stays at its source evaluation point while backing storage and
 cleanup remain valid for the extended reference lifetime. This checkpoint is
-not a validated completion claim.
+not a validated completion claim. It is resolved by the temporary-owner
+initialization correction checkpoint below.
+
+## Temporary-owner initialization correction checkpoint
+
+This resolves the ordering defect recorded in the gate-held checkpoint above;
+that earlier section remains the historical record of the failed probe.
+
+`Checker::hoist_owner` no longer moves an initializer's effects before the
+enclosing statement. It records a new `Statement::Declare(slot)` for stable
+backing storage, while the new checked `InitOwner` and `BorrowInit` nodes run
+the initializer at its source evaluation point. Both backends therefore
+preserve argument, field, and index order; short-circuit operands and branches
+initialize only when taken; and loop conditions re-evaluate their temporary
+once per iteration. Storage lives to the enclosing block's end, and cleanup is
+guarded by the existing runtime activation state, so a skipped declaration is
+a no-op. Re-initializing one source occurrence in a later iteration releases
+the previous value before storing the new one. Break/continue/return/`?` and
+panic paths clean up only initialized owners, exactly once. Ownership checking
+treats declared hidden storage as a loop-bound local and initializes it through
+the same provenance/linearity path as an ordinary `let`; a projected temporary
+place propagates early control flow during place resolution instead of
+reporting a place error. Temporary escape rejection remains unchanged.
+
+New regressions in `crates/kush/tests/borrowing_references.rs` cover argument
+and field/index order, skipped `&&` and `||` operands, loop-condition
+re-evaluation with balanced reference allocations, loop `continue`/`break`
+cleanup of both body and condition temporaries, owning temporaries dropped
+before a `?` early exit, panic ordering before later arguments, panic after a
+temporary owner is initialized, and a `?` inside a projected temporary place.
+Every positive case runs in the reference evaluator and the native backend
+where available; `agrees` checks reference allocations against deallocations.
+
+Local Linux x86-64 validation used
+`CARGO_TARGET_DIR=$HOME/.cache/kush-mbx-temporary-init`, debug information
+disabled, and two jobs:
+
+- Focused `borrowing_references` suite: **36 passed, 0 failed**.
+- Full locked workspace suite: **1039 passed, 0 failed**, including the JSON
+  default-stack and partial-cleanup regressions.
+- `mbx fmt --all -- --check`: passed.
+- `mbx clippy --workspace --all-targets --locked --offline -j 2 -- -D warnings`:
+  passed.
+
+The full Boat gate remains reserved for the parent and is not claimed here.
+Remaining reference boundaries are unchanged: a reference to a temporary
+still cannot escape its enclosing lexical block, `&mut str` remains rejected,
+and the broader recursive-lifetime/variance inference item stays outside the
+implemented fragment.

@@ -54,8 +54,9 @@ The system covers:
   for direct local records;
 - checked `&place`/`&mut place` references to nested and owning record fields,
   inline-array elements, `Vec<T>` elements, and hidden temporary owners, with
-  real storage identity, structural disjointness for constant indices, and
-  last-use release;
+  real storage identity, source-order temporary initialization (including
+  lazy short-circuit and loop-condition evaluation), structural disjointness
+  for constant indices, and last-use release;
 - general `*p` reads for non-owning referents and `*p = value` replacement for
   exclusive references, destroying an old affine payload exactly once.
 

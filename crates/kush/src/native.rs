@@ -2409,6 +2409,7 @@ fn collect_literals<'a>(block: &'a ex::Block, out: &mut Vec<(usize, &'a [u8])>) 
             ex::Statement::Let(_, value) | ex::Statement::Expr(value) => {
                 collect_expr_literals(value, out)
             }
+            ex::Statement::Declare(_) => {}
         }
     }
     if let Some(tail) = &block.tail {
@@ -2474,6 +2475,7 @@ fn collect_closure_types(program: &Executable) -> Vec<Vec<Type>> {
         for statement in &function.body.statements {
             match statement {
                 ex::Statement::Let(_, value) | ex::Statement::Expr(value) => walk(value, &mut all),
+                ex::Statement::Declare(_) => {}
             }
         }
         if let Some(tail) = &function.body.tail {
@@ -2972,6 +2974,7 @@ fn collect_task_types(program: &Executable) -> Vec<usize> {
         for statement in &function.body.statements {
             match statement {
                 ex::Statement::Let(_, value) | ex::Statement::Expr(value) => walk(value, &mut ids),
+                ex::Statement::Declare(_) => {}
             }
         }
         if let Some(tail) = &function.body.tail {
@@ -3786,6 +3789,12 @@ impl Generator<'_, '_> {
         let mut slots = Vec::new();
         for statement in &block.statements {
             match statement {
+                ex::Statement::Declare(slot) => {
+                    // Backing storage for a temporary owner. The initializer
+                    // runs at its source position; cleanup is guarded by the
+                    // resource's activation flag.
+                    slots.push(*slot);
+                }
                 ex::Statement::Let(slot, expr) => {
                     let value = lower!(self.expr(expr));
                     self.consume(expr);
@@ -4070,47 +4079,24 @@ impl Generator<'_, '_> {
                         .collect(),
                 );
             }
-            ExprKind::Borrow(slot) => {
-                let local = &self.program.functions[self.function_index].locals[*slot];
-                let record = local
-                    .ty
-                    .layout()
-                    .is_some_and(|id| self.program.enums[id].record);
-                if record || local.pinned || matches!(local.ty, Type::Union(_) | Type::DynObj(_)) {
-                    let pointer = self.locations[*slot]
-                        .expect("checked inline object borrow is pinned to stack storage");
-                    return Some(vec![pointer]);
-                }
-                if matches!(
-                    local.ty,
-                    Type::Box(_)
-                        | Type::ArenaBox(_)
-                        | Type::Arena
-                        | Type::Bytes
-                        | Type::String
-                        | Type::Vec(_)
-                ) {
-                    let pointer = self.locations[*slot]
-                        .expect("checked owner borrow is pinned to stack storage");
-                    return Some(vec![pointer]);
-                }
-                let variable = self.builder.use_var(self.variables[*slot][0]);
-                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                    ir::StackSlotKind::ExplicitSlot,
-                    8,
-                    3,
-                ));
-                let pointer = self.builder.ins().stack_addr(I64, slot, 0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), variable, pointer, 0);
-                pointer
+            ExprKind::Borrow(slot) => return Some(self.borrow_local_value(*slot)),
+            ExprKind::InitOwner { slot, value: init } => {
+                let values = lower!(self.expr(init));
+                self.consume(init);
+                self.store_initialized_owner(*slot, &values);
+                return Some(self.local_words(*slot));
+            }
+            ExprKind::BorrowInit { slot, value: init } => {
+                let values = lower!(self.expr(init));
+                self.consume(init);
+                self.store_initialized_owner(*slot, &values);
+                return Some(self.borrow_local_value(*slot));
             }
             ExprKind::BorrowField(place) => {
-                return Some(vec![self.place_address(place)]);
+                return Some(vec![lower!(self.place_address(place))]);
             }
             ExprKind::BorrowPlace(place) => {
-                return Some(vec![self.place_address(place)]);
+                return Some(vec![lower!(self.place_address(place))]);
             }
             ExprKind::PlaceIndex { .. } => {
                 unreachable!("a checked place index appears only inside a borrow")
@@ -6174,56 +6160,129 @@ impl Generator<'_, '_> {
         ));
         self.builder.ins().stack_addr(I64, slot, 0)
     }
+    /// Read one local's words without moving it.
+    fn local_words(&mut self, slot: usize) -> Words {
+        if let Some(pointer) = self.locations[slot] {
+            let width = self.variables[slot].len();
+            return self.load_words(pointer, 0, width);
+        }
+        self.variables[slot]
+            .iter()
+            .map(|v| self.builder.use_var(*v))
+            .collect()
+    }
+    /// Store a temporary-owner initializer in its already-declared hidden
+    /// slot, releasing any previous value from an earlier loop evaluation.
+    #[inline(never)]
+    fn store_initialized_owner(&mut self, slot: usize, values: &[Value]) {
+        let id = self.program.functions[self.function_index].local_resources[slot];
+        self.cleanup(id);
+        self.assign(slot, values);
+        self.activate_local(slot);
+    }
+    /// Borrow one direct local binding, giving inline aggregates and owning
+    /// handles their pinned address.
+    fn borrow_local_value(&mut self, slot: usize) -> Words {
+        let local = &self.program.functions[self.function_index].locals[slot];
+        let record = local
+            .ty
+            .layout()
+            .is_some_and(|id| self.program.enums[id].record);
+        if record || local.pinned || matches!(local.ty, Type::Union(_) | Type::DynObj(_)) {
+            let pointer = self.locations[slot]
+                .expect("checked inline object borrow is pinned to stack storage");
+            return vec![pointer];
+        }
+        if matches!(
+            local.ty,
+            Type::Box(_)
+                | Type::ArenaBox(_)
+                | Type::Arena
+                | Type::Bytes
+                | Type::String
+                | Type::Vec(_)
+        ) {
+            let pointer =
+                self.locations[slot].expect("checked owner borrow is pinned to stack storage");
+            return vec![pointer];
+        }
+        let variable = self.builder.use_var(self.variables[slot][0]);
+        let stack = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+            ir::StackSlotKind::ExplicitSlot,
+            8,
+            3,
+        ));
+        let pointer = self.builder.ins().stack_addr(I64, stack, 0);
+        self.builder
+            .ins()
+            .store(ir::MemFlagsData::new(), variable, pointer, 0);
+        vec![pointer]
+    }
+    /// Address of one local's pinned storage, materializing an explicit stack
+    /// slot for a scalar or enum that was never pinned.
+    fn local_address(&mut self, slot: usize) -> Value {
+        if let Some(pointer) = self.locations[slot] {
+            return pointer;
+        }
+        let variable = self.builder.use_var(self.variables[slot][0]);
+        let stack = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+            ir::StackSlotKind::ExplicitSlot,
+            (self.variables[slot].len().max(1) * 8) as u32,
+            3,
+        ));
+        let pointer = self.builder.ins().stack_addr(I64, stack, 0);
+        self.builder
+            .ins()
+            .store(ir::MemFlagsData::new(), variable, pointer, 0);
+        pointer
+    }
     /// Address of a checked place expression: a pinned local or a chain of
     /// aggregate field projections over one. Only read-only projected dispatch
     /// uses this, so no relocation or ownership transfer happens here.
-    fn place_address(&mut self, expr: &Expr) -> Value {
+    /// `None` means evaluating a temporary initializer transferred control, so
+    /// the surrounding expression lowering must stop emitting straight-line
+    /// code.
+    fn place_address(&mut self, expr: &Expr) -> Option<Value> {
         match &expr.kind {
-            ExprKind::Local(slot) | ExprKind::Peek(slot) => {
-                if let Some(pointer) = self.locations[*slot] {
-                    return pointer;
-                }
-                let variable = self.builder.use_var(self.variables[*slot][0]);
-                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
-                    ir::StackSlotKind::ExplicitSlot,
-                    (self.variables[*slot].len().max(1) * 8) as u32,
-                    3,
-                ));
-                let pointer = self.builder.ins().stack_addr(I64, slot, 0);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), variable, pointer, 0);
-                pointer
+            ExprKind::Local(slot) | ExprKind::Peek(slot) => Some(self.local_address(*slot)),
+            ExprKind::InitOwner { slot, value: init } => {
+                // Initialize temporary backing storage at the place's source
+                // position, then address that stable slot.
+                let values = lower!(self.expr(init));
+                self.consume(init);
+                self.store_initialized_owner(*slot, &values);
+                Some(self.local_address(*slot))
             }
             ExprKind::Project(base, offset) => {
                 let base_pointer = if base.ty.is_ref() {
-                    let values = self.expr(base).expect("checked reference base");
-                    values[0]
+                    lower!(self.expr(base))[0]
                 } else {
-                    self.place_address(base)
+                    lower!(self.place_address(base))
                 };
-                self.builder
-                    .ins()
-                    .iadd_imm_s(base_pointer, (*offset * 8) as i64)
+                Some(
+                    self.builder
+                        .ins()
+                        .iadd_imm_s(base_pointer, (*offset * 8) as i64),
+                )
             }
             ExprKind::PlaceIndex { base, index } => {
-                let index = self.scalar(index).expect("checked place index is a scalar");
+                let index = lower!(self.scalar(index));
                 if matches!(base.ty, Type::Vec(_)) {
-                    let location = self.place_address(base);
+                    let location = lower!(self.place_address(base));
                     let handle = self.load_words(location, 0, 1)[0];
-                    return self.runtime_call(self.vec_element, &[handle, index]);
+                    return Some(self.runtime_call(self.vec_element, &[handle, index]));
                 }
                 let (element, length) = base
                     .ty
                     .layout()
                     .and_then(|id| self.program.enums[id].array)
                     .expect("checked array index place");
-                let location = self.place_address(base);
+                let location = lower!(self.place_address(base));
                 self.check_index(index, length as i64);
                 let stride = (self.program.width(element) * 8) as i64;
                 let offset = self.builder.ins().imul_imm_s(index, stride);
                 let data = self.builder.ins().iadd_imm_s(location, 8);
-                self.builder.ins().iadd(data, offset)
+                Some(self.builder.ins().iadd(data, offset))
             }
             _ => unreachable!("checked projected borrow has a place expression"),
         }

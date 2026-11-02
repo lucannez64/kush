@@ -316,6 +316,11 @@ pub(crate) struct Block {
 #[derive(Debug)]
 pub(crate) enum Statement {
     Let(usize, Expr),
+    /// Declare hidden backing storage for a temporary owner without
+    /// evaluating it. The initializer runs at its source position through
+    /// `ExprKind::InitOwner` or `ExprKind::BorrowInit`; the slot is cleaned up
+    /// at the end of this lexical block only if it was actually initialized.
+    Declare(usize),
     Expr(Expr),
 }
 #[derive(Debug)]
@@ -669,6 +674,16 @@ pub(crate) enum ExprKind {
     Local(usize),
     Move(usize),
     Borrow(usize),
+    /// Borrow a temporary owner at its source evaluation point. The slot is
+    /// declared by `Statement::Declare`; `value` initializes it exactly where
+    /// the borrowed aggregate appears, then the expression yields the same
+    /// reference `Borrow(slot)` would. This keeps argument, field, index,
+    /// branch, and short-circuit order while the hidden storage keeps the
+    /// referent alive until every checked use.
+    BorrowInit {
+        slot: usize,
+        value: Box<Expr>,
+    },
     /// A shared reference to a projected place, used only for read-only dynamic
     /// dispatch on an owning field. The projection is evaluated in place; the
     /// root owner stays live and is conservatively shared-borrowed while the
@@ -972,6 +987,19 @@ pub(crate) enum ExprKind {
     },
     /// Read a local without moving it (only to project copyable fields).
     Peek(usize),
+    /// Initialize hidden backing storage for a temporary owner at the
+    /// expression's source evaluation point, then behave as `Peek(slot)`.
+    ///
+    /// The slot itself is declared by `Statement::Declare` in the enclosing
+    /// lexical block, so storage and cleanup outlive every checked borrow even
+    /// though the initializer's effects stay in source order (inside a
+    /// short-circuit operand, loop condition, or branch). Re-initializing the
+    /// slot drops the previous owner first, which keeps repeated loop
+    /// evaluation balanced.
+    InitOwner {
+        slot: usize,
+        value: Box<Expr>,
+    },
     /// Copy the field at a word offset out of a record value.
     Project(Box<Expr>, usize),
     /// Unchecked byte read; the bound was proved statically.
@@ -1029,6 +1057,7 @@ impl Expr {
             for statement in &b.statements {
                 match statement {
                     Statement::Let(_, value) | Statement::Expr(value) => f(value),
+                    Statement::Declare(_) => {}
                 }
             }
             if let Some(tail) = &b.tail {
@@ -1076,6 +1105,8 @@ impl Expr {
             | ExprKind::Project(value, _)
             | ExprKind::BorrowField(value)
             | ExprKind::BorrowPlace(value)
+            | ExprKind::InitOwner { value, .. }
+            | ExprKind::BorrowInit { value, .. }
             | ExprKind::Break(Some(value), _) => f(value),
             ExprKind::PlaceIndex { base, index } => {
                 f(base);
@@ -1808,6 +1839,7 @@ fn fusion_block_safe(
         Statement::Let(_, value) | Statement::Expr(value) => {
             fusion_expr_safe(value, signatures, bodies, memo, visiting)
         }
+        Statement::Declare(_) => true,
     }) && block
         .tail
         .as_ref()
@@ -1845,6 +1877,8 @@ fn fusion_expr_safe(
         | ExprKind::DerefWrite(_, _)
         | ExprKind::BoxWrite(_, _)
         | ExprKind::BorrowPlace(_)
+        | ExprKind::BorrowInit { .. }
+        | ExprKind::InitOwner { .. }
         | ExprKind::PlaceIndex { .. } => false,
         ExprKind::BorrowField(_) => false,
         // No loop has a checked termination argument here.
@@ -2055,6 +2089,7 @@ fn fuse_block(
             Statement::Let(_, value) | Statement::Expr(value) => {
                 fuse_expr(value, types, signatures, safety, fusions)
             }
+            Statement::Declare(_) => {}
         }
     }
     if let Some(tail) = &mut block.tail {
@@ -2097,6 +2132,8 @@ fn fuse_expr(
         | ExprKind::Project(value, _)
         | ExprKind::BorrowField(value)
         | ExprKind::BorrowPlace(value)
+        | ExprKind::InitOwner { value, .. }
+        | ExprKind::BorrowInit { value, .. }
         | ExprKind::RefRead(value) => fuse_expr(value, types, signatures, safety, fusions),
         ExprKind::PlaceIndex { base, index } => {
             fuse_expr(base, types, signatures, safety, fusions);
@@ -10632,14 +10669,18 @@ impl Checker<'_, '_> {
     fn drain_hoisted(&mut self, base: usize, out: &mut Vec<Statement>) {
         out.extend(self.hoisted.drain(base..));
     }
-    /// Move a temporary value into hidden storage so a checked reference can
-    /// point at a real address. The hidden binding is a normal local: it owns
-    /// the value exactly once and its resource drops at the end of the block
-    /// that contains the reference, after the reference's checked last use.
-    fn hoist_owner(&mut self, value: Expr, mutable: bool, span: Span) -> Result<usize> {
-        let slot = self.fresh_local(span, value.ty)?;
+    /// Declare hidden storage for a temporary owner so a checked reference can
+    /// point at a real address. Only the declaration is hoisted into the
+    /// enclosing statement list: its initializer runs at the expression's
+    /// source position through `ExprKind::InitOwner`/`BorrowInit`. The hidden
+    /// binding owns the value exactly once and its resource drops at the end
+    /// of the block that contains the reference, after the reference's checked
+    /// last use; an uninitialized declaration cleans up as a no-op.
+    fn hoist_owner(&mut self, ty: Type, mutable: bool, span: Span) -> Result<usize> {
+        let slot = self.fresh_local(span, ty)?;
         self.locals[slot].mutable = mutable;
-        self.hoisted.push(Statement::Let(slot, value));
+        self.locals[slot].pinned = true;
+        self.hoisted.push(Statement::Declare(slot));
         Ok(slot)
     }
     /// Check a whole-local borrow. Records, trait objects, and owning handles
@@ -10854,10 +10895,14 @@ impl Checker<'_, '_> {
                         "this value has no addressable storage to borrow",
                     ));
                 }
-                let slot = self.hoist_owner(value, mutable, expr.span)?;
+                let ty = value.ty;
+                let slot = self.hoist_owner(ty, mutable, expr.span)?;
                 Ok(Expr {
-                    kind: ExprKind::Peek(slot),
-                    ty: self.locals[slot].ty,
+                    kind: ExprKind::InitOwner {
+                        slot,
+                        value: Box::new(value),
+                    },
+                    ty,
                     span: expr.span,
                     resource: None,
                 })
@@ -17415,6 +17460,8 @@ impl Checker<'_, '_> {
                 | ExprKind::ArenaBoxTake(inner)
                 | ExprKind::Drop(inner)
                 | ExprKind::Project(inner, _)
+                | ExprKind::InitOwner { value: inner, .. }
+                | ExprKind::BorrowInit { value: inner, .. }
                 | ExprKind::Coerce { value: inner, .. }
                 | ExprKind::Assign(_, inner)
                 | ExprKind::Break(Some(inner), _)
@@ -17485,6 +17532,7 @@ impl Checker<'_, '_> {
                 .iter()
                 .find_map(|statement| match statement {
                     Statement::Let(_, value) | Statement::Expr(value) => find(checker, value),
+                    Statement::Declare(_) => None,
                 })
                 .or_else(|| block.tail.as_deref().and_then(|tail| find(checker, tail)))
         }
@@ -18318,8 +18366,20 @@ impl Checker<'_, '_> {
                             "borrow a direct local binding or an addressable field/index place; this temporary value has no stable storage",
                         ));
                     }
-                    let slot = c.hoist_owner(value, *mutable, span)?;
-                    let value = c.borrow_local(slot, *mutable, span)?;
+                    let slot = c.hoist_owner(value.ty, *mutable, span)?;
+                    // Validate the hidden owner exactly as a direct local
+                    // borrow would (views, nested references, mutable record
+                    // fields, owner handles) and pin its storage.
+                    let borrow = c.borrow_local(slot, *mutable, span)?;
+                    let value = Expr {
+                        kind: ExprKind::BorrowInit {
+                            slot,
+                            value: Box::new(value),
+                        },
+                        ty: borrow.ty,
+                        span,
+                        resource: None,
+                    };
                     return match expected {
                         Some(expected) => c.coerce(value, expected, span),
                         None => Ok(value),
@@ -28636,6 +28696,8 @@ fn block_allocates(block: &Block) -> bool {
             | ExprKind::AllocBoxTake(value)
             | ExprKind::Drop(value)
             | ExprKind::Project(value, _)
+            | ExprKind::InitOwner { value, .. }
+            | ExprKind::BorrowInit { value, .. }
             | ExprKind::Coerce { value, .. }
             | ExprKind::Break(Some(value), _)
             | ExprKind::Assign(_, value) => expr(value),
@@ -28701,6 +28763,7 @@ fn block_allocates(block: &Block) -> bool {
     }
     block.statements.iter().any(|statement| match statement {
         Statement::Let(_, value) | Statement::Expr(value) => expr(value),
+        Statement::Declare(_) => false,
     }) || block.tail.as_deref().is_some_and(expr)
 }
 
