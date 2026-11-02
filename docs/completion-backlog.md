@@ -48,10 +48,24 @@ and remaining limits.
 
 ## Traits
 
-- [ ] Associated types and constants with checked projection/substitution.
-- [ ] Generic and blanket implementations with coherent overlap rules.
-- [ ] Trait objects and checked dynamic dispatch/object safety.
-- [ ] Specialization with an explicit deterministic coherence contract.
+- [x] Associated types and constants with checked projection/substitution.
+  Scalar compile-time constants, required/default values, `Self` and bounded
+  `T` projections, per-impl substitution, and missing/extra/type mismatch
+  diagnostics are implemented and tested.
+- [x] Generic and blanket implementations with coherent overlap rules. Type
+  patterns, parameter solving, bound discharge, unconstrained-parameter
+  rejection, duplicate detection, and per-instantiation method checking are
+  implemented and tested.
+- [x] Trait objects and checked dynamic dispatch/object safety. Closed-world
+  union representation, owned and copyable shared receivers, object-argument
+  dispatch, owning cleanup, associated-item agreement, and explicit rejection
+  of open sets, mutable/generic/borrowing-ownership cases are implemented and
+  tested. Stored `&dyn Trait`/`&mut dyn Trait` values remain outside the
+  subset.
+- [x] Specialization with an explicit deterministic coherence contract. Unique
+  most-specific resolution, concrete-over-generic preference, duplicate
+  rejection, and incomparable-overlap rejection are implemented and tested.
+  `default fn`, negative impls, and arbitrary overlap remain rejected.
 
 ## Grades and linear resources
 

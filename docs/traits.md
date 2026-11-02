@@ -80,10 +80,12 @@ impl Convert<Bool> for Point {
 `Point` therefore implements `Convert<i64>` and `Convert<Bool>` independently.
 The impl signature is compared after substituting the trait arguments into the
 trait method, so the impl writes `i64` (or the corresponding concrete type),
-not the trait's parameter name. `impl` headers remain concrete: `impl<T> ...`
-blanket/generic impls and lifetime-parameterized impl headers are rejected.
-A concrete generic nominal target such as
-`impl First<i64> for Pair<i64>` is supported like any other concrete target.
+not the trait's parameter name. Generic and blanket impl headers are supported
+for type parameters, including `impl<T> Show for Wrapper<T>` and
+`impl<T: Show> Loud for Box<T>`; lifetime-parameterized impl headers remain
+rejected. See [generic and blanket impls](#generic-and-blanket-impls). A
+concrete generic nominal target such as `impl First<i64> for Pair<i64>` is
+supported like any other concrete target.
 
 Methods themselves may also be generic, in both traits and impls:
 
@@ -108,13 +110,15 @@ let explicit = point.pair::<i64>(7);
 
 Trait declarations end a signature-only method with `;`. A method written with
 a block is a **default body** that an impl inherits when it omits the method;
-see [default method bodies](#default-method-bodies). Associated types and
-effect-row trait parameters are rejected with explicit diagnostics. Trait
-parameters may not themselves carry trait bounds; put the bound on the function
-type parameter that uses the trait. A method parameter may not reuse a trait
-parameter's name, which would make substitution ambiguous.
-`dyn Trait`, `impl Trait` in type position, and a trait name used as a runtime
-type are rejected rather than silently accepted.
+see [default method bodies](#default-method-bodies). Associated type and
+constant declarations are supported; see [associated
+items](#associated-types-and-constants). Effect-row trait parameters are
+rejected with an explicit diagnostic. Trait parameters may not themselves
+carry trait bounds; put the bound on the function type parameter that uses the
+trait. A method parameter may not reuse a trait parameter's name, which would
+make substitution ambiguous. `impl Trait` in type position and a trait name used
+as a runtime type are rejected. `dyn Trait` is a closed-world trait object; see
+[trait objects](#closed-world-trait-objects).
 
 ## Static dispatch and call lowering
 
@@ -131,10 +135,12 @@ A method call `receiver.name(arguments...)` is checked as follows:
 5. No method found is an error naming the receiver type.
 
 The user-defined call lowers to the same `Target::Function` call node as an
-ordinary function call, with the checked receiver as argument zero. There are
-no vtables, trait values, function pointers added for dispatch, or runtime
-allocation. Receiver evaluation order, argument order, coercions, erased-proof
-discharge, effects, grades, and ownership are the ordinary call rules.
+ordinary function call, with the checked receiver as argument zero. Static
+dispatch adds no vtable, trait value, function pointer, or runtime allocation.
+Trait-object dispatch uses a checked closed-world union matcher instead; see
+[trait objects](#closed-world-trait-objects). Receiver evaluation order,
+argument order, coercions, erased-proof discharge, effects, grades, and
+ownership are the ordinary call rules.
 
 ### Default method bodies
 
@@ -184,9 +190,9 @@ one fresh checked function for each `(impl, method)` pair:
 
 An impl may override a default. The override is still compared with the trait
 signature by the exact contract rules below, so an override cannot weaken an
-effect, drop a grade, change the receiver mode, or change the result. There is
-no specialization: an override replaces the default for that impl, it does not
-add a second dispatch candidate.
+effect, drop a grade, change the receiver mode, or change the result. An
+override replaces the default for that impl; trait-level specialization is a
+separate, explicitly checked relationship between impl headers.
 
 Inside a materialized default body, an unqualified method call on `Self`
 prefers the enclosing trait specialization (for a non-generic trait, the
@@ -281,13 +287,222 @@ body never calls the method. Bound arity is checked at the declaration, while
 the actual impl obligation is checked at every specialization. Bounds on a
 generic method are enforced in exactly the same way.
 
-This is static monomorphization. There is no trait-object representation, no
-blanket-impl overlap solver, and no specialization/coherence reasoning beyond
-exact duplicate detection. A receiver type may have several specializations of
-one trait, but a duplicate `(trait, arguments, receiver)` impl is rejected.
-Generic methods are supported on inherent impls and trait impls; each call site
-monomorphizes the method body, and an unused generic body is not emitted.
-Generic/blanket impl headers remain rejected.
+This is static monomorphization. Generic and blanket impl headers are solved by
+first-order matching. Declaration-time coherence compares every pair of impl
+headers for one trait: overlapping headers must be specialization-comparable,
+and the unique most-specific applicable impl wins. Incomparable overlaps and
+duplicate headers are rejected. A receiver type may have several
+specializations of one trait. Generic methods are supported on inherent impls
+and trait impls; each call site monomorphizes the method body, and an unused
+generic body is not emitted. See [generic and blanket
+impls](#generic-and-blanket-impls) and
+[specialization](#specialization-and-coherence).
+
+## Associated types and constants
+
+A trait declares associated types and compile-time constants alongside its
+methods:
+
+```kush
+struct Point { x: i64 }
+
+trait Scaled {
+    type Out;
+    const FACTOR: i64;
+    fn scaled(self: Self) -> Self.Out ! {panic};
+    fn bumped(self: Self) -> Self.Out ! {panic} {
+        self.scaled() + Self.FACTOR
+    }
+}
+
+impl Scaled for Point {
+    type Out = i64;
+    const FACTOR: i64 = 3;
+    fn scaled(self: Self) -> i64 ! {panic} { self.x * Self.FACTOR }
+}
+```
+
+Every impl must define every declared associated type and every constant that
+has no trait default. An impl may not define an associated item the trait did
+not declare. An associated type value is an ordinary type (it may mention an
+impl parameter in a generic impl) and may not mention `Self`. An associated
+constant type must be a compile-time scalar: `i8`/`i16`/`i32`/`i64`,
+`u8`/`u16`/`u32`/`u64`, `Bool`, or `Char`.
+
+Projection normalization is checked and per-impl:
+
+- `Self.Out` in a trait or impl method signature normalizes to the impl's
+  supplied type before contract comparison and type lowering. The impl may
+  write `Self.Out` or the concrete type.
+- `T.Out` in a signature where `T` is a generic parameter with a trait bound
+  normalizes from the unique impl selected for the concrete `T`. The projection
+  never infers `T` from a result type; `T` is inferred from the ordinary
+  parameters first.
+- `Self.NAME` in an impl body or inherited default substitutes the impl's
+  constant. `T.NAME` projects a constant through a bounded generic parameter
+  using the impl selected for the concrete `T`. `Type.NAME` projects a constant
+  of a concrete nominal type when exactly one trait or inherent impl provides
+  it.
+- An inherited constant default may reference constants defined earlier; it is
+  evaluated in declaration order.
+
+Constant values are evaluated at check time. The accepted expression subset is
+scalar literals, earlier associated constants, checked integer arithmetic
+(`+ - * / %`, shifts, bitwise operators), boolean operators, `!`, and integer
+comparisons. Calls, effects, runtime values, division by zero, and out-of-range
+results are rejected. A constant therefore has no runtime storage, address, or
+accessor function; it lowers to an ordinary literal at every use.
+
+Associated type values and constants participate in the same per-impl
+materialization as default bodies, so an inherited default sees `Self.Out` and
+`Self.NAME` substituted for the impl that inherits it.
+
+## Generic and blanket impls
+
+An impl header may take ordinary type parameters:
+
+```kush
+struct Wrapper<T> { value: T }
+trait Show { type Out; fn show(self: Self) -> Self.Out ! {panic}; }
+
+impl<T> Show for Wrapper<T> {
+    type Out = T;
+    fn show(self: Self) -> T ! {panic} { self.value }
+}
+```
+
+A parameter may carry one declared trait bound, forming a blanket impl:
+
+```kush
+impl<T: Show> Loud for Wrapper<T> {
+    fn loud(self: Self) -> i64 ! {panic} { self.value.show() * 2 }
+}
+```
+
+Trait arguments may also be patterns over the impl parameters:
+
+```kush
+impl<T> Convert<T> for Wrapper<T> {
+    type Out = T;
+    fn render(self: Self) -> T ! {panic} { self.value }
+}
+```
+
+Supported header patterns are owned nominal applications (`Wrapper<T>`,
+`Pair<i64, T>`, `Box<T>`, `Vec<T>`, tuples, and fixed arrays), bare parameters
+for blanket impls, and primitive scalar types. Borrows, slices, function
+arrows, unions, transparent aliases, associated projections, and `Self` in an
+impl header are rejected. Const, grade, and effect parameters on impl headers
+are not implemented; only ordinary type parameters are accepted. Every impl
+parameter must be constrained by the self type or the trait arguments, so
+dispatch can solve it uniquely.
+
+At a call or obligation, matching is first-order:
+
+1. Match the concrete receiver against the impl's self-type pattern.
+2. Match the required trait specialization against the impl's trait-argument
+   patterns.
+3. Bind each impl type parameter consistently; a repeated parameter must match
+   the same concrete type.
+4. Check each bound on an impl parameter. A missing bound makes that impl
+   inapplicable (and produces a missing-trait diagnostic for a direct bound).
+5. Intern one instantiation per distinct concrete impl-argument list. The
+   method body is checked with `Self` equal to the matched self type and every
+   impl parameter substituted, exactly like a default body.
+
+Generic impl methods are not eagerly checked without dispatch: a header with
+no matching receiver emits no body, and a concrete implementation selected at a
+call is checked once per instantiation.
+
+## Specialization and coherence
+
+Overlap is decided by unifying two impl headers for the same trait. Both the
+self-type patterns and the trait-argument patterns must unify. Declaration-time
+coherence then applies:
+
+- **Disjoint** headers (no common receiver and specialization) coexist.
+- **Specialization-comparable** headers coexist when one pattern is an instance
+  of the other. The unique most-specific applicable impl wins. A concrete impl
+  is always more specific than a blanket impl; `Pair<T, i64>` is more specific
+  than `Pair<T, U>`.
+- **Equivalent** headers that cover the same receiver and specialization are a
+  duplicate-implementation error.
+- **Incomparable** overlaps are rejected. For example `Pair<T, i64>` and
+  `Pair<i64, T>` share the instance `Pair<i64, i64>` but neither pattern is more
+  specific. Accepting either would make dispatch depend on declaration order,
+  so the checker reports the conflict.
+
+Resolution is deterministic: collect all applicable impls, retain the unique
+most-specific one, and reject a tie. There is no source-order fallback. A
+concrete exact impl is preferred over a generic match. Unqualified method
+dispatch considers every trait, so an object or receiver with several traits
+providing a name remains an explicit ambiguity error.
+
+Only the specified specialization rule is implemented: a more-specific impl may
+replace a blanket one, but there is no `default fn`, negative impl, or arbitrary
+overlap accepted as specialization.
+
+## Closed-world trait objects
+
+`dyn Trait` and `dyn Trait<Arguments>` are supported when the trait has a
+finite, nonempty set of concrete impls. The object representation is the
+normalized union of those concrete impl targets; dispatch is a checked match
+over the union alternatives that calls each impl's ordinary method. There is no
+vtable, fat pointer, erased function pointer, or runtime allocation.
+
+```kush
+struct Point { x: i64 }
+struct Flag { on: Bool }
+
+trait Describe { fn describe(self: Self) -> i64 ! {panic}; }
+impl Describe for Point { fn describe(self: Self) -> i64 ! {panic} { self.x } }
+impl Describe for Flag { fn describe(self: Self) -> i64 ! {panic} { if self.on { 1 } else { 0 } } }
+
+fn main() -> i64 ! {io, panic} {
+    let object: dyn Describe = Point { x: 9 };
+    print_i64(object.describe());
+    0
+}
+```
+
+A concrete impl value coerces into the object union by the ordinary union
+injection rule. Passing the object to a function, returning it, storing it in a
+`Box`/`Vec`/tuple/array, and narrowing it are ordinary union operations.
+Nominal record and enum declarations are laid out before impl collection; a
+declared field of type `dyn Trait` is therefore rejected, while the same type
+inside a function signature, `Box`, `Vec`, tuple, or array is supported. Because the
+representation is a union, every alternative is still an owning or copyable
+value with the same drop behavior as a statically dispatched call. A method
+that consumes an owning receiver consumes the object exactly once.
+
+Object safety is checked at every `dyn` use:
+
+- no generic or blanket impls for the trait (the member set must be closed);
+- ordinary type parameters only; Nat, Grade, and effect parameters are not
+  object-safe;
+- every trait method takes `self: Self`, `self: &Self`, or `&self`;
+- `&mut self` is rejected because mutating a matched object would require a
+  checked borrowed-object capability;
+- a shared `&self` method is accepted only when every concrete member is
+  copyable; otherwise dispatch would move an owning object;
+- no method type parameters or lifetime parameters, and no erased proof
+  parameters;
+- no `Self` in non-receiver parameters or in the result, so every alternative
+  has the same ABI;
+- no owning/`@[1]` result contract through dynamic dispatch;
+- impls of one specialization must agree on every associated type and constant
+  value, so projection is unambiguous.
+
+An object union may represent several traits when their concrete member sets
+coincide. If more than one represented trait declares the called method name,
+the call is ambiguous; qualify it as `object.Trait.method(...)`. A method that
+belongs to only one represented trait needs no qualification. This closed-world
+sharing is sound because every member of the union implements every represented
+trait, but adding an impl rebuilds the member set.
+
+Borrowed trait objects as stored values (`&dyn Trait`), `&mut dyn Trait`, trait
+objects containing borrowed records, and object methods with lifetime or
+exact-use contracts remain outside this subset.
 
 ## Checked contracts
 
@@ -298,10 +513,10 @@ capture-avoiding substitutions:
   `fn pair<U>` and `fn pair<V>` have the same contract but different bounds or
   parameter counts do not;
 - `Self` is replaced by the concrete impl target, and each trait parameter in
-  the trait signature is replaced by the impl's specialized argument. Trait
-  arguments are closed types (generic impls are rejected), so they cannot
-  capture a method binder. Naming a method parameter like a trait parameter is
-  rejected at declaration to keep the substitution unambiguous.
+  the trait signature is replaced by the impl's specialized argument. A generic
+  impl's arguments are its own parameters; method parameters must be named
+  distinctly from impl and trait parameters, so the substitution cannot
+  capture a method binder.
 
 The comparison then includes:
 
@@ -403,35 +618,34 @@ inherited defaults private to the module that declares the trait.
 
 ## Limits
 
-The following are intentionally not implemented and are rejected or excluded:
+The following remain intentionally outside the implemented subset:
 
-- dynamic trait objects, vtables, and runtime dispatch;
-- associated types or associated constants;
-- generic/blanket impl headers, method declarations without bodies in impls,
-  and impls that overlap beyond exact duplicate detection;
-- specialization: an override must match the default's trait signature exactly
-  and replaces it for that impl; there is no `default fn` or more-specific
-  impl selection;
-- effect-row parameters on a trait declaration (effect parameters remain
-  available on generic functions and methods);
+- vtables, fat pointers, open-world trait objects, and `&dyn Trait`/`&mut dyn
+  Trait` stored values;
+- `dyn Trait` as a declared nominal record or enum field (layout happens before
+  impl collection); use `Box<dyn Trait>` or a tuple when storage is needed;
+- associated type defaults, associated `Nat`/grade/effect values, and
+  associated constants that depend on an impl type parameter;
+- const, grade, and effect parameters on generic impl headers;
+- lifetime-parameterized impl headers, negative impls, `default fn`, and
+  arbitrary-overlap specialization;
 - trait bounds on trait parameters themselves;
 - borrowed receivers for enums, borrowed-record metadata, stored references,
   reference reborrows through an existing `&Self`/`&mut Self`, or any escaping
   reference;
 - passing a reference or borrowed record through an ordinary generic type
   parameter, including a generic method parameter;
-- operator overloading, automatic deriving, and structural/duck-typed traits;
-- trait objects in `Box`, `Vec`, records, enums, tuples, unions, closures, or
-  task results;
-- negative impls.
+- operator overloading, automatic deriving, and structural/duck-typed traits.
 
 A default body is type-checked only for the impls that inherit it. A trait
 declared with a default method but never implemented does not check that body;
 an ill-typed default is reported as soon as an impl inherits it. This matches
-the existing rule that unused generic bodies are not emitted.
+the existing rule that unused generic bodies are not emitted. A generic impl
+method is checked only for the concrete instantiations dispatch selects.
 
-This is a coherent static-dispatch subset with generic traits, generic methods,
-and default bodies, not a claim of a complete typeclass system.
+This is a coherent static-dispatch subset with generic and blanket impls,
+associated items, deterministic specialization, and closed-world objects, not
+a claim of a complete typeclass system or Rust-compatible object model.
 
 ## Verification
 
@@ -440,11 +654,11 @@ trait impls on nominal types and owning buffers, receiver-before-argument
 evaluation, owned-receiver moves and allocation balance, duplicate and missing
 impls, ambiguous dispatch and explicit qualification, exact effect/grade/
 return mismatches, reserved names and field collisions, trait names used as
-types, generic/blanket impls, associated types, trait-method visibility, shared
-and exclusive nominal-record receivers, borrowed receiver contract mismatches,
-explicit trait qualification, method type arguments, cross-module visibility
-and imports, the runnable example, and native/reference agreement. The
-borrowed-receiver boundary is covered in `borrowed_methods.rs`.
+types, trait-method visibility, shared and exclusive nominal-record receivers,
+borrowed receiver contract mismatches, explicit trait qualification, method
+type arguments, cross-module visibility and imports, the runnable example, and
+native/reference agreement. The borrowed-receiver boundary is covered in
+`borrowed_methods.rs`.
 
 `default_methods.rs` adds thirteen tests for inherited defaults: dispatch to
 overrides and to other defaults, inherent methods called from a default body,
@@ -453,18 +667,35 @@ bodyless methods, `Self` substitution across two impl targets, trait type and
 grade argument substitution into default signatures and bodies, generic method
 inference next to a trait parameter, shared and exclusive borrowed receiver
 defaults (including an exclusive field write) and their enum rejection,
-ambiguity and explicit qualification of inherited defaults, body
-checking per impl, record-field collisions, cross-module trait visibility, and
-the runnable `examples/default-methods.kush` example in both backends.
+ambiguity and explicit qualification of inherited defaults, body checking per
+impl, record-field collisions, cross-module trait visibility, and the runnable
+`examples/default-methods.kush` example in both backends.
 
-`generic_traits.rs` adds eighteen tests for concrete generic-trait
-specializations, duplicate and ambiguity diagnostics, bounded helpers with
-missing specializations even in unused bodies, trait-argument arity at impls
-and declarations, `Self`/trait-argument substitution, generic trait methods
-with alpha-equivalent parameters and lifetimes, generic method contracts
-(parameters, effects, grades, erased evidence, wrong specialization results),
-generic nominal impl targets, rejected blanket impls, identity and owning-type
-cleanup in both backends, inferred and explicit method arguments, non-dropped
-method bounds, borrowed receivers with generic scalars, loan retention into
-later arguments, natural trait parameters, cross-module visibility, and the
-runnable `examples/generic_traits.kush` example.
+`generic_traits.rs` covers concrete generic-trait specializations, duplicate
+and ambiguity diagnostics, bounded helpers with missing specializations even in
+unused bodies, trait-argument arity at impls and declarations, `Self` and
+trait-argument substitution, generic trait methods with alpha-equivalent
+parameters and lifetimes, generic method contracts (parameters, effects,
+grades, erased evidence, wrong specialization results), generic nominal impl
+targets, generic impl headers, identity and owning-type cleanup in both
+backends, inferred and explicit method arguments, non-dropped method bounds,
+borrowed receivers with generic scalars, loan retention into later arguments,
+natural trait parameters, cross-module visibility, and the runnable
+`examples/generic_traits.kush` example.
+
+`trait_advanced.rs` adds twenty-two tests for associated type/constant
+projection and substitution, `T.Out` in bounded generic results, inherited
+constant defaults, checked constant arithmetic and range/division diagnostics,
+missing/extra/mistyped associated items, contract rejection when a projection
+and impl result disagree, generic and blanket impls with bound discharge,
+generic trait-argument patterns, borrowed receivers on generic impls,
+most-specific specialization, duplicate/incomparable coherence rejection,
+owned and shared closed-world trait objects, object-argument dispatch, object
+return and union coercion, owning-member cleanup and allocation balance,
+single-specialization generic objects, associated-item agreement, generic
+method inference, effect-exclusion bounds, and linear `@[1]` results on
+generic impls, and explicit
+object-safety rejections (open member sets, borrowed owning members, mutable
+receivers, generic methods, associated-type disagreement, and no impls). Each
+accepted program is compared between the reference evaluator and the native
+backend.

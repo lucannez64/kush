@@ -58,17 +58,22 @@ pub enum ItemKind {
         generics: Vec<Generic>,
         ty: Type,
     },
-    /// `trait Name<T> { fn method(self: Self, ...) -> T ! { ... }; }`.
+    /// `trait Name<T> { type Item; const LIMIT: i64; fn method(self: Self, ...) -> T ! { ... }; }`.
     ///
-    /// Traits are static dispatch contracts only. A method signature ends in
+    /// Traits are static dispatch contracts. A method signature ends in
     /// `;` and requires an explicit impl; a method written with a block is a
     /// default body that an impl inherits when it omits the method. Trait type
     /// parameters are ordinary type/Nat/Grade/Effects parameters that form
-    /// part of the trait's static identity. There are no associated types or
-    /// dynamic objects in this subset.
+    /// part of the trait's static identity. Associated types and constants add
+    /// checked projection and per-impl substitution. Trait objects are a
+    /// closed-world dynamic representation; see the checker.
     Trait {
         name: String,
         generics: Vec<Generic>,
+        /// Associated type and constant declarations. An impl must provide a
+        /// value for every associated type and for every constant without a
+        /// default.
+        associated: Vec<Associated>,
         methods: Vec<Method>,
     },
     /// `algebra Name { elements { A = 0, B = 1 } zero = A; one = B; }`.
@@ -86,10 +91,54 @@ pub enum ItemKind {
     /// trait specialization; the resolver records its binding, and it must
     /// resolve to a declared trait.
     Impl {
+        /// Type parameters of a generic or blanket impl, as in
+        /// `impl<T> Show for Wrapper<T>` or `impl<T: Show> Show for T`.
+        /// Lifetime parameters remain unsupported on impl headers.
+        generics: Vec<Generic>,
         trait_path: Option<Type>,
         self_ty: Type,
+        /// Associated type and constant definitions. In a trait impl every
+        /// declared associated item must be defined, and no extra item may
+        /// appear. Inherent impls may define associated constants for the
+        /// nominal target type.
+        associated: Vec<Associated>,
         methods: Vec<Method>,
     },
+}
+/// One associated item inside a trait declaration or an impl block.
+///
+/// An associated type projects through `Self::Name` or through a bounded
+/// generic parameter `T::Name`. An associated constant is a compile-time
+/// scalar; its value is substituted wherever it is named, so it has no runtime
+/// storage or accessor function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Associated {
+    /// `type Name;` in a trait or `type Name = Type;` in an impl.
+    Type {
+        name: String,
+        value: Option<Type>,
+        span: Span,
+    },
+    /// `const NAME: Type;` in a trait or `const NAME: Type = value;` in an
+    /// impl. A trait declaration may also provide a default value.
+    Const {
+        name: String,
+        ty: Type,
+        value: Option<Expr>,
+        span: Span,
+    },
+}
+impl Associated {
+    pub fn name(&self) -> &str {
+        match self {
+            Associated::Type { name, .. } | Associated::Const { name, .. } => name,
+        }
+    }
+    pub fn span(&self) -> Span {
+        match self {
+            Associated::Type { span, .. } | Associated::Const { span, .. } => *span,
+        }
+    }
 }
 /// One method declaration inside a trait or impl. `public` is meaningful only
 /// on an inherent/trait impl method; trait method declarations reject an
@@ -234,6 +283,13 @@ pub enum TypeKind {
     /// signature. It is replaced by the concrete impl target before runtime
     /// type lowering.
     SelfType,
+    /// `dyn Trait` or `dyn Trait<Arguments>`: a closed-world trait object.
+    ///
+    /// The object type is represented as the normalized union of every
+    /// concrete impl target for the trait. Only traits with a finite, nonempty
+    /// set of concrete impls and object-safe owned-receiver methods admit this
+    /// type; the checker diagnoses every other use.
+    Dyn(Box<Type>),
     Function {
         /// Lifetimes bound by the arrow itself, as in `fn<'a>(&'a [T]) -> &'a [T]`.
         /// The arrow is polymorphic over them: every call picks fresh ones.

@@ -504,7 +504,7 @@ fn generic_nat_and_grade_trait_parameters_are_compile_time_identity() {
 }
 
 #[test]
-fn generic_nominal_impl_targets_keep_blanket_impls_rejected() {
+fn generic_nominal_impl_targets_and_generic_impl_headers_work() {
     agrees(
         "struct Pair<T> { first: T, second: T }
         trait First<T> { fn first_value(self: Self) -> T ! {}; }
@@ -519,14 +519,33 @@ fn generic_nominal_impl_targets_keep_blanket_impls_rejected() {
         0,
         "3\n",
     );
-    rejects(
+    // Generic impl headers are now implemented. The trait argument is
+    // specialized per receiver, and the method body sees `Self = Pair<T>`.
+    agrees(
         "struct Pair<T> { first: T, second: T }
         trait First<T> { fn first_value(self: Self) -> T ! {}; }
-        impl<T> First<i64> for Pair<T> {
+        impl<U> First<U> for Pair<U> {
+            fn first_value(self: Self) -> U ! {} { self.first }
+        }
+        fn main() -> i64 ! {io, panic} {
+            let pair = Pair { first: 7, second: 8 };
+            print_i64(pair.First::<i64>.first_value());
+            0
+        }",
+        0,
+        "7\n",
+    );
+    rejects(
+        "struct Pair<T, U> { first: T, second: U }
+        trait First<T> { fn first_value(self: Self) -> T ! {}; }
+        impl<T> First<i64> for Pair<T, i64> {
             fn first_value(self: Self) -> i64 ! {} { 0 }
         }
+        impl<T> First<i64> for Pair<i64, T> {
+            fn first_value(self: Self) -> i64 ! {} { 1 }
+        }
         fn main() -> i64 ! {} { 0 }",
-        "generic or blanket impls are not supported",
+        "incomparable",
     );
 }
 

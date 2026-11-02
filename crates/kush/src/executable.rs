@@ -635,6 +635,9 @@ struct Signature {
     /// Trait specialization that this instance's default body belongs to.
     /// Unqualified method calls on `Self` inside the body prefer it.
     default_trait: Option<(BindingId, TraitArguments)>,
+    /// Associated constants of the owning impl, already evaluated for this
+    /// instance's specialization. `Self::NAME` resolves here.
+    associated_consts: BTreeMap<String, ConstValue>,
 }
 /// Split `T @[grade]` into the type and its grade expression.
 fn split_grade(ty: &ast::Type) -> (&ast::Type, Option<&ast::Type>) {
@@ -747,6 +750,7 @@ pub(crate) fn type_mentions_binding(
         K::Tuple(items) => items
             .iter()
             .any(|item| type_mentions_binding(resolution, item, binder)),
+        K::Dyn(inner) => type_mentions_binding(resolution, inner, binder),
         K::Slice(inner) => type_mentions_binding(resolution, inner, binder),
         K::Array(element, length) => {
             type_mentions_binding(resolution, element, binder)
@@ -1214,6 +1218,13 @@ struct Declared<'a> {
     /// concrete type/Nat/Grade/effect arguments, which are substituted into the
     /// default body's signature exactly like `Self`.
     default_specialization: Option<usize>,
+    /// Associated values of the impl that owns this method. `Self::Item` and
+    /// `Self::CONST` normalize through this entry.
+    impl_associated: Option<usize>,
+    /// Index into `Functions::impl_headers` when the method belongs to a
+    /// generic impl. Its receiver type and impl generics are supplied per
+    /// instance by `MethodDefinition::impl_arguments`.
+    impl_template: Option<usize>,
 }
 /// One method declared by a trait: its declaration span and signature, with an
 /// optional default body borrowed from the module AST.
@@ -1222,21 +1233,94 @@ struct TraitMethod<'a> {
     span: Span,
     function: &'a ast::Function,
 }
-/// One declared trait: its generic parameters and method declarations.
+/// One associated item declared by a trait.
+#[derive(Debug, Clone)]
+enum TraitAssociated {
+    Type,
+    Const {
+        ty: ast::Type,
+        /// A default value inherited by impls that omit the constant.
+        default: Option<ast::Expr>,
+    },
+}
+/// One declared trait: its generic parameters, associated items, and method
+/// declarations.
 #[derive(Clone)]
 struct TraitDefinition<'a> {
     generics: Vec<ast::Generic>,
+    associated: BTreeMap<String, TraitAssociated>,
+    /// Associated item names in declaration order. Constant defaults may
+    /// reference earlier constants, so inheritance evaluates in this order.
+    associated_order: Vec<String>,
     methods: BTreeMap<String, TraitMethod<'a>>,
+}
+/// A checked, compile-time scalar associated constant. The value is substituted
+/// textually wherever the constant is named, so it never has runtime storage,
+/// address, or an accessor function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConstValue {
+    ty: Type,
+    bits: i64,
+}
+/// Associated values supplied by one impl, from which `Self::Item` projections
+/// and `Self::CONST` references are normalized for that impl's methods and
+/// inherited defaults.
+#[derive(Debug, Clone, Default)]
+struct ImplAssociated {
+    types: BTreeMap<String, ast::Type>,
+    consts: BTreeMap<String, ConstValue>,
 }
 /// Canonical, checked arguments that select one trait specialization. Each
 /// vector is in declaration order among parameters of that category, exactly
 /// like a function instance key.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
-struct TraitArguments {
+pub(crate) struct TraitArguments {
+    pub(crate) types: Vec<Type>,
+    pub(crate) consts: Vec<usize>,
+    pub(crate) grades: Vec<Grade>,
+    pub(crate) effects: Vec<u8>,
+}
+/// Concrete arguments for the generic parameters of one impl header. Stored by
+/// index so `MethodDefinition` stays `Copy`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct ImplArguments {
     types: Vec<Type>,
     consts: Vec<usize>,
     grades: Vec<Grade>,
     effects: Vec<u8>,
+}
+/// One generic or blanket impl header. The self type and trait arguments are
+/// patterns over `generics`; concrete receivers are matched against them by
+/// first-order unification, and the unique most-specific matching impl wins.
+#[derive(Debug, Clone)]
+struct ImplHeader {
+    /// `None` for an inherent `impl<T> Type<T>` block.
+    trait_id: Option<BindingId>,
+    generics: Vec<ast::Generic>,
+    self_ty: ast::Type,
+    /// Raw trait argument patterns, aligned with the trait's generic
+    /// parameters. Empty for inherent impls.
+    trait_arguments: Vec<ast::Type>,
+    associated: ImplAssociated,
+    methods: BTreeMap<String, MethodDefinition>,
+    span: Span,
+    /// Concrete lowered header for monomorphic impls, used by coherence and by
+    /// exact lookup. `None` for generic headers.
+    concrete: Option<(TraitArguments, Type)>,
+}
+/// One match of a generic impl header against a concrete obligation.
+#[derive(Debug, Clone)]
+struct ImplMatch {
+    header: usize,
+    arguments: ImplArguments,
+}
+/// One interned generic-impl instantiation.
+#[derive(Debug, Clone)]
+struct ImplInstantiation {
+    header: usize,
+    arguments: ImplArguments,
+    self_type: Type,
+    trait_arguments: TraitArguments,
 }
 /// The category of one generic binder. Function generics and trait parameters
 /// use the same classification; only ordinary types are runtime values.
@@ -1258,16 +1342,240 @@ fn generic_category(resolution: &Resolution, generic: &ast::Generic) -> GenericC
         GenericCategory::Type
     }
 }
+/// Whether a type can be the declared type of an associated constant. Such
+/// constants are compile-time values with no runtime storage, so only scalar
+/// machine values with a canonical bit representation qualify.
+fn const_scalar_type(ty: Type) -> bool {
+    matches!(ty, Type::I64 | Type::Int(_) | Type::Bool | Type::Char)
+}
+/// Evaluate a constant expression for an associated constant. The subset is
+/// deliberately compile-time only: literals, earlier associated constants of
+/// the same impl, checked integer arithmetic, shifts, boolean operators, and
+/// integer comparisons. Calls, effects, and runtime values are rejected, so an
+/// associated constant can never hide work at a use site.
+fn evaluate_associated_const(
+    _resolution: &Resolution,
+    types: &Types<'_>,
+    _logical: &crate::check::LogicalEnvironment,
+    expr: &ast::Expr,
+    expected: Type,
+    consts: &BTreeMap<String, ConstValue>,
+) -> Result<i64> {
+    match expected {
+        Type::Bool => {
+            let value = evaluate_const_bool(expr, consts, 0)?;
+            Ok(i64::from(value))
+        }
+        Type::Char => match &expr.kind {
+            ast::ExprKind::Char(ch) => Ok(i64::from(u32::from(*ch))),
+            ast::ExprKind::Name(name) | ast::ExprKind::Field { name, .. } => {
+                const_reference(types, consts, name, Type::Char).map(|value| value.bits)
+            }
+            _ => Err(Diagnostic::new(
+                expr.span,
+                "a Char associated constant must be a character literal or another Char constant",
+            )),
+        },
+        Type::I64 | Type::Int(_) => {
+            let value = evaluate_const_int(expr, consts)?;
+            let kind = expected.int_kind().expect("integer constant type");
+            kind.encode(value).ok_or_else(|| {
+                Diagnostic::new(
+                    expr.span,
+                    format!(
+                        "associated constant value {value} is outside the range of {}",
+                        kind.name()
+                    ),
+                )
+            })
+        }
+        _ => Err(Diagnostic::new(
+            expr.span,
+            "associated constants must have a compile-time scalar type",
+        )),
+    }
+}
+fn const_reference(
+    types: &Types<'_>,
+    consts: &BTreeMap<String, ConstValue>,
+    name: &str,
+    expected: Type,
+) -> Result<ConstValue> {
+    let Some(value) = consts.get(name) else {
+        return Err(Diagnostic::new(
+            Span::default(),
+            format!(
+                "unknown associated constant '{name}'; constants may reference earlier constants of the same impl"
+            ),
+        ));
+    };
+    if value.ty != expected {
+        return Err(Diagnostic::new(
+            Span::default(),
+            format!(
+                "associated constant '{name}' has type {}, not {}",
+                types.name(value.ty),
+                types.name(expected)
+            ),
+        ));
+    }
+    Ok(*value)
+}
+fn evaluate_const_int(expr: &ast::Expr, consts: &BTreeMap<String, ConstValue>) -> Result<i128> {
+    match &expr.kind {
+        ast::ExprKind::Integer(text) => text
+            .parse::<i128>()
+            .map_err(|_| Diagnostic::new(expr.span, "integer literal is too large for a constant")),
+        ast::ExprKind::Unary {
+            op: crate::lexer::Kind::Minus,
+            operand,
+            ..
+        } => Ok(-evaluate_const_int(operand, consts)?),
+        ast::ExprKind::Name(name) | ast::ExprKind::Field { name, .. } => {
+            let Some(value) = consts.get(name) else {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    format!(
+                        "unknown associated constant '{name}'; constants may reference earlier constants of the same impl"
+                    ),
+                ));
+            };
+            match value.ty.int_kind() {
+                Some(kind) => Ok(kind.decode(value.bits)),
+                None => Err(Diagnostic::new(
+                    expr.span,
+                    "this associated constant is not an integer",
+                )),
+            }
+        }
+        ast::ExprKind::Binary { op, left, right } => {
+            let left = evaluate_const_int(left, consts)?;
+            let right = evaluate_const_int(right, consts)?;
+            use crate::lexer::Kind;
+            let value = match op {
+                Kind::Plus => left.checked_add(right),
+                Kind::Minus => left.checked_sub(right),
+                Kind::Star => left.checked_mul(right),
+                Kind::Slash => left.checked_div(right),
+                Kind::Percent => left.checked_rem(right),
+                Kind::Shl => u32::try_from(right)
+                    .ok()
+                    .and_then(|shift| left.checked_shl(shift)),
+                Kind::Shr => u32::try_from(right)
+                    .ok()
+                    .and_then(|shift| left.checked_shr(shift)),
+                Kind::Amp => Some(left & right),
+                Kind::Pipe => Some(left | right),
+                Kind::Caret => Some(left ^ right),
+                _ => {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "this operator is not supported in an integer associated constant",
+                    ));
+                }
+            };
+            value.ok_or_else(|| {
+                Diagnostic::new(
+                    expr.span,
+                    "associated constant arithmetic overflows or divides by zero",
+                )
+            })
+        }
+        _ => Err(Diagnostic::new(
+            expr.span,
+            "associated constant values must be literals, earlier constants, and checked arithmetic",
+        )),
+    }
+}
+fn evaluate_const_bool(
+    expr: &ast::Expr,
+    consts: &BTreeMap<String, ConstValue>,
+    depth: usize,
+) -> Result<bool> {
+    if depth >= 64 {
+        return Err(Diagnostic::new(
+            expr.span,
+            "associated constant expression is too deeply nested",
+        ));
+    }
+    match &expr.kind {
+        ast::ExprKind::Bool(value) => Ok(*value),
+        ast::ExprKind::Name(name) | ast::ExprKind::Field { name, .. } => {
+            let Some(value) = consts.get(name) else {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    format!("unknown associated constant '{name}'"),
+                ));
+            };
+            match value.ty {
+                Type::Bool => Ok(value.bits != 0),
+                _ => Err(Diagnostic::new(
+                    expr.span,
+                    "this associated constant is not a Bool",
+                )),
+            }
+        }
+        ast::ExprKind::Unary {
+            op: crate::lexer::Kind::Bang,
+            operand,
+            ..
+        } => Ok(!evaluate_const_bool(operand, consts, depth + 1)?),
+        ast::ExprKind::Binary { op, left, right } => {
+            use crate::lexer::Kind;
+            match op {
+                Kind::AmpAmp => {
+                    let left = evaluate_const_bool(left, consts, depth + 1)?;
+                    Ok(left && evaluate_const_bool(right, consts, depth + 1)?)
+                }
+                Kind::PipePipe => {
+                    let left = evaluate_const_bool(left, consts, depth + 1)?;
+                    Ok(left || evaluate_const_bool(right, consts, depth + 1)?)
+                }
+                Kind::Eq | Kind::Ne | Kind::Lt | Kind::Le | Kind::Gt | Kind::Ge => {
+                    let left = evaluate_const_int(left, consts)?;
+                    let right = evaluate_const_int(right, consts)?;
+                    Ok(match op {
+                        Kind::Eq => left == right,
+                        Kind::Ne => left != right,
+                        Kind::Lt => left < right,
+                        Kind::Le => left <= right,
+                        Kind::Gt => left > right,
+                        Kind::Ge => left >= right,
+                        _ => unreachable!(),
+                    })
+                }
+                _ => Err(Diagnostic::new(
+                    expr.span,
+                    "this operator is not supported in a Bool associated constant",
+                )),
+            }
+        }
+        _ => Err(Diagnostic::new(
+            expr.span,
+            "Bool associated constant values must be literals, earlier constants, comparisons, and boolean operators",
+        )),
+    }
+}
 /// One statically dispatched method: its checked function binding and visibility.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct MethodDefinition {
     binding: BindingId,
     public: bool,
     unit: usize,
+    /// Index into `Functions::impl_instantiations` for a method selected from a
+    /// generic impl. Concrete methods leave this `None`.
+    impl_arguments: Option<usize>,
 }
 /// Key of a checked function instance: binding plus type, grade, effect, and
 /// natural const arguments.
-type InstanceKey = (BindingId, Vec<Type>, Vec<Grade>, Vec<usize>, Vec<u8>);
+type InstanceKey = (
+    BindingId,
+    Vec<Type>,
+    Vec<Grade>,
+    Vec<usize>,
+    Vec<u8>,
+    Option<usize>,
+);
 /// One receiver type's trait-provided methods, each with the specialization
 /// arguments that select it.
 type TraitMethodTable = BTreeMap<String, Vec<(BindingId, TraitArguments, MethodDefinition)>>;
@@ -1314,6 +1622,29 @@ struct Functions<'a> {
     /// Trait specializations inherited by materialized default methods, indexed
     /// by `Declared::default_specialization`.
     default_specializations: Vec<(BindingId, TraitArguments)>,
+    /// Associated values of each impl, indexed by `Declared::impl_associated`.
+    impl_associated: Vec<ImplAssociated>,
+    /// Inherent associated constants keyed by the nominal target type.
+    inherent_consts: BTreeMap<Type, BTreeMap<String, ConstValue>>,
+    /// Associated constants of every trait impl, keyed by trait, canonical
+    /// trait arguments, and receiver type. Used by `Type.CONST` projections.
+    trait_consts: BTreeMap<(BindingId, TraitArguments, Type), BTreeMap<String, ConstValue>>,
+    /// Associated values of every trait impl, keyed like `trait_impls`.
+    trait_associated: BTreeMap<(BindingId, TraitArguments, Type), ImplAssociated>,
+    /// Every declared impl header, concrete or generic, in declaration order.
+    /// Coherence comparisons and generic dispatch both use this table.
+    impl_headers: Vec<ImplHeader>,
+    /// Deduplicated instantiations of generic impl headers. A method selected
+    /// from `impl_headers[i]` points here so its body is monomorphized once per
+    /// concrete impl-argument list.
+    impl_instantiations: Vec<ImplInstantiation>,
+    impl_instantiation_cache: BTreeMap<(usize, ImplArguments), usize>,
+    /// Closed-world trait objects keyed by their runtime union type. One union
+    /// may represent several traits when their concrete member sets coincide;
+    /// unqualified dispatch then requires an unambiguous trait method name.
+    object_traits: BTreeMap<Type, Vec<(BindingId, TraitArguments)>>,
+    /// Checked dynamic-dispatch functions, one per `(trait, arguments, method)`.
+    dynamic_dispatch: BTreeMap<(BindingId, TraitArguments, String), usize>,
     logical: &'a crate::check::LogicalEnvironment,
 }
 const MAX_FUNCTIONS: usize = 256;
@@ -1353,6 +1684,15 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         trait_impls: BTreeMap::new(),
         methods_by_type: BTreeMap::new(),
         default_specializations: Vec::new(),
+        impl_associated: Vec::new(),
+        inherent_consts: BTreeMap::new(),
+        trait_consts: BTreeMap::new(),
+        trait_associated: BTreeMap::new(),
+        impl_headers: Vec::new(),
+        impl_instantiations: Vec::new(),
+        impl_instantiation_cache: BTreeMap::new(),
+        object_traits: BTreeMap::new(),
+        dynamic_dispatch: BTreeMap::new(),
         logical: &logical,
     };
     let mut monomorphic = Vec::new();
@@ -1499,6 +1839,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 span,
                 self_ty: None,
                 default_specialization: None,
+                impl_associated: None,
+                impl_template: None,
             },
         );
         if f.generics.is_empty() {
@@ -1513,13 +1855,15 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         &logical,
         &mut functions,
     )?;
+    prepare_trait_objects(&mut types, resolution, &mut functions)?;
     // Generic methods are monomorphized on demand at each call site. Only
     // monomorphic methods get an eagerly checked instance here.
-    monomorphic.extend(
-        method_bindings
-            .into_iter()
-            .filter(|binding| functions.declared[binding].ast.generics.is_empty()),
-    );
+    monomorphic.extend(method_bindings.into_iter().filter(|binding| {
+        let declared = functions.declared[binding];
+        // A generic impl method is instantiated only after dispatch
+        // selects concrete impl arguments; it has no `Self` otherwise.
+        declared.ast.generics.is_empty() && declared.impl_template.is_none()
+    }));
     for binding in monomorphic {
         functions.instance(
             &mut types,
@@ -1529,6 +1873,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             vec![],
             vec![],
             vec![],
+            None,
             None,
         )?;
     }
@@ -1573,8 +1918,10 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             next_split: 0,
             self_type: sig.self_type,
             default_trait: sig.default_trait.clone(),
+            associated_consts: sig.associated_consts.clone(),
             unit: resolution.unit_of.get(&sig.binding).copied().unwrap_or(0),
             field_place: false,
+            binding: sig.binding,
         };
         let body = (|| {
             let mut runtime = sig.parameters.iter().zip(&sig.parameter_grades);
@@ -1772,6 +2119,7 @@ fn type_key(ty: &ast::Type) -> String {
             }
             text
         }
+        ast::TypeKind::Dyn(inner) => format!("dyn {}", type_key(inner)),
         ast::TypeKind::Integer(value) => value.clone(),
         ast::TypeKind::Bool(value) => format!("bool:{value}"),
         ast::TypeKind::Tuple(items) => {
@@ -1863,6 +2211,10 @@ struct ContractNames {
     /// Trait parameter name -> concrete impl argument, applied after alpha
     /// renaming so a global type name cannot capture a method binder.
     trait_arguments: BTreeMap<String, ast::Type>,
+    /// Associated type name -> impl-supplied value. Both the trait signature
+    /// and the impl signature normalize `Self::Name` through this map, so the
+    /// exact comparison sees the same type on both sides.
+    associated_types: BTreeMap<String, ast::Type>,
 }
 impl ContractNames {
     fn new(
@@ -1870,6 +2222,7 @@ impl ContractNames {
         function: &ast::Function,
         self_ty: Option<&ast::Type>,
         trait_arguments: Option<&BTreeMap<String, ast::Type>>,
+        associated_types: Option<&BTreeMap<String, ast::Type>>,
     ) -> Self {
         let mut types = BTreeMap::new();
         for (index, generic) in function.generics.iter().enumerate() {
@@ -1892,6 +2245,7 @@ impl ContractNames {
             lifetimes,
             self_ty: self_ty.cloned(),
             trait_arguments: trait_arguments.cloned().unwrap_or_default(),
+            associated_types: associated_types.cloned().unwrap_or_default(),
         }
     }
     fn name(&self, name: &str) -> Option<ast::Type> {
@@ -1915,6 +2269,13 @@ impl ContractNames {
                 {
                     return replacement;
                 }
+                if arguments.is_empty()
+                    && path.len() == 2
+                    && path[0] == "Self"
+                    && let Some(value) = self.associated_types.get(&path[1])
+                {
+                    return self.ty(value);
+                }
                 ast::TypeKind::Named {
                     path: path.clone(),
                     arguments: arguments.iter().map(|argument| self.ty(argument)).collect(),
@@ -1926,6 +2287,7 @@ impl ContractNames {
                 }
                 ast::TypeKind::SelfType
             }
+            ast::TypeKind::Dyn(inner) => ast::TypeKind::Dyn(Box::new(self.ty(inner))),
             ast::TypeKind::Lifetime(name) => ast::TypeKind::Lifetime(self.lifetime(name)),
             ast::TypeKind::Borrow {
                 lifetime,
@@ -2010,8 +2372,15 @@ fn method_contract_key(
     function: &ast::Function,
     self_ty: Option<&ast::Type>,
     trait_arguments: Option<&BTreeMap<String, ast::Type>>,
+    associated_types: Option<&BTreeMap<String, ast::Type>>,
 ) -> Result<String> {
-    let names = ContractNames::new(resolution, function, self_ty, trait_arguments);
+    let names = ContractNames::new(
+        resolution,
+        function,
+        self_ty,
+        trait_arguments,
+        associated_types,
+    );
     let mut lifetimes = String::new();
     for lifetime in &function.lifetimes {
         lifetimes.push_str(&names.lifetime(&lifetime.name));
@@ -2281,9 +2650,12 @@ fn checked_method_receiver(
 fn type_mentions_self(ty: &ast::Type) -> bool {
     match &ty.kind {
         ast::TypeKind::SelfType => true,
-        ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => {
-            arguments.iter().any(type_mentions_self)
+        ast::TypeKind::Named { path, arguments } => {
+            path.first().is_some_and(|name| name == "Self")
+                || arguments.iter().any(type_mentions_self)
         }
+        ast::TypeKind::Tuple(arguments) => arguments.iter().any(type_mentions_self),
+        ast::TypeKind::Dyn(inner) => type_mentions_self(inner),
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => {
             type_mentions_self(inner)
         }
@@ -2394,12 +2766,45 @@ fn collect_methods<'a>(
         let ast::ItemKind::Trait {
             name,
             generics,
+            associated,
             methods,
         } = &declaration.item.kind
         else {
             continue;
         };
         let id = resolution.declarations[&declaration.item.span.start];
+        let mut associated_items = BTreeMap::new();
+        for item in associated {
+            match item {
+                ast::Associated::Type { name, .. } => {
+                    associated_items.insert(name.clone(), TraitAssociated::Type);
+                }
+                ast::Associated::Const {
+                    name, ty, value, ..
+                } => {
+                    if type_mentions_self(ty) {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            "an associated constant's type may not mention 'Self'; write a concrete scalar type",
+                        ));
+                    }
+                    let lowered = types.ty_in(ty, &crate::runtime_types::Subst::default())?;
+                    if !const_scalar_type(lowered) {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            "associated constants must have a compile-time scalar type: i8/i16/i32/i64/u8/u16/u32/u64, Bool, or Char",
+                        ));
+                    }
+                    associated_items.insert(
+                        name.clone(),
+                        TraitAssociated::Const {
+                            ty: ty.clone(),
+                            default: value.clone(),
+                        },
+                    );
+                }
+            }
+        }
         for generic in generics {
             if let Some(bound) = &generic.bound {
                 match resolution
@@ -2513,14 +2918,21 @@ fn collect_methods<'a>(
             id,
             TraitDefinition {
                 generics: generics.clone(),
+                associated: associated_items,
+                associated_order: associated
+                    .iter()
+                    .map(|item| item.name().to_owned())
+                    .collect(),
                 methods: signatures,
             },
         );
     }
     for declaration in &module.items {
         let ast::ItemKind::Impl {
+            generics: impl_generics,
             trait_path,
             self_ty,
+            associated,
             methods,
         } = &declaration.item.kind
         else {
@@ -2545,6 +2957,23 @@ fn collect_methods<'a>(
             }
             None => None,
         };
+        if !impl_generics.is_empty() {
+            bindings.extend(collect_generic_impl(
+                span,
+                impl_generics,
+                trait_path.as_ref(),
+                trait_id,
+                self_ty,
+                associated,
+                methods,
+                default_bindings,
+                resolution,
+                types,
+                logical,
+                functions,
+            )?);
+            continue;
+        }
         let self_key = types.ty_in(self_ty, &crate::runtime_types::Subst::default())?;
         if matches!(
             self_key,
@@ -2624,6 +3053,189 @@ fn collect_methods<'a>(
             .zip(trait_argument_ast)
             .map(|(generic, argument)| (generic.name.clone(), argument.clone()))
             .collect::<BTreeMap<_, _>>();
+        let mut impl_associated = ImplAssociated::default();
+        let trait_associated = trait_definition
+            .as_ref()
+            .map(|definition| definition.associated.clone())
+            .unwrap_or_default();
+        let mut provided = BTreeSet::new();
+        for item in associated {
+            match item {
+                ast::Associated::Type { name, value, span } => {
+                    let Some(value) = value else {
+                        return Err(Diagnostic::new(
+                            *span,
+                            "an associated type in an impl requires a value: 'type Name = Type;'",
+                        ));
+                    };
+                    if type_mentions_self(value) {
+                        return Err(Diagnostic::new(
+                            value.span,
+                            "an associated type value may not mention 'Self'; write a concrete type",
+                        ));
+                    }
+                    if trait_id.is_some()
+                        && !matches!(trait_associated.get(name), Some(TraitAssociated::Type))
+                    {
+                        return Err(Diagnostic::new(
+                            *span,
+                            format!(
+                                "associated type '{name}' is not declared by the implemented trait"
+                            ),
+                        ));
+                    }
+                    if trait_id.is_none() {
+                        return Err(Diagnostic::new(
+                            *span,
+                            "inherent impls define associated constants only; associated types require a trait declaration",
+                        ));
+                    }
+                    if !provided.insert(name.clone()) {
+                        return Err(Diagnostic::new(
+                            *span,
+                            format!("duplicate item '{name}' in one impl"),
+                        ));
+                    }
+                    // Lower the value once so a malformed or cyclic projection
+                    // is diagnosed at the impl rather than at an arbitrary use.
+                    types.ty_in(value, &crate::runtime_types::Subst::default())?;
+                    impl_associated.types.insert(name.clone(), value.clone());
+                }
+                ast::Associated::Const {
+                    name,
+                    ty,
+                    value,
+                    span,
+                } => {
+                    if type_mentions_self(ty) {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            "an associated constant's type may not mention 'Self'; write a concrete scalar type",
+                        ));
+                    }
+                    let lowered = types.ty_in(ty, &crate::runtime_types::Subst::default())?;
+                    if !const_scalar_type(lowered) {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            "associated constants must have a compile-time scalar type: i8/i16/i32/i64/u8/u16/u32/u64, Bool, or Char",
+                        ));
+                    }
+                    if trait_id.is_some()
+                        && !matches!(
+                            trait_associated.get(name),
+                            Some(TraitAssociated::Const { .. })
+                        )
+                    {
+                        return Err(Diagnostic::new(
+                            *span,
+                            format!(
+                                "associated constant '{name}' is not declared by the implemented trait"
+                            ),
+                        ));
+                    }
+                    if !provided.insert(name.clone()) {
+                        return Err(Diagnostic::new(
+                            *span,
+                            format!("duplicate item '{name}' in one impl"),
+                        ));
+                    }
+                    let declared_ty = match trait_associated.get(name) {
+                        Some(TraitAssociated::Const { ty: declared, .. }) => {
+                            Some(types.ty_in(declared, &crate::runtime_types::Subst::default())?)
+                        }
+                        _ => None,
+                    };
+                    if let Some(declared_ty) = declared_ty
+                        && declared_ty != lowered
+                    {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            format!(
+                                "associated constant '{name}' must have the declared type {}",
+                                types.name(declared_ty)
+                            ),
+                        ));
+                    }
+                    let Some(value) = value else {
+                        // A default in the trait is inherited below.
+                        continue;
+                    };
+                    let bits = evaluate_associated_const(
+                        resolution,
+                        types,
+                        logical,
+                        value,
+                        lowered,
+                        &impl_associated.consts,
+                    )?;
+                    impl_associated
+                        .consts
+                        .insert(name.clone(), ConstValue { ty: lowered, bits });
+                }
+            }
+        }
+        if let Some(trait_id) = trait_id {
+            let associated_order = trait_definition
+                .as_ref()
+                .map(|definition| definition.associated_order.clone())
+                .unwrap_or_default();
+            for name in &associated_order {
+                let Some(item) = trait_associated.get(name) else {
+                    continue;
+                };
+                match item {
+                    TraitAssociated::Type => {
+                        if !impl_associated.types.contains_key(name) {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!(
+                                    "missing associated type '{name}' for trait '{}' on {}",
+                                    resolution.bindings[trait_id].name,
+                                    types.name(self_key)
+                                ),
+                            ));
+                        }
+                    }
+                    TraitAssociated::Const { ty, default } => {
+                        if impl_associated.consts.contains_key(name) {
+                            continue;
+                        }
+                        let Some(default) = default else {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!(
+                                    "missing associated constant '{name}' for trait '{}' on {}",
+                                    resolution.bindings[trait_id].name,
+                                    types.name(self_key)
+                                ),
+                            ));
+                        };
+                        let lowered = types.ty_in(ty, &crate::runtime_types::Subst::default())?;
+                        let bits = evaluate_associated_const(
+                            resolution,
+                            types,
+                            logical,
+                            default,
+                            lowered,
+                            &impl_associated.consts,
+                        )?;
+                        impl_associated
+                            .consts
+                            .insert(name.clone(), ConstValue { ty: lowered, bits });
+                    }
+                }
+            }
+        }
+        let associated_index =
+            (!impl_associated.types.is_empty() || !impl_associated.consts.is_empty()).then(|| {
+                functions.impl_associated.push(impl_associated.clone());
+                functions.impl_associated.len() - 1
+            });
+        if trait_id.is_none() && !impl_associated.consts.is_empty() {
+            functions
+                .inherent_consts
+                .insert(self_key, impl_associated.consts.clone());
+        }
         let mut definitions = BTreeMap::new();
         for method in methods {
             let f = &method.function;
@@ -2679,8 +3291,14 @@ fn collect_methods<'a>(
                     expected.function,
                     Some(self_ty),
                     Some(&trait_argument_names),
-                )? != method_contract_key(resolution, f, Some(self_ty), None)?
-                {
+                    Some(&impl_associated.types),
+                )? != method_contract_key(
+                    resolution,
+                    f,
+                    Some(self_ty),
+                    None,
+                    Some(&impl_associated.types),
+                )? {
                     return Err(Diagnostic::new(
                         method.span,
                         format!(
@@ -2707,6 +3325,7 @@ fn collect_methods<'a>(
                 binding,
                 public: method.public,
                 unit: resolution.unit_of.get(&binding).copied().unwrap_or(0),
+                impl_arguments: None,
             };
             if definitions.insert(f.name.clone(), definition).is_some() {
                 return Err(Diagnostic::new(
@@ -2721,6 +3340,8 @@ fn collect_methods<'a>(
                     span: method.span,
                     self_ty: Some(self_key),
                     default_specialization: None,
+                    impl_associated: associated_index,
+                    impl_template: None,
                 },
             );
             bindings.push(binding);
@@ -2778,6 +3399,8 @@ fn collect_methods<'a>(
                         span: method.span,
                         self_ty: Some(self_key),
                         default_specialization: Some(index),
+                        impl_associated: associated_index,
+                        impl_template: None,
                     },
                 );
                 definitions.insert(
@@ -2786,6 +3409,7 @@ fn collect_methods<'a>(
                         binding,
                         public: trait_public,
                         unit: impl_unit,
+                        impl_arguments: None,
                     },
                 );
                 bindings.push(binding);
@@ -2824,6 +3448,16 @@ fn collect_methods<'a>(
                     .or_default()
                     .push((trait_id, trait_arguments.clone(), *definition));
             }
+            if !impl_associated.consts.is_empty() {
+                functions.trait_consts.insert(
+                    (trait_id, trait_arguments.clone(), self_key),
+                    impl_associated.consts.clone(),
+                );
+            }
+            functions.trait_associated.insert(
+                (trait_id, trait_arguments.clone(), self_key),
+                impl_associated.clone(),
+            );
         } else {
             let inherent = functions.inherent.entry(self_key).or_default();
             for (name, definition) in definitions {
@@ -2836,6 +3470,80 @@ fn collect_methods<'a>(
                         ),
                     ));
                 }
+            }
+        }
+        // Record every concrete impl as a ground header too. Coherence compares
+        // it with generic headers: a concrete receiver is an instance of a
+        // matching blanket/generic header, which is the specialization axis.
+        functions.impl_headers.push(ImplHeader {
+            trait_id,
+            generics: Vec::new(),
+            self_ty: self_ty.clone(),
+            trait_arguments: trait_argument_ast.to_vec(),
+            associated: impl_associated.clone(),
+            methods: match trait_id {
+                Some(trait_id) => functions
+                    .trait_impls
+                    .get(&(trait_id, trait_arguments.clone(), self_key))
+                    .cloned()
+                    .unwrap_or_default(),
+                None => functions
+                    .inherent
+                    .get(&self_key)
+                    .cloned()
+                    .unwrap_or_default(),
+            },
+            span,
+            concrete: Some((trait_arguments.clone(), self_key)),
+        });
+    }
+    // Declaration-time coherence. Two impl headers that can apply to the same
+    // receiver and trait specialization must be specialization-comparable: one
+    // must be an instance of the other. Incomparable overlaps are rejected
+    // rather than resolved by declaration order.
+    for (left_index, left) in functions.impl_headers.iter().enumerate() {
+        for right in functions.impl_headers.iter().skip(left_index + 1) {
+            if left.trait_id != right.trait_id {
+                continue;
+            }
+            if left.concrete.is_some() && right.concrete.is_some() {
+                // Exact duplicate concrete impls are diagnosed by the exact
+                // trait-impl table; distinct concrete headers are disjoint.
+                continue;
+            }
+            if !headers_overlap(resolution, left, right) {
+                continue;
+            }
+            // Several inherent impls for the same type may coexist when their
+            // method names are disjoint. Trait impls always repeat the trait's
+            // method set, so any equivalent trait header is a duplicate.
+            if left.trait_id.is_none()
+                && !left
+                    .methods
+                    .keys()
+                    .any(|name| right.methods.contains_key(name))
+            {
+                continue;
+            }
+            let left_covers = header_subsumes(resolution, left, right);
+            let right_covers = header_subsumes(resolution, right, left);
+            let left_label = impl_header_label(resolution, types, left);
+            let right_label = impl_header_label(resolution, types, right);
+            if left_covers && right_covers {
+                return Err(Diagnostic::new(
+                    right.span,
+                    format!(
+                        "duplicate implementation: {left_label} and {right_label} cover the same receiver and trait specialization; keep one impl",
+                    ),
+                ));
+            }
+            if !left_covers && !right_covers {
+                return Err(Diagnostic::new(
+                    right.span,
+                    format!(
+                        "overlapping implementations {left_label} and {right_label} are incomparable: neither pattern is more specific, so dispatch has no deterministic winner; make the impls disjoint or specialize one pattern",
+                    ),
+                ));
             }
         }
     }
@@ -2877,7 +3585,1811 @@ fn collect_methods<'a>(
     Ok(bindings)
 }
 
+/// Build the closed-world representation of every usable trait object after
+/// all impls are known. A trait is object-safe here only when:
+///
+/// - it has no generic or blanket impls, so the member set is finite;
+/// - every trait parameter is an ordinary type (no Nat/Grade/Effect arguments);
+/// - every method takes an owned `self: Self` receiver, has no method generics
+///   or lifetimes, and mentions neither `Self` nor erased proof parameters in
+///   its remaining parameters or result;
+/// - every concrete impl of one specialization agrees on each associated type
+///   and constant value used by the object.
+///
+/// The object is the normalized union of the concrete impl targets. Borrowed
+/// receivers are rejected rather than silently copying or moving a derived
+/// payload; supporting them needs a checked borrowed-trait-object capability.
+fn prepare_trait_objects<'a>(
+    types: &mut Types<'a>,
+    resolution: &Resolution,
+    functions: &mut Functions<'a>,
+) -> Result<()> {
+    let traits = functions
+        .traits
+        .iter()
+        .map(|(id, definition)| (*id, definition.clone()))
+        .collect::<Vec<_>>();
+    for (trait_id, definition) in traits {
+        let trait_name = resolution.bindings[trait_id].name.clone();
+        let mut reason: Option<String> = None;
+        for generic in &definition.generics {
+            if generic_category(resolution, generic) != GenericCategory::Type {
+                reason = Some(format!(
+                    "trait parameter '{}' is not an ordinary type; dyn objects support type parameters only",
+                    generic.name
+                ));
+                break;
+            }
+        }
+        if reason.is_none() {
+            for (name, method) in &definition.methods {
+                let f = method.function;
+                let Some(receiver) = f.parameters.first() else {
+                    continue;
+                };
+                match &receiver.ty.kind {
+                    ast::TypeKind::SelfType => {}
+                    ast::TypeKind::Borrow {
+                        mutable: false,
+                        inner,
+                        ..
+                    } if matches!(inner.kind, ast::TypeKind::SelfType) => {}
+                    ast::TypeKind::Borrow { mutable: true, .. } => {
+                        reason = Some(format!(
+                            "method '{name}' has an exclusive '&mut self' receiver; mutating a closed-world object would need a checked borrowed-object capability"
+                        ));
+                        break;
+                    }
+                    _ => {
+                        reason = Some(format!(
+                            "method '{name}' receiver must be 'self: Self', 'self: &Self', or '&self'"
+                        ));
+                        break;
+                    }
+                }
+                if !f.generics.is_empty() {
+                    reason = Some(format!(
+                        "method '{name}' is generic; a generic method cannot be dispatched through a dyn object without runtime type arguments"
+                    ));
+                    break;
+                }
+                if !f.lifetimes.is_empty() {
+                    reason = Some(format!(
+                        "method '{name}' has lifetime parameters; dyn objects cannot erase an exact-use or borrow contract"
+                    ));
+                    break;
+                }
+                if let Some(parameter) = f.parameters[1..]
+                    .iter()
+                    .find(|parameter| parameter.erased || type_mentions_self(&parameter.ty))
+                {
+                    reason = Some(if parameter.erased {
+                        format!(
+                            "method '{name}' has an erased proof parameter; proof terms cannot be erased through dynamic dispatch"
+                        )
+                    } else {
+                        format!(
+                            "method '{name}' mentions 'Self' in a non-receiver parameter, so its ABI would differ per impl"
+                        )
+                    });
+                    break;
+                }
+                if type_mentions_self(&f.result) {
+                    reason = Some(format!(
+                        "method '{name}' mentions 'Self' in its result, so dynamic dispatch would erase the concrete result type"
+                    ));
+                    break;
+                }
+            }
+        }
+        if reason.is_none()
+            && functions
+                .impl_headers
+                .iter()
+                .any(|header| header.trait_id == Some(trait_id) && header.concrete.is_none())
+        {
+            reason = Some(format!(
+                "trait '{trait_name}' has a generic or blanket impl, so its set of concrete members is open"
+            ));
+        }
+        let mut groups: BTreeMap<TraitArguments, Vec<Type>> = BTreeMap::new();
+        if reason.is_none() {
+            let mut concrete: Vec<(TraitArguments, Type, ImplAssociated)> = Vec::new();
+            for header in &functions.impl_headers {
+                if header.trait_id == Some(trait_id)
+                    && let Some((arguments, member)) = &header.concrete
+                {
+                    if !matches!(member.full(), Type::Enum(_)) {
+                        reason = Some(format!(
+                            "concrete impl target '{}' is not a nominal record or enum; dyn objects must own inline values",
+                            types.name(*member)
+                        ));
+                        break;
+                    }
+                    concrete.push((arguments.clone(), *member, header.associated.clone()));
+                }
+            }
+            if reason.is_none() {
+                if concrete.is_empty() {
+                    reason = Some(format!("trait '{trait_name}' has no concrete impls"));
+                } else {
+                    let mut associated_types: BTreeMap<TraitArguments, BTreeMap<String, Type>> =
+                        BTreeMap::new();
+                    let mut associated_consts: BTreeMap<
+                        TraitArguments,
+                        BTreeMap<String, ConstValue>,
+                    > = BTreeMap::new();
+                    for (arguments, member, associated) in &concrete {
+                        groups.entry(arguments.clone()).or_default().push(*member);
+                        let types_entry = associated_types.entry(arguments.clone()).or_default();
+                        for (name, value) in &associated.types {
+                            let lowered =
+                                types.ty_in(value, &crate::runtime_types::Subst::default())?;
+                            if let Some(previous) = types_entry.get(name)
+                                && *previous != lowered
+                            {
+                                reason = Some(format!(
+                                    "impls of trait '{trait_name}' disagree on associated type '{name}'; a dyn object needs one projected type"
+                                ));
+                                break;
+                            }
+                            types_entry.insert(name.clone(), lowered);
+                        }
+                        let consts_entry = associated_consts.entry(arguments.clone()).or_default();
+                        for (name, value) in &associated.consts {
+                            if let Some(previous) = consts_entry.get(name)
+                                && previous != value
+                            {
+                                reason = Some(format!(
+                                    "impls of trait '{trait_name}' disagree on associated constant '{name}'; a dyn object would have ambiguous constant projection"
+                                ));
+                                break;
+                            }
+                            consts_entry.insert(name.clone(), *value);
+                        }
+                        if reason.is_some() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        for (arguments, mut members) in groups {
+            members.sort();
+            members.dedup();
+            let shared_receiver = definition.methods.values().any(|method| {
+                matches!(
+                    method
+                        .function
+                        .parameters
+                        .first()
+                        .map(|parameter| &parameter.ty.kind),
+                    Some(ast::TypeKind::Borrow { mutable: false, .. })
+                )
+            });
+            if shared_receiver
+                && let Some(member) = members.iter().find(|member| {
+                    crate::runtime_types::type_owns(&types.enums, &types.unions, **member, 0)
+                })
+            {
+                reason = Some(format!(
+                    "a method borrows '&self', but object member '{}' owns storage; a shared dispatch would move the object. Use an owned receiver or make every member copyable",
+                    types.name(*member)
+                ));
+                break;
+            }
+            let object = types.union(members, resolution.bindings[trait_id].span)?;
+            types
+                .dyn_objects
+                .insert((trait_id, arguments.clone()), object);
+            functions
+                .object_traits
+                .entry(object)
+                .or_default()
+                .push((trait_id, arguments));
+        }
+        if let Some(reason) = reason {
+            types.dyn_errors.insert(trait_id, reason);
+        }
+    }
+    for entries in functions.object_traits.values_mut() {
+        entries.sort();
+        entries.dedup();
+    }
+    Ok(())
+}
+/// Validate that a generic impl's self type or trait argument is a first-order
+/// pattern over its declared type parameters and nominal types. Borrows,
+/// slices, function arrows, aliases, and associated projections cannot appear in
+/// an impl header: their runtime representation would make coherence depend on
+/// an unresolved lifetime or expansion.
+fn validate_impl_pattern(
+    resolution: &Resolution,
+    types: &Types<'_>,
+    pattern: &ast::Type,
+    generics: &BTreeSet<BindingId>,
+    what: &str,
+) -> Result<()> {
+    match &pattern.kind {
+        ast::TypeKind::Named { path, arguments } => {
+            if path.len() == 2 {
+                return Err(Diagnostic::new(
+                    pattern.span,
+                    format!(
+                        "an impl {what} may not contain the associated projection '{}'; write the impl parameter or a nominal type",
+                        path.join(".")
+                    ),
+                ));
+            }
+            let id = resolution.reference(pattern.span).ok_or_else(|| {
+                Diagnostic::new(pattern.span, format!("impl {what} did not resolve"))
+            })?;
+            let binding = &resolution.bindings[id];
+            match binding.kind {
+                BindingKind::Generic | BindingKind::Parameter => {
+                    if !generics.contains(&id) {
+                        return Err(Diagnostic::new(
+                            pattern.span,
+                            format!(
+                                "impl {what} names '{}', which is not one of this impl's parameters",
+                                binding.name
+                            ),
+                        ));
+                    }
+                    if !arguments.is_empty() {
+                        return Err(Diagnostic::new(
+                            pattern.span,
+                            "an impl type parameter cannot take type arguments",
+                        ));
+                    }
+                }
+                BindingKind::Builtin | BindingKind::Data => {}
+                BindingKind::Alias => {
+                    return Err(Diagnostic::new(
+                        pattern.span,
+                        "transparent aliases are not supported in generic impl headers; write the expanded nominal type",
+                    ));
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        pattern.span,
+                        format!("'{}' cannot appear in a generic impl header", binding.name),
+                    ));
+                }
+            }
+            for argument in arguments {
+                validate_impl_pattern(resolution, types, argument, generics, what)?;
+            }
+            Ok(())
+        }
+        ast::TypeKind::Tuple(items) => {
+            for item in items {
+                validate_impl_pattern(resolution, types, item, generics, what)?;
+            }
+            Ok(())
+        }
+        ast::TypeKind::Array(element, length) => {
+            validate_impl_pattern(resolution, types, element, generics, what)?;
+            if !matches!(length.kind, ast::TypeKind::Integer(_)) {
+                return Err(Diagnostic::new(
+                    length.span,
+                    "a generic impl header array length must be an integer literal",
+                ));
+            }
+            Ok(())
+        }
+        ast::TypeKind::Integer(_) | ast::TypeKind::Bool(_) => Ok(()),
+        ast::TypeKind::Dyn(_) => Err(Diagnostic::new(
+            pattern.span,
+            format!("an impl {what} may not be a trait object; name the concrete receiver"),
+        )),
+        ast::TypeKind::Borrow { .. }
+        | ast::TypeKind::Slice(_)
+        | ast::TypeKind::Function { .. }
+        | ast::TypeKind::Graded { .. }
+        | ast::TypeKind::Binary { .. }
+        | ast::TypeKind::Lifetime(_)
+        | ast::TypeKind::Predicate(_)
+        | ast::TypeKind::SelfType => Err(Diagnostic::new(
+            pattern.span,
+            format!(
+                "an impl {what} must be an owned nominal type pattern built from the impl's type parameters; borrows, slices, arrows, unions, grades, lifetimes, predicates, and 'Self' are not supported (searched {})",
+                types.name(Type::Unit)
+            ),
+        )),
+    }
+}
+/// The binder of a bare type parameter pattern, if `ty` is one.
+fn pattern_binder(resolution: &Resolution, ty: &ast::Type) -> Option<BindingId> {
+    let ast::TypeKind::Named { path, arguments } = &ty.kind else {
+        return None;
+    };
+    if path.len() != 1 || !arguments.is_empty() {
+        return None;
+    }
+    let id = resolution.reference(ty.span)?;
+    (resolution.bindings[id].kind == BindingKind::Generic).then_some(id)
+}
+/// Whether a pattern still contains a generic binder absent from `substitution`.
+fn pattern_has_unbound(
+    resolution: &Resolution,
+    ty: &ast::Type,
+    substitution: &BTreeMap<BindingId, Type>,
+) -> bool {
+    if let Some(id) = pattern_binder(resolution, ty) {
+        return !substitution.contains_key(&id);
+    }
+    match &ty.kind {
+        ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => arguments
+            .iter()
+            .any(|argument| pattern_has_unbound(resolution, argument, substitution)),
+        ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => {
+            pattern_has_unbound(resolution, inner, substitution)
+        }
+        ast::TypeKind::Borrow { inner, .. } => pattern_has_unbound(resolution, inner, substitution),
+        ast::TypeKind::Array(inner, length) => {
+            pattern_has_unbound(resolution, inner, substitution)
+                || pattern_has_unbound(resolution, length, substitution)
+        }
+        ast::TypeKind::Binary { left, right, .. } => {
+            pattern_has_unbound(resolution, left, substitution)
+                || pattern_has_unbound(resolution, right, substitution)
+        }
+        _ => false,
+    }
+}
+/// First-order match of an impl type pattern against a concrete runtime type.
+fn match_type_pattern(
+    resolution: &Resolution,
+    types: &mut Types<'_>,
+    pattern: &ast::Type,
+    actual: Type,
+    substitution: &mut BTreeMap<BindingId, Type>,
+    depth: usize,
+) -> Result<bool> {
+    if depth >= 64 {
+        return Err(Diagnostic::new(
+            pattern.span,
+            "generic impl matching exceeded its nesting budget",
+        ));
+    }
+    if let Some(id) = pattern_binder(resolution, pattern) {
+        if let Some(existing) = substitution.get(&id) {
+            return Ok(*existing == actual);
+        }
+        if actual == Type::Never
+            || actual.is_view()
+            || matches!(actual, Type::Ref(_) | Type::RefMut(_))
+        {
+            return Ok(false);
+        }
+        substitution.insert(id, actual.full());
+        return Ok(true);
+    }
+    if !pattern_has_unbound(resolution, pattern, substitution) {
+        let subst = crate::runtime_types::Subst {
+            types: substitution.clone(),
+            ..Default::default()
+        };
+        return Ok(types.ty_in(pattern, &subst)? == actual);
+    }
+    match &pattern.kind {
+        ast::TypeKind::Named { arguments, .. } => {
+            let Some(id) = resolution.reference(pattern.span) else {
+                return Ok(false);
+            };
+            let binding = &resolution.bindings[id];
+            match (binding.kind, binding.name.as_str(), actual) {
+                (BindingKind::Builtin, "Box", Type::Box(pointer))
+                | (BindingKind::Builtin, "Vec", Type::Vec(pointer))
+                    if arguments.len() == 1 =>
+                {
+                    let pointee = types.pointees[pointer];
+                    match_type_pattern(
+                        resolution,
+                        types,
+                        &arguments[0],
+                        pointee,
+                        substitution,
+                        depth + 1,
+                    )
+                }
+                (BindingKind::Data, _, Type::Enum(layout))
+                    if types.enums[layout].definition == id =>
+                {
+                    let actual_arguments = types.enums[layout].arguments.clone();
+                    let actual_consts = types.enums[layout].consts.clone();
+                    let kinds = types.generic_kinds(id);
+                    let mut actual_types = actual_arguments.iter();
+                    let mut actual_consts = actual_consts.iter();
+                    for (argument, is_const) in arguments.iter().zip(kinds) {
+                        if is_const {
+                            let Some(value) = actual_consts.next() else {
+                                return Ok(false);
+                            };
+                            let subst = crate::runtime_types::Subst {
+                                types: substitution.clone(),
+                                ..Default::default()
+                            };
+                            let expected = crate::length::eval_type(
+                                resolution,
+                                types.logical(),
+                                &subst.consts,
+                                argument,
+                            )?;
+                            if expected != *value {
+                                return Ok(false);
+                            }
+                        } else {
+                            let Some(actual) = actual_types.next() else {
+                                return Ok(false);
+                            };
+                            if !match_type_pattern(
+                                resolution,
+                                types,
+                                argument,
+                                *actual,
+                                substitution,
+                                depth + 1,
+                            )? {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+        ast::TypeKind::Tuple(items) => {
+            let Some(layout) = actual.layout().filter(|layout| types.enums[*layout].tuple) else {
+                return Ok(false);
+            };
+            let elements = types.enums[layout].arguments.clone();
+            if elements.len() != items.len() {
+                return Ok(false);
+            }
+            for (item, element) in items.iter().zip(elements) {
+                if !match_type_pattern(resolution, types, item, element, substitution, depth + 1)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        ast::TypeKind::Array(element, length) => {
+            let Some(layout) = actual.layout() else {
+                return Ok(false);
+            };
+            let Some((actual_element, actual_length)) = types.enums[layout].array else {
+                return Ok(false);
+            };
+            let subst = crate::runtime_types::Subst {
+                types: substitution.clone(),
+                ..Default::default()
+            };
+            let expected =
+                crate::length::eval_type(resolution, types.logical(), &subst.consts, length)?;
+            Ok(expected == actual_length
+                && match_type_pattern(
+                    resolution,
+                    types,
+                    element,
+                    actual_element,
+                    substitution,
+                    depth + 1,
+                )?)
+        }
+        _ => Ok(false),
+    }
+}
+/// Match an impl header's raw trait arguments against the concrete arguments an
+/// obligation requires, by the trait's declared generic categories.
+#[allow(clippy::too_many_arguments)]
+fn match_trait_argument_patterns(
+    resolution: &Resolution,
+    types: &mut Types<'_>,
+    logical: &crate::check::LogicalEnvironment,
+    generics: &[ast::Generic],
+    patterns: &[ast::Type],
+    required: &TraitArguments,
+    substitution: &mut BTreeMap<BindingId, Type>,
+) -> Result<bool> {
+    if patterns.len() != generics.len() {
+        return Ok(false);
+    }
+    let (mut type_index, mut const_index, mut grade_index, mut effect_index) = (0, 0, 0, 0);
+    for (generic, pattern) in generics.iter().zip(patterns) {
+        match generic_category(resolution, generic) {
+            GenericCategory::Type => {
+                let Some(actual) = required.types.get(type_index) else {
+                    return Ok(false);
+                };
+                type_index += 1;
+                if !match_type_pattern(resolution, types, pattern, *actual, substitution, 0)? {
+                    return Ok(false);
+                }
+            }
+            GenericCategory::Const => {
+                let Some(actual) = required.consts.get(const_index) else {
+                    return Ok(false);
+                };
+                const_index += 1;
+                let subst = crate::runtime_types::Subst {
+                    types: substitution.clone(),
+                    ..Default::default()
+                };
+                if crate::length::eval_type(resolution, logical, &subst.consts, pattern)? != *actual
+                {
+                    return Ok(false);
+                }
+            }
+            GenericCategory::Grade => {
+                let Some(actual) = required.grades.get(grade_index) else {
+                    return Ok(false);
+                };
+                grade_index += 1;
+                let grades = crate::grades::evaluate(resolution, &BTreeMap::new(), pattern)?;
+                if grades != *actual {
+                    return Ok(false);
+                }
+            }
+            GenericCategory::Effect => {
+                let Some(actual) = required.effects.get(effect_index) else {
+                    return Ok(false);
+                };
+                effect_index += 1;
+                let effects = crate::runtime_types::effect_bits_with(
+                    resolution,
+                    std::slice::from_ref(pattern),
+                    &BTreeMap::new(),
+                )?;
+                if effects != *actual {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+/// Replace a mapped binder and recursively expand its value.
+fn expand_pattern(
+    resolution: &Resolution,
+    ty: &ast::Type,
+    map: &BTreeMap<BindingId, ast::Type>,
+    depth: usize,
+) -> ast::Type {
+    if depth >= 64 {
+        return ty.clone();
+    }
+    if let Some(id) = pattern_binder(resolution, ty)
+        && let Some(value) = map.get(&id)
+    {
+        return expand_pattern(resolution, value, map, depth + 1);
+    }
+    let kind = match &ty.kind {
+        ast::TypeKind::Named { path, arguments } => ast::TypeKind::Named {
+            path: path.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| expand_pattern(resolution, argument, map, depth + 1))
+                .collect(),
+        },
+        ast::TypeKind::Tuple(items) => ast::TypeKind::Tuple(
+            items
+                .iter()
+                .map(|item| expand_pattern(resolution, item, map, depth + 1))
+                .collect(),
+        ),
+        ast::TypeKind::Array(inner, length) => ast::TypeKind::Array(
+            Box::new(expand_pattern(resolution, inner, map, depth + 1)),
+            Box::new(expand_pattern(resolution, length, map, depth + 1)),
+        ),
+        ast::TypeKind::Borrow {
+            lifetime,
+            mutable,
+            inner,
+        } => ast::TypeKind::Borrow {
+            lifetime: lifetime.clone(),
+            mutable: *mutable,
+            inner: Box::new(expand_pattern(resolution, inner, map, depth + 1)),
+        },
+        ast::TypeKind::Slice(inner) => {
+            ast::TypeKind::Slice(Box::new(expand_pattern(resolution, inner, map, depth + 1)))
+        }
+        other => other.clone(),
+    };
+    ast::Type::new(kind, ty.span)
+}
+/// Unify two type patterns. Binders in `flexible` may be assigned; every other
+/// binder is rigid and compares by identity. Used both for overlap detection
+/// (both sides flexible) and specificity (only the more general side flexible).
+fn unify_ast_patterns(
+    resolution: &Resolution,
+    left: &ast::Type,
+    right: &ast::Type,
+    flexible: &BTreeSet<BindingId>,
+    map: &mut BTreeMap<BindingId, ast::Type>,
+    depth: usize,
+) -> bool {
+    if depth >= 64 {
+        return false;
+    }
+    let left = expand_pattern(resolution, left, map, 0);
+    let right = expand_pattern(resolution, right, map, 0);
+    if let Some(id) = pattern_binder(resolution, &left)
+        && flexible.contains(&id)
+    {
+        if pattern_binder(resolution, &right) == Some(id) {
+            return true;
+        }
+        if type_references_any_binder(resolution, &right, &BTreeSet::from([id])) {
+            return false;
+        }
+        map.insert(id, right);
+        return true;
+    }
+    if let Some(id) = pattern_binder(resolution, &right)
+        && flexible.contains(&id)
+    {
+        if type_references_any_binder(resolution, &left, &BTreeSet::from([id])) {
+            return false;
+        }
+        map.insert(id, left);
+        return true;
+    }
+    match (&left.kind, &right.kind) {
+        (
+            ast::TypeKind::Named {
+                arguments: left_arguments,
+                ..
+            },
+            ast::TypeKind::Named {
+                arguments: right_arguments,
+                ..
+            },
+        ) => {
+            if resolution.reference(left.span) != resolution.reference(right.span)
+                || left_arguments.len() != right_arguments.len()
+            {
+                return false;
+            }
+            left_arguments
+                .iter()
+                .zip(right_arguments)
+                .all(|(left, right)| {
+                    unify_ast_patterns(resolution, left, right, flexible, map, depth + 1)
+                })
+        }
+        (ast::TypeKind::Tuple(left), ast::TypeKind::Tuple(right)) => {
+            left.len() == right.len()
+                && left.iter().zip(right).all(|(left, right)| {
+                    unify_ast_patterns(resolution, left, right, flexible, map, depth + 1)
+                })
+        }
+        (
+            ast::TypeKind::Array(left_element, left_length),
+            ast::TypeKind::Array(right_element, right_length),
+        ) => {
+            unify_ast_patterns(
+                resolution,
+                left_element,
+                right_element,
+                flexible,
+                map,
+                depth + 1,
+            ) && type_key(left_length) == type_key(right_length)
+        }
+        (
+            ast::TypeKind::Borrow {
+                mutable: left_mutable,
+                inner: left_inner,
+                ..
+            },
+            ast::TypeKind::Borrow {
+                mutable: right_mutable,
+                inner: right_inner,
+                ..
+            },
+        ) => {
+            left_mutable == right_mutable
+                && unify_ast_patterns(
+                    resolution,
+                    left_inner,
+                    right_inner,
+                    flexible,
+                    map,
+                    depth + 1,
+                )
+        }
+        (ast::TypeKind::Slice(left), ast::TypeKind::Slice(right)) => {
+            unify_ast_patterns(resolution, left, right, flexible, map, depth + 1)
+        }
+        _ => type_key(&left) == type_key(&right),
+    }
+}
+/// Whether `general` can produce `specific`: every parameter of `general` is
+/// flexible, every parameter of `specific` is rigid.
+fn header_subsumes(resolution: &Resolution, general: &ImplHeader, specific: &ImplHeader) -> bool {
+    let flexible = header_binders(resolution, general);
+    let mut map = BTreeMap::new();
+    if !unify_ast_patterns(
+        resolution,
+        &general.self_ty,
+        &specific.self_ty,
+        &flexible,
+        &mut map,
+        0,
+    ) {
+        return false;
+    }
+    general
+        .trait_arguments
+        .iter()
+        .zip(&specific.trait_arguments)
+        .all(|(general, specific)| {
+            unify_ast_patterns(resolution, general, specific, &flexible, &mut map, 0)
+        })
+        && general.trait_arguments.len() == specific.trait_arguments.len()
+}
+/// Whether two impl headers can apply to one receiver and specialization.
+fn headers_overlap(resolution: &Resolution, left: &ImplHeader, right: &ImplHeader) -> bool {
+    let mut flexible = header_binders(resolution, left);
+    flexible.extend(header_binders(resolution, right));
+    let mut map = BTreeMap::new();
+    if !unify_ast_patterns(
+        resolution,
+        &left.self_ty,
+        &right.self_ty,
+        &flexible,
+        &mut map,
+        0,
+    ) {
+        return false;
+    }
+    left.trait_arguments.len() == right.trait_arguments.len()
+        && left
+            .trait_arguments
+            .iter()
+            .zip(&right.trait_arguments)
+            .all(|(left, right)| {
+                unify_ast_patterns(resolution, left, right, &flexible, &mut map, 0)
+            })
+}
+fn impl_header_label(resolution: &Resolution, types: &Types<'_>, header: &ImplHeader) -> String {
+    let trait_name = match header.trait_id {
+        Some(trait_id) => {
+            let name = &resolution.bindings[trait_id].name;
+            if header.trait_arguments.is_empty() {
+                format!("trait '{name}'")
+            } else {
+                let arguments = header
+                    .trait_arguments
+                    .iter()
+                    .map(type_key)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("trait '{name}<{arguments}>'")
+            }
+        }
+        None => "an inherent impl".to_owned(),
+    };
+    let receiver = match header.concrete {
+        Some((_, ty)) => types.name(ty),
+        None => type_key(&header.self_ty),
+    };
+    let prefix = if header.generics.is_empty() {
+        "impl".to_owned()
+    } else {
+        format!(
+            "impl<{}>",
+            header
+                .generics
+                .iter()
+                .map(|generic| generic.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!("{prefix} {trait_name} for {receiver}")
+}
+fn header_binders(resolution: &Resolution, header: &ImplHeader) -> BTreeSet<BindingId> {
+    header
+        .generics
+        .iter()
+        .filter_map(|generic| resolution.binder(generic.span))
+        .collect()
+}
+/// Collect one generic or blanket impl. Its methods are registered once, as
+/// templates; each concrete receiver match gets a checked instance keyed by the
+/// impl argument list. Associated values are supplied to that instance exactly
+/// like a concrete impl's.
+#[allow(clippy::too_many_arguments)]
+fn collect_generic_impl<'a>(
+    span: Span,
+    generics: &'a [ast::Generic],
+    trait_path: Option<&ast::Type>,
+    trait_id: Option<BindingId>,
+    self_ty: &'a ast::Type,
+    associated: &'a [ast::Associated],
+    methods: &'a [ast::Method],
+    default_bindings: &BTreeMap<(usize, String), BindingId>,
+    resolution: &Resolution,
+    types: &mut Types<'a>,
+    logical: &crate::check::LogicalEnvironment,
+    functions: &mut Functions<'a>,
+) -> Result<Vec<BindingId>> {
+    let mut generic_ids = BTreeSet::new();
+    for generic in generics {
+        match generic_category(resolution, generic) {
+            GenericCategory::Type => {}
+            GenericCategory::Const => {
+                return Err(Diagnostic::new(
+                    generic.span,
+                    "generic impl headers support type parameters only; const, grade, and effect parameters need a future coherence rule",
+                ));
+            }
+            GenericCategory::Grade => {
+                return Err(Diagnostic::new(
+                    generic.span,
+                    "generic impl headers support type parameters only; const, grade, and effect parameters need a future coherence rule",
+                ));
+            }
+            GenericCategory::Effect => {
+                return Err(Diagnostic::new(
+                    generic.span,
+                    "generic impl headers support type parameters only; const, grade, and effect parameters need a future coherence rule",
+                ));
+            }
+        }
+        if generic.excludes.is_some() {
+            return Err(Diagnostic::new(
+                generic.span,
+                "effect-exclusion bounds are not supported on impl type parameters",
+            ));
+        }
+        let id = resolution
+            .binder(generic.span)
+            .ok_or_else(|| Diagnostic::new(generic.span, "impl parameter did not resolve"))?;
+        generic_ids.insert(id);
+        if let Some(bound) = &generic.bound {
+            let Some(bound_id) = resolution.reference(bound.span) else {
+                return Err(Diagnostic::new(
+                    bound.span,
+                    "impl parameter bound did not resolve",
+                ));
+            };
+            if resolution.bindings[bound_id].kind != BindingKind::Trait {
+                return Err(Diagnostic::new(
+                    bound.span,
+                    "impl type parameters may be bounded only by declared traits, as in 'impl<T: Show> Show for Box<T>'",
+                ));
+            }
+            let arguments = match &bound.kind {
+                ast::TypeKind::Named { arguments, .. } => arguments.len(),
+                _ => 0,
+            };
+            let expected = functions.traits[&bound_id].generics.len();
+            if arguments != expected {
+                return Err(Diagnostic::new(
+                    generic.span,
+                    format!(
+                        "trait '{}' expects {expected} argument(s), found {arguments}",
+                        resolution.bindings[bound_id].name
+                    ),
+                ));
+            }
+        }
+    }
+    let trait_definition = trait_id.and_then(|id| functions.traits.get(&id).cloned());
+    let trait_methods = trait_definition
+        .as_ref()
+        .map(|definition| definition.methods.clone())
+        .unwrap_or_default();
+    let trait_generics = trait_definition
+        .as_ref()
+        .map(|definition| definition.generics.clone())
+        .unwrap_or_default();
+    let trait_associated = trait_definition
+        .as_ref()
+        .map(|definition| definition.associated.clone())
+        .unwrap_or_default();
+    let trait_argument_ast = match trait_path {
+        Some(ast::Type {
+            kind: ast::TypeKind::Named { arguments, .. },
+            ..
+        }) => arguments.clone(),
+        _ => Vec::new(),
+    };
+    if let Some(trait_id) = trait_id
+        && trait_argument_ast.len() != trait_generics.len()
+    {
+        let name = resolution.bindings[trait_id].name.clone();
+        return Err(Diagnostic::new(
+            span,
+            format!(
+                "trait '{name}' expects {} argument(s), found {}",
+                trait_generics.len(),
+                trait_argument_ast.len()
+            ),
+        ));
+    }
+    for argument in &trait_argument_ast {
+        if type_mentions_self(argument) {
+            return Err(Diagnostic::new(
+                argument.span,
+                "'Self' cannot appear in a trait's specialization arguments; write a concrete impl target or an impl type parameter",
+            ));
+        }
+    }
+    validate_impl_pattern(resolution, types, self_ty, &generic_ids, "self type")?;
+    for argument in &trait_argument_ast {
+        validate_impl_pattern(resolution, types, argument, &generic_ids, "trait argument")?;
+    }
+    // Every declared parameter must be determined by the self type or the
+    // trait arguments. An unconstrained parameter would make dispatch choose
+    // an arbitrary representative and silently make coherence order-dependent.
+    for generic in generics {
+        let binder = resolution
+            .binder(generic.span)
+            .expect("impl parameter has a binder");
+        let mut used = type_references_any_binder(resolution, self_ty, &BTreeSet::from([binder]));
+        for argument in &trait_argument_ast {
+            used |= type_references_any_binder(resolution, argument, &BTreeSet::from([binder]));
+        }
+        if !used {
+            return Err(Diagnostic::new(
+                generic.span,
+                format!(
+                    "impl parameter '{}' is unconstrained: it does not appear in the self type or trait arguments, so dispatch cannot solve it uniquely",
+                    generic.name
+                ),
+            ));
+        }
+    }
+    if trait_id.is_none()
+        && !matches!(
+            &self_ty.kind,
+            ast::TypeKind::Named { path, .. }
+                if path.len() == 1
+                    && resolution
+                        .reference(self_ty.span)
+                        .is_some_and(|id| resolution.bindings[id].kind == BindingKind::Data)
+        )
+        && !matches!(&self_ty.kind, ast::TypeKind::Named { .. })
+    {
+        return Err(Diagnostic::new(
+            self_ty.span,
+            "an inherent generic impl must target a nominal record or enum pattern",
+        ));
+    }
+    let mut impl_associated = ImplAssociated::default();
+    let mut provided = BTreeSet::new();
+    for item in associated {
+        match item {
+            ast::Associated::Type { name, value, span } => {
+                let Some(value) = value else {
+                    return Err(Diagnostic::new(
+                        *span,
+                        "an associated type in an impl requires a value: 'type Name = Type;'",
+                    ));
+                };
+                if trait_id.is_some()
+                    && !matches!(trait_associated.get(name), Some(TraitAssociated::Type))
+                {
+                    return Err(Diagnostic::new(
+                        *span,
+                        format!(
+                            "associated type '{name}' is not declared by the implemented trait"
+                        ),
+                    ));
+                }
+                if trait_id.is_none() {
+                    return Err(Diagnostic::new(
+                        *span,
+                        "inherent impls define associated constants only; associated types require a trait declaration",
+                    ));
+                }
+                if !provided.insert(name.clone()) {
+                    return Err(Diagnostic::new(
+                        *span,
+                        format!("duplicate item '{name}' in one impl"),
+                    ));
+                }
+                validate_impl_pattern(resolution, types, value, &generic_ids, "associated value")?;
+                impl_associated.types.insert(name.clone(), value.clone());
+            }
+            ast::Associated::Const {
+                name,
+                ty,
+                value,
+                span,
+            } => {
+                if type_mentions_self(ty) {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "an associated constant's type may not mention 'Self'; write a concrete scalar type",
+                    ));
+                }
+                if type_references_any_binder(resolution, ty, &generic_ids) {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "an associated constant type in a generic impl may not depend on the impl's type parameters",
+                    ));
+                }
+                let lowered = types.ty_in(ty, &crate::runtime_types::Subst::default())?;
+                if !const_scalar_type(lowered) {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        "associated constants must have a compile-time scalar type: i8/i16/i32/i64/u8/u16/u32/u64, Bool, or Char",
+                    ));
+                }
+                if trait_id.is_some()
+                    && !matches!(
+                        trait_associated.get(name),
+                        Some(TraitAssociated::Const { .. })
+                    )
+                {
+                    return Err(Diagnostic::new(
+                        *span,
+                        format!(
+                            "associated constant '{name}' is not declared by the implemented trait"
+                        ),
+                    ));
+                }
+                if !provided.insert(name.clone()) {
+                    return Err(Diagnostic::new(
+                        *span,
+                        format!("duplicate item '{name}' in one impl"),
+                    ));
+                }
+                if let Some(declared) = trait_associated.get(name)
+                    && let TraitAssociated::Const { ty: declared, .. } = declared
+                {
+                    let declared =
+                        types.ty_in(declared, &crate::runtime_types::Subst::default())?;
+                    if declared != lowered {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            format!(
+                                "associated constant '{name}' must have the declared type {}",
+                                types.name(declared)
+                            ),
+                        ));
+                    }
+                }
+                let Some(value) = value else {
+                    continue;
+                };
+                if expression_mentions_generic(resolution, value, &generic_ids) {
+                    return Err(Diagnostic::new(
+                        value.span,
+                        "an associated constant value in a generic impl may not depend on the impl's type parameters",
+                    ));
+                }
+                let bits = evaluate_associated_const(
+                    resolution,
+                    types,
+                    logical,
+                    value,
+                    lowered,
+                    &impl_associated.consts,
+                )?;
+                impl_associated
+                    .consts
+                    .insert(name.clone(), ConstValue { ty: lowered, bits });
+            }
+        }
+    }
+    if let Some(trait_id) = trait_id {
+        let associated_order = trait_definition
+            .as_ref()
+            .map(|definition| definition.associated_order.clone())
+            .unwrap_or_default();
+        for name in &associated_order {
+            let Some(item) = trait_associated.get(name) else {
+                continue;
+            };
+            match item {
+                TraitAssociated::Type => {
+                    if !impl_associated.types.contains_key(name) {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "missing associated type '{name}' for trait '{}' on this impl",
+                                resolution.bindings[trait_id].name
+                            ),
+                        ));
+                    }
+                }
+                TraitAssociated::Const { ty, default } => {
+                    if impl_associated.consts.contains_key(name) {
+                        continue;
+                    }
+                    let Some(default) = default else {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "missing associated constant '{name}' for trait '{}'",
+                                resolution.bindings[trait_id].name
+                            ),
+                        ));
+                    };
+                    let lowered = types.ty_in(ty, &crate::runtime_types::Subst::default())?;
+                    let bits = evaluate_associated_const(
+                        resolution,
+                        types,
+                        logical,
+                        default,
+                        lowered,
+                        &impl_associated.consts,
+                    )?;
+                    impl_associated
+                        .consts
+                        .insert(name.clone(), ConstValue { ty: lowered, bits });
+                }
+            }
+        }
+    }
+    let associated_index =
+        (!impl_associated.types.is_empty() || !impl_associated.consts.is_empty()).then(|| {
+            functions.impl_associated.push(impl_associated.clone());
+            functions.impl_associated.len() - 1
+        });
+    let header_index = functions.impl_headers.len();
+    functions.impl_headers.push(ImplHeader {
+        trait_id,
+        generics: generics.to_vec(),
+        self_ty: self_ty.clone(),
+        trait_arguments: trait_argument_ast.clone(),
+        associated: impl_associated.clone(),
+        methods: BTreeMap::new(),
+        span,
+        concrete: None,
+    });
+    let trait_argument_names = trait_generics
+        .iter()
+        .zip(&trait_argument_ast)
+        .map(|(generic, argument)| (generic.name.clone(), argument.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut definitions = BTreeMap::new();
+    let mut bindings = Vec::new();
+    for method in methods {
+        let f = &method.function;
+        if f.total {
+            return Err(Diagnostic::new(
+                method.span,
+                "impl methods are executable declarations and cannot be 'total'",
+            ));
+        }
+        if let Some(collision) = f.generics.iter().find(|generic| {
+            generics
+                .iter()
+                .any(|impl_generic| impl_generic.name == generic.name)
+        }) {
+            return Err(Diagnostic::new(
+                collision.span,
+                format!(
+                    "method parameter '{}' must be distinct from the impl's parameters to avoid capture; rename one of them",
+                    collision.name
+                ),
+            ));
+        }
+        let Some(receiver) = f.parameters.first() else {
+            return Err(Diagnostic::new(
+                method.span,
+                "a method must declare a receiver as its first parameter: 'self: Self' or 'self: &Self'",
+            ));
+        };
+        if receiver.erased || receiver.name != "self" {
+            return Err(Diagnostic::new(
+                receiver.span,
+                "the first method parameter must be the receiver, written 'self: Self', 'self: &Self', 'self: &mut Self', or the concrete target type",
+            ));
+        }
+        checked_generic_method_receiver(types, &receiver.ty, self_ty, &generic_ids, resolution)?;
+        if Checker::builtin_method(&f.name) {
+            return Err(Diagnostic::new(
+                method.span,
+                format!(
+                    "method '{}' uses a reserved builtin method name; builtin receiver methods take precedence, so choose another name",
+                    f.name
+                ),
+            ));
+        }
+        if trait_id.is_some() {
+            let Some(expected) = trait_methods.get(&f.name) else {
+                return Err(Diagnostic::new(
+                    method.span,
+                    format!(
+                        "method '{}' is not declared by the implemented trait",
+                        f.name
+                    ),
+                ));
+            };
+            if method_contract_key(
+                resolution,
+                expected.function,
+                Some(self_ty),
+                Some(&trait_argument_names),
+                Some(&impl_associated.types),
+            )? != method_contract_key(
+                resolution,
+                f,
+                Some(self_ty),
+                None,
+                Some(&impl_associated.types),
+            )? {
+                return Err(Diagnostic::new(
+                    method.span,
+                    format!(
+                        "method '{}' does not match the trait signature exactly; parameters, parameter grades, erasure markers, result type, generic parameters and bounds, effect exclusions, lifetimes, effects, and substituted trait arguments must match",
+                        f.name
+                    ),
+                ));
+            }
+        }
+        for parameter in &f.parameters {
+            if parameter.erased && type_mentions_self(&parameter.ty) {
+                return Err(Diagnostic::new(
+                    parameter.ty.span,
+                    "erased method parameters may not mention 'Self' in this subset",
+                ));
+            }
+        }
+        validate_erased_parameters(resolution, logical, f)?;
+        validate_length_templates(resolution, f)?;
+        let binding = resolution.method(method.span).ok_or_else(|| {
+            Diagnostic::new(method.span, "internal error: impl method has no binding")
+        })?;
+        let definition = MethodDefinition {
+            binding,
+            public: method.public,
+            unit: resolution.unit_of.get(&binding).copied().unwrap_or(0),
+            impl_arguments: None,
+        };
+        if definitions.insert(f.name.clone(), definition).is_some() {
+            return Err(Diagnostic::new(
+                method.span,
+                format!("duplicate method '{}' in one impl", f.name),
+            ));
+        }
+        functions.declared.insert(
+            binding,
+            Declared {
+                ast: f,
+                span: method.span,
+                self_ty: None,
+                default_specialization: None,
+                impl_associated: associated_index,
+                impl_template: Some(header_index),
+            },
+        );
+        bindings.push(binding);
+    }
+    if let Some(trait_id) = trait_id {
+        let trait_public = resolution.public.contains(&trait_id);
+        let impl_unit = resolution.item_units.get(&span.start).copied().unwrap_or(0);
+        for (name, method) in &trait_methods {
+            if definitions.contains_key(name) {
+                continue;
+            }
+            if method.function.body.is_none() {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "missing implementation of trait method '{name}' for {}",
+                        type_key(self_ty)
+                    ),
+                ));
+            }
+            let receiver = method
+                .function
+                .parameters
+                .first()
+                .expect("trait receiver was validated at declaration");
+            checked_generic_method_receiver(
+                types,
+                &receiver.ty,
+                self_ty,
+                &generic_ids,
+                resolution,
+            )?;
+            let binding = *default_bindings
+                .get(&(span.start, name.clone()))
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        method.span,
+                        "internal error: inherited default method has no binding",
+                    )
+                })?;
+            let index = functions.default_specializations.len();
+            functions
+                .default_specializations
+                .push((trait_id, TraitArguments::default()));
+            functions.declared.insert(
+                binding,
+                Declared {
+                    ast: method.function,
+                    span: method.span,
+                    self_ty: None,
+                    default_specialization: Some(index),
+                    impl_associated: associated_index,
+                    impl_template: Some(header_index),
+                },
+            );
+            definitions.insert(
+                name.clone(),
+                MethodDefinition {
+                    binding,
+                    public: trait_public,
+                    unit: impl_unit,
+                    impl_arguments: None,
+                },
+            );
+            bindings.push(binding);
+        }
+    }
+    functions.impl_headers[header_index].methods = definitions;
+    Ok(bindings)
+}
+/// Whether a type expression mentions any of the given generic binders.
+fn type_references_any_binder(
+    resolution: &Resolution,
+    ty: &ast::Type,
+    binders: &BTreeSet<BindingId>,
+) -> bool {
+    let mentions = |ty: &ast::Type| type_references_any_binder(resolution, ty, binders);
+    match &ty.kind {
+        ast::TypeKind::Named { arguments, .. } => {
+            resolution
+                .reference(ty.span)
+                .is_some_and(|id| binders.contains(&id))
+                || arguments.iter().any(mentions)
+        }
+        ast::TypeKind::Tuple(items) => items.iter().any(mentions),
+        ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => mentions(inner),
+        ast::TypeKind::Borrow { inner, .. } => mentions(inner),
+        ast::TypeKind::Array(inner, length) => mentions(inner) || mentions(length),
+        ast::TypeKind::Binary { left, right, .. } => mentions(left) || mentions(right),
+        ast::TypeKind::Function {
+            parameters, result, ..
+        } => parameters.iter().any(|parameter| mentions(&parameter.ty)) || mentions(result),
+        _ => false,
+    }
+}
+/// Whether an expression mentions any of the given generic binders. Used to
+/// reject associated-constant values that would require generic const
+/// evaluation, which is not part of this subset.
+fn expression_mentions_generic(
+    resolution: &Resolution,
+    expr: &ast::Expr,
+    binders: &BTreeSet<BindingId>,
+) -> bool {
+    match &expr.kind {
+        ast::ExprKind::Name(_) | ast::ExprKind::Field { .. } => resolution
+            .reference(expr.span)
+            .is_some_and(|id| binders.contains(&id)),
+        _ => false,
+    }
+}
+/// Validate a method receiver written against a generic impl header. The
+/// receiver must be `Self`/the concrete pattern by value or a shared/exclusive
+/// nominal-record borrow of it.
+fn checked_generic_method_receiver(
+    types: &mut Types<'_>,
+    receiver: &ast::Type,
+    self_ty: &ast::Type,
+    generics: &BTreeSet<BindingId>,
+    resolution: &Resolution,
+) -> Result<()> {
+    let shape = match &receiver.kind {
+        ast::TypeKind::SelfType => return Ok(()),
+        ast::TypeKind::Borrow { inner, .. } => {
+            if !matches!(inner.kind, ast::TypeKind::SelfType) {
+                return Err(Diagnostic::new(
+                    receiver.span,
+                    "a generic impl receiver may borrow only 'Self' (write 'self: &Self' or '&self')",
+                ));
+            }
+            true
+        }
+        ast::TypeKind::Named { .. } => {
+            // The concrete pattern itself is accepted when it is syntactically
+            // the header self type.
+            if type_key(receiver) == type_key(self_ty) {
+                return Ok(());
+            }
+            return Err(Diagnostic::new(
+                receiver.span,
+                "a generic impl receiver must be written 'self: Self', 'self: &Self', or 'self: &mut Self'",
+            ));
+        }
+        _ => {
+            return Err(Diagnostic::new(
+                receiver.span,
+                "a generic impl receiver must be written 'self: Self', 'self: &Self', or 'self: &mut Self'",
+            ));
+        }
+    };
+    let _ = (types, generics, resolution, shape);
+    Ok(())
+}
+
 impl<'a> Functions<'a> {
+    /// The concrete self type of a method instance, if it belongs to an impl.
+    fn self_type_for(&self, binding: BindingId, impl_arguments: Option<usize>) -> Option<Type> {
+        if let Some(index) = impl_arguments {
+            return Some(self.impl_instantiations[index].self_type);
+        }
+        self.declared
+            .get(&binding)
+            .and_then(|declared| declared.self_ty)
+    }
+    /// The concrete trait specialization of a method instance. Concrete impl
+    /// methods and inherited defaults derive it from the impl registration;
+    /// generic impls derive it from the selected instantiation.
+    fn trait_arguments_for(
+        &self,
+        binding: BindingId,
+        impl_arguments: Option<usize>,
+    ) -> Option<TraitArguments> {
+        if let Some(index) = impl_arguments {
+            return Some(self.impl_instantiations[index].trait_arguments.clone());
+        }
+        let declared = self.declared.get(&binding)?;
+        let index = declared.default_specialization?;
+        Some(self.default_specializations[index].1.clone())
+    }
+    /// Intern one concrete instantiation of a generic impl header and compute
+    /// its receiver type and trait specialization. Deduplicated so each method
+    /// body is checked once per impl-argument list.
+    fn intern_impl(
+        &mut self,
+        types: &mut Types<'a>,
+        resolution: &Resolution,
+        header: usize,
+        arguments: ImplArguments,
+    ) -> Result<usize> {
+        if let Some(index) = self
+            .impl_instantiation_cache
+            .get(&(header, arguments.clone()))
+        {
+            return Ok(*index);
+        }
+        let definition = self.impl_headers[header].clone();
+        let mut type_map = BTreeMap::new();
+        for (generic, ty) in definition.generics.iter().zip(&arguments.types) {
+            type_map.insert(resolution.binder(generic.span).unwrap(), *ty);
+        }
+        let substitution = crate::runtime_types::Subst {
+            types: type_map.clone(),
+            ..Default::default()
+        };
+        let self_type = types.ty_in(&definition.self_ty, &substitution)?;
+        let trait_arguments = match definition.trait_id {
+            Some(trait_id) => {
+                let generics = self.traits[&trait_id].generics.clone();
+                evaluate_trait_arguments(
+                    types,
+                    resolution,
+                    self.logical,
+                    &generics,
+                    &definition.trait_arguments,
+                    &substitution,
+                    &resolution.bindings[trait_id].name,
+                    definition.span,
+                )?
+            }
+            None => TraitArguments::default(),
+        };
+        let index = self.impl_instantiations.len();
+        self.impl_instantiations.push(ImplInstantiation {
+            header,
+            arguments: arguments.clone(),
+            self_type,
+            trait_arguments,
+        });
+        self.impl_instantiation_cache
+            .insert((header, arguments), index);
+        Ok(index)
+    }
+    /// Whether a trait obligation is met by an exact concrete impl or by at
+    /// least one applicable generic impl. Used for impl-header bounds and
+    /// bounded-generic discharge.
+    fn obligation_holds(
+        &self,
+        types: &mut Types<'a>,
+        resolution: &Resolution,
+        trait_id: BindingId,
+        required: &TraitArguments,
+        self_ty: Type,
+        depth: usize,
+    ) -> Result<bool> {
+        if self
+            .trait_impls
+            .contains_key(&(trait_id, required.clone(), self_ty))
+        {
+            return Ok(true);
+        }
+        if depth >= 8 {
+            return Ok(false);
+        }
+        Ok(!self
+            .matching_impls(types, resolution, trait_id, required, self_ty, depth + 1)?
+            .is_empty())
+    }
+    /// All generic impls of `trait_id` whose header pattern matches the
+    /// concrete receiver and trait arguments, with their generic parameters
+    /// solved. Declaration-time coherence guarantees that any two matches are
+    /// specialization-comparable; dispatch still checks for a unique most
+    /// specific match.
+    fn matching_impls(
+        &self,
+        types: &mut Types<'a>,
+        resolution: &Resolution,
+        trait_id: BindingId,
+        required: &TraitArguments,
+        self_ty: Type,
+        depth: usize,
+    ) -> Result<Vec<ImplMatch>> {
+        if depth >= 8 {
+            return Ok(Vec::new());
+        }
+        let definition = self.traits[&trait_id].clone();
+        let mut out = Vec::new();
+        for (index, header) in self.impl_headers.iter().enumerate() {
+            if header.trait_id != Some(trait_id) || header.concrete.is_some() {
+                continue;
+            }
+            let mut substitution = BTreeMap::new();
+            if !match_type_pattern(
+                resolution,
+                types,
+                &header.self_ty,
+                self_ty,
+                &mut substitution,
+                0,
+            )? {
+                continue;
+            }
+            if !match_trait_argument_patterns(
+                resolution,
+                types,
+                self.logical,
+                &definition.generics,
+                &header.trait_arguments,
+                required,
+                &mut substitution,
+            )? {
+                continue;
+            }
+            let solved = ImplArguments {
+                types: header
+                    .generics
+                    .iter()
+                    .map(|generic| {
+                        substitution
+                            .get(&resolution.binder(generic.span).unwrap())
+                            .copied()
+                            .unwrap_or(Type::Unit)
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let mut bounds_hold = true;
+            for generic in &header.generics {
+                let Some(bound) = &generic.bound else {
+                    continue;
+                };
+                let Some(bound_trait) = resolution.reference(bound.span) else {
+                    continue;
+                };
+                if resolution.bindings[bound_trait].kind != BindingKind::Trait {
+                    continue;
+                }
+                let argument_ast = match &bound.kind {
+                    ast::TypeKind::Named { arguments, .. } => arguments.clone(),
+                    _ => Vec::new(),
+                };
+                let bound_generics = self.traits[&bound_trait].generics.clone();
+                let subst = crate::runtime_types::Subst {
+                    types: substitution.clone(),
+                    ..Default::default()
+                };
+                let required_bound = evaluate_trait_arguments(
+                    types,
+                    resolution,
+                    self.logical,
+                    &bound_generics,
+                    &argument_ast,
+                    &subst,
+                    &resolution.bindings[bound_trait].name,
+                    generic.span,
+                )?;
+                let actual = substitution
+                    .get(&resolution.binder(generic.span).unwrap())
+                    .copied()
+                    .expect("matched header parameter is solved");
+                if !self.obligation_holds(
+                    types,
+                    resolution,
+                    bound_trait,
+                    &required_bound,
+                    actual,
+                    depth + 1,
+                )? {
+                    bounds_hold = false;
+                    break;
+                }
+            }
+            if bounds_hold {
+                out.push(ImplMatch {
+                    header: index,
+                    arguments: solved,
+                });
+            }
+        }
+        Ok(out)
+    }
+    /// Match only the self-type pattern of an impl header against a concrete
+    /// receiver. Used by unqualified dispatch, which must discover every trait
+    /// that could provide a name before selecting a specialization.
+    fn match_header_for_receiver(
+        &self,
+        types: &mut Types<'a>,
+        resolution: &Resolution,
+        header_index: usize,
+        self_ty: Type,
+        depth: usize,
+    ) -> Result<Option<ImplMatch>> {
+        let header = self.impl_headers[header_index].clone();
+        if header.concrete.is_some() {
+            return Ok(None);
+        }
+        let mut substitution = BTreeMap::new();
+        if !match_type_pattern(
+            resolution,
+            types,
+            &header.self_ty,
+            self_ty,
+            &mut substitution,
+            0,
+        )? {
+            return Ok(None);
+        }
+        let arguments = ImplArguments {
+            types: header
+                .generics
+                .iter()
+                .map(|generic| {
+                    substitution
+                        .get(&resolution.binder(generic.span).unwrap())
+                        .copied()
+                        .unwrap_or(Type::Unit)
+                })
+                .collect(),
+            ..Default::default()
+        };
+        for generic in &header.generics {
+            let Some(bound) = &generic.bound else {
+                continue;
+            };
+            let Some(bound_trait) = resolution.reference(bound.span) else {
+                continue;
+            };
+            if resolution.bindings[bound_trait].kind != BindingKind::Trait {
+                continue;
+            }
+            let argument_ast = match &bound.kind {
+                ast::TypeKind::Named { arguments, .. } => arguments.clone(),
+                _ => Vec::new(),
+            };
+            let bound_generics = self.traits[&bound_trait].generics.clone();
+            let subst = crate::runtime_types::Subst {
+                types: substitution.clone(),
+                ..Default::default()
+            };
+            let required = evaluate_trait_arguments(
+                types,
+                resolution,
+                self.logical,
+                &bound_generics,
+                &argument_ast,
+                &subst,
+                &resolution.bindings[bound_trait].name,
+                generic.span,
+            )?;
+            let actual = substitution
+                .get(&resolution.binder(generic.span).unwrap())
+                .copied()
+                .expect("matched header parameter is solved");
+            if !self.obligation_holds(
+                types,
+                resolution,
+                bound_trait,
+                &required,
+                actual,
+                depth + 1,
+            )? {
+                return Ok(None);
+            }
+        }
+        Ok(Some(ImplMatch {
+            header: header_index,
+            arguments,
+        }))
+    }
+    /// The concrete trait specialization produced by one solved impl header.
+    fn trait_arguments_for_match(
+        &self,
+        types: &mut Types<'a>,
+        resolution: &Resolution,
+        header_index: usize,
+        arguments: &ImplArguments,
+    ) -> Result<TraitArguments> {
+        let header = self.impl_headers[header_index].clone();
+        let Some(trait_id) = header.trait_id else {
+            return Ok(TraitArguments::default());
+        };
+        if let Some(index) = self
+            .impl_instantiation_cache
+            .get(&(header_index, arguments.clone()))
+        {
+            return Ok(self.impl_instantiations[*index].trait_arguments.clone());
+        }
+        let mut type_map = BTreeMap::new();
+        for (generic, ty) in header.generics.iter().zip(&arguments.types) {
+            type_map.insert(resolution.binder(generic.span).unwrap(), *ty);
+        }
+        let subst = crate::runtime_types::Subst {
+            types: type_map,
+            ..Default::default()
+        };
+        let generics = self.traits[&trait_id].generics.clone();
+        evaluate_trait_arguments(
+            types,
+            resolution,
+            self.logical,
+            &generics,
+            &header.trait_arguments,
+            &subst,
+            &resolution.bindings[trait_id].name,
+            header.span,
+        )
+    }
+    /// Pick the unique most-specific match. Coherence has already rejected
+    /// incomparable overlaps; a remaining tie is an internal ambiguity error
+    /// rather than an arbitrary declaration-order choice.
+    fn select_most_specific(
+        &self,
+        resolution: &Resolution,
+        matches: &[ImplMatch],
+    ) -> Option<ImplMatch> {
+        if matches.len() == 1 {
+            return matches.first().cloned();
+        }
+        let mut candidates = Vec::new();
+        for candidate in matches {
+            let mut dominated = false;
+            for other in matches {
+                if candidate.header == other.header && candidate.arguments == other.arguments {
+                    continue;
+                }
+                let a = &self.impl_headers[candidate.header];
+                let b = &self.impl_headers[other.header];
+                if header_subsumes(resolution, a, b) && !header_subsumes(resolution, b, a) {
+                    // The other header is more specific.
+                    dominated = true;
+                    break;
+                }
+            }
+            if !dominated {
+                candidates.push(candidate.clone());
+            }
+        }
+        (candidates.len() == 1).then(|| candidates.remove(0))
+    }
+
     /// A fresh, unspellable identity for one elided input borrow. Every elided
     /// input gets its own identity, so independent inputs never collapse into a
     /// single inferred lifetime.
@@ -2913,6 +5425,7 @@ impl<'a> Functions<'a> {
         grade_arguments: Vec<Grade>,
         const_arguments: Vec<usize>,
         effect_arguments: Vec<u8>,
+        impl_arguments: Option<usize>,
         origin: Option<Span>,
     ) -> Result<usize> {
         let key = (
@@ -2921,6 +5434,7 @@ impl<'a> Functions<'a> {
             grade_arguments,
             const_arguments,
             effect_arguments,
+            impl_arguments,
         );
         if let Some(index) = self.instances.get(&key) {
             return Ok(*index);
@@ -3016,13 +5530,29 @@ impl<'a> Functions<'a> {
             .zip(&key.4)
             .map(|(g, effects)| (resolution.binder(g.span).unwrap(), *effects))
             .collect::<BTreeMap<_, _>>();
+        // A generic impl supplies concrete values for its own parameters. They
+        // join the same substitution maps as the method's generics; the
+        // declaration rejects a method binder that reuses an impl parameter
+        // name, so the keys cannot collide.
+        if let Some(index) = impl_arguments {
+            let instantiation = self.impl_instantiations[index].clone();
+            let header = self.impl_headers[instantiation.header].clone();
+            for (generic, ty) in header.generics.iter().zip(&instantiation.arguments.types) {
+                substitution
+                    .types
+                    .insert(resolution.binder(generic.span).unwrap(), *ty);
+            }
+        }
         // A materialized trait default also needs its trait's concrete
         // arguments. `Self` is substituted above and trait parameters are
         // ordinary binders, so they join the same substitution maps. Method
         // parameters may not reuse a trait parameter name, so the keys cannot
         // collide.
         if let Some(index) = declared.default_specialization {
-            let (trait_id, arguments) = self.default_specializations[index].clone();
+            let (trait_id, stored) = self.default_specializations[index].clone();
+            let arguments = self
+                .trait_arguments_for(binding, impl_arguments)
+                .unwrap_or(stored);
             let definition = self.traits[&trait_id].clone();
             insert_trait_arguments(
                 resolution,
@@ -3037,6 +5567,20 @@ impl<'a> Functions<'a> {
         substitution.consts = const_substitution.clone();
         substitution.grades = grade_substitution.clone();
         substitution.effects = effect_substitution.clone();
+        // Normalize `Self::Item` through this impl's associated values. The
+        // value is an AST type, so it is lowered with the same substitution
+        // and may mention the impl's generic parameters.
+        let mut associated_consts = BTreeMap::new();
+        if let Some(index) = declared.impl_associated {
+            let associated = self.impl_associated[index].clone();
+            substitution.associated_types = associated.types;
+            associated_consts = associated.consts;
+        }
+        // `Self` for a generic impl is its header pattern lowered with the
+        // concrete impl arguments selected by dispatch.
+        let instantiated_self =
+            impl_arguments.map(|index| self.impl_instantiations[index].self_type);
+        substitution.self_type = instantiated_self.or(declared.self_ty);
         // Trait bounds are discharged at specialization time, before the body
         // is checked. A missing impl is an error even when the body never calls
         // a trait method. Bound arguments are substituted through this
@@ -3067,10 +5611,7 @@ impl<'a> Functions<'a> {
                 &resolution.bindings[trait_id].name,
                 generic.span,
             )?;
-            if !self
-                .trait_impls
-                .contains_key(&(trait_id, required.clone(), *actual))
-            {
+            if !self.obligation_holds(types, resolution, trait_id, &required, *actual, 0)? {
                 let trait_name = &resolution.bindings[trait_id].name;
                 let specialization = if definition.generics.is_empty() {
                     trait_name.clone()
@@ -3094,6 +5635,39 @@ impl<'a> Functions<'a> {
                         specialization
                     ),
                 ));
+            }
+            let binder = resolution
+                .binder(generic.span)
+                .expect("generic parameter has a binder");
+            if let Some(associated) = self
+                .trait_associated
+                .get(&(trait_id, required.clone(), *actual))
+                .cloned()
+            {
+                for (name, value) in associated.types {
+                    let lowered = types.ty_in(&value, &substitution)?;
+                    substitution.projections.insert((binder, name), lowered);
+                }
+            } else {
+                // A generic impl supplies the projection. Solve it and lower
+                // the associated value with both the method's and the impl's
+                // parameters substituted.
+                let matches =
+                    self.matching_impls(types, resolution, trait_id, &required, *actual, 0)?;
+                if let Some(selected) = self.select_most_specific(resolution, &matches) {
+                    let header = self.impl_headers[selected.header].clone();
+                    let mut impl_substitution = substitution.clone();
+                    for (impl_generic, ty) in header.generics.iter().zip(&selected.arguments.types)
+                    {
+                        impl_substitution
+                            .types
+                            .insert(resolution.binder(impl_generic.span).unwrap(), *ty);
+                    }
+                    for (name, value) in header.associated.types {
+                        let lowered = types.ty_in(&value, &impl_substitution)?;
+                        substitution.projections.insert((binder, name), lowered);
+                    }
+                }
             }
         }
         let mut parameters = Vec::new();
@@ -3531,8 +6105,9 @@ impl<'a> Functions<'a> {
             parameter_lifetimes,
             result_lifetime,
             lifetime_bounds,
-            self_type: declared.self_ty,
+            self_type: substitution.self_type,
             default_trait,
+            associated_consts,
         });
         self.instances.insert(key, index);
         self.bodies.push(None);
@@ -3822,6 +6397,7 @@ fn validate_type_template(
             validate_type_template(resolution, element, consts, false, false)?;
             validate_length_template(resolution, length, consts)
         }
+        ast::TypeKind::Dyn(inner) => validate_type_template(resolution, inner, consts, false, true),
         ast::TypeKind::Named { arguments, .. } => {
             if let Some(id) = resolution.reference(ty.span) {
                 let binding = &resolution.bindings[id];
@@ -3916,6 +6492,7 @@ fn type_references_binding(resolution: &Resolution, ty: &ast::Type, id: BindingI
         ast::TypeKind::Tuple(items) => items
             .iter()
             .any(|item| type_references_binding(resolution, item, id)),
+        ast::TypeKind::Dyn(inner) => type_references_binding(resolution, inner, id),
         ast::TypeKind::Slice(inner)
         | ast::TypeKind::Borrow { inner, .. }
         | ast::TypeKind::Graded { inner, .. } => type_references_binding(resolution, inner, id),
@@ -4057,11 +6634,17 @@ struct Checker<'a, 't> {
     /// Trait specialization of the default body being checked, if any. An
     /// unqualified method call on `Self` prefers this specialization.
     default_trait: Option<(BindingId, TraitArguments)>,
+    /// Associated constants of the impl that owns this body, already evaluated
+    /// for this specialization. `Self::NAME` projects them.
+    associated_consts: BTreeMap<String, ConstValue>,
     /// Module unit of the function being checked, for method visibility.
     unit: usize,
     /// The current field expression is a place used to derive a subview
     /// (`&mut record.field[..]`), not a copied field value.
     field_place: bool,
+    /// Binding of the function or method body being checked. Used to resolve
+    /// `T.NAME` associated-constant projections through `T`'s trait bound.
+    binding: BindingId,
 }
 impl Checker<'_, '_> {
     fn nested<T>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
@@ -4691,6 +7274,8 @@ impl Checker<'_, '_> {
             effects: self.effect_arguments.clone(),
             lifetimes: BTreeMap::new(),
             self_type: self.self_type,
+            associated_types: BTreeMap::new(),
+            projections: BTreeMap::new(),
         };
         evaluate_trait_arguments(
             self.types,
@@ -4704,7 +7289,7 @@ impl Checker<'_, '_> {
         )
     }
     fn lookup_method(
-        &self,
+        &mut self,
         ty: Type,
         name: &str,
         trait_id: Option<(BindingId, TraitArguments)>,
@@ -4712,8 +7297,8 @@ impl Checker<'_, '_> {
     ) -> Result<MethodDefinition> {
         let key = ty.full();
         if let Some((trait_id, trait_arguments)) = trait_id {
-            let definition = &self.functions.traits[&trait_id];
-            let trait_name = &self.resolution.bindings[trait_id].name;
+            let definition = self.functions.traits[&trait_id].clone();
+            let trait_name = self.resolution.bindings[trait_id].name.clone();
             let specialization = if definition.generics.is_empty() {
                 trait_name.clone()
             } else {
@@ -4727,25 +7312,64 @@ impl Checker<'_, '_> {
                     )
                 )
             };
-            let Some(methods) = self
+            if let Some(methods) =
+                self.functions
+                    .trait_impls
+                    .get(&(trait_id, trait_arguments.clone(), key))
+            {
+                return methods.get(name).copied().ok_or_else(|| {
+                    Diagnostic::new(
+                        span,
+                        format!("trait '{specialization}' has no method '{name}'"),
+                    )
+                });
+            }
+            let mut matches = self.functions.matching_impls(
+                self.types,
+                self.resolution,
+                trait_id,
+                &trait_arguments,
+                key,
+                0,
+            )?;
+            matches.retain(|candidate| {
+                self.functions.impl_headers[candidate.header]
+                    .methods
+                    .contains_key(name)
+            });
+            let selected = self
                 .functions
-                .trait_impls
-                .get(&(trait_id, trait_arguments, key))
-            else {
+                .select_most_specific(self.resolution, &matches);
+            let Some(selected) = selected else {
+                if matches.is_empty() {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "type '{}' does not implement trait '{specialization}'",
+                            self.types.name(ty)
+                        ),
+                    ));
+                }
                 return Err(Diagnostic::new(
                     span,
                     format!(
-                        "type '{}' does not implement trait '{specialization}'",
+                        "method '{name}' on '{}' has several incomparable generic impls; coherence requires a unique most-specific impl",
                         self.types.name(ty)
                     ),
                 ));
             };
-            return methods.get(name).copied().ok_or_else(|| {
-                Diagnostic::new(
-                    span,
-                    format!("trait '{specialization}' has no method '{name}'"),
-                )
-            });
+            let index = self.functions.intern_impl(
+                self.types,
+                self.resolution,
+                selected.header,
+                selected.arguments,
+            )?;
+            let mut definition = *self.functions.impl_headers[selected.header]
+                .methods
+                .get(name)
+                .expect("candidate was filtered by method name");
+            definition.impl_arguments = Some(index);
+            return Ok(definition);
         }
         if let Some(definition) = self
             .functions
@@ -4754,6 +7378,11 @@ impl Checker<'_, '_> {
             .and_then(|methods| methods.get(name))
         {
             return Ok(*definition);
+        }
+        // Generic inherent impls apply only when no exact inherent method
+        // exists; a concrete `impl Type` is always more specific.
+        if let Some(generic) = self.generic_method_candidates(key, name, None, span)? {
+            return Ok(generic);
         }
         let mut candidates = self
             .functions
@@ -4785,6 +7414,87 @@ impl Checker<'_, '_> {
                 return Ok(single.2);
             }
         }
+        // Add applicable generic impls for every trait. Per trait, the unique
+        // most-specific header wins; a concrete impl of the same trait and
+        // arguments still supersedes a generic one.
+        let mut generic_by_trait: BTreeMap<BindingId, Vec<ImplMatch>> = BTreeMap::new();
+        for header_index in 0..self.functions.impl_headers.len() {
+            let Some(trait_id) = self.functions.impl_headers[header_index].trait_id else {
+                continue;
+            };
+            if self.functions.impl_headers[header_index].concrete.is_some()
+                || !self.functions.impl_headers[header_index]
+                    .methods
+                    .contains_key(name)
+            {
+                continue;
+            }
+            if let Some(candidate) = self.functions.match_header_for_receiver(
+                self.types,
+                self.resolution,
+                header_index,
+                key,
+                0,
+            )? {
+                generic_by_trait
+                    .entry(trait_id)
+                    .or_default()
+                    .push(candidate);
+            }
+        }
+        let mut generic_candidates = Vec::new();
+        for (trait_id, matches) in generic_by_trait {
+            let Some(selected) = self
+                .functions
+                .select_most_specific(self.resolution, &matches)
+            else {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "method '{name}' on '{}' has several incomparable generic impls of trait '{}'",
+                        self.types.name(ty),
+                        self.resolution.bindings[trait_id].name
+                    ),
+                ));
+            };
+            let required = self.functions.trait_arguments_for_match(
+                self.types,
+                self.resolution,
+                selected.header,
+                &selected.arguments,
+            )?;
+            if self
+                .functions
+                .trait_impls
+                .contains_key(&(trait_id, required.clone(), key))
+            {
+                continue;
+            }
+            if !self.functions.impl_headers[selected.header]
+                .methods
+                .contains_key(name)
+            {
+                continue;
+            }
+            let index = self.functions.intern_impl(
+                self.types,
+                self.resolution,
+                selected.header,
+                selected.arguments,
+            )?;
+            let mut definition = *self.functions.impl_headers[selected.header]
+                .methods
+                .get(name)
+                .expect("filtered by method name");
+            definition.impl_arguments = Some(index);
+            generic_candidates.push((trait_id, required, definition));
+        }
+        // Deduplicate identical (trait, arguments) generic candidates that can
+        // arise when several specializations of the same trait match.
+        generic_candidates.sort_by_key(|(trait_id, arguments, _)| (*trait_id, arguments.clone()));
+        generic_candidates.dedup_by_key(|(trait_id, arguments, _)| (*trait_id, arguments.clone()));
+        candidates.extend(generic_candidates);
+        candidates.sort_by_key(|(trait_id, arguments, _)| (*trait_id, arguments.clone()));
         match candidates.as_slice() {
             [] => Err(Diagnostic::new(
                 span,
@@ -4825,6 +7535,64 @@ impl Checker<'_, '_> {
                 ))
             }
         }
+    }
+    /// Generic inherent method lookup. Returns `None` when no generic inherent
+    /// impl matches; several incomparable matches are an ambiguity error.
+    fn generic_method_candidates(
+        &mut self,
+        key: Type,
+        name: &str,
+        trait_id: Option<BindingId>,
+        span: Span,
+    ) -> Result<Option<MethodDefinition>> {
+        let mut matches = Vec::new();
+        for (header_index, header) in self.functions.impl_headers.iter().enumerate() {
+            if header.trait_id != trait_id
+                || header.concrete.is_some()
+                || !header.methods.contains_key(name)
+            {
+                continue;
+            }
+            if trait_id.is_some() {
+                continue;
+            }
+            if let Some(candidate) = self.functions.match_header_for_receiver(
+                self.types,
+                self.resolution,
+                header_index,
+                key,
+                0,
+            )? {
+                matches.push(candidate);
+            }
+        }
+        if matches.is_empty() {
+            return Ok(None);
+        }
+        let selected = self
+            .functions
+            .select_most_specific(self.resolution, &matches);
+        let Some(selected) = selected else {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "inherent method '{name}' on '{}' has several incomparable generic impls",
+                    self.types.name(key)
+                ),
+            ));
+        };
+        let index = self.functions.intern_impl(
+            self.types,
+            self.resolution,
+            selected.header,
+            selected.arguments,
+        )?;
+        let mut definition = *self.functions.impl_headers[selected.header]
+            .methods
+            .get(name)
+            .expect("candidate was filtered by method name");
+        definition.impl_arguments = Some(index);
+        Ok(Some(definition))
     }
     /// Whether this method's declared receiver is `&self` (`Some(false)`) or
     /// `&mut self` (`Some(true)`), or is taken by value (`None`).
@@ -4889,6 +7657,18 @@ impl Checker<'_, '_> {
         };
         if receiver.ty == Type::Never {
             return Ok(receiver);
+        }
+        if matches!(receiver.ty, Type::Union(_))
+            && self.functions.object_traits.contains_key(&receiver.ty)
+        {
+            return self.dynamic_method_call(
+                receiver,
+                name,
+                trait_selection.clone(),
+                arguments,
+                expected,
+                span,
+            );
         }
         let lookup_ty = match receiver.ty.ref_pointee() {
             Some(pointer) if self.types.pointees[pointer].layout().is_some() => {
@@ -4979,6 +7759,7 @@ impl Checker<'_, '_> {
         }
         self.invoke_method(
             definition.binding,
+            definition.impl_arguments,
             receiver_ast,
             receiver,
             explicit,
@@ -4987,6 +7768,466 @@ impl Checker<'_, '_> {
             span,
         )
     }
+    /// Resolve `T.NAME` for a generic parameter `T` with a trait bound. The
+    /// concrete constant is selected by the same impl solver used for `T.Out`;
+    /// the projection is a compile-time literal for the current specialization.
+    fn generic_associated_const(
+        &mut self,
+        binder: BindingId,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<ConstValue>> {
+        let Some(declared) = self.functions.declared.get(&self.binding).copied() else {
+            return Ok(None);
+        };
+        let Some(generic) = declared
+            .ast
+            .generics
+            .iter()
+            .find(|generic| self.resolution.binder(generic.span) == Some(binder))
+        else {
+            return Ok(None);
+        };
+        let Some(bound) = &generic.bound else {
+            return Ok(None);
+        };
+        let Some(trait_id) = self.resolution.reference(bound.span) else {
+            return Ok(None);
+        };
+        if self.resolution.bindings[trait_id].kind != BindingKind::Trait {
+            return Ok(None);
+        }
+        let Some(actual) = self.substitution.get(&binder).copied() else {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "cannot project associated constant '{name}' from an unspecialized generic parameter '{}'",
+                    self.resolution.bindings[binder].name
+                ),
+            ));
+        };
+        let definition = self.functions.traits[&trait_id].clone();
+        let argument_ast = match &bound.kind {
+            ast::TypeKind::Named { arguments, .. } => arguments.clone(),
+            _ => Vec::new(),
+        };
+        let substitution = crate::runtime_types::Subst {
+            types: self.substitution.clone(),
+            consts: self.consts.clone(),
+            grades: self.grades.clone(),
+            effects: self.effect_arguments.clone(),
+            lifetimes: BTreeMap::new(),
+            self_type: self.self_type,
+            associated_types: BTreeMap::new(),
+            projections: BTreeMap::new(),
+        };
+        let required = evaluate_trait_arguments(
+            self.types,
+            self.resolution,
+            self.functions.logical,
+            &definition.generics,
+            &argument_ast,
+            &substitution,
+            &self.resolution.bindings[trait_id].name,
+            generic.span,
+        )?;
+        if let Some(values) = self
+            .functions
+            .trait_consts
+            .get(&(trait_id, required.clone(), actual))
+        {
+            return Ok(values.get(name).copied());
+        }
+        let matches = self.functions.matching_impls(
+            self.types,
+            self.resolution,
+            trait_id,
+            &required,
+            actual,
+            0,
+        )?;
+        if let Some(selected) = self
+            .functions
+            .select_most_specific(self.resolution, &matches)
+        {
+            return Ok(self.functions.impl_headers[selected.header]
+                .associated
+                .consts
+                .get(name)
+                .copied());
+        }
+        Ok(None)
+    }
+    /// Dynamic dispatch on a closed-world trait object. Returns `None` when the
+    /// receiver's union does not represent a trait providing this name, so the
+    /// ordinary static path can produce its usual diagnostic.
+    #[allow(clippy::too_many_arguments)]
+    fn dynamic_method_call(
+        &mut self,
+        receiver: Expr,
+        name: &str,
+        trait_selection: Option<(BindingId, TraitArguments)>,
+        arguments: &[ast::Expr],
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        let Some(entries) = self.functions.object_traits.get(&receiver.ty).cloned() else {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "no dynamic method '{name}' is available for '{}'",
+                    self.types.name(receiver.ty)
+                ),
+            ));
+        };
+        let entry = if let Some((trait_id, arguments)) = trait_selection {
+            entries
+                .iter()
+                .find(|(id, args)| *id == trait_id && *args == arguments)
+                .cloned()
+        } else {
+            let matching = entries
+                .iter()
+                .filter(|(trait_id, _)| self.functions.traits[trait_id].methods.contains_key(name))
+                .cloned()
+                .collect::<Vec<_>>();
+            match matching.as_slice() {
+                [] => {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "no trait represented by '{}' declares dynamic method '{name}'; qualify an object trait or use a static impl",
+                            self.types.name(receiver.ty)
+                        ),
+                    ));
+                }
+                [single] => Some(single.clone()),
+                _ => {
+                    let traits = matching
+                        .iter()
+                        .map(|(id, _)| self.resolution.bindings[*id].name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "dynamic method '{name}' is provided by traits {traits}; disambiguate as 'receiver.Trait.method(...)'"
+                        ),
+                    ));
+                }
+            }
+        };
+        let Some((trait_id, trait_arguments)) = entry else {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "trait object '{}' does not represent the requested trait specialization",
+                    self.types.name(receiver.ty)
+                ),
+            ));
+        };
+        let dispatcher = self.dynamic_dispatcher(trait_id, &trait_arguments, name, span)?;
+        let signature = self.functions.signatures[dispatcher].clone();
+        if arguments.len() + 1 != signature.parameters.len() {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "wrong argument count for dynamic method '{name}': expected {}, found {}",
+                    signature.parameters.len().saturating_sub(1),
+                    arguments.len()
+                ),
+            ));
+        }
+        self.require(signature.effects, span)?;
+        let mut receiver = receiver;
+        if let ExprKind::Peek(slot) = &receiver.kind {
+            let slot = *slot;
+            let ty = receiver.ty;
+            let receiver_span = receiver.span;
+            receiver = Expr {
+                kind: ExprKind::Local(slot),
+                ty,
+                span: receiver_span,
+                resource: None,
+            };
+        }
+        let mut values = vec![receiver];
+        for (argument, ty) in arguments.iter().zip(&signature.parameters[1..]) {
+            let value = self.expr_expected(argument, Some(*ty))?;
+            values.push(self.coerce(value, *ty, span)?);
+        }
+        let value = Expr {
+            kind: ExprKind::Call(Target::Function(dispatcher), values),
+            ty: signature.result,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(value, expected, span),
+            None => Ok(value),
+        }
+    }
+    /// Build (or reuse) the checked dispatcher for one object method. The
+    /// dispatcher takes the object union by value, matches its concrete
+    /// alternative, and calls that impl's method. No vtable, erasure, or
+    /// runtime allocation is introduced, and every alternative remains an
+    /// ordinary checked function call.
+    fn dynamic_dispatcher(
+        &mut self,
+        trait_id: BindingId,
+        trait_arguments: &TraitArguments,
+        name: &str,
+        span: Span,
+    ) -> Result<usize> {
+        let key = (trait_id, trait_arguments.clone(), name.to_owned());
+        if let Some(index) = self.functions.dynamic_dispatch.get(&key) {
+            return Ok(*index);
+        }
+        let definition = self.functions.traits[&trait_id].clone();
+        let method = definition
+            .methods
+            .get(name)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    span,
+                    format!(
+                        "trait '{}' has no method '{name}'",
+                        self.resolution.bindings[trait_id].name
+                    ),
+                )
+            })?
+            .function;
+        let object = self
+            .types
+            .dyn_objects
+            .get(&(trait_id, trait_arguments.clone()))
+            .copied()
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    span,
+                    "internal error: trait object has no closed-world representation",
+                )
+            })?;
+        let members = self.types.union_members(object);
+        let mut substitution = crate::runtime_types::Subst::default();
+        let mut consts = BTreeMap::new();
+        let mut grades = BTreeMap::new();
+        let mut effects = BTreeMap::new();
+        insert_trait_arguments(
+            self.resolution,
+            &definition.generics,
+            trait_arguments,
+            &mut substitution,
+            &mut consts,
+            &mut grades,
+            &mut effects,
+        );
+        substitution.consts = consts;
+        substitution.grades = grades;
+        substitution.effects = effects;
+        let shared_receiver = matches!(
+            method
+                .parameters
+                .first()
+                .map(|parameter| &parameter.ty.kind),
+            Some(ast::TypeKind::Borrow { mutable: false, .. })
+        );
+        let mut parameters = vec![object];
+        let mut parameter_grades = vec![None];
+        for parameter in &method.parameters[1..] {
+            let (ty, grade) = split_grade(&parameter.ty);
+            parameters.push(self.types.ty_in(ty, &substitution)?);
+            parameter_grades.push(
+                grade
+                    .map(|grade| grades::evaluate(self.resolution, &substitution.grades, grade))
+                    .transpose()?,
+            );
+        }
+        let (result, result_grade) = result_contract(
+            self.resolution,
+            self.types,
+            &substitution.grades,
+            &method.result,
+        )?;
+        let result = self.types.ty_in(&result, &substitution)?;
+        if result_grade.is_some() || self.linear_type(result) {
+            return Err(Diagnostic::new(
+                span,
+                "a dynamic method cannot return an owning exact-use contract; consume the object statically or return a copyable value",
+            ));
+        }
+        let mut locals = parameters
+            .iter()
+            .map(|ty| Local {
+                ty: *ty,
+                mutable: false,
+                linear: false,
+                grade: None,
+                span,
+            })
+            .collect::<Vec<_>>();
+        let mut total_effects = 0u8;
+        let mut signatures = Vec::new();
+        for member in &members {
+            let Some(impl_methods) =
+                self.functions
+                    .trait_impls
+                    .get(&(trait_id, trait_arguments.clone(), *member))
+            else {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "object member '{}' has no impl for method '{name}'",
+                        self.types.name(*member)
+                    ),
+                ));
+            };
+            let Some(definition) = impl_methods.get(name) else {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "object member '{}' does not implement dynamic method '{name}'",
+                        self.types.name(*member)
+                    ),
+                ));
+            };
+            let index = self.functions.instance(
+                self.types,
+                self.resolution,
+                definition.binding,
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                definition.impl_arguments,
+                Some(span),
+            )?;
+            let signature = self.functions.signatures[index].clone();
+            if signature.parameters.len() != parameters.len()
+                || signature.parameters[1..] != parameters[1..]
+                || signature.result != result
+            {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "object member '{}' has a different ABI for method '{name}'; object-safe methods must have identical non-receiver parameter and result types across impls",
+                        self.types.name(*member)
+                    ),
+                ));
+            }
+            total_effects |= signature.effects;
+            signatures.push((index, signature, *member));
+        }
+        let mut arms = Vec::new();
+        for (tag, (index, signature, member)) in signatures.into_iter().enumerate() {
+            let payload = locals.len();
+            locals.push(Local {
+                ty: member,
+                mutable: false,
+                linear: false,
+                grade: None,
+                span,
+            });
+            let receiver_argument = if shared_receiver {
+                Expr {
+                    kind: ExprKind::Borrow(payload),
+                    ty: Type::Ref(self.types.pointer(member)),
+                    span,
+                    resource: None,
+                }
+            } else {
+                Expr {
+                    kind: ExprKind::Local(payload),
+                    ty: member,
+                    span,
+                    resource: None,
+                }
+            };
+            let mut call_arguments = vec![receiver_argument];
+            for (slot, ty) in parameters.iter().enumerate().skip(1) {
+                call_arguments.push(Expr {
+                    kind: ExprKind::Local(slot),
+                    ty: *ty,
+                    span,
+                    resource: None,
+                });
+            }
+            arms.push(Arm {
+                pattern: Pattern::Type {
+                    tag,
+                    member,
+                    inner: Box::new(Pattern::Bind(payload)),
+                },
+                guard: None,
+                body: Expr {
+                    kind: ExprKind::Call(Target::Function(index), call_arguments),
+                    ty: signature.result,
+                    span,
+                    resource: None,
+                },
+            });
+        }
+        let scrutinee = Expr {
+            kind: ExprKind::Local(0),
+            ty: object,
+            span,
+            resource: None,
+        };
+        let body = Block {
+            statements: Vec::new(),
+            tail: Some(Box::new(Expr {
+                kind: ExprKind::Match(Box::new(scrutinee), arms),
+                ty: result,
+                span,
+                resource: None,
+            })),
+            ty: result,
+        };
+        let function = Function {
+            name: format!(
+                "<dyn {}::{}>",
+                self.resolution.bindings[trait_id].name, name
+            ),
+            parameters: parameters.len(),
+            closure: None,
+            locals,
+            result,
+            body,
+            span,
+            resources: vec![],
+            local_resources: vec![],
+            parameter_grades: parameter_grades.clone(),
+            result_grade: None,
+            parameter_lifetimes: vec![None; parameters.len()],
+            result_lifetime: None,
+            lifetime_bounds: BTreeSet::new(),
+            result_linear: false,
+        };
+        let signature = Signature {
+            binding: usize::MAX,
+            name: function.name.clone(),
+            parameters,
+            result,
+            effects: total_effects,
+            span,
+            substitution: BTreeMap::new(),
+            consts: BTreeMap::new(),
+            grades: BTreeMap::new(),
+            effect_arguments: BTreeMap::new(),
+            origin: None,
+            parameter_grades,
+            result_grade: None,
+            parameter_lifetimes: vec![None; function.parameters],
+            result_lifetime: None,
+            lifetime_bounds: BTreeSet::new(),
+            self_type: None,
+            default_trait: None,
+            associated_consts: BTreeMap::new(),
+        };
+        let index = self.functions.add_synthetic(signature, function)?;
+        self.functions.dynamic_dispatch.insert(key, index);
+        Ok(index)
+    }
     /// The trait-argument substitution of an inherited default method, if the
     /// method was materialized from a trait default. Generic method inference
     /// uses it to resolve trait parameters that appear in the declared
@@ -4994,15 +8235,20 @@ impl Checker<'_, '_> {
     fn default_method_substitution(
         &self,
         binding: BindingId,
+        impl_arguments: Option<usize>,
     ) -> Option<crate::runtime_types::Subst> {
         let declared = self.functions.declared[&binding];
         let index = declared.default_specialization?;
-        let (trait_id, arguments) = self.functions.default_specializations[index].clone();
+        let (trait_id, _) = self.functions.default_specializations[index].clone();
         let definition = &self.functions.traits[&trait_id];
         let mut substitution = crate::runtime_types::Subst {
-            self_type: declared.self_ty,
+            self_type: self.functions.self_type_for(binding, impl_arguments),
             ..Default::default()
         };
+        let arguments = self
+            .functions
+            .trait_arguments_for(binding, impl_arguments)
+            .unwrap_or_default();
         let mut consts = BTreeMap::new();
         let mut grades = BTreeMap::new();
         let mut effects = BTreeMap::new();
@@ -5026,6 +8272,7 @@ impl Checker<'_, '_> {
     fn invoke_method(
         &mut self,
         binding: BindingId,
+        impl_arguments: Option<usize>,
         receiver_ast: &ast::Expr,
         receiver: Expr,
         explicit: Option<&[ast::Type]>,
@@ -5064,8 +8311,8 @@ impl Checker<'_, '_> {
                 .map(|(parameter, argument)| (&parameter.ty, argument))
                 .collect::<Vec<_>>();
             let what = format!("method '{}'", f.name);
-            let self_type = self.functions.declared[&binding].self_ty;
-            let base = self.default_method_substitution(binding);
+            let self_type = self.functions.self_type_for(binding, impl_arguments);
+            let base = self.default_method_substitution(binding, impl_arguments);
             let hint = match expected {
                 Some(expected) => Some((self.result_type_hint(&f.result)?, expected)),
                 None => None,
@@ -5093,6 +8340,7 @@ impl Checker<'_, '_> {
             generic_arguments.1,
             generic_arguments.2,
             generic_arguments.3,
+            impl_arguments,
             Some(span),
         )?;
         let signature = self.functions.signatures[index].clone();
@@ -6254,6 +9502,8 @@ impl Checker<'_, '_> {
             effects: self.effect_arguments.clone(),
             lifetimes: BTreeMap::new(),
             self_type: self.self_type,
+            associated_types: BTreeMap::new(),
+            projections: BTreeMap::new(),
         };
         self.types.ty_in(ty, &subst)
     }
@@ -6619,6 +9869,7 @@ impl Checker<'_, '_> {
             lifetime_bounds: signature.borrows.bounds.clone(),
         };
         let synthetic = Signature {
+            associated_consts: BTreeMap::new(),
             binding: usize::MAX,
             name: name.to_owned(),
             parameters: signature.parameters.clone(),
@@ -8064,6 +11315,105 @@ impl Checker<'_, '_> {
                     span,
                     resource: None,
                 });
+            }
+            // `Self.NAME` and `Type.NAME`: associated constants. They are
+            // compile-time substitutions with the declared scalar type, so the
+            // lowered expression is an ordinary literal and has no storage or
+            // accessor call.
+            if let ast::ExprKind::Field { value, name } = &expr.kind {
+                if matches!(&value.kind, ast::ExprKind::Name(root) if root == "Self") {
+                    let Some(value) = c.associated_consts.get(name).copied() else {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "unknown associated constant '{name}'; an impl must define it or inherit a trait default"
+                            ),
+                        ));
+                    };
+                    let node = Expr {
+                        kind: ExprKind::Constant(value.bits),
+                        ty: value.ty,
+                        span,
+                        resource: None,
+                    };
+                    return match expected {
+                        Some(expected) => c.coerce(node, expected, span),
+                        None => Ok(node),
+                    };
+                }
+                if let Some(id) = c.resolution.reference(span)
+                    && matches!(
+                        c.resolution.bindings[id].kind,
+                        BindingKind::Generic | BindingKind::Parameter
+                    )
+                    && let Some(value) = c.generic_associated_const(id, name, span)?
+                {
+                    let node = Expr {
+                        kind: ExprKind::Constant(value.bits),
+                        ty: value.ty,
+                        span,
+                        resource: None,
+                    };
+                    return match expected {
+                        Some(expected) => c.coerce(node, expected, span),
+                        None => Ok(node),
+                    };
+                }
+                if let Some(id) = c.resolution.reference(span)
+                    && c.resolution.bindings[id].kind == BindingKind::Data
+                    && let Some(layout) = c.types.nominal_by_binding(id)
+                {
+                    let nominal = Type::Enum(layout);
+                    let mut candidates = Vec::new();
+                    if let Some(value) = c
+                        .functions
+                        .inherent_consts
+                        .get(&nominal)
+                        .and_then(|values| values.get(name))
+                    {
+                        candidates.push(*value);
+                    }
+                    for ((_, _, receiver), values) in &c.functions.trait_consts {
+                        if *receiver == nominal
+                            && let Some(value) = values.get(name)
+                            && !candidates.contains(value)
+                        {
+                            candidates.push(*value);
+                        }
+                    }
+                    match candidates.as_slice() {
+                        [] => {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!(
+                                    "type '{}' has no associated constant '{name}'",
+                                    c.types.name(nominal)
+                                ),
+                            ));
+                        }
+                        [value] => {
+                            let node = Expr {
+                                kind: ExprKind::Constant(value.bits),
+                                ty: value.ty,
+                                span,
+                                resource: None,
+                            };
+                            return match expected {
+                                Some(expected) => c.coerce(node, expected, span),
+                                None => Ok(node),
+                            };
+                        }
+                        _ => {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!(
+                                    "associated constant '{name}' of '{}' is ambiguous between several traits; qualify it through that trait's method",
+                                    c.types.name(nominal)
+                                ),
+                            ));
+                        }
+                    }
+                }
             }
             let (kind, ty) = match &expr.kind {
                 ast::ExprKind::Integer(text) => {
@@ -10011,6 +13361,7 @@ impl Checker<'_, '_> {
             lifetime_bounds: BTreeSet::new(),
             self_type: None,
             default_trait: None,
+            associated_consts: BTreeMap::new(),
         };
         let function = Function {
             name: name.to_owned(),
@@ -10155,6 +13506,7 @@ impl Checker<'_, '_> {
             grade_arguments,
             const_arguments,
             effect_arguments,
+            None,
             Some(span),
         )?;
         let signature = self.functions.signatures[index].clone();
@@ -11029,10 +14381,21 @@ impl Checker<'_, '_> {
     ) -> Result<()> {
         match &pattern.kind {
             ast::TypeKind::Lifetime(_) => {}
-            ast::TypeKind::Named { arguments, .. } => {
+            ast::TypeKind::Named { path, arguments } => {
                 let Some(id) = self.resolution.reference(pattern.span) else {
                     return Ok(());
                 };
+                // `T::Item` is an associated projection, not the binder `T`
+                // itself: a concrete result type never determines `T` through
+                // its projection. The projection is normalized after `T` is
+                // inferred from the argument types.
+                if path.len() == 2
+                    && arguments.is_empty()
+                    && self.resolution.bindings[id].kind == BindingKind::Generic
+                    && self.resolution.bindings[id].name == path[0]
+                {
+                    return Ok(());
+                }
                 let arguments = arguments
                     .iter()
                     .filter(|argument| !matches!(argument.kind, ast::TypeKind::Lifetime(_)))
@@ -12152,6 +15515,7 @@ impl Checker<'_, '_> {
             grade_arguments,
             const_arguments,
             effect_arguments,
+            None,
             Some(span),
         )?;
         let signature = self.functions.signatures[index].clone();
@@ -14381,6 +17745,7 @@ pub(crate) fn substitute_alias_type(
                     .collect(),
             }
         }
+        K::Dyn(inner) => K::Dyn(Box::new(substitute_alias_type(resolution, inner, map))),
         K::Integer(value) => K::Integer(value.clone()),
         K::Bool(value) => K::Bool(*value),
         K::Lifetime(name) => K::Lifetime(name.clone()),

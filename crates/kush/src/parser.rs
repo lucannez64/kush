@@ -151,10 +151,11 @@ impl Parser {
                     return Err(self.error("'total' applies only to fn and enum declarations"));
                 }
                 self.bump();
-                let (name, generics, methods) = self.trait_declaration()?;
+                let (name, generics, associated, methods) = self.trait_declaration()?;
                 ItemKind::Trait {
                     name,
                     generics,
+                    associated,
                     methods,
                 }
             } else if self.word_keyword("impl") {
@@ -162,10 +163,13 @@ impl Parser {
                     return Err(self.error("'total' applies only to fn and enum declarations"));
                 }
                 self.bump();
-                let (trait_path, self_ty, methods) = self.impl_declaration()?;
+                let (generics, trait_path, self_ty, associated, methods) =
+                    self.impl_declaration()?;
                 ItemKind::Impl {
+                    generics,
                     trait_path,
                     self_ty,
+                    associated,
                     methods,
                 }
             } else if self.word_keyword("algebra") {
@@ -410,7 +414,10 @@ impl Parser {
             span: self.since(start),
         })
     }
-    fn trait_declaration(&mut self) -> Result<(String, Vec<Generic>, Vec<Method>)> {
+    #[allow(clippy::type_complexity)]
+    fn trait_declaration(
+        &mut self,
+    ) -> Result<(String, Vec<Generic>, Vec<Associated>, Vec<Method>)> {
         let name = self.ident()?;
         let (lifetimes, generics) = self.function_generics()?;
         if let Some(lifetime) = lifetimes.first() {
@@ -429,15 +436,26 @@ impl Parser {
             }
         }
         self.expect(&Kind::LBrace, "'{' before trait methods")?;
+        let mut associated = Vec::new();
         let mut methods = Vec::new();
+        let mut associated_names = std::collections::BTreeSet::new();
         while !self.at(&Kind::RBrace) {
             if self.at(&Kind::Eof) {
                 return Err(self.error("expected '}' to close the trait declaration"));
             }
-            if self.at(&Kind::Type) {
-                return Err(self.error(
-                    "associated types are not supported by this static-dispatch trait subset",
-                ));
+            if self.at(&Kind::Type) || self.word_keyword("const") {
+                let item = self.associated_item(true)?;
+                if !associated_names.insert(item.name().to_owned()) {
+                    return Err(Diagnostic::new(
+                        item.span(),
+                        format!(
+                            "duplicate associated item '{}' in trait '{name}'",
+                            item.name()
+                        ),
+                    ));
+                }
+                associated.push(item);
+                continue;
             }
             let method = self.method()?;
             if method.public {
@@ -446,25 +464,102 @@ impl Parser {
                     "trait methods inherit the trait's visibility; remove 'pub'",
                 ));
             }
+            if !associated_names.insert(method.function.name.clone()) {
+                return Err(Diagnostic::new(
+                    method.span,
+                    format!(
+                        "duplicate associated item '{}' in trait '{name}'",
+                        method.function.name
+                    ),
+                ));
+            }
             methods.push(method);
         }
         self.expect(&Kind::RBrace, "'}' to close the trait declaration")?;
-        Ok((name, generics, methods))
+        Ok((name, generics, associated, methods))
     }
-    fn impl_declaration(&mut self) -> Result<(Option<Type>, Type, Vec<Method>)> {
+    /// `type Name;` / `type Name = Type;` and `const NAME: Type [= value];`.
+    fn associated_item(&mut self, declaration: bool) -> Result<Associated> {
+        let start = self.current().span;
+        if self.eat(&Kind::Type) {
+            let name = self.ident()?;
+            let value = if self.eat(&Kind::Eq) {
+                let value = self.ty()?;
+                if declaration {
+                    return Err(Diagnostic::new(
+                        value.span,
+                        "an associated type declaration in a trait may not provide a default type; every impl must define it",
+                    ));
+                }
+                Some(value)
+            } else {
+                if !declaration {
+                    return Err(Diagnostic::new(
+                        self.current().span,
+                        "an associated type in an impl requires a value: 'type Name = Type;'",
+                    ));
+                }
+                None
+            };
+            self.expect(&Kind::Semi, "';' after associated type")?;
+            return Ok(Associated::Type {
+                name,
+                value,
+                span: self.since(start),
+            });
+        }
+        if self.word_keyword("const") {
+            self.bump();
+            let name = self.ident()?;
+            self.expect(&Kind::Colon, "':' after associated constant name")?;
+            let ty = self.ty()?;
+            let value = if self.eat(&Kind::Eq) {
+                Some(self.expr()?)
+            } else {
+                if !declaration {
+                    return Err(Diagnostic::new(
+                        self.current().span,
+                        "an associated constant in an impl requires a value: 'const NAME: Type = value;'",
+                    ));
+                }
+                None
+            };
+            self.expect(&Kind::Semi, "';' after associated constant")?;
+            return Ok(Associated::Const {
+                name,
+                ty,
+                value,
+                span: self.since(start),
+            });
+        }
+        Err(self.error("expected an associated type or constant"))
+    }
+    #[allow(clippy::type_complexity)]
+    fn impl_declaration(
+        &mut self,
+    ) -> Result<(
+        Vec<Generic>,
+        Option<Type>,
+        Type,
+        Vec<Associated>,
+        Vec<Method>,
+    )> {
         let start = self.current().span;
         let (lifetimes, generics) = self.function_generics()?;
         if let Some(lifetime) = lifetimes.first() {
             return Err(Diagnostic::new(
                 lifetime.span,
-                "generic, lifetime-parameterized, or blanket impls are not supported; write a concrete 'impl Trait for Type'",
+                "lifetime-parameterized impls are not supported; write 'impl Trait for Type' or a generic 'impl<T> Trait for Type'",
             ));
         }
-        if let Some(generic) = generics.first() {
-            return Err(Diagnostic::new(
-                generic.span,
-                "generic or blanket impls are not supported; write a concrete 'impl Trait for Type'",
-            ));
+        let mut seen = std::collections::BTreeSet::new();
+        for generic in &generics {
+            if !seen.insert(generic.name.clone()) {
+                return Err(Diagnostic::new(
+                    generic.span,
+                    format!("duplicate impl parameter '{}'", generic.name),
+                ));
+            }
         }
         let first = self.ty()?;
         let (trait_path, self_ty) = if self.word_keyword("for") {
@@ -480,15 +575,23 @@ impl Parser {
             (None, first)
         };
         self.expect(&Kind::LBrace, "'{' before impl methods")?;
+        let mut associated = Vec::new();
         let mut methods = Vec::new();
+        let mut item_names = std::collections::BTreeSet::new();
         while !self.at(&Kind::RBrace) {
             if self.at(&Kind::Eof) {
                 return Err(self.error("expected '}' to close the impl declaration"));
             }
-            if self.at(&Kind::Type) {
-                return Err(self.error(
-                    "associated types are not supported by this static-dispatch trait subset",
-                ));
+            if self.at(&Kind::Type) || self.word_keyword("const") {
+                let item = self.associated_item(false)?;
+                if !item_names.insert(item.name().to_owned()) {
+                    return Err(Diagnostic::new(
+                        item.span(),
+                        format!("duplicate item '{}' in one impl", item.name()),
+                    ));
+                }
+                associated.push(item);
+                continue;
             }
             let method = self.method()?;
             if method.function.body.is_none() {
@@ -497,16 +600,22 @@ impl Parser {
                     "impl methods require a body; a method signature without a body is only valid in a trait",
                 ));
             }
+            if !item_names.insert(method.function.name.clone()) {
+                return Err(Diagnostic::new(
+                    method.span,
+                    format!("duplicate item '{}' in one impl", method.function.name),
+                ));
+            }
             methods.push(method);
         }
         self.expect(&Kind::RBrace, "'}' to close the impl declaration")?;
-        if methods.is_empty() && trait_path.is_none() {
+        if methods.is_empty() && associated.is_empty() && trait_path.is_none() {
             return Err(Diagnostic::new(
                 self.since(start),
-                "an inherent impl must define at least one method",
+                "an inherent impl must define at least one method or associated constant",
             ));
         }
-        Ok((trait_path, self_ty, methods))
+        Ok((generics, trait_path, self_ty, associated, methods))
     }
     fn function(&mut self, total: bool) -> Result<Function> {
         self.function_body(total, false)
@@ -845,8 +954,16 @@ impl Parser {
                 return Ok(Node::new(TypeKind::SelfType, self.since(path_start)));
             }
             if path == ["dyn"] {
-                return Err(self.error(
-                    "dynamic trait objects are not supported; use static dispatch through a generic bound such as '<T: Trait>'",
+                let trait_path = self.ty()?;
+                if !matches!(&trait_path.kind, TypeKind::Named { .. }) {
+                    return Err(Diagnostic::new(
+                        trait_path.span,
+                        "a trait object must name one declared trait, as in 'dyn Describe' or 'dyn Convert<i64>'",
+                    ));
+                }
+                return Ok(Node::new(
+                    TypeKind::Dyn(Box::new(trait_path)),
+                    self.since(path_start),
                 ));
             }
             if path == ["impl"] {

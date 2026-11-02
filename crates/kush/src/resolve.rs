@@ -170,6 +170,14 @@ struct Resolver {
     scopes: Vec<BTreeMap<String, BindingId>>,
     owner: Option<BindingId>,
     depth: usize,
+    /// Names of declared associated constants. `Type.NAME` is treated as a
+    /// projection only when `NAME` is one of these, so qualified constructors
+    /// such as `Option.Some` keep their ordinary value meaning.
+    associated_const_names: BTreeSet<String>,
+    /// Names of declared associated types. `T.Item` is treated as a projection
+    /// only when `Item` is one of these, so a qualified logical name such as
+    /// `Nat.succ<N>` keeps its ordinary type meaning.
+    associated_type_names: BTreeSet<String>,
 }
 impl Resolver {
     fn new() -> Self {
@@ -181,6 +189,8 @@ impl Resolver {
             scopes: Vec::new(),
             owner: None,
             depth: 0,
+            associated_const_names: BTreeSet::new(),
+            associated_type_names: BTreeSet::new(),
         };
         // Primitive names only. Standard-library containers are not fabricated.
         for name in [
@@ -497,6 +507,25 @@ impl Resolver {
         }
     }
     fn run(mut self, items: &[Declaration], units: &[UnitInfo]) -> Result<Resolution> {
+        for info in units {
+            for declaration in &items[info.items.clone()] {
+                match &declaration.item.kind {
+                    ItemKind::Trait { associated, .. } | ItemKind::Impl { associated, .. } => {
+                        for item in associated {
+                            match item {
+                                Associated::Const { name, .. } => {
+                                    self.associated_const_names.insert(name.clone());
+                                }
+                                Associated::Type { name, .. } => {
+                                    self.associated_type_names.insert(name.clone());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         // 1. Top-level declarations of every module.
         for (unit, info) in units.iter().enumerate() {
             self.unit = unit;
@@ -713,7 +742,10 @@ impl Resolver {
                     ItemKind::GradeAlgebra(_) => Ok(()),
                     ItemKind::Function(f) => r.function(f),
                     ItemKind::Trait {
-                        generics, methods, ..
+                        generics,
+                        associated,
+                        methods,
+                        ..
                     } => {
                         // Trait parameters are in scope while resolving every
                         // method signature and default body. A default body is
@@ -725,6 +757,9 @@ impl Resolver {
                             generics,
                             GenericContext::Unsupported("a trait declaration's parameters"),
                         )?;
+                        for item in associated {
+                            r.associated(item)?;
+                        }
                         for method in methods {
                             let saved = r.owner;
                             if method.function.body.is_some() {
@@ -736,14 +771,20 @@ impl Resolver {
                         Ok(())
                     }
                     ItemKind::Impl {
+                        generics,
                         trait_path,
                         self_ty,
+                        associated,
                         methods,
                     } => {
+                        r.generics(generics, GenericContext::Executable)?;
                         if let Some(trait_path) = trait_path {
                             r.ty(trait_path)?;
                         }
                         r.ty(self_ty)?;
+                        for item in associated {
+                            r.associated(item)?;
+                        }
                         for method in methods {
                             let saved = r.owner;
                             r.owner = r.result.method_bindings.get(&method.span.start).copied();
@@ -952,10 +993,51 @@ impl Resolver {
         }
         Ok(())
     }
+    /// Resolve one associated item of a trait or impl. Type values and constant
+    /// types are ordinary type syntax. A default constant expression is checked
+    /// in the declaration's module and may name `Self`-projected constants,
+    /// which the executable checker substitutes for the concrete impl.
+    fn associated(&mut self, item: &Associated) -> Result<()> {
+        match item {
+            Associated::Type {
+                value: Some(value), ..
+            } => self.ty(value),
+            Associated::Type { .. } => Ok(()),
+            Associated::Const { ty, value, .. } => {
+                self.ty(ty)?;
+                if let Some(value) = value {
+                    self.expr(value)?;
+                }
+                Ok(())
+            }
+        }
+    }
     fn ty(&mut self, ty: &Type) -> Result<()> {
         self.nested(ty.span, |r| {
             match &ty.kind {
                 TypeKind::Named { path, arguments } => {
+                    // Associated type projections are not module paths:
+                    // `Self::Item` is resolved against the impl that supplies
+                    // the value, and `T::Item` against the trait bound of the
+                    // generic parameter `T`. Record the base binding so the
+                    // executable checker can normalize the projection.
+                    if path.len() == 2
+                        && (path[0] == "Self" || r.associated_type_names.contains(&path[1]))
+                    {
+                        if path[0] != "Self"
+                            && let Ok(base) = r.lookup(std::slice::from_ref(&path[0]), ty.span)
+                            && matches!(
+                                r.result.bindings[base].kind,
+                                BindingKind::Generic | BindingKind::Parameter
+                            )
+                        {
+                            r.record(base, ty.span);
+                        }
+                        for argument in arguments {
+                            r.ty(argument)?;
+                        }
+                        return Ok(());
+                    }
                     r.reference(path, ty.span)?;
                     for argument in arguments {
                         r.ty(argument)?;
@@ -969,6 +1051,7 @@ impl Resolver {
                 // `Self` is not a binding. It is substituted by the concrete
                 // impl target before runtime type lowering.
                 TypeKind::SelfType => {}
+                TypeKind::Dyn(trait_path) => r.ty(trait_path)?,
                 TypeKind::Tuple(types) => {
                     for ty in types {
                         r.ty(ty)?;
@@ -1244,6 +1327,29 @@ impl Resolver {
                     }
                 }
                 ExprKind::Field { value, name: _ } => {
+                    // `Self.NAME` names an associated constant of the
+                    // enclosing trait or impl. It is substituted for the
+                    // concrete impl before execution and is never a runtime
+                    // field access.
+                    if matches!(&value.kind, ExprKind::Name(root) if root == "Self") {
+                        return Ok(());
+                    }
+                    // `Type.NAME` names an associated constant when `Type` is
+                    // a nominal declaration (or an inherent constant target)
+                    // and no value of that qualified path exists. Record the
+                    // type binding so the checker can project the constant.
+                    if let Some(path) = Self::expression_path(expr)
+                        && path.len() == 2
+                        && r.associated_const_names.contains(&path[1])
+                        && let Ok(base) = r.lookup(std::slice::from_ref(&path[0]), expr.span)
+                        && matches!(
+                            r.result.bindings[base].kind,
+                            BindingKind::Data | BindingKind::Generic | BindingKind::Parameter
+                        )
+                    {
+                        r.record(base, expr.span);
+                        return Ok(());
+                    }
                     // `receiver.Trait.method(...)` is the explicit spelling for
                     // a statically dispatched trait method. Record the trait
                     // reference on the `receiver.Trait` node so the checker can

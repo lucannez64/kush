@@ -267,13 +267,13 @@ fn duplicate_and_unsupported_impl_forms_are_explicit() {
             fn value(self: Point) -> i64 ! {} { 2 }
         }
         fn main() -> i64 ! {} { 0 }",
-        "duplicate method 'value'",
+        "duplicate item 'value'",
     );
     rejects(
         "trait Describe { fn describe(self: Self) -> i64 ! {}; }
-        impl<T> Describe for T { fn describe(self: Self) -> i64 ! {} { 1 } }
+        impl<T, U> Describe for T { fn describe(self: Self) -> i64 ! {} { 1 } }
         fn main() -> i64 ! {} { 0 }",
-        "generic or blanket impls are not supported",
+        "is unconstrained",
     );
     rejects(
         "trait Describe { pub fn describe(self: Self) -> i64 ! {} { 1 } }
@@ -281,9 +281,11 @@ fn duplicate_and_unsupported_impl_forms_are_explicit() {
         "inherit the trait's visibility",
     );
     rejects(
-        "trait Describe { type Output; fn describe(self: Self) -> i64 ! {}; }
+        "struct Point { x: i64 }
+        trait Describe { type Output; fn describe(self: Self) -> i64 ! {}; }
+        impl Describe for Point { fn describe(self: Self) -> i64 ! {} { 0 } }
         fn main() -> i64 ! {} { 0 }",
-        "associated types are not supported",
+        "missing associated type 'Output'",
     );
     rejects(
         "trait Describe { fn describe(self: Self) -> i64 ! {}; }
@@ -305,7 +307,7 @@ fn trait_names_are_bounds_not_runtime_types() {
         "trait Describe { fn describe(self: Self) -> i64 ! {}; }
         fn f(value: dyn Describe) -> i64 ! {} { 0 }
         fn main() -> i64 ! {} { 0 }",
-        "dynamic trait objects are not supported",
+        "has no concrete impls",
     );
 }
 

@@ -1,0 +1,38 @@
+// Associated types/constants, a generic impl, and a closed-world trait object.
+struct Point { x: i64 }
+struct Wrapper<T> { value: T }
+
+trait Scaled {
+    type Out;
+    const FACTOR: i64;
+    fn scaled(self: Self) -> Self.Out ! {panic};
+}
+
+impl Scaled for Point {
+    type Out = i64;
+    const FACTOR: i64 = 3;
+    fn scaled(self: Self) -> i64 ! {panic} { self.x * Self.FACTOR }
+}
+
+impl<T> Scaled for Wrapper<T> {
+    type Out = T;
+    const FACTOR: i64 = 2;
+    fn scaled(self: Self) -> T ! {panic} { self.value }
+}
+
+trait Describe {
+    fn describe(self: Self) -> i64 ! {panic};
+}
+
+impl Describe for Point { fn describe(self: Self) -> i64 ! {panic} { self.x } }
+impl Describe for Wrapper<i64> { fn describe(self: Self) -> i64 ! {panic} { self.value } }
+
+fn reveal<T: Scaled>(value: T) -> T.Out ! {panic} { value.scaled() }
+
+fn main() -> i64 ! {io, panic} {
+    print_i64(reveal(Point { x: 4 }));
+    print_i64(reveal(Wrapper { value: 7 }));
+    let object: dyn Describe = Point { x: 9 };
+    print_i64(object.describe());
+    0
+}

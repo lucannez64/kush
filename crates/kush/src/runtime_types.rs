@@ -5,7 +5,7 @@
 use crate::{
     Diagnostic, Span, ast,
     check::LogicalEnvironment,
-    executable::Type,
+    executable::{TraitArguments, Type},
     grades::Grade,
     resolve::{BindingId, BindingKind, Resolution},
 };
@@ -35,6 +35,15 @@ pub(crate) struct Subst {
     /// Concrete impl target for `Self` inside a method signature. Ordinary
     /// functions leave this empty, so a stray `Self` is rejected.
     pub self_type: Option<Type>,
+    /// Associated type values of the impl that supplies a method signature.
+    /// `Self::Item` in a trait/impl signature normalizes to this AST value
+    /// (which may itself mention impl generic parameters and is lowered with
+    /// the same substitution).
+    pub associated_types: BTreeMap<String, ast::Type>,
+    /// Associated type projections resolved for concrete generic specializations.
+    /// The key is the base generic binder and the declared associated name, so
+    /// `T::Item` lowers to the value supplied by the impl selected for `T`.
+    pub projections: BTreeMap<(BindingId, String), Type>,
 }
 #[derive(Clone, Copy)]
 struct Alias<'a> {
@@ -462,6 +471,12 @@ pub(crate) struct Types<'a> {
     union_cache: BTreeMap<Vec<Type>, usize>,
     function_cache: BTreeMap<FunctionKey, usize>,
     active: BTreeSet<BindingId>,
+    /// Closed-world trait objects: `(trait, trait arguments) -> union of every
+    /// concrete impl target`. Populated once impls are collected, before any
+    /// function instance is checked.
+    pub dyn_objects: BTreeMap<(BindingId, TraitArguments), Type>,
+    /// Traits that cannot be used as `dyn` objects, with the checked reason.
+    pub dyn_errors: BTreeMap<BindingId, String>,
     /// Monotonic source of compiler-internal lifetime identities for inferred
     /// local record construction and call-argument freshening. These names are
     /// not surface syntax and cannot collide with declared lifetimes.
@@ -672,6 +687,8 @@ impl<'a> Types<'a> {
             union_cache: BTreeMap::new(),
             function_cache: BTreeMap::new(),
             active: BTreeSet::new(),
+            dyn_objects: BTreeMap::new(),
+            dyn_errors: BTreeMap::new(),
             inferred_lifetimes: 0,
         };
         let monomorphic = result
@@ -1025,6 +1042,18 @@ impl<'a> Types<'a> {
     /// Number of erased lifetime parameters of a type alias.
     pub fn alias_lifetime_count(&self, id: BindingId) -> Option<usize> {
         self.aliases.get(&id).map(|alias| alias.lifetimes.len())
+    }
+    /// The trusted logical environment used for constant-length evaluation.
+    pub(crate) fn logical(&self) -> &'a LogicalEnvironment {
+        self.logical
+    }
+    /// The nominal layout index of a declared record/enum binding, when it is
+    /// instantiated without generic arguments. Used to resolve `Type.CONST`
+    /// projections before type lowering.
+    pub fn nominal_by_binding(&self, id: BindingId) -> Option<usize> {
+        self.enums
+            .iter()
+            .position(|layout| layout.definition == id && layout.arguments.is_empty())
     }
     /// Human-readable type name for diagnostics.
     pub fn name(&self, ty: Type) -> String {
@@ -1582,7 +1611,118 @@ impl<'a> Types<'a> {
             }
             return self.tuple(elements, ty.span);
         }
-        if let ast::TypeKind::Named { arguments, .. } = &ty.kind {
+        if let ast::TypeKind::Dyn(trait_path) = &ty.kind {
+            let ast::TypeKind::Named { arguments, .. } = &trait_path.kind else {
+                return Err(Diagnostic::new(
+                    trait_path.span,
+                    "a trait object must name one declared trait",
+                ));
+            };
+            let trait_id = self.resolution.reference(trait_path.span).ok_or_else(|| {
+                Diagnostic::new(trait_path.span, "trait object path did not resolve")
+            })?;
+            if self.resolution.bindings[trait_id].kind != BindingKind::Trait {
+                return Err(Diagnostic::new(
+                    trait_path.span,
+                    format!(
+                        "'{}' is not a declared trait; 'dyn' names a trait object",
+                        self.resolution.bindings[trait_id].name
+                    ),
+                ));
+            }
+            if let Some(reason) = self.dyn_errors.get(&trait_id) {
+                return Err(Diagnostic::new(
+                    ty.span,
+                    format!(
+                        "trait '{}' is not object-safe: {reason}",
+                        self.resolution.bindings[trait_id].name
+                    ),
+                ));
+            }
+            let mut type_arguments = Vec::new();
+            for argument in arguments {
+                if matches!(argument.kind, ast::TypeKind::Lifetime(_)) {
+                    return Err(Diagnostic::new(
+                        argument.span,
+                        "trait objects do not take lifetime arguments in this subset; object values are owned and cannot store borrows",
+                    ));
+                }
+                type_arguments.push(self.lower(argument, substitution, depth + 1)?);
+            }
+            let key = (
+                trait_id,
+                TraitArguments {
+                    types: type_arguments,
+                    ..Default::default()
+                },
+            );
+            return self.dyn_objects.get(&key).copied().ok_or_else(|| {
+                Diagnostic::new(
+                    ty.span,
+                    format!(
+                        "no finite closed-world object type exists for trait '{}'; it needs at least one concrete impl and no generic or blanket impls",
+                        self.resolution.bindings[trait_id].name
+                    ),
+                )
+            });
+        }
+        if let ast::TypeKind::Named { path, arguments } = &ty.kind {
+            if path.len() == 2 {
+                if path[0] == "Self" {
+                    if !arguments.is_empty() {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            format!(
+                                "associated type projection 'Self::{}' does not take type arguments",
+                                path[1]
+                            ),
+                        ));
+                    }
+                    let value = substitution
+                        .associated_types
+                        .get(&path[1])
+                        .cloned()
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                ty.span,
+                                format!(
+                                    "associated type '{}' is not defined by this impl",
+                                    path[1]
+                                ),
+                            )
+                        })?;
+                    return self.lower(&value, substitution, depth + 1);
+                }
+                if let Some(base) = self.resolution.reference(ty.span)
+                    && matches!(
+                        self.resolution.bindings[base].kind,
+                        BindingKind::Generic | BindingKind::Parameter
+                    )
+                {
+                    let key = (base, path[1].clone());
+                    if let Some(value) = substitution.projections.get(&key) {
+                        if !arguments.is_empty() {
+                            return Err(Diagnostic::new(
+                                ty.span,
+                                format!(
+                                    "associated type projection '{}::{}' does not take type arguments",
+                                    self.resolution.bindings[base].name, path[1]
+                                ),
+                            ));
+                        }
+                        return Ok(*value);
+                    }
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        format!(
+                            "cannot project associated type '{}' from '{}' without a concrete impl; add a trait bound '<{}: Trait>' that declares it",
+                            path[1],
+                            self.resolution.bindings[base].name,
+                            self.resolution.bindings[base].name
+                        ),
+                    ));
+                }
+            }
             let id = self.resolution.reference(ty.span).unwrap();
             let b = &self.resolution.bindings[id];
             let (lifetime_arguments, arguments) =
@@ -2172,7 +2312,7 @@ impl<'a> Types<'a> {
         }
         self.union(clauses, span)
     }
-    fn union_members(&self, ty: Type) -> Vec<Type> {
+    pub(crate) fn union_members(&self, ty: Type) -> Vec<Type> {
         match ty {
             Type::Never => Vec::new(),
             Type::Union(id) => self.unions[id].members.clone(),
