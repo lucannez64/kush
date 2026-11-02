@@ -289,7 +289,13 @@ pub enum TypeKind {
     /// `struct { name: Type, ... }`: an anonymous structural record type with a
     /// canonical field row. Unlike a nominal declaration it has no module-level
     /// name; two occurrences with the same fields intern to one layout.
-    Structural(Vec<Field>),
+    /// `open` is set by a trailing `..`: the annotation accepts any record
+    /// containing these fields, with unmentioned fields erased at the call
+    /// boundary. It is a documented erased-row contract, not row unification.
+    Structural {
+        fields: Vec<Field>,
+        open: bool,
+    },
     Borrow {
         /// Optional explicit lifetime, as in `&'a [T]`.
         lifetime: Option<String>,

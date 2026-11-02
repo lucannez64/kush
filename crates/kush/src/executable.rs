@@ -1019,7 +1019,7 @@ pub(crate) fn type_mentions_binding(
         K::Tuple(items) => items
             .iter()
             .any(|item| type_mentions_binding(resolution, item, binder)),
-        K::Structural(fields) => fields
+        K::Structural { fields, .. } => fields
             .iter()
             .any(|field| type_mentions_binding(resolution, &field.ty, binder)),
         K::Dyn(inner) => type_mentions_binding(resolution, inner, binder),
@@ -2854,7 +2854,7 @@ fn dynamic_trait_set(module: &ast::Module, resolution: &Resolution) -> BTreeSet<
                 scan(right, resolution, out);
             }
             ast::TypeKind::Graded { inner, .. } => scan(inner, resolution, out),
-            ast::TypeKind::Structural(fields) => {
+            ast::TypeKind::Structural { fields, .. } => {
                 for field in fields {
                     scan(&field.ty, resolution, out);
                 }
@@ -3496,7 +3496,7 @@ fn type_key(ty: &ast::Type) -> String {
             text
         }
         ast::TypeKind::Dyn(inner) => format!("dyn {}", type_key(inner)),
-        ast::TypeKind::Structural(fields) => {
+        ast::TypeKind::Structural { fields, .. } => {
             let mut fields = fields
                 .iter()
                 .map(|field| (field.name.clone(), field.ty.clone()))
@@ -3692,8 +3692,8 @@ impl ContractNames {
             ast::TypeKind::Tuple(items) => {
                 ast::TypeKind::Tuple(items.iter().map(|item| self.ty(item)).collect())
             }
-            ast::TypeKind::Structural(fields) => ast::TypeKind::Structural(
-                fields
+            ast::TypeKind::Structural { fields, open } => ast::TypeKind::Structural {
+                fields: fields
                     .iter()
                     .map(|field| ast::Field {
                         name: field.name.clone(),
@@ -3701,7 +3701,8 @@ impl ContractNames {
                         span: field.span,
                     })
                     .collect(),
-            ),
+                open: *open,
+            },
             ast::TypeKind::Slice(inner) => ast::TypeKind::Slice(Box::new(self.ty(inner))),
             ast::TypeKind::Array(inner, length) => {
                 ast::TypeKind::Array(Box::new(self.ty(inner)), Box::new(self.ty(length)))
@@ -4068,7 +4069,7 @@ fn type_self_associations(ty: &ast::Type, out: &mut BTreeSet<String>) {
                 type_self_associations(item, out);
             }
         }
-        ast::TypeKind::Structural(fields) => {
+        ast::TypeKind::Structural { fields, .. } => {
             for field in fields {
                 type_self_associations(&field.ty, out);
             }
@@ -4197,7 +4198,7 @@ fn type_mentions_self(ty: &ast::Type) -> bool {
                 || arguments.iter().any(type_mentions_self)
         }
         ast::TypeKind::Tuple(arguments) => arguments.iter().any(type_mentions_self),
-        ast::TypeKind::Structural(fields) => {
+        ast::TypeKind::Structural { fields, .. } => {
             fields.iter().any(|field| type_mentions_self(&field.ty))
         }
         ast::TypeKind::Dyn(inner) => type_mentions_self(inner),
@@ -4604,6 +4605,12 @@ fn collect_methods<'a>(
                 functions,
             )?);
             continue;
+        }
+        if type_has_open_row(self_ty) {
+            return Err(Diagnostic::new(
+                self_ty.span,
+                "an impl self type cannot use an open row ('..'); impl headers match one exact canonical structural row",
+            ));
         }
         let self_key = types.ty_in(self_ty, &crate::runtime_types::Subst::default())?;
         if matches!(
@@ -5481,6 +5488,32 @@ fn prepare_trait_objects<'a>(
     }
     Ok(())
 }
+/// Whether a declared type syntax contains an open structural row. Impl
+/// headers require an exact canonical row, so they reject `..`.
+fn type_has_open_row(ty: &ast::Type) -> bool {
+    match &ty.kind {
+        ast::TypeKind::Structural { fields, open } => {
+            *open || fields.iter().any(|field| type_has_open_row(&field.ty))
+        }
+        ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => {
+            arguments.iter().any(type_has_open_row)
+        }
+        ast::TypeKind::Dyn(inner)
+        | ast::TypeKind::Slice(inner)
+        | ast::TypeKind::Graded { inner, .. }
+        | ast::TypeKind::Borrow { inner, .. } => type_has_open_row(inner),
+        ast::TypeKind::Array(element, length) => {
+            type_has_open_row(element) || type_has_open_row(length)
+        }
+        ast::TypeKind::Binary { left, right, .. } => {
+            type_has_open_row(left) || type_has_open_row(right)
+        }
+        ast::TypeKind::Function {
+            parameters, result, ..
+        } => parameters.iter().any(|p| type_has_open_row(&p.ty)) || type_has_open_row(result),
+        _ => false,
+    }
+}
 /// Validate that a generic impl's self type or trait argument is a first-order
 /// pattern over its declared type parameters and nominal types. Borrows,
 /// slices, function arrows, aliases, and associated projections cannot appear in
@@ -5570,7 +5603,15 @@ fn validate_impl_pattern(
             Ok(())
         }
         ast::TypeKind::Integer(_) | ast::TypeKind::Bool(_) => Ok(()),
-        ast::TypeKind::Structural(fields) => {
+        ast::TypeKind::Structural { fields, open } => {
+            if *open {
+                return Err(Diagnostic::new(
+                    pattern.span,
+                    format!(
+                        "an impl {what} cannot use an open row ('..'); impl headers match one exact canonical structural row"
+                    ),
+                ));
+            }
             for field in fields {
                 validate_impl_pattern(resolution, types, &field.ty, generics, const_binders, what)?;
             }
@@ -5642,7 +5683,7 @@ fn pattern_has_unbound(
         ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => arguments
             .iter()
             .any(|argument| pattern_has_unbound(resolution, argument, bindings)),
-        ast::TypeKind::Structural(fields) => fields
+        ast::TypeKind::Structural { fields, .. } => fields
             .iter()
             .any(|field| pattern_has_unbound(resolution, &field.ty, bindings)),
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => {
@@ -5812,7 +5853,7 @@ fn match_type_pattern(
             }
             Ok(true)
         }
-        ast::TypeKind::Structural(fields) => {
+        ast::TypeKind::Structural { fields, .. } => {
             // Structural impl headers match an anonymous structural row
             // exactly. Nominal records are deliberately not matched here:
             // they keep their own identity, so a structural impl cannot
@@ -6125,7 +6166,10 @@ fn unify_ast_patterns(
                     unify_ast_patterns(resolution, left, right, flexible, map, depth + 1)
                 })
         }
-        (ast::TypeKind::Structural(left), ast::TypeKind::Structural(right)) => {
+        (
+            ast::TypeKind::Structural { fields: left, .. },
+            ast::TypeKind::Structural { fields: right, .. },
+        ) => {
             // Structural rows are canonical by field name. Two impl headers
             // overlap only when their rows have exactly the same field names;
             // each field type then unifies recursively.
@@ -6848,7 +6892,7 @@ fn type_references_any_binder(
                 || arguments.iter().any(mentions)
         }
         ast::TypeKind::Tuple(items) => items.iter().any(mentions),
-        ast::TypeKind::Structural(fields) => fields.iter().any(|field| mentions(&field.ty)),
+        ast::TypeKind::Structural { fields, .. } => fields.iter().any(|field| mentions(&field.ty)),
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => mentions(inner),
         ast::TypeKind::Borrow { inner, .. } => mentions(inner),
         ast::TypeKind::Array(inner, length) => mentions(inner) || mentions(length),
@@ -8448,7 +8492,7 @@ fn validate_type_template(
             }
             Ok(())
         }
-        ast::TypeKind::Structural(fields) => {
+        ast::TypeKind::Structural { fields, .. } => {
             for field in fields {
                 validate_type_template(resolution, &field.ty, consts, false, false)?;
             }
@@ -8506,7 +8550,7 @@ fn type_references_binding(resolution: &Resolution, ty: &ast::Type, id: BindingI
         ast::TypeKind::Tuple(items) => items
             .iter()
             .any(|item| type_references_binding(resolution, item, id)),
-        ast::TypeKind::Structural(fields) => fields
+        ast::TypeKind::Structural { fields, .. } => fields
             .iter()
             .any(|field| type_references_binding(resolution, &field.ty, id)),
         ast::TypeKind::Dyn(inner) => type_references_binding(resolution, inner, id),
@@ -18924,7 +18968,7 @@ impl Checker<'_, '_> {
             ast::TypeKind::Tuple(items) => items
                 .iter()
                 .any(|a| self.mentions(a, type_vars, const_vars, effect_vars, subst)),
-            ast::TypeKind::Structural(fields) => fields
+            ast::TypeKind::Structural { fields, .. } => fields
                 .iter()
                 .any(|field| self.mentions(&field.ty, type_vars, const_vars, effect_vars, subst)),
             ast::TypeKind::Function {
@@ -19420,7 +19464,7 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            ast::TypeKind::Structural(fields) => {
+            ast::TypeKind::Structural { fields, .. } => {
                 if let Some(layout) = actual.layout().filter(|id| self.types.enums[*id].record) {
                     let variant = self.types.enums[layout].variants[0].clone();
                     for field in fields {
@@ -23789,8 +23833,8 @@ pub(crate) fn substitute_alias_type(
                 .map(|item| substitute_alias_type(resolution, item, map))
                 .collect(),
         ),
-        K::Structural(fields) => K::Structural(
-            fields
+        K::Structural { fields, open } => K::Structural {
+            fields: fields
                 .iter()
                 .map(|field| ast::Field {
                     name: field.name.clone(),
@@ -23798,7 +23842,8 @@ pub(crate) fn substitute_alias_type(
                     span: field.span,
                 })
                 .collect(),
-        ),
+            open: *open,
+        },
         K::Slice(inner) => K::Slice(Box::new(substitute_alias_type(resolution, inner, map))),
         K::Array(element, length) => K::Array(
             Box::new(substitute_alias_type(resolution, element, map)),

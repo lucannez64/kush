@@ -314,7 +314,7 @@ fn grade_occurrences(resolution: &Resolution, ty: &ast::Type, binder: BindingId)
             .iter()
             .map(|item| grade_occurrences(resolution, item, binder))
             .sum(),
-        K::Structural(fields) => fields
+        K::Structural { fields, .. } => fields
             .iter()
             .map(|field| grade_occurrences(resolution, &field.ty, binder))
             .sum(),

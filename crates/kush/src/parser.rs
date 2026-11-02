@@ -921,18 +921,31 @@ impl Parser {
                 &Kind::LBrace,
                 "'{' after 'struct' in an anonymous structural record type",
             )?;
-            let fields = self.separated(Kind::RBrace, |p| {
-                let start = p.current().span;
-                let name = p.ident()?;
-                p.expect(&Kind::Colon, "':' after structural record field name")?;
-                let ty = p.ty()?;
-                Ok(Field {
+            let mut fields = Vec::new();
+            let mut open = false;
+            while !self.at(&Kind::RBrace) {
+                if self.eat(&Kind::DotDot) {
+                    if self.at(&Kind::Comma) {
+                        self.bump();
+                    }
+                    open = true;
+                    break;
+                }
+                let field_start = self.current().span;
+                let name = self.ident()?;
+                self.expect(&Kind::Colon, "':' after structural record field name")?;
+                let ty = self.ty()?;
+                fields.push(Field {
                     name,
                     ty,
-                    span: p.since(start),
-                })
-            })?;
-            Node::new(TypeKind::Structural(fields), self.since(start))
+                    span: self.since(field_start),
+                });
+                if !self.eat(&Kind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&Kind::RBrace, "'}' after structural record type")?;
+            Node::new(TypeKind::Structural { fields, open }, self.since(start))
         } else if self.eat(&Kind::LBracket) {
             let inner = self.ty()?;
             let kind = if self.eat(&Kind::Semi) {

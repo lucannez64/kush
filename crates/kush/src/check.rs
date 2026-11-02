@@ -368,7 +368,7 @@ fn alias_refs_in_type(resolution: &Resolution, ty: &Type, out: &mut BTreeSet<Bin
                 alias_refs_in_type(resolution, item, out);
             }
         }
-        TypeKind::Structural(fields) => {
+        TypeKind::Structural { fields, .. } => {
             for field in fields {
                 alias_refs_in_type(resolution, &field.ty, out);
             }

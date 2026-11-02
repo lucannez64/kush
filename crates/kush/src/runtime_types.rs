@@ -1652,7 +1652,7 @@ impl<'a> Types<'a> {
             )?;
             return self.array(element, length, ty.span);
         }
-        if let ast::TypeKind::Structural(fields) = &ty.kind {
+        if let ast::TypeKind::Structural { fields, .. } = &ty.kind {
             let mut lowered = Vec::with_capacity(fields.len());
             for field in fields {
                 let (inner, grade) = crate::grades::split(&field.ty);

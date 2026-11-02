@@ -1133,6 +1133,58 @@ fn structural_borrowed_field_transfer_keeps_cleanup_balanced() {
 }
 
 #[test]
+fn open_row_parameters_accept_records_with_the_named_fields() {
+    // `..` is an erased open-row contract: the callee sees exactly the named
+    // fields in canonical order and unmentioned fields are dropped once at the
+    // call boundary. It is width subtyping with an explicit spelling, not row
+    // unification that preserves the extra fields.
+    let source = r#"
+        struct Wide { flag: Bool, x: i64, extra: Box<i64> }
+        fn read(v: struct { x: i64, .. }) -> i64 ! {panic} { v.x }
+        fn main() -> i64 ! {alloc, panic} {
+            read(Wide { flag: true, x: 42, extra: Box.new(1) })
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // An open row still requires every named field.
+    rejects(
+        r#"
+        struct Point { y: i64 }
+        fn read(v: struct { x: i64, .. }) -> i64 ! {panic} { v.x }
+        fn main() -> i64 ! {panic} { read(Point { y: 1 }) }"#,
+        "no field 'x'",
+    );
+    // Erasing an extra linear field is not allowed: the target cannot consume
+    // it, exactly as for a closed width conversion.
+    rejects(
+        r#"
+        #[linear]
+        struct Token { id: i64 }
+        struct Wide { x: i64, token: Token }
+        fn read(v: struct { x: i64, .. }) -> i64 ! {panic} { v.x }
+        fn main() -> i64 ! {panic} {
+            let token = Token { id: 1 };
+            read(Wide { x: 1, token: token })
+        }"#,
+        "linear obligation",
+    );
+    // Impl headers match one exact canonical row; an open row there would make
+    // dispatch depend on width compatibility, so it stays rejected.
+    rejects(
+        r#"
+        impl struct { x: i64, .. } {
+            fn read_x(self: Self) -> i64 ! {panic} { self.x }
+        }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "open row",
+    );
+}
+
+#[test]
 fn structural_records_are_impl_receivers() {
     // A concrete structural row is a first-class impl receiver. The nominal
     // record is coerced once to the canonical structural row and dispatch then
