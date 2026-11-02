@@ -3530,29 +3530,23 @@ impl Generator<'_, '_> {
                         }
                         return Some(out);
                     }
-                    Coercion::Struct { kept, drops } => {
-                        let source_id =
-                            value.ty.layout().expect("checked structural source layout");
-                        let source_fields =
-                            self.program.enums[source_id].variants[0].fields.clone();
-                        let mut offsets = Vec::with_capacity(source_fields.len());
-                        let mut offset = 1usize;
-                        for field in &source_fields {
-                            offsets.push(offset);
-                            offset += self.program.width(*field);
-                        }
-                        let mut out = Vec::with_capacity(width);
-                        out.push(self.constant(0));
-                        for (_, source_index) in kept {
-                            let start = offsets[*source_index];
-                            let field_width = self.program.width(source_fields[*source_index]);
-                            out.extend(values[start..start + field_width].iter().copied());
-                        }
-                        for (source_index, ty) in drops {
-                            let start = offsets[*source_index];
-                            let field_width = self.program.width(*ty);
-                            self.drop_value(*ty, &values[start..start + field_width]);
-                        }
+                    Coercion::Struct {
+                        source,
+                        kept,
+                        drops,
+                    } => {
+                        let target_id = to.layout().expect("checked structural target layout");
+                        let target_fields =
+                            self.program.enums[target_id].variants[0].fields.clone();
+                        let mut out: Vec<Value> = vec![self.constant(0)];
+                        self.struct_coercion_words(
+                            *source,
+                            &target_fields,
+                            kept,
+                            drops,
+                            &values,
+                            &mut out,
+                        );
                         while out.len() < width {
                             out.push(self.constant(0));
                         }
@@ -4583,6 +4577,75 @@ impl Generator<'_, '_> {
             }
             StrOp::ToString => {
                 vec![self.runtime_call(self.str_to_string, &[pointer, length])]
+            }
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn struct_coercion_words(
+        &mut self,
+        source: Type,
+        target_fields: &[Type],
+        kept: &[(usize, usize, Option<Coercion>)],
+        drops: &[(usize, Type)],
+        values: &[Value],
+        out: &mut Vec<Value>,
+    ) {
+        let source_id = source.layout().expect("checked structural source layout");
+        let source_fields = self.program.enums[source_id].variants[0].fields.clone();
+        let mut offsets = Vec::with_capacity(source_fields.len());
+        let mut offset = 1usize;
+        for field in &source_fields {
+            offsets.push(offset);
+            offset += self.program.width(*field);
+        }
+        for (target_index, source_index, coercion) in kept {
+            let start = offsets[*source_index];
+            let field_width = self.program.width(source_fields[*source_index]);
+            let field = &values[start..start + field_width];
+            match coercion {
+                Some(coercion) => out.extend(self.nested_coercion_words(
+                    coercion,
+                    target_fields[*target_index],
+                    field,
+                )),
+                None => out.extend(field.iter().copied()),
+            }
+        }
+        for (source_index, ty) in drops {
+            let start = offsets[*source_index];
+            let field_width = self.program.width(*ty);
+            self.drop_value(*ty, &values[start..start + field_width]);
+        }
+    }
+    fn nested_coercion_words(&mut self, coercion: &Coercion, to: Type, values: &[Value]) -> Words {
+        let width = self.program.width(to);
+        match coercion {
+            Coercion::Inject { tag } => {
+                let mut out = Vec::with_capacity(width);
+                out.push(self.constant(*tag as i64));
+                out.extend(values.iter().copied().take(width.saturating_sub(1)));
+                while out.len() < width {
+                    out.push(self.constant(0));
+                }
+                out
+            }
+            Coercion::Struct {
+                source,
+                kept,
+                drops,
+            } => {
+                let target_id = to.layout().expect("checked nested structural target");
+                let target_fields = self.program.enums[target_id].variants[0].fields.clone();
+                let mut out = vec![self.constant(0)];
+                self.struct_coercion_words(*source, &target_fields, kept, drops, values, &mut out);
+                while out.len() < width {
+                    out.push(self.constant(0));
+                }
+                out
+            }
+            Coercion::Repack { .. } => {
+                debug_assert!(false, "nested union repacking is rejected by the checker");
+                values.to_vec()
             }
         }
     }

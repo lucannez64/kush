@@ -107,9 +107,10 @@ this fix still needs the integrated test/review gate.
 
 - [ ] Structural record subtyping and representation-changing coercions.
   **Partial:** anonymous `struct { ... }` rows, canonical field order,
-  width subtyping, checked field-copy coercions, affine-field cleanup, linear
-  field erasure rejection, and borrowed-leaf/mutability invariance are
-  implemented in both backends. Nested field representation changes, open rows,
+  width/order subtyping, recursive nested structural field conversions,
+  atom-to-union field injection, affine-field cleanup, linear field erasure
+  rejection, and borrowed-leaf/mutability invariance are implemented in both
+  backends. Nested union repacking, callable field adaptation, open rows,
   structural record literals, generic structural patterns, and structural
   records in impl headers are explicitly rejected. See
   [subtyping.md](subtyping.md#structural-records).

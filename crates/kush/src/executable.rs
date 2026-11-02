@@ -662,12 +662,14 @@ pub(crate) enum Coercion {
     Inject { tag: usize },
     /// Remap every source alternative tag to a target alternative tag.
     Repack { map: Vec<usize> },
-    /// Rebuild a record in a canonical structural row. `kept` maps each target
-    /// field index to its source field index. `drops` lists source fields that
-    /// are absent from the target and must be cleaned up exactly once; the
-    /// checker guarantees none of them carries a linear obligation.
+    /// Rebuild a record in a canonical structural row. `source` is the checked
+    /// source record layout, `kept` maps each target field to its source field
+    /// and an optional nested representation change, and `drops` lists source
+    /// fields absent from the target. The checker guarantees no dropped field
+    /// carries a linear obligation.
     Struct {
-        kept: Vec<(usize, usize)>,
+        source: Type,
+        kept: Vec<(usize, usize, Option<Coercion>)>,
         drops: Vec<(usize, Type)>,
     },
 }
@@ -10567,34 +10569,61 @@ impl Checker<'_, '_> {
     /// representation, while width/order changes still require a real
     /// conversion. This is a deliberate limit, not a silent relabeling.
     fn coerce_struct(&mut self, value: Expr, expected: Type, span: Span) -> Result<Expr> {
+        let coercion = self.struct_coercion(value.ty, expected, span, 0)?;
+        Ok(Expr {
+            kind: ExprKind::Coerce {
+                value: Box::new(value),
+                to: expected,
+                coercion,
+            },
+            ty: expected,
+            span,
+            resource: None,
+        })
+    }
+    /// Build the checked field mapping for a record-to-structural conversion.
+    /// A retained field may itself need a nested structural conversion or an
+    /// atom-to-union injection; union-to-union repacking is rejected because it
+    /// needs its own control flow and should be written as an explicit field
+    /// conversion. The depth budget keeps nested rows finite.
+    fn struct_coercion(
+        &mut self,
+        source: Type,
+        expected: Type,
+        span: Span,
+        depth: usize,
+    ) -> Result<Coercion> {
+        if depth >= 32 {
+            return Err(Diagnostic::new(
+                span,
+                "structural field coercion nesting budget exhausted (32)",
+            ));
+        }
         let Some(target_row) = self.types.structural_row(expected) else {
             return Err(Diagnostic::new(
                 span,
                 "internal error: structural conversion target is not a structural record",
             ));
         };
-        let Some(source_layout) = value.ty.layout().filter(|id| self.types.enums[*id].record)
-        else {
+        let Some(source_layout) = source.layout().filter(|id| self.types.enums[*id].record) else {
             return Err(Diagnostic::new(
                 span,
                 format!(
                     "type mismatch: expected {}, found {}",
                     self.types.name(expected),
-                    self.types.name(value.ty)
+                    self.types.name(source)
                 ),
             ));
         };
-        let source_variant = &self.types.enums[source_layout].variants[0];
-        if !self.subtype(value.ty, expected) {
-            // Produce the precise field mismatch before falling back to the
-            // generic diagnostic. The structural relation is the authority.
+        let source_variant = self.types.enums[source_layout].variants[0].clone();
+        if !self.subtype(source, expected) {
             for (name, target_ty) in &target_row {
                 let Some(index) = source_variant.names.iter().position(|n| n == name) else {
                     return Err(Diagnostic::new(
                         span,
                         format!(
                             "cannot convert {} to {}: the source row has no field '{name}'",
-                            self.types.name(value.ty),
+                            self.types.name(source),
                             self.types.name(expected)
                         ),
                     ));
@@ -10615,7 +10644,7 @@ impl Checker<'_, '_> {
                 span,
                 format!(
                     "cannot convert {} to {}: a width-erased field carries a linear obligation or changes a borrowed leaf",
-                    self.types.name(value.ty),
+                    self.types.name(source),
                     self.types.name(expected)
                 ),
             ));
@@ -10628,17 +10657,8 @@ impl Checker<'_, '_> {
                 .position(|source| source == name)
                 .expect("structural subtype has every target field");
             let source_ty = source_variant.fields[source_index];
-            if !self.same_layout(source_ty, *target_ty) {
-                return Err(Diagnostic::new(
-                    span,
-                    format!(
-                        "structural field '{name}' would need a nested representation change from {} to {}; this fragment copies representation-compatible fields. Convert the field explicitly before the structural coercion",
-                        self.types.name(source_ty),
-                        self.types.name(*target_ty)
-                    ),
-                ));
-            }
-            kept.push((target_index, source_index));
+            let nested = self.nested_field_coercion(source_ty, *target_ty, span, depth + 1)?;
+            kept.push((target_index, source_index, nested));
         }
         let mut drops = Vec::new();
         for (source_index, source_ty) in source_variant.fields.iter().enumerate() {
@@ -10660,19 +10680,82 @@ impl Checker<'_, '_> {
             }
             drops.push((source_index, *source_ty));
         }
-        // Record cleanup is reverse declaration order; keep the width-erased
-        // fields in the same order so observable destruction is deterministic.
         drops.reverse();
-        Ok(Expr {
-            kind: ExprKind::Coerce {
-                value: Box::new(value),
-                to: expected,
-                coercion: Coercion::Struct { kept, drops },
-            },
-            ty: expected,
-            span,
-            resource: None,
+        Ok(Coercion::Struct {
+            source,
+            kept,
+            drops,
         })
+    }
+    /// A nested field conversion that stays inside the structural conversion's
+    /// own representation. Only two cases need work: a nested structural row
+    /// (recursive field mapping) and an atom injected into a union alternative.
+    fn nested_field_coercion(
+        &mut self,
+        source: Type,
+        target: Type,
+        span: Span,
+        depth: usize,
+    ) -> Result<Option<Coercion>> {
+        if self.same_layout(source, target) {
+            return Ok(None);
+        }
+        if !self.subtype(source, target) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "cannot convert field from {} to {}",
+                    self.types.name(source),
+                    self.types.name(target)
+                ),
+            ));
+        }
+        if self.types.is_structural(target) {
+            return Ok(Some(self.struct_coercion(source, target, span, depth)?));
+        }
+        let Type::Union(target_id) = target else {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "structural field would need an unsupported nested representation change from {} to {}; convert the field explicitly before the structural coercion",
+                    self.types.name(source),
+                    self.types.name(target)
+                ),
+            ));
+        };
+        let target_members = self.types.unions[target_id].members.clone();
+        if let Type::Union(_) = source {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "structural field needs a nested union repack from {} to {}; bind and convert the field explicitly before the structural coercion",
+                    self.types.name(source),
+                    self.types.name(target)
+                ),
+            ));
+        }
+        let Some(tag) = target_members
+            .iter()
+            .position(|member| self.subtype(source, *member))
+        else {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "internal error: field {} has no alternative in {}",
+                    self.types.name(source),
+                    self.types.name(target)
+                ),
+            ));
+        };
+        if Self::function_parts(source).is_some()
+            && Self::function_parts(target_members[tag]).is_some()
+        {
+            return Err(Diagnostic::new(
+                span,
+                "a callable field cannot be converted to a union alternative inside a structural coercion; adapt the field explicitly first",
+            ));
+        }
+        Ok(Some(Coercion::Inject { tag }))
     }
     /// Whether a union-to-union repack can copy a member's payload words
     /// directly. Callable members may only cross when the calling convention

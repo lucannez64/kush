@@ -1335,6 +1335,63 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             )),
         }
     }
+    fn apply_struct_coercion(
+        &mut self,
+        value: Value,
+        kept: &[(usize, usize, Option<Coercion>)],
+        drops: &[(usize, Type)],
+        span: Span,
+    ) -> Result<Value> {
+        let Value::Enum { fields, .. } = value else {
+            return Err(Diagnostic::new(
+                span,
+                "internal error: structural record conversion received a non-record value",
+            ));
+        };
+        let mut source = fields.into_iter().map(Some).collect::<Vec<_>>();
+        let mut target = Vec::with_capacity(kept.len());
+        for (_, source_index, coercion) in kept {
+            let Some(field) = source.get_mut(*source_index).and_then(|field| field.take()) else {
+                return Err(Diagnostic::new(
+                    span,
+                    "internal error: structural conversion reuses a source field",
+                ));
+            };
+            target.push(match coercion {
+                Some(coercion) => self.apply_nested_coercion(field, coercion, span)?,
+                None => field,
+            });
+        }
+        for (source_index, _) in drops {
+            if let Some(field) = source.get_mut(*source_index).and_then(|field| field.take()) {
+                self.drop_value(field)?;
+            }
+        }
+        Ok(Value::Enum {
+            tag: 0,
+            fields: target,
+        })
+    }
+    fn apply_nested_coercion(
+        &mut self,
+        value: Value,
+        coercion: &Coercion,
+        span: Span,
+    ) -> Result<Value> {
+        match coercion {
+            Coercion::Inject { tag } => Ok(Value::Union {
+                tag: *tag,
+                value: Box::new(value),
+            }),
+            Coercion::Repack { .. } => Err(Diagnostic::new(
+                span,
+                "internal error: nested union repacking should be rejected by the checker",
+            )),
+            Coercion::Struct { kept, drops, .. } => {
+                self.apply_struct_coercion(value, kept, drops, span)
+            }
+        }
+    }
     fn dyn_array_call(
         &mut self,
         op: DynArrayOp,
@@ -2101,37 +2158,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         };
                         Value::Union { tag, value }
                     }
-                    Coercion::Struct { kept, drops } => {
-                        let Value::Enum { fields, .. } = inner else {
-                            return Err(Diagnostic::new(
-                                expr.span,
-                                "internal error: structural record conversion received a non-record value",
-                            ));
-                        };
-                        let mut source = fields.into_iter().map(Some).collect::<Vec<_>>();
-                        let mut target = Vec::with_capacity(kept.len());
-                        for (_, source_index) in kept {
-                            let Some(field) =
-                                source.get_mut(*source_index).and_then(|field| field.take())
-                            else {
-                                return Err(Diagnostic::new(
-                                    expr.span,
-                                    "internal error: structural conversion reuses a source field",
-                                ));
-                            };
-                            target.push(field);
-                        }
-                        for (source_index, _) in drops {
-                            if let Some(field) =
-                                source.get_mut(*source_index).and_then(|field| field.take())
-                            {
-                                self.drop_value(field)?;
-                            }
-                        }
-                        Value::Enum {
-                            tag: 0,
-                            fields: target,
-                        }
+                    Coercion::Struct { kept, drops, .. } => {
+                        self.apply_struct_coercion(inner, kept, drops, expr.span)?
                     }
                 }
             }

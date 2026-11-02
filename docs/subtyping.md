@@ -89,13 +89,16 @@ Width subtyping drops source fields that the target does not mention. Dropping
 is a real runtime conversion, not a pointer reinterpretation:
 
 - target fields are copied into canonical order;
-- source fields absent from the target are cleaned up exactly once;
+- source fields absent from the target are cleaned up exactly once, in reverse
+  declaration order;
 - an omitted field that carries a linear obligation is rejected, because the
   target cannot consume it;
 - fields that are already at the target representation are copied directly;
-- a nested representation change (for example a field that would need a union
-  tag insertion) is rejected with an explicit diagnostic and must be converted
-  before the structural coercion.
+- a retained field may itself need a nested structural width conversion or an
+  atom-to-union injection; both are checked recursively and still allocate
+  nothing. A nested union-to-union repack needs its own control flow and is
+  rejected explicitly, so bind/convert that field before the structural
+  coercion.
 
 Borrowed leaves are invariant. A structural conversion cannot change an
 `&[T]` into `&mut [T]`, drop the mutability of a view, or relabel a borrowed
@@ -293,8 +296,9 @@ Implemented and tested:
 Deliberately unsupported, with explicit diagnostics:
 
 - **Structural record limits:** anonymous `struct { ... }` rows support width
-  subtyping, canonical reordering, and exact-representation field copying, as
-  described above. Nested field conversions, open rows, field renaming, generic
+  subtyping, canonical reordering, recursive nested structural rows, and
+  atom-to-union field injection, as described above. Nested union-to-union
+  repacking, callable field adaptation, open rows, field renaming, generic
   structural patterns, and structural records in impl headers are rejected.
   Nominal records remain invariant with respect to other nominal records.
 - **Function subtyping:** arrow subtyping is implemented for first-class

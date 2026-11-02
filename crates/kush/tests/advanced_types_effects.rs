@@ -597,14 +597,32 @@ fn structural_width_cannot_erase_a_linear_field() {
 }
 
 #[test]
-fn structural_nested_representation_change_is_explicitly_rejected() {
+fn structural_nested_width_and_field_union_injection_coerce() {
+    let source = r#"
+        struct Inner { x: i64, extra: Box<i64> }
+        struct Outer { inner: Inner, tag: i64 }
+        fn read(v: struct { inner: struct { x: i64 }, tag: i64 | Bool }) -> i64 ! {panic} {
+            match v.tag {
+                i64 @ n => v.inner.x + n,
+                Bool @ _ => 0,
+            }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            read(Outer { inner: Inner { x: 40, extra: Box.new(1) }, tag: 2 })
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
     rejects(
         r#"
-        struct Inner { x: i64 }
+        struct Inner { v: i64 | Bool }
         struct Outer { inner: Inner }
-        fn read(v: struct { inner: struct { x: i64 } }) -> i64 ! {panic} { 0 }
-        fn main() -> i64 ! {panic} { read(Outer { inner: Inner { x: 1 } }) }"#,
-        "nested representation change",
+        fn read(v: struct { inner: struct { v: i64 | Bool | Unit } }) -> i64 ! {panic} { 0 }
+        fn main() -> i64 ! {panic} { read(Outer { inner: Inner { v: 1 } }) }"#,
+        "nested union repack",
     );
 }
 
