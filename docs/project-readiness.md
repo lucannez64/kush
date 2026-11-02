@@ -42,3 +42,22 @@ Test functions return `Unit` and use the `std.test` assertion helpers; runtime
 failures are reported by test name with captured output, while compile errors
 retain normal source diagnostics. See [projects.md](projects.md) for exact
 limits and integration points.
+
+## Project workflow integration
+
+Merged `6180569` as `bcc0aa5`: strict Kush.toml manifests, deterministic local
+path dependency resolution and Kush.lock verification, project build/run/check,
+per-process #[test] execution, argument forwarding, conservative whitespace
+formatting, and VS Code syntax highlighting. LSP diagnostics/go-to-definition
+are not implemented. Native manifest entries remain explicit build errors until
+the Rust/C bridge is integrated.
+
+Boat validation: 28 focused project/library/CLI tests pass. The full workspace
+run passed formatting, Clippy, and every target except one stale diagnostic
+substring assertion (1059 passing tests, 1 failing assertion). Commit `f969a0d`
+updates that assertion; its entire 9-test executable suite passes on Boat.
+Thus all 1060 tests passed across the full run and affected-target rerun, not
+in one uninterrupted clean run. Sandbox confirmed stopped. Logs are local:
+`/tmp/kush-boat-project-full.log`, `/tmp/kush-boat-project-executable-rerun.log`.
+Independent project workflow review remains pending; host APIs and Rust/C
+integration continue in separate worktrees.
