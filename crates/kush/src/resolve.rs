@@ -364,6 +364,7 @@ impl Resolver {
             "ArenaBox.take",
             "Allocator",
             "Allocator.new",
+            "Allocator.with_realloc",
             "AllocBox",
             "AllocBox.new",
             "AllocBox.try_new",
@@ -375,6 +376,8 @@ impl Resolver {
             "AllocVec.len",
             "AllocVec.get",
             "AllocVec.push",
+            "AllocVec.try_push",
+            "AllocVec.pop",
             "AllocVec.set",
             "AllocVec.clear",
             "Task",
@@ -1572,6 +1575,16 @@ impl Resolver {
     fn pattern(&mut self, pattern: &Pattern, names: &mut BTreeMap<String, Span>) -> Result<()> {
         self.nested(pattern.span, |r| {
             match &pattern.kind {
+                PatternKind::Rest(name) => {
+                    if let Some(name) = name
+                        && names.insert(name.clone(), pattern.span).is_some()
+                    {
+                        return Err(Diagnostic::new(
+                            pattern.span,
+                            format!("duplicate pattern binding '{name}'"),
+                        ));
+                    }
+                }
                 PatternKind::Name(path) if path.len() == 1 => {
                     // Constructor aliases win in patterns. Otherwise a single name binds.
                     if r.units[r.unit].constructors.contains_key(&path[0]) {

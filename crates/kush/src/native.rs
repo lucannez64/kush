@@ -624,7 +624,7 @@ uint64_t kush_bytes_from(const unsigned char *source, int64_t length) {
     b->length = (uint64_t)length; return handle;
 }
 /* ---- User-defined allocators ---------------------------------------------
-   A checked allocator value is a pair of noncapturing code pointers:
+   A checked allocator value is a group of noncapturing code pointers:
    `alloc(bytes) -> Bytes` supplies a block with at least `bytes` capacity, and
    `free(block) -> Unit` releases it. A smaller returned block is a refusal and
    is released through the same pair. Containers store the pair themselves, so
@@ -671,17 +671,32 @@ void kush_alloc_box_release(uint64_t handle) {
 }
 typedef struct {
     uint64_t length; uint64_t capacity; uint64_t width;
-    uint64_t allocator; uint64_t release; uint64_t block;
+    uint64_t allocator; uint64_t release; uint64_t realloc; uint64_t block;
 } KushAllocVec;
+typedef uint64_t (*KushReallocBlockFn)(uint64_t block, uint64_t old_bytes, uint64_t bytes);
 static uint64_t kush_alloc_vec_block_bytes(uint64_t capacity, uint64_t width) {
     if (width == 0 || capacity > ((uint64_t)INT64_MAX) / 8 / width) kush_panic();
     return capacity * width * 8;
 }
-uint64_t kush_alloc_vec_create(uint64_t allocator, uint64_t release, int64_t capacity, int64_t width) {
+/* A growth hook consumes the previous block and returns a block with at least
+   `bytes` capacity that still contains the old contents. A short result is a
+   panic because the old block is already gone. */
+static uint64_t kush_alloc_block_grow(uint64_t grow, uint64_t block, uint64_t old_bytes,
+                                      uint64_t bytes) {
+    if (grow == 0 || block == 0) kush_panic();
+    /* The growth hook observes `old_bytes` readable bytes, matching the
+       reference model's zero-filled block view. */
+    ((KushBytes *)(uintptr_t)block)->length = old_bytes;
+    uint64_t grown = ((KushReallocBlockFn)(uintptr_t)grow)(block, old_bytes, bytes);
+    if (grown == 0 || ((KushBytes *)(uintptr_t)grown)->capacity < bytes) kush_panic();
+    return grown;
+}
+uint64_t kush_alloc_vec_create(uint64_t allocator, uint64_t release, uint64_t realloc,
+                               int64_t capacity, int64_t width) {
     if (capacity < 0 || width <= 0) kush_panic();
     KushAllocVec *v = (KushAllocVec *)(uintptr_t)kush_alloc(sizeof(KushAllocVec));
     v->length = 0; v->capacity = (uint64_t)capacity; v->width = (uint64_t)width;
-    v->allocator = allocator; v->release = release; v->block = 0;
+    v->allocator = allocator; v->release = release; v->realloc = realloc; v->block = 0;
     if (capacity > 0) {
         v->block = kush_alloc_block(allocator, release, kush_alloc_vec_block_bytes(v->capacity, v->width));
     }
@@ -689,13 +704,53 @@ uint64_t kush_alloc_vec_create(uint64_t allocator, uint64_t release, int64_t cap
 }
 static void kush_alloc_vec_grow(KushAllocVec *v, uint64_t next) {
     uint64_t bytes = kush_alloc_vec_block_bytes(next, v->width);
-    uint64_t block = kush_alloc_block(v->allocator, v->release, bytes);
+    uint64_t block;
+    if (v->realloc != 0 && v->block != 0) {
+        block = kush_alloc_block_grow(v->realloc, v->block,
+                                      v->length * v->width * 8, bytes);
+    } else {
+        block = kush_alloc_block(v->allocator, v->release, bytes);
+        if (v->length != 0) {
+            memcpy(kush_alloc_block_data(block), kush_alloc_block_data(v->block),
+                   (size_t)(v->length * v->width * 8));
+        }
+        kush_alloc_block_release(v->release, v->block);
+    }
+    v->block = block; v->capacity = next; ++kush_buffer_growths;
+}
+static int kush_alloc_vec_try_grow(KushAllocVec *v, uint64_t next) {
+    uint64_t bytes = kush_alloc_vec_block_bytes(next, v->width);
+    /* A fallible append never uses the growth hook: a hook that cannot honor
+       the request has already consumed the old block, so refusal could not
+       preserve the vector. The fresh-block path keeps every element. */
+    uint64_t block = kush_alloc_block_try(v->allocator, v->release, bytes);
+    if (block == 0) return 0;
     if (v->length != 0) {
         memcpy(kush_alloc_block_data(block), kush_alloc_block_data(v->block),
                (size_t)(v->length * v->width * 8));
     }
     kush_alloc_block_release(v->release, v->block);
     v->block = block; v->capacity = next; ++kush_buffer_growths;
+    return 1;
+}
+uint64_t kush_alloc_vec_try_push(uint64_t handle, const uint64_t *item) {
+    KushAllocVec *v = (KushAllocVec *)(uintptr_t)handle;
+    if (v->length == v->capacity) {
+        uint64_t next = v->capacity == 0 ? 4 : v->capacity * 2;
+        if (next <= v->capacity) return 0;
+        if (!kush_alloc_vec_try_grow(v, next)) return 0;
+    }
+    memcpy(kush_alloc_block_data(v->block) + v->length * v->width * 8, item,
+           (size_t)(v->width * 8));
+    v->length++;
+    return 1;
+}
+void kush_alloc_vec_pop(uint64_t handle, uint64_t *out) {
+    KushAllocVec *v = (KushAllocVec *)(uintptr_t)handle;
+    if (v->length == 0) kush_panic();
+    uint64_t index = --v->length;
+    memcpy(out, kush_alloc_block_data(v->block) + index * v->width * 8,
+           (size_t)(v->width * 8));
 }
 int64_t kush_alloc_vec_len(uint64_t handle) {
     return (int64_t)((KushAllocVec *)(uintptr_t)handle)->length;
@@ -1578,7 +1633,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let mut alloc_vec_create_sig = module.make_signature();
     alloc_vec_create_sig
         .params
-        .extend((0..4).map(|_| AbiParam::new(I64)));
+        .extend((0..5).map(|_| AbiParam::new(I64)));
     alloc_vec_create_sig.returns.push(AbiParam::new(I64));
     let alloc_vec_create = module
         .declare_function(
@@ -1597,6 +1652,20 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
         .map_err(error)?;
     let alloc_vec_len = module
         .declare_function("kush_alloc_vec_len", Linkage::Import, &alloc_unary_sig)
+        .map_err(error)?;
+    let alloc_vec_try_push = module
+        .declare_function(
+            "kush_alloc_vec_try_push",
+            Linkage::Import,
+            &alloc_vec_push_sig,
+        )
+        .map_err(error)?;
+    let mut alloc_vec_pop_sig = module.make_signature();
+    alloc_vec_pop_sig
+        .params
+        .extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    let alloc_vec_pop = module
+        .declare_function("kush_alloc_vec_pop", Linkage::Import, &alloc_vec_pop_sig)
         .map_err(error)?;
     let mut alloc_vec_get_sig = module.make_signature();
     alloc_vec_get_sig
@@ -1631,6 +1700,8 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
         box_release: alloc_box_release,
         vec_create: alloc_vec_create,
         vec_push: alloc_vec_push,
+        vec_try_push: alloc_vec_try_push,
+        vec_pop: alloc_vec_pop,
         vec_len: alloc_vec_len,
         vec_get: alloc_vec_get,
         vec_set: alloc_vec_set,
@@ -2236,6 +2307,8 @@ struct AllocOps {
     box_release: FuncId,
     vec_create: FuncId,
     vec_push: FuncId,
+    vec_try_push: FuncId,
+    vec_pop: FuncId,
     vec_len: FuncId,
     vec_get: FuncId,
     vec_set: FuncId,
@@ -2635,145 +2708,28 @@ fn synthesize_drops(
 }
 fn collect_task_types(program: &Executable) -> Vec<usize> {
     fn walk(node: &Expr, out: &mut Vec<usize>) {
-        match &node.kind {
-            ExprKind::TaskSpawn { body, .. } => {
-                if let Type::Once(id) = body.ty {
-                    out.push(id);
-                }
-                walk(body, out);
-            }
-            ExprKind::TaskScope { body, .. } => walk(body, out),
-            ExprKind::TaskCancel(reference) => walk(reference, out),
-            ExprKind::TaskJoin { task, .. } => walk(task, out),
-            ExprKind::Block(block) => walk_block(block, out),
-            ExprKind::HandlerPush { handler, body, .. } => {
-                walk(handler, out);
-                walk_block(body, out);
-            }
-            ExprKind::DynamicPerform {
-                payload, resume, ..
-            } => {
-                walk(payload, out);
-                walk(resume, out);
-            }
-            ExprKind::Unary(_, value)
-            | ExprKind::Try { value, .. }
-            | ExprKind::Return(value)
-            | ExprKind::BoxNew(value)
-            | ExprKind::BoxTake(value)
-            | ExprKind::BoxRead(value)
-            | ExprKind::ArenaBoxRead(value)
-            | ExprKind::ArenaBoxTake(value)
-            | ExprKind::Drop(value)
-            | ExprKind::Project(value, _)
-            | ExprKind::Coerce { value, .. }
-            | ExprKind::Break(Some(value), _)
-            | ExprKind::Assign(_, value) => walk(value, out),
-            ExprKind::BoxWrite(reference, value) => {
-                walk(reference, out);
-                walk(value, out);
-            }
-            ExprKind::ArenaAlloc { arena, value } => {
-                walk(arena, out);
-                walk(value, out);
-            }
-            ExprKind::ArenaNewWith { strategy } => walk(strategy, out),
-            ExprKind::ArenaTryAlloc { arena, value, .. } => {
-                walk(arena, out);
-                walk(value, out);
-            }
-            ExprKind::ArenaNew => {}
-            ExprKind::RefAssign(reference, _, value) => {
-                walk(reference, out);
-                walk(value, out);
-            }
-            ExprKind::Loop(block) => walk_block(block, out),
-            ExprKind::While(condition, block) => {
-                walk(condition, out);
-                walk_block(block, out);
-            }
-            ExprKind::BoxReuse { owner, payload } => {
-                walk(owner, out);
-                walk(payload, out);
-            }
-            ExprKind::VecMap {
-                vector, callbacks, ..
-            } => {
-                walk(vector, out);
-                for callback in callbacks {
-                    walk(callback, out);
-                }
-            }
-            ExprKind::BytesAt(a, b) | ExprKind::Binary(_, a, b) => {
-                walk(a, out);
-                walk(b, out);
-            }
-            ExprKind::Slice {
-                base, start, end, ..
-            } => {
-                walk(base, out);
-                if let Some(start) = start {
-                    walk(start, out);
-                }
-                if let Some(end) = end {
-                    walk(end, out);
-                }
-            }
-            ExprKind::Call(_, arguments)
-            | ExprKind::Construct {
-                fields: arguments, ..
-            } => {
-                for argument in arguments {
-                    walk(argument, out);
-                }
-            }
-            ExprKind::CallIndirect { callee, arguments } => {
-                walk(callee, out);
-                for argument in arguments {
-                    walk(argument, out);
-                }
-            }
-            ExprKind::FnValue { captures, .. } => {
-                for capture in captures {
-                    walk(capture, out);
-                }
-            }
-            ExprKind::If(condition, yes, no) => {
-                walk(condition, out);
-                walk_block(yes, out);
-                walk_block(no, out);
-            }
-            ExprKind::Match(value, arms) => {
-                walk(value, out);
-                for arm in arms {
-                    if let Some(guard) = &arm.guard {
-                        walk(guard, out);
-                    }
-                    walk(&arm.body, out);
-                }
-            }
-            _ => {}
+        if let ExprKind::TaskSpawn { body, .. } = &node.kind
+            && let Type::Once(id) = body.ty
+        {
+            out.push(id);
         }
-    }
-    fn walk_block(block: &ex::Block, out: &mut Vec<usize>) {
-        for statement in &block.statements {
-            match statement {
-                ex::Statement::Let(_, value) | ex::Statement::Expr(value) => walk(value, out),
-            }
-        }
-        if let Some(tail) = &block.tail {
-            walk(tail, out);
-        }
+        node.for_each_child(&mut |child| walk(child, out));
     }
     let mut ids = Vec::new();
     for function in &program.functions {
-        walk_block(&function.body, &mut ids);
+        for statement in &function.body.statements {
+            match statement {
+                ex::Statement::Let(_, value) | ex::Statement::Expr(value) => walk(value, &mut ids),
+            }
+        }
+        if let Some(tail) = &function.body.tail {
+            walk(tail, &mut ids);
+        }
     }
     ids.sort_unstable();
     ids.dedup();
     ids
 }
-
 /// Build the native task entry wrappers. A wrapper always has the C ABI
 /// `(code, env, result_ptr) -> ()`, so the runtime can call a statically or
 /// dynamically selected once callable without knowing its signature.
@@ -3910,10 +3866,21 @@ impl Generator<'_, '_> {
                 self.consume(value);
                 return Some(vec![self.constant(0)]);
             }
-            ExprKind::AllocatorNew { alloc, free } => {
+            ExprKind::AllocatorNew {
+                alloc,
+                free,
+                realloc,
+            } => {
                 let allocator = lower!(self.expr(alloc));
                 let release = lower!(self.expr(free));
-                return Some(vec![allocator[0], release[0]]);
+                let grow = match realloc {
+                    Some(realloc) => {
+                        let realloc = lower!(self.expr(realloc));
+                        realloc[0]
+                    }
+                    None => self.constant(0),
+                };
+                return Some(vec![allocator[0], release[0], grow]);
             }
             ExprKind::AllocBoxNew { allocator, value } => {
                 let pair = lower!(self.expr(allocator));
@@ -4072,7 +4039,7 @@ impl Generator<'_, '_> {
                 let width = self.constant(self.program.width(*element) as i64);
                 let handle = self.runtime_call(
                     self.alloc_ops.vec_create,
-                    &[pair[0], pair[1], capacity, width],
+                    &[pair[0], pair[1], pair[2], capacity, width],
                 );
                 return Some(vec![handle]);
             }
@@ -4712,6 +4679,52 @@ impl Generator<'_, '_> {
                 values.extend(item);
                 return Some(values);
             }
+            ExprKind::DynArrayEqual {
+                left,
+                right,
+                element,
+                capacity,
+                negate,
+            } => {
+                let left = lower!(self.expr(left));
+                let right = lower!(self.expr(right));
+                let width = self.program.width(*element);
+                let one = self.constant(1);
+                let length_equal = self.builder.ins().icmp(IntCC::Equal, left[0], right[0]);
+                let mut equal = self.builder.ins().uextend(I64, length_equal);
+                for slot in 0..*capacity {
+                    // A slot participates only while it is inside the live
+                    // length of both arrays; equal lengths make one test enough.
+                    let active = self.builder.ins().icmp_imm_s(
+                        IntCC::UnsignedGreaterThan,
+                        left[0],
+                        slot as i64,
+                    );
+                    let mut slot_equal = one;
+                    for word in 0..width {
+                        let a = left[1 + slot * width + word];
+                        let b = right[1 + slot * width + word];
+                        let comparison = if let Some(kind) = element.float_kind() {
+                            let a = self.float_value(kind, a);
+                            let b = self.float_value(kind, b);
+                            self.float_binary(kind, &crate::lexer::Kind::EqEq, a, b)
+                        } else {
+                            let value = self.builder.ins().icmp(IntCC::Equal, a, b);
+                            self.builder.ins().uextend(I64, value)
+                        };
+                        slot_equal = self.builder.ins().band(slot_equal, comparison);
+                    }
+                    let contribution = self.builder.ins().select(active, slot_equal, one);
+                    equal = self.builder.ins().band(equal, contribution);
+                }
+                let result = if *negate {
+                    let value = self.builder.ins().icmp_imm_s(IntCC::Equal, equal, 0);
+                    self.builder.ins().uextend(I64, value)
+                } else {
+                    equal
+                };
+                return Some(vec![result]);
+            }
             ExprKind::Project(base, offset) => {
                 let values = lower!(self.expr(base));
                 let width = self.program.width(expr.ty);
@@ -4742,6 +4755,7 @@ impl Generator<'_, '_> {
                 check,
                 split: _,
                 text,
+                field,
             } => {
                 if *text {
                     let base_values = lower!(self.expr(base));
@@ -4800,6 +4814,8 @@ impl Generator<'_, '_> {
                 // A checked DynArray view borrows the pinned record storage, so
                 // the descriptor points at the live inline slots. The length is
                 // the runtime length word, and the capacity is the static bound.
+                // A view over a record field points at the field's word offset
+                // inside the pinned record storage.
                 let dynamic_array_location = match &base.kind {
                     ExprKind::Borrow(slot)
                         if base
@@ -4809,7 +4825,12 @@ impl Generator<'_, '_> {
                             .and_then(|pointee| pointee.layout())
                             .is_some_and(|id| self.program.enums[id].dynamic_array.is_some()) =>
                     {
-                        self.locations[*slot]
+                        self.locations[*slot].map(|location| (location, 0))
+                    }
+                    _ if field.is_some() => {
+                        let (slot, offset) = projection_offset(base)
+                            .expect("checked record-field DynArray view root");
+                        self.locations[slot].map(|location| (location, offset))
                     }
                     _ => None,
                 };
@@ -4819,13 +4840,20 @@ impl Generator<'_, '_> {
                     lower!(self.expr(base))
                 };
                 let (pointer, length, stride, bytes) =
-                    if let Some(location) = dynamic_array_location {
+                    if let Some((location, word_offset)) = dynamic_array_location {
                         // Word 0 is the runtime length; elements follow it.
-                        let data = self.builder.ins().iadd_imm_s(location, 8);
+                        let base_address = if word_offset == 0 {
+                            location
+                        } else {
+                            self.builder
+                                .ins()
+                                .iadd_imm_s(location, (word_offset * 8) as i64)
+                        };
+                        let data = self.builder.ins().iadd_imm_s(base_address, 8);
                         let length =
                             self.builder
                                 .ins()
-                                .load(I64, ir::MemFlagsData::new(), location, 0);
+                                .load(I64, ir::MemFlagsData::new(), base_address, 0);
                         (
                             data,
                             length,
@@ -5577,7 +5605,7 @@ impl Generator<'_, '_> {
                     }
                     Target::Vec(op, element) => return Some(self.vec_call(*op, *element, values)),
                     Target::AllocVec(op, element) => {
-                        return Some(self.alloc_vec_call(*op, *element, values));
+                        return Some(self.alloc_vec_call(*op, *element, values, expr.ty));
                     }
                     Target::Slice(op, element) => {
                         return Some(self.slice_call(*op, *element, values));
@@ -6145,7 +6173,13 @@ impl Generator<'_, '_> {
     /// Lower allocator-backed vector operations. Metadata is one stable
     /// handle; element storage is a user-allocator block reached through the
     /// imported helpers, so growth and release always use the recorded pair.
-    fn alloc_vec_call(&mut self, op: AllocVecOp, element: Type, values: Words) -> Words {
+    fn alloc_vec_call(
+        &mut self,
+        op: AllocVecOp,
+        element: Type,
+        values: Words,
+        result: Type,
+    ) -> Words {
         let width = self.program.width(element);
         match op {
             AllocVecOp::Len => {
@@ -6169,6 +6203,92 @@ impl Generator<'_, '_> {
                 self.store_words(item, &values[1..1 + width]);
                 let handle = self.runtime_call(self.alloc_ops.vec_push, &[values[0], item]);
                 vec![handle]
+            }
+            AllocVecOp::TryPush => {
+                let item = self.stack_words(width);
+                self.store_words(item, &values[1..1 + width]);
+                let success = self.runtime_call(self.alloc_ops.vec_try_push, &[values[0], item]);
+                let shape = result
+                    .layout()
+                    .and_then(|id| self.program.enums[id].result)
+                    .expect("checked AllocVec.try_push result");
+                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, success, 0);
+                let ok = self.builder.create_block();
+                let error = self.builder.create_block();
+                let done = self.builder.create_block();
+                let result_width = self.program.width(result);
+                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    (result_width * 8).max(1) as u32,
+                    3,
+                ));
+                let destination = self.builder.ins().stack_addr(I64, slot, 0);
+                let zero = self.constant(0);
+                self.builder.ins().brif(failed, error, &[], ok, &[]);
+                self.builder.switch_to_block(ok);
+                for index in 0..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                let tag = self.constant(shape.ok_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), values[0], destination, 8);
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(error);
+                let tag = self.constant(shape.err_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), zero, destination, 8);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), values[0], destination, 16);
+                for index in 0..width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        values[1 + index],
+                        destination,
+                        ((index + 3) * 8) as i32,
+                    );
+                }
+                for index in (3 + width)..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(done);
+                (0..result_width)
+                    .map(|index| {
+                        self.builder.ins().load(
+                            I64,
+                            ir::MemFlagsData::new(),
+                            destination,
+                            (index * 8) as i32,
+                        )
+                    })
+                    .collect()
+            }
+            AllocVecOp::Pop => {
+                let item = self.stack_words(width);
+                self.runtime_void(self.alloc_ops.vec_pop, &[values[0], item]);
+                let zero = self.constant(0);
+                let mut out = vec![zero, values[0]];
+                out.extend(self.load_words(item, 0, width));
+                out
             }
             AllocVecOp::Set => {
                 let item = self.stack_words(width);
@@ -6713,6 +6833,32 @@ impl Generator<'_, '_> {
                 }
                 result
             }
+            Pattern::DynArray {
+                element,
+                prefix,
+                rest,
+                ..
+            } => {
+                let width = self.program.width(*element);
+                let length = values[0];
+                let required = prefix.len() as i64;
+                let mut result = if *rest {
+                    self.builder.ins().icmp_imm_s(
+                        IntCC::UnsignedGreaterThanOrEqual,
+                        length,
+                        required,
+                    )
+                } else {
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, length, required)
+                };
+                for (index, pattern) in prefix.iter().enumerate() {
+                    let field = self.pattern(pattern, &values[1 + index * width..]);
+                    result = self.builder.ins().band(result, field);
+                }
+                result
+            }
         }
     }
     fn dispose_pattern(&mut self, pattern: &Pattern, ty: Type, values: &[Value]) {
@@ -6734,6 +6880,7 @@ impl Generator<'_, '_> {
             Pattern::Type { member, inner, .. } => {
                 self.dispose_pattern(inner, *member, &values[1..]);
             }
+            Pattern::DynArray { .. } => {}
             Pattern::Or(ps) => {
                 let join = self.builder.create_block();
                 for p in ps {
@@ -6764,6 +6911,42 @@ impl Generator<'_, '_> {
                 }
             }
             Pattern::Type { inner, .. } => self.bind_pattern(inner, &values[1..]),
+            Pattern::DynArray {
+                element,
+                capacity,
+                prefix,
+                rest_binding,
+                ..
+            } => {
+                let width = self.program.width(*element);
+                for (index, pattern) in prefix.iter().enumerate() {
+                    self.bind_pattern(pattern, &values[1 + index * width..]);
+                }
+                if let Some(slot) = rest_binding {
+                    let zero = self.constant(0);
+                    let length = values[0];
+                    let mut tail = vec![zero; 1 + width * *capacity];
+                    let rest_length = self
+                        .builder
+                        .ins()
+                        .iadd_imm_s(length, -(prefix.len() as i64));
+                    tail[0] = rest_length;
+                    for position in 0..capacity.saturating_sub(prefix.len()) {
+                        let source = prefix.len() + position;
+                        let active = self.builder.ins().icmp_imm_s(
+                            IntCC::UnsignedGreaterThan,
+                            length,
+                            source as i64,
+                        );
+                        for word in 0..width {
+                            let value = values[1 + source * width + word];
+                            tail[1 + position * width + word] =
+                                self.builder.ins().select(active, value, zero);
+                        }
+                    }
+                    self.assign(*slot, &tail);
+                }
+            }
             Pattern::Or(ps) if ps.iter().any(has_bindings) => {
                 let join = self.builder.create_block();
                 for p in ps {
@@ -6783,12 +6966,34 @@ impl Generator<'_, '_> {
         }
     }
 }
+/// Root local and total word offset of a record-field projection chain.
+fn projection_offset(expr: &Expr) -> Option<(usize, usize)> {
+    let mut offset = 0usize;
+    let mut current = expr;
+    loop {
+        match &current.kind {
+            ExprKind::Project(base, field) => {
+                offset += field;
+                current = base;
+            }
+            ExprKind::Peek(slot) | ExprKind::Local(slot) | ExprKind::Move(slot) => {
+                return Some((*slot, offset));
+            }
+            _ => return None,
+        }
+    }
+}
 fn has_bindings(p: &Pattern) -> bool {
     match p {
         Pattern::Bind(_) => true,
         Pattern::Variant { fields, .. } => fields.iter().any(|(_, p)| has_bindings(p)),
         Pattern::Type { inner, .. } => has_bindings(inner),
         Pattern::Or(ps) => ps.iter().any(has_bindings),
+        Pattern::DynArray {
+            prefix,
+            rest_binding,
+            ..
+        } => rest_binding.is_some() || prefix.iter().any(has_bindings),
         _ => false,
     }
 }

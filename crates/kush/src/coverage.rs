@@ -10,6 +10,9 @@ enum Pat {
     Scalar(i64),
     Variant(usize, Vec<Pat>),
     Or(Vec<Pat>),
+    /// A length-checked DynArray pattern. The runtime length is unbounded, so
+    /// only a catch-all arm can make a later wildcard redundant.
+    Dynamic,
 }
 fn lower(p: &Pattern) -> Pat {
     match p {
@@ -20,6 +23,7 @@ fn lower(p: &Pattern) -> Pat {
         }
         Pattern::Type { tag, inner, .. } => Pat::Variant(*tag, vec![lower(inner)]),
         Pattern::Or(ps) => Pat::Or(ps.iter().map(lower).collect()),
+        Pattern::DynArray { .. } => Pat::Dynamic,
     }
 }
 pub(crate) struct Coverage {
@@ -132,6 +136,11 @@ fn useful(
         return Ok(false);
     }
     match &candidate[0] {
+        Pat::Dynamic => Ok(!(candidate.len() == 1
+            && types.len() == 1
+            && rows
+                .iter()
+                .any(|row| matches!(row.first(), Some(Pat::Wild))))),
         Pat::Scalar(n) => useful(
             &specialize(&rows, None, Some(*n), 0),
             &candidate[1..],
@@ -157,6 +166,26 @@ fn useful(
             )
         }
         Pat::Wild => match types[0] {
+            // A DynArray's runtime length is not a finite variant set: only a
+            // wildcard row can cover every length. Dynamic rows never do.
+            Type::Enum(id) | Type::Variants(id, _) if enums[id].dynamic_array.is_some() => {
+                let wild: Vec<Vec<Pat>> = rows
+                    .iter()
+                    .filter_map(|row| match row.first()? {
+                        Pat::Wild => Some(row[1..].to_vec()),
+                        _ => None,
+                    })
+                    .collect();
+                useful(
+                    &wild,
+                    &candidate[1..],
+                    &types[1..],
+                    enums,
+                    unions,
+                    budget,
+                    span,
+                )
+            }
             Type::Enum(id) | Type::Variants(id, _) => {
                 let mask = crate::runtime_types::mask_of(types[0], enums);
                 for (tag, variant) in enums[id].variants.iter().enumerate() {

@@ -1495,6 +1495,14 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
+            ExprKind::DynArrayEqual { left, right, .. } => {
+                if !self.expr(left, multiplier)? {
+                    return Ok(false);
+                }
+                if !self.expr(right, multiplier)? {
+                    return Ok(false);
+                }
+            }
             ExprKind::HandlerPush { handler, body, .. } => {
                 if !self.expr(handler, Grade::ONE)? {
                     return Ok(false);
@@ -1598,8 +1606,17 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
-            ExprKind::AllocatorNew { alloc, free } => {
+            ExprKind::AllocatorNew {
+                alloc,
+                free,
+                realloc,
+            } => {
                 if !self.expr(alloc, Grade::ONE)? || !self.expr(free, Grade::ONE)? {
+                    return Ok(false);
+                }
+                if let Some(realloc) = realloc
+                    && !self.expr(realloc, Grade::ONE)?
+                {
                     return Ok(false);
                 }
             }
