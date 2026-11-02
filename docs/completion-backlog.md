@@ -703,3 +703,42 @@ regressions:
 
 `dedb144` (all four implementation merges plus every review fix) passes the
 full Boat gate: **953 tests**, formatting, and Clippy.
+
+## Borrowing closure follow-up
+
+Three commits on top of `15f62d3` broaden the borrowing contract:
+
+- `f8f371b` stores borrowed records in `Box`/`Vec` containers with per-field
+  element provenance. Construction, indexed reads, `push`/`set`/`clear`, box
+  reads/takes, `&mut` container writes, containing records, direct calls, and
+  indirect calls preserve every field's owner loan. Hostile cases cover owner
+  replacement, block-local escapes, `&mut Vec<Holder>` writes, and clearing a
+  vector before using a previously read element.
+- `c043b22` infers anonymous intersection results when a body returns several
+  distinct input lifetimes. Every source owner stays loaned, a caller may
+  select the shortest provable actual lifetime, and inference now follows local
+  destructuring bindings, nested record patterns, and simple aliases before
+  choosing result sources. Explicit results receive the same inferred outlives
+  edges, including through a destructured binding. The constraint closure is
+  documented with its finite reachability decision procedure.
+- `a017173` documents and tests the exact remaining boundaries: mutable owner
+  borrows of temporaries, record fields, and index results; general
+  `&record.field`; `&mut str`; and a child task returning a borrowed
+  `TaskExit<T>`. `Task<TaskExit<...>>` now has a specific diagnostic instead of
+  the generic container rejection.
+
+None of these closes the two Borrowing backlog items completely, so both stay
+unchecked. In particular item 1 still lacks mutable field/index/temporary
+borrows and general field addresses, and item 2 still lacks principal
+unification for recursive lifetime constraints, variance, and rows.
+
+Local Linux x86-64 validation used
+`CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/close-refs` with debug
+information disabled and two Cargo jobs:
+
+- Full `cargo test -p kush --offline -j 2`: **959 passed, 0 failed** across 62
+  test binaries.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p kush --all-targets --offline -j 2 -- -D warnings`: passed.
+
+No Boat run or credential access was used for this checkout.
