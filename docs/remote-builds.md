@@ -211,3 +211,13 @@ a separate remote-editing workflow is explicitly set up.
 An authenticated sandbox and a completed remote check are required before claiming
 this setup works. Merely installing the CLI or creating this script is not that
 verification.
+
+## Integrated milestone validation (2026-11-02)
+
+Boat is now authenticated and usable directly from the current development PC.
+The corrected full gate hash-verified 173 source files, passed formatting,
+**681 tests**, and Clippy with warnings denied, then stopped the existing
+sandbox. The earlier gate passed tests/Clippy but failed two formatting checks;
+those were corrected before the successful full rerun. See the
+[milestone review](milestone-review.md) for the implementation and independent
+review record.

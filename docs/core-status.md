@@ -321,3 +321,9 @@ result-only grade parameter as `1` from a checked expected arrow. Transparent
 aliases can carry grade parameters in result positions. Composite grade
 inference, direct-call grade inference, and grade-parameterized aliases in
 parameter/storage positions remain rejected.
+
+The integrated additions above passed the full corrected Boat gate: **681
+tests**, formatting, and Clippy with warnings denied. Independent review of
+implementation commit `29674d2` found no blocking defects in source inspection
+and six focused native/reference probes. See the [milestone review](milestone-review.md)
+for scope, evidence, and remaining boundaries.
