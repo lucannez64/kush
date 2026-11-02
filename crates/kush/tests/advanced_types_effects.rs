@@ -1187,6 +1187,19 @@ fn open_row_parameters_accept_records_with_the_named_fields() {
     assert_eq!(stats.deallocations, 1);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 42);
+    // An empty open row accepts any record whose fields can be erased.
+    let empty = r#"
+        struct Wide { x: i64, extra: Box<i64> }
+        fn ignore(v: struct { .. }) -> i64 ! {panic} { 42 }
+        fn main() -> i64 ! {alloc, panic} {
+            ignore(Wide { x: 1, extra: Box.new(2) })
+        }"#;
+    let (result, stats) = evaluate(empty);
+    assert_eq!(result, 42);
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.deallocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(empty, 42);
     // An open row still requires every named field.
     rejects(
         r#"

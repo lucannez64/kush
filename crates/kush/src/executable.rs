@@ -19071,7 +19071,11 @@ impl Checker<'_, '_> {
             if let Some(id) = variable_id
                 && !subst.types.contains_key(&id)
             {
-                variables.push((alternative, id));
+                // A repeated bare variable (`T | T | i64`) is one partition
+                // target, not two; the normalized pattern is still `T | i64`.
+                if !variables.iter().any(|(_, existing)| *existing == id) {
+                    variables.push((alternative, id));
+                }
             } else if self.mentions(alternative, type_vars, const_vars, effect_vars, subst) {
                 // A non-bare variable alternative needs real backtracking over
                 // its shape. Leave that to the ordinary inference path.
