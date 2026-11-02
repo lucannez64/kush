@@ -53,8 +53,10 @@ and remaining limits.
   defaults with trait-argument substitution, chained `Self::Other` projections,
   cycle/unknown/bare-`Self` rejection, object-member agreement, `Self` and
   bounded `T` projections, per-impl substitution, and missing/extra/type
-  mismatch diagnostics are implemented and tested. Non-scalar associated
-  constants remain outside the subset.
+  mismatch diagnostics are implemented and tested. Associated constants may
+  also be finite tuples or inline arrays of compile-time constants, including
+  aggregate defaults and aliases; owning/`String` constants and constants that
+  depend on an impl type parameter remain outside the subset.
 - [x] Generic and blanket implementations with coherent overlap rules. Type,
   natural (`Nat`), and grade impl-header parameters; array-length and trait
   argument solving; bound discharge; unconstrained-parameter rejection;
@@ -79,9 +81,9 @@ and remaining limits.
 
 Open trait work still includes open/generic object member sets, direct
 `dyn Trait` nominal fields, borrowed objects with owning/linear members,
-object methods with lifetime or exact-use contracts, non-scalar associated
-constants and associated constants depending on an impl type parameter, and
-lifetime/effect impl parameters. The implemented closed-world union dispatch is
+object methods with lifetime or exact-use contracts, owning or `String`
+associated constants, associated constants depending on an impl type
+parameter, and lifetime/effect impl parameters. The implemented closed-world union dispatch is
 not a claim of general vtable-based trait-object support. See
 [trait contracts](traits.md).
 

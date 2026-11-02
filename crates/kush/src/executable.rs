@@ -1924,13 +1924,33 @@ struct TraitDefinition<'a> {
     associated_order: Vec<String>,
     methods: BTreeMap<String, TraitMethod<'a>>,
 }
-/// A checked, compile-time scalar associated constant. The value is substituted
-/// textually wherever the constant is named, so it never has runtime storage,
-/// address, or an accessor function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A checked compile-time associated constant. Scalar values carry their bit
+/// representation; tuples and inline arrays of constants carry recursively
+/// checked element values. The value is substituted wherever the constant is
+/// named, so it has no runtime storage, address, or accessor function.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ConstValue {
     ty: Type,
+    /// Scalar bit representation. Aggregate values use `elements`.
     bits: i64,
+    /// Element values for a tuple or inline-array constant; empty for scalars.
+    elements: Vec<ConstValue>,
+}
+impl ConstValue {
+    fn scalar(ty: Type, bits: i64) -> Self {
+        Self {
+            ty,
+            bits,
+            elements: Vec::new(),
+        }
+    }
+    fn aggregate(ty: Type, elements: Vec<ConstValue>) -> Self {
+        Self {
+            ty,
+            bits: 0,
+            elements,
+        }
+    }
 }
 /// Associated values supplied by one impl, from which `Self::Item` projections
 /// and `Self::CONST` references are normalized for that impl's methods and
@@ -2012,34 +2032,54 @@ fn generic_category(resolution: &Resolution, generic: &ast::Generic) -> GenericC
         GenericCategory::Type
     }
 }
-/// Whether a type can be the declared type of an associated constant. Such
-/// constants are compile-time values with no runtime storage, so only scalar
-/// machine values with a canonical bit representation qualify.
-fn const_scalar_type(ty: Type) -> bool {
-    matches!(ty, Type::I64 | Type::Int(_) | Type::Bool | Type::Char)
+/// Whether a type can be the declared type of an associated constant. Scalar
+/// machine values and finite tuples/inline arrays of such values have a
+/// canonical compile-time representation.
+fn const_scalar_type(types: &Types<'_>, ty: Type) -> bool {
+    fn allowed(types: &Types<'_>, ty: Type, depth: usize) -> bool {
+        if depth >= 8 {
+            return false;
+        }
+        if matches!(ty, Type::I64 | Type::Int(_) | Type::Bool | Type::Char) {
+            return true;
+        }
+        let Some(layout) = ty.layout() else {
+            return false;
+        };
+        if let Some((element, _)) = types.enums[layout].array {
+            return allowed(types, element, depth + 1);
+        }
+        types.enums[layout].tuple
+            && types.enums[layout].variants[0]
+                .fields
+                .iter()
+                .all(|field| allowed(types, *field, depth + 1))
+    }
+    allowed(types, ty, 0)
 }
 /// Evaluate a constant expression for an associated constant. The subset is
-/// deliberately compile-time only: literals, earlier associated constants of
-/// the same impl, checked integer arithmetic, shifts, boolean operators, and
-/// integer comparisons. Calls, effects, and runtime values are rejected, so an
-/// associated constant can never hide work at a use site.
+/// deliberately compile-time only: scalar literals, tuple/array literals of
+/// constants, earlier associated constants of the same impl, checked integer
+/// arithmetic, shifts, boolean operators, and integer comparisons. Calls,
+/// effects, and runtime values are rejected, so an associated constant can
+/// never hide work at a use site.
 fn evaluate_associated_const(
-    _resolution: &Resolution,
     types: &Types<'_>,
-    _logical: &crate::check::LogicalEnvironment,
     expr: &ast::Expr,
     expected: Type,
     consts: &BTreeMap<String, ConstValue>,
-) -> Result<i64> {
+) -> Result<ConstValue> {
     match expected {
         Type::Bool => {
             let value = evaluate_const_bool(expr, consts, 0)?;
-            Ok(i64::from(value))
+            Ok(ConstValue::scalar(Type::Bool, i64::from(value)))
         }
         Type::Char => match &expr.kind {
-            ast::ExprKind::Char(ch) => Ok(i64::from(u32::from(*ch))),
+            ast::ExprKind::Char(ch) => {
+                Ok(ConstValue::scalar(Type::Char, i64::from(u32::from(*ch))))
+            }
             ast::ExprKind::Name(name) | ast::ExprKind::Field { name, .. } => {
-                const_reference(types, consts, name, Type::Char).map(|value| value.bits)
+                const_reference(types, consts, name, Type::Char)
             }
             _ => Err(Diagnostic::new(
                 expr.span,
@@ -2049,7 +2089,7 @@ fn evaluate_associated_const(
         Type::I64 | Type::Int(_) => {
             let value = evaluate_const_int(expr, consts)?;
             let kind = expected.int_kind().expect("integer constant type");
-            kind.encode(value).ok_or_else(|| {
+            let bits = kind.encode(value).ok_or_else(|| {
                 Diagnostic::new(
                     expr.span,
                     format!(
@@ -2057,13 +2097,105 @@ fn evaluate_associated_const(
                         kind.name()
                     ),
                 )
-            })
+            })?;
+            Ok(ConstValue::scalar(expected, bits))
         }
-        _ => Err(Diagnostic::new(
-            expr.span,
-            "associated constants must have a compile-time scalar type",
-        )),
+        _ => {
+            let Some(layout) = expected.layout() else {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    "associated constants must have a compile-time scalar, tuple, or inline-array type",
+                ));
+            };
+            if let Some((element, length)) = types.enums[layout].array {
+                let items = match &expr.kind {
+                    ast::ExprKind::Array(items) => items.clone(),
+                    ast::ExprKind::Name(name) | ast::ExprKind::Field { name, .. } => {
+                        return const_reference(types, consts, name, expected);
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "an array associated constant must be an array literal or an earlier constant of the same type",
+                        ));
+                    }
+                };
+                if items.len() != length {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        format!(
+                            "array associated constant has {} element(s), but its type needs {length}",
+                            items.len()
+                        ),
+                    ));
+                }
+                let mut elements = Vec::with_capacity(items.len());
+                for item in &items {
+                    elements.push(evaluate_associated_const(types, item, element, consts)?);
+                }
+                return Ok(ConstValue::aggregate(expected, elements));
+            }
+            if types.enums[layout].tuple {
+                let field_types = types.enums[layout].variants[0].fields.clone();
+                let items = match &expr.kind {
+                    ast::ExprKind::Tuple(items) => items.clone(),
+                    ast::ExprKind::Name(name) | ast::ExprKind::Field { name, .. } => {
+                        return const_reference(types, consts, name, expected);
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "a tuple associated constant must be a tuple literal or an earlier constant of the same type",
+                        ));
+                    }
+                };
+                if items.len() != field_types.len() {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        format!(
+                            "tuple associated constant has {} element(s), but its type needs {}",
+                            items.len(),
+                            field_types.len()
+                        ),
+                    ));
+                }
+                let mut elements = Vec::with_capacity(items.len());
+                for (item, field_ty) in items.iter().zip(field_types) {
+                    elements.push(evaluate_associated_const(types, item, field_ty, consts)?);
+                }
+                return Ok(ConstValue::aggregate(expected, elements));
+            }
+            Err(Diagnostic::new(
+                expr.span,
+                "associated constants must have a compile-time scalar, tuple, or inline-array type",
+            ))
+        }
     }
+}
+/// Lower one checked compile-time constant to an ordinary checked expression.
+/// Scalars are literals; tuples and arrays reconstruct their canonical layout
+/// from recursively lowered elements.
+fn const_value_expr(value: &ConstValue, span: Span) -> Result<Expr> {
+    let kind = if let Some(layout) = value.ty.layout() {
+        let fields = value
+            .elements
+            .iter()
+            .map(|element| const_value_expr(element, span))
+            .collect::<Result<Vec<_>>>()?;
+        ExprKind::Construct {
+            enum_id: layout,
+            tag: 0,
+            fields,
+        }
+    } else {
+        ExprKind::Constant(value.bits)
+    };
+    Ok(Expr {
+        kind,
+        ty: value.ty,
+        span,
+        resource: None,
+    })
 }
 fn const_reference(
     types: &Types<'_>,
@@ -2089,7 +2221,7 @@ fn const_reference(
             ),
         ));
     }
-    Ok(*value)
+    Ok(value.clone())
 }
 fn evaluate_const_int(expr: &ast::Expr, consts: &BTreeMap<String, ConstValue>) -> Result<i128> {
     match &expr.kind {
@@ -2110,6 +2242,12 @@ fn evaluate_const_int(expr: &ast::Expr, consts: &BTreeMap<String, ConstValue>) -
                     ),
                 ));
             };
+            if !value.elements.is_empty() {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    "this associated constant is an aggregate, not an integer",
+                ));
+            }
             match value.ty.int_kind() {
                 Some(kind) => Ok(kind.decode(value.bits)),
                 None => Err(Diagnostic::new(
@@ -2178,7 +2316,7 @@ fn evaluate_const_bool(
                 ));
             };
             match value.ty {
-                Type::Bool => Ok(value.bits != 0),
+                Type::Bool if value.elements.is_empty() => Ok(value.bits != 0),
                 _ => Err(Diagnostic::new(
                     expr.span,
                     "this associated constant is not a Bool",
@@ -3760,10 +3898,10 @@ fn collect_methods<'a>(
                         ));
                     }
                     let lowered = types.ty_in(ty, &crate::runtime_types::Subst::default())?;
-                    if !const_scalar_type(lowered) {
+                    if !const_scalar_type(types, lowered) {
                         return Err(Diagnostic::new(
                             ty.span,
-                            "associated constants must have a compile-time scalar type: i8/i16/i32/i64/u8/u16/u32/u64, Bool, or Char",
+                            "associated constants must have a compile-time scalar, tuple, or inline-array type; scalar types are i8/i16/i32/i64/u8/u16/u32/u64, Bool, or Char",
                         ));
                     }
                     associated_items.insert(
@@ -4088,10 +4226,10 @@ fn collect_methods<'a>(
                         ));
                     }
                     let lowered = types.ty_in(ty, &crate::runtime_types::Subst::default())?;
-                    if !const_scalar_type(lowered) {
+                    if !const_scalar_type(types, lowered) {
                         return Err(Diagnostic::new(
                             ty.span,
-                            "associated constants must have a compile-time scalar type: i8/i16/i32/i64/u8/u16/u32/u64, Bool, or Char",
+                            "associated constants must have a compile-time scalar, tuple, or inline-array type; scalar types are i8/i16/i32/i64/u8/u16/u32/u64, Bool, or Char",
                         ));
                     }
                     if trait_id.is_some()
@@ -4134,17 +4272,9 @@ fn collect_methods<'a>(
                         // A default in the trait is inherited below.
                         continue;
                     };
-                    let bits = evaluate_associated_const(
-                        resolution,
-                        types,
-                        logical,
-                        value,
-                        lowered,
-                        &impl_associated.consts,
-                    )?;
-                    impl_associated
-                        .consts
-                        .insert(name.clone(), ConstValue { ty: lowered, bits });
+                    let checked =
+                        evaluate_associated_const(types, value, lowered, &impl_associated.consts)?;
+                    impl_associated.consts.insert(name.clone(), checked);
                 }
             }
         }
@@ -4188,17 +4318,13 @@ fn collect_methods<'a>(
                             ));
                         };
                         let lowered = types.ty_in(ty, &crate::runtime_types::Subst::default())?;
-                        let bits = evaluate_associated_const(
-                            resolution,
+                        let checked = evaluate_associated_const(
                             types,
-                            logical,
                             default,
                             lowered,
                             &impl_associated.consts,
                         )?;
-                        impl_associated
-                            .consts
-                            .insert(name.clone(), ConstValue { ty: lowered, bits });
+                        impl_associated.consts.insert(name.clone(), checked);
                     }
                 }
             }
@@ -4742,7 +4868,7 @@ fn prepare_trait_objects<'a>(
                                 ));
                                 break;
                             }
-                            consts_entry.insert(name.clone(), *value);
+                            consts_entry.insert(name.clone(), value.clone());
                         }
                         if reason.is_some() {
                             break;
@@ -5805,10 +5931,10 @@ fn collect_generic_impl<'a>(
                     ));
                 }
                 let lowered = types.ty_in(ty, &crate::runtime_types::Subst::default())?;
-                if !const_scalar_type(lowered) {
+                if !const_scalar_type(types, lowered) {
                     return Err(Diagnostic::new(
                         ty.span,
-                        "associated constants must have a compile-time scalar type: i8/i16/i32/i64/u8/u16/u32/u64, Bool, or Char",
+                        "associated constants must have a compile-time scalar, tuple, or inline-array type; scalar types are i8/i16/i32/i64/u8/u16/u32/u64, Bool, or Char",
                     ));
                 }
                 if trait_id.is_some()
@@ -5854,17 +5980,9 @@ fn collect_generic_impl<'a>(
                         "an associated constant value in a generic impl may not depend on the impl's type parameters",
                     ));
                 }
-                let bits = evaluate_associated_const(
-                    resolution,
-                    types,
-                    logical,
-                    value,
-                    lowered,
-                    &impl_associated.consts,
-                )?;
-                impl_associated
-                    .consts
-                    .insert(name.clone(), ConstValue { ty: lowered, bits });
+                let checked =
+                    evaluate_associated_const(types, value, lowered, &impl_associated.consts)?;
+                impl_associated.consts.insert(name.clone(), checked);
             }
         }
     }
@@ -5906,17 +6024,13 @@ fn collect_generic_impl<'a>(
                         ));
                     };
                     let lowered = types.ty_in(ty, &crate::runtime_types::Subst::default())?;
-                    let bits = evaluate_associated_const(
-                        resolution,
+                    let checked = evaluate_associated_const(
                         types,
-                        logical,
                         default,
                         lowered,
                         &impl_associated.consts,
                     )?;
-                    impl_associated
-                        .consts
-                        .insert(name.clone(), ConstValue { ty: lowered, bits });
+                    impl_associated.consts.insert(name.clone(), checked);
                 }
             }
         }
@@ -9211,7 +9325,7 @@ impl Checker<'_, '_> {
             .trait_consts
             .get(&(trait_id, required.clone(), actual))
         {
-            return Ok(values.get(name).copied());
+            return Ok(values.get(name).cloned());
         }
         let matches = self.functions.matching_impls(
             self.types,
@@ -9229,7 +9343,7 @@ impl Checker<'_, '_> {
                 .associated
                 .consts
                 .get(name)
-                .copied());
+                .cloned());
         }
         Ok(None)
     }
@@ -13474,7 +13588,7 @@ impl Checker<'_, '_> {
             // accessor call.
             if let ast::ExprKind::Field { value, name } = &expr.kind {
                 if matches!(&value.kind, ast::ExprKind::Name(root) if root == "Self") {
-                    let Some(value) = c.associated_consts.get(name).copied() else {
+                    let Some(value) = c.associated_consts.get(name).cloned() else {
                         return Err(Diagnostic::new(
                             span,
                             format!(
@@ -13482,12 +13596,7 @@ impl Checker<'_, '_> {
                             ),
                         ));
                     };
-                    let node = Expr {
-                        kind: ExprKind::Constant(value.bits),
-                        ty: value.ty,
-                        span,
-                        resource: None,
-                    };
+                    let node = const_value_expr(&value, span)?;
                     return match expected {
                         Some(expected) => c.coerce(node, expected, span),
                         None => Ok(node),
@@ -13500,12 +13609,7 @@ impl Checker<'_, '_> {
                     )
                     && let Some(value) = c.generic_associated_const(id, name, span)?
                 {
-                    let node = Expr {
-                        kind: ExprKind::Constant(value.bits),
-                        ty: value.ty,
-                        span,
-                        resource: None,
-                    };
+                    let node = const_value_expr(&value, span)?;
                     return match expected {
                         Some(expected) => c.coerce(node, expected, span),
                         None => Ok(node),
@@ -13523,14 +13627,14 @@ impl Checker<'_, '_> {
                         .get(&nominal)
                         .and_then(|values| values.get(name))
                     {
-                        candidates.push(*value);
+                        candidates.push(value.clone());
                     }
                     for ((_, _, receiver), values) in &c.functions.trait_consts {
                         if *receiver == nominal
                             && let Some(value) = values.get(name)
                             && !candidates.contains(value)
                         {
-                            candidates.push(*value);
+                            candidates.push(value.clone());
                         }
                     }
                     match candidates.as_slice() {
@@ -13544,12 +13648,7 @@ impl Checker<'_, '_> {
                             ));
                         }
                         [value] => {
-                            let node = Expr {
-                                kind: ExprKind::Constant(value.bits),
-                                ty: value.ty,
-                                span,
-                                resource: None,
-                            };
+                            let node = const_value_expr(value, span)?;
                             return match expected {
                                 Some(expected) => c.coerce(node, expected, span),
                                 None => Ok(node),

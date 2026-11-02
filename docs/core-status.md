@@ -257,9 +257,10 @@ rejected. A trait associated type may declare a default, substituted with the
 impl's trait arguments and allowed to chain through `Self::Other`; unknown
 projections and direct or transitive default cycles are rejected when the trait
 is declared. Associated constants accept `i8`/`i16`/`i32`/`i64`, unsigned
-widths, `Bool`, and `Char`, with required values, declaration-ordered defaults,
-and checked compile-time arithmetic. They lower to literals and have no runtime
-storage or accessor.
+widths, `Bool`, `Char`, and finite tuples or inline arrays of those values, with
+required values, declaration-ordered defaults, aggregate literals/aliases, and
+checked compile-time arithmetic. They lower to literals or aggregate
+construction and have no runtime storage or accessor.
 
 Generic impls (`impl<T> Show for Wrapper<T>`) and blanket impls
 (`impl<T: Show> Loud for Wrapper<T>`) bind their parameters from the concrete
@@ -294,8 +295,8 @@ name that both declare is ambiguous and requires `object.Trait.method(...)`.
 
 Open/generic object member sets, direct `dyn Trait` nominal fields, borrowed
 objects with owning/linear members, object methods with lifetime or exact-use
-contracts, associated constants that are non-scalar or depend on an impl type
-parameter, effect/lifetime impl parameters, `default fn`, negative impls, and
+contracts, owning or `String` associated constants, associated constants that
+depend on an impl type parameter, effect/lifetime impl parameters, `default fn`, negative impls, and
 arbitrary-overlap specialization remain outside this subset. Nominal record/enum
 declarations are laid out before impl collection, so `dyn Trait` is supported in
 function signatures, `Box`/`Vec`, tuples, and arrays but not as a declared

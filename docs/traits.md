@@ -337,8 +337,8 @@ agreement, and are checked as a graph: an unknown projection or any direct or
 transitive default cycle is rejected at the trait declaration. An associated
 type value is an ordinary type (it may mention an impl parameter in a generic
 impl) and may not mention bare `Self`. An associated constant type must be a
-compile-time scalar: `i8`/`i16`/`i32`/`i64`, `u8`/`u16`/`u32`/`u64`, `Bool`, or
-`Char`.
+compile-time scalar (`i8`/`i16`/`i32`/`i64`, `u8`/`u16`/`u32`/`u64`, `Bool`, or
+`Char`) or a finite tuple/inline array of such constants.
 
 Projection normalization is checked and per-impl:
 
@@ -358,11 +358,14 @@ Projection normalization is checked and per-impl:
   evaluated in declaration order.
 
 Constant values are evaluated at check time. The accepted expression subset is
-scalar literals, earlier associated constants, checked integer arithmetic
-(`+ - * / %`, shifts, bitwise operators), boolean operators, `!`, and integer
-comparisons. Calls, effects, runtime values, division by zero, and out-of-range
-results are rejected. A constant therefore has no runtime storage, address, or
-accessor function; it lowers to an ordinary literal at every use.
+scalar literals, tuple and inline-array literals of constants, earlier
+associated constants, checked integer arithmetic (`+ - * / %`, shifts, bitwise
+operators), boolean operators, `!`, and integer comparisons. Calls, effects,
+runtime values, division by zero, and out-of-range results are rejected. An
+array literal must match its declared length; aggregate constants may alias an
+earlier constant of the same type. A constant therefore has no runtime storage,
+address, or accessor function; it lowers to an ordinary literal or aggregate
+construction at every use.
 
 Associated type values and constants participate in the same per-impl
 materialization as default bodies, so an inherited default sees `Self.Out` and
@@ -691,8 +694,8 @@ The following remain intentionally outside the implemented subset:
   impl collection); use `Box<dyn Trait>` or a tuple when storage is needed;
 - borrowed trait objects whose members own storage or are linear, and object
   methods with lifetime or exact-use contracts;
-- associated `Nat`/grade/effect values and non-scalar associated constants, and
-  associated constants that depend on an impl type parameter;
+- associated `Nat`/grade/effect values, owning or `String` associated
+  constants, and associated constants that depend on an impl type parameter;
 - effect parameters on impl headers and lifetime-parameterized impl headers;
 - negative impls, `default fn`, and arbitrary-overlap specialization;
 - trait bounds on trait parameters themselves;
@@ -750,9 +753,9 @@ borrowed receivers with generic scalars, loan retention into later arguments,
 natural trait parameters, cross-module visibility, and the runnable
 `examples/generic_traits.kush` example.
 
-`trait_advanced.rs` adds thirty-six tests for associated type/constant
+`trait_advanced.rs` adds thirty-seven tests for associated type/constant
 projection and substitution, `T.Out` in bounded generic results, inherited
-constant defaults, checked constant arithmetic and range/division diagnostics,
+constant defaults, tuple/array aggregate constants with aliases and length diagnostics, checked constant arithmetic and range/division diagnostics,
 associated type defaults (trait-argument substitution, chained `Self::Other`
 projection, object-member agreement, and unknown/cyclic/bare-`Self`
 rejections), missing/extra/mistyped associated items, contract rejection when a

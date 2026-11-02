@@ -204,7 +204,7 @@ fn associated_items_are_required_and_must_match_declarations() {
         trait Show { const LIMIT: String; }
         impl Show for Point { const LIMIT: String = "x"; }
         fn main() -> i64 ! {} { 0 }"#,
-        "compile-time scalar type",
+        "compile-time scalar, tuple, or inline-array",
     );
 }
 
@@ -814,6 +814,50 @@ fn mutable_object_dispatch_preserves_owning_member_cleanup() {
 ",
     );
     assert_eq!(stats.allocations, 3, "{}", stats.allocations);
+}
+
+#[test]
+fn associated_constants_may_be_tuples_and_inline_arrays() {
+    agrees(
+        r#"
+        struct Marker { tag: i64 }
+        trait Table {
+            const PAIR: (i64, Bool);
+            const ROWS: [i64; 3] = [1, 2, 3];
+            const ALIAS: [i64; 3] = Self.ROWS;
+            fn first(self: Self) -> i64 ! {panic} { let rows = Self.ALIAS; rows[0] }
+            fn flag(self: Self) -> Bool ! {panic} { let pair = Self.PAIR; pair.1 }
+        }
+        impl Table for Marker { const PAIR: (i64, Bool) = (9, true); }
+        fn main() -> i64 ! {io, panic} {
+            let marker = Marker { tag: 0 };
+            print_i64(Marker.ROWS[1]);
+            print_i64(marker.first());
+            if marker.flag() { print_i64(1); } else { print_i64(0); }
+            0
+        }"#,
+        0,
+        "2
+1
+1
+",
+    );
+    rejects(
+        r#"
+        struct Marker { }
+        trait Bad { const VALUE: (i64, String); }
+        impl Bad for Marker { const VALUE: (i64, String) = (1, "x"); }
+        fn main() -> i64 ! {} { 0 }"#,
+        "compile-time scalar, tuple, or inline-array",
+    );
+    rejects(
+        r#"
+        struct Marker { }
+        trait Bad { const ROWS: [i64; 2] = [1, 2, 3]; }
+        impl Bad for Marker { }
+        fn main() -> i64 ! {} { 0 }"#,
+        "array associated constant has 3 element(s), but its type needs 2",
+    );
 }
 
 #[test]
