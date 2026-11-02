@@ -485,3 +485,13 @@ Merge `0f640b5` (review fixes `2f807d5` plus memory remainder `c78c444`)
 passes **896 tests** on the full Boat gate, with formatting and all-targets
 Clippy clean. The trait-object/open-world work is still in progress on a
 separate branch and is not included.
+
+## Merged gate with open dynamic trait objects
+
+Merge `49ea138` adds the open dynamic trait-object work (`2481d7d`,
+`7963eed`: fixed-layout dynamic objects with per-member method tables,
+nominal `dyn` fields, in-place borrowed dispatch of owning/linear members,
+lifetime-parameterized object methods, per-member `Nat` impl substitution) on
+top of `7f372cf`. The full Boat gate passes **908 tests**, formatting, and
+all-targets Clippy. This work has not yet had an independent review.
+Remaining boundaries are listed in [traits.md](traits.md).
