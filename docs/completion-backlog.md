@@ -1296,3 +1296,11 @@ so moved state and stale context handles are rejected. Allocator constructors
 keep the context resource active while evaluating later arguments, preserving
 cleanup on early return. The allocator-container suite passed locally and on
 Boat: **32 tests**, including native/reference regression cases. The full workspace gate had not been rerun for this checkpoint.
+
+## Combined temporary-reference and allocator safety gate
+
+Compiler checkpoint `77182b1` combines the temporary-initializer correction
+with allocator context ownership and early-exit cleanup. The full Boat gate
+passed **1041 tests**, formatting, and Clippy. The sandbox was stopped after
+the run. Independent allocator safety recheck remains pending. The unchecked
+feature boundaries above are still outstanding.
