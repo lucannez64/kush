@@ -497,3 +497,138 @@ fn row_subtraction_solves_principal_minimal_rows() {
         "incomparable minimal",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Named effect rows
+// ---------------------------------------------------------------------------
+
+#[test]
+fn effect_row_aliases_expand_transparently() {
+    let source = "effect row IoPanic = {io, panic};
+                  fn io_inc(x: i64) -> i64 ! {IoPanic} { x + 1 }
+                  fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
+                      -> i64 ! {panic, e} { f(x) }
+                  fn main() -> i64 ! {IoPanic} { apply(io_inc, 41) }";
+    assert_eq!(value(source), 42);
+    native_agrees(source, 42);
+    // An alias may name another alias, and may be unioned with concrete names.
+    assert_eq!(
+        value(
+            "effect row Io = {io};
+             effect row IoPanic = {Io, panic};
+             fn inc(x: i64) -> i64 ! {IoPanic} { x + 1 }
+             fn main() -> i64 ! {Io | panic} { inc(41) }"
+        ),
+        42
+    );
+    // Subtraction sees the expanded alias bits, never the alias name.
+    assert_eq!(
+        value(
+            "effect row Io = {io};
+             fn apply<e: Effects>(f: fn(i64) -> i64 ! {e}, x: i64)
+                 -> i64 ! {panic, e - Io} { f(x) }
+             fn inc(x: i64) -> i64 ! {panic} { x + 1 }
+             fn main() -> i64 ! {panic} { apply(inc, 41) }"
+        ),
+        42
+    );
+}
+
+#[test]
+fn effect_row_aliases_cannot_hide_required_effects() {
+    rejects(
+        "effect row IoPanic = {io, panic};
+         fn io_inc(x: i64) -> i64 ! {IoPanic} { x + 1 }
+         fn main() -> i64 ! {panic} { io_inc(1) }",
+        "requires effects {io}",
+    );
+    // An alias used in a subtraction position is still checked by the body.
+    rejects(
+        "effect row Io = {io};
+         fn io_id(x: i64) -> i64 ! {io, panic} { x }
+         fn apply<e: Effects>(f: fn(i64) -> i64 ! {e})
+             -> i64 ! {panic, e - Io} { f(1) }
+         fn main() -> i64 ! {io, panic} { apply(io_id) }",
+        "requires effects {io}",
+    );
+}
+
+#[test]
+fn effect_row_aliases_are_finite_and_cannot_take_arguments() {
+    rejects(
+        "effect row A = {B};
+         effect row B = {A};
+         fn main() -> i64 ! {A} { 0 }",
+        "is recursive",
+    );
+    rejects(
+        "effect row Io = {io};
+         fn main() -> i64 ! {Io<i64>} { 0 }",
+        "does not take arguments",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Per-bit row solver beyond three variables
+// ---------------------------------------------------------------------------
+
+#[test]
+fn per_bit_solver_handles_more_than_three_unbound_rows() {
+    let source = r#"
+        fn f1(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn f2(x: i64) -> i64 ! {alloc, panic} { x + 1 }
+        fn f3(x: i64) -> i64 ! {suspend, panic} { x + 1 }
+        fn f4(x: i64) -> i64 ! {panic} { x + 1 }
+        fn f5(x: i64) -> i64 ! {} { x }
+        fn five<
+            e1: Effects,
+            e2: Effects,
+            e3: Effects,
+            e4: Effects,
+            e5: Effects,
+        >(
+            g1: fn(i64) -> i64 ! {e1},
+            g2: fn(i64) -> i64 ! {e2},
+            g3: fn(i64) -> i64 ! {e3},
+            g4: fn(i64) -> i64 ! {e4},
+            g5: fn(i64) -> i64 ! {e5},
+            x: i64,
+        ) -> i64 ! {panic, e1, e2, e3, e4, e5} {
+            g5(g4(g3(g2(g1(x)))))
+        }
+        fn main() -> i64 ! {io, alloc, suspend, panic} {
+            five(f1, f2, f3, f4, f5, 40)
+        }"#;
+    assert_eq!(value(source), 44);
+    native_agrees(source, 44);
+    // The same group without one argument's io evidence must reject the caller
+    // that omitted io, proving the solver still checks every bit.
+    rejects(
+        r#"
+        fn f1(x: i64) -> i64 ! {io, panic} { x + 1 }
+        fn f2(x: i64) -> i64 ! {panic} { x + 1 }
+        fn f3(x: i64) -> i64 ! {panic} { x + 1 }
+        fn f4(x: i64) -> i64 ! {panic} { x + 1 }
+        fn f5(x: i64) -> i64 ! {} { x }
+        fn five<
+            e1: Effects,
+            e2: Effects,
+            e3: Effects,
+            e4: Effects,
+            e5: Effects,
+        >(
+            g1: fn(i64) -> i64 ! {e1},
+            g2: fn(i64) -> i64 ! {e2},
+            g3: fn(i64) -> i64 ! {e3},
+            g4: fn(i64) -> i64 ! {e4},
+            g5: fn(i64) -> i64 ! {e5},
+            x: i64,
+        ) -> i64 ! {panic, e1, e2, e3, e4, e5} {
+            g5(g4(g3(g2(g1(x)))))
+        }
+        fn main() -> i64 ! {panic} {
+            five(f1, f2, f3, f4, f5, 40)
+        }"#,
+        "requires effects {io}",
+    );
+}

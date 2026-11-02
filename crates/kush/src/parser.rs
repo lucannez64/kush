@@ -163,16 +163,26 @@ impl Parser {
                     return Err(self.error("'total' applies only to fn and enum declarations"));
                 }
                 self.bump();
-                let name = self.ident()?;
-                self.expect(&Kind::Colon, "':' after the effect operation name")?;
-                let parameter = self.ty()?;
-                self.expect(&Kind::Arrow, "'->' in an effect operation signature")?;
-                let result = self.ty()?;
-                self.expect(&Kind::Semi, "';' after an effect declaration")?;
-                ItemKind::Effect {
-                    name,
-                    parameter,
-                    result,
+                if self.word_keyword("row") {
+                    self.bump();
+                    let name = self.ident()?;
+                    self.expect(&Kind::Eq, "'=' in an effect row alias")?;
+                    self.expect(&Kind::LBrace, "'{' before an effect row alias body")?;
+                    let effects = self.separated(Kind::RBrace, |p| p.ty())?;
+                    self.expect(&Kind::Semi, "';' after an effect row alias")?;
+                    ItemKind::EffectRow { name, effects }
+                } else {
+                    let name = self.ident()?;
+                    self.expect(&Kind::Colon, "':' after the effect operation name")?;
+                    let parameter = self.ty()?;
+                    self.expect(&Kind::Arrow, "'->' in an effect operation signature")?;
+                    let result = self.ty()?;
+                    self.expect(&Kind::Semi, "';' after an effect declaration")?;
+                    ItemKind::Effect {
+                        name,
+                        parameter,
+                        result,
+                    }
                 }
             } else if self.word_keyword("impl") {
                 if total {

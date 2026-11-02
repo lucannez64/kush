@@ -19,6 +19,11 @@ pub(crate) const IO: u8 = 2;
 pub(crate) const ALLOC: u8 = 4;
 pub(crate) const SUSPEND: u8 = 8;
 pub(crate) const EFFECT_BITS: u8 = PANIC | IO | ALLOC | SUSPEND;
+/// Upper bound on unbound row variables solved together by the per-bit row
+/// solver. One bit then has `2^16 = 65536` assignments, and the four effect
+/// bits are solved independently, so the bound is linear in the number of
+/// constraints rather than the previous `16^n` whole-row product.
+pub(crate) const MAX_EFFECT_ROW_VARIABLES: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Type {
     I64,
@@ -3452,6 +3457,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             | ast::ItemKind::Impl { .. }
             | ast::ItemKind::GradeAlgebra(_)
             | ast::ItemKind::Effect { .. }
+            | ast::ItemKind::EffectRow { .. }
             | ast::ItemKind::Use(_) => continue,
             ast::ItemKind::Alias { .. } => continue,
             ast::ItemKind::Function(f) => f,
@@ -21187,18 +21193,30 @@ impl Checker<'_, '_> {
             ),
         )
     }
-    /// Solve accumulated row constraints by finite enumeration.
+    /// Solve accumulated row constraints with a per-bit Boolean solver.
     ///
-    /// The effect universe has four concrete bits. For `n` unbound row
-    /// variables the solver considers at most `16^n` assignments; the budget is
-    /// 4096 assignments, so up to three variables are always exhaustive and a
-    /// larger group is rejected with an explicit request for specialization.
-    /// A solver result must be *unique componentwise-minimal*: every variable
-    /// assignment is a subset of every other valid assignment. If several
-    /// incomparable minimal solutions exist, the call is ambiguous and the
-    /// diagnostic asks for explicit `::<...>` arguments. A variable that no
-    /// constraint mentions is also rejected instead of defaulting to `{}`,
-    /// because doing so could hide an effect promised by the caller.
+    /// The effect universe is four independent concrete bits and every row
+    /// operation (union, subtraction, inclusion) is bitwise, so each bit can be
+    /// solved on its own. For `n` unbound row variables one bit therefore has
+    /// at most `2^n` assignments instead of the previous `16^n` whole-row
+    /// enumeration. The documented bound is [`MAX_EFFECT_ROW_VARIABLES`]
+    /// variables per call group; a larger group is rejected with an explicit
+    /// request for specialization.
+    ///
+    /// A solver result must be *unique componentwise-minimal*: one variable
+    /// assignment is a subset of every other valid assignment. For one bit the
+    /// bitwise AND of every valid assignment is the unique minimal assignment
+    /// exactly when it is itself valid; if it is not, several incomparable
+    /// minimal assignments exist and the call is ambiguous. The same check is
+    /// applied independently to every effect bit.
+    ///
+    /// A variable that no constraint mentions is solved from its domain alone:
+    /// an unconstrained open row defaults to `{}` (the principal, least row),
+    /// and a `<e: Effects + io>` lower bound defaults to exactly the required
+    /// bits. This is sound because every row equation is an inclusion and the
+    /// function body is rechecked against the chosen specialization; a body
+    /// that performs an effect outside its declared row is rejected before the
+    /// call can hide it.
     fn solve_effect_constraints(
         &mut self,
         mark: usize,
@@ -21206,9 +21224,6 @@ impl Checker<'_, '_> {
         subst: &mut crate::runtime_types::Subst,
         span: Span,
     ) -> Result<()> {
-        if mark >= self.effect_constraints.len() {
-            return Ok(());
-        }
         let constraints = self.effect_constraints.split_off(mark);
         let mut allowed: BTreeMap<BindingId, u8> = BTreeMap::new();
         let mut required: BTreeMap<BindingId, u8> = BTreeMap::new();
@@ -21220,22 +21235,6 @@ impl Checker<'_, '_> {
                 crate::runtime_types::effect_includes(self.resolution, generic)?.unwrap_or(0);
             allowed.insert(binder, EFFECT_BITS & !excluded);
             required.insert(binder, included);
-        }
-        let mut mentioned = BTreeSet::new();
-        for constraint in &constraints {
-            mentioned.extend(constraint.row.variables());
-        }
-        for generic in effect_generics {
-            let binder = self.resolution.binder(generic.span).unwrap();
-            if !subst.effects.contains_key(&binder) && !mentioned.contains(&binder) {
-                return Err(Diagnostic::new(
-                    span,
-                    format!(
-                        "cannot infer effect row parameter '{}' of this call: no callable argument mentions it. Pass a callable whose effects constrain the row, or specialize it explicitly with '::<...>'",
-                        generic.name
-                    ),
-                ));
-            }
         }
         let mut unbound = Vec::new();
         for generic in effect_generics {
@@ -21282,152 +21281,214 @@ impl Checker<'_, '_> {
             }
             return Ok(());
         }
-        let mut assignments: u128 = 1;
-        for _ in &unbound {
-            assignments *= 16;
-        }
-        if assignments > 4096 {
+        if unbound.len() > MAX_EFFECT_ROW_VARIABLES {
             return Err(Diagnostic::new(
                 span,
-                "effect-row constraint group exceeds the finite solver budget (more than three unbound row variables); specialize the effect rows explicitly with '::<...>'",
+                format!(
+                    "effect-row constraint group has {} unbound row variables, exceeding the per-bit solver bound of {MAX_EFFECT_ROW_VARIABLES}; specialize some rows explicitly with '::<...>'",
+                    unbound.len()
+                ),
             ));
         }
-        let mut solutions: Vec<BTreeMap<BindingId, u8>> = vec![BTreeMap::new()];
-        for variable in &unbound {
-            let maximum = allowed.get(variable).copied().unwrap_or(EFFECT_BITS);
-            let minimum = required.get(variable).copied().unwrap_or(0);
-            let mut next = Vec::new();
-            for solution in &solutions {
-                for bits in 0..=EFFECT_BITS {
-                    if bits & !maximum != 0 || bits & minimum != minimum {
+        let positions = unbound
+            .iter()
+            .enumerate()
+            .map(|(position, variable)| (*variable, position))
+            .collect::<BTreeMap<_, _>>();
+        // Solve each of the four concrete effects independently. A row term is
+        // built only from bitwise union/subtraction, so the bit at position `b`
+        // of every constraint depends solely on the same bit of each variable.
+        let mut chosen: BTreeMap<BindingId, u8> = unbound
+            .iter()
+            .map(|variable| (*variable, 0u8))
+            .collect();
+        for bit_index in 0..4u8 {
+            let bit = 1u8 << bit_index;
+            let limit = 1u32 << unbound.len();
+            let mut valid_masks = Vec::new();
+            let mut and_all: Option<u32> = None;
+            for mask in 0..limit {
+                let mut in_domain = true;
+                for (position, variable) in unbound.iter().enumerate() {
+                    let allowed_bits = allowed.get(variable).copied().unwrap_or(EFFECT_BITS);
+                    let required_bits = required.get(variable).copied().unwrap_or(0);
+                    if mask & (1 << position) != 0 {
+                        if allowed_bits & bit == 0 {
+                            in_domain = false;
+                            break;
+                        }
+                    } else if required_bits & bit != 0 {
+                        in_domain = false;
+                        break;
+                    }
+                }
+                if !in_domain {
+                    continue;
+                }
+                let mut covers = true;
+                for constraint in &constraints {
+                    if constraint.actual & bit == 0 {
                         continue;
                     }
-                    let mut candidate = solution.clone();
-                    candidate.insert(*variable, bits);
-                    next.push(candidate);
-                }
-            }
-            solutions = next;
-        }
-        let valid = solutions
-            .into_iter()
-            .filter(|solution| {
-                constraints.iter().all(|constraint| {
-                    let Some(covered) = constraint.row.evaluate(solution) else {
-                        return false;
+                    let covered = constraint.row.evaluate_with(&mut |variable| {
+                        if let Some(bits) = subst.effects.get(&variable) {
+                            return Some(*bits);
+                        }
+                        let position = positions.get(&variable)?;
+                        Some(if mask & (1 << *position) != 0 {
+                            bit
+                        } else {
+                            0
+                        })
+                    });
+                    let Some(covered) = covered else {
+                        covers = false;
+                        break;
                     };
-                    constraint.actual & !covered == 0
-                })
-            })
-            .collect::<Vec<_>>();
-        if valid.is_empty() {
-            let first = &constraints[0];
-            let reachable = first
-                .row
-                .evaluate_with(&mut |variable| {
-                    subst
-                        .effects
-                        .get(&variable)
-                        .copied()
-                        .or_else(|| allowed.get(&variable).copied())
-                })
-                .unwrap_or(0);
-            let excluded = first.actual & !reachable;
-            if excluded != 0 {
-                let names = (0..4)
-                    .filter(|bit| excluded & (1 << bit) != 0)
-                    .map(|bit| match 1u8 << bit {
-                        crate::executable::PANIC => "panic",
-                        crate::executable::IO => "io",
-                        crate::executable::ALLOC => "alloc",
-                        _ => "suspend",
-                    })
-                    .collect::<Vec<_>>();
-                fn effect_spelling(ty: &ast::Type) -> String {
-                    match &ty.kind {
-                        ast::TypeKind::Named { path, .. } => path.join("."),
-                        ast::TypeKind::Binary {
-                            op: crate::lexer::Kind::Pipe,
-                            left,
-                            right,
-                        } => format!("{} | {}", effect_spelling(left), effect_spelling(right)),
-                        ast::TypeKind::Binary {
-                            op: crate::lexer::Kind::Minus,
-                            left,
-                            right,
-                        } => format!("{} - {}", effect_spelling(left), effect_spelling(right)),
-                        _ => "concrete effects".to_owned(),
+                    if covered & bit == 0 {
+                        covers = false;
+                        break;
                     }
                 }
-                let variables = first
+                if !covers {
+                    continue;
+                }
+                valid_masks.push(mask);
+                and_all = Some(and_all.map_or(mask, |known| known & mask));
+            }
+            if valid_masks.is_empty() {
+                let Some(first) = constraints.first() else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "no specialization of the effect row parameters satisfies their declared bounds",
+                    ));
+                };
+                let reachable = first
                     .row
-                    .variables()
+                    .evaluate_with(&mut |variable| {
+                        subst
+                            .effects
+                            .get(&variable)
+                            .copied()
+                            .or_else(|| allowed.get(&variable).copied())
+                    })
+                    .unwrap_or(0);
+                let excluded = first.actual & !reachable;
+                if excluded != 0 {
+                    let names = (0..4)
+                        .filter(|bit| excluded & (1 << bit) != 0)
+                        .map(|bit| match 1u8 << bit {
+                            crate::executable::PANIC => "panic",
+                            crate::executable::IO => "io",
+                            crate::executable::ALLOC => "alloc",
+                            _ => "suspend",
+                        })
+                        .collect::<Vec<_>>();
+                    fn effect_spelling(ty: &ast::Type) -> String {
+                        match &ty.kind {
+                            ast::TypeKind::Named { path, .. } => path.join("."),
+                            ast::TypeKind::Binary {
+                                op: crate::lexer::Kind::Pipe,
+                                left,
+                                right,
+                            } => format!("{} | {}", effect_spelling(left), effect_spelling(right)),
+                            ast::TypeKind::Binary {
+                                op: crate::lexer::Kind::Minus,
+                                left,
+                                right,
+                            } => {
+                                format!("{} - {}", effect_spelling(left), effect_spelling(right))
+                            }
+                            _ => "concrete effects".to_owned(),
+                        }
+                    }
+                    let variables = first
+                        .row
+                        .variables()
+                        .iter()
+                        .map(|variable| format!("'{}'", self.resolution.bindings[*variable].name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let bound = first.row.variables().first().and_then(|variable| {
+                        effect_generics
+                            .iter()
+                            .find(|generic| {
+                                self.resolution.binder(generic.span).as_ref() == Some(variable)
+                            })
+                            .and_then(|generic| generic.excludes.as_ref())
+                            .map(|excludes| {
+                                format!(
+                                    "<{}: Effects - {}>",
+                                    self.resolution.bindings[*variable].name,
+                                    effect_spelling(excludes)
+                                )
+                            })
+                    });
+                    let bound = bound.unwrap_or_else(|| format!("the bound on {variables}"));
+                    return Err(Diagnostic::new(
+                        first.span,
+                        format!(
+                            "effect {} is excluded by '{bound}', but the callable argument requires it",
+                            names
+                                .iter()
+                                .map(|name| format!("'{name}'"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
+                return Err(Diagnostic::new(
+                    first.span,
+                    format!(
+                        "no specialization of the effect row parameters satisfies every callable argument; the actual row {:#06b} conflicts with another argument",
+                        first.actual
+                    ),
+                ));
+            }
+            // The bitwise AND of every valid assignment is the unique
+            // componentwise-minimal solution exactly when it is itself valid.
+            // If it is not, at least two incomparable minimal rows exist.
+            let and_all = and_all.expect("at least one valid assignment");
+            let minimal_valid = constraints.iter().all(|constraint| {
+                if constraint.actual & bit == 0 {
+                    return true;
+                }
+                constraint
+                    .row
+                    .evaluate_with(&mut |variable| {
+                        if let Some(bits) = subst.effects.get(&variable) {
+                            return Some(*bits);
+                        }
+                        let position = positions.get(&variable)?;
+                        Some(if and_all & (1 << *position) != 0 {
+                            bit
+                        } else {
+                            0
+                        })
+                    })
+                    .is_some_and(|covered| covered & bit != 0)
+            });
+            if !minimal_valid {
+                let names = unbound
                     .iter()
                     .map(|variable| format!("'{}'", self.resolution.bindings[*variable].name))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let bound = first.row.variables().first().and_then(|variable| {
-                    effect_generics
-                        .iter()
-                        .find(|generic| {
-                            self.resolution.binder(generic.span).as_ref() == Some(variable)
-                        })
-                        .and_then(|generic| generic.excludes.as_ref())
-                        .map(|excludes| {
-                            format!(
-                                "<{}: Effects - {}>",
-                                self.resolution.bindings[*variable].name,
-                                effect_spelling(excludes)
-                            )
-                        })
-                });
-                let bound = bound.unwrap_or_else(|| format!("the bound on {variables}"));
                 return Err(Diagnostic::new(
-                    first.span,
+                    span,
                     format!(
-                        "effect {} is excluded by '{bound}', but the callable argument requires it",
-                        names
-                            .iter()
-                            .map(|name| format!("'{name}'"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        "effect row parameters {names} have several incomparable minimal solutions; the callable arguments do not identify one row. Specialize them explicitly with '::<...>'"
                     ),
                 ));
             }
-            return Err(Diagnostic::new(
-                first.span,
-                format!(
-                    "no specialization of the effect row parameters satisfies every callable argument; the actual row {:#06b} conflicts with another argument",
-                    first.actual
-                ),
-            ));
+            for (position, variable) in unbound.iter().enumerate() {
+                if and_all & (1 << position) != 0 {
+                    *chosen.get_mut(variable).unwrap() |= bit;
+                }
+            }
         }
-        let minimal = valid
-            .iter()
-            .filter(|candidate| {
-                !valid.iter().any(|other| {
-                    other != *candidate
-                        && other.iter().all(|(variable, bits)| {
-                            bits & !candidate.get(variable).copied().unwrap_or(0) == 0
-                        })
-                })
-            })
-            .collect::<Vec<_>>();
-        if minimal.len() != 1 {
-            let names = unbound
-                .iter()
-                .map(|variable| format!("'{}'", self.resolution.bindings[*variable].name))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(Diagnostic::new(
-                span,
-                format!(
-                    "effect row parameters {names} have several incomparable minimal solutions; the callable arguments do not identify one row. Specialize them explicitly with '::<...>'"
-                ),
-            ));
-        }
-        for (variable, bits) in minimal[0] {
-            subst.effects.insert(*variable, *bits);
+        for (variable, bits) in chosen {
+            subst.effects.insert(variable, bits);
         }
         Ok(())
     }

@@ -67,6 +67,15 @@ pub enum ItemKind {
         parameter: Type,
         result: Type,
     },
+    /// `effect row Name = { io, alloc };` declares a named finite effect row.
+    ///
+    /// The alias is transparent and expands to the union of its effects wherever
+    /// an effect row is written. It is not a runtime type, cannot take
+    /// arguments, and may name other row aliases; cycles are rejected.
+    EffectRow {
+        name: String,
+        effects: Vec<Type>,
+    },
     /// `trait Name<T> { type Item; const LIMIT: i64; fn method(self: Self, ...) -> T ! { ... }; }`.
     ///
     /// Traits are static dispatch contracts. A method signature ends in

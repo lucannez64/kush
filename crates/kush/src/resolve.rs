@@ -23,6 +23,10 @@ pub enum BindingKind {
     /// A declared effect operation signature. The name is not a runtime value;
     /// it names the dynamic handler stack entry used by `perform`.
     Effect,
+    /// A declared named effect row (`effect row Name = { ... };`). The name is
+    /// only meaningful inside an effect-row position; it expands to a finite
+    /// union and cannot be used as a runtime type.
+    EffectRow,
 }
 
 /// One declared finite grade algebra. The carrier and operation tables stay as
@@ -77,6 +81,10 @@ pub struct Resolution {
     pub effect_binders: BTreeSet<BindingId>,
     /// The lexically visible Option declaration for each Slice.try_get call.
     pub slice_options: BTreeMap<(usize, usize), BindingId>,
+    /// Declared named effect rows, keyed by their binding. The stored effect
+    /// list is resolved but not expanded; [`crate::runtime_types::effect_row_term`]
+    /// expands aliases (and rejects cycles) when a row is evaluated.
+    pub effect_rows: BTreeMap<BindingId, Vec<Type>>,
     /// Impl method function binding, keyed by the method declaration's start
     /// offset. Methods are not name-resolvable at module scope; they are reached
     /// only by receiver-type dispatch or the explicit `receiver.Trait.method`
@@ -593,6 +601,7 @@ impl Resolver {
                     ItemKind::Prop { name, .. } => (name, BindingKind::Data),
                     ItemKind::Alias { name, .. } => (name, BindingKind::Alias),
                     ItemKind::Effect { name, .. } => (name, BindingKind::Effect),
+                    ItemKind::EffectRow { name, .. } => (name, BindingKind::EffectRow),
                     ItemKind::Trait { name, .. } => (name, BindingKind::Trait),
                     ItemKind::GradeAlgebra(algebra) => (&algebra.name, BindingKind::GradeAlgebra),
                     ItemKind::Impl { methods, .. } => {
@@ -868,6 +877,15 @@ impl Resolver {
                     } => {
                         r.ty(parameter)?;
                         r.ty(result)
+                    }
+                    ItemKind::EffectRow { effects, .. } => {
+                        for effect in effects {
+                            r.ty(effect)?;
+                        }
+                        if let Some(owner) = r.owner {
+                            r.result.effect_rows.insert(owner, effects.clone());
+                        }
+                        Ok(())
                     }
                 })?;
             }

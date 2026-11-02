@@ -829,10 +829,22 @@ fn effect_specialization_is_checked_and_stays_separate_from_other_categories() {
          fn main() -> i64 ! {panic} { apply::<io>(alloc_id, 1) }",
         "type mismatch",
     );
+    // An unconstrained open row defaults to the principal (least) row `{}`.
+    // The call's result row is therefore exactly `{panic}`; the body is
+    // rechecked under that specialization, so defaulting cannot hide an effect
+    // the body actually performs.
+    assert_eq!(
+        value(
+            "fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { x }
+             fn main() -> i64 ! {panic} { apply(1) }"
+        ),
+        1
+    );
     rejects(
-        "fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { x }
-         fn main() -> i64 ! {panic} { apply(1) }",
-        "cannot infer effect row parameter",
+        "fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { alloc_id(x) }
+         fn alloc_id(x: i64) -> i64 ! {alloc, panic} { x }
+         fn main() -> i64 ! {alloc, panic} { apply(1) }",
+        "requires effects {alloc}",
     );
     rejects(
         "fn apply<e: Effects>(x: i64) -> i64 ! {panic, e} { x }
