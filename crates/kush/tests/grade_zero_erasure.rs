@@ -307,6 +307,23 @@ fn vector_map_callbacks_cannot_erase_observed_elements() {
 }
 
 #[test]
+fn capturing_closure_adapters_bridge_erased_parameter_arities() {
+    agrees(
+        r#"fn call(f: once fn(i64) -> i64 ! {alloc, panic}) -> i64 ! {alloc, panic} {
+            f(1)
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let base = 40;
+            let f: once fn(i64 @[0]) -> i64 ! {alloc, panic} =
+                fn(x: i64 @[0]) -> i64 ! {alloc, panic} { base + 2 };
+            call(f)
+        }"#,
+        42,
+        "",
+    );
+}
+
+#[test]
 fn dynamic_dispatch_can_erase_a_copyable_result() {
     agrees(
         r#"trait Compute { fn compute(self: Self) -> i64 @[0] ! {io, panic}; }
