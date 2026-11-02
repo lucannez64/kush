@@ -83,7 +83,7 @@ through effects other than `alloc`. Those cases remain explicit non-fusions.
 The engine never treats a rejection as a proof that the original shape is
 incorrect or unsafe; it simply leaves both passes intact.
 
-## 2. Widening reuse: `Box.reuse_grow`
+## 2. Widening reuse: `Box.reuse_grow` and vector maps
 
 ```rust
 let owner: Box<i64> = Box.new(1);
@@ -117,6 +117,47 @@ otherwise infallible growth uses the native small-block size classes or an
 exact block above the pool limit. Allocation/deallocation counters are unchanged either way, and the
 stable `reuses` counter increments once per successful operation.
 
+### Widening vector elements: `Vec.map_in_place_grow`
+
+`Vec.map_in_place` keeps its existing non-increasing width rule. Widening an
+element in place is a separate explicit operation:
+
+```rust
+fn widen(x: i64) -> [i64; 4] ! {panic} { [x, x + 1, x + 2, x + 3] }
+
+let values: Vec<i64> = [1, 2];
+let values = Vec.map_in_place_grow(values, widen);
+```
+
+`Vec.map_in_place_grow(values, f)` and
+`Vec.map_chain_in_place_grow(values, f, g)` consume an owned vector and return
+the same logical vector with a possibly wider element type:
+
+- Both arguments are evaluated once, left to right, before the element loop.
+  Callback order is still `f(e0), f(e1), ...` (and `f(e0), g(e0), f(e1),
+  g(e1), ...` for a chain), never reverse order.
+- The callbacks keep the ordinary in-place contract: noncapturing `fn` values,
+  matching parameter layouts, non-erased parameters/results, and effect rows
+  required by the enclosing function. The operation additionally requires
+  `{alloc, panic}` and is rejected under `#[noalloc]`.
+- If the retained physical allocation already covers `capacity * width(U)`
+  bytes, the allocation is reused. Otherwise infallible storage growth happens
+  once and may move the block. Allocation/deallocation counters stay unchanged;
+  `buffer-growths` increments once when the block actually moves or grows.
+- Native relocation moves elements with `memmove`: backwards for a wider
+  stride and forwards for a narrower one, so no unread source element is
+  overwritten. Callbacks then run in forward order at the final stride.
+- The vector header records the final element width before callbacks run, so a
+  later `Vec.get`, `Vec.push`, slice, or destruction uses the new layout.
+  Owning source elements are moved into the callback and are released exactly
+  once; owning results are stored in the same slot.
+- A narrower target remains legal, so one operation covers widening and
+  narrowing. Automatic fusion is never selected across a growth-capable map:
+  merging it with another pass could reorder allocation and callback effects.
+
+`Vec.map_in_place` and `Vec.map_chain_in_place` still reject a wider final
+layout and direct the source to the explicit growth variant.
+
 ## 3. Fallible allocation and reuse
 
 These operations return the conventional `Result<T, E>` declared in the file;
@@ -129,6 +170,7 @@ there is no process abort disguised as `Err`. They require the exact
 | `Box.try_reuse(owner, payload)` | `Ok(Box<U>)`, possibly grown/moved | `Err(owner)`: the original allocation and payload intact | `{alloc}` |
 | `Vec.try_reserve(values, n)` | `Ok(Vec<T>)`, room for `len + n` | `Err(values)`: untouched elements, length, and capacity | `{alloc}` |
 | `Bytes.try_with_capacity(n)` | `Ok(Bytes)` with exact capacity `n` | `Err(n)`: the requested capacity | `{alloc}` |
+| `Arena.try_alloc(&arena, value)` | `Ok(ArenaBox<T>)`, one region reference | `Err(value)`: the untouched payload | `{alloc}` |
 
 - `Box.try_new` moves the payload into the box on success and returns the same
   owner unchanged in `Err`. Cleanup is therefore exact on both paths.
@@ -149,6 +191,13 @@ there is no process abort disguised as `Err`. They require the exact
   request fitting retained physical capacity cannot be refused by the probe.
   The reference retains the existing 1Mi-element modeled limit. See
   [vector reuse](vector-reuse.md#vectry_reserve-return-the-original-vector-on-refusal).
+- `Arena.try_alloc` asks the region for one payload slot. If the current chunk
+  has room, the operation performs no allocator action and cannot fail. If a
+  fresh chunk is required, one fallible attempt is charged; refusal returns the
+  payload unchanged and leaves the region's reference count, chunk list, and
+  bump position exactly as they were, so the same arena remains usable. The
+  success path adds one `ArenaBox` and one region reference; a later region
+  release destroys the payload exactly once.
 - The runtime uses `kush_try_alloc`/`kush_try_grow`, which report system
   allocator refusal instead of calling `kush_panic`. Ordinary `kush_alloc` and
   `kush_grow` still abort. The pool's logical counters change only on success.
@@ -163,9 +212,11 @@ let (value, stats) = program.evaluate_with_alloc_budget(&mut output, 0)?;
 ```
 
 The budget charges only fallible attempts, not ordinary allocation. Zero makes
-the next fallible attempt fail; a non-widening `Box.try_reuse` still succeeds
-because it performs no allocator action. This is a reference test tool, not a
-language effect or a native limit.
+the next fallible attempt fail; a non-widening `Box.try_reuse`, a
+`Vec.try_reserve` that fits retained physical capacity, and an
+`Arena.try_alloc` that fits the current chunk still succeed because they
+perform no allocator action. This is a reference test tool, not a language
+effect or a native limit.
 
 The native runtime supports a test-only probe:
 
@@ -221,12 +272,23 @@ ArenaBox.take(first) + ArenaBox.take(second)
 - `Arena` and `ArenaBox<T>` may cross function boundaries, and a box may be
   captured by a structured task; the region reference travels with the box and
   is released when the task or its joined value drops it.
+- `Arena.with_strategy(f)` creates a region with a user-defined chunk-sizing
+  strategy. `f` must be a noncapturing, pure `fn(need: i64, current: i64) ->
+  i64`; it receives the rounded payload requirement and the current chunk
+  capacity and returns the next chunk capacity (clamped up to `need`). The
+  function is stored as a code pointer, so it owns no environment and cannot
+  capture a borrow or an owner. A strategy that allocates, performs I/O,
+  suspends, or panics is rejected at check time. This is a real user-defined
+  allocation policy, but it only chooses chunk capacity; it is not a general
+  allocator trait, free callback, or FFI interface.
 
 Limits: chunks are only freed when the whole region is released; there is no
-per-value `free`, no allocator trait, no user callback, no `realloc` inside a
-region, and no claim that an arena is faster for every workload. Region
-allocation failure aborts through the ordinary `panic` path of `Arena.alloc`;
-a fallible region API is not implemented.
+per-value `free`, no allocator trait, no user callback that supplies raw
+storage or deallocation, no `realloc` inside a region, and no claim that an
+arena is faster for every workload. Region allocation failure aborts through
+the ordinary `panic` path of `Arena.alloc`; `Arena.try_alloc` reports refusal
+instead. `Arena.with_strategy` controls chunk sizing only, so arbitrary
+user-defined allocator ownership remains outside the implemented contract.
 
 ## 5. Reproducible benchmark harness
 
@@ -266,9 +328,11 @@ or a proof obligation.
 
 - `crates/kush/tests/memory_completion.rs`: fusion positives and rejections
   (I/O, panic, loops, recursion, indirect calls), explicit-chain non-fusion,
-  widening reuse and owner obligations, fallible success/refusal with the
-  reference budget and the native probe, overflow, arena lifetime and task
-  capture, provenance rejections, and reference/native diagnostics parity.
+  widening reuse and owner obligations, vector widening reuse with callback
+  order/drop/layout checks, fallible success/refusal with the reference budget
+  and the native probe, fallible arena allocation and region preservation,
+  user chunk strategies, overflow, arena lifetime and task capture, provenance
+  rejections, and reference/native diagnostics parity.
 - `crates/kush/tests/reuse.rs`, `vector_reuse.rs`, `allocator_pool.rs`: existing
   same-allocation reuse, pure-map fusion, explicit chains, pool bounds, and
   stable diagnostics.
@@ -276,8 +340,9 @@ or a proof obligation.
 
 ## Explicitly still absent
 
-- arbitrary user-defined allocator implementations or allocator callbacks, and
-  any FFI allocator interface;
+- arbitrary user-defined alloc/dealloc callbacks, an allocator trait, FFI, or
+  containers that own a general allocator value; `Arena.with_strategy` only
+  chooses chunk capacity for the built-in region;
 - per-value free or compaction inside an arena;
 - automatic fusion of effectful (`io`, `panic`, `suspend`), recursive, looping,
   or indirectly called callbacks;

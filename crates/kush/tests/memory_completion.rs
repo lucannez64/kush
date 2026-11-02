@@ -969,3 +969,310 @@ fn fallible_vector_reserve_keeps_argument_order_and_early_return_cleanup() {
     );
     assert_eq!(stats.allocations, 2);
 }
+
+// ---------------------------------------------------------------------------
+// Fallible arena allocation and user chunk strategy
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fallible_arena_returns_the_payload_and_preserves_the_region_on_refusal() {
+    let source = r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn main() -> i64 ! {alloc, panic} {
+            let arena = Arena.new();
+            match Arena.try_alloc(&arena, 42) {
+                Ok(b) => { drop(arena); ArenaBox.take(b) },
+                Err(v) => { drop(arena); v }
+            }
+        }"#;
+    assert_eq!(reference_with_budget(source, 0).0, 42);
+    assert_eq!(reference(source).0, 42);
+    let refused = native_run(source, &[("KUSH_ALLOC_FAIL_AFTER", "0")]);
+    assert_eq!(refused.exit, Some(42), "{}", refused.stderr);
+    let allowed = native_run(source, &[]);
+    assert_eq!(allowed.exit, Some(42), "{}", allowed.stderr);
+}
+
+#[test]
+fn refused_arena_chunk_request_leaves_the_region_usable() {
+    let source = r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn main() -> i64 ! {alloc, panic} {
+            let arena = Arena.new();
+            match Arena.try_alloc(&arena, 7) {
+                Ok(b) => { drop(b); 0 },
+                Err(first) => {
+                    let later = Arena.alloc(&arena, 9);
+                    first + ArenaBox.take(later)
+                }
+            }
+        }"#;
+    // The fallible probe refuses the first chunk. The ordinary allocation
+    // ignores the probe and must still see an untouched, usable region.
+    assert_eq!(reference_with_budget(source, 0).0, 16);
+    let refused = native_run(source, &[("KUSH_ALLOC_FAIL_AFTER", "0")]);
+    assert_eq!(refused.exit, Some(16), "{}", refused.stderr);
+}
+
+#[test]
+fn fallible_arena_spends_the_budget_only_on_a_real_chunk_request() {
+    let source = r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn main() -> i64 ! {alloc, panic} {
+            let arena = Arena.new();
+            let first = match Arena.try_alloc(&arena, 1) {
+                Ok(b) => ArenaBox.take(b),
+                Err(v) => v,
+            };
+            let second = match Arena.try_alloc(&arena, 2) {
+                Ok(b) => ArenaBox.take(b),
+                Err(v) => v,
+            };
+            let third = match Arena.try_alloc(&arena, 3) {
+                Ok(b) => ArenaBox.take(b),
+                Err(v) => v,
+            };
+            drop(arena);
+            first + second + third
+        }"#;
+    // The first request creates a 4 KiB chunk; the next two fit without any
+    // fallible allocator attempt, so a one-success budget still returns 6.
+    assert_eq!(reference_with_budget(source, 1).0, 6);
+    let run = native_run(source, &[("KUSH_ALLOC_FAIL_AFTER", "1")]);
+    assert_eq!(run.exit, Some(6), "{}", run.stderr);
+}
+
+#[test]
+fn user_chunk_strategy_changes_fallible_arena_growth_behavior() {
+    let source = r#"enum Result<T, E> { Ok(T), Err(E) }
+        fn exact(need: i64, current: i64) -> i64 ! {} {
+            if need < 1 { 1 } else { need }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let arena = Arena.with_strategy(exact);
+            let first = match Arena.try_alloc(&arena, 10) {
+                Ok(b) => ArenaBox.take(b),
+                Err(v) => v,
+            };
+            let second = match Arena.try_alloc(&arena, 20) {
+                Ok(b) => { drop(b); 1 },
+                Err(v) => v,
+            };
+            drop(arena);
+            first + second
+        }"#;
+    // With an exact-chunk strategy, the second request needs a fresh chunk and
+    // therefore fails under a one-attempt budget: 10 + 20 = 30.
+    assert_eq!(reference_with_budget(source, 1).0, 30);
+    let exact = native_run(source, &[("KUSH_ALLOC_FAIL_AFTER", "1")]);
+    assert_eq!(exact.exit, Some(30), "{}", exact.stderr);
+
+    // The default 4 KiB chunk accepted both requests with the same budget.
+    let summed = source.replace("Arena.with_strategy(exact)", "Arena.new()");
+    assert_eq!(reference_with_budget(&summed, 1).0, 11);
+    let default = native_run(&summed, &[("KUSH_ALLOC_FAIL_AFTER", "1")]);
+    assert_eq!(default.exit, Some(11), "{}", default.stderr);
+}
+
+#[test]
+fn arena_strategy_owns_no_environment_and_survives_the_arena_owner() {
+    agrees(
+        r#"fn exact(need: i64, current: i64) -> i64 ! {} { need }
+        fn main() -> i64 ! {alloc, panic} {
+            let arena = Arena.with_strategy(exact);
+            let first = Arena.alloc(&arena, 20);
+            let second = Arena.alloc(&arena, 22);
+            drop(arena);
+            ArenaBox.take(first) + ArenaBox.take(second)
+        }"#,
+        42,
+    );
+}
+
+#[test]
+fn arena_strategy_rejects_capturing_effectful_and_mismatched_functions() {
+    rejects(
+        r#"fn capture(strategy: once fn(i64, i64) -> i64 ! {}) -> Arena ! {alloc, panic} {
+            Arena.with_strategy(strategy)
+        }
+        fn main() -> i64 ! {alloc, panic} { 0 }"#,
+        "noncapturing fn(i64, i64) -> i64",
+    );
+    rejects(
+        r#"fn main() -> i64 ! {alloc, panic} {
+            let arena = Arena.with_strategy(fn() -> i64 ! {} { 1 });
+            0
+        }"#,
+        "exact fn(i64, i64) -> i64",
+    );
+    rejects(
+        r#"fn allocates(need: i64, current: i64) -> i64 ! {alloc} {
+            let b = Box.new(need);
+            Box.take(b) + current
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let arena = Arena.with_strategy(allocates);
+            0
+        }"#,
+        "pure strategy",
+    );
+    rejects(
+        r#"fn wrong(need: i64) -> i64 ! {} { need }
+        fn main() -> i64 ! {alloc, panic} {
+            let arena = Arena.with_strategy(wrong);
+            0
+        }"#,
+        "exact fn(i64, i64) -> i64",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Vector element widening reuse
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vector_map_grow_widens_elements_and_reports_one_growth() {
+    let stats = agrees(
+        r#"fn widen(x: i64) -> [i64; 4] ! {panic} { [x, x + 1, x + 2, x + 3] }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = [1, 2];
+            let values = Vec.map_in_place_grow(values, widen);
+            let [a, b, c, d] = Vec.get(&values, 1);
+            a + b + c + d
+        }"#,
+        14,
+    );
+    assert_eq!(stats.allocations, 1);
+    assert_eq!(stats.buffer_growths, 1);
+}
+
+#[test]
+fn vector_map_grow_reuses_retained_physical_capacity_without_growth() {
+    let stats = agrees(
+        r#"fn first(pair: [i64; 4]) -> i64 ! {} { let [a, b, c, d] = pair; a }
+        fn pair(x: i64) -> [i64; 2] ! {panic} { [x, x + 1] }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<[i64; 4]> = [[1, 1, 1, 1], [2, 2, 2, 2], [3, 3, 3, 3], [4, 4, 4, 4]];
+            let values = Vec.map_in_place(values, first);
+            let values = Vec.map_in_place_grow(values, pair);
+            let [a, b] = Vec.get(&values, 3);
+            a * 10 + b
+        }"#,
+        45,
+    );
+    // The narrowed map retained the wide allocation; widening back to two
+    // words fits, so no allocator growth is charged.
+    assert_eq!(stats.buffer_growths, 0);
+}
+
+#[test]
+fn vector_map_grow_applies_callbacks_forward_and_moves_elements_safely() {
+    let source = r#"fn widen(x: i64) -> [i64; 2] ! {io, panic} { print_i64(x); [x, x + 1] }
+        fn main() -> i64 ! {alloc, panic, io} {
+            let values: Vec<i64> = [1, 2, 3];
+            let values = Vec.map_in_place_grow(values, widen);
+            let [a, b] = Vec.get(&values, 2);
+            a * 10 + b
+        }"#;
+    agrees(source, 34);
+    assert_eq!(reference(source).2, b"1\n2\n3\n");
+}
+
+#[test]
+fn vector_map_grow_consumes_owning_elements_exactly_once() {
+    let stats = agrees(
+        r#"fn unwrap(boxed: Box<i64>) -> [i64; 2] ! {panic} {
+            [Box.take(boxed), 1]
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<Box<i64>> = [Box.new(5), Box.new(6)];
+            let values = Vec.map_in_place_grow(values, unwrap);
+            let [a, b] = Vec.get(&values, 0);
+            let [c, d] = Vec.get(&values, 1);
+            a + b + c + d
+        }"#,
+        13,
+    );
+    assert_eq!(stats.allocations, 3);
+}
+
+#[test]
+fn vector_map_grow_keeps_the_new_stride_for_later_operations() {
+    agrees(
+        r#"fn widen(x: i64) -> [i64; 3] ! {} { [x, x, x] }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = [1, 2];
+            let values = Vec.map_in_place_grow(values, widen);
+            let values = Vec.push(values, [7, 8, 9]);
+            let [a, b, c] = Vec.get(&values, 2);
+            let [x, y, z] = Vec.get(&values, 1);
+            a + b + c + x + y + z
+        }"#,
+        30,
+    );
+}
+
+#[test]
+fn vector_map_chain_grow_widens_the_final_layout() {
+    agrees(
+        r#"fn wide(x: i64) -> [i64; 4] ! {panic} { [x, x + 1, x + 2, x + 3] }
+        fn narrow(pair: [i64; 4]) -> [i64; 2] ! {panic} {
+            let [a, b, c, d] = pair;
+            [a + c, b + d]
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = [1, 2];
+            let values = Vec.map_chain_in_place_grow(values, wide, narrow);
+            let [a, b] = Vec.get(&values, 1);
+            a * 10 + b
+        }"#,
+        68,
+    );
+}
+
+#[test]
+fn vector_map_grow_does_not_create_automatic_fusions() {
+    let source = r#"fn widen(x: i64) -> [i64; 2] ! {} { [x, x] }
+        fn first(pair: [i64; 2]) -> i64 ! {} { let [a, b] = pair; a }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = [1, 2];
+            let values = Vec.map_in_place(Vec.map_in_place_grow(values, widen), first);
+            Vec.get(&values, 0) + Vec.get(&values, 1)
+        }"#;
+    assert_eq!(reference(source).0, 3);
+    assert_eq!(check(source).unwrap().fusion_count(), 0);
+}
+
+#[test]
+fn vector_map_grow_requires_alloc_panic_and_an_owned_receiver() {
+    rejects(
+        r#"fn widen(x: i64) -> [i64; 2] ! {} { [x, x] }
+        #[noalloc] fn transform(values: Vec<i64>) -> Vec<[i64; 2]> ! {panic} {
+            Vec.map_in_place_grow(values, widen)
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "alloc",
+    );
+    rejects(
+        r#"fn widen(x: i64) -> [i64; 2] ! {} { [x, x] }
+        fn main() -> i64 ! {alloc, panic} {
+            let values: Vec<i64> = [1];
+            drop(Vec.map_in_place_grow(&values, widen));
+            0
+        }"#,
+        "owned Vec",
+    );
+}
+
+#[test]
+fn refused_arena_allocation_returns_a_structured_payload_unchanged() {
+    let source = r#"enum Result<T, E> { Ok(T), Err(E) }
+        struct Pair { left: i64, right: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let arena = Arena.new();
+            match Arena.try_alloc(&arena, Pair { left: 20, right: 22 }) {
+                Ok(b) => { drop(arena); let pair = ArenaBox.take(b); pair.left + pair.right },
+                Err(pair) => { drop(arena); pair.left + pair.right }
+            }
+        }"#;
+    assert_eq!(reference_with_budget(source, 0).0, 42);
+    let refused = native_run(source, &[("KUSH_ALLOC_FAIL_AFTER", "0")]);
+    assert_eq!(refused.exit, Some(42), "{}", refused.stderr);
+}

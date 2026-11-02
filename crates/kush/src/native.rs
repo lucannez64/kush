@@ -465,15 +465,37 @@ struct KushArenaChunk {
 };
 _Static_assert(sizeof(KushArenaChunk) % KUSH_ALLOC_ALIGN == 0,
                "arena chunk data must preserve alignment");
+/* Optional user chunk-sizing strategy. It is a noncapturing generated
+   function with signature uint64_t(uint64_t need, uint64_t current) and is
+   called only while sizing a fresh chunk. */
+typedef uint64_t (*KushArenaStrategy)(uint64_t need, uint64_t current);
 typedef struct KushArena {
     uint64_t references;
     KushArenaChunk *chunks;
+    KushArenaStrategy strategy;
 } KushArena;
 static uint64_t kush_arena_round(uint64_t bytes) {
     uint64_t rounded, total;
     if (__builtin_add_overflow(bytes, (uint64_t)8, &total)) kush_panic();
     if (__builtin_add_overflow(total, KUSH_ALLOC_ALIGN - 1, &rounded)) kush_panic();
     return rounded & ~(KUSH_ALLOC_ALIGN - 1);
+}
+/* Non-aborting variant used by the fallible entry point. */
+static int kush_arena_try_round(uint64_t bytes, uint64_t *need) {
+    uint64_t rounded;
+    if (__builtin_add_overflow(bytes, (uint64_t)8, need)) return 0;
+    if (__builtin_add_overflow(*need, KUSH_ALLOC_ALIGN - 1, &rounded)) return 0;
+    *need = rounded & ~(KUSH_ALLOC_ALIGN - 1);
+    return 1;
+}
+static uint64_t kush_arena_chunk_capacity(KushArena *arena, uint64_t need) {
+    uint64_t current = arena->chunks == NULL ? 0 : arena->chunks->capacity;
+    if (arena->strategy != NULL) {
+        uint64_t chosen = arena->strategy(need, current);
+        if ((int64_t)chosen < 0) return need;
+        return chosen > need ? chosen : need;
+    }
+    return need < 4096 ? 4096 : need;
 }
 static void kush_arena_free_chunks(KushArena *arena) {
     KushArenaChunk *chunk = arena->chunks;
@@ -492,29 +514,79 @@ static void kush_arena_release_pointer(KushArena *arena) {
         kush_free((uint64_t)(uintptr_t)arena);
     }
 }
-uint64_t kush_arena_new(void) {
+static KushArena *kush_arena_create(KushArenaStrategy strategy) {
     KushArena *arena = (KushArena *)(uintptr_t)kush_alloc(sizeof(KushArena));
     arena->references = 1;
     arena->chunks = NULL;
-    return (uint64_t)(uintptr_t)arena;
+    arena->strategy = strategy;
+    return arena;
+}
+uint64_t kush_arena_new(void) { return (uint64_t)(uintptr_t)kush_arena_create(NULL); }
+uint64_t kush_arena_new_with_strategy(uint64_t strategy) {
+    return (uint64_t)(uintptr_t)kush_arena_create((KushArenaStrategy)(uintptr_t)strategy);
+}
+static KushArenaChunk *kush_arena_claim_chunk(uint64_t capacity) {
+    uint64_t total;
+    if (__builtin_add_overflow(sizeof(KushArenaChunk), capacity, &total)) kush_panic();
+    if (__builtin_add_overflow(total, KUSH_ALLOC_ALIGN - 1, &total)) kush_panic();
+    total &= ~(KUSH_ALLOC_ALIGN - 1);
+    KushArenaChunk *fresh =
+        (KushArenaChunk *)aligned_alloc((size_t)KUSH_ALLOC_ALIGN, (size_t)total);
+    if (fresh == NULL) kush_panic();
+    fresh->next = NULL;
+    fresh->used = 0;
+    fresh->capacity = capacity;
+    fresh->padding = 0;
+    return fresh;
+}
+static int kush_arena_try_claim_chunk(uint64_t capacity, KushArenaChunk **out) {
+    uint64_t total;
+    if (__builtin_add_overflow(sizeof(KushArenaChunk), capacity, &total)) return 0;
+    if (__builtin_add_overflow(total, KUSH_ALLOC_ALIGN - 1, &total)) return 0;
+    total &= ~(KUSH_ALLOC_ALIGN - 1);
+    KushArenaChunk *fresh =
+        (KushArenaChunk *)aligned_alloc((size_t)KUSH_ALLOC_ALIGN, (size_t)total);
+    if (fresh == NULL) return 0;
+    fresh->next = NULL;
+    fresh->used = 0;
+    fresh->capacity = capacity;
+    fresh->padding = 0;
+    *out = fresh;
+    return 1;
 }
 uint64_t kush_arena_alloc(uint64_t handle, uint64_t bytes) {
     KushArena *arena = (KushArena *)(uintptr_t)handle;
     uint64_t need = kush_arena_round(bytes);
     KushArenaChunk *chunk = arena->chunks;
     if (chunk == NULL || chunk->capacity - chunk->used < need) {
-        uint64_t capacity = need < 4096 ? 4096 : need;
-        uint64_t total;
-        if (__builtin_add_overflow(sizeof(KushArenaChunk), capacity, &total)) kush_panic();
-        if (__builtin_add_overflow(total, KUSH_ALLOC_ALIGN - 1, &total)) kush_panic();
-        total &= ~(KUSH_ALLOC_ALIGN - 1);
-        KushArenaChunk *fresh =
-            (KushArenaChunk *)aligned_alloc((size_t)KUSH_ALLOC_ALIGN, (size_t)total);
-        if (fresh == NULL) kush_panic();
+        uint64_t capacity = kush_arena_chunk_capacity(arena, need);
+        KushArenaChunk *fresh = kush_arena_claim_chunk(capacity);
         fresh->next = arena->chunks;
-        fresh->used = 0;
-        fresh->capacity = capacity;
-        fresh->padding = 0;
+        arena->chunks = fresh;
+        chunk = fresh;
+    }
+    unsigned char *start = chunk->data + chunk->used;
+    chunk->used += need;
+    *(KushArena **)(void *)start = arena;
+    ++arena->references;
+    return (uint64_t)(uintptr_t)(start + 8);
+}
+/* Fallible arena allocation. A refused chunk request leaves the region's
+   reference count, chunk list, and bump position exactly as they were, so the
+   caller can retry or keep using the region after returning the payload in
+   Err. An allocation that fits the current chunk does not touch the fallible
+   attempt probe. */
+uint64_t kush_arena_try_alloc(uint64_t handle, uint64_t bytes) {
+    KushArena *arena = (KushArena *)(uintptr_t)handle;
+    uint64_t need;
+    if (!kush_arena_try_round(bytes, &need)) return 0;
+    KushArenaChunk *chunk = arena->chunks;
+    if (chunk == NULL || chunk->capacity - chunk->used < need) {
+        if (kush_try_refuses()) return 0;
+        uint64_t capacity = kush_arena_chunk_capacity(arena, need);
+        KushArenaChunk *fresh = NULL;
+        if (!kush_arena_try_claim_chunk(capacity, &fresh)) return 0;
+        fresh->next = arena->chunks;
         arena->chunks = fresh;
         chunk = fresh;
     }
@@ -794,6 +866,41 @@ uint64_t kush_vec_try_reserve(uint64_t handle, int64_t additional) {
     replacement->capacity = needed;
     ++kush_buffer_growths;
     return (uint64_t)(uintptr_t)replacement;
+}
+/* Widen or compact a vector's element stride while preserving the allocation
+   when the retained usable capacity already covers `capacity * target_width`
+   elements. Otherwise `kush_grow` moves the block once. Elements are moved
+   with memmove: forwards for a compaction, backwards for a widening, so the
+   move never overwrites a source element that has not been moved yet. The
+   caller then applies callbacks in forward order at the new stride. The
+   logical allocation counters are unchanged; `buffer-growths` counts an
+   actual block move. */
+uint64_t kush_vec_restride(uint64_t handle, int64_t source_width, int64_t target_width) {
+    KushVec *v = (KushVec *)(uintptr_t)handle;
+    if (source_width <= 0 || target_width <= 0) kush_panic();
+    if (v->width != (uint64_t)source_width) kush_panic();
+    uint64_t bytes = kush_vec_bytes(v->capacity, (uint64_t)target_width);
+    KushVec *replacement = (KushVec *)kush_grow(v, bytes);
+    if (replacement != v) ++kush_buffer_growths;
+    v = replacement;
+    uint64_t source = (uint64_t)source_width * 8;
+    uint64_t target = (uint64_t)target_width * 8;
+    if (source != target) {
+        unsigned char *data = (unsigned char *)v->data;
+        if (target > source) {
+            uint64_t index = v->length;
+            while (index > 0) {
+                --index;
+                memmove(data + index * target, data + index * source, (size_t)source);
+            }
+        } else {
+            for (uint64_t index = 0; index < v->length; ++index) {
+                memmove(data + index * target, data + index * source, (size_t)source);
+            }
+        }
+    }
+    v->width = (uint64_t)target_width;
+    return (uint64_t)(uintptr_t)v;
 }
 /* Stackful cooperative tasks. One OS thread; strict handoff. */
 #include <ucontext.h>
@@ -1313,14 +1420,28 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let arena_new = module
         .declare_function("kush_arena_new", Linkage::Import, &arena_new_sig)
         .map_err(error)?;
+    let arena_new_with_strategy = module
+        .declare_function("kush_arena_new_with_strategy", Linkage::Import, &alloc_sig)
+        .map_err(error)?;
     let arena_alloc = module
         .declare_function("kush_arena_alloc", Linkage::Import, &grow_sig)
+        .map_err(error)?;
+    let arena_try_alloc = module
+        .declare_function("kush_arena_try_alloc", Linkage::Import, &grow_sig)
         .map_err(error)?;
     let arena_release = module
         .declare_function("kush_arena_release", Linkage::Import, &free_sig)
         .map_err(error)?;
     let arena_box_release = module
         .declare_function("kush_arena_box_release", Linkage::Import, &free_sig)
+        .map_err(error)?;
+    let mut restride_sig = module.make_signature();
+    restride_sig
+        .params
+        .extend([AbiParam::new(I64), AbiParam::new(I64), AbiParam::new(I64)]);
+    restride_sig.returns.push(AbiParam::new(I64));
+    let vec_restride = module
+        .declare_function("kush_vec_restride", Linkage::Import, &restride_sig)
         .map_err(error)?;
     let mut reuse_sig = module.make_signature();
     reuse_sig.returns.push(AbiParam::new(I64));
@@ -1624,8 +1745,11 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             try_bytes_with_capacity,
             free,
             arena_new,
+            arena_new_with_strategy,
             arena_alloc,
+            arena_try_alloc,
             arena_box_release,
+            vec_restride,
             note_reuse,
             drops: &drops,
             tracked: vec![],
@@ -1827,6 +1951,11 @@ fn collect_expr_literals<'a>(expr: &'a Expr, out: &mut Vec<(usize, &'a [u8])>) {
             collect_expr_literals(arena, out);
             collect_expr_literals(value, out);
         }
+        ExprKind::ArenaNewWith { strategy } => collect_expr_literals(strategy, out),
+        ExprKind::ArenaTryAlloc { arena, value, .. } => {
+            collect_expr_literals(arena, out);
+            collect_expr_literals(value, out);
+        }
         ExprKind::ArenaNew => {}
         ExprKind::RefAssign(reference, _, value) => {
             collect_expr_literals(reference, out);
@@ -1964,6 +2093,11 @@ fn collect_closure_types(program: &Executable) -> Vec<Vec<Type>> {
             | ExprKind::Break(Some(value), _)
             | ExprKind::Assign(_, value) => walk(program, value, out),
             ExprKind::ArenaAlloc { arena, value } => {
+                walk(program, arena, out);
+                walk(program, value, out);
+            }
+            ExprKind::ArenaNewWith { strategy } => walk(program, strategy, out),
+            ExprKind::ArenaTryAlloc { arena, value, .. } => {
                 walk(program, arena, out);
                 walk(program, value, out);
             }
@@ -2400,6 +2534,11 @@ fn collect_task_types(program: &Executable) -> Vec<usize> {
                 walk(arena, out);
                 walk(value, out);
             }
+            ExprKind::ArenaNewWith { strategy } => walk(strategy, out),
+            ExprKind::ArenaTryAlloc { arena, value, .. } => {
+                walk(arena, out);
+                walk(value, out);
+            }
             ExprKind::ArenaNew => {}
             ExprKind::RefAssign(reference, _, value) => {
                 walk(reference, out);
@@ -2659,8 +2798,11 @@ struct Generator<'a, 'b> {
     try_bytes_with_capacity: FuncId,
     free: FuncId,
     arena_new: FuncId,
+    arena_new_with_strategy: FuncId,
     arena_alloc: FuncId,
+    arena_try_alloc: FuncId,
     arena_box_release: FuncId,
+    vec_restride: FuncId,
     note_reuse: FuncId,
     drops: &'b BTreeMap<Type, FuncId>,
     closure_drops: &'b BTreeMap<Vec<Type>, FuncId>,
@@ -3501,6 +3643,11 @@ impl Generator<'_, '_> {
                 pointer
             }
             ExprKind::ArenaNew => self.runtime_call(self.arena_new, &[]),
+            ExprKind::ArenaNewWith { strategy } => {
+                let code = lower!(self.scalar(strategy));
+                self.consume(strategy);
+                self.runtime_call(self.arena_new_with_strategy, &[code])
+            }
             ExprKind::ArenaAlloc { arena, value } => {
                 let reference = lower!(self.scalar(arena));
                 let handle = self
@@ -3521,6 +3668,96 @@ impl Generator<'_, '_> {
                     );
                 }
                 pointer
+            }
+            ExprKind::ArenaTryAlloc {
+                arena,
+                value,
+                shape,
+            } => {
+                let reference = lower!(self.scalar(arena));
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                let payload = lower!(self.expr(value));
+                self.consume(arena);
+                self.consume(value);
+                let bytes = self.constant((self.program.width(value.ty) * 8) as i64);
+                let pointer = self.runtime_call(self.arena_try_alloc, &[handle, bytes]);
+                let failed = self.builder.ins().icmp_imm_s(IntCC::Equal, pointer, 0);
+                let ok = self.builder.create_block();
+                let error = self.builder.create_block();
+                let done = self.builder.create_block();
+                let result_width = self.program.width(expr.ty);
+                let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    (result_width * 8).max(1) as u32,
+                    3,
+                ));
+                let destination = self.builder.ins().stack_addr(I64, slot, 0);
+                self.builder.ins().brif(failed, error, &[], ok, &[]);
+                self.builder.switch_to_block(ok);
+                for (index, word) in payload.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        pointer,
+                        (index * 8) as i32,
+                    );
+                }
+                let tag = self.constant(shape.ok_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), pointer, destination, 8);
+                let zero = self.constant(0);
+                for index in 2..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(error);
+                let tag = self.constant(shape.err_tag as i64);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), tag, destination, 0);
+                for (index, word) in payload.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        destination,
+                        ((index + 1) * 8) as i32,
+                    );
+                }
+                let zero = self.constant(0);
+                for index in (payload.len() + 1)..result_width {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        zero,
+                        destination,
+                        (index * 8) as i32,
+                    );
+                }
+                self.builder.ins().jump(done, &[]);
+                self.builder.switch_to_block(done);
+                return Some(
+                    (0..result_width)
+                        .map(|index| {
+                            self.builder.ins().load(
+                                I64,
+                                ir::MemFlagsData::new(),
+                                destination,
+                                (index * 8) as i32,
+                            )
+                        })
+                        .collect(),
+                );
             }
             ExprKind::ArenaBoxRead(argument) => {
                 let reference = lower!(self.scalar(argument));
@@ -4428,8 +4665,9 @@ impl Generator<'_, '_> {
                 callbacks,
                 source,
                 target,
+                grow,
             } => {
-                let handle = lower!(self.scalar(vector));
+                let mut handle = lower!(self.scalar(vector));
                 let mut codes = Vec::with_capacity(callbacks.len());
                 for callback in callbacks {
                     codes.push(lower!(self.scalar(callback)));
@@ -4440,6 +4678,18 @@ impl Generator<'_, '_> {
                 }
                 let source_width = self.program.width(*source);
                 let target_width = self.program.width(*target);
+                let element_width = if *grow {
+                    // Grow or compact storage once, move elements safely, and
+                    // update the header before any callback runs. The loop then
+                    // reads and writes at the final stride in source order.
+                    let source_words = self.constant(source_width as i64);
+                    let target_words = self.constant(target_width as i64);
+                    handle =
+                        self.runtime_call(self.vec_restride, &[handle, source_words, target_words]);
+                    target_width
+                } else {
+                    source_width
+                };
                 let length = self
                     .builder
                     .ins()
@@ -4463,8 +4713,11 @@ impl Generator<'_, '_> {
                 let stride = self
                     .builder
                     .ins()
-                    .imul_imm_s(index, (source_width * 8) as i64);
+                    .imul_imm_s(index, (element_width * 8) as i64);
                 let address = self.builder.ins().iadd(handle, stride);
+                // The destination stride is the final width, but the value
+                // currently in the slot still has the source width until the
+                // first callback consumes it.
                 let mut current = self.load_words(address, 24, source_width);
                 for (code, callback) in codes.iter().zip(callbacks.iter()) {
                     let Type::Fn(id) = callback.ty else {

@@ -208,26 +208,36 @@ outstanding implementation item.
   non-owning so fallible allocation order is preserved. Arbitrary
   effectful interleaving remains rejected; the explicit chain chooses that
   order at source level.
-- [ ] Widening reuse with explicit allocation/capacity guarantees. **Partial:**
-  **Implemented for box payloads:** `Box.reuse_grow` checks the old owner and
-  payload obligations, destroys the old payload once, and either keeps the
-  allocation or grows/moves it under an explicit `{alloc, panic}` contract.
-  `#[noalloc]` rejects it; `Box.reuse` keeps its no-allocating-fallback
-  contract. Widening a vector element in place remains explicitly unsupported.
+- [x] Widening reuse with explicit allocation/capacity guarantees.
+  **Implemented for box payloads and vector elements:** `Box.reuse_grow`
+  checks the old owner and payload obligations, destroys the old payload once,
+  and either keeps the allocation or grows/moves it under an explicit
+  `{alloc, panic}` contract. `Vec.map_in_place_grow` and
+  `Vec.map_chain_in_place_grow` widen the final element layout under the same
+  explicit contract, reuse retained physical capacity when it fits, and
+  otherwise grow/move once with safe backwards relocation and unchanged
+  callback order, drop behavior, and final stride. `#[noalloc]` rejects all
+  three; plain `Box.reuse` and the non-growing map operations keep their
+  no-allocating-fallback contracts.
 - [ ] Custom allocators and lifetime-safe allocator ownership. **Partial, with
   a documented built-in allocator strategy:** `Arena`/`ArenaBox` with
   reference-retained regions, deterministic drop, function/task escape, and
-  checked provenance. Arbitrary user-defined allocator callbacks and FFI are
-  deliberately not implemented and are not claimed.
-- [ ] Fallible allocation/reuse with exact cleanup on all failure paths. **Partial:**
-  **Implemented:** `Box.try_new`, growth-capable `Box.try_reuse`, and
-  `Bytes.try_with_capacity`, and `Vec.try_reserve` return the conventional
-  checked `Result`; failures
-  preserve the old owner and, for `try_new`, the supplied payload. Real native
-  malloc refusal and a reference allocation budget are both exercised; no
-  process abort is disguised as `Err`. Vector refusal retains every element,
-  length, capacity, and owner obligation; physical-capacity and failure-budget
-  parity are tested. Fallible arena allocation remains outstanding.
+  checked provenance. `Arena.with_strategy` adds a user-defined, noncapturing
+  pure chunk-sizing policy stored as a code pointer in the region.
+  Arbitrary user-defined alloc/dealloc callbacks, an allocator trait, FFI, and
+  containers that own a general allocator value are deliberately not
+  implemented and are not claimed.
+- [x] Fallible allocation/reuse with exact cleanup on all failure paths.
+  **Implemented:** `Box.try_new`, growth-capable `Box.try_reuse`,
+  `Bytes.try_with_capacity`, `Vec.try_reserve`, and `Arena.try_alloc` return
+  the conventional checked `Result`; failures preserve the old owner, the
+  supplied payload, and (for arena/vector) the original region or vector state.
+  Real native malloc refusal and a reference allocation budget are both
+  exercised; no process abort is disguised as `Err`. Vector refusal retains
+  every element, length, capacity, and owner obligation; physical-capacity and
+  failure-budget parity are tested. A refused arena chunk request leaves the
+  region's references, chunks, and bump position untouched, and a request that
+  fits the current chunk spends no fallible attempt.
 - [x] Reproducible performance and physical-memory benchmarks.
   **Implemented:** `scripts/memory-bench.py` measures allocation counters,
   reference/native parity, wall time, maximum RSS, and native pool retention
@@ -398,3 +408,39 @@ type/effect integration) found three defects, now fixed with regressions:
 The reviewer found handler-depth restoration (`break`, `return`, `?`, nested
 calls), task isolation of dynamic frames, and vector element-origin unions
 sound within its probe budget.
+
+## Memory remainder checkpoint
+
+Compiler checkpoint `c78c444` implements the remaining executable memory-area
+gaps on top of `460ec58`:
+
+- `Arena.try_alloc` is fallible, returns the untouched payload on refusal, and
+  leaves region references, chunks, and bump state unchanged. Requests fitting
+  the current chunk spend no fallible attempt.
+- `Vec.map_in_place_grow` and `Vec.map_chain_in_place_grow` provide explicit
+  `{alloc, panic}` vector-element widening. They reuse retained physical
+  capacity when it fits, otherwise grow/move once; native relocation is
+  backwards for widening and forwards for narrowing, callbacks stay in forward
+  source order, owning elements are consumed once, and the final stride governs
+  later vector operations.
+- `Arena.with_strategy` stores a user-defined pure noncapturing
+  `fn(need, current) -> capacity` chunk-sizing policy as a code pointer.
+  This is an allocation policy, not a general allocator.
+- Growth-capable maps are excluded from automatic fusion.
+
+Local Linux x86-64 validation used `target/memory-c1616b8a` with debug
+information disabled and two Cargo jobs:
+
+- Full locked workspace suite: **893 passed, 0 failed** across 61 test binaries.
+- `cargo fmt --all -- --check`: passed.
+- All-targets Clippy with warnings denied: passed.
+- New tests cover fallible-arena success/refusal/region reuse, chunk-strategy
+  behavior and rejections, structured-payload preservation, vector widening
+  growth/reuse/order/drop/layout, chain widening, fusion exclusion, and
+  native/reference parity.
+
+The Boat gate for `c78c444` is parent-coordinated and was not run from this
+checkout. Arbitrary user alloc/dealloc callbacks, allocator traits, FFI, and
+container-owned general allocators remain absent; the custom-allocator backlog
+item stays unchecked, so this checkpoint does not claim that all memory work is
+complete.

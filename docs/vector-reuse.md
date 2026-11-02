@@ -246,17 +246,18 @@ source effect rows, never from whether reserve happened to avoid a reallocation.
 
 ## Explicit boundaries
 
-The memory-completion work adds a built-in `Arena` strategy, fallible box/byte
-allocation, and `Box.reuse_grow`; see
+The memory-completion work adds a built-in `Arena` strategy, fallible
+box/byte/arena allocation, `Box.reuse_grow`, and explicit vector-element
+widening through `Vec.map_in_place_grow` / `Vec.map_chain_in_place_grow`; see
 [memory-completion.md](memory-completion.md). Not implemented or guaranteed by
 this milestone:
 
 - a pluggable user-defined allocator or allocator callbacks (the `Arena`
-  strategy and the native [pool](allocator-pool.md) are built in);
-- fallible `Vec.reserve` specifically (fallible `Box.try_new`,
-  `Box.try_reuse`, and `Bytes.try_with_capacity` are available);
-- widening a vector element in place, including widening the final chain
-  result;
+  strategy and the native [pool](allocator-pool.md) are built in;
+  `Arena.with_strategy` only controls chunk capacity);
+- widening a vector element without an explicit growth-capable operation, or
+  automatic widening of `Vec.map_in_place` / `Vec.map_chain_in_place`;
+- a fallible `Vec.reserve` spelling (use `Vec.try_reserve`);
 - automatic flattening or general fusion of effectful maps and chains;
 - changing the evaluation order of existing callbacks or `map_in_place`;
 - in-place transformation of borrowed, shared, or aliased storage;
@@ -271,8 +272,12 @@ needs a wider final element or a different allocation must build a new vector.
 ## Allocator-level follow-up
 
 The bounded native pool is now implemented in [allocator-pool.md](allocator-pool.md),
-and the source-level `Arena` strategy plus fallible allocation are described in
-[memory-completion.md](memory-completion.md). Neither relaxes the rules above:
-the stable diagnostics format, balanced deallocation counts, non-increasing
-element width, reverse element destruction, checked negative/overflow reserve,
-and reference/native parity remain required.
+and the source-level `Arena` strategy, user chunk-sizing policy, and fallible
+allocation are described in [memory-completion.md](memory-completion.md).
+Neither relaxes the rules above: the stable diagnostics format, balanced
+deallocation counts, non-increasing element width for the non-growing
+operations, reverse element destruction, checked negative/overflow reserve, and
+reference/native parity remain required. The explicit
+`Vec.map_in_place_grow`/`Vec.map_chain_in_place_grow` operations are the
+sanctioned way to widen the final element layout; they preserve forward
+callback order and use safe element relocation or one explicit growth.
