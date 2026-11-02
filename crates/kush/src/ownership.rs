@@ -4501,6 +4501,7 @@ fn expr_live(
         | ExprKind::Peek(slot)
         | ExprKind::Borrow(slot)
         | ExprKind::Move(slot) => add_use(&mut live, *slot, views),
+        ExprKind::Erased(_) => {}
         ExprKind::Assign(slot, value) => {
             let mut after = live.clone();
             after.remove(slot);

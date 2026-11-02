@@ -1442,7 +1442,18 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
         if f.closure.is_some() {
             sig.params.push(AbiParam::new(I64));
         }
-        for local in &f.locals[captures..f.parameters] {
+        for (index, local) in f.locals[captures..f.parameters].iter().enumerate() {
+            let slot = captures + index;
+            if f.parameter_grades
+                .get(slot)
+                .copied()
+                .flatten()
+                .is_some_and(Grade::is_zero)
+            {
+                // Grade-zero parameter: the argument is evaluated at the call
+                // site but has no physical ABI slot.
+                continue;
+            }
             sig.params
                 .extend((0..program.width(local.ty)).map(|_| AbiParam::new(I64)));
         }
@@ -1614,6 +1625,14 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             }
         }
         for i in captures..f.parameters {
+            if f.parameter_grades
+                .get(i)
+                .copied()
+                .flatten()
+                .is_some_and(Grade::is_zero)
+            {
+                continue;
+            }
             let width = g.variables[i].len();
             let values = g.builder.block_params(entry)[offset..offset + width].to_vec();
             g.assign(i, &values);
@@ -2954,6 +2973,12 @@ impl Generator<'_, '_> {
     fn expression(&mut self, expr: &Expr) -> Option<Words> {
         let scalar = match &expr.kind {
             ExprKind::Constant(n) => self.constant(*n),
+            // Synthesized adapter placeholder for a physically erased
+            // parameter position. The call's ABI drops these words.
+            ExprKind::Erased(ty) => {
+                let width = self.program.width(*ty);
+                return Some(vec![self.constant(0); width]);
+            }
             ExprKind::FnValue { function, captures } => {
                 let reference = self
                     .module
@@ -3031,8 +3056,11 @@ impl Generator<'_, '_> {
                 if once {
                     values.push(callable[1]);
                 }
-                for argument in arguments {
-                    values.extend(lower!(self.expr(argument)));
+                for (index, argument) in arguments.iter().enumerate() {
+                    let words = lower!(self.expr(argument));
+                    if !signature.parameter_erased(index) {
+                        values.extend(words);
+                    }
                 }
                 self.consume(callee);
                 for argument in arguments {
@@ -4268,9 +4296,28 @@ impl Generator<'_, '_> {
                 return Some(self.builder.block_params(join).to_vec());
             }
             ExprKind::Call(target, args) => {
+                let erased_parameters = match target {
+                    Target::Function(index) => {
+                        let function = &self.program.functions[*index];
+                        (0..args.len())
+                            .map(|position| {
+                                function
+                                    .parameter_grades
+                                    .get(position)
+                                    .copied()
+                                    .flatten()
+                                    .is_some_and(Grade::is_zero)
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                    _ => Vec::new(),
+                };
                 let mut values = Vec::new();
-                for arg in args {
-                    values.extend(lower!(self.expr(arg)));
+                for (position, arg) in args.iter().enumerate() {
+                    let words = lower!(self.expr(arg));
+                    if erased_parameters.get(position).copied() != Some(true) {
+                        values.extend(words);
+                    }
                 }
                 for arg in args {
                     self.consume(arg);

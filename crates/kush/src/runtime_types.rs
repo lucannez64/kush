@@ -433,6 +433,24 @@ pub(crate) struct FunctionType {
     pub linear: bool,
     pub borrows: BorrowSig,
 }
+/// Whether a usage grade physically erases the value it annotates. `@[0]` and
+/// any custom algebra's additive identity are erasure annotations.
+pub(crate) fn grade_erases(grade: Option<Grade>) -> bool {
+    grade.is_some_and(Grade::is_zero)
+}
+impl FunctionType {
+    /// Whether logical parameter `index` has no physical ABI slot. A grade-zero
+    /// parameter is still evaluated at the source call site and remains in the
+    /// logical parameter list, but it is absent from the calling convention.
+    pub(crate) fn parameter_erased(&self, index: usize) -> bool {
+        grade_erases(self.parameter_grades.get(index).copied().flatten())
+    }
+    /// Whether the callable result is physically erased. A `@[0]` result has no
+    /// returned payload; callers observe `Unit`.
+    pub(crate) fn result_erased(&self) -> bool {
+        grade_erases(self.result_grade)
+    }
+}
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ResultShape {
     pub ok_tag: usize,
@@ -1041,6 +1059,40 @@ impl<'a> Types<'a> {
     }
     pub fn width(&self, ty: Type) -> usize {
         width(&self.enums, &self.unions, &self.function_types, ty)
+    }
+    /// Whether dropping this value can release storage or a linear obligation.
+    /// Mirrors the executable checker's ownership predicate for the checked
+    /// runtime type graph. Depth is bounded so binary recursive data cannot
+    /// cause unbounded work.
+    pub(crate) fn owns(&self, ty: Type) -> bool {
+        fn go(types: &Types<'_>, ty: Type, depth: usize) -> bool {
+            match ty {
+                Type::Box(p) | Type::Vec(p) if depth < 64 => {
+                    go(types, types.pointees[p], depth + 1)
+                }
+                Type::Bytes
+                | Type::String
+                | Type::Box(_)
+                | Type::Vec(_)
+                | Type::Once(_)
+                | Type::Task(_) => true,
+                Type::Enum(id) | Type::Variants(id, _) if depth < 64 => {
+                    types.enums[id].linear
+                        || types.enums[id].variants.iter().any(|variant| {
+                            variant
+                                .fields
+                                .iter()
+                                .any(|field| go(types, *field, depth + 1))
+                        })
+                }
+                Type::Union(id) if depth < 64 => types.unions[id]
+                    .members
+                    .iter()
+                    .any(|member| go(types, *member, depth + 1)),
+                _ => false,
+            }
+        }
+        go(self, ty, 0)
     }
     /// Intern a checked callable signature. The `once` flag is part of the
     /// identity because it changes representation (one word vs two) and the
@@ -1653,6 +1705,12 @@ impl<'a> Types<'a> {
                         })
                         .transpose()?,
                 );
+                if grades.last().copied().flatten().is_some_and(Grade::is_zero) && self.owns(ty) {
+                    return Err(Diagnostic::new(
+                        parameter.ty.span,
+                        "a grade-zero arrow parameter would silently discard an owning/linear argument; erase only copyable parameters",
+                    ));
+                }
                 lowered.push(ty);
             }
             let result_ast = self.expand_result_alias(result)?;
@@ -3819,6 +3877,15 @@ fn data_uses_const(
 /// an unbounded number of uses, so they are only compatible with an unbounded
 /// target.
 fn grade_contract_compatible(source: Option<Grade>, target: Option<Grade>) -> bool {
+    // A source parameter graded `@[0]` is physically absent and never observed
+    // by the callee. It is safe to use that function where a stricter usage
+    // contract is expected: the extra argument supplied by callers is
+    // evaluated for effects and then discarded. The reverse direction is not
+    // safe, because the target caller would supply no value for a parameter
+    // the source function observes.
+    if source.is_some_and(Grade::is_zero) {
+        return true;
+    }
     match (source, target) {
         (_, None) => true,
         (_, Some(target)) if target.is_many() => true,

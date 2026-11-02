@@ -465,6 +465,12 @@ pub(crate) enum ExprKind {
         input: ResultShape,
         output: ResultShape,
     },
+    /// A placeholder for a logical argument whose parameter is physically
+    /// erased by `@[0]`. It is only ever used as an argument in a synthesized
+    /// adapter where the adapter has no source value to forward. Both backends
+    /// produce a dummy zero word and the callee's ABI erases the position, so
+    /// the expression is never observed, stored, or passed.
+    Erased(Type),
     Local(usize),
     Move(usize),
     Borrow(usize),
@@ -726,6 +732,13 @@ struct Signature {
     /// Associated constants of the owning impl, already evaluated for this
     /// instance's specialization. `Self::NAME` resolves here.
     associated_consts: BTreeMap<String, ConstValue>,
+}
+impl Signature {
+    /// Whether logical runtime parameter `index` is physically erased by a
+    /// grade-zero contract.
+    fn parameter_erased(&self, index: usize) -> bool {
+        crate::runtime_types::grade_erases(self.parameter_grades.get(index).copied().flatten())
+    }
 }
 /// Split `T @[grade]` into the type and its grade expression.
 fn split_grade(ty: &ast::Type) -> (&ast::Type, Option<&ast::Type>) {
@@ -2551,17 +2564,21 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     checker.locals[slot].grade = *grade;
                     checker.locals[slot].linear =
                         grade.is_some_and(Grade::is_one) && checker.owned_type(*ty);
-                    checker.validate_grade(*grade, *ty, p.ty.span)?;
+                    checker.validate_grade(*grade, *ty, p.ty.span, false)?;
                     let id = resolution.binder(p.span).unwrap();
                     checker.admit_scalar_index(id, *ty, p.span)?;
                 }
             }
             let body = checker.block(f.body.as_ref().unwrap(), Some(sig.result))?;
-            checker.expect(body.ty, sig.result, sig.span)?;
+            if body.ty != Type::Never
+                && !(sig.result_grade.is_some_and(Grade::is_zero) && body.ty == Type::Unit)
+            {
+                checker.expect(body.ty, sig.result, sig.span)?;
+            }
             if body.ty != Type::Never
                 && let Some(tail) = &body.tail
                 && checker.observes_copyable_result(tail)
-                && !checker.transfers_copyable_result()
+                && !checker.transfers_copyable_result_from(tail)
             {
                 return Err(Diagnostic::new(
                     tail.span,
@@ -9007,12 +9024,14 @@ impl Checker<'_, '_> {
             let signature = self.functions.signatures[index].clone();
             if signature.parameters.len() != parameters.len()
                 || signature.parameters[1..] != parameters[1..]
+                || signature.parameter_grades[1..] != parameter_grades[1..]
                 || signature.result != result
+                || signature.result_grade != result_grade
             {
                 return Err(Diagnostic::new(
                     span,
                     format!(
-                        "object member '{}' has a different ABI for method '{name}'; object-safe methods must have identical non-receiver parameter and result types across impls",
+                        "object member '{}' has a different ABI for method '{name}'; object-safe methods must have identical non-receiver parameter and result types and usage contracts across impls",
                         self.types.name(*member)
                     ),
                 ));
@@ -9047,12 +9066,25 @@ impl Checker<'_, '_> {
             };
             let mut call_arguments = vec![receiver_argument];
             for (slot, ty) in parameters.iter().enumerate().skip(1) {
-                call_arguments.push(Expr {
-                    kind: ExprKind::Local(slot),
-                    ty: *ty,
-                    span,
-                    resource: None,
-                });
+                call_arguments.push(
+                    if crate::runtime_types::grade_erases(parameter_grades[slot]) {
+                        // The dispatcher's own parameter is physically absent;
+                        // never read its unmaterialized local.
+                        Expr {
+                            kind: ExprKind::Erased(*ty),
+                            ty: *ty,
+                            span,
+                            resource: None,
+                        }
+                    } else {
+                        Expr {
+                            kind: ExprKind::Local(slot),
+                            ty: *ty,
+                            span,
+                            resource: None,
+                        }
+                    },
+                );
             }
             arms.push(Arm {
                 pattern: Pattern::Type {
@@ -10844,13 +10876,35 @@ impl Checker<'_, '_> {
     /// Whether moving between these arrow types changes the word
     /// representation of an argument or result. Such conversions require a
     /// checked adapter; same-layout variance needs no runtime work.
+    ///
+    /// Grade-zero parameters are physically absent. A `@[0]` source parameter
+    /// used where a non-erased contract is expected (or the reverse) therefore
+    /// changes the calling convention even when the logical parameter lists
+    /// are identical. Treating that as a raw compatible cast would shift every
+    /// later argument.
     fn arrow_rep_change(&self, source: &FunctionType, target: &FunctionType) -> bool {
-        target
-            .parameters
-            .iter()
-            .zip(&source.parameters)
-            .any(|(target, source)| !self.same_layout(*target, *source))
-            || !self.same_layout(source.result, target.result)
+        if source.parameters.len() != target.parameters.len() {
+            return true;
+        }
+        let mut rep_change = false;
+        for index in 0..source.parameters.len() {
+            let source_erased = source.parameter_erased(index);
+            let target_erased = target.parameter_erased(index);
+            if source_erased != target_erased
+                || (!source_erased
+                    && !self.same_layout(source.parameters[index], target.parameters[index]))
+            {
+                rep_change = true;
+            }
+        }
+        let source_result_erased = crate::runtime_types::grade_erases(source.result_grade);
+        let target_result_erased = crate::runtime_types::grade_erases(target.result_grade);
+        if source_result_erased != target_result_erased
+            || (!source_result_erased && !self.same_layout(source.result, target.result))
+        {
+            rep_change = true;
+        }
+        rep_change
     }
     /// Coerce a function value to a supertype. Pure-to-once is a null-env
     /// padding operation with no allocation. Representation-changing variance
@@ -11028,6 +11082,19 @@ impl Checker<'_, '_> {
             .zip(&source_signature.parameters)
             .enumerate()
         {
+            if target.parameter_erased(index) || source_signature.parameter_erased(index) {
+                // One side of this conversion has no physical slot. The
+                // adapter must not read an unmaterialized local or treat the
+                // value as ABI-compatible; the erased position is evaluated as
+                // a dummy and dropped by the callee's own erasure.
+                arguments.push(Expr {
+                    kind: ExprKind::Erased(*source_parameter),
+                    ty: *source_parameter,
+                    span,
+                    resource: None,
+                });
+                continue;
+            }
             let argument = Expr {
                 kind: ExprKind::Local(index),
                 ty: *target_parameter,
@@ -11108,6 +11175,19 @@ impl Checker<'_, '_> {
             .zip(&source_signature.parameters)
             .enumerate()
         {
+            if target.parameter_erased(index) || source_signature.parameter_erased(index) {
+                // One side of this conversion has no physical slot. The
+                // adapter must not read an unmaterialized local or treat the
+                // value as ABI-compatible; the erased position is evaluated as
+                // a dummy and dropped by the callee's own erasure.
+                arguments.push(Expr {
+                    kind: ExprKind::Erased(*source_parameter),
+                    ty: *source_parameter,
+                    span,
+                    resource: None,
+                });
+                continue;
+            }
             let argument = Expr {
                 kind: ExprKind::Local(index),
                 ty: *target_parameter,
@@ -11175,6 +11255,15 @@ impl Checker<'_, '_> {
         for (index, (target_parameter, source_parameter)) in
             target.parameters.iter().zip(&source.parameters).enumerate()
         {
+            if target.parameter_erased(index) || source.parameter_erased(index) {
+                arguments.push(Expr {
+                    kind: ExprKind::Erased(*source_parameter),
+                    ty: *source_parameter,
+                    span,
+                    resource: None,
+                });
+                continue;
+            }
             let argument = Expr {
                 kind: ExprKind::Local(index + 1),
                 ty: *target_parameter,
@@ -11978,24 +12067,24 @@ impl Checker<'_, '_> {
                     let id = self.resolution.binder(pattern.span).unwrap();
                     self.admit_scalar_index(id, ty, pattern.span)?;
                     self.facts.define(slot, &value);
-                    let must_use = self.observes_copyable_result(&value);
-                    if must_use
+                    let must_use = self.copyable_result_grade(&value);
+                    if let Some(required) = must_use
                         && let Some(annotation) = grade
-                        && !annotation.is_one()
+                        && annotation != required
                     {
                         return Err(Diagnostic::new(
                             pattern.span,
                             format!(
-                                "a copyable result with the must-use `@[1]` contract cannot be bound to a local graded @[{annotation}]; bind it ungraded or as @[1]"
+                                "a copyable result with the must-use @[{required}] contract cannot be bound to a local graded @[{annotation}]; bind it ungraded or as @[{required}]"
                             ),
                         ));
                     }
-                    self.locals[slot].grade = grade.or(must_use.then_some(Grade::Finite(1)));
+                    self.locals[slot].grade = grade.or(must_use);
                     self.locals[slot].linear = self.value_moves_linear(&value)
                         || (self.locals[slot].grade.is_some_and(Grade::is_one)
                             && self.owned_type(ty));
                     if !diverges {
-                        self.validate_grade(grade, ty, pattern.span)?;
+                        self.validate_grade(grade, ty, pattern.span, true)?;
                     }
                     checked.push(Statement::Let(slot, value));
                 }
@@ -12092,50 +12181,66 @@ impl Checker<'_, '_> {
     /// a call argument, aggregate field, read, match scrutinee, or `?` operand.
     /// It is never an owning/linear move, even though it uses the same literal
     /// `@[1]` surface grade.
-    fn copyable_result_obligation(&self, expr: &Expr) -> bool {
+    fn copyable_result_grade(&self, expr: &Expr) -> Option<Grade> {
         match &expr.kind {
-            ExprKind::Call(Target::Function(index), _) => self
-                .functions
-                .signatures
-                .get(*index)
-                .is_some_and(|signature| {
-                    signature.result_grade.is_some_and(Grade::is_one)
-                        && !self.owned_type(signature.result)
-                }),
+            ExprKind::Call(Target::Function(index), _) => {
+                self.functions.signatures.get(*index).and_then(|signature| {
+                    signature
+                        .result_grade
+                        .filter(|grade| grade.is_one() && !self.owned_type(signature.result))
+                })
+            }
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
                 Type::Fn(id) | Type::Once(id) => {
-                    self.types.function_types.get(id).is_some_and(|signature| {
-                        signature.result_grade.is_some_and(Grade::is_one)
-                            && !self.owned_type(signature.result)
+                    self.types.function_types.get(id).and_then(|signature| {
+                        signature
+                            .result_grade
+                            .filter(|grade| grade.is_one() && !self.owned_type(signature.result))
                     })
                 }
-                _ => false,
+                _ => None,
             },
-            ExprKind::Coerce { value, .. } => self.copyable_result_obligation(value),
+            ExprKind::Coerce { value, .. } => self.copyable_result_grade(value),
             ExprKind::Block(block) => block
                 .tail
                 .as_ref()
-                .is_some_and(|tail| self.copyable_result_obligation(tail)),
-            ExprKind::If(_, yes, no) => {
-                (yes.ty != Type::Never
-                    && yes
-                        .tail
+                .and_then(|tail| self.copyable_result_grade(tail)),
+            ExprKind::If(_, yes, no) => (yes.ty != Type::Never)
+                .then(|| {
+                    yes.tail
                         .as_ref()
-                        .is_some_and(|tail| self.copyable_result_obligation(tail)))
-                    || (no.ty != Type::Never
-                        && no
-                            .tail
-                            .as_ref()
-                            .is_some_and(|tail| self.copyable_result_obligation(tail)))
-            }
-            ExprKind::Match(_, arms) => arms.iter().any(|arm| {
-                arm.body.ty != Type::Never && self.copyable_result_obligation(&arm.body)
+                        .and_then(|tail| self.copyable_result_grade(tail))
+                })
+                .flatten()
+                .or_else(|| {
+                    (no.ty != Type::Never)
+                        .then(|| {
+                            no.tail
+                                .as_ref()
+                                .and_then(|tail| self.copyable_result_grade(tail))
+                        })
+                        .flatten()
+                }),
+            ExprKind::Match(_, arms) => arms.iter().find_map(|arm| {
+                (arm.body.ty != Type::Never)
+                    .then(|| self.copyable_result_grade(&arm.body))
+                    .flatten()
             }),
             ExprKind::Loop(body) => crate::ownership::loop_break_values(body)
                 .into_iter()
-                .any(|value| self.copyable_result_obligation(value)),
-            _ => false,
+                .find_map(|value| self.copyable_result_grade(value)),
+            // A copyable `@[1]` task result is delivered as `Completed` on both
+            // the normal and cancellation paths. Joining the (linear) handle
+            // produces a must-use `TaskExit<T>`; a scope returns the must-use
+            // value directly.
+            ExprKind::TaskJoin { obligation, .. } | ExprKind::TaskScope { obligation, .. } => {
+                (*obligation && !self.owned_type(expr.ty)).then_some(Grade::ONE)
+            }
+            _ => None,
         }
+    }
+    fn copyable_result_obligation(&self, expr: &Expr) -> bool {
+        self.copyable_result_grade(expr).is_some()
     }
     /// Whether a returned value would observe a copyable must-use obligation.
     /// An owning `@[1]` result is a move instead and is handled by the
@@ -12147,8 +12252,13 @@ impl Checker<'_, '_> {
     /// the current function result. Only a matching `@[1]` copyable result
     /// contract can carry it; otherwise the caller would receive an ordinary
     /// value with no obligation.
-    fn transfers_copyable_result(&self) -> bool {
-        self.result_grade.is_some_and(Grade::is_one) && !self.owned_type(self.result)
+    /// Whether a returned must-use obligation matches the current result
+    /// contract. Exact grade equality is required: a custom algebra's `one` is
+    /// not silently equated with the builtin exactly-one observation.
+    fn transfers_copyable_result_from(&self, expr: &Expr) -> bool {
+        !self.owned_type(self.result)
+            && self.result_grade.is_some()
+            && self.result_grade == self.copyable_result_grade(expr)
     }
     /// Propagate binding obligations before lambda types and capture slots are
     /// elaborated. The ownership pass independently validates consumption later.
@@ -12418,6 +12528,50 @@ impl Checker<'_, '_> {
     }
     fn expr(&mut self, expr: &ast::Expr) -> Result<Expr> {
         self.expr_expected(expr, None)
+    }
+    /// Whether an expected type is the enclosing function's erased result.
+    /// Such a position accepts `Unit` as the erased value in addition to the
+    /// declared copyable payload type.
+    fn erased_result_context(&self, expected: Option<Type>) -> bool {
+        self.result_grade.is_some_and(Grade::is_zero) && expected == Some(self.result)
+    }
+    /// Check a value in a possible erased-result position. A nested call to
+    /// another erased-result function produces `Unit`; returning it through an
+    /// erased result is well-typed and carries no payload. Every other value is
+    /// checked against the declared payload type normally.
+    fn expr_expected_result(&mut self, expr: &ast::Expr, expected: Option<Type>) -> Result<Expr> {
+        if !self.erased_result_context(expected) {
+            return self.expr_expected(expr, expected);
+        }
+        let value = self.expr(expr)?;
+        if matches!(value.ty, Type::Unit | Type::Never) {
+            return Ok(value);
+        }
+        let span = value.span;
+        self.coerce(value, self.result, span)
+    }
+    /// Erase an expression's value in an erased-result position while keeping
+    /// its effects and cleanup. `Drop` is a checked no-op for the copyable
+    /// payload types admitted by `@[0]`.
+    fn erase_value(&mut self, value: Expr, span: Span) -> Expr {
+        if matches!(value.ty, Type::Unit | Type::Never) {
+            return value;
+        }
+        Expr {
+            kind: ExprKind::Drop(Box::new(value)),
+            ty: Type::Unit,
+            span,
+            resource: None,
+        }
+    }
+    fn erase_block_value(&mut self, mut block: Block, span: Span) -> Block {
+        if matches!(block.ty, Type::Unit | Type::Never) {
+            return block;
+        }
+        let tail = block.tail.take().expect("non-unit block has a tail");
+        block.tail = Some(Box::new(self.erase_value(*tail, span)));
+        block.ty = Type::Unit;
+        block
     }
     fn expr_expected(&mut self, expr: &ast::Expr, expected: Option<Type>) -> Result<Expr> {
         self.nested(expr.span, |c| {
@@ -13651,8 +13805,12 @@ impl Checker<'_, '_> {
                         };
                         c.coerce(unit, c.result, span)?
                     };
-                    c.expect(value.ty, c.result, span)?;
-                    if c.observes_copyable_result(&value) && !c.transfers_copyable_result() {
+                    if !(c.erased_result_context(Some(c.result)) && value.ty == Type::Unit) {
+                        c.expect(value.ty, c.result, span)?;
+                    }
+                    if c.observes_copyable_result(&value)
+                        && !c.transfers_copyable_result_from(&value)
+                    {
                         return Err(Diagnostic::new(
                             value.span,
                             "this returns a copyable result with the must-use `@[1]` contract through an ungraded result; annotate the function result as '@[1]' so every caller inherits exactly one observation, or observe the value here",
@@ -14171,7 +14329,7 @@ impl Checker<'_, '_> {
                     "a function value cannot take an owner reference or &str text-view parameter; slice views and records with borrowed slice fields are supported",
                 ));
             }
-            self.validate_grade(grade, ty, parameter.ty.span)?;
+            self.validate_grade(grade, ty, parameter.ty.span, false)?;
             parameters.push(ty);
             parameter_grades.push(grade);
         }
@@ -14610,7 +14768,7 @@ impl Checker<'_, '_> {
             if body.ty != Type::Never
                 && let Some(tail) = &body.tail
                 && self.observes_copyable_result(tail)
-                && !self.transfers_copyable_result()
+                && !self.transfers_copyable_result_from(tail)
             {
                 return Err(Diagnostic::new(
                     tail.span,
@@ -15232,20 +15390,43 @@ impl Checker<'_, '_> {
         }
     }
     /// Reject grades that would duplicate or discard owning/linear storage.
-    fn validate_grade(&self, grade: Option<Grade>, ty: Type, span: Span) -> Result<()> {
+    fn validate_grade(
+        &self,
+        grade: Option<Grade>,
+        ty: Type,
+        span: Span,
+        allow_affine_drop: bool,
+    ) -> Result<()> {
         if !self.owned_type(ty) {
             return Ok(());
         }
         match grade {
             None => Ok(()),
             Some(grade) if grade.is_one() => Ok(()),
-            Some(grade) if grade.is_zero() => Err(Diagnostic::new(
-                span,
-                format!(
-                    "grade @[0] would silently discard the owning/linear value {}; consume it with grade @[1] or leave it ungraded",
-                    self.types.name(ty)
-                ),
-            )),
+            Some(grade) if grade.is_zero() => {
+                if self.linear_type(ty) {
+                    Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "grade @[0] would silently discard the linear obligation of {}; consume it with grade @[1] or leave it ungraded",
+                            self.types.name(ty)
+                        ),
+                    ))
+                } else if allow_affine_drop {
+                    // Affine owned storage may be initialized and dropped
+                    // eagerly: the binding itself is not materialized, but the
+                    // value is destroyed exactly once at the binding site.
+                    Ok(())
+                } else {
+                    Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "grade @[0] would silently discard the owning/linear value {}; consume it with grade @[1] or leave it ungraded",
+                            self.types.name(ty)
+                        ),
+                    ))
+                }
+            }
             Some(grade) if grade.is_many() => Err(Diagnostic::new(
                 span,
                 format!(
@@ -19474,6 +19655,18 @@ impl Checker<'_, '_> {
             ));
         }
         let parameter = signature.parameters[0];
+        if signature.parameter_erased(0) {
+            return Err(Diagnostic::new(
+                callback.span,
+                "Vec.map_in_place cannot use a callback whose element parameter is graded @[0]; the transform still passes each element to the callback",
+            ));
+        }
+        if signature.result_erased() {
+            return Err(Diagnostic::new(
+                callback.span,
+                "Vec.map_in_place cannot use a callback whose result is graded @[0]; the transform stores each returned element",
+            ));
+        }
         if !self.subtype(source, parameter) || !self.same_layout(source, parameter) {
             return Err(Diagnostic::new(
                 callback.span,
@@ -19733,6 +19926,14 @@ impl Checker<'_, '_> {
             ));
         }
         let parameter = signature.parameters[0];
+        if signature.parameter_erased(0) || signature.result_erased() {
+            return Err(Diagnostic::new(
+                callback.span,
+                format!(
+                    "Vec.map_chain_in_place {position} callback cannot erase its element parameter or result; every element is observed and every result is stored"
+                ),
+            ));
+        }
         if !self.subtype(input, parameter) || !self.same_layout(input, parameter) {
             return Err(Diagnostic::new(
                 callback.span,

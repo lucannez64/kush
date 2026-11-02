@@ -1897,6 +1897,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     }
     fn call_with(&mut self, index: usize, captures: Vec<Value>, args: Vec<Value>) -> Result<Value> {
         let f = &self.program.functions[index];
+        let erased_result = f.result_grade.is_some_and(Grade::is_zero);
         if self.depth >= 128 {
             return Err(Diagnostic::new(
                 f.span,
@@ -1909,18 +1910,50 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             locals: vec![Value::Scalar(0); f.locals.len()],
             resources: vec![None; f.resources.len()],
         };
-        let initial = captures.len() + args.len();
-        frame.locals[..initial]
-            .clone_from_slice(&captures.into_iter().chain(args).collect::<Vec<_>>());
-        for slot in 0..initial {
+        frame.locals[..captures.len()].clone_from_slice(&captures);
+        for slot in 0..captures.len() {
             self.local_active(slot, &mut frame);
+        }
+        let mut args = args.into_iter();
+        for slot in captures.len()..f.parameters {
+            if f.parameter_grades
+                .get(slot)
+                .copied()
+                .flatten()
+                .is_some_and(Grade::is_zero)
+            {
+                // Grade-zero parameter: no ABI argument exists and its local
+                // slot is never observed. Leave it as the dummy scalar.
+                continue;
+            }
+            let Some(value) = args.next() else {
+                return Err(Diagnostic::new(
+                    f.span,
+                    "internal error: missing physical argument for a call",
+                ));
+            };
+            frame.locals[slot] = value;
+            self.local_active(slot, &mut frame);
+        }
+        if args.next().is_some() {
+            return Err(Diagnostic::new(
+                f.span,
+                "internal error: too many physical arguments for a call",
+            ));
         }
         let result = self.block(&f.body, &mut frame);
         self.depth -= 1;
         let flow = result?;
         self.cleanup(&mut frame)?;
         Ok(match flow {
-            Flow::Value(v) | Flow::Return(v) => v,
+            Flow::Value(v) | Flow::Return(v) => {
+                if erased_result {
+                    self.drop_value(v)?;
+                    Value::Scalar(0)
+                } else {
+                    v
+                }
+            }
             Flow::Break(_) | Flow::Continue => unreachable!("loop exits are checked"),
         })
     }
@@ -1987,6 +2020,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         let panic = || Diagnostic::new(expr.span, "panic: checked arithmetic failed");
         let result = match &expr.kind {
             ExprKind::Constant(n) => Value::Scalar(*n),
+            // Only synthesized adapters use this placeholder, and the callee's
+            // erased parameter position drops it. It is never observable.
+            ExprKind::Erased(_) => Value::Scalar(0),
             ExprKind::FnValue { function, captures } => {
                 if captures.is_empty() {
                     Value::Function {
@@ -2031,6 +2067,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         "internal error: indirect call received a non-callable value",
                     ));
                 };
+                let erased: Vec<bool> = match callee.ty {
+                    Type::Fn(id) | Type::Once(id) => (0..values.len())
+                        .map(|position| self.program.function_types[id].parameter_erased(position))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let values = values
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(position, _)| erased.get(*position).copied() != Some(true))
+                    .map(|(_, value)| value)
+                    .collect::<Vec<_>>();
                 match environment {
                     None => self.call(function, values)?,
                     Some(environment) => {
@@ -2771,7 +2819,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Target::DynArray(op, element) => {
                         self.dyn_array_call(*op, *element, values, expr.span)?
                     }
-                    Target::Function(index) => self.call(*index, values)?,
+                    Target::Function(index) => {
+                        let function = &self.program.functions[*index];
+                        let mut physical = Vec::with_capacity(values.len());
+                        for (position, value) in values.into_iter().enumerate() {
+                            if !function
+                                .parameter_grades
+                                .get(position)
+                                .copied()
+                                .flatten()
+                                .is_some_and(Grade::is_zero)
+                            {
+                                physical.push(value);
+                            }
+                        }
+                        self.call(*index, physical)?
+                    }
                     Target::Panic => return Err(panic()),
                     Target::Print => {
                         writeln!(self.output, "{}", values[0].scalar()).map_err(|e| {
