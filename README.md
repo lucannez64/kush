@@ -185,6 +185,32 @@ cargo test --workspace --offline
 cargo clippy --workspace --all-targets --offline -- -D warnings
 ```
 
+## Project workflow
+
+A local project uses a documented `Kush.toml` with an entry point and local path
+dependencies, a deterministic `Kush.lock`, project-level check/build/run/test
+commands, per-test process isolation and filtering, and a conservative formatter
+that preserves comments and strings:
+
+```sh
+kush new hello
+cd hello
+kush check
+kush run
+kush test
+kush fmt --check
+```
+
+Single-file commands are unchanged. See [project workflow, tests, formatting,
+and editor support](docs/projects.md) for the manifest and module layout,
+lockfile rules, `#[test]`/`std.test` assertions, `--locked`, program-argument
+forwarding after `--`, formatter limits, the grammar-only VS Code highlighting
+extension, and the validated-but-pending native bridge manifest fields. There is
+no language server or go-to-definition yet.
+
+The standalone [project demo](examples/project-demo) exercises a local module, a
+local dependency, tests, and formatting.
+
 For dependency-first development priorities, see the [foundation roadmap](docs/foundation-roadmap.md).
 The [streaming copy](examples/stream-copy.kush) example uses `IO.read_chunk` and
 `Bytes.clear` to reuse one buffer for input larger than its capacity.

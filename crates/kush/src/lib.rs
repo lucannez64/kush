@@ -18,6 +18,7 @@ pub mod natural;
 mod ownership;
 pub mod parser;
 pub mod program;
+pub mod project;
 pub mod resolve;
 mod runtime_types;
 pub mod source;

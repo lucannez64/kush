@@ -1,0 +1,30 @@
+module std.test;
+
+/// Panics when `condition` is false. The test runner reports the test name and
+/// the captured stderr, which contains the native panic diagnostic.
+pub fn is_true(condition: Bool) -> Unit ! {panic} {
+    if condition { () } else { panic() }
+}
+
+/// Panics when `condition` is true.
+pub fn is_false(condition: Bool) -> Unit ! {panic} {
+    is_true(!condition)
+}
+
+/// Prints the actual and expected values before panicking so a failed test has
+/// readable values even though the runtime panic message itself is generic.
+pub fn equal_i64(actual: i64, expected: i64) -> Unit ! {io, panic} {
+    if actual == expected {
+        ()
+    } else {
+        print_i64(actual);
+        print_i64(expected);
+        panic()
+    }
+}
+
+/// Panics unconditionally. Use this for a deliberate test failure; the runner
+/// attributes it to the enclosing test function.
+pub fn fail() -> Unit ! {panic} {
+    panic()
+}

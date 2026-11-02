@@ -1,0 +1,13 @@
+module project_demo.greeting;
+
+/// Prints the demo greeting and a deterministic number. Kept in a sibling
+/// module so the example exercises the project module index rather than a
+/// single-file path.
+pub fn greet(number: i64) -> Unit ! {io, panic} {
+    print_i64(value(number));
+}
+
+/// Pure helper shared by the application and its tests.
+pub fn value(number: i64) -> i64 ! {panic} {
+    100 + number
+}

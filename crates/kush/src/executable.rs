@@ -4021,7 +4021,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         let function = matches!(declaration.item.kind, ast::ItemKind::Function(_));
         for attribute in &declaration.attributes {
             let valid = if function {
-                matches!(attribute.kind.as_str(), "noalloc" | "nosuspend")
+                matches!(attribute.kind.as_str(), "noalloc" | "nosuspend" | "test")
             } else {
                 attribute.kind == "linear"
             };
@@ -4029,7 +4029,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 return Err(Diagnostic::new(
                     attribute.span,
                     if function {
-                        "functions support the #[noalloc] and #[nosuspend] contracts"
+                        "functions support the #[noalloc], #[nosuspend], and #[test] attributes"
                     } else {
                         "data declarations support only the #[linear] attribute"
                     },

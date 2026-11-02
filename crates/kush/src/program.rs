@@ -17,6 +17,7 @@ pub const STD: &[(&str, &str)] = &[
     ("std.math", include_str!("../std/math.kush")),
     ("std.task", include_str!("../std/task.kush")),
     ("std.json", include_str!("../std/json.kush")),
+    ("std.test", include_str!("../std/test.kush")),
 ];
 const MAX_MODULES: usize = 256;
 const MAX_TOTAL_SOURCE: usize = 16 * 1024 * 1024;

@@ -1,0 +1,36 @@
+{
+  "name": "kush",
+  "displayName": "Kush",
+  "description": "Syntax highlighting and bracket configuration for the Kush language.",
+  "version": "0.1.0",
+  "publisher": "kush-language",
+  "private": true,
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "kush",
+        "aliases": [
+          "Kush",
+          "kush"
+        ],
+        "extensions": [
+          ".kush"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kush",
+        "scopeName": "source.kush",
+        "path": "./syntaxes/kush.tmLanguage.json"
+      }
+    ]
+  }
+}
