@@ -78,40 +78,65 @@ use std::collections::BTreeMap;
 
 type Result<T> = std::result::Result<T, Diagnostic>;
 
-/// A law-checked finite grade algebra. The carrier and both total operations
-/// are explicit. The object is leaked so `Grade` stays `Copy` and carries its
-/// display names and operation tables.
+/// Compiler-owned, law-checked finite grade algebra. Executables retain their
+/// tables; copyable grade handles use a weak registry and never own/leak data.
 #[derive(Debug)]
 pub(crate) struct Algebra {
-    pub name: &'static str,
-    pub elements: &'static [&'static str],
-    pub add: &'static [&'static [usize]],
-    pub mul: &'static [&'static [usize]],
+    id: u64,
+    pub name: String,
+    pub elements: Vec<String>,
+    pub add: Vec<Vec<usize>>,
+    pub mul: Vec<Vec<usize>>,
     pub zero: usize,
     pub one: usize,
 }
 impl Algebra {
     pub(crate) fn element(&self, name: &str) -> Option<usize> {
-        self.elements.iter().position(|element| *element == name)
+        self.elements.iter().position(|element| element == name)
     }
 }
-
+type AlgebraRegistry = std::sync::Mutex<BTreeMap<u64, std::sync::Weak<Algebra>>>;
+fn algebra_registry() -> &'static AlgebraRegistry {
+    static REGISTRY: std::sync::OnceLock<AlgebraRegistry> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(Default::default)
+}
+impl Drop for Algebra {
+    fn drop(&mut self) {
+        algebra_registry()
+            .lock()
+            .expect("algebra registry lock poisoned")
+            .remove(&self.id);
+    }
+}
+/// Stable identity only; the resolving compilation/executable owns the tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct AlgebraRef(u64);
+impl AlgebraRef {
+    fn get(self) -> std::sync::Arc<Algebra> {
+        algebra_registry()
+            .lock()
+            .expect("algebra registry lock poisoned")
+            .get(&self.0)
+            .and_then(std::sync::Weak::upgrade)
+            .expect("grade algebra must remain owned by its compilation or executable")
+    }
+}
 /// The usage semiring: finite natural bounds plus infinity, extended with
 /// finite user-defined algebra elements.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Grade {
     Finite(u64),
     Many,
-    /// An element of a validated finite algebra, together with its static table
-    /// and element index.
-    Element(&'static Algebra, usize),
+    /// An element of a validated finite algebra, identified by a weak table
+    /// handle and element index. The executable retains the table owner.
+    Element(AlgebraRef, usize),
 }
 impl PartialEq for Grade {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Finite(a), Self::Finite(b)) => a == b,
             (Self::Many, Self::Many) => true,
-            (Self::Element(a, x), Self::Element(b, y)) => std::ptr::eq(*a, *b) && x == y,
+            (Self::Element(a, x), Self::Element(b, y)) => a == b && x == y,
             _ => false,
         }
     }
@@ -127,7 +152,7 @@ impl std::hash::Hash for Grade {
             Self::Many => 1u8.hash(state),
             Self::Element(algebra, element) => {
                 2u8.hash(state);
-                algebra.name.hash(state);
+                algebra.hash(state);
                 element.hash(state);
             }
         }
@@ -151,7 +176,7 @@ impl Ord for Grade {
         match (self, other) {
             (Self::Finite(a), Self::Finite(b)) => a.cmp(b),
             (Self::Many, Self::Many) => Ordering::Equal,
-            (Self::Element(a, x), Self::Element(b, y)) => a.name.cmp(b.name).then(x.cmp(y)),
+            (Self::Element(a, x), Self::Element(b, y)) => a.cmp(b).then(x.cmp(y)),
             _ => rank(self).cmp(&rank(other)),
         }
     }
@@ -163,34 +188,35 @@ impl Grade {
     pub(crate) fn is_zero(self) -> bool {
         match self {
             Self::Finite(0) => true,
-            Self::Element(algebra, element) => element == algebra.zero,
+            Self::Element(algebra, element) => element == algebra.get().zero,
             _ => false,
         }
     }
     pub(crate) fn is_one(self) -> bool {
         match self {
             Self::Finite(1) => true,
-            Self::Element(algebra, element) => element == algebra.one,
+            Self::Element(algebra, element) => element == algebra.get().one,
             _ => false,
         }
     }
     pub(crate) fn is_many(self) -> bool {
         matches!(self, Self::Many)
     }
-    pub(crate) fn algebra_zero(algebra: &'static Algebra) -> Self {
-        Self::Element(algebra, algebra.zero)
+    pub(crate) fn algebra_zero(algebra: AlgebraRef) -> Self {
+        Self::Element(algebra, algebra.get().zero)
     }
     /// Repeated addition of one algebra element. Bounded so a hostile finite
     /// demand cannot make the compiler loop for an unbounded time.
-    fn repeated_add(algebra: &'static Algebra, element: usize, times: u64) -> Option<Self> {
+    fn repeated_add(handle: AlgebraRef, element: usize, times: u64) -> Option<Self> {
         if times > 1_000_000 {
             return None;
         }
+        let algebra = handle.get();
         let mut result = algebra.zero;
         for _ in 0..times {
             result = algebra.add[result][element];
         }
-        Some(Self::Element(algebra, result))
+        Some(Self::Element(handle, result))
     }
     /// Addition with checked finite overflow. `None` means the mathematical
     /// finite result does not fit in `u64` or mixes incompatible algebras;
@@ -200,18 +226,18 @@ impl Grade {
         match (self, other) {
             (Self::Many, _) | (_, Self::Many) => Some(Self::Many),
             (Self::Finite(a), Self::Finite(b)) => a.checked_add(b).map(Self::Finite),
-            (Self::Element(a, x), Self::Element(b, y)) if std::ptr::eq(a, b) => {
-                Some(Self::Element(a, a.add[x][y]))
+            (Self::Element(a, x), Self::Element(b, y)) if a == b => {
+                Some(Self::Element(a, a.get().add[x][y]))
             }
             (Self::Element(a, x), Self::Finite(n)) => {
-                Self::repeated_add(a, a.one, n).map(|amount| match amount {
-                    Self::Element(_, count) => Self::Element(a, a.add[x][count]),
+                Self::repeated_add(a, a.get().one, n).map(|amount| match amount {
+                    Self::Element(_, count) => Self::Element(a, a.get().add[x][count]),
                     _ => unreachable!("repeated_add stays in its algebra"),
                 })
             }
             (Self::Finite(n), Self::Element(b, y)) => {
-                Self::repeated_add(b, b.one, n).map(|amount| match amount {
-                    Self::Element(_, count) => Self::Element(b, b.add[count][y]),
+                Self::repeated_add(b, b.get().one, n).map(|amount| match amount {
+                    Self::Element(_, count) => Self::Element(b, b.get().add[count][y]),
                     _ => unreachable!("repeated_add stays in its algebra"),
                 })
             }
@@ -224,14 +250,14 @@ impl Grade {
         match (self, other) {
             (Self::Finite(0), Self::Element(algebra, _))
             | (Self::Element(algebra, _), Self::Finite(0)) => {
-                Some(Self::Element(algebra, algebra.zero))
+                Some(Self::Element(algebra, algebra.get().zero))
             }
             (Self::Finite(0), _) | (_, Self::Finite(0)) => Some(Self::ZERO),
             (Self::Many, Self::Many) => Some(Self::Many),
             (Self::Many, Self::Finite(_)) | (Self::Finite(_), Self::Many) => Some(Self::Many),
             (Self::Finite(a), Self::Finite(b)) => a.checked_mul(b).map(Self::Finite),
-            (Self::Element(a, x), Self::Element(b, y)) if std::ptr::eq(a, b) => {
-                Some(Self::Element(a, a.mul[x][y]))
+            (Self::Element(a, x), Self::Element(b, y)) if a == b => {
+                Some(Self::Element(a, a.get().mul[x][y]))
             }
             (Self::Element(a, x), Self::Finite(n)) => Self::repeated_add(a, x, n),
             (Self::Finite(n), Self::Element(b, y)) => Self::repeated_add(b, y, n),
@@ -255,6 +281,7 @@ impl std::fmt::Display for Grade {
             Self::Finite(n) => write!(f, "{n}"),
             Self::Many => f.write_str("many"),
             Self::Element(algebra, element) => {
+                let algebra = algebra.get();
                 write!(f, "{}.{}", algebra.name, algebra.elements[*element])
             }
         }
@@ -403,8 +430,18 @@ pub(crate) fn validate_algebras(resolution: &mut Resolution) -> Result<()> {
     Ok(())
 }
 
-fn lower_algebra(declaration: &crate::resolve::GradeAlgebraDecl) -> Result<&'static Algebra> {
+fn lower_algebra(
+    declaration: &crate::resolve::GradeAlgebraDecl,
+) -> Result<std::sync::Arc<Algebra>> {
     let count = declaration.elements.len();
+    // Exhaustive law checking is cubic and table storage is quadratic. Bound
+    // both before allocating tables, rather than trusting source declarations.
+    if count > 64 {
+        return Err(Diagnostic::new(
+            declaration.span,
+            "a grade algebra supports at most 64 elements (exhaustive law-checking budget)",
+        ));
+    }
     if count == 0 {
         return Err(Diagnostic::new(
             declaration.span,
@@ -500,30 +537,35 @@ fn lower_algebra(declaration: &crate::resolve::GradeAlgebraDecl) -> Result<&'sta
             }
         }
     }
-    let leaked_name: &'static str = Box::leak(declaration.name.clone().into_boxed_str());
-    let leaked_elements: &'static [&'static str] = Box::leak(
-        declaration
-            .elements
-            .iter()
-            .map(|element| Box::leak(element.clone().into_boxed_str()) as &'static str)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-    );
-    let leak_table = |table: Vec<Vec<usize>>| -> &'static [&'static [usize]] {
-        let rows = table
-            .into_iter()
-            .map(|row| Box::leak(row.into_boxed_slice()) as &'static [usize])
-            .collect::<Vec<_>>();
-        Box::leak(rows.into_boxed_slice())
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
     };
-    Ok(Box::leak(Box::new(Algebra {
-        name: leaked_name,
-        elements: leaked_elements,
-        add: leak_table(add),
-        mul: leak_table(mul),
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let mut candidate = NEXT_ID.load(Ordering::Relaxed);
+    let id = loop {
+        let next = candidate
+            .checked_add(1)
+            .expect("algebra identity space exhausted");
+        match NEXT_ID.compare_exchange_weak(candidate, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break candidate,
+            Err(actual) => candidate = actual,
+        }
+    };
+    let algebra = Arc::new(Algebra {
+        id,
+        name: declaration.name.clone(),
+        elements: declaration.elements.clone(),
+        add,
+        mul,
         zero,
         one,
-    })))
+    });
+    algebra_registry()
+        .lock()
+        .expect("algebra registry lock poisoned")
+        .insert(id, Arc::downgrade(&algebra));
+    Ok(algebra)
 }
 
 fn algebra_table(
@@ -634,7 +676,7 @@ pub(crate) fn evaluate(
                         ),
                     )
                 })?;
-                Ok(Grade::Element(algebra, element))
+                Ok(Grade::Element(AlgebraRef(algebra.id), element))
             }
             ast::TypeKind::Named { path, arguments } if arguments.is_empty() && path.len() == 1 => {
                 let Some(id) = resolution.reference(expr.span) else {
@@ -1710,5 +1752,49 @@ mod tests {
         assert_eq!(n(0).to_string(), "0");
         assert_eq!(n(42).to_string(), "42");
         assert_eq!(Grade::Many.to_string(), "many");
+    }
+}
+
+#[cfg(test)]
+mod algebra_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_algebras_are_rejected_before_allocating_operation_tables() {
+        let elements = (0..65)
+            .map(|i| format!("E{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            "algebra Huge {{ elements {{ {elements} }} zero = E0; one = E1; add {{}} mul {{}} }}\nfn main() -> i64 ! {{}} {{ 0 }}"
+        );
+        let error = crate::executable::check(&source).unwrap_err();
+        assert!(error.message.contains("at most 64 elements"), "{error:?}");
+    }
+
+    #[test]
+    fn executable_owns_algebra_tables_and_releases_registry_entries() {
+        // This tests the public source -> executable boundary: the temporary
+        // resolution has already gone away when check returns. Weak probes do
+        // not keep the tables alive and remain independent of parallel tests.
+        for _ in 0..8 {
+            let program =
+                crate::executable::check(include_str!("../../../examples/grade-algebras.kush"))
+                    .unwrap();
+            assert!(!program._grade_algebras.is_empty());
+            let table = &program._grade_algebras[0];
+            let weak = std::sync::Arc::downgrade(table);
+            let id = table.id;
+            let one = Grade::Element(AlgebraRef(id), table.one);
+            assert!(one.is_one());
+            assert_eq!(one.checked_mul(Grade::ONE), Some(one));
+            assert!(weak.upgrade().is_some());
+            drop(program);
+            assert!(
+                weak.upgrade().is_none(),
+                "program drop must release its tables"
+            );
+            assert!(!algebra_registry().lock().unwrap().contains_key(&id));
+        }
     }
 }

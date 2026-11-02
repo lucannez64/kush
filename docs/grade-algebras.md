@@ -40,7 +40,8 @@ table rows, and a wrong `zero`/`one` are rejected.
 
 ## Semantics
 
-- `elements` is the finite carrier.
+- `elements` is the finite carrier, limited to 64 elements so table storage and
+  exhaustive law checking have a bounded compiler resource cost.
 - `add` and `mul` must be total on the carrier; every ordered pair must appear
   exactly once.
 - `zero` is the additive identity and `one` is the multiplicative identity.
@@ -67,10 +68,13 @@ comparison/joins beyond the declared semiring are not supported.
 
 ## Allocation and static descriptions
 
-The lowered algebra tables are static compiler metadata. They are leaked once
-per compiled program so a `Grade` stays `Copy` and can carry its display names
-and tables. This is compiler-process memory, not program runtime memory; no
-allocation appears in `--stats` and program allocation counts are unchanged.
+The resolution and checked executable own lowered tables through reference
+counted compiler metadata. Copyable grade identities use a weak registry to
+look up their tables; the registry never keeps the data alive. Dropping the
+last compilation/executable owner releases the tables and removes their lookup
+entries. This is compiler-process memory, not generated-program runtime
+memory; no allocation appears in `--stats` and program allocation counts are
+unchanged. An ownership regression checks repeated public check/drop cycles.
 
 ## Tests
 

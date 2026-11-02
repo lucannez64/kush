@@ -2587,6 +2587,22 @@ impl Checker<'_> {
     /// Retain a slice result through the rest of its enclosing expression,
     /// including later call arguments. This is separate from local liveness.
     fn hold_view(&mut self, expr: &Expr) -> Result<()> {
+        self.hold_view_with(expr, false)
+    }
+    /// Reference field reads do not retain an argument loan, but passing the
+    /// reference to a call does: later arguments must not alias that capability.
+    fn hold_reference_argument(&mut self, expr: &Expr) -> Result<()> {
+        if expr.ty.is_ref()
+            && matches!(
+                expr.kind,
+                ExprKind::Local(_) | ExprKind::Peek(_) | ExprKind::Move(_) | ExprKind::Borrow(_)
+            )
+        {
+            self.hold_view_with(expr, true)?;
+        }
+        Ok(())
+    }
+    fn hold_view_with(&mut self, expr: &Expr, argument: bool) -> Result<()> {
         if !(expr.ty.is_view() || expr.ty.is_ref()) {
             return Ok(());
         }
@@ -2598,7 +2614,8 @@ impl Checker<'_> {
         // Reading an existing reference is not creating a new capability; its
         // loan was established by the caller. Retaining it per read would make
         // `p.x = p.x + 1` conflict with itself.
-        if expr.ty.is_ref()
+        if !argument
+            && expr.ty.is_ref()
             && matches!(
                 expr.kind,
                 ExprKind::Local(_) | ExprKind::Peek(_) | ExprKind::Move(_) | ExprKind::Borrow(_)
@@ -3354,6 +3371,7 @@ impl Checker<'_> {
                 }
                 for arg in args.iter_mut().skip(usize::from(reborrow)) {
                     self.expr(arg)?;
+                    self.hold_reference_argument(arg)?;
                 }
                 self.loans = loans;
                 if let Some(index) = func {
@@ -3417,6 +3435,7 @@ impl Checker<'_> {
                 }
                 for argument in arguments.iter_mut() {
                     self.expr(argument)?;
+                    self.hold_reference_argument(argument)?;
                 }
                 self.loans = loans;
                 // A scoped closure may return a view or record borrowed from
@@ -3515,6 +3534,7 @@ impl Checker<'_> {
                 // loans cover exactly this expression.
                 let loans = self.loans.clone();
                 let site = through_coerce(body);
+                let site_ptr = site as *const Expr as usize;
                 let old_capture_site = self.capture_site;
                 self.capture_site = matches!(site.kind, ExprKind::FnValue { .. })
                     .then_some(site as *const Expr as usize);
@@ -3522,6 +3542,19 @@ impl Checker<'_> {
                 self.capture_site = old_capture_site;
                 checked?;
                 self.loans = loans;
+                if expr.ty.is_view() {
+                    let loan = self
+                        .borrowed_values
+                        .get(&site_ptr)
+                        .and_then(|info| info.result_slice.clone())
+                        .ok_or_else(|| Diagnostic::new(
+                            expr.span,
+                            "a borrowed Task.scope result requires checked capture-result provenance",
+                        ))?;
+                    self.call_views.insert(expr_ptr, loan.clone());
+                    self.call_origins.insert(expr_ptr, loan.origins.clone());
+                    self.call_splits.insert(expr_ptr, loan.splits.clone());
+                }
             }
             ExprKind::TaskSpawn { body, .. } => {
                 let loans = self.loans.clone();

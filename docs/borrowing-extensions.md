@@ -266,3 +266,18 @@ captures:
   cannot be coerced or passed on.
 - The analysis remains path-insensitive and conservative. Both backends and
   the runtime are trusted implementation components.
+
+## Review fixes and scope slice results
+
+A slice returned from `Task.scope` retains the scope closure's capture-result
+provenance. Its original storage remains borrowed through the returned view's
+last use, and block-local storage cannot escape. Borrowed-record scope results
+and borrowed `TaskExit` values across function boundaries remain restricted.
+
+A borrowed `TaskExit<T>` cannot be hidden in a closure/task environment: match
+it within the joining scope. Reading a stored reference for a field access is
+a reborrow, while passing it as a call argument retains the child loan through
+later argument evaluation. Multiple shared arguments are allowed; overlapping
+exclusive arguments, including two uses of one stored `&mut`, are rejected.
+These rules have dedicated native/reference and rejection regressions in
+`tests/borrowing_safety.rs`.

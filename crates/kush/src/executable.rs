@@ -171,6 +171,8 @@ fn normalized_scalar(term: &Term) -> Option<Scalar> {
 }
 #[derive(Debug)]
 pub struct Executable {
+    /// Own grade tables for every copyable grade identity in this program.
+    pub(crate) _grade_algebras: Vec<std::sync::Arc<crate::grades::Algebra>>,
     pub(crate) functions: Vec<Function>,
     pub(crate) entry: Option<usize>,
     pub(crate) enums: Vec<Enum>,
@@ -2013,6 +2015,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         ));
     }
     let mut executable = Executable {
+        _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,
         uses_tasks: functions.uses_tasks,
         certificates: functions.certificates,
@@ -12942,6 +12945,13 @@ impl Checker<'_, '_> {
         for slot in &captures {
             let local = self.locals[*slot];
             let ty = local.ty;
+            if crate::runtime_types::contains_task_exit_borrow(self.types, ty) {
+                return Err(Diagnostic::new(
+                    span,
+                    "a lambda or task cannot capture TaskExit<T> with a borrowed payload; match it inside the scope that joined it",
+                )
+                .with_note(local.span, "joined borrowed result declared here"));
+            }
             if matches!(ty, Type::Ref(_) | Type::RefMut(_)) {
                 return Err(Diagnostic::new(
                     span,

@@ -99,9 +99,9 @@ trait-object support. See [trait contracts](traits.md).
   joined explicitly. Copyable must-use task results and forced cancellation
   unwinding remain out of scope. See `docs/linear-task-results.md`.
 
-The finite-algebra implementation currently leaks compiler metadata to keep
-`Grade` copyable. Compiler-owned table lifetimes still need fixing; generated
-program allocation counters do not measure this leak.
+Finite-algebra compiler metadata now has explicit compilation/executable
+owners and weak lookup entries. Program-drop tests verify table reclamation;
+this fix still needs the integrated test/review gate.
 
 ## Advanced types and effects
 

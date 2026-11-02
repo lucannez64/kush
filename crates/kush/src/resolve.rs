@@ -83,7 +83,7 @@ pub struct Resolution {
     /// annotations use `Algebra.Element`; see [the grade documentation].
     pub algebras: BTreeMap<String, GradeAlgebraDecl>,
     /// Lowered, law-checked algebra tables used while evaluating annotations.
-    pub(crate) lowered_algebras: BTreeMap<String, &'static crate::grades::Algebra>,
+    pub(crate) lowered_algebras: BTreeMap<String, std::sync::Arc<crate::grades::Algebra>>,
     references_by_span: BTreeMap<(usize, usize), BindingId>,
     binders_by_span: BTreeMap<(usize, usize), BindingId>,
 }
