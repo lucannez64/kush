@@ -21,8 +21,12 @@ and remaining limits.
   and reference-valued arrow parameters/results remain rejected.
 - [ ] Broader sound lifetime inference. **Partial:** function/arrow/lambda
   results can be inferred from a single record-field source and ambiguous
-  origins are rejected; body-based inference, inferred outlives bounds and
-  general unification are still absent.
+  origins are rejected. Elided function results with several input lifetimes
+  now use a conservative body-origin seed: a direct parameter name, field,
+  slice, or one branch of a block/`if`/`match` value selects that parameter's
+  lifetime, while several return-position lifetimes remain rejected. Inferred
+  outlives bounds, helper-call body inference, per-field inference from a
+  multi-lifetime record, and general unification are still absent.
 - [x] Capturing lambdas returning borrowed slices with represented provenance.
   The capture index and field path travel in the callable contract and the
   result is resolved against the capture's outer provenance.

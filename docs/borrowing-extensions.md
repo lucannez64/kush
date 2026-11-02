@@ -238,10 +238,18 @@ captures:
 - A lambda/closure result uses parameters, captured slice views, and captured
   record fields as candidates. Ambiguous origins are rejected rather than
   unified.
-- No inference reads the function body, no inferred outlives bounds, no
-  variance annotations, and no general owner-reference inference. Two distinct
-  input lifetimes still require an explicit shared lifetime or result binder.
-  Body-based inference and inferred outlives bounds remain outstanding.
+- When an elided function result has several input-lifetime candidates, the
+  function body is inspected for returned values rooted in a parameter. A
+  direct name, field projection, or slice of one parameter resolves the result
+  to that parameter's lifetime; block, `if`, and `match` value positions keep
+  only the branches that produce the result. Return positions that mention
+  several parameter lifetimes remain an explicit ambiguity error, and the
+  ownership pass still checks every returned origin against the selected
+  lifetime.
+- No inferred outlives bounds, no variance annotations, and no general
+  owner-reference inference. Body inference does not follow helper calls or
+  infer a per-field lifetime from a record parameter with several leaf
+  lifetimes; those still require explicit annotations or one shared lifetime.
 
 ## Remaining deliberate limits
 

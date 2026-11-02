@@ -698,10 +698,12 @@ be returned across a task boundary.
 
 - Elision is limited to a borrowed slice result whose input borrows name
   exactly one distinct lifetime. Borrowed record parameters contribute one
-  candidate per field lifetime, and arrows/lambdas count record leaves, but
-  there is no inference from the body, no inferred outlives bounds, and no
-  alias-based provenance. Multiple distinct origins are rejected, not unified.
-  Borrowed slice returns otherwise require explicit `<'a>` and
+  candidate per field lifetime, and arrows/lambdas count record leaves. When a
+  function result has several input candidates, the body may resolve them when
+  its return positions are rooted in exactly one parameter lifetime; several
+  return-position lifetimes are rejected, not unified. There are no inferred
+  outlives bounds and no helper-call or alias-based body inference. Borrowed
+  slice returns otherwise require explicit `<'a>` and
   `-> &'a [T]` / `-> &'a mut [T]` annotations.
 - References may be returned when tied to a reference parameter. Shared
   `&Box<T>`, `&Vec<T>`, `&Bytes`, and `&String` results are supported; exclusive

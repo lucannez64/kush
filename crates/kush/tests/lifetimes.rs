@@ -1087,26 +1087,38 @@ fn borrowed_closures_retain_elided_helper_result_loans() {
 }
 
 #[test]
-fn elided_result_lifetimes_reject_ambiguity_and_undeserved_storage() {
-    // Two independent anonymous inputs stay distinct, so the result cannot
-    // silently pick one. The diagnostic points at every candidate input.
+fn elided_result_lifetimes_use_body_origins_and_reject_ambiguity() {
+    // Two independent anonymous inputs stay distinct, but a body that returns
+    // one directly resolves the result soundly.
+    agrees(
+        "fn pick(a: &[i64], b: &[i64]) -> &[i64] ! {panic} { a }
+         fn main() -> i64 ! {panic} {
+            let x: [i64; 2] = [40, 1];
+            let y: [i64; 1] = [2];
+            Slice.get(pick(&x[..], &y[..]), 0)
+         }",
+        40,
+        "",
+    );
+    // Two return positions keep both candidates ambiguous. The diagnostic
+    // points at every candidate input.
     let error = check(
-        "fn bad(a: &[i64], b: &[i64]) -> &[i64] ! {panic} { a }
+        "fn bad(a: &[i64], b: &[i64]) -> &[i64] ! {panic} { if true { a } else { b } }
          fn main() -> Unit ! {} {}",
     )
     .unwrap_err();
     assert!(
-        error.message.contains("distinct input borrow lifetimes"),
+        error.message.contains("distinct parameter lifetimes"),
         "{error:?}"
     );
     assert_eq!(error.notes.len(), 2, "{error:?}");
-    // Borrowed owner-reference inputs participate in ambiguity conservatively,
-    // but they cannot supply slice provenance.
-    rejects(
-        "fn bad(owner: &Bytes, view: &[i64]) -> &[i64] ! {panic} { view }
+    // An unrelated owner-reference input participates in the candidate list,
+    // but a body returning only the slice input resolves to that slice.
+    check(
+        "fn take(owner: &Bytes, view: &[i64]) -> &[i64] ! {panic} { view }
          fn main() -> Unit ! {} {}",
-        "distinct input borrow lifetimes",
-    );
+    )
+    .unwrap();
     // A borrowed slice result with no borrowed input has no source lifetime.
     rejects(
         "fn bad() -> &[i64] ! {panic} { panic() }

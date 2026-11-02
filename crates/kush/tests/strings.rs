@@ -728,7 +728,7 @@ fn borrowed_text_task_and_generic_positions_are_rejected() {
         "result lifetime 'b' does not appear on any parameter that outlives it",
     );
     rejects(
-        "fn ambiguous(first: &str, second: &str) -> &str ! {} { first }",
+        "fn ambiguous(first: &str, second: &str) -> &str ! {} { if true { first } else { second } }",
         "cannot infer this borrowed slice result's lifetime",
     );
     rejects(

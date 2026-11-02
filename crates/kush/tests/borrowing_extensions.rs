@@ -550,6 +550,6 @@ fn result_lifetime_elision_counts_a_single_record_field_source() {
         r#"struct Two<'a, 'b> { first: &'a [i64], second: &'b [i64] }
         fn pick<'a, 'b>(two: Two<'a, 'b>) -> &[i64] ! {panic} { two.first }
         fn main() -> Unit ! {} {}"#,
-        "distinct input borrow lifetimes",
+        "does not return one directly",
     );
 }

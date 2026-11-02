@@ -891,6 +891,175 @@ fn type_lifetimes(ty: &ast::Type, out: &mut BTreeSet<String>) {
         _ => {}
     }
 }
+/// Collect explicit `return value` expressions while ignoring nested lambdas,
+/// whose returns belong to the callable rather than this function body.
+fn collect_body_returns<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
+    match &expr.kind {
+        ast::ExprKind::Return(Some(value)) => {
+            out.push(value);
+            collect_body_returns(value, out);
+        }
+        ast::ExprKind::Lambda(_) | ast::ExprKind::Return(None) | ast::ExprKind::Continue => {}
+        ast::ExprKind::Name(_)
+        | ast::ExprKind::Integer(_)
+        | ast::ExprKind::Float(_)
+        | ast::ExprKind::String(_)
+        | ast::ExprKind::Char(_)
+        | ast::ExprKind::Bool(_) => {}
+        ast::ExprKind::Tuple(items) | ast::ExprKind::Array(items) => {
+            for item in items {
+                collect_body_returns(item, out);
+            }
+        }
+        ast::ExprKind::Block(block) => collect_block_returns(block, out),
+        ast::ExprKind::Unary { operand, .. }
+        | ast::ExprKind::Try(operand)
+        | ast::ExprKind::Field { value: operand, .. }
+        | ast::ExprKind::Specialize {
+            callee: operand, ..
+        } => {
+            collect_body_returns(operand, out);
+        }
+        ast::ExprKind::Slice { value, start, end } => {
+            collect_body_returns(value, out);
+            if let Some(start) = start {
+                collect_body_returns(start, out);
+            }
+            if let Some(end) = end {
+                collect_body_returns(end, out);
+            }
+        }
+        ast::ExprKind::Binary { left, right, .. } => {
+            collect_body_returns(left, out);
+            collect_body_returns(right, out);
+        }
+        ast::ExprKind::Index { value, index } => {
+            collect_body_returns(value, out);
+            collect_body_returns(index, out);
+        }
+        ast::ExprKind::Call { callee, arguments } => {
+            collect_body_returns(callee, out);
+            for argument in arguments {
+                collect_body_returns(argument, out);
+            }
+        }
+        ast::ExprKind::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            collect_body_returns(condition, out);
+            collect_block_returns(then, out);
+            if let Some(otherwise) = otherwise {
+                collect_body_returns(otherwise, out);
+            }
+        }
+        ast::ExprKind::Match { value, arms } => {
+            collect_body_returns(value, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_body_returns(guard, out);
+                }
+                collect_body_returns(&arm.body, out);
+            }
+        }
+        ast::ExprKind::Record { ty, fields } => {
+            collect_body_returns(ty, out);
+            for (_, field) in fields {
+                collect_body_returns(field, out);
+            }
+        }
+        ast::ExprKind::While { condition, body } => {
+            collect_body_returns(condition, out);
+            collect_block_returns(body, out);
+        }
+        ast::ExprKind::Loop(body) => collect_block_returns(body, out),
+        ast::ExprKind::Break(value) => {
+            if let Some(value) = value {
+                collect_body_returns(value, out);
+            }
+        }
+    }
+}
+fn collect_block_returns<'a>(block: &'a ast::Block, out: &mut Vec<&'a ast::Expr>) {
+    for statement in &block.statements {
+        match statement {
+            ast::Statement::Let { value, .. } => collect_body_returns(value, out),
+            ast::Statement::Expr(expr) => collect_body_returns(expr, out),
+        }
+    }
+    if let Some(tail) = &block.tail {
+        collect_body_returns(tail, out);
+    }
+}
+/// Parameter lifetimes that the returned value syntactically derives from. A
+/// direct name, field projection, or slice of a parameter carries that
+/// parameter's lifetime; block/if/match value positions keep the branches that
+/// actually produce the result. This is a conservative inference seed only:
+/// the ownership pass still checks every returned origin against the chosen
+/// lifetime, so a missed path becomes a checked dangling-borrow error rather
+/// than an unsound widening.
+fn value_lifetime_candidates(
+    resolution: &Resolution,
+    expr: &ast::Expr,
+    parameter_lifetimes: &BTreeMap<BindingId, String>,
+    out: &mut BTreeSet<String>,
+) {
+    match &expr.kind {
+        ast::ExprKind::Name(_) => {
+            if let Some(id) = resolution.reference(expr.span)
+                && let Some(lifetime) = parameter_lifetimes.get(&id)
+            {
+                out.insert(lifetime.clone());
+            }
+        }
+        ast::ExprKind::Field { value, .. }
+        | ast::ExprKind::Unary { operand: value, .. }
+        | ast::ExprKind::Try(value) => {
+            value_lifetime_candidates(resolution, value, parameter_lifetimes, out);
+        }
+        ast::ExprKind::Slice {
+            value, start, end, ..
+        } => {
+            // Only the sliced base supplies the returned storage; endpoints
+            // are integers and cannot name a borrow lifetime.
+            let _ = (start, end);
+            value_lifetime_candidates(resolution, value, parameter_lifetimes, out);
+        }
+        ast::ExprKind::Block(block) => {
+            block_value_lifetime_candidates(resolution, block, parameter_lifetimes, out);
+        }
+        ast::ExprKind::If {
+            then, otherwise, ..
+        } => {
+            block_value_lifetime_candidates(resolution, then, parameter_lifetimes, out);
+            if let Some(otherwise) = otherwise {
+                value_lifetime_candidates(resolution, otherwise, parameter_lifetimes, out);
+            }
+        }
+        ast::ExprKind::Match { arms, .. } => {
+            for arm in arms {
+                value_lifetime_candidates(resolution, &arm.body, parameter_lifetimes, out);
+            }
+        }
+        _ => {}
+    }
+}
+fn block_value_lifetime_candidates(
+    resolution: &Resolution,
+    block: &ast::Block,
+    parameter_lifetimes: &BTreeMap<BindingId, String>,
+    out: &mut BTreeSet<String>,
+) {
+    let mut returns = Vec::new();
+    collect_block_returns(block, &mut returns);
+    for returned in returns {
+        value_lifetime_candidates(resolution, returned, parameter_lifetimes, out);
+    }
+    if let Some(tail) = &block.tail {
+        value_lifetime_candidates(resolution, tail, parameter_lifetimes, out);
+    }
+}
 /// Whether `long` outlives `short` under a reflexive-transitive bound set.
 /// Every lifetime outlives itself; declared bounds supply the strict steps.
 pub(crate) fn outlives(bounds: &BTreeSet<(String, String)>, long: &str, short: &str) -> bool {
@@ -2924,6 +3093,7 @@ impl<'a> Functions<'a> {
         let mut parameters = Vec::new();
         let mut parameter_grades = Vec::new();
         let mut parameter_lifetimes = Vec::new();
+        let mut parameter_binder_lifetimes = BTreeMap::new();
         let mut declared_lifetimes = BTreeSet::new();
         let mut input_lifetimes: Vec<(String, Span, Option<String>)> = Vec::new();
         for lifetime in &f.lifetimes {
@@ -2979,22 +3149,34 @@ impl<'a> Functions<'a> {
             {
                 input_lifetimes.push((name.clone(), p.ty.span, explicit_lifetime));
             }
-            parameter_lifetimes.push(lifetime);
+            parameter_lifetimes.push(lifetime.clone());
+            let binder = resolution.binder(p.span);
+            if let (Some(binder), Some(name)) = (binder, &lifetime) {
+                parameter_binder_lifetimes.insert(binder, name.clone());
+            }
             // A by-value borrowed record contributes one candidate per field
             // lifetime, so elided slice results can be inferred from a single
             // record source exactly as from a single slice parameter.
             if crate::runtime_types::is_borrowed_record(types, parameters.last().copied().unwrap())
             {
+                let mut record_lifetimes = BTreeSet::new();
                 for leaf in
                     crate::runtime_types::borrow_leaves(types, parameters.last().copied().unwrap())
                 {
-                    if let Some(name) = leaf.lifetime
-                        && !input_lifetimes
+                    if let Some(name) = leaf.lifetime {
+                        record_lifetimes.insert(name.clone());
+                        if !input_lifetimes
                             .iter()
                             .any(|(existing, _, _)| existing == &name)
-                    {
-                        input_lifetimes.push((name.clone(), p.ty.span, Some(name)));
+                        {
+                            input_lifetimes.push((name.clone(), p.ty.span, Some(name)));
+                        }
                     }
+                }
+                if let (Some(binder), [name]) = (binder, record_lifetimes.as_slice())
+                    && !parameter_binder_lifetimes.contains_key(&binder)
+                {
+                    parameter_binder_lifetimes.insert(binder, name.clone());
                 }
             }
         }
@@ -3039,27 +3221,60 @@ impl<'a> Functions<'a> {
                     }
                     [(lifetime, _, _)] => Some(lifetime.clone()),
                     candidates => {
-                        let mut diagnostic = Diagnostic::new(
-                            f.result.span,
-                            format!(
-                                "cannot infer this borrowed slice result's lifetime: the function has {} distinct input borrow lifetimes. Annotate the returned input and the result with one explicit lifetime, as in 'fn f<'a>(s: &'a [i64]) -> &'a [i64]'",
-                                candidates.len()
-                            ),
-                        );
-                        for (_, span, explicit) in candidates {
-                            diagnostic = diagnostic.with_note(
-                                *span,
-                                match explicit {
-                                    Some(name) => {
-                                        format!("candidate input lifetime '{name}' declared here")
-                                    }
-                                    None => {
-                                        "candidate elided input borrow declared here".to_string()
-                                    }
-                                },
+                        // More than one input lifetime exists. Infer from the
+                        // function body only when every returned value is
+                        // syntactically rooted in one parameter lifetime. The
+                        // ownership pass still checks that lifetime against
+                        // every returned origin, so this seed never widens a
+                        // borrow beyond what the body actually returns.
+                        let mut returned = Vec::new();
+                        collect_block_returns(&f.body, &mut returned);
+                        if let Some(tail) = &f.body.tail {
+                            returned.push(tail);
+                        }
+                        let mut body_lifetimes = BTreeSet::new();
+                        for value in returned {
+                            value_lifetime_candidates(
+                                resolution,
+                                value,
+                                &parameter_binder_lifetimes,
+                                &mut body_lifetimes,
                             );
                         }
-                        return Err(diagnostic);
+                        let inferred = body_lifetimes.iter().cloned().collect::<Vec<_>>();
+                        if let [only] = inferred.as_slice() {
+                            Some(only.clone())
+                        } else {
+                            let mut diagnostic = Diagnostic::new(
+                                f.result.span,
+                                if inferred.is_empty() {
+                                    format!(
+                                        "cannot infer this borrowed slice result's lifetime: the function has {} distinct input borrow lifetimes and its body does not return one directly. Annotate the returned input and the result with one explicit lifetime, as in 'fn f<'a>(s: &'a [i64]) -> &'a [i64]'",
+                                        candidates.len()
+                                    )
+                                } else {
+                                    format!(
+                                        "cannot infer this borrowed slice result's lifetime from the function body: return positions mention {} distinct parameter lifetimes. Annotate the returned input and the result with one shared lifetime",
+                                        inferred.len()
+                                    )
+                                },
+                            );
+                            for (_, span, explicit) in candidates {
+                                diagnostic = diagnostic.with_note(
+                                    *span,
+                                    match explicit {
+                                        Some(name) => {
+                                            format!(
+                                                "candidate input lifetime '{name}' declared here"
+                                            )
+                                        }
+                                        None => "candidate elided input borrow declared here"
+                                            .to_string(),
+                                    },
+                                );
+                            }
+                            return Err(diagnostic);
+                        }
                     }
                 }
             }
