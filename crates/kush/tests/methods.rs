@@ -153,7 +153,7 @@ fn borrowing_methods_require_a_local_owner() {
     );
     rejects(
         "fn main() -> Unit ! {alloc, panic} { let b = Bytes.from(\"x\"); b.get({ drop(b); 0 }); }",
-        "cannot move an owner while it is borrowed",
+        "cannot move or drop an owner or view",
     );
 }
 

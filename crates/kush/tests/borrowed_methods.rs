@@ -239,7 +239,7 @@ fn exclusive_borrows_reject_shared_aliases_moves_reads_and_replacement() {
             take(&p, { p = P { x: 2 }; 0 });
         }
         "#,
-        "borrowed by a call",
+        "borrows it",
     );
     rejects(
         r#"
