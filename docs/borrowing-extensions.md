@@ -11,8 +11,11 @@ arrows, borrowed `Task.scope` records and `TaskExit` values across
 function/callable boundaries, mutable owner references with in-place container
 writes, containers of borrowed records with per-field element provenance,
 per-field body lifetime inference, inferred outlives bounds, multi-source
-anonymous intersection results, destructuring-derived inference, and
-helper-call body inference. The reference evaluator and the Cranelift native
+anonymous intersection results, destructuring-derived inference,
+helper-call body inference, addressable place references (nested/owning record
+fields, inline-array and vector indices, and hidden temporary owners), checked
+`*p` reads and `*p = value` replacement, and returned field references rooted
+in a `&Record` parameter. The reference evaluator and the Cranelift native
 backend agree on every positive case in `tests/borrowing_extensions.rs`,
 `tests/borrowing_references.rs`, and `tests/strings.rs`. This is an engineering
 contract inside the existing capability model, not a formal soundness proof.
@@ -190,6 +193,80 @@ Slice.set(right, 0, 30);
   destination binding, so disjointness survives helper calls and branches only
   when the checker can still identify that binding. A merged or temporary
   record loses field identity and is treated conservatively.
+
+## Addressable place references, indexing, and temporary owners
+
+`&place` and `&mut place` may now name a direct local binding, a record-field
+chain (including nested and owning fields), an inline-array element, or a
+`Vec<T>` element. The reference aliases the root owner's storage; it is not a
+copy of the projected value.
+
+```rust
+struct Inner { a: i64, b: i64 }
+struct Outer { inner: Inner, note: i64 }
+
+fn add(left: &mut i64, right: &mut i64) -> Unit ! {panic} {
+    *left = *left + *right;
+}
+
+let mut outer = Outer { inner: Inner { a: 3, b: 4 }, note: 10 };
+add(&mut outer.inner.a, &mut outer.inner.b);
+let note = &outer.note;
+
+let mut values: Vec<i64> = [1, 2, 3];
+let element = &mut values[1];
+*element = *element + 5;
+```
+
+- Field places carry the same structural identity as nested slice subviews.
+  Two references to structurally disjoint fields or to distinct constant
+  indices of one array/vector may be live in the same expression; the root
+  binding stays an ancestor capability and cannot be moved, dropped, replaced,
+  or passed while either loan can still be used. A runtime index is
+  conservative: all dynamic indices of one base conflict.
+- `&mut` requires a mutable root binding or an exclusive reference root. A
+  shared root is never upgraded. A record with borrowed fields remains
+  read-only for whole-record borrowing; owned metadata of such a record is not
+  mutated through `&mut Record`.
+- An owning field (`Box`, `Vec`, `Bytes`, `String`) is referenced through the
+  same allocation handle as a direct `&mut` borrow, so `Box.set`, `Vec.push`,
+  `Vec.set`, and the read builtins keep working through the projected
+  reference. Moving or dropping the root while that reference is live is
+  rejected.
+- Nested record references are projected in place: `&mut outer.inner` is an
+  exclusive reference to the inline inner record, and a later `r.a = ...` writes
+  the parent's storage. Reading a field of a `&Record` parameter and returning
+  it as `&Field` is accepted when the parameter's declared lifetime outlives
+  the result (the finite, non-recursive `reference_reaches_type` rule).
+- Every runtime index is checked once when the reference is created; an
+  out-of-bounds index panics in both backends. The owner is loaned until the
+  reference's checked last use, so a later vector growth cannot invalidate the
+  element address.
+- A temporary aggregate or owning handle used as the borrowed place is hoisted
+  into hidden storage in the enclosing statement list. The hidden owner is
+  dropped at that block's end, after every checked reference's last use, and
+  exactly once. A projection is never turned into a copied reference, and the
+  hidden owner is never duplicated.
+
+### Dereference reads and writes
+
+A checked `*p` read copies only a non-owning, non-linear referent; copying an
+owning payload or a linear obligation is rejected. `*p = value` requires an
+exclusive reference and replaces the referent once: an old affine payload is
+destroyed before the new value is stored, while a linear referent is rejected.
+Owning handles keep their dedicated operations (`Box.set`/`Box.reuse`,
+`Vec.push`/`Vec.set`/`Vec.clear`) rather than reinterpreting a handle word as a
+payload.
+
+### Mutable text boundary
+
+`&mut str` remains rejected at declaration. The exact design issue is that a
+text view is validated UTF-8 and byte positions are not scalar boundaries; an
+unrestricted byte write could create invalid UTF-8. A sound `&mut str` needs an
+operation that replaces one whole Unicode scalar with another whose UTF-8
+encoding has the same byte length (or a validated re-encoding that moves the
+view), not a raw byte store. That operation is not part of the current text
+fragment.
 
 ## Reference storage, escape, and reborrow
 
@@ -471,22 +548,23 @@ one function:
 
 ## Remaining deliberate limits
 
-- Mutable owner borrows of temporaries, record fields, or index results,
-  `&mut str`, and `Vec.try_reserve` through `&mut Vec<T>` remain outside the
-  subset. Each is an explicit, tested rejection; there is no silent temporary
-  address, field pointer, or element pointer. `&mut Bytes`/`&mut String`
-  provide read access but no mutating builtins. Shared and exclusive owner
-  references, `&str` fields/containers, `&mut` nominal records, and containers
-  of borrowed records are supported as described above.
+- `&mut str`, `Vec.try_reserve` through `&mut Vec<T>`, and place references
+  into slice elements remain outside the subset; each is an explicit, tested
+  rejection. `&mut Bytes`/`&mut String` provide read access but no mutating
+  builtins. Temporary owners, record fields, and array/vector indices are
+  supported through hidden storage or real element addresses as described
+  above. A record with borrowed fields is still not mutated as a whole.
 - A child task cannot return a borrowed `TaskExit<T>` (rejected when the
   `Task<TaskExit<...>>` result type is formed), and a lambda or task cannot
   capture a borrowed `TaskExit<T>` in its environment. Match it in the scope
   that joined it before hiding it in a callable or child task.
-- There is no general `&record.field` reference-taking form. Shared reference,
-  shared slice, and text fields are readable through `&Record`, and a slice
-  field can be sub-sliced with `&record.view[..]` or `&mut record.view[..]`;
-  exclusive reference/slice fields and arbitrary field addresses still require
-  destructuring. `&record.field` itself is an explicit rejection.
+- `&record.field` is supported for copyable, owning, and nested record fields.
+  Shared reference, shared slice, and text fields remain readable through
+  `&Record`; a slice field is sub-sliced with `&record.view[..]` or `&mut
+  record.view[..]`. A place reference into one slice element, or into a
+  container element whose type owns storage, remains an explicit rejection.
+  Outlives bounds are not part of a record declaration, so a projected
+  reference borrows the whole record binding.
 - Containers of borrowed records are supported for `Box` and `Vec`; `AllocBox`
   and `AllocVec` reject every borrowed element because their allocator-owned
   storage has no per-element provenance. Inline arrays of borrowed records

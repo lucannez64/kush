@@ -30,10 +30,19 @@ and remaining limits.
   `Vec.push`/`set`/`clear`/`reserve` update the caller's container, and a
   written reference must outlive the declared element lifetime. A call that
   mutates a `&mut` container also merges the written reference's owner loan into
-  the caller's container provenance. Remaining exclusions: mutable owner
-  borrows of temporaries, record fields, and index results, general
-  `&record.field` reference-taking, `&mut str`, and a child task returning a
-  borrowed `TaskExit`. See
+  the caller's container provenance. General `&place`/`&mut place` references
+  now alias nested and owning record fields, inline-array elements, `Vec<T>`
+  elements, and hidden temporary owners; both backends use real storage
+  identity, structural disjointness (record fields and distinct constant
+  indices), ancestor suspension, and last-use release. General `*p` reads copy
+  only non-owning, non-linear referents, and `*p = value` replaces an affine
+  referent by destroying the old payload exactly once. A temporary aggregate or
+  owning handle is hoisted into hidden storage whose cleanup follows every
+  checked reference. Remaining exclusions: `&mut str` (unrestricted byte writes
+  can invalidate UTF-8), place references into slice elements, mutation of a
+  record with borrowed fields as a whole, runtime-index disjointness (all
+  dynamic indices of one base conflict), and a child task returning a borrowed
+  `TaskExit`. See
   [borrowing-extensions.md](borrowing-extensions.md).
 - [ ] Broader sound lifetime inference. **Partial:** function/arrow/lambda
   results can be inferred from a single record-field source or a per-field body
@@ -49,8 +58,11 @@ and remaining limits.
   source. This is a finite, closed constraint graph over one function's
   declared lifetimes with a documented reachability decision procedure (see
   [borrowing-extensions.md](borrowing-extensions.md#lifetime-constraints-and-decidability)).
-  Principal unification for recursive lifetime constraints, variance, and row
-  variables remains explicitly absent.
+  A returned `&Field` may also name a field of a `&Record` parameter; the finite
+  `reference_reaches_type` reachability rule accepts it when the parameter
+  lifetime outlives the result, and the ownership pass still proves the exact
+  origin. Principal unification for recursive lifetime constraints, variance,
+  and row variables remains explicitly absent.
 - [x] Capturing lambdas returning borrowed slices with represented provenance.
   The capture index and field path travel in the callable contract and the
   result is resolved against the capture's outer provenance.
@@ -1074,3 +1086,54 @@ pass. Local builds used mbx exclusively in a standalone managed target directory
 capacity and two Clippy jobs. This gate includes the typed-payload growth-hook
 regression and all queued borrowing, trait, row/proof, and DynArray branches.
 The full Boat gate is pending. Unchecked backlog items remain unresolved.
+
+## Addressable place references checkpoint
+
+The remaining reference-place forms are implemented in `7680cf9` on top of `edb98f1`:
+
+- `&place` / `&mut place` alias direct local bindings, nested and owning
+  nominal-record fields, inline-array elements, `Vec<T>` elements, and hidden
+  temporary owners. The reference evaluator stores a pinned root plus a typed
+  word path; the native backend uses the real field/element address. Roots stay
+  loaned until the reference's checked last use, and the whole owner remains an
+  ancestor capability.
+- Disjoint-field loans now include structurally distinct record fields and
+  distinct constant element indices. A runtime index is conservative: all
+  dynamic indices of one base conflict. An out-of-bounds index panics in both
+  backends, and a statically out-of-range constant index is a check error.
+- A temporary aggregate or owning handle is hoisted into a hidden local in the
+  enclosing statement list. Its resource drops at block end, after every
+  checked reference's last use, exactly once. Projected values are never copied
+  into a reference, and the hidden owner is never duplicated.
+- General `*p` reads copy only non-owning, non-linear referents. `*p = value`
+  requires an exclusive reference and destroys an old affine payload once
+  before storing the replacement; linear referents and owning handle
+  replacement through `*p` are rejected in favor of their dedicated
+  operations.
+- A returned `&Field` may derive from a `&Record` parameter. The signature
+  check uses a finite recursive field-reachability rule, and the ownership pass
+  still proves the exact origin and mutability.
+- Pinned local ownership resources now alias the live storage cell instead of a
+  binding-time snapshot, so replacing an affine record or box payload through a
+  reference is neither leaked nor double-dropped.
+
+`&mut str` remains an explicit rejection. Text views are validated UTF-8, byte
+positions are not scalar boundaries, and an unrestricted byte store can create
+invalid UTF-8. A sound operation must replace a complete Unicode scalar with an
+encoding of unchanged byte length (or re-encode and move the following bytes);
+that operation is not part of the current text fragment.
+
+Local Linux x86-64 validation used `~/.cache/kush-mbx-reference-places` with
+debug information disabled and two jobs:
+
+- Full locked workspace suite: **1014 passed, 0 failed**.
+- `cargo fmt --all -- --check`: passed.
+- All-targets Clippy with warnings denied: passed.
+
+New coverage lives in `crates/kush/tests/borrowing_references.rs` (nested,
+owning, array, vector, temporary, returned-field, affine-replacement, hostile
+alias/escape/bounds, and native/reference cases) with updated expectations in
+`borrowed_methods.rs` and `strings.rs`. The full Boat gate is parent-coordinated.
+The broader lifetime-inference item stays unchecked: recursive lifetime
+variables, record variance annotations, and row/lifetime unification remain
+outside the grammar and are not silently guessed.
