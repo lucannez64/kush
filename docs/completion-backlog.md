@@ -1073,4 +1073,7 @@ pass. Local builds used mbx exclusively in a standalone managed target directory
 (`~/.cache/kush-mbx-integration`), with four test-build jobs after checking spare
 capacity and two Clippy jobs. This gate includes the typed-payload growth-hook
 regression and all queued borrowing, trait, row/proof, and DynArray branches.
-The full Boat gate is pending. Unchecked backlog items remain unresolved.
+The full Boat gate also passes **1011 tests, formatting, and Clippy** for
+compiler checkpoint `9df5bb6`; the sandbox was confirmed stopped afterwards.
+Unchecked backlog items remain unresolved. Independent combined review and
+reference-place/stateful-allocator implementation continue separately.
