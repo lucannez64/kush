@@ -669,7 +669,13 @@
       "status": "todo",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 17:40:41",
+          "who": "agent",
+          "text": "Active focus: two independent implementation tracks (variance and recursive summaries), then borrowed rows/results and integrated review. No dependency on unfinished effects/layout/research projects."
+        }
+      ]
     },
     {
       "id": "D-TEMP-SCOPE",
@@ -1590,10 +1596,16 @@
       "deps": [
         "LT-RECURSIVE-DESIGN"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Stable instance/leaf IDs, finite domain and discovery/freeze states; no backend consumes provisional contracts.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 17:40:41",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "LT-REC-FLOW",
@@ -1669,10 +1681,16 @@
       "deps": [
         "LT-VARIANCE-DESIGN"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Sign-set algebra, constant occurrence seeds, declaration SCC fixed point, conservative unknowns and deterministic caching.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 17:40:41",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "LT-VAR-CONTEXT",
@@ -1682,10 +1700,16 @@
       "deps": [
         "LT-VARIANCE-DESIGN"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Checked type views with free/bound/internal identities; preserve callable interning without one source map per shared type ID.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 17:40:41",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "LT-VAR-CHECK",
