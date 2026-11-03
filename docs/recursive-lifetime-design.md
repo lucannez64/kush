@@ -198,6 +198,80 @@ API only for validating/closing justified finite bounds.
   before the callee; exact trait and arrow contracts cannot be strengthened.
 - Calls through explicit arrows/boundaries retain existing guarantees; unknown
   targets and growing polymorphic recursion fail explicitly when unsupported.
+
+## Implementation status
+
+Source baseline: `a6f0263` (prepared HEAD). The recursive summary chain is
+implemented as `crates/kush/src/executable/recursive_lifetimes.rs` and is solved
+once in `check_program` before any body is checked. Its finite domain, lattice,
+call substitution, local binding/assignment flow, SCC worklist, budget, and
+diagnostics are live code, not design scaffolding. A signature, callable arrow,
+or ownership judgment therefore observes the frozen summary; provisional
+metadata is never published to a backend.
+
+Implemented in this fragment:
+
+- Stable origins are a runtime parameter index plus a source field path. The
+  origin set is a power set of those leaves; join is union and facts only grow.
+- Direct static calls compose through helpers, self recursion, and mutual
+  recursion. Local `let` aliases, record destructuring, field projections,
+  record literals, blocks, branches, and matches carry origins; assignments are
+  folded to a local fixed point. Input permutations on recursive calls keep
+  every actual alternative.
+- Call-graph condensation is separate from the outlives solver. Iteration and
+  diagnostics are sorted by declaration name plus binding for deterministic
+  results under declaration permutation. The aggregate step/fact budget
+  returns a checked diagnostic instead of a partial summary.
+- An elided multi-source result becomes the existing anonymous intersection
+  lifetime with bounds from every contributed input. Unioning origins retains
+  every owner loan; a branch join now keeps the shortest provable common view
+  lifetime rather than dropping to `None`, which lets explicit recursive
+  contracts use their propagated `b: a` precondition.
+- A cycle with several independent direct input lifetimes and no base origin is
+  rejected with the recursive call chain. A single unambiguous elided input
+  keeps the existing parametric elision, and an explicit result contract
+  remains parametric forwarding validated by ownership, including no-base
+  cycles. Inference never invents `Never`, lifetime equality, or a fresh label
+  per iteration.
+- Inferred requirements are exported on the recursive declaration and checked
+  at every caller. A frozen function value carries the same bounds, so an
+  unconstrained arrow cannot silently strengthen or erase them.
+- Local/temporary escape, mutable capability upgrades, grade/effect checks, and
+  the existing 256-instance cap are unchanged. Callers are revalidated by the
+  ordinary ownership pass after bodies are checked.
+
+Remaining limits, deliberately not claimed as complete:
+
+- The summarized result slot is a borrowed slice, text view, or reference.
+  Borrowed-record field result binders still require their existing declared
+  field lifetimes; per-field recursive result summaries are not inferred.
+- Direct and lexically resolved static calls participate. Indirect calls,
+  dynamic dispatch, method calls, effect-operation results, and loop results are
+  unsupported boundaries: a recursive result that needs one is rejected and
+  asks for an explicit annotation (or must route through a direct checked
+  function).
+- Summaries are solved per declaration. Lifetime labels do not vary with type
+  substitution in the supported fragment, so concrete instances map the same
+  stable parameter-leaf IDs onto their own frozen labels. Instance-specific
+  discovery of new borrowed field shapes is outside this fragment.
+- Polymorphic recursion past the existing instance limit keeps its explicit
+  rejection. Variance and subtype interaction is a separate track; this module
+  does not change `runtime_types` subtype or variance rules.
+
+Gate used for this stage:
+
+```text
+mbx test -p kush --test recursive_lifetimes -j2
+mbx test -p kush --test lifetimes --test borrowed_records \
+  --test borrowing_references --test borrowing_extensions --test task_borrows -j2
+mbx test -p kush --test borrowed_methods --test slices --test subtyping \
+  --test review_regressions --test advanced_types_effects -j2
+```
+
+`LT-RECURSIVE` and `LIFE` remain open: the closed-world direct-scalar fragment
+above is implemented and tested, but the record-result and indirect-boundary
+extensions are not.
+
 - Stable anonymous IDs, signature/cache replay, deep SCCs, exhaustion diagnostics
   and deterministic witnesses. No provisional metadata survives finalization.
 - Reference/native agreement and balanced cleanup for accepted programs,

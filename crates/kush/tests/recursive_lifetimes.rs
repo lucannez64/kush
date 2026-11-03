@@ -1,0 +1,416 @@
+//! Recursive lifetime summaries across direct-call SCCs.
+//!
+//! These tests exercise the finite may-origin fixed point, all-owner retention,
+//! declaration-order and worklist independence, local escape, propagated
+//! preconditions, and rigid arrow contracts. Unsupported boundaries and
+//! unseeded cycles stay checked rejections.
+use kush::executable::{MemoryStats, check};
+
+fn rejects(source: &str, fragment: &str) {
+    let error = check(source).unwrap_err();
+    assert!(
+        error.message.contains(fragment),
+        "expected {fragment:?}, got {error:?}"
+    );
+}
+
+fn run(source: &str) -> (i64, String, MemoryStats) {
+    let program = check(source).unwrap();
+    let mut output = Vec::new();
+    let (status, stats) = program.evaluate_with_stats(&mut output).unwrap();
+    assert_eq!(stats.allocations, stats.deallocations, "{source}");
+    (status, String::from_utf8(output).unwrap(), stats)
+}
+
+fn agrees(source: &str, expected_status: i64, expected_output: &str) {
+    let (status, output, _) = run(source);
+    assert_eq!(status, expected_status, "{source}");
+    assert_eq!(output, expected_output, "{source}");
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let program = check(source).unwrap();
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("recursive-lifetime-test");
+        kush::native::build(&program, &binary).unwrap();
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some((expected_status as u64 & 255) as i32),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected_output);
+    }
+}
+
+const MUTUAL: &str = r#"
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+    if stop { a } else { right(a, b, true) }
+}
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+    if stop { b } else { left(a, b, true) }
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(left(&a[..], &b[..], false), 0)
+}
+"#;
+
+#[test]
+fn mutual_recursion_keeps_every_result_owner_and_evaluates_consistently() {
+    // `false` selects the recursive branch and then `b`; a path-insensitive
+    // summary must still retain both owners.
+    agrees(MUTUAL, 3, "");
+}
+
+#[test]
+fn declaration_order_does_not_change_mutual_summaries() {
+    let reversed = r#"
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+    if stop { b } else { left(a, b, true) }
+}
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+    if stop { a } else { right(a, b, true) }
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(left(&a[..], &b[..], false), 0)
+}
+"#;
+    agrees(reversed, 3, "");
+}
+
+#[test]
+fn input_permutation_on_recursive_calls_keeps_all_sources() {
+    agrees(
+        r#"
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+    if stop { a } else { right(b, a, true) }
+}
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+    if stop { b } else { left(b, a, true) }
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(left(&a[..], &b[..], false), 0)
+}
+"#,
+        1,
+        "",
+    );
+}
+
+#[test]
+fn self_recursion_with_a_base_origin_unions_every_visit() {
+    // One visit flips the arguments; the base returns the second lifetime.
+    agrees(
+        r#"
+fn find<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    if n == 0 { a } else { find(b, a, n - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(find(&a[..], &b[..], 1), 0)
+}
+"#,
+        3,
+        "",
+    );
+}
+
+#[test]
+fn helper_chains_compose_through_a_three_function_cycle() {
+    agrees(
+        r#"
+fn first<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    if n == 0 { a } else { second(a, b, n - 1) }
+}
+fn second<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    third(a, b, n)
+}
+fn third<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    if n == 0 { b } else { first(a, b, n - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(first(&a[..], &b[..], 1), 0)
+}
+"#,
+        3,
+        "",
+    );
+}
+
+#[test]
+fn recursive_record_field_parameters_keep_field_paths() {
+    agrees(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn first<'a, 'b>(p: Pair<'a, 'b>, q: Pair<'a, 'b>, n: i64) -> &[i64] ! {panic} {
+    if n == 0 { p.left } else { second(q, p, n - 1) }
+}
+fn second<'a, 'b>(p: Pair<'a, 'b>, q: Pair<'a, 'b>, n: i64) -> &[i64] ! {panic} {
+    if n == 0 { q.right } else { first(p, q, n - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    let p = Pair { left: &a[..], right: &b[..] };
+    let q = Pair { left: &a[..], right: &b[..] };
+    Slice.get(first(p, q, 1), 1)
+}
+"#,
+        4,
+        "",
+    );
+}
+
+#[test]
+fn a_local_escape_on_a_recursive_path_stays_rejected() {
+    rejects(
+        r#"
+fn f<'a>(a: &'a [i64], n: i64) -> &[i64] ! {panic} {
+    let local: [i64; 2] = [9, 9];
+    if n == 0 { a } else { f(&local[..], n - 1) }
+}
+fn main() -> Unit ! {panic} { let a: [i64; 2] = [1, 2]; let _ = f(&a[..], 2); }
+"#,
+        "outlive the lexical scope",
+    );
+}
+
+#[test]
+fn a_no_seed_cycle_cannot_manufacture_an_origin_or_equality() {
+    let error = check(
+        r#"
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+    right(a, b, stop)
+}
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+    left(a, b, stop)
+}
+fn main() -> Unit ! {} {}
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("no independently justified result origin"),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .notes
+            .iter()
+            .any(|(_, note)| note.contains("recursive call edge 'left' -> 'right'")),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .notes
+            .iter()
+            .any(|(_, note)| note.contains("recursive call edge 'right' -> 'left'")),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn an_explicit_recursive_contract_is_parametric_forwarding_not_inferred_never() {
+    check(
+        r#"
+fn f<'a>(a: &'a [i64], n: i64) -> &'a [i64] ! {panic} { f(a, n) }
+fn main() -> Unit ! {} {}
+"#,
+    )
+    .unwrap();
+    agrees(
+        r#"
+fn f<'a>(a: &'a [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { a } else { f(a, n - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [7, 8];
+    Slice.get(f(&a[..], 2), 0)
+}
+"#,
+        7,
+        "",
+    );
+}
+
+#[test]
+fn a_recursive_precondition_is_exported_and_checked_at_callers() {
+    // `right` returns `b` through an explicit `'a` result, so the SCC exports
+    // `b: a`. A caller without that relation is rejected even though the
+    // declaration order could have checked the caller header first.
+    rejects(
+        r#"
+fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+    Slice.get(left(a, b, 1), 0)
+}
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { a } else { right(a, b, n - 1) }
+}
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { b } else { left(a, b, n - 1) }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "cannot establish the callee's outlives constraint 'b: 'a",
+    );
+    // The same call is accepted when the caller declares the propagated
+    // requirement. `caller` is checked eagerly even though `main` never calls
+    // it, so this is not a dead-code exemption.
+    check(
+        r#"
+fn caller<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+    Slice.get(left(a, b, 1), 0)
+}
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { a } else { right(a, b, n - 1) }
+}
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { b } else { left(a, b, n - 1) }
+}
+fn main() -> Unit ! {} {}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_frozen_recursive_contract_cannot_be_silently_strengthened_by_an_arrow() {
+    // The recursive SCC infers `b: a`; an unconstrained arrow cannot erase it.
+    rejects(
+        r#"
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { a } else { right(a, b, n - 1) }
+}
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { b } else { left(a, b, n - 1) }
+}
+fn main() -> Unit ! {panic} {
+    let f: fn<'a, 'b>(&'a [i64], &'b [i64], i64) -> &'a [i64] ! {panic} = left;
+    let _ = f;
+}
+"#,
+        "type mismatch",
+    );
+    // Spelling the requirement keeps the exact arrow contract valid.
+    check(
+        r#"
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { a } else { right(a, b, n - 1) }
+}
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { b } else { left(a, b, n - 1) }
+}
+fn main() -> Unit ! {panic} {
+    let f: fn<'a, 'b: 'a>(&'a [i64], &'b [i64], i64) -> &'a [i64] ! {panic} = left;
+    let _ = f;
+}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_explicit_boundary_can_seed_an_elided_recursive_cycle() {
+    // The elided function has more than one input lifetime, but every result
+    // comes from a call whose explicit contract names `'a`. That is a
+    // parametric seed, not an unseeded cycle. `annotated` never returns, so
+    // this also checks that no `Never` result is inferred.
+    check(
+        r#"
+fn annotated<'a>(a: &'a [i64], n: i64) -> &'a [i64] ! {panic} {
+    elided(a, a, n - 1)
+}
+fn elided<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    annotated(a, n)
+}
+fn main() -> Unit ! {} {}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_unsupported_recursive_boundary_asks_for_an_explicit_contract() {
+    rejects(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+    Pair { left: a, right: b }
+}
+fn f<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    if n == 0 { make(a, b).left } else { f(a, b, n - 1) }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "not part of the root-slot recursive fragment",
+    );
+}
+
+#[test]
+fn every_recursive_result_owner_stays_loaned_until_the_last_use() {
+    rejects(
+        r#"
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+    if stop { a } else { right(a, b, true) }
+}
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> &[i64] ! {panic} {
+    if stop { b } else { left(a, b, true) }
+}
+fn main() -> i64 ! {panic} {
+    let mut a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    let view = left(&a[..], &b[..], false);
+    a = [5, 6];
+    Slice.get(view, 0)
+}
+"#,
+        "cannot replace an owner",
+    );
+}
+
+#[test]
+fn mutually_recursive_exclusive_views_keep_their_capabilities() {
+    // The result may alias either exclusive view, so both stay loaned and the
+    // write through the returned view remains checked.
+    agrees(
+        r#"
+fn left<'a, 'b>(a: &'a mut [i64], b: &'b mut [i64], n: i64) -> &mut [i64] ! {panic} {
+    if n == 0 { a } else { right(a, b, n - 1) }
+}
+fn right<'a, 'b>(a: &'a mut [i64], b: &'b mut [i64], n: i64) -> &mut [i64] ! {panic} {
+    if n == 0 { b } else { left(a, b, n - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let mut a: [i64; 2] = [1, 2];
+    let mut b: [i64; 2] = [3, 4];
+    let view = left(&mut a[..], &mut b[..], 1);
+    Slice.set(view, 0, 9);
+    a[1] + b[0]
+}
+"#,
+        11,
+        "",
+    );
+    // A shared view cannot become the exclusive recursive result, even when
+    // the recursive branch only forwards the shared parameter.
+    rejects(
+        r#"
+fn bad<'a>(a: &'a [i64], n: i64) -> &mut [i64] ! {panic} {
+    if n == 0 { a } else { bad(a, n - 1) }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "shared storage cannot be returned mutably",
+    );
+}
