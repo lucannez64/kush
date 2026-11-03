@@ -1,0 +1,18 @@
+id = "kush"
+name = "Kush"
+description = "Kush language support: syntax highlighting, outline, and the `kush lsp` language server."
+version = "0.1.0"
+schema_version = 1
+authors = ["lucannez64"]
+repository = "https://github.com/lucannez64/kush"
+
+# Zed fetches grammars from git. `scripts/install-zed-kush.sh` rewrites this
+# to a local clone of editors/tree-sitter-kush and pins `rev`.
+[grammars.kush]
+repository = "https://github.com/lucannez64/kush"
+rev = "main"
+path = "editors/tree-sitter-kush"
+
+[language_servers.kush-lsp]
+name = "Kush language server"
+languages = ["Kush"]

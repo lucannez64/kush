@@ -1,0 +1,4 @@
+{
+  "grammars": [{ "name": "kush", "camelcase": "Kush", "scope": "source.kush", "path": ".", "file-types": ["kush"] }],
+  "metadata": { "version": "0.1.0", "license": "MIT", "description": "Kush grammar for tree-sitter", "links": { "repository": "https://github.com/lucannez64/kush" } }
+}
