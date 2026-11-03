@@ -118,9 +118,9 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "41 worktrees; keep only ones with unmerged work.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 15:28:24",
@@ -151,6 +151,11 @@
           "time": "2026-11-03 15:39:42",
           "who": "agent",
           "text": "Final audit: 33 patch-equivalent inactive checkouts removed; marker files and one symlink archived, all branch refs and real caches retained; eight unique-patch checkouts preserved."
+        },
+        {
+          "time": "2026-11-03 15:39:43",
+          "who": "agent",
+          "text": "Safe checkout cleanup complete: removed 33 integrated inactive checkouts; retained eight unique-patch worktrees, all branch refs and real caches. Branch deletion excluded for recoverability."
         }
       ]
     },
@@ -462,9 +467,9 @@
       "deps": [
         "BORROW"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Separate the outlives graph from the ownership pass so it can be solved and explained.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 15:29:47",
@@ -475,6 +480,11 @@
           "time": "2026-11-03 15:33:39",
           "who": "agent",
           "text": "Extracted declared/inferred outlives closure into lifetimes.rs; owner-origin and call-signature boundaries unchanged."
+        },
+        {
+          "time": "2026-11-03 15:39:43",
+          "who": "agent",
+          "text": "Standalone graph replaces both declared/inferred closure loops; Boat 1179 tests pass."
         }
       ]
     },
@@ -487,9 +497,9 @@
       "deps": [
         "LT-GRAPH"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Deterministic least solution over declared + anonymous lifetimes; same results as today on all tests.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 15:29:48",
@@ -500,6 +510,11 @@
           "time": "2026-11-03 15:33:39",
           "who": "agent",
           "text": "Iterative SCC decomposition and condensation reachability; exhaustive 4096 graph comparison passed locally; full Boat gate running."
+        },
+        {
+          "time": "2026-11-03 15:39:43",
+          "who": "agent",
+          "text": "Iterative SCC condensation, least reachability, exhaustive 4096-graph reference comparison; strict Clippy passes."
         }
       ]
     },
@@ -512,9 +527,9 @@
       "deps": [
         "LT-SOLVER"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Diagnostics show the chain of outlives edges that fails.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 15:29:48",
@@ -525,6 +540,11 @@
           "time": "2026-11-03 15:33:39",
           "who": "agent",
           "text": "Added deterministic declared-cycle witnesses and failed-call known-chain/missing-endpoint notes; integration regressions added."
+        },
+        {
+          "time": "2026-11-03 15:39:43",
+          "who": "agent",
+          "text": "Cycle witness and missing call-path notes with integration regressions; full Boat gate passes."
         }
       ]
     },
