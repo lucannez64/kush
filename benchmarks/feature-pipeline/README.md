@@ -240,3 +240,14 @@ records all four controls and separate phases. Release takes 74.736 ms versus
 161.274 ms by default and 61.495 ms for manual Rust fusion. The map phase
 is 7.801 ms versus Rust's 16.781 ms; initialization and checksum still leave
 Kush slower end to end. These measurements describe this scalar workload only.
+
+The [collection/cache checkpoint](sample-results/fastpaths-2026-11-03/report.md)
+reruns the archived previous-release binary alongside the new release and Rust
+controls. It also records warm-versus-disabled C-runtime cache build timings:
+
+```sh
+python3 benchmarks/feature-pipeline/build_time.py --kush /path/to/kush
+```
+
+Runtime source remains unchanged. Raw samples and binary hashes are included;
+the compile-time experiment excludes execution from its timer.

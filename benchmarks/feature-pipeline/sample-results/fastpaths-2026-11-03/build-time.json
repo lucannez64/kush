@@ -1,0 +1,43 @@
+{
+  "utc": "2026-11-03T02:29:40.121233+00:00",
+  "git_head": "524c39b19a7a1643f1038072995eae80509e9559",
+  "compiler_sha256": "1a4ba65b8eae3fef1c06672e05d54a93a12b0781fb86188eeef0c6f73a21fb9b",
+  "source_sha256": "cafd7a051c4b826027b1b2a768ea06238b37ed8ccc5175736a6dfefce5382a20",
+  "command": [
+    "/home/hirew/.cache/kush-mbx-release/debug/kush",
+    "build",
+    "/tmp/kush-build-bench-m9l1sjw3/pipeline.kush",
+    "-o",
+    "/tmp/kush-build-bench-m9l1sjw3/program",
+    "--release"
+  ],
+  "pinned_cpu": 11,
+  "repetitions": 7,
+  "shuffle_seed": 20261103,
+  "initial_cold_cache_ms": 1088.1386910041329,
+  "samples_ms": {
+    "warm-cache": [
+      238.44301799545065,
+      235.34074999042787,
+      242.63036699267104,
+      237.08531199372374,
+      236.74664599820971,
+      231.68889799853787,
+      234.88091501349118
+    ],
+    "cache-disabled": [
+      1043.6935939942487,
+      1054.8611060075928,
+      1036.8892300029984,
+      1040.9285000059754,
+      1040.8136540063424,
+      1048.5881420027,
+      1040.4947530041682
+    ]
+  },
+  "median_ms": {
+    "warm-cache": 236.74664599820971,
+    "cache-disabled": 1040.9285000059754
+  },
+  "note": "Total native CLI build time, including checking/codegen/dependency scan/link; execution correctness probe excluded. Cache-disabled skips lookup and recompiles C. Initial cold sample is descriptive, not a median."
+}

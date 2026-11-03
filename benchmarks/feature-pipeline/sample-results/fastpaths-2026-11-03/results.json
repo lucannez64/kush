@@ -1,0 +1,722 @@
+{
+  "metadata": {
+    "utc": "2026-11-03T02:28:51.736580+00:00",
+    "git_head": "524c39b19a7a1643f1038072995eae80509e9559",
+    "shuffle_seed": 20261103,
+    "warmups": 2,
+    "phase_warmups": 1,
+    "source_sha256": "cafd7a051c4b826027b1b2a768ea06238b37ed8ccc5175736a6dfefce5382a20",
+    "cpu_model": "AMD Ryzen 5 PRO 5675U with Radeon Graphics",
+    "kush_binary_sha256": "1a4ba65b8eae3fef1c06672e05d54a93a12b0781fb86188eeef0c6f73a21fb9b",
+    "rustc": "rustc 1.100.0-nightly (cea272fa3 2026-09-07)\nbinary: rustc\ncommit-hash: cea272fa356e94bd2ee2cadf376630aa0683867a\ncommit-date: 2026-09-07\nhost: x86_64-unknown-linux-gnu\nrelease: 1.100.0-nightly\nLLVM version: 23.1.1\n",
+    "pinned_cpu": 11,
+    "repetitions": 7,
+    "builds": [
+      {
+        "variant": "kush-default",
+        "command": [
+          "/home/hirew/.cache/kush-mbx-release/debug/kush",
+          "build",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/optimizations/pipeline.kush",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/optimizations/kush-default"
+        ],
+        "wall_s": 1.0692843470023945,
+        "binary_sha256": "8dde3ee27ebf961b6c7fcabb9ce1fab56c2e335fa433486d8d6c0968a128db2e"
+      },
+      {
+        "variant": "kush-speed",
+        "command": [
+          "/home/hirew/.cache/kush-mbx-release/debug/kush",
+          "build",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/optimizations/pipeline.kush",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/optimizations/kush-speed",
+          "--opt-level",
+          "speed"
+        ],
+        "wall_s": 0.24653666900121607,
+        "binary_sha256": "d86850e4b62f9a8a67322753b9a084c79f2f28e096e222453fa32dff7b540ef3"
+      },
+      {
+        "variant": "kush-inline",
+        "command": [
+          "/home/hirew/.cache/kush-mbx-release/debug/kush",
+          "build",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/optimizations/pipeline.kush",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/optimizations/kush-inline",
+          "--inline-scalars"
+        ],
+        "wall_s": 0.23320637698634528,
+        "binary_sha256": "b2a8aca664671000b247300a3f34482edfcdd9172fc5ebb3e6bd1c435391109e"
+      },
+      {
+        "variant": "kush-release",
+        "command": [
+          "/home/hirew/.cache/kush-mbx-release/debug/kush",
+          "build",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/optimizations/pipeline.kush",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/optimizations/kush-release",
+          "--release"
+        ],
+        "wall_s": 0.2356627289991593,
+        "binary_sha256": "e587bc8b13b2121402e6ace7ee6fcc6cf730a08a47db7baaf372d5eb13673b62"
+      },
+      {
+        "variant": "rust-o3",
+        "command": [
+          "rustc",
+          "+nightly",
+          "-Zcodegen-backend=cranelift",
+          "-Copt-level=3",
+          "-Coverflow-checks=yes",
+          "-Cpanic=abort",
+          "-Ctarget-cpu=x86-64",
+          "--edition=2024",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/rust/main.rs",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/optimizations/rust-o3"
+        ],
+        "binary_sha256": "4707f62402e7839d9eae723242783f5669d231898701965526189518d73b966d"
+      },
+      {
+        "variant": "kush-previous-release",
+        "binary_sha256": "8d9e51800814e8392fc6d72bcfa7d3654052ea1194aa3d20ab01fe41076c3045",
+        "phase_binary_sha256": "3449b4c767e2d3056eae851081688543953a013feb42f02368dcaf718aaf7139",
+        "path": "/tmp/kush-before-fastpaths"
+      }
+    ]
+  },
+  "measurements": [
+    {
+      "variant": "kush-default",
+      "label": "Kush / default",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 159.135607,
+          "peak_rss_kib": 18544,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 159.079672,
+          "peak_rss_kib": 18604,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 163.496271,
+          "peak_rss_kib": 18684,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 158.982478,
+          "peak_rss_kib": 18604,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 187.863581,
+          "peak_rss_kib": 18592,
+          "user_s": 0.17,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 158.450397,
+          "peak_rss_kib": 18692,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 161.09838,
+          "peak_rss_kib": 18536,
+          "user_s": 0.15,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "kush-previous-release",
+      "label": "Kush / previous release",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 74.45871,
+          "peak_rss_kib": 18524,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 73.544069,
+          "peak_rss_kib": 18684,
+          "user_s": 0.07,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 75.980444,
+          "peak_rss_kib": 18576,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 78.237701,
+          "peak_rss_kib": 18508,
+          "user_s": 0.07,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 74.8415,
+          "peak_rss_kib": 18512,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 76.618634,
+          "peak_rss_kib": 18572,
+          "user_s": 0.07,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 74.312485,
+          "peak_rss_kib": 18548,
+          "user_s": 0.06,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "kush-speed",
+      "label": "Kush / speed only",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 125.053739,
+          "peak_rss_kib": 18568,
+          "user_s": 0.11,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 125.014986,
+          "peak_rss_kib": 18476,
+          "user_s": 0.11,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 125.354896,
+          "peak_rss_kib": 18504,
+          "user_s": 0.11,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 126.051456,
+          "peak_rss_kib": 18668,
+          "user_s": 0.11,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 125.572385,
+          "peak_rss_kib": 18616,
+          "user_s": 0.12,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 124.54445,
+          "peak_rss_kib": 18660,
+          "user_s": 0.11,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 123.519863,
+          "peak_rss_kib": 18656,
+          "user_s": 0.11,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "kush-inline",
+      "label": "Kush / callback inlining only",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 76.828749,
+          "peak_rss_kib": 18616,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 75.549452,
+          "peak_rss_kib": 18616,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 77.473683,
+          "peak_rss_kib": 18568,
+          "user_s": 0.07,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 76.15929,
+          "peak_rss_kib": 18760,
+          "user_s": 0.07,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 76.125146,
+          "peak_rss_kib": 18452,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 76.759329,
+          "peak_rss_kib": 18480,
+          "user_s": 0.07,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 75.871889,
+          "peak_rss_kib": 18560,
+          "user_s": 0.06,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "kush-release",
+      "label": "Kush / release (speed + inlining)",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 38.696741,
+          "peak_rss_kib": 18640,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 38.096342,
+          "peak_rss_kib": 18516,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 38.340451,
+          "peak_rss_kib": 18588,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 37.366288,
+          "peak_rss_kib": 18640,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 38.725516,
+          "peak_rss_kib": 18616,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 38.792992,
+          "peak_rss_kib": 18660,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 38.084879,
+          "peak_rss_kib": 18560,
+          "user_s": 0.03,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "rust-manual",
+      "label": "Rust CLIF O3 / manual fusion",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 61.976163,
+          "peak_rss_kib": 18796,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 60.621754,
+          "peak_rss_kib": 18724,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 60.84221,
+          "peak_rss_kib": 18864,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 60.786846,
+          "peak_rss_kib": 18832,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 61.862539,
+          "peak_rss_kib": 18824,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 60.913253,
+          "peak_rss_kib": 18764,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 62.313869,
+          "peak_rss_kib": 18796,
+          "user_s": 0.05,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "rust-iter",
+      "label": "Rust CLIF O3 / iterator chain",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 193.1458,
+          "peak_rss_kib": 18796,
+          "user_s": 0.18,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 192.493442,
+          "peak_rss_kib": 18952,
+          "user_s": 0.18,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 193.554128,
+          "peak_rss_kib": 18796,
+          "user_s": 0.18,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 196.685009,
+          "peak_rss_kib": 18816,
+          "user_s": 0.19,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 219.103712,
+          "peak_rss_kib": 18852,
+          "user_s": 0.21,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 206.543408,
+          "peak_rss_kib": 18800,
+          "user_s": 0.19,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 194.556364,
+          "peak_rss_kib": 18844,
+          "user_s": 0.18,
+          "system_s": 0.0
+        }
+      ]
+    }
+  ],
+  "phases": [
+    {
+      "variant": "kush-default",
+      "observations": [
+        {
+          "initialize_ms": 48.052314,
+          "map_ms": 93.063558,
+          "checksum_ms": 11.626034
+        },
+        {
+          "initialize_ms": 48.205453,
+          "map_ms": 92.8372,
+          "checksum_ms": 11.590098
+        },
+        {
+          "initialize_ms": 49.871808,
+          "map_ms": 94.606489,
+          "checksum_ms": 11.533552
+        },
+        {
+          "initialize_ms": 48.198929,
+          "map_ms": 93.051024,
+          "checksum_ms": 11.547717
+        },
+        {
+          "initialize_ms": 48.481941,
+          "map_ms": 94.004759,
+          "checksum_ms": 11.676631
+        },
+        {
+          "initialize_ms": 48.085428,
+          "map_ms": 93.328434,
+          "checksum_ms": 11.600918
+        },
+        {
+          "initialize_ms": 47.784261,
+          "map_ms": 92.302272,
+          "checksum_ms": 11.575402
+        }
+      ],
+      "medians": {
+        "initialize_ms": 48.198929,
+        "map_ms": 93.063558,
+        "checksum_ms": 11.590098
+      }
+    },
+    {
+      "variant": "kush-previous-release",
+      "observations": [
+        {
+          "initialize_ms": 49.475734,
+          "map_ms": 8.248759,
+          "checksum_ms": 15.824777
+        },
+        {
+          "initialize_ms": 49.664838,
+          "map_ms": 7.638794,
+          "checksum_ms": 15.875911
+        },
+        {
+          "initialize_ms": 48.282607,
+          "map_ms": 7.791159,
+          "checksum_ms": 15.898214
+        },
+        {
+          "initialize_ms": 49.671621,
+          "map_ms": 7.508628,
+          "checksum_ms": 15.819827
+        },
+        {
+          "initialize_ms": 50.77162,
+          "map_ms": 7.955239,
+          "checksum_ms": 16.69897
+        },
+        {
+          "initialize_ms": 47.418082,
+          "map_ms": 8.443247,
+          "checksum_ms": 15.92362
+        },
+        {
+          "initialize_ms": 49.153595,
+          "map_ms": 8.720199,
+          "checksum_ms": 16.163573
+        }
+      ],
+      "medians": {
+        "initialize_ms": 49.475734,
+        "map_ms": 7.955239,
+        "checksum_ms": 15.898214
+      }
+    },
+    {
+      "variant": "kush-release",
+      "observations": [
+        {
+          "initialize_ms": 18.752184,
+          "map_ms": 8.297823,
+          "checksum_ms": 7.520952
+        },
+        {
+          "initialize_ms": 18.833205,
+          "map_ms": 7.751306,
+          "checksum_ms": 7.187954
+        },
+        {
+          "initialize_ms": 18.731344,
+          "map_ms": 8.80117,
+          "checksum_ms": 7.122872
+        },
+        {
+          "initialize_ms": 18.575652,
+          "map_ms": 7.979594,
+          "checksum_ms": 7.208322
+        },
+        {
+          "initialize_ms": 16.60782,
+          "map_ms": 8.900618,
+          "checksum_ms": 7.572056
+        },
+        {
+          "initialize_ms": 18.519786,
+          "map_ms": 8.903313,
+          "checksum_ms": 7.166013
+        },
+        {
+          "initialize_ms": 16.728266,
+          "map_ms": 7.707914,
+          "checksum_ms": 7.080462
+        }
+      ],
+      "medians": {
+        "initialize_ms": 18.575652,
+        "map_ms": 8.297823,
+        "checksum_ms": 7.187954
+      }
+    },
+    {
+      "variant": "rust-manual",
+      "observations": [
+        {
+          "initialize_ms": 29.418804,
+          "map_ms": 16.736542,
+          "checksum_ms": 9.766266
+        },
+        {
+          "initialize_ms": 30.07549,
+          "map_ms": 16.733526,
+          "checksum_ms": 9.691124
+        },
+        {
+          "initialize_ms": 29.311972,
+          "map_ms": 16.656812,
+          "checksum_ms": 9.456562
+        },
+        {
+          "initialize_ms": 29.890912,
+          "map_ms": 16.904316,
+          "checksum_ms": 9.655018
+        },
+        {
+          "initialize_ms": 29.707639,
+          "map_ms": 16.90102,
+          "checksum_ms": 10.060279
+        },
+        {
+          "initialize_ms": 29.75669,
+          "map_ms": 16.819097,
+          "checksum_ms": 9.672789
+        },
+        {
+          "initialize_ms": 29.282438,
+          "map_ms": 16.605836,
+          "checksum_ms": 9.504973
+        }
+      ],
+      "medians": {
+        "initialize_ms": 29.707639,
+        "map_ms": 16.736542,
+        "checksum_ms": 9.672789
+      }
+    }
+  ],
+  "safety": [],
+  "source_lines": {
+    "Kush production": {
+      "files": [
+        "kush/main.kush",
+        "kush/src/pipeline.kush"
+      ],
+      "nonblank_noncomment_lines": 76
+    },
+    "Rust production": {
+      "files": [
+        "rust/main.rs",
+        "rust/pipeline.rs"
+      ],
+      "nonblank_noncomment_lines": 107
+    },
+    "Rust allocation instrumentation (excluded)": {
+      "files": [
+        "rust/allocation.rs"
+      ],
+      "nonblank_noncomment_lines": 70
+    }
+  },
+  "text_sections": {},
+  "summary": [
+    {
+      "variant": "kush-default",
+      "label": "Kush / default",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 159.135607,
+      "min_wall_ms": 158.450397,
+      "max_wall_ms": 187.863581,
+      "median_peak_rss_kib": 18604
+    },
+    {
+      "variant": "kush-previous-release",
+      "label": "Kush / previous release",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 74.8415,
+      "min_wall_ms": 73.544069,
+      "max_wall_ms": 78.237701,
+      "median_peak_rss_kib": 18548
+    },
+    {
+      "variant": "kush-speed",
+      "label": "Kush / speed only",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 125.053739,
+      "min_wall_ms": 123.519863,
+      "max_wall_ms": 126.051456,
+      "median_peak_rss_kib": 18616
+    },
+    {
+      "variant": "kush-inline",
+      "label": "Kush / callback inlining only",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 76.15929,
+      "min_wall_ms": 75.549452,
+      "max_wall_ms": 77.473683,
+      "median_peak_rss_kib": 18568
+    },
+    {
+      "variant": "kush-release",
+      "label": "Kush / release (speed + inlining)",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 38.340451,
+      "min_wall_ms": 37.366288,
+      "max_wall_ms": 38.792992,
+      "median_peak_rss_kib": 18616
+    },
+    {
+      "variant": "rust-manual",
+      "label": "Rust CLIF O3 / manual fusion",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 60.913253,
+      "min_wall_ms": 60.621754,
+      "max_wall_ms": 62.313869,
+      "median_peak_rss_kib": 18796
+    },
+    {
+      "variant": "rust-iter",
+      "label": "Rust CLIF O3 / iterator chain",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 194.556364,
+      "min_wall_ms": 192.493442,
+      "max_wall_ms": 219.103712,
+      "median_peak_rss_kib": 18816
+    }
+  ]
+}

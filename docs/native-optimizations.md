@@ -183,3 +183,19 @@ python3 benchmarks/feature-pipeline/build_time.py --kush /path/to/kush
 The optimization benchmark optionally accepts `--previous /path/to/binaries`
 containing a previous `kush-release` and `phases-kush-release`; hashes are
 recorded and those controls run in the same shuffled cohort as the new builds.
+
+### Collection/cache checkpoint (2026-11-03)
+
+At compiler `524c39b`, a matched seven-sample cohort measures release at
+38.340 ms versus the previous release binary at 74.841 ms and Rust Cranelift
+manual fusion at 60.913 ms. Peak RSS stays near 18 MiB. Separate phase probes
+measure initialization at 18.576 ms (previous 49.476), transform at 8.298 ms
+(previous 7.955), and checksum at 7.188 ms (previous 15.898). The transform
+change is small; the targeted gains are initialization and checksum.
+
+Warm C-runtime caching reduces total native build median from 1040.929 ms
+(cache disabled) to 236.747 ms using the same compiler, source, release flags
+and CPU. A single initial cold-cache build takes 1088.139 ms. The workload
+source and previous binary hashes match the prior archived cohort. Raw data
+and caveats: `benchmarks/feature-pipeline/sample-results/fastpaths-2026-11-03/`.
+These measurements cover this scalar workload only.

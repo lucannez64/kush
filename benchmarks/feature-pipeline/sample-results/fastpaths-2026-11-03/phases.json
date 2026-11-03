@@ -1,0 +1,182 @@
+[
+  {
+    "variant": "kush-default",
+    "observations": [
+      {
+        "initialize_ms": 48.052314,
+        "map_ms": 93.063558,
+        "checksum_ms": 11.626034
+      },
+      {
+        "initialize_ms": 48.205453,
+        "map_ms": 92.8372,
+        "checksum_ms": 11.590098
+      },
+      {
+        "initialize_ms": 49.871808,
+        "map_ms": 94.606489,
+        "checksum_ms": 11.533552
+      },
+      {
+        "initialize_ms": 48.198929,
+        "map_ms": 93.051024,
+        "checksum_ms": 11.547717
+      },
+      {
+        "initialize_ms": 48.481941,
+        "map_ms": 94.004759,
+        "checksum_ms": 11.676631
+      },
+      {
+        "initialize_ms": 48.085428,
+        "map_ms": 93.328434,
+        "checksum_ms": 11.600918
+      },
+      {
+        "initialize_ms": 47.784261,
+        "map_ms": 92.302272,
+        "checksum_ms": 11.575402
+      }
+    ],
+    "medians": {
+      "initialize_ms": 48.198929,
+      "map_ms": 93.063558,
+      "checksum_ms": 11.590098
+    }
+  },
+  {
+    "variant": "kush-previous-release",
+    "observations": [
+      {
+        "initialize_ms": 49.475734,
+        "map_ms": 8.248759,
+        "checksum_ms": 15.824777
+      },
+      {
+        "initialize_ms": 49.664838,
+        "map_ms": 7.638794,
+        "checksum_ms": 15.875911
+      },
+      {
+        "initialize_ms": 48.282607,
+        "map_ms": 7.791159,
+        "checksum_ms": 15.898214
+      },
+      {
+        "initialize_ms": 49.671621,
+        "map_ms": 7.508628,
+        "checksum_ms": 15.819827
+      },
+      {
+        "initialize_ms": 50.77162,
+        "map_ms": 7.955239,
+        "checksum_ms": 16.69897
+      },
+      {
+        "initialize_ms": 47.418082,
+        "map_ms": 8.443247,
+        "checksum_ms": 15.92362
+      },
+      {
+        "initialize_ms": 49.153595,
+        "map_ms": 8.720199,
+        "checksum_ms": 16.163573
+      }
+    ],
+    "medians": {
+      "initialize_ms": 49.475734,
+      "map_ms": 7.955239,
+      "checksum_ms": 15.898214
+    }
+  },
+  {
+    "variant": "kush-release",
+    "observations": [
+      {
+        "initialize_ms": 18.752184,
+        "map_ms": 8.297823,
+        "checksum_ms": 7.520952
+      },
+      {
+        "initialize_ms": 18.833205,
+        "map_ms": 7.751306,
+        "checksum_ms": 7.187954
+      },
+      {
+        "initialize_ms": 18.731344,
+        "map_ms": 8.80117,
+        "checksum_ms": 7.122872
+      },
+      {
+        "initialize_ms": 18.575652,
+        "map_ms": 7.979594,
+        "checksum_ms": 7.208322
+      },
+      {
+        "initialize_ms": 16.60782,
+        "map_ms": 8.900618,
+        "checksum_ms": 7.572056
+      },
+      {
+        "initialize_ms": 18.519786,
+        "map_ms": 8.903313,
+        "checksum_ms": 7.166013
+      },
+      {
+        "initialize_ms": 16.728266,
+        "map_ms": 7.707914,
+        "checksum_ms": 7.080462
+      }
+    ],
+    "medians": {
+      "initialize_ms": 18.575652,
+      "map_ms": 8.297823,
+      "checksum_ms": 7.187954
+    }
+  },
+  {
+    "variant": "rust-manual",
+    "observations": [
+      {
+        "initialize_ms": 29.418804,
+        "map_ms": 16.736542,
+        "checksum_ms": 9.766266
+      },
+      {
+        "initialize_ms": 30.07549,
+        "map_ms": 16.733526,
+        "checksum_ms": 9.691124
+      },
+      {
+        "initialize_ms": 29.311972,
+        "map_ms": 16.656812,
+        "checksum_ms": 9.456562
+      },
+      {
+        "initialize_ms": 29.890912,
+        "map_ms": 16.904316,
+        "checksum_ms": 9.655018
+      },
+      {
+        "initialize_ms": 29.707639,
+        "map_ms": 16.90102,
+        "checksum_ms": 10.060279
+      },
+      {
+        "initialize_ms": 29.75669,
+        "map_ms": 16.819097,
+        "checksum_ms": 9.672789
+      },
+      {
+        "initialize_ms": 29.282438,
+        "map_ms": 16.605836,
+        "checksum_ms": 9.504973
+      }
+    ],
+    "medians": {
+      "initialize_ms": 29.707639,
+      "map_ms": 16.736542,
+      "checksum_ms": 9.672789
+    }
+  }
+]
