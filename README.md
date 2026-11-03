@@ -238,6 +238,11 @@ Native build/run now also accept `--release` for Cranelift speed optimization
 and restricted pure-scalar map callback inlining; see
 [native optimization controls](docs/native-optimizations.md).
 
+The [JSON document memory benchmark](benchmarks/json-memory) compares rebuild
+and deliberate reuse in Kush and Rust/Cranelift. It separates allocator requests,
+live requested bytes, process RSS and retention after dropping the large corpus,
+with an independent JSON oracle and a measured laptop snapshot.
+
 The standalone [project demo](examples/project-demo) exercises a local module, a
 local dependency, tests, and formatting.
 

@@ -136,3 +136,17 @@ Raw samples, phase frames, allocator reports, commands, compiler versions and
 binary/source hashes are written to `results/latest/`, with a standalone
 interactive `report.html` and `report.md`. Generated build/results directories
 are ignored; selected measured snapshots can be committed under sample-results.
+
+## Measured laptop checkpoint
+
+The [2026-11-03 analysis](sample-results/laptop-2026-11-03/analysis.md) records
+the full three-size experiment. Reuse reaches essentially the same allocator
+request count in both languages. On the largest case, Kush reuse uses more
+peak requested heap and RSS than Rust reuse, while finishing sooner. The
+analysis reconciles the requested-heap gap with document layouts and pool
+retention; it does not infer OS allocation counts from libc requests.
+
+The content-hashed probe object filenames force Cargo to relink if the C probe
+changes. `--skip-build` checks source/compiler/binary hashes before accepting
+existing binaries. Raw data records both the measurement script hash and, when
+regenerated later, the report-generator hash.
