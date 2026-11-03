@@ -168,8 +168,11 @@ pub(super) fn compile(runtime: &str, defines: &[String], scratch: &Scratch) -> R
     let object = scratch.path().join("runtime.o");
     let source = scratch.path().join("runtime.c");
     fs::write(&source, runtime).map_err(error)?;
-    let cache = cache_directory(scratch)
-        .and_then(|root| compiler_identity(&source, defines).map(|identity| (root, identity)));
+    let directory = cache_directory(scratch);
+    let identity = directory
+        .as_ref()
+        .and_then(|_| compiler_identity(&source, defines));
+    let cache = directory.zip(identity);
     let mut key = b"kush-c-runtime-v1\0-std=c11\0-O2\0".to_vec();
     key.extend_from_slice(runtime.as_bytes());
     key.extend_from_slice(format!("{defines:?}").as_bytes());

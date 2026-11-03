@@ -132,7 +132,7 @@ fn source_and_link_failures_do_not_replace_existing_output() {
     let tools = scratch.path().join("tools");
     fs::create_dir(&tools).unwrap();
     let cc = tools.join("cc");
-    fs::write(&cc, "#!/bin/sh\necho forced-link-failure >&2\nexit 23\n").unwrap();
+    fs::write(&cc, "#!/bin/sh\nfor argument do\n case \"$argument\" in -c|--version|-dumpmachine|-M) exec /usr/bin/cc \"$@\";; esac\ndone\necho forced-link-failure >&2\nexit 23\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&cc, fs::Permissions::from_mode(0o700)).unwrap();
     let linked = Command::new(env!("CARGO_BIN_EXE_kush"))
@@ -140,11 +140,32 @@ fn source_and_link_failures_do_not_replace_existing_output() {
         .arg(&source)
         .arg("-o")
         .arg(&output)
-        .env("PATH", &tools)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                tools.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
         .output()
         .unwrap();
     assert!(!linked.status.success());
     assert!(String::from_utf8_lossy(&linked.stderr).contains("native link failed"));
+    assert_eq!(fs::read_to_string(&output).unwrap(), "previous");
+    fs::write(&cc, "#!/bin/sh\necho forced-compile-failure >&2\nexit 23\n").unwrap();
+    let compiled = Command::new(env!("CARGO_BIN_EXE_kush"))
+        .arg("build")
+        .arg(&source)
+        .arg("-o")
+        .arg(&output)
+        .env("PATH", &tools)
+        .output()
+        .unwrap();
+    assert!(!compiled.status.success());
+    assert!(
+        String::from_utf8_lossy(&compiled.stderr).contains("native runtime compilation failed")
+    );
     assert_eq!(fs::read_to_string(&output).unwrap(), "previous");
     let result = Command::new(env!("CARGO_BIN_EXE_kush"))
         .arg("build")
