@@ -577,9 +577,9 @@
       "deps": [
         "LT-SOLVER"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Box/Vec covariant, &mut invariant, fn parameters contravariant, records by field.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 16:00:42",
@@ -590,6 +590,11 @@
           "time": "2026-11-03 16:37:24",
           "who": "agent",
           "text": "Integrated DeepSeek draft; corrected seedless variance equations, unused composition, callable occurrence maps and stale capability assumptions. Decisions: lifetime-only; exact structural/capture/TaskExit boundaries; optional enum invariant until explicit metadata; existing anonymous intersections retained."
+        },
+        {
+          "time": "2026-11-03 16:37:51",
+          "who": "agent",
+          "text": "Reviewed lifetime-only variance design finalized: seeded sign-set algebra, occurrence binder environments, owner witnesses, conservative boundaries and staged implementation. Algebra/DAG/link checks pass; no compiler implementation claimed."
         }
       ]
     },
@@ -1550,6 +1555,11 @@
           "time": "2026-11-03 16:09:28",
           "who": "agent",
           "text": "Finite may-origin/requirement equations, call-graph SCC worklist, no-seed rejection, freeze/recheck protocol and bounded testable scope designed; implementation stays open."
+        },
+        {
+          "time": "2026-11-03 16:37:51",
+          "who": "agent",
+          "text": "Reconciled with variance contract; explicit boundary summaries retain all permitted origins. Recursive implementation remains open."
         }
       ]
     },
