@@ -35,7 +35,7 @@ fn window<'long: 'short, 'short>(view: &'long [i64]) -> Window<'short> ! {} {
 
 #[noalloc]
 fn first<'a>(w: Window<'a>) -> &'a [i64] ! {} {
-    let Window { view, .. } = w;
+    let Window { view, ..} = w;
     view
 }
 

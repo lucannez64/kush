@@ -21,19 +21,19 @@ fn scalar(flag: Bool) -> i64 | Bool ! {} {
 
 fn scalar_value(value: i64 | Bool) -> i64 ! {panic} {
     match value {
-        i64 @ n => n,
-        Bool @ flag => if flag { 22 } else { 0 },
+        i64 @n => n,
+        Bool @flag => if flag { 22 } else { 0 },
     }
 }
 
 fn shape_value(value: Point | Shape | i64) -> i64 ! {panic} {
     match value {
-        Point @ p => p.x + p.y,
-        Shape @ s => match s {
+        Point @p => p.x + p.y,
+        Shape @s => match s {
             Shape.Dot => 0,
             Shape.Line(n) => n,
         },
-        i64 @ n => n,
+        i64 @n => n,
     }
 }
 
@@ -53,9 +53,9 @@ fn widen(flag: Bool) -> i64 | Bool | Bytes ! {alloc, panic} {
 
 fn guarded(value: i64 | Bool) -> i64 ! {panic} {
     match value {
-        i64 @ n if n > 0 => n,
-        i64 @ _ => 0,
-        Bool @ flag => if flag { 1 } else { 0 },
+        i64 @n if n > 0 => n,
+        i64 @_ => 0,
+        Bool @flag => if flag { 1 } else { 0 },
     }
 }
 
@@ -65,26 +65,26 @@ fn main() -> Unit ! {io, alloc, panic} {
     let boxed = owning(true);
     let bytes = owning(false);
     print_i64(match boxed {
-        Box<i64> @ b => Box.take(b),
-        Bytes @ _ => 0,
+        Box<i64> @b => Box.take(b),
+        Bytes @_ => 0,
     });
     print_i64(match bytes {
-        Box<i64> @ _ => 0,
-        Bytes @ b => Bytes.len(&b),
+        Box<i64> @_ => 0,
+        Bytes @b => Bytes.len(&b),
     });
 
     print_i64(shape_value(Point { x: 19, y: 20 }));
     print_i64(shape_value(Shape.Line(3)));
 
     print_i64(match widen(true) {
-        i64 @ n => n,
-        Bool @ _ => 0,
-        Bytes @ _ => 0,
+        i64 @n => n,
+        Bool @_ => 0,
+        Bytes @_ => 0,
     });
     print_i64(match widen(false) {
-        i64 @ _ => 0,
-        Bool @ _ => 0,
-        Bytes @ b => Bytes.len(&b),
+        i64 @_ => 0,
+        Bool @_ => 0,
+        Bytes @b => Bytes.len(&b),
     });
 
     // `(i64 | Bool) & i64` normalizes to `i64`; the false alternatives vanish.

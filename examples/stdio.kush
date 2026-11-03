@@ -1,10 +1,10 @@
 module examples.stdio;
 
-enum Result<T,E> { Ok(T), Err(E) }
+enum Result<T, E> { Ok(T), Err(E) }
 
 #[noalloc]
 #[nosuspend]
-fn copy(input: Stdin, output: Stdout, buffer: Bytes) -> Result<Unit,i64> ! {io} {
+fn copy(input: Stdin, output: Stdout, buffer: Bytes) -> Result<Unit, i64> ! {io} {
     let bytes = IO.read_all(input, buffer)?;
     IO.write(output, &bytes)
 }

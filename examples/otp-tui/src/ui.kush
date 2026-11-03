@@ -45,8 +45,7 @@ pub fn frame(store: &adapter.Store, selected: i64, editing: Bool, input_len: i64
     let end = i + visible;
     if count == 0 { out = append(out, &Bytes.from("No entries. Press a to add an otpauth:// URI.\n")); }
     while i < count && i < end {
-        if i == selected { out = append(out, &Bytes.from("> ")); }
-        else { out = append(out, &Bytes.from("  ")); }
+        if i == selected { out = append(out, &Bytes.from("> ")); } else { out = append(out, &Bytes.from("  ")); }
         out = append(out, &text.format_i64(i + 1));
         out = append(out, &Bytes.from("  "));
         out = append(out, &match adapter.label(store, i) { Ok(value) => value, Err(_) => Bytes.from("?") });
@@ -54,8 +53,7 @@ pub fn frame(store: &adapter.Store, selected: i64, editing: Bool, input_len: i64
         out = append(out, &match adapter.code(store, i, timestamp) { Ok(value) => value, Err(_) => Bytes.from("ERROR") });
         out = append(out, &Bytes.from("  |  "));
         let remaining = match adapter.remaining(store, i, timestamp) { Ok(value) => value, Err(_) => 0 };
-        if remaining == -1 { out = append(out, &Bytes.from("HOTP [n]ext")); }
-        else { out = append(out, &text.format_i64(remaining)); out = append(out, &Bytes.from("s")); }
+        if remaining == -1 { out = append(out, &Bytes.from("HOTP [n]ext")); } else { out = append(out, &text.format_i64(remaining)); out = append(out, &Bytes.from("s")); }
         out = append(out, &Bytes.from("\n"));
         i = i + 1;
     }
@@ -86,8 +84,7 @@ pub fn run(store: &adapter.Store, terminal: adapter.Terminal) -> Result<Unit, i6
         let mut tag = 0;
         if Bytes.len(&event) > 0 { tag = Bytes.get(&event, 0); }
         if tag == 13 { status = Bytes.from("Paste must be one line, at most 8192 bytes"); }
-        if tag == 11 { running = false; }
-        else {
+        if tag == 11 { running = false; } else {
             if editing {
                 if tag == 1 {
                     if Bytes.len(&input) + Bytes.len(&event) - 1 <= 8192 {

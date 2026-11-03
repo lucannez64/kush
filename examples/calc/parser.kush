@@ -47,6 +47,7 @@ fn operator(token: Token, level: i64) -> Option ! {} {
         _ => Option.None,
     }
 }
+
 enum Option { None, Some(Op) }
 
 fn operand(tokens: &Vec<Token>, at: i64, level: i64) -> Result<Parsed, ParseError> ! {alloc, panic} {

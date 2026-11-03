@@ -144,8 +144,7 @@ fn list(path: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
         let end = if found < 0 { n } else { found };
         let state = Bytes.get(&data, start);
         out = append(out, &open);
-        if state == 49 { out = Bytes.push(out, 120); }
-        else { out = Bytes.push(out, 32); }
+        if state == 49 { out = Bytes.push(out, 120); } else { out = Bytes.push(out, 32); }
         out = append(out, &close);
         out = text.format_i64_into(out, number);
         out = append(out, &dot);

@@ -1,6 +1,7 @@
 module examples.parser;
 
 // An initial syntax fixture for the future parser/compiler application.
+
 pub struct Span {
     start: usize,
     end: usize,

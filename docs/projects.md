@@ -238,22 +238,32 @@ the test lines; `--nocapture` also shows captured output for passing tests.
 
 ## Formatter
 
-`kush fmt` is intentionally conservative. The AST does not retain comments, so a
-full AST pretty-printer would delete them. Instead the formatter:
+`kush fmt` works on the lexer token stream, because the AST does not retain
+comments and an AST pretty-printer would delete them. The layout pass re-emits
+every token verbatim and only decides the whitespace around it:
 
-- removes trailing spaces and tabs outside string literals, character literals,
-  and block comments;
-- ensures a final newline;
-- preserves comments, string/char contents, indentation, tokens, and line
-  endings.
+- indentation follows block nesting; `{ ... }` bodies the author spread over
+  lines are re-indented, while one-line blocks stay inline;
+- statements, comma-separated fields and variants, and match arms get one line
+  each in multi-line blocks;
+- binary operators, `->`, `:`, `=`, and `! {row}` headers get conventional
+  spacing, and generic brackets (`Vec<i64>`, `impl<T>`, `Nat.succ<n>`) stay
+  closed up;
+- exactly one blank line separates top-level item groups (module/imports,
+  foreign declarations, then everything else); interior single blank lines and
+  comments are preserved;
+- string and character contents, comment text, and the file's line endings are
+  preserved unchanged, and a final newline is ensured.
 
-Before writing, it lexes the original and candidate and refuses the rewrite if
-the token kinds differ. Lexically invalid files are not rewritten.
-`kush fmt --check` writes nothing and exits 1 when a file would change. With no
-file arguments it formats all root-package `.kush` files, excluding `target/`,
-hidden directories, and dependency package roots.
+Before writing, it lexes the original and the candidate and refuses the rewrite
+if the token kinds differ, so a layout bug cannot change program text.
+Lexically invalid files are not rewritten. `kush fmt --check` writes nothing and
+exits 1 when a file would change; writes go through an exclusive temporary file
+and an atomic rename, and symlinked inputs are refused. With no file arguments
+it formats all root-package `.kush` files, excluding `target/`, hidden
+directories, and dependency package roots.
 
-It is a whitespace hygiene pass, not a code-style reflow tool.
+It normalizes layout; it is not a line-wrapping or comment-reflow tool.
 
 ## Editor support
 
@@ -267,11 +277,12 @@ It is a whitespace hygiene pass, not a code-style reflow tool.
   path and restart command.
 
 The language server publishes diagnostics for unsaved open text, supports
-go-to-definition for the resolver's lexical bindings and project modules, and
-exposes the whitespace-only formatter through `textDocument/formatting`. It does
-**not** provide completion, hover, rename, references, semantic tokens, or
-incremental sync. See [language-server.md](language-server.md) for the protocol
-surface, UTF-16 handling, and the exact method/dynamic-dispatch limits.
+go-to-definition for the resolver's lexical bindings and project modules, hover
+and document symbols, semantic tokens for highlighting, and the formatter
+through `textDocument/formatting`. It does **not** provide completion, rename,
+references, or incremental sync. See [language-server.md](language-server.md)
+for the protocol surface, UTF-16 handling, and the exact method/dynamic-dispatch
+limits. An nvim client ships in `editors/nvim-kush`.
 
 ## Native bridge extension points
 

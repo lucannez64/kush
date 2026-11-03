@@ -6,6 +6,7 @@ module examples.logical_data;
 // never be proof evidence.
 
 // Evenness as an inductive property.
+
 total enum Even {
     EvenZero: Even,
     EvenSucc(Even): Even,

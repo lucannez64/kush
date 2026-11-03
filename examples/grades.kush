@@ -8,8 +8,8 @@ fn twice(x: i64 @[2]) -> i64 ! {panic} { x + x }
 fn four<G: Grade>(x: i64 @[G * 2]) -> i64 ! {panic} { x + x + x + x }
 
 fn main() -> i64 ! {panic} {
-    let a = twice(21);       // 42
-    let b = four::<2>(10);   // 40
+    let a = twice(21); // 42
+    let b = four::<2>(10); // 40
     let ghost: i64 @[0] = 7; // compiled, never observed
     a + b - 40
 }

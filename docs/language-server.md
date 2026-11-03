@@ -152,11 +152,13 @@ markers are left to the client's fallback. Tokens use relative
 ## Formatting
 
 `textDocument/formatting` calls `project::format::format_source` and returns one
-whole-document `TextEdit`. This is deliberately the existing **whitespace
-hygiene** formatter: it removes trailing spaces/tabs outside literals and block
-comments and ensures exactly one final newline. It does not reflow code, change
-indentation, reorder tokens, or rewrite comments. If the document is not valid
-enough to lex, it returns `null` rather than inventing edits.
+whole-document `TextEdit`. It is the same token-level layout pass as `kush fmt`:
+it normalizes indentation and spacing, keeps single blank lines between
+top-level item groups, preserves comments, literal contents, and the file's
+line endings, and never reorders tokens. Before returning, the original and
+candidate are lexed and the edit is refused unless the token kinds match. If the
+document is not valid enough to lex, it returns `null` rather than inventing
+edits.
 
 ## Client
 

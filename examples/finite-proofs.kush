@@ -6,6 +6,7 @@ module examples.finite_proofs;
 // produce `Fin (succ n)`, so the predecessor index varies independently of the
 // family parameter. Constructor-local binders are written on the constructor
 // itself and are distinct from the family's uniform/index parameters.
+
 total enum Fin<N: Nat> {
     FZero<n: Nat>: Fin<Nat.succ<n>>,
     FSucc<n: Nat>(pred: Fin<n>): Fin<Nat.succ<n>>,

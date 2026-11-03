@@ -25,7 +25,7 @@ fn main() -> Unit ! {io, alloc, panic} {
         owner = bump(owner);
         i = i + 1;
     }
-    print_i64(Box.take(owner));                  // 100
+    print_i64(Box.take(owner)); // 100
 
     let mut values: Vec<i64> = Vec.new();
     let mut i = 0;
@@ -34,7 +34,7 @@ fn main() -> Unit ! {io, alloc, panic} {
         i = i + 1;
     }
     let values = Vec.map_in_place(values, inc);
-    print_i64(Vec.get(&values, 3));              // 4
+    print_i64(Vec.get(&values, 3)); // 4
 
     // Owning elements are moved into the callback, not copied. The callback
     // returns a narrower scalar, so the vector's storage is retained and its

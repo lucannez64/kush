@@ -8,7 +8,6 @@ use std.text.format_i64_into;
 /// CR, or LF. A final line without a newline is accepted; blank lines and any
 /// other shape make the whole file invalid without changing it.
 
-
 pub fn empty() -> Bytes ! {alloc, panic} {
     Bytes.with_capacity(0)
 }

@@ -2,6 +2,7 @@ module words;
 
 /// A tiny dependency package. Its package name is the top-level module name,
 /// so the root project imports it with `use words;`.
+
 pub fn answer() -> i64 ! {panic} {
     42
 }

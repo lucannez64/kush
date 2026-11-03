@@ -7,6 +7,7 @@ use std.text;
 /// implement TLS, redirects, content-length/chunked decoding, or connection
 /// reuse. `body` starts immediately after the header terminator and may contain
 /// chunk framing when the server sends `Transfer-Encoding: chunked`.
+
 pub struct Response {
     status: i64,
     headers: Bytes,

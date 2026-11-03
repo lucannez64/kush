@@ -1,6 +1,7 @@
 module examples.induction;
 
 // Named binders in function types let later parameters/results depend on them.
+
 total fn induction(
     P: fn(n: Nat) -> Type ! {},
     zero: P<0>,

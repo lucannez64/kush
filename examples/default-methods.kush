@@ -53,7 +53,7 @@ trait Choose {
     }
 }
 
-impl Choose for Point { }
+impl Choose for Point {}
 
 trait Wrap<T> {
     fn value(self: Self) -> T ! {panic};

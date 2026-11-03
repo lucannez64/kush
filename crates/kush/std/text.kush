@@ -341,4 +341,3 @@ pub fn parse_bool(text: &Bytes) -> Result<Bool, i64> ! {panic} {
     }
     Result.Err(22)
 }
-

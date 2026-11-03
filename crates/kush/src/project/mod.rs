@@ -17,6 +17,7 @@ use std::{
 };
 
 pub mod format;
+mod layout;
 pub mod lock;
 pub mod manifest;
 pub mod modules;

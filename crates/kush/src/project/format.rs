@@ -37,7 +37,17 @@ pub struct FormatOutcome {
 pub fn format_source(name: &str, source: &str) -> Result<String, Failure> {
     let before =
         lexer::lex(source).map_err(|diagnostic| Failure::new(diagnostic.render(name, source)))?;
-    let candidate = normalize(source);
+    // The layout pass emits `\n`; restore the file's own line ending.
+    let crlf = source
+        .find('\n')
+        .is_some_and(|newline| newline > 0 && source.as_bytes()[newline - 1] == b'\r');
+    let laid_out = super::layout::layout(source, &before);
+    let laid_out = if crlf {
+        laid_out.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        laid_out
+    };
+    let candidate = normalize(&laid_out);
     let after = lexer::lex(&candidate).map_err(|diagnostic| {
         Failure::new(format!(
             "formatter safety check failed for {name}; file not changed\n{}",
@@ -360,5 +370,54 @@ mod tests {
         assert!(formatted.contains("'\\n';"));
         assert!(formatted.contains("'a;"));
         assert!(!formatted.contains(";   \n"));
+    }
+
+    #[test]
+    fn indents_struct_fields_and_keeps_generic_brackets_closed() {
+        let source = "struct Document {\nnode:Box<Node>, text:Bytes, children:Vec<i64>\n}\n";
+        let formatted = format_source("<test>", source).unwrap();
+        assert_eq!(
+            formatted,
+            "struct Document {\n    node: Box<Node>, text: Bytes, children: Vec<i64>\n}\n"
+        );
+        // `>` in a field list must not read as a comparison continuation.
+        assert!(formatted.lines().last() == Some("}"));
+    }
+
+    #[test]
+    fn generic_heads_stay_closed_up() {
+        for needle in [
+            "impl<T> Scaled for Wrapper<T>",
+            "Fin<Nat.succ<n>>",
+            "add<1, 1>",
+        ] {
+            let source = format!("{needle} ! {{}}");
+            let formatted = format_source("<test>", &source).unwrap();
+            assert!(formatted.contains(needle), "{formatted}");
+            assert!(!formatted.contains(" < "), "{formatted}");
+            assert!(!formatted.contains(" >"), "{formatted}");
+            assert_eq!(format_source("<test>", &formatted).unwrap(), formatted);
+        }
+    }
+
+    #[test]
+    fn one_blank_line_separates_top_level_groups() {
+        let source = "module app;\nuse std.result.Result;\nfn main() -> Unit ! {panic} {}\n";
+        let formatted = format_source("<test>", source).unwrap();
+        assert_eq!(
+            formatted,
+            "module app;\nuse std.result.Result;\n\nfn main() -> Unit ! {panic} {}\n"
+        );
+        let twice = format_source("<test>", &formatted).unwrap();
+        assert_eq!(twice, formatted);
+    }
+
+    #[test]
+    fn comments_and_single_blank_lines_survive_layout() {
+        let source = "module app;\n\n// explains the entry\nfn main() -> Unit ! {panic} {\n    // body note\n    0;\n}\n";
+        let formatted = format_source("<test>", source).unwrap();
+        assert!(formatted.contains("// explains the entry"));
+        assert!(formatted.contains("    // body note\n"));
+        assert_eq!(format_source("<test>", &formatted).unwrap(), formatted);
     }
 }

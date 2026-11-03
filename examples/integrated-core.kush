@@ -21,8 +21,8 @@ fn main() -> i64 ! {alloc, panic} {
     let checked = verified(sum, reflexive(sum));
     let callback: fn(i64) -> i64 ! {panic} | Bool = inc;
     let answer = match callback {
-        fn(i64) -> i64 ! {panic} @ f => apply(f, checked - 1),
-        Bool @ _ => twice(21),
+        fn(i64) -> i64 ! {panic} @f => apply(f, checked - 1),
+        Bool @_ => twice(21),
     };
     let owner: Box<i64> @[1] = Box.new(answer);
     let finish: linear once fn() -> i64 ! {} = fn() -> i64 ! {} { Box.take(owner) };

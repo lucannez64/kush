@@ -1,6 +1,7 @@
 module examples.proofs;
 
 // All generic arguments are explicit in this bootstrap logical subset.
+
 total fn identity<T: Type>(x: T) -> T ! {} {
     x
 }

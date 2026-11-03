@@ -10,6 +10,7 @@ fn report(error: json.Error) -> i64 ! {io, alloc, panic} {
     print_i64(json.position(error));
     1
 }
+
 fn main() -> i64 ! {io, alloc, panic} {
     let source = match IO.read_all(IO.stdin(), Bytes.with_capacity(65536)) {
         Ok(source) => source, Err(_) => { return 2; },

@@ -3,6 +3,7 @@ module feature_pipeline.pipeline;
 // Only the named calibration value can obtain this kernel-checked witness.
 // The witness is erased; this is a configuration whitelist, NOT a proof of
 // arithmetic correctness, termination, or bounds-check elimination.
+
 prop AuthorizedKey<key: i64> {
     Standard: AuthorizedKey<23130>,
 }

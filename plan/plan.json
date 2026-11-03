@@ -1308,6 +1308,23 @@
       "desc": "",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "FMT-LAYOUT",
+      "title": "Formatter: code layout (indentation + top-level grouping)",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "in_progress",
+      "desc": "Normalise indentation and blank lines between top-level item groups while preserving comments/strings; verified idempotent and check-parity on all tracked .kush files.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-03 12:52:55",
+          "who": "agent",
+          "text": "Resumed after context handoff"
+        }
+      ]
     }
   ]
 }

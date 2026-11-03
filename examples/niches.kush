@@ -1,8 +1,10 @@
 use std.option.Option;
+
 struct Point { x: i64 }
 fn owned(yes: Bool) -> Option<Box<i64>> ! {alloc, panic} {
     if yes { Option.Some(Box.new(42)) } else { Option.None }
 }
+
 fn main() -> Unit ! {io, alloc, panic} {
     match owned(true) {
         Option.Some(value) => print_i64(Box.take(value)),

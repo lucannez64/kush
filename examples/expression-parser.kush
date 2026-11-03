@@ -1,6 +1,6 @@
 module examples.expression_parser;
 
-enum Result<T,E> { Ok(T), Err(E) }
+enum Result<T, E> { Ok(T), Err(E) }
 enum ParseError { ExpectedNumber(i64), UnexpectedByte(i64), Overflow }
 enum Expr { Number(i64), Add(Box<Expr>, Box<Expr>), Multiply(Box<Expr>, Box<Expr>) }
 enum Parsed { At(Expr, i64) }
@@ -20,7 +20,7 @@ fn number_tail(source: &Bytes, index: i64, value: i64) -> Result<Parsed, ParseEr
     let byte = Bytes.get(source, index);
     if byte < 48 || byte > 57 { return Ok(Parsed.At(Expr.Number(value), index)); }
     let digit = byte - 48;
-    if value > (9223372036854775807 - digit) / 10 { return Err(ParseError.Overflow); }
+    if value >(9223372036854775807 - digit) / 10 { return Err(ParseError.Overflow); }
     number_tail(source, index + 1, value * 10 + digit)
 }
 

@@ -3,14 +3,14 @@ use std.result.Result;
 
 fn main() -> i64 ! {io, alloc, panic} {
     let text = "héllo";
-    print_i64(text.len());          // UTF-8 bytes
-    print_i64(text.scalar_len());   // Unicode scalar values
-    print_i64(text.byte_at(1));     // first byte of 'é'
+    print_i64(text.len()); // UTF-8 bytes
+    print_i64(text.scalar_len()); // Unicode scalar values
+    print_i64(text.byte_at(1)); // first byte of 'é'
     match text.scalar_at(1) {
         Option.Some(c) => print_int(c.code()),
         Option.None => print_i64(-1),
     }
-    let raw = text.as_bytes();      // explicit copy
+    let raw = text.as_bytes(); // explicit copy
     print_i64(raw.len());
     let invalid = Bytes.push(Bytes.with_capacity(1), 255);
     match invalid.from_utf8() {

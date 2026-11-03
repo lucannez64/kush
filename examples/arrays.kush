@@ -1,4 +1,5 @@
 module examples.arrays;
+
 #[noalloc]
 fn pair() -> [i64; 2] ! {} { [20, 22] }
 fn main() -> Unit ! {io, panic} {

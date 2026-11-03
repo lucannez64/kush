@@ -19,8 +19,8 @@ fn id<T>(x: T) -> T ! {panic} { x }
 // only `fn(i64) -> i64` is promised.
 fn classify(x: i64 | Bool) -> i64 ! {panic} {
     match x {
-        i64 @ n => n,
-        Bool @ b => if b { 1 } else { 0 },
+        i64 @n => n,
+        Bool @b => if b { 1 } else { 0 },
     }
 }
 
@@ -61,22 +61,22 @@ fn compose(f: fn(i64) -> i64 ! {panic}, g: fn(i64) -> i64 ! {panic}) -> (once fn
 }
 
 fn main() -> Unit ! {io, alloc, panic} {
-    print_i64(apply(inc, 41));                 // 42
-    print_i64(apply(classify, 42));            // 42, with union injection
-    print_i64(apply(id::<i64>, 42));           // 42, specialized generic value
-    print_i64(apply_twice(twice_graded, 21));   // 42, graded arrow contract
-    print_i64(pair_sum(make_pair, 20));        // 20 + 22
+    print_i64(apply(inc, 41)); // 42
+    print_i64(apply(classify, 42)); // 42, with union injection
+    print_i64(apply(id::<i64>, 42)); // 42, specialized generic value
+    print_i64(apply_twice(twice_graded, 21)); // 42, graded arrow contract
+    print_i64(pair_sum(make_pair, 20)); // 20 + 22
 
     let mut values: Vec<i64> = Vec.new();
     values = Vec.push(values, 10);
     values = Vec.push(values, 11);
-    let mapped = map(values, double);          // [20, 22]
+    let mapped = map(values, double); // [20, 22]
     print_i64(Vec.get(&mapped, 0) + Vec.get(&mapped, 1));
 
-    let pipeline = compose(inc, double);       // once closure capturing two fns
-    print_i64(pipeline(20));                   // double(21)
+    let pipeline = compose(inc, double); // once closure capturing two fns
+    print_i64(pipeline(20)); // double(21)
 
     let base = Box.new(41);
     let add_base = fn(x: i64) -> i64 ! {panic} { Box.take(base) + x };
-    print_i64(add_base(1));                    // 42
+    print_i64(add_base(1)); // 42
 }

@@ -2,6 +2,7 @@ module std.test;
 
 /// Panics when `condition` is false. The test runner reports the test name and
 /// the captured stderr, which contains the native panic diagnostic.
+
 pub fn is_true(condition: Bool) -> Unit ! {panic} {
     if condition { () } else { panic() }
 }

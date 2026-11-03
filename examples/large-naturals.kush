@@ -1,6 +1,7 @@
 module examples.large_naturals;
 
 // 2^128: already larger than any unsigned 128-bit machine integer.
+
 total fn large() -> Nat ! {} {
     340282366920938463463374607431768211456
 }

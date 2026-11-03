@@ -3,6 +3,7 @@ module std.sort;
 /// In-place insertion sort for small integer arrays and mutable slices. The
 /// algorithm is deliberately simple and allocation-free; it is O(n^2) and is
 /// intended for application-sized data, not bulk sorting.
+
 pub fn sort_i64(values: &mut [i64]) -> Unit ! {panic} {
     let n = Slice.len(values);
     let mut i = 1;
@@ -32,8 +33,7 @@ pub fn binary_search_i64(values: &[i64], target: i64) -> i64 ! {panic} {
         if value < target {
             low = middle + 1;
         } else {
-            if value > target { high = middle; }
-            else { found = middle; done = true; }
+            if value > target { high = middle; } else { found = middle; done = true; }
         }
     }
     found

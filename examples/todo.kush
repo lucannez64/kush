@@ -2,6 +2,7 @@
 use std.result.Result;
 
 // 32 slots, each [state, title length, 96 title bytes]. State 0=free, 1=open, 2=done.
+
 #[noalloc]
 #[nosuspend]
 fn cell(slot: i64) -> i64 ! {panic} { slot * 98 }
@@ -48,8 +49,7 @@ fn screen(items: &[i64], filter: i64, message: &Bytes) -> Bytes ! {alloc, panic}
             shown = shown + 1;
             out = append(out, Bytes.from("  "));
             out = number(out, slot + 1);
-            if state == 1 { out = append(out, Bytes.from("  [ ] ")); }
-            else { out = append(out, Bytes.from("  [x] ")); }
+            if state == 1 { out = append(out, Bytes.from("  [ ] ")); } else { out = append(out, Bytes.from("  [x] ")); }
             let mut i = 0;
             while i < Slice.get(items, base + 1) {
                 out = Bytes.push(out, Slice.get(items, base + 2 + i));
@@ -65,9 +65,9 @@ fn screen(items: &[i64], filter: i64, message: &Bytes) -> Bytes ! {alloc, panic}
     out = append(out, Bytes.from(" open / "));
     out = number(out, done);
     out = append(out, Bytes.from(" done   |   view: "));
-    if filter == 0 { out = append(out, Bytes.from("all")); }
-    else { if filter == 1 { out = append(out, Bytes.from("open")); }
-           else { out = append(out, Bytes.from("done")); } }
+    if filter == 0 { out = append(out, Bytes.from("all")); } else {
+        if filter == 1 { out = append(out, Bytes.from("open")); } else { out = append(out, Bytes.from("done")); }
+    }
     out = append(out, Bytes.from("\n\n"));
     out = append_ref(out, message);
     append(out, Bytes.from("\n> "))
@@ -155,10 +155,11 @@ fn run() -> Result<Unit, i64> ! {io, alloc, panic} {
         if end > 0 && Bytes.get(&input, end - 1) == 13 { end = end - 1; }
         let line = &input[..end];
         if equals(line, Bytes.from("q")) { break; }
-        if equals(line, Bytes.from("f all")) { filter = 0; message = Bytes.from("Showing all tasks."); }
-        else { if equals(line, Bytes.from("f open")) { filter = 1; message = Bytes.from("Showing open tasks."); }
-        else { if equals(line, Bytes.from("f done")) { filter = 2; message = Bytes.from("Showing completed tasks."); }
-        else { message = change(&mut items[..], line); } } }
+        if equals(line, Bytes.from("f all")) { filter = 0; message = Bytes.from("Showing all tasks."); } else {
+            if equals(line, Bytes.from("f open")) { filter = 1; message = Bytes.from("Showing open tasks."); } else {
+                if equals(line, Bytes.from("f done")) { filter = 2; message = Bytes.from("Showing completed tasks."); } else { message = change(&mut items[..], line); }
+            }
+        }
     }
     let goodbye = Bytes.from("\nGoodbye. Session discarded.\n");
     IO.write(IO.stdout(), &goodbye)

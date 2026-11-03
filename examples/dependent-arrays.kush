@@ -29,8 +29,8 @@ fn head<N: Nat>(b: Buffer<N>) -> i64 ! {panic} { b.data[0] }
 #[noalloc]
 fn describe(v: Value) -> i64 ! {panic} {
     match v {
-        i64 @ n => n,
-        Bool @ b => if b { 1 } else { 0 },
+        i64 @n => n,
+        Bool @b => if b { 1 } else { 0 },
     }
 }
 

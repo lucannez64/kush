@@ -2,6 +2,7 @@ use std.option.Option;
 
 // A borrowed text view is a shared four-word descriptor over a validated
 // String. It allocates nothing, never mutates its owner, and cannot outlive it.
+
 fn scalar_count(text: &str) -> i64 ! {} {
     Str.scalar_len(text)
 }

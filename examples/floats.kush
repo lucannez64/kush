@@ -22,10 +22,10 @@ fn classify(x: f64) -> i64 ! {} {
 fn main() -> i64 ! {io, panic} {
     let ratio = 7.0 / 2.0;
     let rounded: f32 = 0.1;
-    print_float(ratio);          // 3.5
-    print_float(rounded);       // 0.1
+    print_float(ratio); // 3.5
+    print_float(rounded); // 0.1
     print_float(Float.sqrt(2.0));
-    print_float(1.0 / 0.0);     // inf
+    print_float(1.0 / 0.0); // inf
     print_int(classify(0.0 / 0.0));
     print_int(classify(-2.5));
 
