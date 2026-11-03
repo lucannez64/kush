@@ -100,10 +100,16 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "main is ~31 commits ahead of origin; push after confirming the last Boat gate.",
-      "commit": null,
-      "log": []
+      "commit": "e1f0f67",
+      "log": [
+        {
+          "time": "2026-11-03 13:38:12",
+          "who": "agent",
+          "text": "origin/main advanced 9443581..e1f0f67"
+        }
+      ]
     },
     {
       "id": "OPS-WORKTREES",
