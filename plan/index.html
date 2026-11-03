@@ -177,7 +177,7 @@ function detail() {
   const link = ids => ids.length ? ids.map(i => `<a data-id="${esc(i)}">${esc(i)}</a>`).join("") : '<span class="muted">none</span>';
   const blocking = n.deps.filter(d => data.byId[d].status !== "done");
   box.innerHTML = `<h2>${esc(n.id)}</h2><div>${esc(n.title)}</div>
-    <p><b>${esc(n.kind)}</b> · step #${n.order} of ${data.total} · ${esc(n.area || "")} · size ${esc(n.size)}${n.hard ? " · hard" : ""}${n.commit ? " · commit <code>" + esc(n.commit) + "</code>" : ""}</p>
+    <p><b>${esc(n.kind)}</b> · dependency position #${n.order} of ${data.total} · ${esc(n.area || "")} · size ${esc(n.size)}${n.hard ? " · hard" : ""}${n.commit ? " · commit <code>" + esc(n.commit) + "</code>" : ""}</p>
     ${n.desc ? `<p>${esc(n.desc)}</p>` : ""}
     <p class="deps"><span class="muted">depends on:</span> ${link(n.deps)}</p>
     ${blocking.length ? `<p class="deps"><span class="muted">blocked by:</span> ${link(blocking)}</p>` : ""}
@@ -197,7 +197,7 @@ function stats() {
   $("s-ahead").textContent = data.repo.ahead + (data.repo.dirty ? " +dirty" : "");
   $("s-wt").textContent = data.repo.worktrees;
   if (showOrder) {
-    $("lowtitle").textContent = "Build order (topological)";
+    $("lowtitle").textContent = "Dependency order — not execution priority";
     $("log").innerHTML = data.order.map(id => { const n = data.byId[id];
       return `<div class="order-row" data-id="${esc(id)}"><span class="muted">#${n.order}</span><span class="dot ${kindClass(n.kind)}"></span><div><b>${esc(id)}</b> ${esc(n.title)} <span class="area">${esc(n.area || "")} · ${esc(n.size)}</span></div></div>`; }).join("");
     $("log").querySelectorAll(".order-row").forEach(r => r.onclick = () => select(r.dataset.id));

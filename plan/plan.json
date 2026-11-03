@@ -382,7 +382,7 @@
       "hard": false,
       "deps": [
         "R-STR-TESTS",
-        "R-SLICE-PLACE-BACKENDS",
+        "R-SLICE-PLACE-TESTS",
         "R-BREC-TESTS",
         "R-IDX-TESTS",
         "R-TASKEXIT-BACKENDS"
@@ -1255,12 +1255,18 @@
       "size": "M",
       "hard": false,
       "deps": [
-        "R-SLICE-PLACE-LOAN"
+        "R-SLICE-PLACE-BACKENDS"
       ],
       "status": "todo",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 15:23:23",
+          "who": "agent",
+          "text": "End-to-end place views need implemented slice-place backends, not just loan rules."
+        }
+      ]
     },
     {
       "id": "A-REVIEW",
@@ -1308,7 +1314,9 @@
         "DA",
         "PERF-INLINE",
         "OPS-PUSH",
-        "OPS-WORKTREES"
+        "OPS-WORKTREES",
+        "OPS-STEP-GATE",
+        "PLAN-ORDER"
       ],
       "status": "todo",
       "desc": "",
@@ -1353,6 +1361,41 @@
           "text": "16 drops removed across std, todo-cli, calc; Boat gate 1176 tests"
         }
       ]
+    },
+    {
+      "id": "PLAN-ORDER",
+      "title": "Clarify dependency order and practical execution sequence",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "in_progress",
+      "desc": "Separate topological position from priority; document recommended waves and fix explicit gate omissions.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-03 15:23:22",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-03 15:24:16",
+          "who": "agent",
+          "text": "Documented proposed execution waves and graph limitations; relabeled topological positions; added slice-place hostile-test gate, backend dependency and missing final operational gate."
+        }
+      ]
+    },
+    {
+      "id": "R-SLICE-PLACE-TESTS",
+      "title": "Slice-element reference hostile tests",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "R-SLICE-PLACE-BACKENDS"
+      ],
+      "status": "todo",
+      "desc": "Aliasing through slice roots, split halves, bounds, escape, owner invalidation and native/evaluator parity.",
+      "commit": null,
+      "log": []
     }
   ]
 }
