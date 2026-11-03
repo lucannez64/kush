@@ -670,6 +670,11 @@
           "time": "2026-11-03 22:52:23",
           "who": "agent",
           "text": "Integrated 2182f7e: call-wide lifetime occurrence constraints, direct/indirect/static method agreement, narrow outer placeholder handling, opaque unresolved result labels and field-specific literal inference. Worker full local suite1242 passed; full Boat pending. Canonical indirect-arrow bounds and outer-only provenance remain review boundaries."
+        },
+        {
+          "time": "2026-11-03 22:58:21",
+          "who": "agent",
+          "text": "Full c69b41b Boat gate passed: 1242 tests, formatting, strict Clippy. Call-wide correction integrated; final targeted review required before LT-VARIANCE closure and row implementation."
         }
       ]
     },

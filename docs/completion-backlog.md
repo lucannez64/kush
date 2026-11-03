@@ -1365,3 +1365,17 @@ The independent corrective recheck is pending. This is regression evidence,
 not a soundness proof or closure of LIFE. Structural-row metadata, broader
 recursive result/call coverage, and independent caller-requirement summaries
 remain outstanding.
+
+## Call-wide lifetime constraint checkpoint: c69b41b
+
+The full Boat gate passes: 1242 tests, formatting and strict Clippy. The
+call-wide correction checks repeated invariant occurrences across direct,
+indirect and static method arguments and keeps nested argument blocks checked.
+Unresolved result binders receive opaque identities. This supersedes the earlier
+instantiated-conversion checkpoint, whose focused review found additional call
+boundary defects.
+
+Final targeted review is still required. LIFE remains open for structural row
+metadata/results and broader recursive summaries, including independent caller
+requirements. Outer-only reference provenance and canonical indirect-arrow
+bounds remain explicit review boundaries.
