@@ -585,6 +585,11 @@
           "time": "2026-11-03 16:00:42",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-03 16:37:24",
+          "who": "agent",
+          "text": "Integrated DeepSeek draft; corrected seedless variance equations, unused composition, callable occurrence maps and stale capability assumptions. Decisions: lifetime-only; exact structural/capture/TaskExit boundaries; optional enum invariant until explicit metadata; existing anonymous intersections retained."
         }
       ]
     },
@@ -595,7 +600,7 @@
       "size": "M",
       "hard": false,
       "deps": [
-        "LT-VARIANCE-DESIGN"
+        "LT-VAR-TESTS"
       ],
       "status": "todo",
       "desc": "",
@@ -1522,9 +1527,9 @@
       "deps": [
         "LT-SOLVER"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Define finite summaries, caller obligations, recursive fixpoint, termination, ambiguity and failure diagnostics before implementation.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 16:00:43",
@@ -1540,6 +1545,11 @@
           "time": "2026-11-03 16:05:13",
           "who": "agent",
           "text": "Design review: SCCs over concrete call instances are separate from lifetime SCCs; preserve actual_outlives lexical rules and prohibit growing recursive field-path domains."
+        },
+        {
+          "time": "2026-11-03 16:09:28",
+          "who": "agent",
+          "text": "Finite may-origin/requirement equations, call-graph SCC worklist, no-seed rejection, freeze/recheck protocol and bounded testable scope designed; implementation stays open."
         }
       ]
     },
@@ -1619,6 +1629,59 @@
       ],
       "status": "todo",
       "desc": "Order independence, all-owner retention, mutable aliases, local escape, cache replay, budgets and native/reference parity; soundness review.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LT-VAR-TABLE",
+      "title": "Infer seeded finite lifetime variance tables",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "LT-VARIANCE-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "Sign-set algebra, constant occurrence seeds, declaration SCC fixed point, conservative unknowns and deterministic caching.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LT-VAR-CONTEXT",
+      "title": "Represent occurrence-specific lifetime and binder environments",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LT-VARIANCE-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "Checked type views with free/bound/internal identities; preserve callable interning without one source map per shared type ID.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LT-VAR-CHECK",
+      "title": "Integrate lifetime variance witnesses with coercions and ownership",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LT-VAR-TABLE",
+        "LT-VAR-CONTEXT"
+      ],
+      "status": "todo",
+      "desc": "Single pair/path witness for callable and type checks; retain owners and declared mutable destination labels; lifetime-only, no erased fallback.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LT-VAR-TESTS",
+      "title": "Validate lifetime variance soundness boundaries",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LT-VAR-CHECK"
+      ],
+      "status": "todo",
+      "desc": "Algebra, aliasing attacks, callable occurrence environments, source-copy loans, anonymous intersections, parity and independent soundness review.",
       "commit": null,
       "log": []
     }

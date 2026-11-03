@@ -39,7 +39,9 @@ contracts and unresolved generic calls require their existing explicit checked
 contracts; do not guess an inferred callee set. If an inferred recursive result
 needs an unsupported origin channel, reject with an annotation/boundary message.
 An explicit boundary can compose with a supported SCC without itself being
-inferred. Lazy dynamic member registration cannot silently change a frozen SCC.
+inferred. When a boundary's contract permits several input origins for a result,
+retain all of them; do not turn its single printed result lifetime into evidence
+for one chosen owner. Lazy dynamic member registration cannot silently change a frozen SCC.
 Polymorphic recursion that creates more than the existing finite instance limit
 keeps its explicit rejection. This is not higher-rank lifetime inference.
 
@@ -201,7 +203,7 @@ API only for validating/closing justified finite bounds.
 - Reference/native agreement and balanced cleanup for accepted programs,
   cancellation/early-exit regressions where explicit task contracts are composed.
 
-Variance implementation is not a hard prerequisite for this first fragment:
+The [variance design](lifetime-variance-design.md) is not a hard implementation prerequisite for this first fragment:
 existing invariant/substitution rules suffice. More permissive nested container
 or arrow coercions must wait for LT-VARIANCE and use its lifetime-aware judgment,
 not erased-shape compatibility.

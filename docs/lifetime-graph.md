@@ -56,3 +56,8 @@ closure set.
 Final validation: full Boat gate passed **1,179 tests**, formatting and strict
 workspace/all-target Clippy. Standalone solver tests and Clippy also passed
 locally. No recursive inference or variance node is closed by this result.
+
+
+Follow-up designs (implementation remains open): [lifetime variance](lifetime-variance-design.md)
+and [recursive lifetime summaries](recursive-lifetime-design.md). The latter
+separates call-graph fixed points from this module's outlives reachability.
