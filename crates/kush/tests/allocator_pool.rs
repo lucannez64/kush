@@ -201,7 +201,7 @@ fn repeated_boxes_reuse_one_retained_size_class() {
     assert_eq!(pool.releases, 0);
     assert_eq!(
         pool.peak_retained, 32,
-        "16-byte header plus a 16-byte class"
+        "16-byte allocation header plus the 16-byte box class"
     );
 }
 
@@ -250,8 +250,8 @@ fn zero_capacity_and_the_size_class_boundary_are_exact() {
     assert_eq!(stats.allocations, 1);
     assert_eq!(pool.misses, 1);
     assert_eq!(
-        pool.peak_retained, 32,
-        "16-byte header plus a 16-byte class"
+        pool.peak_retained, 16,
+        "headerless buffer occupies its 16-byte metadata class"
     );
 
     // A 1024-byte payload is the largest pooled block (struct header 16 +
@@ -271,8 +271,8 @@ fn zero_capacity_and_the_size_class_boundary_are_exact() {
     assert_eq!(pool.retains, 1);
     assert_eq!(pool.releases, 0);
     assert_eq!(
-        pool.peak_retained, 1040,
-        "16-byte header plus a 1024-byte class"
+        pool.peak_retained, 1024,
+        "headerless buffer occupies its 1024-byte class"
     );
 
     // One byte more (1025-byte payload) is unpooled: no miss, no retention,
@@ -329,8 +329,8 @@ fn buffer_growth_from_pooled_storage_preserves_contents() {
     );
     assert_eq!(
         pool.peak_retained,
-        6 * (16 + 16) + (4 + 8 + 16 + 32 + 64) * 8,
-        "header plus padded payload per retained block"
+        6 * 16 + (4 + 8 + 16 + 32 + 64) * 8,
+        "headerless size class per retained buffer"
     );
     assert_eq!(pool.drained, 6);
 
@@ -364,8 +364,8 @@ fn buffer_growth_from_pooled_storage_preserves_contents() {
     assert_eq!(pool.retains, 7);
     assert_eq!(pool.releases, 3);
     assert_eq!(
-        pool.peak_retained, 1232,
-        "header plus padded payload per retained block"
+        pool.peak_retained, 1120,
+        "headerless size class per retained buffer"
     );
 }
 
@@ -390,8 +390,8 @@ fn clear_reserve_and_push_reserved_integrate_with_the_pool() {
     assert_eq!(stats.deallocations, 1);
     assert_eq!(stats.buffer_growths, 2, "first push plus reserve");
     assert!(
-        pool.peak_retained >= 560,
-        "header plus the grown 544-byte class"
+        pool.peak_retained >= 544,
+        "the grown headerless 544-byte class"
     );
 
     // `push_reserved` is still a non-allocating operation under `#[noalloc]`
@@ -411,8 +411,8 @@ fn clear_reserve_and_push_reserved_integrate_with_the_pool() {
     assert_eq!(stats.buffer_growths, 0);
     assert_eq!(pool.misses, 1);
     assert_eq!(
-        pool.peak_retained, 48,
-        "16-byte header plus the 32-byte class"
+        pool.peak_retained, 32,
+        "headerless buffer occupies its 32-byte class"
     );
 }
 

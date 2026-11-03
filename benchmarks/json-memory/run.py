@@ -233,12 +233,15 @@ def phase_rss(count, rounds):
 
 def measure(language,count,rounds,mode,cpu):
     marker="__memory_bench__"
+    cpu_before=resource.getrusage(resource.RUSAGE_CHILDREN)
     start=time.perf_counter()
     result=run(["/usr/bin/time","-f",marker+" %M",*command(language,"plain",count,rounds,mode)],preexec_fn=lambda:limits(cpu))
     elapsed=time.perf_counter()-start
+    cpu_after=resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu_ms=1000*((cpu_after.ru_utime+cpu_after.ru_stime)-(cpu_before.ru_utime+cpu_before.ru_stime))
     assert int(result.stdout)==expected(count,rounds),(language,count,rounds)
     peak=int(re.search(marker+r" (\d+)",result.stderr)[1])
-    return {"wall_ms":elapsed*1000,"peak_rss_kib":peak}
+    return {"wall_ms":elapsed*1000,"process_tree_cpu_ms":cpu_ms,"peak_rss_kib":peak}
 
 def report(data,output):
     rows=[]
@@ -249,6 +252,7 @@ def report(data,output):
         rows.append({"variant":item["variant"],"label":item["label"],"count":item["count"],"rounds":item["rounds"],
                      "median_wall_ms":statistics.median(x["wall_ms"] for x in item["samples"]),
                      "median_peak_rss_kib":statistics.median(x["peak_rss_kib"] for x in item["samples"]),
+                     "median_cpu_ms":statistics.median(x["process_tree_cpu_ms"] for x in item["samples"]) if all("process_tree_cpu_ms" in x for x in item["samples"]) else None,
                      "allocator_calls":frame["alloc_calls"],"realloc_calls":frame["realloc_calls"],"allocator_requests":frame["alloc_calls"]+frame["realloc_calls"],
                      "requested_bytes_total":frame["requested_bytes_total"],"peak_live_requested_bytes":frame["peak_live_requested_bytes"],"peak_live_usable_bytes":frame["peak_live_usable_bytes"],"after_drop_rss_kib":phase["frames"][3]["rss_kib"]})
     data["summary"]=rows
@@ -322,7 +326,7 @@ def main():
     checks=correctness(kush,args.inline_metadata)
     print(f"Correctness: {len(checks)} JSON output cases; reference/native agreement and invalid arguments passed.",flush=True)
     if args.validate_only:return
-    data={"metadata":{"inline_metadata":args.inline_metadata,"generated_workload_sha256":sha(workload_source(args.inline_metadata)),"utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"git_head":run(["git","rev-parse","HEAD"],cwd=REPO).stdout.strip(),"compiler_sha256":sha(kush),"libc":platform.libc_ver(),"kernel":platform.release(),"cc":run(["cc","--version"]).stdout,"allocator_environment":{key:os.environ.get(key) for key in ["MALLOC_ARENA_MAX","MALLOC_TRIM_THRESHOLD_","MALLOC_MMAP_THRESHOLD_","GLIBC_TUNABLES","LD_PRELOAD"]},"rustc":run(["rustc",f"+{args.toolchain}","-vV"]).stdout,"cpu_model":next(line.split(":",1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')),"pinned_cpu":args.cpu,"repetitions":args.repetitions,"warmups":2,"phase_rss_repetitions":3,"shuffle_seed":20261103,"builds":builds,"sources":{str(p.relative_to(ROOT)):sha(p) for p in [ROOT/"kush/main.kush",ROOT/"rust/src/main.rs",ROOT/"probe.c",ROOT/"probe_self_test.c",ROOT/"seed.json",ROOT/"rust/Cargo.lock",ROOT/"rust/Cargo.toml",ROOT/"Kush.toml",ROOT/"run.py"]}},"correctness":checks,"allocations":[],"phase_rss":[],"timings":[]}
+    data={"metadata":{"inline_metadata":args.inline_metadata,"generated_workload_sha256":sha(workload_source(args.inline_metadata)),"utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"git_head":run(["git","rev-parse","HEAD"],cwd=REPO).stdout.strip(),"compiler_sha256":sha(kush),"libc":platform.libc_ver(),"kernel":platform.release(),"cc":run(["cc","--version"]).stdout,"allocator_environment":{key:os.environ.get(key) for key in ["MALLOC_ARENA_MAX","MALLOC_TRIM_THRESHOLD_","MALLOC_MMAP_THRESHOLD_","GLIBC_TUNABLES","LD_PRELOAD"]},"rustc":run(["rustc",f"+{args.toolchain}","-vV"]).stdout,"cpu_model":next(line.split(":",1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')),"pinned_cpu":args.cpu,"load_average_start":os.getloadavg(),"cpu_time_scope":"process tree including the GNU time wrapper; child user+system CPU via getrusage", "repetitions":args.repetitions,"warmups":2,"phase_rss_repetitions":3,"shuffle_seed":20261103,"builds":builds,"sources":{str(p.relative_to(ROOT)):sha(p) for p in [ROOT/"kush/main.kush",ROOT/"rust/src/main.rs",ROOT/"probe.c",ROOT/"probe_self_test.c",ROOT/"seed.json",ROOT/"rust/Cargo.lock",ROOT/"rust/Cargo.toml",ROOT/"Kush.toml",ROOT/"run.py"]}},"correctness":checks,"allocations":[],"phase_rss":[],"timings":[]}
     rng=random.Random(20261103)
     for count in args.sizes:
         data["allocations"]+=trace("trace",count,args.rounds)
@@ -335,6 +339,7 @@ def main():
                 if at>=2:observations[name].append(observation)
         for name,label,_,_ in VARIANTS:data["timings"].append({"variant":name,"label":label,"count":count,"rounds":args.rounds,"samples":observations[name]})
         print(f"Measured {count} documents × {args.rounds} edits",flush=True)
+    data["metadata"]["load_average_end"]=os.getloadavg()
     report(data,args.output)
 
 if __name__=="__main__":main()

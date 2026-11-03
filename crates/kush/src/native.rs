@@ -291,6 +291,9 @@ static int kush_block_live(const KushAllocHeader *header) {
     return header->magic == KUSH_ALLOC_MAGIC || header->magic == KUSH_ALLOC_UNPOOLED;
 }
 static KushAllocHeader *kush_pool_lists[KUSH_POOL_CLASSES];
+/* Headerless ordinary buffers have their own intrusive lists. Both families
+   share the existing per-class count and global physical-byte budget. */
+static uint64_t *kush_buffer_lists[KUSH_POOL_CLASSES];
 static size_t kush_pool_counts[KUSH_POOL_CLASSES];
 static uint64_t kush_pool_retained = 0;
 static uint64_t kush_pool_peak_retained = 0;
@@ -378,6 +381,14 @@ static void kush_pool_drain(void) {
             free(header);
             ++kush_pool_drains;
             header = next;
+        }
+        uint64_t *buffer = kush_buffer_lists[class];
+        kush_buffer_lists[class] = NULL;
+        while (buffer != NULL) {
+            uint64_t *next = (uint64_t *)(uintptr_t)buffer[0];
+            free(buffer);
+            ++kush_pool_drains;
+            buffer = next;
         }
     }
     kush_pool_retained = 0;
@@ -479,6 +490,131 @@ void *kush_try_grow(void *payload, uint64_t bytes) {
     if (copy != 0) memcpy((void *)(replacement + 1), payload, (size_t)copy);
     kush_block_release(header);
     return (void *)(replacement + 1);
+}
+/* Small ordinary buffers need no separate KushAllocHeader. The high byte of
+   their capacity word stores 0x80 | class (1..64); the low bits store logical
+   capacity. Such capacities are bounded by the <=1024-byte allocation itself.
+   Large or exact fallible-grown buffers keep the ordinary header and their
+   full positive capacity word. Size classes, not libc usable-size guesses,
+   preserve deterministic retained-capacity/refusal behavior after map changes. */
+#define KUSH_BUFFER_RAW UINT64_C(0x8000000000000000)
+#define KUSH_BUFFER_CAP_MASK UINT64_C(0x00ffffffffffffff)
+static uint64_t kush_buffer_capacity(const void *payload) {
+    uint64_t word = ((const uint64_t *)payload)[1];
+    return (word & KUSH_BUFFER_RAW) ? word & KUSH_BUFFER_CAP_MASK : word;
+}
+static void kush_buffer_set_capacity(void *payload, uint64_t capacity) {
+    uint64_t *words = (uint64_t *)payload;
+    if (words[1] & KUSH_BUFFER_RAW) {
+        if (capacity > KUSH_BUFFER_CAP_MASK) kush_panic();
+        words[1] = (words[1] & ~KUSH_BUFFER_CAP_MASK) | capacity;
+    } else {
+        if (capacity > (uint64_t)INT64_MAX) kush_panic();
+        words[1] = capacity;
+    }
+}
+static uint64_t kush_buffer_usable(const void *payload) {
+    uint64_t word = ((const uint64_t *)payload)[1];
+    if (word & KUSH_BUFFER_RAW) {
+        uint64_t code = (word >> 56) & 127;
+        if (code == 0 || code > KUSH_POOL_CLASSES) kush_panic();
+        return code * KUSH_ALLOC_ALIGN;
+    }
+    const KushAllocHeader *header = (const KushAllocHeader *)payload - 1;
+    if (!kush_block_live(header)) kush_panic();
+    return header->usable;
+}
+static void *kush_buffer_claim(uint64_t bytes, uint64_t capacity) {
+    if (bytes < 16 || capacity > (uint64_t)INT64_MAX || capacity > bytes - 16) kush_panic();
+    if (bytes > KUSH_POOL_MAX) {
+        KushAllocHeader *header = kush_try_system_block(bytes);
+        if (header == NULL) return NULL;
+        uint64_t *payload = (uint64_t *)(header + 1);
+        payload[1] = capacity;
+        return payload;
+    }
+    uint64_t usable = (bytes + KUSH_ALLOC_ALIGN - 1) & ~(KUSH_ALLOC_ALIGN - 1);
+    size_t class = kush_pool_class(usable);
+    uint64_t *payload = kush_buffer_lists[class];
+    if (payload != NULL) {
+        kush_buffer_lists[class] = (uint64_t *)(uintptr_t)payload[0];
+        --kush_pool_counts[class];
+        kush_pool_retained -= usable;
+        ++kush_pool_hits;
+    } else {
+        ++kush_pool_misses;
+        payload = (uint64_t *)aligned_alloc((size_t)KUSH_ALLOC_ALIGN, (size_t)usable);
+        if (payload == NULL) return NULL;
+    }
+    payload[1] = ((UINT64_C(0x80) | (uint64_t)(class + 1)) << 56) | capacity;
+    return payload;
+}
+static void kush_buffer_release(void *payload) {
+    uint64_t *words = (uint64_t *)payload;
+    if (!(words[1] & KUSH_BUFFER_RAW)) {
+        KushAllocHeader *header = (KushAllocHeader *)payload - 1;
+        if (!kush_block_live(header)) kush_panic();
+        kush_block_release(header);
+        return;
+    }
+    uint64_t usable = kush_buffer_usable(payload);
+    size_t class = kush_pool_class(usable);
+    /* Invalid class zero makes a retained double release fail before any
+       pointer-prefix access. Reclaim initializes the complete capacity word. */
+    words[1] = KUSH_BUFFER_RAW;
+    if (kush_pool_counts[class] < KUSH_POOL_CLASS_CAP
+        && kush_pool_retained + usable <= KUSH_POOL_RETAIN_CAP) {
+        words[0] = (uint64_t)(uintptr_t)kush_buffer_lists[class];
+        kush_buffer_lists[class] = words;
+        ++kush_pool_counts[class];
+        kush_pool_retained += usable;
+        if (kush_pool_retained > kush_pool_peak_retained) kush_pool_peak_retained = kush_pool_retained;
+        ++kush_pool_retains;
+    } else {
+        free(payload);
+        ++kush_pool_releases;
+    }
+}
+uint64_t kush_buffer_alloc(uint64_t bytes, uint64_t capacity, int fallible) {
+    if (fallible && kush_try_refuses()) return 0;
+    void *payload = kush_buffer_claim(bytes, capacity);
+    if (payload == NULL) {
+        if (fallible) return 0;
+        kush_panic();
+    }
+    kush_note_allocation();
+    return (uint64_t)(uintptr_t)payload;
+}
+void kush_buffer_free(uint64_t handle) {
+    if (handle == 0 || kush_live_allocations == 0) kush_panic();
+    kush_buffer_release((void *)(uintptr_t)handle);
+    kush_note_deallocation();
+}
+static void *kush_buffer_grow(void *payload, uint64_t bytes) {
+    uint64_t copy = kush_buffer_usable(payload);
+    if (bytes <= copy) return payload;
+    void *replacement = kush_buffer_claim(bytes, kush_buffer_capacity(payload));
+    if (replacement == NULL) kush_panic();
+    uint64_t encoding = ((uint64_t *)replacement)[1];
+    memcpy(replacement, payload, (size_t)copy);
+    ((uint64_t *)replacement)[1] = encoding;
+    kush_buffer_release(payload);
+    return replacement;
+}
+static void *kush_buffer_try_grow(void *payload, uint64_t bytes) {
+    uint64_t copy = kush_buffer_usable(payload);
+    if (bytes <= copy) return payload;
+    if (kush_try_refuses()) return NULL;
+    /* Exact fallible growth intentionally keeps a header even for small
+       requests. Subsequent no-ops must not silently round its capacity. */
+    KushAllocHeader *header = kush_try_system_block(bytes);
+    if (header == NULL) return NULL;
+    uint64_t *replacement = (uint64_t *)(header + 1);
+    uint64_t capacity = kush_buffer_capacity(payload);
+    memcpy(replacement, payload, (size_t)copy);
+    replacement[1] = capacity;
+    kush_buffer_release(payload);
+    return replacement;
 }
 int64_t kush_note_reuse(void) { ++kush_reuses; return 0; }
 /* ---- Scoped bump-allocator regions ---------------------------------------
@@ -640,15 +776,15 @@ typedef struct { uint64_t length; uint64_t capacity; unsigned char data[]; } Kus
 #define KUSH_MAX_CAPACITY ((uint64_t)INT64_MAX - (uint64_t)sizeof(KushBytes))
 uint64_t kush_bytes_with_capacity(int64_t capacity) {
     if (capacity < 0 || (uint64_t)capacity > KUSH_MAX_CAPACITY) kush_panic();
-    KushBytes *b = (KushBytes *)(uintptr_t)kush_alloc(sizeof(KushBytes) + (uint64_t)capacity);
-    b->length = 0; b->capacity = (uint64_t)capacity; return (uint64_t)(uintptr_t)b;
+    KushBytes *b = (KushBytes *)(uintptr_t)kush_buffer_alloc(sizeof(KushBytes) + (uint64_t)capacity, (uint64_t)capacity, 0);
+    b->length = 0; return (uint64_t)(uintptr_t)b;
 }
 uint64_t kush_try_bytes_with_capacity(int64_t capacity) {
     if (capacity < 0 || (uint64_t)capacity > KUSH_MAX_CAPACITY) return 0;
-    uint64_t handle = kush_try_alloc(sizeof(KushBytes) + (uint64_t)capacity);
+    uint64_t handle = kush_buffer_alloc(sizeof(KushBytes) + (uint64_t)capacity, (uint64_t)capacity, 1);
     if (handle == 0) return 0;
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
-    b->length = 0; b->capacity = (uint64_t)capacity;
+    b->length = 0;
     return handle;
 }
 uint64_t kush_bytes_from(const unsigned char *source, int64_t length) {
@@ -747,7 +883,7 @@ uint64_t kush_alloc_block_try(uint64_t allocator, uint64_t release, uint64_t con
         block = ((KushAllocBlockFn)(uintptr_t)allocator)(bytes);
     }
     if (block == 0) return 0;
-    if (((KushBytes *)(uintptr_t)block)->capacity < bytes) {
+    if (kush_buffer_capacity((const void *)(uintptr_t)block) < bytes) {
         kush_alloc_block_release(release, context, block);
         return 0;
     }
@@ -807,7 +943,7 @@ static uint64_t kush_alloc_block_grow(uint64_t grow, uint64_t context, uint64_t 
     } else {
         grown = ((KushReallocBlockFn)(uintptr_t)grow)(block, old_bytes, bytes);
     }
-    if (grown == 0 || ((KushBytes *)(uintptr_t)grown)->capacity < bytes) {
+    if (grown == 0 || kush_buffer_capacity((const void *)(uintptr_t)grown) < bytes) {
         free(saved);
         kush_panic();
     }
@@ -922,7 +1058,7 @@ void kush_alloc_vec_release(uint64_t handle) {
     kush_free(handle);
 }
 int64_t kush_bytes_len(uint64_t handle) { return (int64_t)((KushBytes *)(uintptr_t)handle)->length; }
-int64_t kush_bytes_capacity(uint64_t handle) { return (int64_t)((KushBytes *)(uintptr_t)handle)->capacity; }
+int64_t kush_bytes_capacity(uint64_t handle) { return (int64_t)kush_buffer_capacity((const void *)(uintptr_t)handle); }
 int64_t kush_bytes_get(uint64_t handle, int64_t index) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
     if (index < 0 || (uint64_t)index >= b->length) kush_panic();
@@ -937,12 +1073,12 @@ uint64_t kush_bytes_copy(uint64_t handle) {
 static uint64_t kush_bytes_push_impl(uint64_t handle, int64_t value, int grow) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
     if (value < 0 || value > 255) kush_panic();
-    if (b->length == b->capacity) {
+    if (b->length == kush_buffer_capacity(b)) {
         if (!grow) kush_panic();
-        uint64_t next = b->capacity == 0 ? 8 : (b->capacity <= KUSH_MAX_CAPACITY / 2 ? b->capacity * 2 : KUSH_MAX_CAPACITY);
-        if (next <= b->capacity || next > KUSH_MAX_CAPACITY) kush_panic();
-        b = (KushBytes *)kush_grow(b, sizeof(KushBytes) + next);
-        b->capacity = next; ++kush_buffer_growths;
+        uint64_t next = kush_buffer_capacity(b) == 0 ? 8 : (kush_buffer_capacity(b) <= KUSH_MAX_CAPACITY / 2 ? kush_buffer_capacity(b) * 2 : KUSH_MAX_CAPACITY);
+        if (next <= kush_buffer_capacity(b) || next > KUSH_MAX_CAPACITY) kush_panic();
+        b = (KushBytes *)kush_buffer_grow(b, sizeof(KushBytes) + next);
+        kush_buffer_set_capacity(b, next); ++kush_buffer_growths;
     }
     b->data[b->length++] = (unsigned char)value; return (uint64_t)(uintptr_t)b;
 }
@@ -1047,14 +1183,14 @@ int64_t kush_io_read_all(int64_t stream, uint64_t handle) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
     unsigned char probe;
     for (;;) {
-        int full = b->length == b->capacity;
+        int full = b->length == kush_buffer_capacity(b);
         void *destination = full ? (void *)&probe : (void *)(b->data + b->length);
-        size_t count = full ? 1 : (size_t)(b->capacity - b->length);
+        size_t count = full ? 1 : (size_t)(kush_buffer_capacity(b) - b->length);
         ssize_t received = read((int)stream, destination, count);
         if (received < 0 && errno == EINTR) continue;
-        if (received < 0) { int code = errno; kush_free(handle); return code; }
+        if (received < 0) { int code = errno; kush_buffer_free(handle); return code; }
         if (received == 0) return 0;
-        if (full) { kush_free(handle); return EFBIG; }
+        if (full) { kush_buffer_free(handle); return EFBIG; }
         b->length += (uint64_t)received;
     }
 }
@@ -1066,9 +1202,9 @@ int64_t kush_io_read_line(int64_t stream, uint64_t handle) {
         unsigned char byte;
         ssize_t received = read((int)stream, &byte, 1);
         if (received < 0 && errno == EINTR) continue;
-        if (received < 0) { int code = errno; kush_free(handle); return code; }
+        if (received < 0) { int code = errno; kush_buffer_free(handle); return code; }
         if (received == 0) return 0;
-        if (b->length == b->capacity) { kush_free(handle); return EFBIG; }
+        if (b->length == kush_buffer_capacity(b)) { kush_buffer_free(handle); return EFBIG; }
         b->data[b->length++] = byte;
         if (byte == '\n') return 0;
     }
@@ -1076,11 +1212,11 @@ int64_t kush_io_read_line(int64_t stream, uint64_t handle) {
 /* One successful read, never an excess-byte probe. Full input is EFBIG. */
 int64_t kush_io_read_chunk(int64_t stream, uint64_t handle) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
-    if (b->length == b->capacity) { kush_free(handle); return EFBIG; }
+    if (b->length == kush_buffer_capacity(b)) { kush_buffer_free(handle); return EFBIG; }
     for (;;) {
-        ssize_t n = read((int)stream, b->data + b->length, (size_t)(b->capacity - b->length));
+        ssize_t n = read((int)stream, b->data + b->length, (size_t)(kush_buffer_capacity(b) - b->length));
         if (n < 0 && errno == EINTR) continue;
-        if (n < 0) { int code = errno; kush_free(handle); return code; }
+        if (n < 0) { int code = errno; kush_buffer_free(handle); return code; }
         b->length += (uint64_t)n; return 0;
     }
 }
@@ -1124,7 +1260,7 @@ static int kush_host_open(const char *path, int flags, int with_mode, mode_t mod
     }
 }
 static int64_t kush_host_append(KushBytes *b, const unsigned char *data, uint64_t length) {
-    if (b->length > b->capacity || length > b->capacity - b->length) return EFBIG;
+    if (b->length > kush_buffer_capacity(b) || length > kush_buffer_capacity(b) - b->length) return EFBIG;
     if (length != 0) memcpy(b->data + b->length, data, (size_t)length);
     b->length += length;
     return 0;
@@ -1132,16 +1268,16 @@ static int64_t kush_host_append(KushBytes *b, const unsigned char *data, uint64_
 int64_t kush_fs_read(uint64_t path_handle, uint64_t buffer_handle, uint64_t *out) {
     int code = 0;
     char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
-    if (path == NULL) { kush_free(buffer_handle); return code; }
+    if (path == NULL) { kush_buffer_free(buffer_handle); return code; }
     int fd = kush_host_open(path, O_RDONLY | O_CLOEXEC, 0, 0);
     free(path);
-    if (fd < 0) { code = errno; kush_free(buffer_handle); return code; }
+    if (fd < 0) { code = errno; kush_buffer_free(buffer_handle); return code; }
     KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
     unsigned char probe;
     for (;;) {
-        int full = b->length == b->capacity;
+        int full = b->length == kush_buffer_capacity(b);
         void *destination = full ? (void *)&probe : (void *)(b->data + b->length);
-        size_t count = full ? 1 : (size_t)(b->capacity - b->length);
+        size_t count = full ? 1 : (size_t)(kush_buffer_capacity(b) - b->length);
         ssize_t received = read(fd, destination, count);
         if (received < 0 && errno == EINTR) continue;
         if (received < 0) { code = errno; break; }
@@ -1150,7 +1286,7 @@ int64_t kush_fs_read(uint64_t path_handle, uint64_t buffer_handle, uint64_t *out
         b->length += (uint64_t)received;
     }
     (void)close(fd);
-    if (code != 0) { kush_free(buffer_handle); return code; }
+    if (code != 0) { kush_buffer_free(buffer_handle); return code; }
     *out = buffer_handle;
     return 0;
 }
@@ -1260,10 +1396,10 @@ int64_t kush_fs_rename(uint64_t from_handle, uint64_t to_handle, uint64_t *out) 
 int64_t kush_fs_list(uint64_t path_handle, uint64_t buffer_handle, uint64_t *out) {
     int code = 0;
     char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
-    if (path == NULL) { kush_free(buffer_handle); return code; }
+    if (path == NULL) { kush_buffer_free(buffer_handle); return code; }
     DIR *directory = opendir(path);
     free(path);
-    if (directory == NULL) { code = errno; kush_free(buffer_handle); return code; }
+    if (directory == NULL) { code = errno; kush_buffer_free(buffer_handle); return code; }
     KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
     for (;;) {
         errno = 0;
@@ -1278,7 +1414,7 @@ int64_t kush_fs_list(uint64_t path_handle, uint64_t buffer_handle, uint64_t *out
         if (status != 0) { code = status; break; }
     }
     (void)closedir(directory);
-    if (code != 0) { kush_free(buffer_handle); return code; }
+    if (code != 0) { kush_buffer_free(buffer_handle); return code; }
     *out = buffer_handle;
     return 0;
 }
@@ -1323,11 +1459,11 @@ int64_t kush_env_arg_count(uint64_t *out) {
 int64_t kush_env_arg(int64_t index, uint64_t buffer_handle, uint64_t *out) {
     KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
     if (index < 0 || index >= (int64_t)kush_host_argc || kush_host_argv == NULL) {
-        kush_free(buffer_handle); return ENOENT;
+        kush_buffer_free(buffer_handle); return ENOENT;
     }
     const char *value = kush_host_argv[index];
     int64_t code = kush_host_append(b, (const unsigned char *)value, (uint64_t)strlen(value));
-    if (code != 0) { kush_free(buffer_handle); return code; }
+    if (code != 0) { kush_buffer_free(buffer_handle); return code; }
     *out = buffer_handle;
     return 0;
 }
@@ -1344,13 +1480,13 @@ int64_t kush_env_var_count(uint64_t *out) {
 int64_t kush_env_var(const KushBytes *name, uint64_t buffer_handle, uint64_t *out) {
     int code = 0;
     char *text = kush_host_c_path(name, &code);
-    if (text == NULL) { kush_free(buffer_handle); return code; }
+    if (text == NULL) { kush_buffer_free(buffer_handle); return code; }
     const char *value = getenv(text);
     free(text);
-    if (value == NULL) { kush_free(buffer_handle); return ENOENT; }
+    if (value == NULL) { kush_buffer_free(buffer_handle); return ENOENT; }
     code = (int)kush_host_append((KushBytes *)(uintptr_t)buffer_handle,
         (const unsigned char *)value, (uint64_t)strlen(value));
-    if (code != 0) { kush_free(buffer_handle); return code; }
+    if (code != 0) { kush_buffer_free(buffer_handle); return code; }
     *out = buffer_handle;
     return 0;
 }
@@ -1386,12 +1522,12 @@ int64_t kush_time_sleep_ms(int64_t milliseconds, uint64_t *out) {
     return 0;
 }
 int64_t kush_os_strerror(int64_t code, uint64_t buffer_handle, uint64_t *out) {
-    if (code < 0 || code > 4095) { kush_free(buffer_handle); return EINVAL; }
+    if (code < 0 || code > 4095) { kush_buffer_free(buffer_handle); return EINVAL; }
     const char *text = strerror((int)code);
     if (text == NULL) text = "Unknown error";
     int64_t status = kush_host_append((KushBytes *)(uintptr_t)buffer_handle,
         (const unsigned char *)text, (uint64_t)strlen(text));
-    if (status != 0) { kush_free(buffer_handle); return status; }
+    if (status != 0) { kush_buffer_free(buffer_handle); return status; }
     *out = buffer_handle;
     return 0;
 }
@@ -1519,7 +1655,7 @@ int64_t kush_proc_run(uint64_t program_handle, uint64_t args_handle,
     int64_t deadline = kush_host_deadline(timeout_ms);
     int failed = 0, timed_out = 0;
     for (;;) {
-        int full = length == b->capacity;
+        int full = length == kush_buffer_capacity(b);
         struct pollfd waiting = { outpipe[0], POLLIN | POLLHUP, 0 };
         int ready = poll(&waiting, 1, kush_host_remaining(deadline));
         if (ready < 0) {
@@ -1540,7 +1676,7 @@ int64_t kush_proc_run(uint64_t program_handle, uint64_t args_handle,
             if (received == 0) break;
             code = EFBIG; failed = 1; break;
         }
-        ssize_t received = read(outpipe[0], b->data + length, (size_t)(b->capacity - length));
+        ssize_t received = read(outpipe[0], b->data + length, (size_t)(kush_buffer_capacity(b) - length));
         if (received < 0 && (errno == EINTR || errno == EAGAIN)) continue;
         if (received < 0) { code = errno; failed = 1; break; }
         if (received == 0) break;
@@ -1678,7 +1814,7 @@ int64_t kush_net_tcp_exchange(uint64_t host_handle, int64_t port,
     uint64_t length = b->length;
     uint64_t received_total = 0;
     while (code == 0) {
-        int full = length == b->capacity;
+        int full = length == kush_buffer_capacity(b);
         struct pollfd waiting = { fd, POLLIN | POLLHUP, 0 };
         int ready = poll(&waiting, 1, kush_host_remaining(deadline));
         if (ready < 0) { if (errno == EINTR) continue; code = errno; break; }
@@ -1688,7 +1824,7 @@ int64_t kush_net_tcp_exchange(uint64_t host_handle, int64_t port,
         }
         unsigned char probe;
         void *destination = full ? (void *)&probe : (void *)(b->data + length);
-        size_t room = full ? 1 : (size_t)(b->capacity - length);
+        size_t room = full ? 1 : (size_t)(kush_buffer_capacity(b) - length);
         ssize_t count = recv(fd, destination, room, 0);
         if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
         if (count < 0) { code = errno; break; }
@@ -1711,8 +1847,8 @@ static uint64_t kush_vec_bytes(uint64_t capacity, uint64_t width) {
 }
 uint64_t kush_vec_with_capacity(int64_t capacity, int64_t width) {
     if (capacity < 0 || width <= 0) kush_panic();
-    KushVec *v = (KushVec *)(uintptr_t)kush_alloc(kush_vec_bytes((uint64_t)capacity, (uint64_t)width));
-    v->length = 0; v->capacity = (uint64_t)capacity;
+    KushVec *v = (KushVec *)(uintptr_t)kush_buffer_alloc(kush_vec_bytes((uint64_t)capacity, (uint64_t)width), (uint64_t)capacity, 0);
+    v->length = 0;
     return (uint64_t)(uintptr_t)v;
 }
 int64_t kush_vec_len(uint64_t handle) { return (int64_t)((KushVec *)(uintptr_t)handle)->length; }
@@ -1723,12 +1859,12 @@ void kush_vec_get(uint64_t handle, int64_t index, uint64_t *out, uint64_t width)
 }
 uint64_t kush_vec_push(uint64_t handle, const uint64_t *item, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
-    if (v->length == v->capacity) {
-        uint64_t next = v->capacity == 0 ? 4 : v->capacity * 2;
-        if (next <= v->capacity) kush_panic();
+    if (v->length == kush_buffer_capacity(v)) {
+        uint64_t next = kush_buffer_capacity(v) == 0 ? 4 : kush_buffer_capacity(v) * 2;
+        if (next <= kush_buffer_capacity(v)) kush_panic();
         uint64_t bytes = kush_vec_bytes(next, width);
-        v = (KushVec *)kush_grow(v, bytes);
-        v->capacity = next; ++kush_buffer_growths;
+        v = (KushVec *)kush_buffer_grow(v, bytes);
+        kush_buffer_set_capacity(v, next); ++kush_buffer_growths;
     }
     memcpy(v->data + v->length * width, item, (size_t)(width * 8));
     v->length++;
@@ -1758,9 +1894,9 @@ uint64_t kush_vec_reserve(uint64_t handle, int64_t additional, uint64_t width) {
     if (additional < 0) kush_panic();
     uint64_t needed;
     if (__builtin_add_overflow(v->length, (uint64_t)additional, &needed)) kush_panic();
-    if (needed <= v->capacity) return handle;
-    KushVec *replacement = (KushVec *)kush_grow(v, kush_vec_bytes(needed, width));
-    replacement->capacity = needed;
+    if (needed <= kush_buffer_capacity(v)) return handle;
+    KushVec *replacement = (KushVec *)kush_buffer_grow(v, kush_vec_bytes(needed, width));
+    kush_buffer_set_capacity(replacement, needed);
     ++kush_buffer_growths;
     return (uint64_t)(uintptr_t)replacement;
 }
@@ -1771,12 +1907,12 @@ uint64_t kush_vec_try_reserve(uint64_t handle, int64_t additional, uint64_t widt
     if (additional < 0) return 0;
     uint64_t needed;
     if (__builtin_add_overflow(v->length, (uint64_t)additional, &needed)) return 0;
-    if (needed <= v->capacity) return handle;
+    if (needed <= kush_buffer_capacity(v)) return handle;
     if (width == 0 || needed > ((uint64_t)INT64_MAX - sizeof(KushVec)) / 8 / width) return 0;
     uint64_t bytes = sizeof(KushVec) + needed * width * 8;
-    KushVec *replacement = (KushVec *)kush_try_grow(v, bytes);
+    KushVec *replacement = (KushVec *)kush_buffer_try_grow(v, bytes);
     if (replacement == NULL) return 0;
-    replacement->capacity = needed;
+    kush_buffer_set_capacity(replacement, needed);
     ++kush_buffer_growths;
     return (uint64_t)(uintptr_t)replacement;
 }
@@ -1791,8 +1927,8 @@ uint64_t kush_vec_try_reserve(uint64_t handle, int64_t additional, uint64_t widt
 uint64_t kush_vec_restride(uint64_t handle, int64_t source_width, int64_t target_width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     if (source_width <= 0 || target_width <= 0) kush_panic();
-    uint64_t bytes = kush_vec_bytes(v->capacity, (uint64_t)target_width);
-    KushVec *replacement = (KushVec *)kush_grow(v, bytes);
+    uint64_t bytes = kush_vec_bytes(kush_buffer_capacity(v), (uint64_t)target_width);
+    KushVec *replacement = (KushVec *)kush_buffer_grow(v, bytes);
     if (replacement != v) ++kush_buffer_growths;
     v = replacement;
     uint64_t source = (uint64_t)source_width * 8;
@@ -2631,6 +2767,9 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
     let free = module
         .declare_function("kush_free", Linkage::Import, &free_sig)
         .map_err(error)?;
+    let buffer_free = module
+        .declare_function("kush_buffer_free", Linkage::Import, &free_sig)
+        .map_err(error)?;
     let mut arena_new_sig = module.make_signature();
     arena_new_sig.returns.push(AbiParam::new(I64));
     let arena_new = module
@@ -3057,6 +3196,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
         &mut module,
         program,
         free,
+        buffer_free,
         arena_release,
         arena_box_release,
         &alloc_ops,
@@ -3611,6 +3751,7 @@ fn synthesize_drops(
     module: &mut ObjectModule,
     program: &Executable,
     free: FuncId,
+    buffer_free: FuncId,
     arena_release: FuncId,
     arena_box_release: FuncId,
     alloc_ops: &AllocOps,
@@ -3684,7 +3825,7 @@ fn synthesize_drops(
         let args = builder.block_params(entry).to_vec();
         match ty {
             Type::Bytes | Type::String => {
-                emit_drop(&mut builder, module, free, &args);
+                emit_drop(&mut builder, module, buffer_free, &args);
                 builder.ins().return_(&[]);
             }
             Type::Box(index) | Type::ArenaBox(index) => {
@@ -3842,7 +3983,7 @@ fn synthesize_drops(
                     builder.ins().jump(head, &[next.into()]);
                     builder.switch_to_block(done);
                 }
-                emit_drop(&mut builder, module, free, &args);
+                emit_drop(&mut builder, module, buffer_free, &args);
                 builder.ins().return_(&[]);
             }
             Type::Enum(index) => {
@@ -7920,6 +8061,12 @@ impl Generator<'_, '_> {
             .builder
             .ins()
             .load(I64, ir::MemFlagsData::new(), handle, 8);
+        let raw = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::SignedLessThan, capacity, 0);
+        let decoded = self.builder.ins().band_imm_s(capacity, 0x00ffffffffffffff);
+        let capacity = self.builder.ins().select(raw, decoded, capacity);
         let room = self
             .builder
             .ins()
@@ -9133,6 +9280,108 @@ mod scalar_inline_codegen_tests {
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod allocator_runtime_tests {
     use super::*;
+
+    #[test]
+    fn headerless_buffers_preserve_growth_capacity_and_typed_release() {
+        let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+        let source = scratch.path().join("headerless-test.c");
+        let binary = scratch.path().join("headerless-test");
+        let test = r#"
+#undef main
+#include <assert.h>
+int64_t kush_entry(void) { return 0; }
+int main(int argc, char **argv) {
+    if (argc > 1) {
+        uint64_t handle=kush_bytes_with_capacity(0), guard=kush_alloc(8);
+        (void)argv; (void)guard;
+        kush_buffer_free(handle);
+        kush_buffer_free(handle);
+        return 90;
+    }
+    assert(sizeof(KushBytes)==16 && sizeof(KushVec)==16);
+    uint64_t ordinary[2]={0,UINT64_C(0x7fffffffffffffef)};
+    assert(kush_buffer_capacity(ordinary)==UINT64_C(0x7fffffffffffffef));
+    kush_buffer_set_capacity(ordinary,UINT64_C(0x7fffffffffffffff));
+    assert(kush_buffer_capacity(ordinary)==UINT64_C(0x7fffffffffffffff));
+    for (int64_t capacity=0;capacity<=1100;capacity++) {
+        uint64_t handle=kush_bytes_with_capacity(capacity);
+        KushBytes *b=(KushBytes *)(uintptr_t)handle;
+        assert(((uintptr_t)b & 15)==0);
+        assert(kush_bytes_capacity(handle)==capacity);
+        assert((b->capacity & KUSH_BUFFER_RAW)!=0 ? capacity<=1008 : capacity>1008);
+        for (int64_t i=0;i<capacity;i++) handle=kush_bytes_push(handle,i%256);
+        assert(kush_bytes_len(handle)==capacity);
+        for (int64_t i=0;i<capacity;i++) assert(kush_bytes_get(handle,i)==i%256);
+        handle=kush_bytes_push(handle,42);
+        assert(kush_bytes_get(handle,capacity)==42);
+        kush_buffer_free(handle);
+    }
+    kush_pool_drain();
+    for(size_t i=0;i<KUSH_POOL_CLASSES;i++) assert(kush_pool_counts[i]==0);
+    assert(kush_pool_retained==0 && kush_live_allocations==0);
+    uint64_t v=kush_vec_with_capacity(4,4);
+    for(int64_t i=0;i<4;i++) {uint64_t words[4]={(uint64_t)i,2,3,4};v=kush_vec_push(v,words,4);}
+    /* Emulate a checked narrowing map's compacted slots without changing its
+       physical class; logical capacity remains four elements. */
+    KushVec *vec=(KushVec *)(uintptr_t)v;
+    for(int64_t i=0;i<4;i++) vec->data[i]=(uint64_t)i;
+    kush_try_fail_after=0;kush_try_attempts=0;kush_try_probe_initialized=1;
+    assert(kush_vec_try_reserve(v,8,1)==v);
+    assert(kush_buffer_capacity(vec)==12 && kush_try_attempts==0);
+    assert(kush_vec_try_reserve(v,1000,1)==0);
+    assert(kush_buffer_capacity(vec)==12);
+    kush_try_fail_after=UINT64_MAX;
+    uint64_t grown=kush_vec_try_reserve(v,1000,1);
+    assert(grown!=0);
+    vec=(KushVec *)(uintptr_t)grown;
+    assert(!(vec->capacity & KUSH_BUFFER_RAW));
+    for(int64_t i=0;i<4;i++) assert(vec->data[i]==(uint64_t)i);
+    kush_buffer_free(grown);
+    kush_pool_drain();
+    assert(kush_pool_retained==0 && kush_live_allocations==0);
+    return 0;
+}
+"#;
+        fs::write(
+            &source,
+            format!("#define main kush_runtime_process_main\n{RUNTIME}\n{test}"),
+        )
+        .unwrap();
+        let output = Command::new("cc")
+            .args([
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-DKUSH_HAS_TASKS=1",
+                "-DKUSH_STATS=1",
+                "-DKUSH_FUSION_COUNT=0",
+            ])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .arg("-lm")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(&binary)
+            .env_remove("KUSH_ALLOC_FAIL_AFTER")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(&binary).arg("double").output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("panic:"));
+    }
 
     #[test]
     fn compact_headers_preserve_alignment_markers_growth_and_class_counts() {
