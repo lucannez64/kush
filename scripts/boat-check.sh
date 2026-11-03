@@ -169,18 +169,41 @@ echo "SYNC: $actual_manifest (local and remote files match)"
 
 # Swap the verified upload into the stable path so both machines expose the
 # same source tree between runs.
-python3 - "$KUSH_STAGING" "$KUSH_STABLE" <<'PY'
+if ! python3 - "$KUSH_STAGING" "$KUSH_STABLE" <<'PY'
 import os, shutil, sys
 src, dst = sys.argv[1], sys.argv[2]
+backup = dst + ".old-" + os.path.basename(src)
+moved = False
 if os.path.lexists(dst):
-    if os.path.isdir(dst) and not os.path.islink(dst):
-        shutil.rmtree(dst)
+    if os.path.lexists(backup):
+        raise RuntimeError("workspace backup already exists: " + backup)
+    # Renaming does not require deleting read-only generated descendants.
+    os.rename(dst, backup)
+    moved = True
+try:
+    os.replace(src, dst)
+except BaseException:
+    if moved:
+        os.rename(backup, dst)
+    raise
+if moved:
+    if os.path.isdir(backup) and not os.path.islink(backup):
+        shutil.rmtree(backup, ignore_errors=True)
     else:
-        os.remove(dst)
-os.replace(src, dst)
+        os.unlink(backup)
+    if os.path.lexists(backup):
+        print("warning: old read-only workspace retained at " + backup, file=sys.stderr)
 PY
+then
+    echo "cannot install verified source upload; checks aborted" >&2
+    exit 3
+fi
 export KUSH_SOURCE="$KUSH_STABLE"
 cd "$KUSH_SOURCE" || exit 1
+if [ ! -f Cargo.toml ]; then
+    echo "verified workspace has no Cargo.toml; checks aborted" >&2
+    exit 3
+fi
 
 # Cargo test binaries embed the absolute workspace path. If the cache was built
 # under a different path, its test binaries can point at a directory that no
