@@ -707,20 +707,6 @@ struct WitnessCheck<'a, 'b> {
     witness: Witness,
 }
 impl WitnessCheck<'_, '_> {
-    fn classify(
-        &self,
-        label: &str,
-        path: &WitnessPath,
-        fields: &[usize],
-    ) -> Result<LabelClass, WitnessError> {
-        self.env
-            .classify(label)
-            .ok_or_else(|| WitnessError::UnclassifiedLabel {
-                path: path.clone(),
-                fields: fields.to_vec(),
-                label: label.to_owned(),
-            })
-    }
     fn pair(
         &mut self,
         source: Option<&str>,
@@ -743,14 +729,56 @@ impl WitnessCheck<'_, '_> {
         match (source, target) {
             (None, None) => Ok(()),
             (Some(source), Some(target)) => {
-                self.classify(source, path, fields)?;
-                self.classify(target, path, fields)?;
+                let source_class = self.env.classify(source);
+                let target_class = self.env.classify(target);
+                if polarity == LabelPolarity::Invariant {
+                    // An invariant position requires identical binder identity
+                    // after valid substitution. An internal/fresh identity is
+                    // rigid: it is never a wildcard that can stand for a named
+                    // binder, and an unclassified callee label has no proof at
+                    // this occurrence. Both are checked rejections here rather
+                    // than deferred acceptance.
+                    let source_class =
+                        source_class.ok_or_else(|| WitnessError::UnclassifiedLabel {
+                            path: path.clone(),
+                            fields: fields.to_vec(),
+                            label: source.to_owned(),
+                        })?;
+                    let target_class =
+                        target_class.ok_or_else(|| WitnessError::UnclassifiedLabel {
+                            path: path.clone(),
+                            fields: fields.to_vec(),
+                            label: target.to_owned(),
+                        })?;
+                    if source != target
+                        && (matches!(source_class, LabelClass::Internal)
+                            || matches!(target_class, LabelClass::Internal))
+                    {
+                        return Err(WitnessError::NotIdentical {
+                            path: path.clone(),
+                            fields: fields.to_vec(),
+                            source: source.to_owned(),
+                            target: target.to_owned(),
+                        });
+                    }
+                } else if source_class.is_none() || target_class.is_none() {
+                    // Outside an invariant position an unclassified label is a
+                    // callee-instantiated or elided identity whose outlives
+                    // relation is owned by the call/provenance evidence, not by
+                    // this same-scope witness. The surrounding call boundary
+                    // checks it; this pair contributes no local obligation.
+                    return Ok(());
+                }
                 // Elided and compiler-generated identities are rigid, but
                 // their actual outlives relation is established by ownership
-                // provenance, not by the named function bounds. Defer only the
-                // pairs that involve such an identity; every other pair still
-                // produces a checked obligation.
-                if source != target && (is_internal_label(source) || is_internal_label(target)) {
+                // provenance, not by the named function bounds. Defer only a
+                // non-invariant pair that involves such an identity; an
+                // invariant pair was rejected above and a fully classified pair
+                // still produces a checked obligation.
+                if polarity != LabelPolarity::Invariant
+                    && source != target
+                    && (is_internal_label(source) || is_internal_label(target))
+                {
                     return Ok(());
                 }
                 match polarity {
@@ -794,10 +822,15 @@ impl WitnessCheck<'_, '_> {
                 });
                 Ok(())
             }
-            _ => Err(WitnessError::MissingLabel {
+            _ if polarity == LabelPolarity::Invariant => Err(WitnessError::MissingLabel {
                 path: path.clone(),
                 fields: fields.to_vec(),
             }),
+            // One side of a non-invariant borrowed leaf is unlabelled. The
+            // missing relation belongs to the surrounding call/provenance
+            // evidence, so this same-scope witness contributes no local
+            // obligation rather than inventing a region.
+            _ => Ok(()),
         }
     }
     /// Outlives evidence. Canonical arrow labels are resolved against the

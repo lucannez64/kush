@@ -1338,6 +1338,170 @@ impl<'a> Types<'a> {
             _ => Ok(ty),
         }
     }
+    /// Apply an occurrence-specific lifetime substitution to a checked type.
+    /// Call results keep the callee's declared labels until this substitution
+    /// relates them to the caller's actual argument labels. Only erased
+    /// checker metadata changes: record lifetime slots and container-element
+    /// annotations are reconstructed, never a runtime representation.
+    pub fn relabel_lifetimes(
+        &mut self,
+        ty: Type,
+        map: &BTreeMap<String, String>,
+        span: Span,
+    ) -> Result<Type> {
+        if map.is_empty() {
+            return Ok(ty);
+        }
+        match ty {
+            Type::Enum(id) => {
+                let definition = self.enums[id].definition;
+                let consts = self.enums[id].consts.clone();
+                let arguments = self.enums[id].arguments.clone();
+                let lifetimes = self.enums[id].lifetimes.clone();
+                let mut relabeled_arguments = Vec::with_capacity(arguments.len());
+                let mut changed = false;
+                for argument in arguments {
+                    let relabeled = self.relabel_lifetimes(argument, map, span)?;
+                    changed |= relabeled != argument;
+                    relabeled_arguments.push(relabeled);
+                }
+                let mut relabeled_lifetimes = Vec::with_capacity(lifetimes.len());
+                for lifetime in &lifetimes {
+                    let relabeled = map
+                        .get(lifetime)
+                        .cloned()
+                        .unwrap_or_else(|| lifetime.clone());
+                    changed |= relabeled != *lifetime;
+                    relabeled_lifetimes.push(relabeled);
+                }
+                if !changed {
+                    return Ok(ty);
+                }
+                self.instantiate(
+                    definition,
+                    relabeled_arguments,
+                    consts,
+                    relabeled_lifetimes,
+                    span,
+                )
+                .map(Type::Enum)
+            }
+            Type::Variants(id, mask) => {
+                let relabeled = self.relabel_lifetimes(Type::Enum(id), map, span)?;
+                match relabeled {
+                    Type::Enum(new_id) if new_id == id => Ok(ty),
+                    Type::Enum(new_id) => {
+                        Ok(crate::runtime_types::refine(&self.enums, new_id, mask))
+                    }
+                    other => Ok(other),
+                }
+            }
+            Type::Union(id) => {
+                let members = self.unions[id].members.clone();
+                let mut relabeled = Vec::with_capacity(members.len());
+                for member in members {
+                    relabeled.push(self.relabel_lifetimes(member, map, span)?);
+                }
+                self.union(relabeled, span)
+            }
+            Type::Box(p) => {
+                let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
+                if inner == self.pointees[p] {
+                    Ok(ty)
+                } else {
+                    Ok(Type::Box(self.pointer(inner)))
+                }
+            }
+            Type::Vec(p) => {
+                let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
+                if inner == self.pointees[p] {
+                    Ok(ty)
+                } else {
+                    Ok(Type::Vec(self.pointer(inner)))
+                }
+            }
+            Type::ArenaBox(p) => {
+                let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
+                if inner == self.pointees[p] {
+                    Ok(ty)
+                } else {
+                    Ok(Type::ArenaBox(self.pointer(inner)))
+                }
+            }
+            Type::AllocBox(p) => {
+                let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
+                if inner == self.pointees[p] {
+                    Ok(ty)
+                } else {
+                    Ok(Type::AllocBox(self.pointer(inner)))
+                }
+            }
+            Type::AllocVec(p) => {
+                let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
+                if inner == self.pointees[p] {
+                    Ok(ty)
+                } else {
+                    Ok(Type::AllocVec(self.pointer(inner)))
+                }
+            }
+            Type::Ref(p) => {
+                let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
+                if inner == self.pointees[p] {
+                    Ok(ty)
+                } else {
+                    Ok(Type::Ref(self.pointer(inner)))
+                }
+            }
+            Type::RefMut(p) => {
+                let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
+                if inner == self.pointees[p] {
+                    Ok(ty)
+                } else {
+                    Ok(Type::RefMut(self.pointer(inner)))
+                }
+            }
+            Type::Slice(p) => {
+                let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
+                if inner == self.pointees[p] {
+                    Ok(ty)
+                } else {
+                    Ok(Type::Slice(self.pointer(inner)))
+                }
+            }
+            Type::SliceMut(p) => {
+                let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
+                if inner == self.pointees[p] {
+                    Ok(ty)
+                } else {
+                    Ok(Type::SliceMut(self.pointer(inner)))
+                }
+            }
+            Type::Task(p) => {
+                let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
+                if inner == self.pointees[p] {
+                    Ok(ty)
+                } else {
+                    Ok(Type::Task(self.pointer(inner)))
+                }
+            }
+            Type::Annotated(p, label) => {
+                let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
+                let name = self.reference_label_name(label);
+                let relabeled = name
+                    .as_deref()
+                    .and_then(|name| map.get(name))
+                    .cloned()
+                    .or(name);
+                let new_label = self.reference_label_id(relabeled.as_deref());
+                if inner == self.pointees[p] && new_label == label {
+                    Ok(ty)
+                } else {
+                    Ok(Type::Annotated(self.pointer(inner), new_label))
+                }
+            }
+            _ => Ok(ty),
+        }
+    }
     /// The declared generic parameters and right-hand side of a type alias.
     pub fn alias_definition(&self, id: BindingId) -> Option<(&'a [ast::Generic], &'a ast::Type)> {
         self.aliases

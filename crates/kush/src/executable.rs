@@ -14207,7 +14207,7 @@ impl Checker<'_, '_> {
         let ty = if diverges {
             Type::Never
         } else {
-            call_result_type(&signature)
+            self.instantiated_call_result_type(&signature, &coerced, span)?
         };
         let value = Expr {
             kind: ExprKind::Call(Target::Function(index), coerced),
@@ -15393,12 +15393,6 @@ impl Checker<'_, '_> {
         if self.call_boundary > 0 {
             return Ok(());
         }
-        if matches!(
-            value.kind,
-            ExprKind::Call(_, _) | ExprKind::CallIndirect { .. } | ExprKind::Coerce { .. }
-        ) {
-            return Ok(());
-        }
         if !crate::runtime_types::has_borrow(self.types, value.ty)
             && !crate::runtime_types::has_borrow(self.types, expected)
         {
@@ -15428,14 +15422,6 @@ impl Checker<'_, '_> {
         let target = crate::variance::TypeOccurrence::new(expected);
         match crate::variance::witness(self.types, &source, &target, &env, &evidence) {
             Ok(_) => Ok(()),
-            // A label that is neither declared here nor compiler-internal is
-            // an instantiated callee/nested label, not a wildcard region. Its
-            // relation is owned by that occurrence's contract and provenance;
-            // every label this same-scope conversion can classify is still
-            // checked below. This is a per-occurrence deferral, never a
-            // whole-conversion erased fallback.
-            Err(crate::variance::WitnessError::MissingLabel { .. })
-            | Err(crate::variance::WitnessError::UnclassifiedLabel { .. }) => Ok(()),
             Err(error) => Err(Diagnostic::new(
                 span,
                 format!(
@@ -15456,6 +15442,162 @@ impl Checker<'_, '_> {
         let result = self.coerce(value, expected, span);
         self.call_boundary -= 1;
         result
+    }
+    /// Collect the actual caller label supplied for each callee-declared
+    /// lifetime that occurs in a parameter type. Multiple occurrences of one
+    /// declaration must agree; an ambiguous declaration is left unsubstituted
+    /// and therefore cannot silently pick one actual lifetime.
+    fn collect_call_lifetimes(
+        &self,
+        callee: Type,
+        actual: Type,
+        candidates: &mut BTreeMap<String, BTreeSet<String>>,
+        depth: usize,
+    ) {
+        if depth >= 64 {
+            return;
+        }
+        match (callee, actual) {
+            (
+                Type::Annotated(callee_pointee, callee_label),
+                Type::Annotated(actual_pointee, actual_label),
+            ) => {
+                if let (Some(callee_label), Some(actual_label)) = (
+                    self.types.reference_label_name(callee_label),
+                    self.types.reference_label_name(actual_label),
+                ) {
+                    candidates
+                        .entry(callee_label)
+                        .or_default()
+                        .insert(actual_label);
+                }
+                self.collect_call_lifetimes(
+                    self.types.pointees[callee_pointee],
+                    self.types.pointees[actual_pointee],
+                    candidates,
+                    depth + 1,
+                );
+            }
+            (Type::Annotated(callee_pointee, _), other) => self.collect_call_lifetimes(
+                self.types.pointees[callee_pointee],
+                other,
+                candidates,
+                depth + 1,
+            ),
+            (callee, Type::Annotated(actual_pointee, _)) => self.collect_call_lifetimes(
+                callee,
+                self.types.pointees[actual_pointee],
+                candidates,
+                depth + 1,
+            ),
+            (Type::Enum(callee_id), Type::Enum(actual_id)) => {
+                let callee_layout = &self.types.enums[callee_id];
+                let actual_layout = &self.types.enums[actual_id];
+                if callee_layout.definition != actual_layout.definition {
+                    return;
+                }
+                let callee_lifetimes = callee_layout.lifetimes.clone();
+                let actual_lifetimes = actual_layout.lifetimes.clone();
+                for (declared, actual) in callee_lifetimes.iter().zip(&actual_lifetimes) {
+                    if !declared.is_empty() && !actual.is_empty() {
+                        candidates
+                            .entry(declared.clone())
+                            .or_default()
+                            .insert(actual.clone());
+                    }
+                }
+                let callee_arguments = callee_layout.arguments.clone();
+                let actual_arguments = actual_layout.arguments.clone();
+                for (callee_argument, actual_argument) in
+                    callee_arguments.iter().zip(&actual_arguments)
+                {
+                    self.collect_call_lifetimes(
+                        *callee_argument,
+                        *actual_argument,
+                        candidates,
+                        depth + 1,
+                    );
+                }
+                let callee_fields = callee_layout.variants.clone();
+                let actual_fields = actual_layout.variants.clone();
+                for (callee_variant, actual_variant) in callee_fields.iter().zip(&actual_fields) {
+                    for (callee_field, actual_field) in
+                        callee_variant.fields.iter().zip(&actual_variant.fields)
+                    {
+                        self.collect_call_lifetimes(
+                            *callee_field,
+                            *actual_field,
+                            candidates,
+                            depth + 1,
+                        );
+                    }
+                }
+            }
+            (Type::Variants(callee_id, _), Type::Variants(actual_id, _))
+            | (Type::Enum(callee_id), Type::Variants(actual_id, _))
+            | (Type::Variants(callee_id, _), Type::Enum(actual_id)) => self.collect_call_lifetimes(
+                Type::Enum(callee_id),
+                Type::Enum(actual_id),
+                candidates,
+                depth + 1,
+            ),
+            (Type::Ref(callee_pointee), Type::Ref(actual_pointee))
+            | (Type::RefMut(callee_pointee), Type::RefMut(actual_pointee))
+            | (Type::RefMut(callee_pointee), Type::Ref(actual_pointee))
+            | (Type::Slice(callee_pointee), Type::Slice(actual_pointee))
+            | (Type::SliceMut(callee_pointee), Type::SliceMut(actual_pointee))
+            | (Type::Box(callee_pointee), Type::Box(actual_pointee))
+            | (Type::Vec(callee_pointee), Type::Vec(actual_pointee))
+            | (Type::ArenaBox(callee_pointee), Type::ArenaBox(actual_pointee))
+            | (Type::AllocBox(callee_pointee), Type::AllocBox(actual_pointee))
+            | (Type::AllocVec(callee_pointee), Type::AllocVec(actual_pointee))
+            | (Type::Task(callee_pointee), Type::Task(actual_pointee)) => self
+                .collect_call_lifetimes(
+                    self.types.pointees[callee_pointee],
+                    self.types.pointees[actual_pointee],
+                    candidates,
+                    depth + 1,
+                ),
+            _ => {}
+        }
+    }
+    /// Instantiate the callee's result lifetime labels from the actual argument
+    /// labels. This turns "the result carries the callee binder 'x" into "the
+    /// result carries the caller provenance label supplied for 'x", so a later
+    /// same-scope conversion checks the real identity instead of deferring an
+    /// unclassified callee label.
+    fn relabel_call_result(
+        &mut self,
+        parameters: &[Type],
+        result: Type,
+        values: &[Expr],
+        span: Span,
+    ) -> Result<Type> {
+        let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (parameter, value) in parameters.iter().zip(values) {
+            self.collect_call_lifetimes(*parameter, value.ty, &mut candidates, 0);
+        }
+        let mut map = BTreeMap::new();
+        for (declared, actuals) in candidates {
+            let actuals = actuals.into_iter().collect::<Vec<_>>();
+            if let [actual] = actuals.as_slice()
+                && !actual.is_empty()
+            {
+                map.insert(declared, actual.clone());
+            }
+        }
+        self.types.relabel_lifetimes(result, &map, span)
+    }
+    fn instantiated_call_result_type(
+        &mut self,
+        signature: &Signature,
+        values: &[Expr],
+        span: Span,
+    ) -> Result<Type> {
+        if crate::runtime_types::grade_erases(signature.result_grade) {
+            return Ok(Type::Unit);
+        }
+        self.relabel_call_result(&signature.parameters, signature.result, values, span)
     }
     /// Insert the deterministic runtime conversion needed to use `value` as
     /// `expected`. Same-layout refinements stay narrow (no runtime work); atom
@@ -21721,7 +21863,7 @@ impl Checker<'_, '_> {
         } else if signature.result_erased() {
             Type::Unit
         } else {
-            signature.result
+            self.relabel_call_result(&signature.parameters, signature.result, &values, span)?
         };
         let value = Expr {
             kind: ExprKind::CallIndirect {
@@ -24693,6 +24835,39 @@ impl Checker<'_, '_> {
         what: &str,
         span: Span,
     ) -> Result<Inferred> {
+        // Parameter and record-field labels at an inference site are fresh
+        // placeholders chosen by this occurrence, not rigid caller binders.
+        // Their relation is established by the call/provenance mapping after
+        // the value is checked, so this same-scope witness does not reinterpret
+        // them as an identity obligation.
+        self.call_boundary += 1;
+        let result = self.infer_inner(
+            generics,
+            explicit,
+            pairs,
+            result,
+            freshen_borrowed_arguments,
+            self_type,
+            base,
+            what,
+            span,
+        );
+        self.call_boundary -= 1;
+        result
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn infer_inner(
+        &mut self,
+        generics: &[ast::Generic],
+        explicit: Option<&[ast::Type]>,
+        pairs: &[(&ast::Type, &ast::Expr)],
+        result: Option<(&ast::Type, Type)>,
+        freshen_borrowed_arguments: bool,
+        self_type: Option<Type>,
+        base: Option<&crate::runtime_types::Subst>,
+        what: &str,
+        span: Span,
+    ) -> Result<Inferred> {
         let mut type_generics = Vec::new();
         let mut const_generics = Vec::new();
         let mut grade_generics = Vec::new();
@@ -25575,7 +25750,7 @@ impl Checker<'_, '_> {
         let ty = if diverges {
             Type::Never
         } else {
-            call_result_type(&signature)
+            self.instantiated_call_result_type(&signature, &values, span)?
         };
         let value = Expr {
             kind: ExprKind::Call(
@@ -25594,6 +25769,70 @@ impl Checker<'_, '_> {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
         }
+    }
+    /// Infer a record literal's erased lifetime arguments from the values that
+    /// supply its fields. A declared lifetime used by exactly one field whose
+    /// checked value carries exactly one erased label adopts that actual label;
+    /// otherwise the slot keeps a fresh local identity. This is a mapping from
+    /// checked provenance, never a guess: ambiguous fields stay anonymous so a
+    /// later invariant conversion must still prove identity.
+    fn infer_record_lifetimes(
+        &mut self,
+        pairs: &[(&ast::Type, &ast::Expr)],
+        values: &[Expr],
+        declared: &[ast::Lifetime],
+    ) -> Vec<String> {
+        let declared_names: BTreeSet<String> = declared
+            .iter()
+            .map(|lifetime| lifetime.name.clone())
+            .collect();
+        let mut candidates: BTreeMap<String, BTreeSet<String>> = declared_names
+            .iter()
+            .map(|name| (name.clone(), BTreeSet::new()))
+            .collect();
+        if declared.len() == 1 {
+            let only = declared[0].name.clone();
+            let mut actuals = BTreeSet::new();
+            for value in values {
+                actuals.extend(
+                    crate::runtime_types::borrow_lifetimes(self.types, value.ty)
+                        .into_iter()
+                        .filter(|label| !label.is_empty() && !label.starts_with('<')),
+                );
+            }
+            actuals.remove("");
+            if actuals.len() == 1 {
+                candidates.entry(only).or_default().extend(actuals);
+            }
+        } else {
+            for ((declared_ty, _), value) in pairs.iter().zip(values) {
+                let mut used = BTreeSet::new();
+                type_lifetimes(declared_ty, &mut used);
+                used.retain(|name| declared_names.contains(name));
+                let actuals = crate::runtime_types::borrow_lifetimes(self.types, value.ty);
+                let actuals = actuals
+                    .into_iter()
+                    .filter(|label| !label.is_empty() && !label.starts_with('<'))
+                    .collect::<BTreeSet<_>>();
+                if used.len() == 1 && actuals.len() == 1 {
+                    let field_lifetime = used.into_iter().next().expect("one field lifetime");
+                    let actual = actuals.into_iter().next().expect("one actual lifetime");
+                    candidates.entry(field_lifetime).or_default().insert(actual);
+                }
+            }
+        }
+        declared
+            .iter()
+            .map(|lifetime| {
+                let actuals = candidates.get(&lifetime.name);
+                match actuals {
+                    Some(actuals) if actuals.len() == 1 => {
+                        actuals.iter().next().expect("one candidate").clone()
+                    }
+                    _ => self.types.fresh_lifetime("inferred record lifetime"),
+                }
+            })
+            .collect()
     }
     fn record(
         &mut self,
@@ -25728,6 +25967,21 @@ impl Checker<'_, '_> {
                 }
                 (arguments, consts, lifetimes, values)
             } else {
+                // When the literal has no expected type, its own declared
+                // lifetime names are placeholders for values this occurrence
+                // infers, not caller binders. Freshen them before checking
+                // fields so a field value cannot masquerade as the record's
+                // declared label; actual provenance labels stay on the value
+                // and drive inference below.
+                let mut placeholder_substitution = crate::runtime_types::Subst::default();
+                if explicit.is_none() {
+                    for lifetime in declared_lifetimes {
+                        placeholder_substitution.lifetimes.insert(
+                            lifetime.name.clone(),
+                            self.types.fresh_lifetime("record field lifetime"),
+                        );
+                    }
+                }
                 let (arguments, _grades, consts, _effects, values) = self.infer(
                     generics,
                     if explicit.is_some() {
@@ -25743,16 +25997,14 @@ impl Checker<'_, '_> {
                     // outer lifetime relationships against field provenance.
                     true,
                     None,
-                    None,
+                    Some(&placeholder_substitution),
                     "this record",
                     span,
                 )?;
                 let lifetimes = if explicit.is_some() {
                     explicit_lifetimes
                 } else {
-                    (0..declared_lifetimes.len())
-                        .map(|_| self.types.fresh_lifetime("inferred record lifetime"))
-                        .collect()
+                    self.infer_record_lifetimes(&pairs, &values, declared_lifetimes)
                 };
                 (arguments, consts, lifetimes, values)
             };

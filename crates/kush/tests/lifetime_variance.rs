@@ -356,3 +356,145 @@ fn nested_record_leaves_inherit_enclosing_invariant_variance() {
         "invariant occurrence",
     );
 }
+
+#[test]
+fn invariant_identity_through_calls_and_typed_locals_is_rejected() {
+    // A callee binder is instantiated from the actual argument. Relabeling the
+    // result with that caller provenance must make the same-scope invariant
+    // check see `'long`, not an unclassified callee placeholder.
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn make<'x>(i: Inv<'x>) -> Inv<'x> ! {panic} { i }
+        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {panic} {
+            let a = make(i);
+            let b: Inv<'short> = a;
+            let _ = b;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+    // The reverse extension is equally unproved.
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn make<'x>(i: Inv<'x>) -> Inv<'x> ! {panic} { i }
+        fn bad<'long: 'short, 'short>(s: Inv<'short>) -> Unit ! {panic} {
+            let a = make(s);
+            let b: Inv<'long> = a;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+    // A borrowed-record result through one local keeps the same provenance;
+    // removing only the direct `Call` case would leave this hole open.
+    rejects(
+        r#"struct Wrap<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn idr<'x>(w: &'x Wrap<'x>) -> &'x Wrap<'x> ! {panic} { w }
+        fn bad<'long: 'short, 'short>(w: &'long Wrap<'long>) -> Unit ! {panic} {
+            let e = idr(w);
+            let y: &'short Wrap<'short> = e;
+            let _ = y;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+    // Direct coercion of the call result, with no intervening local.
+    rejects(
+        r#"struct Wrap<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn idr<'x>(w: &'x Wrap<'x>) -> &'x Wrap<'x> ! {panic} { w }
+        fn bad<'long: 'short, 'short>(w: &'long Wrap<'long>) -> Unit ! {panic} {
+            let y: &'short Wrap<'short> = idr(w);
+            let _ = y;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+    // A builtin container read carries the caller's element label; its result
+    // must not be accepted as a different invariant element lifetime.
+    rejects(
+        r#"fn bad<'long: 'short, 'short>(v: &Vec<&'long mut Box<&'long i64>>) -> Unit ! {panic} {
+            let x: &'short mut Box<&'short i64> = Vec.get(v, 0);
+            let _ = x;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+}
+
+#[test]
+fn fresh_inferred_record_identity_must_not_launder_invariance() {
+    // Destructuring and reconstructing a record gives the literal a fresh
+    // inferred identity. Once field provenance resolves that identity to
+    // `'long`, an unused typed binding to `Inv<'short>` is still an unproved
+    // invariant conversion.
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {panic} {
+            let Inv { cell } = i;
+            let w = Inv { cell: cell };
+            let x: Inv<'short> = w;
+            let _ = x;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+    // The same fresh literal may not silently extend a short source either.
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn bad<'long: 'short, 'short>(i: Inv<'short>) -> Unit ! {panic} {
+            let Inv { cell } = i;
+            let w = Inv { cell: cell };
+            let x: Inv<'long> = w;
+            let _ = x;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+    // A field whose value carries a nested borrow label resolves the same way,
+    // so the escape path is rejected at the binding, not by an internal
+    // capability error later.
+    rejects(
+        r#"struct V<'a> { keep: &'a mut Vec<&'a i64> }
+        fn make<'x>(v: V<'x>) -> V<'x> ! {panic} { v }
+        fn bad<'long: 'short, 'short>(s: V<'short>, out: &mut Vec<&'long i64>) -> Unit ! {alloc, panic} {
+            let a = make(s);
+            let b: V<'long> = a;
+            let V { keep } = b;
+            let leaked = Vec.get(keep, 0);
+            Vec.push(out, leaked);
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+}
+
+#[test]
+fn inferred_literal_identity_and_covariance_remain_accepted() {
+    // Destructure/reconstruct is a legitimate identity transfer when the
+    // inferred literal gets its actual field provenance label.
+    check(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn keep<'a>(i: Inv<'a>) -> Inv<'a> ! {panic} {
+            let Inv { cell } = i;
+            let w = Inv { cell: cell };
+            w
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+    // An inferred covariant record literal may still shorten to a declared
+    // parameter lifetime.
+    check(
+        r#"struct Window<'a> { view: &'a [i64] }
+        fn first<'a>(window: Window<'a>) -> i64 ! {panic} { Slice.get(window.view, 0) }
+        fn local<'short>(values: &'short [i64]) -> i64 ! {panic} {
+            let w = Window { view: values };
+            let x: Window<'short> = w;
+            first(x)
+        }
+        fn main() -> i64 ! {panic} {
+            let values: [i64; 2] = [40, 2];
+            local(&values[..])
+        }"#,
+    )
+    .unwrap();
+}

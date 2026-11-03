@@ -42,11 +42,15 @@ and layouts as before.
   borrowed records, and mutable container writes. This keeps destination
   declared labels authoritative and preserves the existing owner-loan rules.
 - Same-scope conversions in the executable checker run the contextual witness
-  when every involved label is a declared function lifetime. If a label is
-  elided or compiler-internal, the checker defers to the independent ownership
-  provenance evidence instead of treating absence as proof. Calls through a
-  callee contract are governed by the callee's instantiated lifetimes and the
-  existing ownership mapping.
+  for every borrowed conversion, including call results and coerced values.
+  Direct and indirect call results are relabeled from the actual argument
+  labels before a later conversion is checked, so an unclassified callee
+  binder is not treated as free identity. At an invariant position, an
+  internal/fresh or unclassified label without an identity proof is rejected;
+  outside an invariant position the call/provenance evidence still owns the
+  relation. Calls through a callee contract instantiate their parameter
+  lifetimes from the actual arguments, and the ownership mapping retains the
+  result provenance.
 
 ## Tests
 
@@ -78,8 +82,10 @@ and layouts as before.
   fully labelled same-scope conversions and by the mutable-container write
   checks; a dynamic leaf check for a borrowed record stored behind an owner
   reference remains future work.
-- Elided and internal labels are never converted into a named lifetime. Where
-  the witness cannot classify a label it defers to the existing ownership
-  provenance check rather than inventing a relation.
+- Elided and internal labels are never converted into a named lifetime. An
+  invariant conversion involving an internal/fresh identity or an unclassified
+  label is rejected without an identity proof; a non-invariant occurrence may
+  still defer to the existing call/provenance evidence rather than inventing a
+  relation.
 - No new higher-rank callable inference is added. Canonical arrow labels are
   still mapped by the established positional instantiation rule.
