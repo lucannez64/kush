@@ -51,6 +51,30 @@ def state():
             kind = "waiting"
         node["kind"] = kind
         counts[kind] += 1
+    # Stable topological order: Kahn's algorithm, preferring finished work,
+    # then shallower nodes, then file order, so the sequence reads naturally.
+    depth = {}
+
+    def node_depth(node_id):
+        if node_id not in depth:
+            deps = nodes[node_id]["deps"]
+            depth[node_id] = 1 + max(map(node_depth, deps)) if deps else 0
+        return depth[node_id]
+
+    position = {node["id"]: i for i, node in enumerate(plan["nodes"])}
+    remaining = {node["id"]: set(node["deps"]) for node in plan["nodes"]}
+    order = []
+    while remaining:
+        free = [i for i, deps in remaining.items() if not deps]
+        free.sort(key=lambda i: (nodes[i]["status"] != "done", node_depth(i), position[i]))
+        pick = free[0]
+        order.append(pick)
+        del remaining[pick]
+        for deps in remaining.values():
+            deps.discard(pick)
+    for index, node_id in enumerate(order, 1):
+        nodes[node_id]["order"] = index
+        nodes[node_id]["depth"] = node_depth(node_id)
     log = [
         dict(entry, node=node["id"])
         for node in plan["nodes"]
@@ -62,6 +86,7 @@ def state():
     return {
         "title": plan.get("title", "Plan"),
         "nodes": plan["nodes"],
+        "order": order,
         "counts": counts,
         "total": len(plan["nodes"]),
         "retries": sum(node.get("retries", 0) for node in plan["nodes"]),

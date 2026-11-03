@@ -43,6 +43,11 @@
   path.dim, .node.dim { opacity: .22; }
   .node { position: absolute; width: 200px; border: 1px solid; border-radius: 6px; padding: 5px 8px; cursor: pointer; }
   .node .id { font: 600 12px ui-monospace, monospace; }
+  .node .ord { font-size: 10px; color: var(--muted); margin-right: 5px; }
+  .order-row { display: grid; grid-template-columns: 34px 14px 1fr; gap: 6px; padding: 3px 0; cursor: pointer; border-bottom: 1px solid var(--line); font-size: 12px; }
+  .order-row:hover { background: var(--bg); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid; margin-top: 3px; }
+  .area { font-size: 10px; color: var(--muted); }
   .node .sz { font-size: 9px; color: var(--muted); margin-left: 4px; }
   .node .hard { font-size: 9px; color: #c0392b; margin-left: 4px; }
   .node .t { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -73,7 +78,7 @@
     <div class="stat"><b id="s-np">–</b><span>not pushed</span></div>
     <input id="find" placeholder="Find a node">
     <button id="zin">+</button><button id="zout">−</button><button id="fit">Fit all</button>
-    <button id="onlyprog">In progress</button><button id="direct" class="on">Direct edges</button>
+    <button id="onlyprog">In progress</button><button id="direct" class="on">Direct edges</button><button id="ordbtn">Order</button>
     <div class="stat"><b id="s-load">–</b><span>load</span></div>
     <div class="stat"><b id="s-head">–</b><span>main / origin</span></div>
     <div class="stat"><b id="s-ahead">–</b><span>commits ahead</span></div>
@@ -91,12 +96,12 @@
   <div id="view"><div id="world"><svg id="edges"></svg></div></div>
   <aside>
     <section id="detail"><span class="muted">Select a node to see its details, dependencies and log.</span></section>
-    <section id="runlog"><h2>Running log</h2><div id="log"></div></section>
+    <section id="runlog"><h2 id="lowtitle">Running log</h2><div id="log"></div></section>
   </aside>
 </main>
 <script>
 const W = 200, H = 46, GX = 36, GY = 70;
-let data = null, selected = null, onlyProgress = false, directOnly = true;
+let data = null, selected = null, onlyProgress = false, directOnly = true, showOrder = false;
 let scale = 1, tx = 20, ty = 20, laidOut = false, pos = {};
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -155,7 +160,7 @@ function render() {
     const dim = !match || (focus && !focus.has(n.id)) || (onlyProgress && n.kind !== "in progress");
     el.className = `node ${kindClass(n.kind)} ${dim ? "dim" : ""} ${n.id === selected ? "sel" : ""}`;
     el.style.left = p.x + "px"; el.style.top = p.y + "px";
-    el.innerHTML = `<div><span class="id">${esc(n.id)}</span><span class="sz">${esc(n.size)}</span>${n.hard ? '<span class="hard">hard</span>' : ""}</div><div class="t" title="${esc(n.title)}">${esc(n.title)}</div>`;
+    el.innerHTML = `<div><span class="ord">#${n.order}</span><span class="id">${esc(n.id)}</span><span class="sz">${esc(n.size)}</span>${n.hard ? '<span class="hard">hard</span>' : ""}</div><div class="t" title="${esc(n.title)}">${esc(n.title)}</div>`;
     el.onclick = ev => { ev.stopPropagation(); select(n.id === selected ? null : n.id); };
     world.appendChild(el);
   }
@@ -172,7 +177,7 @@ function detail() {
   const link = ids => ids.length ? ids.map(i => `<a data-id="${esc(i)}">${esc(i)}</a>`).join("") : '<span class="muted">none</span>';
   const blocking = n.deps.filter(d => data.byId[d].status !== "done");
   box.innerHTML = `<h2>${esc(n.id)}</h2><div>${esc(n.title)}</div>
-    <p><b>${esc(n.kind)}</b> · size ${esc(n.size)}${n.hard ? " · hard" : ""}${n.commit ? " · commit <code>" + esc(n.commit) + "</code>" : ""}</p>
+    <p><b>${esc(n.kind)}</b> · step #${n.order} of ${data.total} · ${esc(n.area || "")} · size ${esc(n.size)}${n.hard ? " · hard" : ""}${n.commit ? " · commit <code>" + esc(n.commit) + "</code>" : ""}</p>
     ${n.desc ? `<p>${esc(n.desc)}</p>` : ""}
     <p class="deps"><span class="muted">depends on:</span> ${link(n.deps)}</p>
     ${blocking.length ? `<p class="deps"><span class="muted">blocked by:</span> ${link(blocking)}</p>` : ""}
@@ -191,6 +196,14 @@ function stats() {
   $("s-head").textContent = `${data.repo.head || "?"} / ${data.repo.origin || "?"}`;
   $("s-ahead").textContent = data.repo.ahead + (data.repo.dirty ? " +dirty" : "");
   $("s-wt").textContent = data.repo.worktrees;
+  if (showOrder) {
+    $("lowtitle").textContent = "Build order (topological)";
+    $("log").innerHTML = data.order.map(id => { const n = data.byId[id];
+      return `<div class="order-row" data-id="${esc(id)}"><span class="muted">#${n.order}</span><span class="dot ${kindClass(n.kind)}"></span><div><b>${esc(id)}</b> ${esc(n.title)} <span class="area">${esc(n.area || "")} · ${esc(n.size)}</span></div></div>`; }).join("");
+    $("log").querySelectorAll(".order-row").forEach(r => r.onclick = () => select(r.dataset.id));
+    return;
+  }
+  $("lowtitle").textContent = "Running log";
   $("log").innerHTML = data.log.map(e => `<div class="entry"><span class="muted">${esc((e.time || "").slice(11, 19))}</span><div><span class="who">${esc(e.node)}</span> ${esc(e.text)}</div></div>`).join("") || '<span class="muted">No log entries yet. Use scripts/plan.py log ID "message".</span>';
 }
 
@@ -223,6 +236,7 @@ $("zin").onclick = () => zoom(1.2); $("zout").onclick = () => zoom(1 / 1.2); $("
 $("onlyprog").onclick = e => { onlyProgress = !onlyProgress; e.target.classList.toggle("on", onlyProgress); render(); };
 $("direct").onclick = e => { directOnly = !directOnly; e.target.classList.toggle("on", directOnly); render(); };
 $("find").oninput = render;
+$("ordbtn").onclick = e => { showOrder = !showOrder; e.target.classList.toggle("on", showOrder); stats(); };
 $("view").onclick = () => select(null);
 $("view").addEventListener("wheel", e => { e.preventDefault(); const r = $("view").getBoundingClientRect(); zoom(e.deltaY < 0 ? 1.1 : 1 / 1.1, e.clientX - r.left, e.clientY - r.top); }, { passive: false });
 let drag = null;
