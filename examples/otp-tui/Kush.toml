@@ -1,0 +1,8 @@
+[package]
+name = "otp_tui"
+version = "0.1.0"
+entry = "main.kush"
+test = "tests/main.kush"
+
+[native]
+cargo-manifests = ["Cargo.toml"]

@@ -1,0 +1,9 @@
+This recreation follows the behavior and public test fixtures of otp-tui
+(/home/hirew/Projects/otp-tui), MIT, copyright 2026 otp-tui contributors.
+See LICENSE. No Zig/zigzag source is compiled or linked.
+
+The Rust adapter reuses crates identified and version-locked in Cargo.lock:
+crossterm, data-encoding, hmac, sha1, sha2, url, unicode-width, zeroize, and their
+transitive dependencies. Their respective licenses apply; upstream crate
+sources and licenses are distributed by crates.io. RFC 4226 and RFC 6238 supply
+public algorithm test vectors.

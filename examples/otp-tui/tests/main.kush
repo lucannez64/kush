@@ -1,0 +1,64 @@
+module otp_tui.tests.main;
+
+use std.result.Result;
+use std.test;
+use std.text;
+use otp_tui.adapter;
+use otp_tui.ui;
+
+fn add_rfc(store: &adapter.Store) -> i64 ! {io, alloc, panic} {
+    match adapter.add(store, &Bytes.from("otpauth://totp/RFC?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8")) { Ok(value) => value, Err(_) => { test.fail(); 0 } }
+}
+
+#[test]
+fn totp_rfc_and_expiry_cross_the_generated_bridge() -> Unit ! {io, alloc, panic} {
+    let store = adapter.store_new();
+    let index = add_rfc(&store);
+    let code = match adapter.code(&store, index, 59) { Ok(value) => value, Err(_) => Bytes.from("") };
+    test.is_true(text.eq(&code, &Bytes.from("94287082")));
+    test.equal_i64(match adapter.remaining(&store, index, 59) { Ok(value) => value, Err(_) => 0 }, 1);
+    test.equal_i64(match adapter.remaining(&store, index, 60) { Ok(value) => value, Err(_) => 0 }, 30);
+}
+
+#[test]
+fn hotp_counter_is_explicit_and_mutable_through_the_opaque_store() -> Unit ! {io, alloc, panic} {
+    let store = adapter.store_new();
+    let index = match adapter.add(&store, &Bytes.from("otpauth://hotp/RFC?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0")) { Ok(value) => value, Err(_) => { test.fail(); 0 } };
+    test.is_true(text.eq(&match adapter.code(&store, index, 0) { Ok(value) => value, Err(_) => Bytes.from("") }, &Bytes.from("755224")));
+    test.is_true(match adapter.advance(&store, index) { Ok(_) => true, Err(_) => false });
+    test.is_true(text.eq(&match adapter.code(&store, index, 0) { Ok(value) => value, Err(_) => Bytes.from("") }, &Bytes.from("287082")));
+    test.equal_i64(match adapter.remaining(&store, index, 0) { Ok(value) => value, Err(_) => 0 }, -1);
+}
+
+#[test]
+fn invalid_uri_preserves_the_session_and_reports_a_non_secret_error() -> Unit ! {io, alloc, panic} {
+    let store = adapter.store_new();
+    let _ = add_rfc(&store);
+    test.is_true(match adapter.add(&store, &Bytes.from("otpauth://totp/Bad?secret=PRIVATE!")) { Ok(_) => false, Err(_) => true });
+    test.equal_i64(adapter.count(&store), 1);
+    let message = match adapter.last_error() { Ok(value) => value, Err(_) => Bytes.from("") };
+    test.is_false(text.contains(&message, &Bytes.from("PRIVATE")));
+    test.is_true(match adapter.remove(&store, 0) { Ok(_) => true, Err(_) => false });
+    test.equal_i64(adapter.count(&store), 0);
+}
+
+#[test]
+fn kush_navigation_clamps_empty_sessions_and_page_jumps() -> Unit ! {io, panic} {
+    test.equal_i64(ui.navigate(0, 0, 6), 0);
+    test.equal_i64(ui.navigate(0, 25, 9), 0);
+    test.equal_i64(ui.navigate(0, 25, 10), 10);
+    test.equal_i64(ui.navigate(20, 25, 10), 24);
+    test.equal_i64(ui.navigate(20, 25, 7), 0);
+    test.equal_i64(ui.navigate(0, 25, 8), 24);
+    test.equal_i64(ui.navigate(24, 24, 0), 23);
+}
+
+#[test]
+fn kush_frame_shows_codes_but_hides_uri_input() -> Unit ! {io, alloc, panic} {
+    let store = adapter.store_new();
+    let _ = add_rfc(&store);
+    let frame = ui.frame(&store, 0, true, 99, &Bytes.from(""), 59, 24);
+    test.is_true(text.contains(&frame, &Bytes.from("94287082")));
+    test.is_true(text.contains(&frame, &Bytes.from("99 bytes")));
+    test.is_false(text.contains(&frame, &Bytes.from("GEZDGNBV")));
+}

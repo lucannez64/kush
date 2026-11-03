@@ -1,0 +1,129 @@
+module otp_tui.ui;
+
+use std.result.Result;
+use std.text;
+use otp_tui.adapter;
+
+pub fn append(out: Bytes, value: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut result = out;
+    let mut i = 0;
+    while i < Bytes.len(value) {
+        result = Bytes.push(result, Bytes.get(value, i));
+        i = i + 1;
+    }
+    result
+}
+
+// Keep selection valid after navigation, deletion, or an empty session.
+pub fn navigate(selected: i64, count: i64, event: i64) -> i64 ! {panic} {
+    if count == 0 { return 0; }
+    let mut next = selected;
+    if event == 5 { next = next - 1; }
+    if event == 6 { next = next + 1; }
+    if event == 7 { next = 0; }
+    if event == 8 { next = count - 1; }
+    if event == 9 { next = next - 10; }
+    if event == 10 { next = next + 10; }
+    if next < 0 { next = 0; }
+    if next >= count { next = count - 1; }
+    next
+}
+
+fn failure() -> Bytes ! {io, alloc, panic} {
+    match adapter.last_error() { Ok(message) => message, Err(_) => Bytes.from("Operation failed") }
+}
+
+pub fn frame(store: &adapter.Store, selected: i64, editing: Bool, input_len: i64, status: &Bytes, timestamp: i64, rows: i64) -> Bytes ! {io, alloc, panic} {
+    let mut out = Bytes.from("OTP TUI — Kush + Rust\nSession only: entries disappear on exit.\n\n  #  Label                         Code        Remaining\n----------------------------------------------------------\n");
+    let count = adapter.count(store);
+    let mut i = 0;
+    // A fixed-size viewport keeps large sessions usable and bounded.
+    let mut visible = rows - 9;
+    if visible < 1 { visible = 1; }
+    if visible > 18 { visible = 18; }
+    if selected >= visible { i = selected - visible + 1; }
+    let end = i + visible;
+    if count == 0 { out = append(out, &Bytes.from("No entries. Press a to add an otpauth:// URI.\n")); }
+    while i < count && i < end {
+        if i == selected { out = append(out, &Bytes.from("> ")); }
+        else { out = append(out, &Bytes.from("  ")); }
+        out = append(out, &text.format_i64(i + 1));
+        out = append(out, &Bytes.from("  "));
+        out = append(out, &match adapter.label(store, i) { Ok(value) => value, Err(_) => Bytes.from("?") });
+        out = append(out, &Bytes.from("  |  "));
+        out = append(out, &match adapter.code(store, i, timestamp) { Ok(value) => value, Err(_) => Bytes.from("ERROR") });
+        out = append(out, &Bytes.from("  |  "));
+        let remaining = match adapter.remaining(store, i, timestamp) { Ok(value) => value, Err(_) => 0 };
+        if remaining == -1 { out = append(out, &Bytes.from("HOTP [n]ext")); }
+        else { out = append(out, &text.format_i64(remaining)); out = append(out, &Bytes.from("s")); }
+        out = append(out, &Bytes.from("\n"));
+        i = i + 1;
+    }
+    out = append(out, &Bytes.from("----------------------------------------------------------\n"));
+    if editing {
+        out = append(out, &Bytes.from("Paste URI (hidden): "));
+        out = append(out, &text.format_i64(input_len));
+        out = append(out, &Bytes.from(" bytes\nEnter: add    Esc: cancel    Backspace: erase\n"));
+    } else {
+        out = append(out, &Bytes.from("[a]dd [d]elete [c]opy [n]ext HOTP [q]uit\nUp/Down · PgUp/PgDn · Home/End\n"));
+    }
+    out = append(out, status);
+    append(out, &Bytes.from("\n"))
+}
+
+pub fn run(store: &adapter.Store, terminal: adapter.Terminal) -> Result<Unit, i64> ! {io, alloc, panic} {
+    let mut selected = 0;
+    let mut editing = false;
+    let mut input = Bytes.from("");
+    let mut status = Bytes.from("");
+    let mut running = true;
+    while running {
+        let timestamp = adapter.now()?;
+        let rows = adapter.terminal_rows(&terminal)?;
+        let display = frame(store, selected, editing, Bytes.len(&input), &status, timestamp, rows);
+        adapter.terminal_draw(&terminal, &display)?;
+        let event = adapter.terminal_event(&terminal)?;
+        let mut tag = 0;
+        if Bytes.len(&event) > 0 { tag = Bytes.get(&event, 0); }
+        if tag == 13 { status = Bytes.from("Paste must be one line, at most 8192 bytes"); }
+        if tag == 11 { running = false; }
+        else {
+            if editing {
+                if tag == 1 {
+                    if Bytes.len(&input) + Bytes.len(&event) - 1 <= 8192 {
+                        let mut i = 1;
+                        while i < Bytes.len(&event) { input = Bytes.push(input, Bytes.get(&event, i)); i = i + 1; }
+                    } else { status = Bytes.from("URI exceeds 8192 bytes"); }
+                }
+                if tag == 4 { input = adapter.backspace(&input)?; }
+                if tag == 3 { input = Bytes.clear(input); editing = false; status = Bytes.from("Cancelled"); }
+                if tag == 2 {
+                    let added = adapter.add(store, &input);
+                    match added {
+                        Ok(index) => { selected = index; status = Bytes.from("Added to this session"); editing = false; input = Bytes.clear(input); },
+                        Err(_) => { status = failure(); },
+                    };
+                }
+            } else {
+                selected = navigate(selected, adapter.count(store), tag);
+                if tag == 1 && Bytes.len(&event) == 2 {
+                    let key = Bytes.get(&event, 1);
+                    if key == 113 { running = false; }
+                    if key == 97 { editing = true; input = Bytes.clear(input); status = Bytes.from(""); }
+                    if key == 100 && adapter.count(store) > 0 {
+                        match adapter.remove(store, selected) { Ok(_) => { status = Bytes.from("Deleted"); }, Err(_) => { status = failure(); } };
+                        selected = navigate(selected, adapter.count(store), 0);
+                    }
+                    if key == 110 && adapter.count(store) > 0 {
+                        match adapter.advance(store, selected) { Ok(_) => { status = Bytes.from("HOTP counter advanced (session only)"); }, Err(_) => { status = failure(); } };
+                    }
+                    if key == 99 && adapter.count(store) > 0 {
+                        let code = adapter.code(store, selected, timestamp)?;
+                        match adapter.clipboard(&terminal, &code) { Ok(_) => { status = Bytes.from("Clipboard request sent (terminal OSC 52 support required)"); }, Err(_) => { status = failure(); } };
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

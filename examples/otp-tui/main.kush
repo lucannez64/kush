@@ -1,0 +1,53 @@
+module otp_tui;
+
+use std.result.Result;
+use std.text;
+use otp_tui.adapter;
+use otp_tui.ui;
+
+fn argument_count() -> i64 ! {io} { match ENV.arg_count() { Ok(value) => value, Err(_) => 0 } }
+
+fn write_line(value: &Bytes) -> Unit ! {io, alloc, panic} {
+    let _ = IO.write(IO.stdout(), value);
+    let _ = IO.write(IO.stdout(), &Bytes.from("\n"));
+}
+
+fn error() -> i64 ! {io, alloc, panic} {
+    let message = match adapter.last_error() { Ok(value) => value, Err(_) => Bytes.from("Operation failed") };
+    let _ = adapter.report(&message);
+    1
+}
+
+fn help() -> Unit ! {io, alloc, panic} {
+    write_line(&Bytes.from("otp-tui — Kush application with Rust HMAC and terminal adapters\n\nUsage:\n  otp-tui                 interactive session (no persistence)\n  otp-tui --demo          interactive session with public RFC test entries\n  otp-tui --code-stdin [--at SECONDS]\n                          read one otpauth URI from stdin and print its code\n  otp-tui --help\n\nKeys: a add, d delete, c copy, n advance HOTP, q/Ctrl-C quit\n      arrows, PgUp/PgDn, Home/End navigate\n\nClipboard uses terminal OSC 52. Codes and entries are not saved.\nThe URI prompt is hidden; headless mode reads stdin rather than argv."));
+}
+
+fn headless(store: &adapter.Store) -> i64 ! {io, alloc, panic} {
+    let mut timestamp = match adapter.now() { Ok(value) => value, Err(_) => { return error(); } };
+    if argument_count() == 4 {
+        let option = match ENV.arg(2, Bytes.with_capacity(64)) { Ok(value) => value, Err(_) => { return 2; } };
+        if !text.eq(&option, &Bytes.from("--at")) { help(); return 2; }
+        let value = match ENV.arg(3, Bytes.with_capacity(64)) { Ok(value) => value, Err(_) => { return 2; } };
+        timestamp = match text.parse_i64(&value) { Ok(value) => value, Err(_) => { help(); return 2; } };
+        if timestamp < 0 { help(); return 2; }
+    } else { if argument_count() != 2 { help(); return 2; } }
+    let uri = match adapter.read_uri() { Ok(value) => value, Err(_) => { return error(); } };
+    let index = match adapter.add(store, &uri) { Ok(value) => value, Err(_) => { return error(); } };
+    let code = match adapter.code(store, index, timestamp) { Ok(value) => value, Err(_) => { return error(); } };
+    write_line(&code);
+    0
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let store = adapter.store_new();
+    if argument_count() > 1 {
+        let option = match ENV.arg(1, Bytes.with_capacity(128)) { Ok(value) => value, Err(_) => { return 2; } };
+        if text.eq(&option, &Bytes.from("--help")) { help(); return 0; }
+        if text.eq(&option, &Bytes.from("--code-stdin")) { return headless(&store); }
+        if !text.eq(&option, &Bytes.from("--demo")) || argument_count() != 2 { help(); return 2; }
+        let _ = adapter.add(&store, &Bytes.from("otpauth://totp/RFC6238?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8"));
+        let _ = adapter.add(&store, &Bytes.from("otpauth://hotp/RFC4226?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0"));
+    }
+    let terminal = match adapter.terminal_open() { Ok(value) => value, Err(_) => { return error(); } };
+    match ui.run(&store, terminal) { Ok(_) => 0, Err(_) => error() }
+}

@@ -224,6 +224,11 @@ The [Rust adapter example](examples/rust-adapter) reuses `sha2` through
 `kush run` and `kush test`. See [native interop](docs/native-interop.md) for the
 schema, supported ABI, cleanup/error/panic behavior, and exact limits.
 
+The [OTP TUI recreation](examples/otp-tui) is a complete session-based terminal
+application: Kush controls the UI and CLI while generated Rust adapters reuse
+RustCrypto and crossterm. It includes TOTP/HOTP, hidden URI entry, navigation,
+clipboard requests, headless codes, RFC vectors, and pseudo-terminal tests.
+
 The standalone [project demo](examples/project-demo) exercises a local module, a
 local dependency, tests, and formatting.
 

@@ -1,0 +1,148 @@
+[adapter]
+module = "otp_tui.adapter"
+rust-output = "src/ffi.rs"
+kush-output = "src/adapter.kush"
+
+[[resource]]
+name = "Store"
+rust-type = "crate::bridge::Store"
+release-symbol = "otp_store_release"
+
+[[resource]]
+name = "Terminal"
+rust-type = "crate::bridge::Terminal"
+release-symbol = "otp_terminal_release"
+
+[[function]]
+name = "store_new"
+symbol = "otp_store_new"
+rust-path = "crate::bridge::store_new"
+parameters = []
+result = { resource = "Store" }
+
+[[function]]
+name = "count"
+symbol = "otp_count"
+rust-path = "crate::bridge::count"
+parameters = [{ name = "store", resource = "Store" }]
+result = "i64"
+
+[[function]]
+name = "add"
+symbol = "otp_add"
+rust-path = "crate::bridge::add"
+parameters = [{ name = "store", resource = "Store" }, { name = "uri", type = "bytes" }]
+result = "i64"
+fallible = true
+
+[[function]]
+name = "remove"
+symbol = "otp_remove"
+rust-path = "crate::bridge::remove"
+parameters = [{ name = "store", resource = "Store" }, { name = "at", type = "i64" }]
+result = "unit"
+fallible = true
+
+[[function]]
+name = "label"
+symbol = "otp_label"
+rust-path = "crate::bridge::label"
+parameters = [{ name = "store", resource = "Store" }, { name = "at", type = "i64" }]
+result = "bytes"
+fallible = true
+
+[[function]]
+name = "code"
+symbol = "otp_code"
+rust-path = "crate::bridge::code"
+parameters = [{ name = "store", resource = "Store" }, { name = "at", type = "i64" }, { name = "timestamp", type = "i64" }]
+result = "bytes"
+fallible = true
+
+[[function]]
+name = "remaining"
+symbol = "otp_remaining"
+rust-path = "crate::bridge::remaining"
+parameters = [{ name = "store", resource = "Store" }, { name = "at", type = "i64" }, { name = "timestamp", type = "i64" }]
+result = "i64"
+fallible = true
+
+[[function]]
+name = "advance"
+symbol = "otp_advance"
+rust-path = "crate::bridge::advance"
+parameters = [{ name = "store", resource = "Store" }, { name = "at", type = "i64" }]
+result = "unit"
+fallible = true
+
+[[function]]
+name = "now"
+symbol = "otp_now"
+rust-path = "crate::bridge::now"
+parameters = []
+result = "i64"
+fallible = true
+
+[[function]]
+name = "backspace"
+symbol = "otp_backspace"
+rust-path = "crate::bridge::backspace"
+parameters = [{ name = "input", type = "bytes" }]
+result = "bytes"
+fallible = true
+
+[[function]]
+name = "terminal_open"
+symbol = "otp_terminal_open"
+rust-path = "crate::bridge::terminal_open"
+parameters = []
+result = { resource = "Terminal" }
+fallible = true
+
+[[function]]
+name = "terminal_draw"
+symbol = "otp_terminal_draw"
+rust-path = "crate::bridge::terminal_draw"
+parameters = [{ name = "terminal", resource = "Terminal" }, { name = "frame", type = "bytes" }]
+result = "unit"
+fallible = true
+
+[[function]]
+name = "terminal_event"
+symbol = "otp_terminal_event"
+rust-path = "crate::bridge::terminal_event"
+parameters = [{ name = "terminal", resource = "Terminal" }]
+result = "bytes"
+fallible = true
+
+[[function]]
+name = "clipboard"
+symbol = "otp_clipboard"
+rust-path = "crate::bridge::clipboard"
+parameters = [{ name = "terminal", resource = "Terminal" }, { name = "text", type = "bytes" }]
+result = "unit"
+fallible = true
+
+[[function]]
+name = "read_uri"
+symbol = "otp_read_uri"
+rust-path = "crate::bridge::read_uri"
+parameters = []
+result = "bytes"
+fallible = true
+
+[[function]]
+name = "report"
+symbol = "otp_report"
+rust-path = "crate::bridge::report"
+parameters = [{ name = "message", type = "bytes" }]
+result = "unit"
+fallible = true
+
+[[function]]
+name = "terminal_rows"
+symbol = "otp_terminal_rows"
+rust-path = "crate::bridge::terminal_rows"
+parameters = [{ name = "terminal", resource = "Terminal" }]
+result = "i64"
+fallible = true
