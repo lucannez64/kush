@@ -167,3 +167,16 @@ Run them with:
 ```sh
 cargo test -p kush --test allocator_pool
 ```
+
+## Compact-header and retention checkpoint (2026-11-03)
+
+Compiler `528a804` passes the full Boat gate (1,149 tests, formatting, strict
+Clippy). Local direct C checks also cover alignment and marker state, fallible
+pool hits, growth and both retention bounds. The stable logical stats format
+is unchanged; physical byte expectations reflect the 16-byte header.
+
+The [matched JSON editor comparison](../benchmarks/json-memory/sample-results/compact-pool-2026-11-03/analysis.md)
+measures lower live heap and post-release RSS. Limiting retained blocks also
+increases libc requests for rebuild-heavy batches; this policy makes a bounded
+memory/cache-hit tradeoff. Deliberate buffer/box reuse remains preferable when
+the application can retain its own capacity.

@@ -166,3 +166,8 @@ The tracer reuses a hash-table tombstone immediately for a fresh allocation
 address; allocator uniqueness guarantees that no live key is duplicated. This
 keeps heavy reallocation tracing from scanning a long history of freed slots.
 Tracer time is excluded from application timing and RSS measurements.
+
+The [compact-header/retention comparison](sample-results/compact-pool-2026-11-03/analysis.md)
+reruns the baseline compiler and the corrected runtime together. It records
+reduced live heap and post-release RSS, the remaining Rust memory gap, and the
+extra allocation traffic paid by rebuild-heavy cases.
