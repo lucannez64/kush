@@ -210,3 +210,17 @@ style warning; both were corrected and the full gate rerun. Logs are
 The local installed `~/.local/bin/kush` was updated after validation.
 The measured `524c39b` and validated `94cbe30` have identical collection codegen;
 the latter only adjusts lazy cache lookup style and failure-test coverage.
+
+### Allocation metadata and retention (2026-11-03)
+
+Compiler `528a804` uses 16-byte allocation headers and retains at most 64 free
+blocks per size class under the existing global budget. These changes apply to
+all native build modes. Runtime-object caching invalidates automatically because
+the embedded C source changed. Full Boat validation passes 1,149 tests,
+formatting and strict Clippy. The installed local `kush` has been updated and
+its JSON-project checksum smoke check passes.
+
+The [matched memory comparison](../benchmarks/json-memory/sample-results/compact-pool-2026-11-03/analysis.md)
+records lower peak requested heap and post-release RSS, plus increased
+rebuild-only allocation traffic. Rust deliberate reuse remains leaner on the
+measured large corpus.

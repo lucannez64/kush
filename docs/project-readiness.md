@@ -351,3 +351,12 @@ the C runtime; `--release` also enables vector-push fast paths and guarded
 slice-loop specialization. [Measured results and limits](native-optimizations.md)
 include same-cohort previous-release and Rust controls, plus separate cold/warm
 build timings.
+
+## Compact native allocator checkpoint (2026-11-03)
+
+Compiler `528a804` passes the full Boat gate: 1,149 tests, formatting and strict
+Clippy. The sandbox stopped with its snapshot preserved. The local installed
+compiler is updated and passes the JSON-project smoke check. Compact allocation
+headers and per-class retention bounds reduce memory overhead; the
+[measured comparison and tradeoffs](../benchmarks/json-memory/sample-results/compact-pool-2026-11-03/analysis.md)
+retain old/current/Rust controls, allocation accounting and three-run phase RSS.
