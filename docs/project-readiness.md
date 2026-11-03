@@ -341,3 +341,13 @@ Clippy; formatting passed separately. A retry resolved a missing cached
 dependency artifact from the first test attempt. The sandbox stopped with its
 snapshot preserved. See [native optimizations](native-optimizations.md) for
 controls, safety boundaries, measurements, and local/remote verification.
+
+## Runtime cache and collection checkpoint (2026-11-03)
+
+Compiler `94cbe30` passes the full Boat gate: 1,147 workspace tests, formatting,
+and strict all-target Clippy. The sandbox stopped with its snapshot preserved.
+The installed local `kush` has been updated. Native builds automatically cache
+the C runtime; `--release` also enables vector-push fast paths and guarded
+slice-loop specialization. [Measured results and limits](native-optimizations.md)
+include same-cohort previous-release and Rust controls, plus separate cold/warm
+build timings.

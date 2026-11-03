@@ -199,3 +199,14 @@ and CPU. A single initial cold-cache build takes 1088.139 ms. The workload
 source and previous binary hashes match the prior archived cohort. Raw data
 and caveats: `benchmarks/feature-pipeline/sample-results/fastpaths-2026-11-03/`.
 These measurements cover this scalar workload only.
+
+Validation at `94cbe30`: Boat passed all **1,147 workspace tests**, formatting,
+and strict workspace/all-target Clippy, then stopped with its snapshot preserved.
+The first gate identified an obsolete link-failure mock and an older-Clippy
+style warning; both were corrected and the full gate rerun. Logs are
+`/tmp/kush-boat-cache-fastpaths-full.log` and
+`/tmp/kush-boat-cache-fastpaths-retry.log`. Local mbx checks used two jobs:
+60 focused tests, strict Clippy, plus the corrected failure-preservation test.
+The local installed `~/.local/bin/kush` was updated after validation.
+The measured `524c39b` and validated `94cbe30` have identical collection codegen;
+the latter only adjusts lazy cache lookup style and failure-test coverage.
