@@ -310,24 +310,28 @@ owners.
   [expanded borrowing contracts](borrowing-extensions.md).
 - A record with a borrowed field cannot be `#[linear]`, cannot contain a linear
   field or an owned payload with a linear obligation, and cannot contain a
-  stream, union, callable, task handle or `Box`/`Vec` of a borrowed record.
-  Metadata exclusions also apply inside nominal records/enums and owned
-  `Box`/`Vec` payloads; wrapping a forbidden field does not bypass them.
-- No records with a borrowed field may be stored in containers, unions, or
-  ordinary enums. They may be captured by a scoped borrowed-capture closure or
-  by a scope body/child task when their leaves derive from storage outside the
-  scope; such captures are lexical capabilities and cannot escape. A child task
-  may return one as `Task<T>`; `Task.join` wraps it in the conventional
-  `TaskExit<T>`, whose provenance is checked until the matched record is
-  consumed or dropped. A `Box`/`Vec`/array of a borrowed record stays rejected
-  even when `Box`, `Vec`, `Bytes` or an owning enum is allowed as record
-  metadata.
+  stream, union, callable, or task handle. `Box`/`Vec` of a borrowed record are
+  supported and preserve per-element field provenance. Metadata exclusions
+  apply inside nominal records/enums and owned `Box`/`Vec` payloads; wrapping a
+  forbidden field does not bypass them.
+- `Box`/`Vec` of a borrowed record may be stored, moved, appended, replaced and
+  cleared while every element field's owner stays loaned. Unions, ordinary
+  enums and inline arrays of a borrowed record remain rejected. A borrowed
+  record may be captured by a scoped borrowed-capture closure or by a scope
+  body/child task when its leaves derive from storage outside the scope; such
+  captures are lexical capabilities and cannot escape. A child task may return
+  one as `Task<T>`; `Task.join` wraps it in the conventional `TaskExit<T>`,
+  whose provenance is checked until the matched record is consumed or
+  dropped. See [lifetime variance](lifetime-variance.md) for the lifetime-only
+  conversion rules; runtime type arguments remain invariant.
 - No self-referential records: constructing `R { owner: value, view:
   &value[..] }` (or the reverse order) is rejected by the ordinary move and loan
   checks.
 - Outlives bounds are supported only on executable function signatures. Record
-  and alias lifetime parameters keep exact agreement; no variance annotations,
-  higher-kinded lifetimes, or lifetime inference from function bodies.
+  and alias lifetime parameters use the seeded lifetime-only variance judgment
+  in [lifetime variance](lifetime-variance.md); there are no user variance
+  annotations, no runtime type-argument variance, no higher-kinded lifetimes,
+  and no lifetime inference from function bodies.
 - Function arrows may carry borrowed record parameters/results and closure
   captures may return fields with represented provenance. A scoped closure
   result must have exactly one parameter or capture origin; mixing or unifying
