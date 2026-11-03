@@ -13,8 +13,32 @@ struct Node {
     id: i64,
     revision: i64,
 }
+#[cfg(not(feature = "inline-metadata"))]
+type Metadata = Box<Node>;
+#[cfg(feature = "inline-metadata")]
+type Metadata = Node;
+fn metadata(node: Node) -> Metadata {
+    #[cfg(not(feature = "inline-metadata"))]
+    {
+        Box::new(node)
+    }
+    #[cfg(feature = "inline-metadata")]
+    {
+        node
+    }
+}
+fn replace_metadata(target: &mut Metadata, node: Node) {
+    #[cfg(not(feature = "inline-metadata"))]
+    {
+        **target = node;
+    }
+    #[cfg(feature = "inline-metadata")]
+    {
+        *target = node;
+    }
+}
 struct Document {
-    node: Box<Node>,
+    node: Metadata,
     text: Vec<u8>,
     children: Vec<i64>,
 }
@@ -36,7 +60,7 @@ fn corpus(count: usize, initial: &Seed) -> Vec<Document> {
     let mut result = Vec::with_capacity(count);
     for id in 0..count {
         result.push(Document {
-            node: Box::new(Node {
+            node: metadata(Node {
                 id: id as i64,
                 revision: initial.revision,
             }),
@@ -65,7 +89,7 @@ fn rebuild(doc: &mut Document) {
     content(&mut text, id, revision);
     let mut children = Vec::with_capacity(4);
     subtree(&mut children, id, revision);
-    let node = Box::new(Node { id, revision });
+    let node = metadata(Node { id, revision });
     // Construct every replacement before releasing any old field, matching Kush.
     let old = std::mem::replace(
         doc,
@@ -86,7 +110,7 @@ fn reuse(doc: &mut Document) {
     doc.children.clear();
     doc.children.reserve(if revision % 2 == 1 { 32 } else { 4 });
     subtree(&mut doc.children, id, revision);
-    *doc.node = Node { id, revision };
+    replace_metadata(&mut doc.node, Node { id, revision });
 }
 fn number(out: &mut Vec<u8>, value: i64) {
     // Same positive-integer decimal algorithm as Kush's format_i64_into.

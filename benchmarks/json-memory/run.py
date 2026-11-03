@@ -40,12 +40,38 @@ def limits(cpu=None):
     if cpu is not None:
         os.sched_setaffinity(0, {cpu})
 
-def build(kush, toolchain):
+def workload_source(inline=False):
+    source = ROOT / "kush/main.kush"
+    if not inline:
+        return source
+    # Explicit application-layout control, applied equally to Kush and Rust.
+    # This does NOT claim automatic scalar replacement of Box by the compiler.
+    text = source.read_text()
+    substitutions = [
+        ("node:Box<Node>", "node:Node"),
+        ("node:Box.new(Node {\n            id:id,revision:initial.revision\n        })", "node:Node {\n            id:id,revision:initial.revision\n        }"),
+        ("let previous=Box.read(&node);", "let previous=node;"),
+        ("let meta=Box.read(&node);", "let meta=node;"),
+        ("let next=Box.new(Node {\n        id:previous.id,revision:revision\n    });", "let next=Node {\n        id:previous.id,revision:revision\n    };"),
+        ("let next=Box.reuse(node,Node {\n        id:previous.id,revision:revision\n    });", "let next=Node {\n        id:previous.id,revision:revision\n    };"),
+        ("    drop(node);\n", ""),
+    ]
+    for old, new in substitutions:
+        assert old in text, f"inline layout transformation needs updating: {old}"
+        text = text.replace(old, new)
+    BUILD.mkdir(parents=True, exist_ok=True)
+    output = BUILD / "kush-inline.kush"
+    if not output.exists() or output.read_text() != text:
+        output.write_text(text)
+    return output
+
+def build(kush, toolchain, inline=False):
     BUILD.mkdir(parents=True, exist_ok=True)
     cc = shutil.which("cc")
     if not cc or not shutil.which("mbx"):
         raise RuntimeError("cc and mbx are required")
     metadata = []
+    source = workload_source(inline)
     target = Path.home() / ".cache/kush-json-memory-rust"
     environment = dict(os.environ, RUSTUP_TOOLCHAIN=toolchain,
                        CARGO_PROFILE_RELEASE_DEBUG="0", CARGO_TARGET_DIR=str(target),
@@ -68,13 +94,16 @@ def build(kush, toolchain):
             wrapper.chmod(0o700)
             child_environment["PATH"] = str(directory) + os.pathsep + os.environ["PATH"]
         output = BUILD / f"kush-{kind}"
-        command = [kush, "build", ROOT / "kush/main.kush", "-o", output, "--release", "--link", object_file]
+        command = [kush, "build", source, "-o", output, "--release", "--link", object_file]
         if kind == "trace":
             command += ["--stats"]
         start = time.perf_counter()
         run(command, env=child_environment)
         metadata.append({"name": output.name, "command": list(map(str, command)), "wall_s": time.perf_counter()-start, "sha256": sha(output)})
-        command = ["mbx", "rustc", "--manifest-path", ROOT / "rust/Cargo.toml", "--release", "--offline", "-j", "2", "--", "-C", f"link-arg={object_file}"]
+        command = ["mbx", "rustc", "--manifest-path", ROOT / "rust/Cargo.toml", "--release", "--offline", "-j", "2"]
+        if inline:
+            command += ["--features", "inline-metadata"]
+        command += ["--", "-C", f"link-arg={object_file}"]
         for flag in wrapper_flags:
             command += ["-C", f"link-arg={flag}"]
         start = time.perf_counter()
@@ -86,10 +115,11 @@ def build(kush, toolchain):
     command = [cc, "-std=c11", "-O0", ROOT/"probe_self_test.c", BUILD/"probe-trace.o", "-o", BUILD/"probe-self-test", *[f"-Wl,--wrap={name}" for name in WRAPS]]
     run(command)
     sources=[ROOT/"kush/main.kush",ROOT/"rust/src/main.rs",ROOT/"probe.c",ROOT/"probe_self_test.c",ROOT/"seed.json",ROOT/"rust/Cargo.toml",ROOT/"rust/Cargo.lock"]
-    (BUILD/"manifest.json").write_text(json.dumps({"builds":metadata,"compiler_sha256":sha(kush),"sources":{str(path):sha(path) for path in sources}},indent=2))
+    if source not in sources: sources.append(source)
+    (BUILD/"manifest.json").write_text(json.dumps({"inline_metadata":inline,"builds":metadata,"compiler_sha256":sha(kush),"sources":{str(path):sha(path) for path in sources}},indent=2))
     return metadata
 
-def build_previous(compiler):
+def build_previous(compiler, inline=False):
     compiler=str(compiler.resolve())
     metadata=[]
     for kind in ["plain","trace","rss"]:
@@ -98,7 +128,7 @@ def build_previous(compiler):
         if kind=="trace":
             environment["PATH"]=str(BUILD/"trace-compiler")+os.pathsep+os.environ["PATH"]
         output=BUILD/f"kush-before-{kind}"
-        command=[compiler,"build",ROOT/"kush/main.kush","-o",output,"--release","--link",object_file]
+        command=[compiler,"build",workload_source(inline),"-o",output,"--release","--link",object_file]
         if kind=="trace":command.append("--stats")
         run(command,env=environment)
         metadata.append({"name":output.name,"command":list(map(str,command)),"sha256":sha(output),"compiler_sha256":sha(compiler),"shared_probe_sha256":sha(ROOT/"probe.c")})
@@ -140,7 +170,7 @@ def expected(count, rounds):
 def command(language, kind, count, rounds, mode, emit=0):
     return [BUILD/f"{language}-{kind}", count, rounds, mode, emit]
 
-def correctness(kush):
+def correctness(kush, inline=False):
     checks = []
     for name, _, language, mode in VARIANTS:
         for count, rounds in [(1, 0), (3, 1), (3, 2), (17, 5)]:
@@ -157,7 +187,7 @@ def correctness(kush):
             result = subprocess.run(list(map(str,[BUILD/f"{language}-plain",*bad])),capture_output=True)
             assert result.returncode==2,(name,bad,result)
     # Foreign probe hooks are no-ops in the reference validation only.
-    source=(ROOT/"kush/main.kush").read_text()
+    source=workload_source(inline).read_text()
     source=re.sub(r'^foreign\s+"memory_(?:begin|stage|end)"\s+fn[^;]*;\s*','',source,flags=re.M)
     source=re.sub(r'memory_(?:begin|end)\(\);|memory_stage\(\d+\);','',source)
     reference=BUILD/"reference.kush"
@@ -251,6 +281,7 @@ def main():
     parser.add_argument("--cpu",type=int,default=max(os.sched_getaffinity(0)))
     parser.add_argument("--output",type=Path,default=ROOT/"results/latest")
     parser.add_argument("--skip-build",action="store_true")
+    parser.add_argument("--inline-metadata",action="store_true",help="remove the metadata Box explicitly in BOTH languages; separate application layout control")
     baseline=parser.add_mutually_exclusive_group()
     baseline.add_argument("--previous",type=Path,help="preserved baseline directory with kush-plain/trace/rss and manifest.json")
     baseline.add_argument("--previous-compiler",type=Path,help="build baseline using this compiler and the same current probes")
@@ -260,6 +291,7 @@ def main():
     kush=str(Path(args.kush).resolve())
     if args.skip_build:
         manifest=json.loads((BUILD/"manifest.json").read_text())
+        assert manifest.get("inline_metadata",False)==args.inline_metadata,"layout changed; rebuild required"
         assert manifest["compiler_sha256"]==sha(kush),"compiler changed; rebuild required"
         for path,digest in manifest["sources"].items():
             assert sha(path)==digest,f"source changed; rebuild required: {path}"
@@ -267,10 +299,11 @@ def main():
         for item in builds:
             assert sha(BUILD/item["name"])==item["sha256"],f"binary changed: {item['name']}"
     else:
-        builds=build(kush,args.toolchain)
+        builds=build(kush,args.toolchain,args.inline_metadata)
     if args.previous:
         previous=args.previous.resolve()
         manifest=json.loads((previous/"manifest.json").read_text())
+        assert manifest.get("inline_metadata",False)==args.inline_metadata,"previous workload layout differs"
         for path,digest in manifest["sources"].items():
             assert sha(path)==digest,f"previous workload source differs: {path}"
         for kind in ["plain","trace","rss"]:
@@ -281,15 +314,15 @@ def main():
             shutil.copyfile(original,target);target.chmod(0o700)
             builds.append({"name":target.name,"sha256":sha(target),"preserved_path":str(original),"compiler_sha256":manifest["compiler_sha256"]})
     if args.previous_compiler:
-        builds.extend(build_previous(args.previous_compiler))
+        builds.extend(build_previous(args.previous_compiler,args.inline_metadata))
     if args.previous or args.previous_compiler:
         VARIANTS.insert(0,("kush-before-rebuild","Kush / previous rebuild","kush-before",0))
         VARIANTS.insert(1,("kush-before-reuse","Kush / previous reuse","kush-before",1))
     probe_correctness()
-    checks=correctness(kush)
+    checks=correctness(kush,args.inline_metadata)
     print(f"Correctness: {len(checks)} JSON output cases; reference/native agreement and invalid arguments passed.",flush=True)
     if args.validate_only:return
-    data={"metadata":{"utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"git_head":run(["git","rev-parse","HEAD"],cwd=REPO).stdout.strip(),"compiler_sha256":sha(kush),"libc":platform.libc_ver(),"kernel":platform.release(),"cc":run(["cc","--version"]).stdout,"allocator_environment":{key:os.environ.get(key) for key in ["MALLOC_ARENA_MAX","MALLOC_TRIM_THRESHOLD_","MALLOC_MMAP_THRESHOLD_","GLIBC_TUNABLES","LD_PRELOAD"]},"rustc":run(["rustc",f"+{args.toolchain}","-vV"]).stdout,"cpu_model":next(line.split(":",1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')),"pinned_cpu":args.cpu,"repetitions":args.repetitions,"warmups":2,"phase_rss_repetitions":3,"shuffle_seed":20261103,"builds":builds,"sources":{str(p.relative_to(ROOT)):sha(p) for p in [ROOT/"kush/main.kush",ROOT/"rust/src/main.rs",ROOT/"probe.c",ROOT/"probe_self_test.c",ROOT/"seed.json",ROOT/"rust/Cargo.lock",ROOT/"rust/Cargo.toml",ROOT/"Kush.toml",ROOT/"run.py"]}},"correctness":checks,"allocations":[],"phase_rss":[],"timings":[]}
+    data={"metadata":{"inline_metadata":args.inline_metadata,"generated_workload_sha256":sha(workload_source(args.inline_metadata)),"utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"git_head":run(["git","rev-parse","HEAD"],cwd=REPO).stdout.strip(),"compiler_sha256":sha(kush),"libc":platform.libc_ver(),"kernel":platform.release(),"cc":run(["cc","--version"]).stdout,"allocator_environment":{key:os.environ.get(key) for key in ["MALLOC_ARENA_MAX","MALLOC_TRIM_THRESHOLD_","MALLOC_MMAP_THRESHOLD_","GLIBC_TUNABLES","LD_PRELOAD"]},"rustc":run(["rustc",f"+{args.toolchain}","-vV"]).stdout,"cpu_model":next(line.split(":",1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')),"pinned_cpu":args.cpu,"repetitions":args.repetitions,"warmups":2,"phase_rss_repetitions":3,"shuffle_seed":20261103,"builds":builds,"sources":{str(p.relative_to(ROOT)):sha(p) for p in [ROOT/"kush/main.kush",ROOT/"rust/src/main.rs",ROOT/"probe.c",ROOT/"probe_self_test.c",ROOT/"seed.json",ROOT/"rust/Cargo.lock",ROOT/"rust/Cargo.toml",ROOT/"Kush.toml",ROOT/"run.py"]}},"correctness":checks,"allocations":[],"phase_rss":[],"timings":[]}
     rng=random.Random(20261103)
     for count in args.sizes:
         data["allocations"]+=trace("trace",count,args.rounds)

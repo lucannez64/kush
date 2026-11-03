@@ -116,7 +116,7 @@ allocation request, and an OS page allocation are different events.
 - Kush `std.json` and Rust `serde_json` parse the same small seed. Their parser
   allocations differ and are included, so this is not a parser comparison or
   a perfectly identical representation experiment.
-- Kush has thin heap handles, word-granular record tags, runtime buffer headers,
+- Kush has thin heap handles, untagged nonempty nominal records, runtime buffer headers,
   16-byte allocation headers, padding and a bounded 1 MiB pool. Rust has inline
   Vec descriptors and normal Box allocations. Physical metrics include these
   differences rather than pretending payload sizes are the same.
@@ -171,3 +171,19 @@ The [compact-header/retention comparison](sample-results/compact-pool-2026-11-03
 reruns the baseline compiler and the corrected runtime together. It records
 reduced live heap and post-release RSS, the remaining Rust memory gap, and the
 extra allocation traffic paid by rebuild-heavy cases.
+
+## Inline metadata control
+
+`--inline-metadata` removes the metadata `Box<Node>` explicitly in **both**
+languages. The harness writes a checked transformation of the original Kush
+source to `build/kush-inline.kush`; Rust selects its `inline-metadata` feature.
+Both paths retain the same JSON oracle, edit order and ownership checks. This
+is an application-layout comparison, not automatic box elimination. Results
+record the selected layout and generated source hash; `--skip-build` refuses
+a layout mismatch. Use separate output directories for boxed and inline runs.
+
+The current compiler removes the discriminator from nonempty nominal records
+and stores only length/capacity in ordinary vector headers (16 bytes). Element
+width is a monomorphized constant at every runtime call. Genuine sum tags,
+empty structs, tuples, structural rows and inline array ABIs retain their
+existing representations. Older snapshots below predate these changes.
