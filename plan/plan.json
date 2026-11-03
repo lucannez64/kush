@@ -580,6 +580,11 @@
           "time": "2026-11-03 21:10:36",
           "who": "agent",
           "text": "Integrated reviewed fixes c4adae9: erased argument mapping, propagated unsupported channels, checked local budget exhaustion and missing paths. Focused Boat gate running; independent caller-requirement summary remains unimplemented."
+        },
+        {
+          "time": "2026-11-03 21:16:09",
+          "who": "agent",
+          "text": "Stable 0b5ad39 focused Boat gate passed: 157 tests (lib, recursive, variance, baseline, lifetimes, strings), formatting and strict all-target Clippy. Initial attempt stopped before tests on sync mismatch caused by concurrent plan update; rerun verified stable upload. Not a full workspace rerun."
         }
       ]
     },
