@@ -118,7 +118,7 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "todo",
       "desc": "41 worktrees; keep only ones with unmerged work.",
       "commit": null,
       "log": [
@@ -131,6 +131,26 @@
           "time": "2026-11-03 15:29:47",
           "who": "agent",
           "text": "Audited all 41 delegate worktrees; zero clean ancestor-tip candidates. Preserved all checkouts/branches because cherry-pick equivalence and inactivity need further evidence."
+        },
+        {
+          "time": "2026-11-03 15:29:47",
+          "who": "agent",
+          "text": "Audit finished; removal remains outstanding for unproven cherry-picked branches. No destructive cleanup attempted."
+        },
+        {
+          "time": "2026-11-03 15:29:47",
+          "who": "agent",
+          "text": "Audit complete; no proven disposable candidates. Keep removal outstanding rather than claiming 41 worktrees were cleaned."
+        },
+        {
+          "time": "2026-11-03 15:38:42",
+          "who": "agent",
+          "text": "Patch-id audit identified 33 integrated checkouts; preserved empty untracked markers in ~/.cache/kush-worktree-cleanup-20261103, removed verified inactive checkouts without force, retained all branches and eight checkouts with unique commits."
+        },
+        {
+          "time": "2026-11-03 15:39:42",
+          "who": "agent",
+          "text": "Final audit: 33 patch-equivalent inactive checkouts removed; marker files and one symlink archived, all branch refs and real caches retained; eight unique-patch checkouts preserved."
         }
       ]
     },
@@ -141,9 +161,9 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Each step: fmt, strict Clippy, targeted tests locally with mbx, full Boat gate before merge, review for soundness steps.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 15:28:23",
@@ -154,6 +174,11 @@
           "time": "2026-11-03 15:29:47",
           "who": "agent",
           "text": "Documented per-step fmt/Clippy/focused parity tests, integrated Boat gate, soundness review and safe cleanup rules in docs/working-gates.md."
+        },
+        {
+          "time": "2026-11-03 15:29:47",
+          "who": "agent",
+          "text": "Working gate documented."
         }
       ]
     },
@@ -437,10 +462,21 @@
       "deps": [
         "BORROW"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Separate the outlives graph from the ownership pass so it can be solved and explained.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 15:29:47",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-03 15:33:39",
+          "who": "agent",
+          "text": "Extracted declared/inferred outlives closure into lifetimes.rs; owner-origin and call-signature boundaries unchanged."
+        }
+      ]
     },
     {
       "id": "LT-SOLVER",
@@ -451,10 +487,21 @@
       "deps": [
         "LT-GRAPH"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Deterministic least solution over declared + anonymous lifetimes; same results as today on all tests.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 15:29:48",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-03 15:33:39",
+          "who": "agent",
+          "text": "Iterative SCC decomposition and condensation reachability; exhaustive 4096 graph comparison passed locally; full Boat gate running."
+        }
+      ]
     },
     {
       "id": "LT-DIAG",
@@ -465,10 +512,21 @@
       "deps": [
         "LT-SOLVER"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Diagnostics show the chain of outlives edges that fails.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 15:29:48",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-03 15:33:39",
+          "who": "agent",
+          "text": "Added deterministic declared-cycle witnesses and failed-call known-chain/missing-endpoint notes; integration regressions added."
+        }
+      ]
     },
     {
       "id": "LT-RECURSIVE",

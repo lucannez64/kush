@@ -34,8 +34,12 @@ Cherry-picking means an unmerged tip is not by itself proof of unique work;
 patch comparison and final-state review are required before removing such a
 checkout. Keep it if equivalence or inactivity is uncertain.
 
-The initial audit inspected 41 delegate worktrees. None had both a clean status
-and a tip proven to be an ancestor of main. All were preserved; no branch,
-source file, or build cache was deleted. The machine-readable audit is in
-`plan/worktree-audit.json`. This closes the safe audit, not a claim that all old
-worktrees are disposable. Further removal needs per-checkout evidence.
+The audit inspected 41 delegate worktrees. An ancestry-only check found no
+merged-tip candidates, so patch equivalence was checked as well. Thirty-three
+inactive checkouts had every unique commit patch-equivalent to main. Their
+only untracked file was an empty marker; one also held a target symlink.
+These were archived under `~/.cache/kush-worktree-cleanup-20261103`, then those
+33 checkouts were removed without force. All branch references and the real
+build caches remain. Eight checkouts with unique patches were preserved.
+The machine-readable evidence is in `plan/worktree-audit.json`. Branch deletion
+is deliberately excluded from this cleanup so every historical tip is recoverable.

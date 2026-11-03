@@ -786,3 +786,8 @@ be returned across a task boundary.
 - The ancestry analysis is path-insensitive and conservative. It is not a
   formal proof. Both backends and the runtime are trusted implementation
   components.
+
+
+The finite outlives relation is implemented by the standalone [lifetime graph
+and SCC solver](lifetime-graph.md), including cycle and failed-call diagnostics.
+The documented inference limits above still apply.

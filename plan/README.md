@@ -70,3 +70,8 @@ not a sufficient specification of those rules.
 Use `scripts/plan.py` to update status/dependencies and record new evidence.
 When implementing a node, revisit its prerequisites against the current source;
 add missing design/test work instead of treating “ready” as proof of feasibility.
+
+The per-step implementation and integration procedure is in
+[working gates](../docs/working-gates.md). The worktree audit is preserved in
+[worktree-audit.json](worktree-audit.json); unproven cleanup candidates remain
+outstanding rather than being force-removed.

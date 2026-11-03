@@ -5,7 +5,15 @@
     "head": "c04207ee052a230289d952a415906c147599d251",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-1d30b67d/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-2142b1e5",
@@ -13,7 +21,21 @@
     "head": "de4f0ebebd8efc14ec15036f6e7981625363fd46",
     "clean": false,
     "merged": false,
-    "locked": false
+    "locked": false,
+    "patches": [
+      "+ c0d1c42d655c83b138fb89972131f56c6ffa5014",
+      "- 45a37992ccce222d386ebe863f594fa730e41f1b",
+      "- 8a13b6a655cae40cafb59592e9840a46655f2b18",
+      "+ c92ca0f1265f7c59c8bc73b52f7ac25fd9b6fc3d",
+      "- f54e5c037b47aebd7bd40cf9fe603fb07323b088",
+      "+ 6ed56a19df3acdcbe2a7ebada705f6f4e57f41e7",
+      "- de4f0ebebd8efc14ec15036f6e7981625363fd46"
+    ],
+    "patch_equivalent": false,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-2b47a6c9",
@@ -21,7 +43,15 @@
     "head": "9f90718c43c7ba38a59341162186822563d2236c",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-2b47a6c9/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-2fd22546",
@@ -29,7 +59,15 @@
     "head": "5e66c65d2940c85a739f7e4aa6f3aacb37b6344a",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-2fd22546/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-331fbe85",
@@ -37,7 +75,15 @@
     "head": "799cd211fd0dd50aca5b156bdfc2ac9d34e6926c",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-331fbe85/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-34732665",
@@ -45,7 +91,23 @@
     "head": "044e567a3fe33212b0f05d4ab6b3463c5a8be59a",
     "clean": false,
     "merged": false,
-    "locked": false
+    "locked": false,
+    "patches": [
+      "- b9978ce8f4193fdadc44b0e9c15a3f1a0af793bd",
+      "- 406618d661b5524fa9c14cf091c306b0abe569fd",
+      "- e94e3ebab18811545b3d264682a97d01099fc9d1",
+      "- a580d27f5f0e328df11d4b614c7e1acc44d72975",
+      "- 2e0cbcbf2cb912e455a47cd9e14d592c3cce0879",
+      "- 0ba1b8dce31269cfbeca0df0f89c274e2ea5af7d",
+      "- 044e567a3fe33212b0f05d4ab6b3463c5a8be59a"
+    ],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-34732665/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-38ef2543",
@@ -53,7 +115,15 @@
     "head": "0ccd59d5949c2221202dab8ef3e8d7d2b3a845e0",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-38ef2543/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-3b66f75d",
@@ -61,7 +131,15 @@
     "head": "dc10e04a27d6ddd001cf40d8d847357f52000001",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-3b66f75d/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-3e161f5c",
@@ -69,7 +147,15 @@
     "head": "610641ccbb77e2f06a9bf3d314dec6c64258d2fa",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-3e161f5c/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-3e34c2d7",
@@ -77,7 +163,15 @@
     "head": "08286e9b2840ba11cdd252482c440d9d9b1df5bc",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-3e34c2d7/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-3f9da2ac",
@@ -85,7 +179,18 @@
     "head": "160810dfa971f970fc708ff5e3cdec738772d47f",
     "clean": false,
     "merged": false,
-    "locked": false
+    "locked": false,
+    "patches": [
+      "+ 01b1f179c6bee47221b0ec7cc2f6fbbf34003cb6",
+      "- 2c6dae608a1328b1c4b18c55785925449a71abad",
+      "- cf9cbea1c51e1aa8668bb01217fcfc75be814a12",
+      "- 160810dfa971f970fc708ff5e3cdec738772d47f"
+    ],
+    "patch_equivalent": false,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-409000a3",
@@ -93,7 +198,15 @@
     "head": "eb46a0a3b5ae9828e0d7a91b993bf35bef7b7283",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-409000a3/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-43724249",
@@ -101,7 +214,15 @@
     "head": "9a40ad70385715ac954b383f41bc15ed3c2eea7b",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-43724249/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-47e65a3f",
@@ -109,7 +230,15 @@
     "head": "a8ea9926885c59cf9b01915d56f63eefbbd98f04",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-47e65a3f/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-596cb3ea",
@@ -117,7 +246,15 @@
     "head": "3431ca556cee47b8ca476cfcaf291dcdaa0ec230",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-596cb3ea/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-5c276fe0",
@@ -125,7 +262,19 @@
     "head": "2bb3002bb7095fe3cb837582ca4127b772bb9c61",
     "clean": false,
     "merged": false,
-    "locked": false
+    "locked": false,
+    "patches": [
+      "- 7fd1944e439cf90c7e029a92386245f5bdc3744e",
+      "- 544c7d7d9afea02af3cf690bef661cfb66a9174e",
+      "- 2bb3002bb7095fe3cb837582ca4127b772bb9c61"
+    ],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-5c276fe0/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-612a19ff",
@@ -133,7 +282,15 @@
     "head": "bf20e61321bd5d2376d67d90e2b602859a23ee64",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-612a19ff/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-6381e282",
@@ -141,7 +298,15 @@
     "head": "54efb8b3fd42f425de73857e673cc098becbc6ec",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-6381e282/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-7269da81",
@@ -149,7 +314,15 @@
     "head": "264c87d817fe10bdce2bf114f7f931ae9db1718c",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-7269da81/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-7acbf300",
@@ -157,7 +330,15 @@
     "head": "980296e87a281bdcc2d0b6540ae601162940df1b",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-7acbf300/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-7dc078f9",
@@ -165,7 +346,15 @@
     "head": "2b14b84cd724d167fc452a512714c77ab0956393",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-7dc078f9/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-7f93ad28",
@@ -173,7 +362,15 @@
     "head": "1fa2a137747904a886bb7e531fbd3da2751453b9",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-7f93ad28/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-832dc7e4",
@@ -181,7 +378,15 @@
     "head": "fa1d5b5d842dc1d6e665abd175025a7b24011d77",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-832dc7e4/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-853b4bc3",
@@ -189,7 +394,15 @@
     "head": "fb4b51b3dc3e844dfc212c5f7c9a2b350a9c2435",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-853b4bc3/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-8ea14429",
@@ -197,7 +410,17 @@
     "head": "279844aae59e983a7f94c5266576fc0ce2b2086d",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used",
+      "!! target"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-8ea14429/target-vela-heavy-used",
+    "target_symlink_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-8ea14429/target"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-9e49ec68",
@@ -205,7 +428,15 @@
     "head": "efac7d690339abe395eefefe1e40d7a2c05f8589",
     "clean": false,
     "merged": false,
-    "locked": false
+    "locked": false,
+    "patches": [
+      "+ efac7d690339abe395eefefe1e40d7a2c05f8589"
+    ],
+    "patch_equivalent": false,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-9e4d0dd3",
@@ -213,7 +444,15 @@
     "head": "da7c1bb23eddb09c11816e299124d47a3d4ce428",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-9e4d0dd3/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-a278793d",
@@ -221,7 +460,15 @@
     "head": "8d04a0b25e458aeae87da5e0e22cd08a2006669e",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-a278793d/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-a6ca1cb2",
@@ -229,7 +476,15 @@
     "head": "f142831c22aee2a6a246e0a1afe1e5ad45cc4a41",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-a6ca1cb2/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-aa9aa806",
@@ -237,7 +492,24 @@
     "head": "ff4b9f68cd3b0d450bcc9bc5b0021381db4eb3dc",
     "clean": false,
     "merged": false,
-    "locked": false
+    "locked": false,
+    "patches": [
+      "+ 66c5c023003a66a2502011fc09bc021f80130e0e",
+      "- 4dc484b889f60b596715f0859f0bf039f843db3c",
+      "- 7075c70c03421fbc8a6e67ed900fa7f58ee91915",
+      "+ acd7685c73a6e669becd9ab4f98bd372efd149e7",
+      "- bc15766a3a26a59d15325d295062249f2dab6883",
+      "- 55f3086d3c19695131d08c9bae043742c993f983",
+      "+ fb7a394fed6eaf7f6e06be6141428773425c5fb7",
+      "- 1b3c14f6d5a527b16529d115081b4e5f586c3471",
+      "+ fe7fc0d90e7dbff93d216705b3efec7b5b34770a",
+      "- ff4b9f68cd3b0d450bcc9bc5b0021381db4eb3dc"
+    ],
+    "patch_equivalent": false,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-b123abe4",
@@ -245,7 +517,15 @@
     "head": "0a2013c0040f5f87582c3872ce73b5dc8dd7301c",
     "clean": false,
     "merged": false,
-    "locked": false
+    "locked": false,
+    "patches": [
+      "+ 0a2013c0040f5f87582c3872ce73b5dc8dd7301c"
+    ],
+    "patch_equivalent": false,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-c1616b8a",
@@ -253,7 +533,15 @@
     "head": "55f8c69debc32b7fbbc97d7f36e2e0f8966866cd",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-c1616b8a/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-c2e32305",
@@ -261,7 +549,15 @@
     "head": "06e45ed6db50618ccf423209f7955d9b542a1c2b",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-c2e32305/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-c54b1b0e",
@@ -269,7 +565,15 @@
     "head": "c3425fe2f70232f93f1149ef6aafe2a9c025d7ed",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-c54b1b0e/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-caf5bc50",
@@ -277,7 +581,15 @@
     "head": "c8375c44f67bd3d2a7e70f7b35b7ddd75ce9989a",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-caf5bc50/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-cd7b838c",
@@ -285,7 +597,16 @@
     "head": "587540a1ef31e35517e6e793f106b5957ab98a0c",
     "clean": false,
     "merged": false,
-    "locked": false
+    "locked": false,
+    "patches": [
+      "+ b2739bbb8977a71193309351a1c5531d08093840",
+      "- 587540a1ef31e35517e6e793f106b5957ab98a0c"
+    ],
+    "patch_equivalent": false,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-e2014f46",
@@ -293,7 +614,15 @@
     "head": "960db71c467d6499410fa5946628f2116a901d0f",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-e2014f46/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-e45750f9",
@@ -301,7 +630,19 @@
     "head": "11246f0be84529499ec49c4550fec60a716759bb",
     "clean": false,
     "merged": false,
-    "locked": false
+    "locked": false,
+    "patches": [
+      "+ 2f0139b73eea92ffc0a96c9e9343c5d0b17115aa",
+      "- c56aa505da9e7f999c3c8ca767d480de758a9040",
+      "+ de9d64116d49251b4704db9f51da0d2e687fb447",
+      "- e439cdb9161b0f4c8d51bbe8bbe73a9940afb5f7",
+      "+ 11246f0be84529499ec49c4550fec60a716759bb"
+    ],
+    "patch_equivalent": false,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-e9ec8488",
@@ -309,7 +650,15 @@
     "head": "9174d9fdb5578d50fc1b79913c40f244a1d1fabb",
     "clean": false,
     "merged": true,
-    "locked": false
+    "locked": false,
+    "patches": [],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-e9ec8488/target-vela-heavy-used"
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-ec853916",
@@ -317,7 +666,16 @@
     "head": "bf4b21c7585900440af879a6e4498bc76d9b8422",
     "clean": false,
     "merged": false,
-    "locked": false
+    "locked": false,
+    "patches": [
+      "+ 6eedb0b9ed50e5e20b5d30eac8033605f92e6086",
+      "- bf4b21c7585900440af879a6e4498bc76d9b8422"
+    ],
+    "patch_equivalent": false,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false
   },
   {
     "path": "/home/hirew/.t3/worktrees/kush/t3-f92593a8",
@@ -325,6 +683,17 @@
     "head": "728b124572f4aeea40f7af07b0e4a43e1b1218bb",
     "clean": false,
     "merged": false,
-    "locked": false
+    "locked": false,
+    "patches": [
+      "- da5dd2589cd70c8747d645d7073eed9822d834fb",
+      "- 728b124572f4aeea40f7af07b0e4a43e1b1218bb"
+    ],
+    "patch_equivalent": true,
+    "ignored": [
+      "?? target-vela-heavy-used"
+    ],
+    "active_cwd": false,
+    "cleanup": "removed checkout; branch retained",
+    "marker_archive": "/home/hirew/.cache/kush-worktree-cleanup-20261103/t3-f92593a8/target-vela-heavy-used"
   }
 ]

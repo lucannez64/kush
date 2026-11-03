@@ -1872,25 +1872,10 @@ fn call_result_type(signature: &Signature) -> Type {
 }
 /// Outer lifetime annotation of a borrow type, if any.
 /// Reflexive-transitive closure of declared or inferred outlives edges.
-fn close_lifetime_bounds(mut closure: BTreeSet<(String, String)>) -> BTreeSet<(String, String)> {
-    loop {
-        let mut added = Vec::new();
-        for (long, short) in &closure {
-            for (other_long, other_short) in &closure {
-                if short == other_long {
-                    let edge = (long.clone(), other_short.clone());
-                    if !closure.contains(&edge) {
-                        added.push(edge);
-                    }
-                }
-            }
-        }
-        if added.is_empty() {
-            break;
-        }
-        closure.extend(added);
-    }
-    closure
+fn close_lifetime_bounds(bounds: BTreeSet<(String, String)>) -> BTreeSet<(String, String)> {
+    crate::lifetimes::LifetimeGraph::new(&bounds)
+        .solve()
+        .closure
 }
 fn borrow_lifetime(ty: &ast::Type) -> Option<String> {
     match &ty.kind {
@@ -3324,24 +3309,10 @@ pub(crate) fn build_lifetime_bounds(
             spans.insert((lifetime.name.clone(), bound.name.clone()), bound.span);
         }
     }
-    let mut closure = edges;
-    loop {
-        let mut added = Vec::new();
-        for (long, short) in &closure {
-            for (other_long, other_short) in &closure {
-                if short == other_long {
-                    let edge = (long.clone(), other_short.clone());
-                    if !closure.contains(&edge) {
-                        added.push(edge);
-                    }
-                }
-            }
-        }
-        if added.is_empty() {
-            break;
-        }
-        closure.extend(added);
-    }
+    let graph = crate::lifetimes::LifetimeGraph::new(&edges);
+    let solution = graph.solve();
+    let closure = solution.closure;
+    debug_assert!(solution.components.iter().all(|c| !c.is_empty()));
     // A cycle makes the members equal, which needs one shared lifetime rather
     // than a mutually bounded pair. Rejecting it keeps the order a strict DAG.
     if let Some(((long, short), span)) = spans
@@ -3353,7 +3324,7 @@ pub(crate) fn build_lifetime_bounds(
             format!(
                 "cyclic outlives bounds are not supported: '{long}' and '{short}' would be the same lifetime; use one lifetime parameter"
             ),
-        ));
+        ).with_note(*span, format!("outlives cycle: {}", graph.path(short, long).unwrap().iter().map(|n| format!("'{n}")).chain(std::iter::once(format!("'{short}"))).collect::<Vec<_>>().join(" -> "))));
     }
     Ok(closure)
 }

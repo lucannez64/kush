@@ -17,6 +17,7 @@ pub mod kernel;
 pub mod language_server;
 mod length;
 pub mod lexer;
+mod lifetimes;
 pub mod native;
 pub mod natural;
 mod ownership;

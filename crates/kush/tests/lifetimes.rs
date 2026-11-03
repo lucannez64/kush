@@ -3229,3 +3229,37 @@ fn lifetime_bounds_example_agrees_natively() {
         "20\n30\n10\n40\n30\n7\n",
     );
 }
+
+#[test]
+fn lifetime_graph_diagnostics_explain_cycles_and_missing_call_paths() {
+    let error = check(
+        r#"fn f<'a: 'b, 'b: 'c, 'c: 'a>(v: &'a [i64])->&'c [i64] ! {} { v }
+    fn main()->Unit ! {} {}"#,
+    )
+    .unwrap_err();
+    assert!(error.message.contains("cyclic outlives"));
+    assert!(
+        error
+            .notes
+            .iter()
+            .any(|(_, s)| s.contains("outlives cycle:")
+                && s.contains("'a")
+                && s.contains("'b")
+                && s.contains("'c")),
+        "{error:?}"
+    );
+    let error=check(r#"fn f<'a,'b>(a: &'a mut [i64], b: &'b mut [i64])->&'a mut [i64] ! {panic} { let child=&mut b[1..]; child }
+    fn main()->Unit ! {panic} {let mut a:[i64;2]=[1,2];let mut b:[i64;2]=[3,4];f(&mut a[..],&mut b[..]);}"#).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("cannot establish the callee's outlives constraint")
+    );
+    assert!(
+        error
+            .notes
+            .iter()
+            .any(|(_, s)| s.contains("required endpoint") && s.contains("not inferred")),
+        "{error:?}"
+    );
+}

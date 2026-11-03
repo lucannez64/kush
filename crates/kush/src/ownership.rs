@@ -1895,7 +1895,7 @@ impl Checker<'_> {
                                 describe_actual(short_actual),
                                 describe_lifetime(short)
                             ),
-                        ));
+                        ).with_note(span, crate::lifetimes::LifetimeGraph::new(&self.lifetime_bounds).explain_missing(long_actual, short_actual)));
                     }
                 }
             }
