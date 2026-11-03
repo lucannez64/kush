@@ -498,3 +498,307 @@ fn inferred_literal_identity_and_covariance_remain_accepted() {
     )
     .unwrap();
 }
+
+#[test]
+fn call_wide_lifetime_constraints_follow_parameter_variance() {
+    // One invariant binder cannot be instantiated from two distinct actual
+    // identities, even when the call result is unused Unit.
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn take<'x>(p: Inv<'x>, q: Inv<'x>) -> Unit ! {panic} {
+            let _ = p;
+            let _ = q;
+        }
+        fn bad<'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+            take(p, q);
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant occurrence requires one actual lifetime identity",
+    );
+    check(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn take<'x>(p: Inv<'x>, q: Inv<'x>) -> Unit ! {panic} {
+            let _ = p;
+            let _ = q;
+        }
+        fn ok<'short>(p: Inv<'short>, q: Inv<'short>) -> Unit ! {panic} {
+            take(p, q);
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+    // A covariant occurrence may use a longer actual lifetime once the
+    // invariant occurrence has fixed the binder, but the reverse has no proof.
+    check(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        struct View<'a> { r: &'a i64 }
+        fn relax<'x>(p: Inv<'x>, v: View<'x>) -> Unit ! {panic} {
+            let _ = p;
+            let _ = v;
+        }
+        fn ok<'long: 'short, 'short>(p: Inv<'short>, v: View<'long>) -> Unit ! {panic} {
+            relax(p, v);
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        struct View<'a> { r: &'a i64 }
+        fn relax<'x>(p: Inv<'x>, v: View<'x>) -> Unit ! {panic} {
+            let _ = p;
+            let _ = v;
+        }
+        fn bad<'long: 'short, 'short>(p: Inv<'long>, v: View<'short>) -> Unit ! {panic} {
+            relax(p, v);
+        }
+        fn main() -> Unit ! {} {}"#,
+        "cannot use lifetime 'short' where 'x' is invariant 'long'",
+    );
+    // The same occurrence constraints apply to methods.
+    check(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        struct Sink { n: i64 }
+        impl Sink {
+            fn absorb<'x>(self: &Self, p: Inv<'x>, q: Inv<'x>) -> Unit ! {panic} {
+                let _ = self;
+                let _ = p;
+                let _ = q;
+            }
+        }
+        fn ok<'short>(p: Inv<'short>, q: Inv<'short>) -> Unit ! {panic} {
+            let sink = Sink { n: 0 };
+            sink.absorb(p, q);
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        struct Sink { n: i64 }
+        impl Sink {
+            fn absorb<'x>(self: &Self, p: Inv<'x>, q: Inv<'x>) -> Unit ! {panic} {
+                let _ = self;
+                let _ = p;
+                let _ = q;
+            }
+        }
+        fn bad<'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+            let sink = Sink { n: 0 };
+            sink.absorb(p, q);
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant occurrence requires one actual lifetime identity",
+    );
+}
+
+#[test]
+fn indirect_calls_instantiate_lifetimes_from_actual_arguments() {
+    // A single actual identity instantiates the arrow binder; the call is
+    // valid for unused Unit, observable results, and nested borrowed records.
+    check(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn take<'x>(i: Inv<'x>) -> Unit ! {panic} { let _ = i; }
+        fn ok<'long>(i: Inv<'long>) -> Unit ! {panic} {
+            let f: fn<'x>(Inv<'x>) -> Unit ! {panic} = take;
+            f(i);
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+    agrees(
+        r#"struct Window<'a> { view: &'a [i64], start: i64 }
+        fn first<'x>(window: Window<'x>) -> i64 ! {panic} {
+            Slice.get(window.view, window.start)
+        }
+        fn main() -> i64 ! {panic} {
+            let f: fn<'x>(Window<'x>) -> i64 ! {panic} = first;
+            let values: [i64; 2] = [40, 2];
+            f(Window { view: &values[..], start: 0 })
+        }"#,
+        40,
+        "",
+    );
+    // Two invariant occurrences still need one identity through the arrow.
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn take<'x>(p: Inv<'x>, q: Inv<'x>) -> Unit ! {panic} {
+            let _ = p;
+            let _ = q;
+        }
+        fn bad<'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+            let f: fn<'x>(Inv<'x>, Inv<'x>) -> Unit ! {panic} = take;
+            f(p, q);
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant occurrence requires one actual lifetime identity",
+    );
+    // Returning the arrow's identity and then shortening it is still an
+    // unproved invariant conversion.
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn make<'x>(i: Inv<'x>) -> Inv<'x> ! {panic} { i }
+        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {panic} {
+            let f: fn<'x>(Inv<'x>) -> Inv<'x> ! {panic} = make;
+            let a = f(i);
+            let b: Inv<'short> = a;
+            let _ = b;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+}
+
+#[test]
+fn nested_argument_blocks_and_lambdas_keep_their_lifetime_checks() {
+    // The call boundary covers only the outer argument instantiation; a block
+    // used as an argument still checks its own annotated conversion.
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn sink(n: i64) -> Unit ! {panic} { let _ = n; }
+        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {panic} {
+            sink({ let b: Inv<'short> = i; let _ = b; 0 });
+        }
+        fn main() -> Unit ! {} {}"#,
+        "lifetime mismatch",
+    );
+    check(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn sink(n: i64) -> Unit ! {panic} { let _ = n; }
+        fn ok<'long>(i: Inv<'long>) -> Unit ! {panic} {
+            sink({ let b: Inv<'long> = i; let _ = b; 0 });
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn sink(n: i64) -> Unit ! {panic} { let _ = n; }
+        fn bad<'long: 'short, 'short>(c: Bool, i: Inv<'long>) -> Unit ! {panic} {
+            sink(if c { let b: Inv<'short> = i; let _ = b; 0 } else { 0 });
+        }
+        fn main() -> Unit ! {} {}"#,
+        "lifetime mismatch",
+    );
+    check(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn sink(n: i64) -> Unit ! {panic} { let _ = n; }
+        fn ok<'long>(c: Bool, i: Inv<'long>) -> Unit ! {panic} {
+            sink(if c { let b: Inv<'long> = i; let _ = b; 0 } else { 0 });
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+    // An immediately called lambda keeps its body obligations even when the
+    // lambda itself is the callee of a call.
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn bad<'long: 'short, 'short>(i: Inv<'long>) -> Unit ! {alloc, panic} {
+            let _ = (fn() -> i64 ! {alloc, panic} {
+                let b: Inv<'short> = i;
+                let _ = b;
+                0
+            })();
+        }
+        fn main() -> Unit ! {} {}"#,
+        "lifetime mismatch",
+    );
+    check(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn ok<'long>(i: Inv<'long>) -> Unit ! {alloc, panic} {
+            let _ = (fn() -> i64 ! {alloc, panic} {
+                let b: Inv<'long> = i;
+                let _ = b;
+                0
+            })();
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn unresolved_callee_result_labels_never_alias_caller_binders() {
+    // The callee binder 'x is ambiguous, so it must not survive as the raw
+    // name 'x and accidentally equal the caller's own 'x.
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn make<'x>(p: Inv<'x>, q: Inv<'x>) -> Inv<'x> ! {panic} { p }
+        fn bad<'x, 'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+            let r = make(p, q);
+            let x: Inv<'x> = r;
+            let _ = x;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant occurrence requires one actual lifetime identity",
+    );
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn make<'x>(p: Inv<'x>, q: Inv<'x>) -> Inv<'x> ! {panic} { p }
+        fn control<'x, 'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+            let r = make(p, q);
+            let x: Inv<'short> = r;
+            let _ = x;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant occurrence requires one actual lifetime identity",
+    );
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn make<'x>(p: Inv<'x>) -> Inv<'x> ! {panic} { p }
+        fn bad<'x, 'long>(p: Inv<'long>) -> Unit ! {panic} {
+            let r = make(p);
+            let x: Inv<'x> = r;
+            let _ = x;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn make<'x>(p: Inv<'x>, q: Inv<'x>) -> Inv<'x> ! {panic} { p }
+        fn bad<'x, 'long: 'short, 'short>(p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+            let f: fn<'x>(Inv<'x>, Inv<'x>) -> Inv<'x> ! {panic} = make;
+            let r = f(p, q);
+            let x: Inv<'x> = r;
+            let _ = x;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant occurrence requires one actual lifetime identity",
+    );
+}
+
+#[test]
+fn record_literal_inference_uses_only_fields_that_mention_the_lifetime() {
+    // `W<'a, T>` has one lifetime parameter used by `inv`. The unrelated
+    // `extra: B<'long>` field must neither supply nor poison that identity.
+    check(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        struct W<'a, T> { inv: Inv<'a>, extra: T }
+        struct B<'b> { view: &'b i64 }
+        fn ok<'long: 'short, 'short>(i: Inv<'short>, b: B<'long>) -> Unit ! {panic} {
+            let w = W { inv: i, extra: b };
+            let x: W<'short, B<'long>> = w;
+            let _ = x;
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+    // The unrelated field's longer lifetime cannot be taken as the identity
+    // of the invariant field.
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        struct W<'a, T> { inv: Inv<'a>, extra: T }
+        struct B<'b> { view: &'b i64 }
+        fn loose<'a, T>(inv: Inv<'a>, extra: T) -> W<'a, T> ! {panic} {
+            W { inv: inv, extra: extra }
+        }
+        fn bad<'long: 'short, 'short>(i: Inv<'short>, b: B<'long>) -> Unit ! {panic} {
+            let w = W { inv: i, extra: b };
+            let x: W<'long, B<'long>> = w;
+            let _ = x;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+}

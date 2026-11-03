@@ -1287,17 +1287,26 @@ impl<'a> Types<'a> {
         }
         go(self, left, right, 0, &mut BTreeSet::new())
     }
-    /// Erase a callable parameter's record lifetimes to fresh local identities.
-    /// Passing `Window<'x, i64>` to a parameter written `Window<'a, i64>` is a
-    /// checked instantiation, not a silent relabeling: the argument's own field
-    /// provenance is related to `'a` by the caller.
-    pub fn freshen_borrows(&mut self, ty: Type, span: Span) -> Result<Type> {
+    /// Erase a callable parameter's declared lifetime binders to fresh local
+    /// placeholder identities. Passing `Window<'x, i64>` to a parameter
+    /// written `Window<'a, i64>` is a checked instantiation, not a silent
+    /// relabeling: the argument's own field provenance is related to `'a` by
+    /// the caller. Only labels named by `binders` are placeholders; labels
+    /// supplied by an enclosing caller through a generic type argument stay
+    /// rigid and keep their existing same-scope obligations.
+    pub fn freshen_borrows(
+        &mut self,
+        ty: Type,
+        binders: &BTreeSet<String>,
+        span: Span,
+    ) -> Result<Type> {
         let mut map = BTreeMap::new();
-        self.freshen_borrows_with(ty, &mut map, span)
+        self.freshen_borrows_with(ty, binders, &mut map, span)
     }
     fn freshen_borrows_with(
         &mut self,
         ty: Type,
+        binders: &BTreeSet<String>,
         map: &mut BTreeMap<String, String>,
         span: Span,
     ) -> Result<Type> {
@@ -1310,10 +1319,14 @@ impl<'a> Types<'a> {
                 let lifetimes = self.enums[id].lifetimes.clone();
                 let mut fresh_arguments = Vec::new();
                 for argument in arguments {
-                    fresh_arguments.push(self.freshen_borrows_with(argument, map, span)?);
+                    fresh_arguments.push(self.freshen_borrows_with(argument, binders, map, span)?);
                 }
                 let mut fresh_lifetimes = Vec::new();
                 for (index, lifetime) in lifetimes.into_iter().enumerate() {
+                    if !binders.contains(&lifetime) {
+                        fresh_lifetimes.push(lifetime);
+                        continue;
+                    }
                     let fresh = if let Some(fresh) = map.get(&lifetime) {
                         fresh.clone()
                     } else {
@@ -1329,12 +1342,128 @@ impl<'a> Types<'a> {
                 self.instantiate(definition, fresh_arguments, consts, fresh_lifetimes, span)
                     .map(Type::Enum)
             }
-            Type::Variants(..)
-            | Type::Slice(_)
-            | Type::SliceMut(_)
-            | Type::Str
-            | Type::Ref(_)
-            | Type::RefMut(_) => Ok(ty),
+            Type::Ref(pointer) => {
+                let pointee = self.pointees[pointer];
+                let inner = self.freshen_borrows_with(pointee, binders, map, span)?;
+                Ok(if inner == self.pointees[pointer] {
+                    ty
+                } else {
+                    Type::Ref(self.pointer(inner))
+                })
+            }
+            Type::RefMut(pointer) => {
+                let pointee = self.pointees[pointer];
+                let inner = self.freshen_borrows_with(pointee, binders, map, span)?;
+                Ok(if inner == self.pointees[pointer] {
+                    ty
+                } else {
+                    Type::RefMut(self.pointer(inner))
+                })
+            }
+            Type::Slice(pointer) => {
+                let pointee = self.pointees[pointer];
+                let inner = self.freshen_borrows_with(pointee, binders, map, span)?;
+                Ok(if inner == self.pointees[pointer] {
+                    ty
+                } else {
+                    Type::Slice(self.pointer(inner))
+                })
+            }
+            Type::SliceMut(pointer) => {
+                let pointee = self.pointees[pointer];
+                let inner = self.freshen_borrows_with(pointee, binders, map, span)?;
+                Ok(if inner == self.pointees[pointer] {
+                    ty
+                } else {
+                    Type::SliceMut(self.pointer(inner))
+                })
+            }
+            Type::Box(pointer) => {
+                let pointee = self.pointees[pointer];
+                let inner = self.freshen_borrows_with(pointee, binders, map, span)?;
+                Ok(if inner == self.pointees[pointer] {
+                    ty
+                } else {
+                    Type::Box(self.pointer(inner))
+                })
+            }
+            Type::Vec(pointer) => {
+                let pointee = self.pointees[pointer];
+                let inner = self.freshen_borrows_with(pointee, binders, map, span)?;
+                Ok(if inner == self.pointees[pointer] {
+                    ty
+                } else {
+                    Type::Vec(self.pointer(inner))
+                })
+            }
+            Type::Task(pointer) => {
+                let pointee = self.pointees[pointer];
+                let inner = self.freshen_borrows_with(pointee, binders, map, span)?;
+                Ok(if inner == self.pointees[pointer] {
+                    ty
+                } else {
+                    Type::Task(self.pointer(inner))
+                })
+            }
+            Type::Annotated(pointer, label) => {
+                let pointee = self.pointees[pointer];
+                let inner = self.freshen_borrows_with(pointee, binders, map, span)?;
+                let name = self.reference_label_name(label);
+                let fresh_label = match name {
+                    Some(name) if binders.contains(&name) => {
+                        let fresh = if let Some(fresh) = map.get(&name) {
+                            fresh.clone()
+                        } else {
+                            let fresh = format!("<argument label {label}>");
+                            map.insert(name, fresh.clone());
+                            fresh
+                        };
+                        self.reference_label_id(Some(&fresh))
+                    }
+                    _ => label,
+                };
+                Ok(if inner == self.pointees[pointer] && fresh_label == label {
+                    ty
+                } else {
+                    Type::Annotated(self.pointer(inner), fresh_label)
+                })
+            }
+            Type::Union(id) => {
+                let members = self.unions[id].members.clone();
+                let mut fresh_members = Vec::with_capacity(members.len());
+                for member in members {
+                    fresh_members.push(self.freshen_borrows_with(member, binders, map, span)?);
+                }
+                self.union(fresh_members, span)
+            }
+            Type::Enum(id) => {
+                let definition = self.enums[id].definition;
+                let consts = self.enums[id].consts.clone();
+                let arguments = self.enums[id].arguments.clone();
+                let lifetimes = self.enums[id].lifetimes.clone();
+                let mut fresh_arguments = Vec::with_capacity(arguments.len());
+                let mut changed = false;
+                for argument in arguments {
+                    let fresh = self.freshen_borrows_with(argument, binders, map, span)?;
+                    changed |= fresh != argument;
+                    fresh_arguments.push(fresh);
+                }
+                if !changed {
+                    return Ok(ty);
+                }
+                self.instantiate(definition, fresh_arguments, consts, lifetimes, span)
+                    .map(Type::Enum)
+            }
+            Type::Variants(id, mask) => {
+                let fresh = self.freshen_borrows_with(Type::Enum(id), binders, map, span)?;
+                match fresh {
+                    Type::Enum(new_id) if new_id != id => {
+                        Ok(crate::runtime_types::refine(&self.enums, new_id, mask))
+                    }
+                    _ => Ok(ty),
+                }
+            }
+            Type::Str => Ok(ty),
             _ => Ok(ty),
         }
     }

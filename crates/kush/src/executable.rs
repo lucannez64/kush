@@ -3318,6 +3318,13 @@ fn collect_parameter_field_lifetimes(
     }
     Ok(())
 }
+/// A lifetime label that names no caller identity at this occurrence: an
+/// inferred record identity, a freshened argument placeholder, or an elided
+/// label. These are resolved by the ownership provenance pass and must not be
+/// compared as if they were declared caller lifetimes.
+fn is_opaque_call_label(label: &str) -> bool {
+    label.is_empty() || label == "_" || label.starts_with('<')
+}
 /// Whether `long` outlives `short` under a reflexive-transitive bound set.
 /// Every lifetime outlives itself; declared bounds supply the strict steps.
 pub(crate) fn outlives(bounds: &BTreeSet<(String, String)>, long: &str, short: &str) -> bool {
@@ -10622,6 +10629,15 @@ struct Checker<'a, 't> {
     /// drops at that block's end, after every checked reference's last use.
     hoisted: Vec<Statement>,
 }
+/// One actual lifetime supplied for a callee-declared binder at a parameter
+/// occurrence. The polarity decides whether the actual identity must equal the
+/// binder (invariant), outlive it (covariant), or be outlived by it
+/// (contravariant).
+#[derive(Clone, Debug)]
+struct CallLifetimeOccurrence {
+    actual: String,
+    polarity: crate::variance::LabelPolarity,
+}
 impl Checker<'_, '_> {
     fn nested<T>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         if self.depth >= 128 {
@@ -12893,13 +12909,18 @@ impl Checker<'_, '_> {
                 Some(expected) => Some((self.result_type_hint(&method.result)?, expected)),
                 None => None,
             };
+            let binders = method
+                .lifetimes
+                .iter()
+                .map(|lifetime| lifetime.name.clone())
+                .collect::<BTreeSet<_>>();
             let (types, grades, consts, effects, values) = self.infer(
                 &method.generics,
                 explicit,
                 &pairs,
                 hint.as_ref()
                     .map(|(declared, expected)| (declared, *expected)),
-                true,
+                Some(&binders),
                 None,
                 None,
                 &what,
@@ -14074,6 +14095,11 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
+        let lifetime_binders = f
+            .lifetimes
+            .iter()
+            .map(|lifetime| lifetime.name.clone())
+            .collect::<BTreeSet<_>>();
         let mut prechecked = None;
         let mut generic_arguments = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         if !f.generics.is_empty() {
@@ -14096,7 +14122,7 @@ impl Checker<'_, '_> {
                 &pairs,
                 hint.as_ref()
                     .map(|(declared, expected)| (declared, *expected)),
-                true,
+                Some(&lifetime_binders),
                 self_type,
                 base.as_ref(),
                 &what,
@@ -14176,7 +14202,15 @@ impl Checker<'_, '_> {
                     Some(values) => values
                         .next()
                         .expect("inferred method argument in runtime order"),
-                    None => self.expr_expected(evidence, Some(ty))?,
+                    None => {
+                        let wanted = if lifetime_binders.is_empty() {
+                            ty
+                        } else {
+                            self.types
+                                .freshen_borrows(ty, &lifetime_binders, evidence.span)?
+                        };
+                        self.expr_expected(evidence, Some(wanted))?
+                    }
                 };
                 diverges |= value.ty == Type::Never;
                 values.push(value);
@@ -14199,16 +14233,24 @@ impl Checker<'_, '_> {
                 )?;
             }
         }
-        let mut coerced = Vec::with_capacity(values.len());
-        for (value, ty) in values.into_iter().zip(&signature.parameters) {
-            diverges |= value.ty == Type::Never;
-            coerced.push(self.coerce_argument(value, *ty, span)?);
-        }
+        diverges |= values.iter().any(|value| value.ty == Type::Never);
         let ty = if diverges {
             Type::Never
         } else {
-            self.instantiated_call_result_type(&signature, &coerced, span)?
+            self.instantiated_call_result_type(
+                &lifetime_binders,
+                &signature.parameters,
+                signature.result,
+                signature.result_grade,
+                &signature.lifetime_bounds,
+                &values,
+                span,
+            )?
         };
+        let mut coerced = Vec::with_capacity(values.len());
+        for (value, ty) in values.into_iter().zip(&signature.parameters) {
+            coerced.push(self.coerce_argument(value, *ty, span)?);
+        }
         let value = Expr {
             kind: ExprKind::Call(Target::Function(index), coerced),
             ty,
@@ -15398,6 +15440,18 @@ impl Checker<'_, '_> {
         {
             return Ok(());
         }
+        // A freshly generated argument placeholder is not an occurrence
+        // identity: the enclosing call relates the value's real provenance to
+        // the callee binder through its occurrence constraints. Nested block,
+        // lambda, `if`, and `match` checks still run normally because this
+        // exemption is keyed to the placeholder itself, not to a call-wide
+        // suppression depth.
+        if crate::runtime_types::borrow_lifetimes(self.types, expected)
+            .iter()
+            .any(|label| label.starts_with("<argument "))
+        {
+            return Ok(());
+        }
         // Shape compatibility owns its own diagnostics. This judgment is a
         // refinement, never a replacement for erased structure.
         if !self.subtype(value.ty, expected) {
@@ -15443,161 +15497,518 @@ impl Checker<'_, '_> {
         self.call_boundary -= 1;
         result
     }
-    /// Collect the actual caller label supplied for each callee-declared
-    /// lifetime that occurs in a parameter type. Multiple occurrences of one
-    /// declaration must agree; an ambiguous declaration is left unsubstituted
-    /// and therefore cannot silently pick one actual lifetime.
-    fn collect_call_lifetimes(
+    /// Record one callee binder occurrence against the actual label supplied
+    /// by the argument value. Only labels declared by the callee are
+    /// instantiated; labels that came from a caller type argument stay rigid
+    /// and keep their ordinary same-scope obligations.
+    fn record_call_lifetime_occurrence(
+        &self,
+        callee: Option<&str>,
+        actual: Option<&str>,
+        position: crate::variance::SignSet,
+        binders: &BTreeSet<String>,
+        occurrences: &mut BTreeMap<String, Vec<CallLifetimeOccurrence>>,
+    ) {
+        let Some(callee) = callee else {
+            return;
+        };
+        if !binders.contains(callee) {
+            return;
+        }
+        let Some(polarity) = crate::variance::LabelPolarity::of(position) else {
+            return;
+        };
+        occurrences
+            .entry(callee.to_owned())
+            .or_default()
+            .push(CallLifetimeOccurrence {
+                actual: actual.unwrap_or("").to_owned(),
+                polarity,
+            });
+    }
+    /// Whether either checked type mentions a lifetime binder being
+    /// instantiated. This prunes unrelated recursive shapes before the
+    /// occurrence walk descends into their fields.
+    fn call_type_mentions_binder(&self, ty: Type, binders: &BTreeSet<String>) -> bool {
+        crate::runtime_types::borrow_lifetimes(self.types, ty)
+            .iter()
+            .any(|label| binders.contains(label))
+    }
+    /// Walk one callee parameter against its checked argument value, recording
+    /// every declared binder occurrence at its composed variance position.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_call_lifetime_occurrences(
         &self,
         callee: Type,
         actual: Type,
-        candidates: &mut BTreeMap<String, BTreeSet<String>>,
+        position: crate::variance::SignSet,
+        binders: &BTreeSet<String>,
+        occurrences: &mut BTreeMap<String, Vec<CallLifetimeOccurrence>>,
         depth: usize,
-    ) {
+    ) -> Result<()> {
         if depth >= 64 {
-            return;
+            return Err(Diagnostic::new(
+                Span::default(),
+                "call lifetime instantiation exceeded its finite nesting budget; this call is too deeply nested to prove",
+            ));
+        }
+        if position.is_unused()
+            || (!self.call_type_mentions_binder(callee, binders)
+                && !self.call_type_mentions_binder(actual, binders))
+        {
+            return Ok(());
         }
         match (callee, actual) {
             (
                 Type::Annotated(callee_pointee, callee_label),
                 Type::Annotated(actual_pointee, actual_label),
             ) => {
-                if let (Some(callee_label), Some(actual_label)) = (
-                    self.types.reference_label_name(callee_label),
-                    self.types.reference_label_name(actual_label),
-                ) {
-                    candidates
-                        .entry(callee_label)
-                        .or_default()
-                        .insert(actual_label);
-                }
-                self.collect_call_lifetimes(
-                    self.types.pointees[callee_pointee],
-                    self.types.pointees[actual_pointee],
-                    candidates,
-                    depth + 1,
+                let callee_label = self.types.reference_label_name(callee_label);
+                let actual_label = self.types.reference_label_name(actual_label);
+                self.record_call_lifetime_occurrence(
+                    callee_label.as_deref(),
+                    actual_label.as_deref(),
+                    position,
+                    binders,
+                    occurrences,
                 );
+                let callee_inner = self.types.pointees[callee_pointee];
+                let actual_inner = self.types.pointees[actual_pointee];
+                self.collect_call_lifetime_occurrences(
+                    callee_inner,
+                    actual_inner,
+                    position.compose(crate::variance::SignSet::POSITIVE),
+                    binders,
+                    occurrences,
+                    depth + 1,
+                )
             }
-            (Type::Annotated(callee_pointee, _), other) => self.collect_call_lifetimes(
-                self.types.pointees[callee_pointee],
-                other,
-                candidates,
-                depth + 1,
-            ),
-            (callee, Type::Annotated(actual_pointee, _)) => self.collect_call_lifetimes(
-                callee,
-                self.types.pointees[actual_pointee],
-                candidates,
-                depth + 1,
-            ),
-            (Type::Enum(callee_id), Type::Enum(actual_id)) => {
-                let callee_layout = &self.types.enums[callee_id];
-                let actual_layout = &self.types.enums[actual_id];
-                if callee_layout.definition != actual_layout.definition {
-                    return;
+            (Type::Annotated(callee_pointee, callee_label), other) => {
+                let callee_label = self.types.reference_label_name(callee_label);
+                self.record_call_lifetime_occurrence(
+                    callee_label.as_deref(),
+                    None,
+                    position,
+                    binders,
+                    occurrences,
+                );
+                let callee_inner = self.types.pointees[callee_pointee];
+                self.collect_call_lifetime_occurrences(
+                    callee_inner,
+                    other,
+                    position.compose(crate::variance::SignSet::POSITIVE),
+                    binders,
+                    occurrences,
+                    depth + 1,
+                )
+            }
+            (callee, Type::Annotated(actual_pointee, _)) => {
+                let actual_inner = self.types.pointees[actual_pointee];
+                self.collect_call_lifetime_occurrences(
+                    callee,
+                    actual_inner,
+                    position.compose(crate::variance::SignSet::POSITIVE),
+                    binders,
+                    occurrences,
+                    depth + 1,
+                )
+            }
+            (Type::Enum(callee_id), Type::Enum(actual_id))
+            | (Type::Enum(callee_id), Type::Variants(actual_id, _))
+            | (Type::Variants(callee_id, _), Type::Enum(actual_id))
+            | (Type::Variants(callee_id, _), Type::Variants(actual_id, _)) => {
+                if self.types.enums[callee_id].definition != self.types.enums[actual_id].definition
+                {
+                    return Ok(());
                 }
-                let callee_lifetimes = callee_layout.lifetimes.clone();
-                let actual_lifetimes = actual_layout.lifetimes.clone();
-                for (declared, actual) in callee_lifetimes.iter().zip(&actual_lifetimes) {
-                    if !declared.is_empty() && !actual.is_empty() {
-                        candidates
-                            .entry(declared.clone())
-                            .or_default()
-                            .insert(actual.clone());
-                    }
+                let definition = self.types.enums[callee_id].definition;
+                let record = self.types.enums[callee_id].record;
+                let callee_lifetimes = self.types.enums[callee_id].lifetimes.clone();
+                let actual_lifetimes = self.types.enums[actual_id].lifetimes.clone();
+                for (index, (callee_label, actual_label)) in
+                    callee_lifetimes.iter().zip(&actual_lifetimes).enumerate()
+                {
+                    let variance = if record {
+                        self.types
+                            .variance
+                            .of(definition, index)
+                            .unwrap_or(crate::variance::SignSet::INVARIANT)
+                    } else {
+                        crate::variance::SignSet::INVARIANT
+                    };
+                    self.record_call_lifetime_occurrence(
+                        Some(callee_label),
+                        Some(actual_label),
+                        position.compose(variance),
+                        binders,
+                        occurrences,
+                    );
                 }
-                let callee_arguments = callee_layout.arguments.clone();
-                let actual_arguments = actual_layout.arguments.clone();
+                let callee_arguments = self.types.enums[callee_id].arguments.clone();
+                let actual_arguments = self.types.enums[actual_id].arguments.clone();
                 for (callee_argument, actual_argument) in
                     callee_arguments.iter().zip(&actual_arguments)
                 {
-                    self.collect_call_lifetimes(
+                    self.collect_call_lifetime_occurrences(
                         *callee_argument,
                         *actual_argument,
-                        candidates,
+                        position.compose(crate::variance::SignSet::INVARIANT),
+                        binders,
+                        occurrences,
                         depth + 1,
-                    );
+                    )?;
                 }
-                let callee_fields = callee_layout.variants.clone();
-                let actual_fields = actual_layout.variants.clone();
-                for (callee_variant, actual_variant) in callee_fields.iter().zip(&actual_fields) {
+                if record {
+                    return Ok(());
+                }
+                let callee_variants = self.types.enums[callee_id].variants.clone();
+                let actual_variants = self.types.enums[actual_id].variants.clone();
+                for (callee_variant, actual_variant) in callee_variants.iter().zip(&actual_variants)
+                {
                     for (callee_field, actual_field) in
                         callee_variant.fields.iter().zip(&actual_variant.fields)
                     {
-                        self.collect_call_lifetimes(
+                        self.collect_call_lifetime_occurrences(
                             *callee_field,
                             *actual_field,
-                            candidates,
+                            position.compose(crate::variance::SignSet::INVARIANT),
+                            binders,
+                            occurrences,
                             depth + 1,
-                        );
+                        )?;
                     }
                 }
+                Ok(())
             }
-            (Type::Variants(callee_id, _), Type::Variants(actual_id, _))
-            | (Type::Enum(callee_id), Type::Variants(actual_id, _))
-            | (Type::Variants(callee_id, _), Type::Enum(actual_id)) => self.collect_call_lifetimes(
-                Type::Enum(callee_id),
-                Type::Enum(actual_id),
-                candidates,
-                depth + 1,
-            ),
             (Type::Ref(callee_pointee), Type::Ref(actual_pointee))
             | (Type::RefMut(callee_pointee), Type::RefMut(actual_pointee))
             | (Type::RefMut(callee_pointee), Type::Ref(actual_pointee))
             | (Type::Slice(callee_pointee), Type::Slice(actual_pointee))
             | (Type::SliceMut(callee_pointee), Type::SliceMut(actual_pointee))
             | (Type::Box(callee_pointee), Type::Box(actual_pointee))
-            | (Type::Vec(callee_pointee), Type::Vec(actual_pointee))
-            | (Type::ArenaBox(callee_pointee), Type::ArenaBox(actual_pointee))
+            | (Type::Vec(callee_pointee), Type::Vec(actual_pointee)) => {
+                let callee_inner = self.types.pointees[callee_pointee];
+                let actual_inner = self.types.pointees[actual_pointee];
+                self.collect_call_lifetime_occurrences(
+                    callee_inner,
+                    actual_inner,
+                    position.compose(if matches!(callee, Type::RefMut(_) | Type::SliceMut(_)) {
+                        crate::variance::SignSet::INVARIANT
+                    } else {
+                        crate::variance::SignSet::POSITIVE
+                    }),
+                    binders,
+                    occurrences,
+                    depth + 1,
+                )
+            }
+            (Type::ArenaBox(callee_pointee), Type::ArenaBox(actual_pointee))
             | (Type::AllocBox(callee_pointee), Type::AllocBox(actual_pointee))
             | (Type::AllocVec(callee_pointee), Type::AllocVec(actual_pointee))
-            | (Type::Task(callee_pointee), Type::Task(actual_pointee)) => self
-                .collect_call_lifetimes(
-                    self.types.pointees[callee_pointee],
-                    self.types.pointees[actual_pointee],
-                    candidates,
+            | (Type::Task(callee_pointee), Type::Task(actual_pointee)) => {
+                let callee_inner = self.types.pointees[callee_pointee];
+                let actual_inner = self.types.pointees[actual_pointee];
+                self.collect_call_lifetime_occurrences(
+                    callee_inner,
+                    actual_inner,
+                    position.compose(crate::variance::SignSet::INVARIANT),
+                    binders,
+                    occurrences,
                     depth + 1,
-                ),
-            _ => {}
+                )
+            }
+            (Type::Union(callee_id), Type::Union(actual_id)) => {
+                let callee_members = self.types.unions[callee_id].members.clone();
+                let actual_members = self.types.unions[actual_id].members.clone();
+                if callee_members.len() != actual_members.len() {
+                    return Ok(());
+                }
+                for (callee_member, actual_member) in callee_members.iter().zip(&actual_members) {
+                    self.collect_call_lifetime_occurrences(
+                        *callee_member,
+                        *actual_member,
+                        position,
+                        binders,
+                        occurrences,
+                        depth + 1,
+                    )?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
         }
     }
-    /// Instantiate the callee's result lifetime labels from the actual argument
-    /// labels. This turns "the result carries the callee binder 'x" into "the
-    /// result carries the caller provenance label supplied for 'x", so a later
-    /// same-scope conversion checks the real identity instead of deferring an
-    /// unclassified callee label.
-    fn relabel_call_result(
-        &mut self,
+    /// Collect every binder occurrence for one call. `parameters` are the
+    /// callee's checked parameter types and `values` are the already-checked
+    /// arguments, before their runtime coercion replaces the argument's own
+    /// lifetime labels with the parameter type.
+    fn call_lifetime_occurrences(
+        &self,
         parameters: &[Type],
-        result: Type,
         values: &[Expr],
-        span: Span,
-    ) -> Result<Type> {
-        let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        binders: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Vec<CallLifetimeOccurrence>>> {
+        let mut occurrences = BTreeMap::new();
         for (parameter, value) in parameters.iter().zip(values) {
-            self.collect_call_lifetimes(*parameter, value.ty, &mut candidates, 0);
+            self.collect_call_lifetime_occurrences(
+                *parameter,
+                value.ty,
+                crate::variance::SignSet::POSITIVE,
+                binders,
+                &mut occurrences,
+                0,
+            )?;
         }
+        Ok(occurrences)
+    }
+    /// Resolve each callee binder from all of its parameter occurrences.
+    /// Invariant occurrences must agree on one actual identity; covariant and
+    /// contravariant occurrences may use a different actual lifetime only when
+    /// an established outlives edge proves the required direction. A binder
+    /// with no parameter occurrence keeps a distinct opaque identity so an
+    /// unresolved callee label can never masquerade as a caller binder with the
+    /// same printed name.
+    fn resolve_call_lifetimes(
+        &mut self,
+        binders: &BTreeSet<String>,
+        parameters: &[Type],
+        values: &[Expr],
+        bounds: &BTreeSet<(String, String)>,
+        span: Span,
+    ) -> Result<BTreeMap<String, String>> {
+        let mut occurrences = self.call_lifetime_occurrences(parameters, values, binders)?;
         let mut map = BTreeMap::new();
-        for (declared, actuals) in candidates {
-            let actuals = actuals.into_iter().collect::<Vec<_>>();
-            if let [actual] = actuals.as_slice()
-                && !actual.is_empty()
+        for binder in binders {
+            let occurrences = occurrences.remove(binder).unwrap_or_default();
+            let actuals = occurrences
+                .iter()
+                .map(|occurrence| occurrence.actual.clone())
+                .filter(|actual| !actual.is_empty())
+                .collect::<BTreeSet<_>>();
+            if actuals.is_empty() {
+                if occurrences.is_empty() {
+                    // No parameter occurrence at all: no caller identity can
+                    // ever supply this binder. Keep a distinct opaque identity
+                    // so its printed name cannot collide with a caller binder.
+                    map.insert(
+                        binder.clone(),
+                        self.types.fresh_lifetime("callee result lifetime"),
+                    );
+                } else {
+                    // The only occurrences are outer borrow positions whose
+                    // actual lexical lifetime is owned by the ownership
+                    // provenance pass, not by a record label in the checked
+                    // type. Preserve that established contract; inventing an
+                    // opaque identity here would erase real provenance.
+                    map.insert(binder.clone(), binder.clone());
+                }
+                continue;
+            }
+            // Compiler-inferred and elided labels are occurrence placeholders,
+            // not caller identities. When every supplied record label is one of
+            // these, the call has no named identity to prove or collide with;
+            // the ownership provenance pass remains authoritative.
+            let named = actuals
+                .iter()
+                .filter(|actual| !is_opaque_call_label(actual))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if named.is_empty() {
+                map.insert(
+                    binder.clone(),
+                    self.types.fresh_lifetime("callee result lifetime"),
+                );
+                continue;
+            }
+            let invokes_invariant = occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.polarity == crate::variance::LabelPolarity::Invariant
+                })
+                .collect::<Vec<_>>();
+            if invokes_invariant
+                .iter()
+                .any(|occurrence| is_opaque_call_label(&occurrence.actual))
             {
-                map.insert(declared, actual.clone());
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "this call cannot prove the invariant lifetime '{binder}': one occurrence supplies an inferred/elided identity while another supplies a named lifetime"
+                    ),
+                ));
+            }
+            let invariants = invokes_invariant
+                .iter()
+                .map(|occurrence| occurrence.actual.clone())
+                .filter(|actual| !actual.is_empty())
+                .collect::<BTreeSet<_>>();
+            let candidate = if !invariants.is_empty() {
+                if invariants.len() > 1 {
+                    let names = invariants
+                        .iter()
+                        .map(|actual| format!("'{actual}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "this call instantiates lifetime '{binder}' invariantly from several argument lifetimes ({names}); an invariant occurrence requires one actual lifetime identity"
+                        ),
+                    ));
+                }
+                let candidate = invariants.into_iter().next().expect("one invariant actual");
+                for occurrence in &occurrences {
+                    if occurrence.actual.is_empty() || is_opaque_call_label(&occurrence.actual) {
+                        continue;
+                    }
+                    match occurrence.polarity {
+                        crate::variance::LabelPolarity::Positive => {
+                            if !outlives(&self.lifetime_bounds, &occurrence.actual, &candidate) {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    format!(
+                                        "this call cannot use lifetime '{}' where '{binder}' is invariant '{}': no established outlives edge proves '{}: '{}",
+                                        occurrence.actual, candidate, occurrence.actual, candidate
+                                    ),
+                                ));
+                            }
+                        }
+                        crate::variance::LabelPolarity::Negative => {
+                            if !outlives(&self.lifetime_bounds, &candidate, &occurrence.actual) {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    format!(
+                                        "this call cannot use lifetime '{}' where '{binder}' is invariant '{}': no established outlives edge proves '{}: '{}",
+                                        occurrence.actual, candidate, candidate, occurrence.actual
+                                    ),
+                                ));
+                            }
+                        }
+                        crate::variance::LabelPolarity::Invariant => {
+                            if occurrence.actual != candidate {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    format!(
+                                        "this call instantiates lifetime '{binder}' invariantly from both '{}' and '{}'; an invariant occurrence requires one actual lifetime identity",
+                                        occurrence.actual, candidate
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+                candidate
+            } else if actuals.len() == 1 {
+                actuals.into_iter().next().expect("one actual lifetime")
+            } else {
+                let candidates = named
+                    .iter()
+                    .filter(|candidate| {
+                        occurrences.iter().all(|occurrence| {
+                            if occurrence.actual.is_empty()
+                                || is_opaque_call_label(&occurrence.actual)
+                            {
+                                return true;
+                            }
+                            match occurrence.polarity {
+                                crate::variance::LabelPolarity::Positive => {
+                                    outlives(&self.lifetime_bounds, &occurrence.actual, candidate)
+                                }
+                                crate::variance::LabelPolarity::Negative => {
+                                    outlives(&self.lifetime_bounds, candidate, &occurrence.actual)
+                                }
+                                crate::variance::LabelPolarity::Invariant => false,
+                            }
+                        })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                match candidates.as_slice() {
+                    [candidate] => candidate.clone(),
+                    [] => {
+                        let names = named
+                            .iter()
+                            .map(|actual| format!("'{actual}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "cannot choose one actual lifetime for callee lifetime '{binder}' from covariant argument occurrences ({names}); no candidate satisfies every required outlives edge"
+                            ),
+                        ));
+                    }
+                    _ => {
+                        let minimal = candidates.iter().find(|candidate| {
+                            candidates.iter().all(|other| {
+                                other == *candidate
+                                    || outlives(&self.lifetime_bounds, other, candidate)
+                            })
+                        });
+                        match minimal {
+                            Some(candidate) => candidate.clone(),
+                            None => {
+                                let names = candidates
+                                    .iter()
+                                    .map(|actual| format!("'{actual}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                return Err(Diagnostic::new(
+                                    span,
+                                    format!(
+                                        "cannot choose one actual lifetime for callee lifetime '{binder}': the covariant argument lifetimes {names} are incomparable, so no checked common identity exists"
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            };
+            map.insert(binder.clone(), candidate);
+        }
+        for (long, short) in bounds {
+            if !binders.contains(long) || !binders.contains(short) {
+                continue;
+            }
+            let (Some(long), Some(short)) = (map.get(long), map.get(short)) else {
+                continue;
+            };
+            if long.starts_with('<') || short.starts_with('<') {
+                continue;
+            }
+            if !outlives(&self.lifetime_bounds, long, short) {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "this call instantiates the callee bound '{long}: {short}', but no caller outlives edge proves '{}: '{}",
+                        long.trim_start_matches('\''),
+                        short.trim_start_matches('\'')
+                    ),
+                ));
             }
         }
-        self.types.relabel_lifetimes(result, &map, span)
+        Ok(map)
     }
+    /// Instantiate a call result from the actual argument provenance. Every
+    /// unresolved callee binder becomes a distinct opaque identity, never its
+    /// raw printed name, so a caller binder with the same name cannot pose as
+    /// the callee's identity.
+    #[allow(clippy::too_many_arguments)]
     fn instantiated_call_result_type(
         &mut self,
-        signature: &Signature,
+        binders: &BTreeSet<String>,
+        parameters: &[Type],
+        result: Type,
+        result_grade: Option<Grade>,
+        bounds: &BTreeSet<(String, String)>,
         values: &[Expr],
         span: Span,
     ) -> Result<Type> {
-        if crate::runtime_types::grade_erases(signature.result_grade) {
+        if crate::runtime_types::grade_erases(result_grade) {
             return Ok(Type::Unit);
         }
-        self.relabel_call_result(&signature.parameters, signature.result, values, span)
+        let map = self.resolve_call_lifetimes(binders, parameters, values, bounds, span)?;
+        self.types.relabel_lifetimes(result, &map, span)
     }
     /// Insert the deterministic runtime conversion needed to use `value` as
     /// `expected`. Same-layout refinements stay narrow (no runtime work); atom
@@ -21452,7 +21863,7 @@ impl Checker<'_, '_> {
                     Some(list),
                     &[],
                     None,
-                    false,
+                    None,
                     None,
                     None,
                     &what,
@@ -21846,25 +22257,48 @@ impl Checker<'_, '_> {
             ));
         }
         self.require(signature.effects, span)?;
+        let mut binders = BTreeSet::new();
+        for ty in signature
+            .parameters
+            .iter()
+            .copied()
+            .chain(std::iter::once(signature.result))
+        {
+            binders.extend(crate::runtime_types::borrow_lifetimes(self.types, ty));
+        }
+        binders.retain(|label| !label.is_empty() && !label.starts_with('<'));
         let mut diverges = false;
-        let mut values = Vec::with_capacity(arguments.len());
+        let mut checked = Vec::with_capacity(arguments.len());
         for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
             // An arrow's record lifetimes are instantiated afresh at each
             // call, exactly like a direct call. The argument constructs a
-            // record with its own inferred labels; the call boundary relates
-            // those labels to the arrow's declared ones.
-            let wanted = self.types.freshen_borrows(*parameter, argument.span)?;
+            // record with its own inferred labels; the call occurrence
+            // constraints relate those labels to the arrow's declared ones.
+            let wanted = self
+                .types
+                .freshen_borrows(*parameter, &binders, argument.span)?;
             let value = self.expr_expected(argument, Some(wanted))?;
             diverges |= value.ty == Type::Never;
-            values.push(self.coerce_argument(value, *parameter, argument.span)?);
+            checked.push(value);
         }
         let ty = if diverges {
             Type::Never
-        } else if signature.result_erased() {
-            Type::Unit
         } else {
-            self.relabel_call_result(&signature.parameters, signature.result, &values, span)?
+            self.instantiated_call_result_type(
+                &binders,
+                &signature.parameters,
+                signature.result,
+                signature.result_grade,
+                &BTreeSet::new(),
+                &checked,
+                span,
+            )?
         };
+        let mut values = Vec::with_capacity(checked.len());
+        for (value, parameter) in checked.into_iter().zip(&signature.parameters) {
+            let value_span = value.span;
+            values.push(self.coerce_argument(value, *parameter, value_span)?);
+        }
         let value = Expr {
             kind: ExprKind::CallIndirect {
                 callee: Box::new(callee),
@@ -24829,31 +25263,23 @@ impl Checker<'_, '_> {
         explicit: Option<&[ast::Type]>,
         pairs: &[(&ast::Type, &ast::Expr)],
         result: Option<(&ast::Type, Type)>,
-        freshen_borrowed_arguments: bool,
+        freshen_binders: Option<&BTreeSet<String>>,
         self_type: Option<Type>,
         base: Option<&crate::runtime_types::Subst>,
         what: &str,
         span: Span,
     ) -> Result<Inferred> {
-        // Parameter and record-field labels at an inference site are fresh
-        // placeholders chosen by this occurrence, not rigid caller binders.
-        // Their relation is established by the call/provenance mapping after
-        // the value is checked, so this same-scope witness does not reinterpret
-        // them as an identity obligation.
-        self.call_boundary += 1;
-        let result = self.infer_inner(
+        self.infer_inner(
             generics,
             explicit,
             pairs,
             result,
-            freshen_borrowed_arguments,
+            freshen_binders,
             self_type,
             base,
             what,
             span,
-        );
-        self.call_boundary -= 1;
-        result
+        )
     }
     #[allow(clippy::too_many_arguments)]
     fn infer_inner(
@@ -24862,7 +25288,7 @@ impl Checker<'_, '_> {
         explicit: Option<&[ast::Type]>,
         pairs: &[(&ast::Type, &ast::Expr)],
         result: Option<(&ast::Type, Type)>,
-        freshen_borrowed_arguments: bool,
+        freshen_binders: Option<&BTreeSet<String>>,
         self_type: Option<Type>,
         base: Option<&crate::runtime_types::Subst>,
         what: &str,
@@ -25022,11 +25448,11 @@ impl Checker<'_, '_> {
             // argument value, not forced to the callee's declaration names.
             // Freshening keeps the construction checked against local
             // provenance while the call boundary relates the two sets.
-            let wanted = match wanted {
-                Some(ty) if freshen_borrowed_arguments => {
-                    Some(self.types.freshen_borrows(ty, value.span)?)
+            let wanted = match (wanted, freshen_binders) {
+                (Some(ty), Some(binders)) => {
+                    Some(self.types.freshen_borrows(ty, binders, value.span)?)
                 }
-                other => other,
+                (other, _) => other,
             };
             let value = self.expr_expected(value, wanted)?;
             constraints.push((declared, value.ty));
@@ -25654,6 +26080,11 @@ impl Checker<'_, '_> {
             Some(expected) => Some((self.result_type_hint(&f.result)?, expected)),
             None => None,
         };
+        let lifetime_binders = f
+            .lifetimes
+            .iter()
+            .map(|lifetime| lifetime.name.clone())
+            .collect::<BTreeSet<_>>();
         let (type_arguments, grade_arguments, const_arguments, effect_arguments, values) = self
             .infer(
                 &f.generics,
@@ -25661,7 +26092,7 @@ impl Checker<'_, '_> {
                 &pairs,
                 hint.as_ref()
                     .map(|(declared, expected)| (declared, *expected)),
-                true,
+                Some(&lifetime_binders),
                 None,
                 None,
                 &what,
@@ -25680,10 +26111,22 @@ impl Checker<'_, '_> {
         )?;
         let signature = self.functions.signatures[index].clone();
         self.require(signature.effects, span)?;
-        let mut diverges = false;
+        let diverges = values.iter().any(|value| value.ty == Type::Never);
+        let ty = if diverges {
+            Type::Never
+        } else {
+            self.instantiated_call_result_type(
+                &lifetime_binders,
+                &signature.parameters,
+                signature.result,
+                signature.result_grade,
+                &signature.lifetime_bounds,
+                &values,
+                span,
+            )?
+        };
         let mut coerced = Vec::with_capacity(values.len());
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
-            diverges |= value.ty == Type::Never;
             coerced.push(self.coerce_argument(value, *ty, span)?);
         }
         let values = coerced;
@@ -25747,11 +26190,6 @@ impl Checker<'_, '_> {
                 )?;
             }
         }
-        let ty = if diverges {
-            Type::Never
-        } else {
-            self.instantiated_call_result_type(&signature, &values, span)?
-        };
         let value = Expr {
             kind: ExprKind::Call(
                 if self.functions.foreign_functions.contains_key(&index) {
@@ -25790,35 +26228,23 @@ impl Checker<'_, '_> {
             .iter()
             .map(|name| (name.clone(), BTreeSet::new()))
             .collect();
-        if declared.len() == 1 {
-            let only = declared[0].name.clone();
-            let mut actuals = BTreeSet::new();
-            for value in values {
-                actuals.extend(
-                    crate::runtime_types::borrow_lifetimes(self.types, value.ty)
-                        .into_iter()
-                        .filter(|label| !label.is_empty() && !label.starts_with('<')),
-                );
-            }
-            actuals.remove("");
-            if actuals.len() == 1 {
-                candidates.entry(only).or_default().extend(actuals);
-            }
-        } else {
-            for ((declared_ty, _), value) in pairs.iter().zip(values) {
-                let mut used = BTreeSet::new();
-                type_lifetimes(declared_ty, &mut used);
-                used.retain(|name| declared_names.contains(name));
-                let actuals = crate::runtime_types::borrow_lifetimes(self.types, value.ty);
-                let actuals = actuals
-                    .into_iter()
-                    .filter(|label| !label.is_empty() && !label.starts_with('<'))
-                    .collect::<BTreeSet<_>>();
-                if used.len() == 1 && actuals.len() == 1 {
-                    let field_lifetime = used.into_iter().next().expect("one field lifetime");
-                    let actual = actuals.into_iter().next().expect("one actual lifetime");
-                    candidates.entry(field_lifetime).or_default().insert(actual);
-                }
+        // Only a field whose declared type actually mentions the lifetime can
+        // supply evidence for it. An unrelated field with its own borrow label
+        // must not be mistaken for the declaration's identity, even when the
+        // record has a single lifetime parameter.
+        for ((declared_ty, _), value) in pairs.iter().zip(values) {
+            let mut used = BTreeSet::new();
+            type_lifetimes(declared_ty, &mut used);
+            used.retain(|name| declared_names.contains(name));
+            let actuals = crate::runtime_types::borrow_lifetimes(self.types, value.ty);
+            let actuals = actuals
+                .into_iter()
+                .filter(|label| !label.is_empty() && !label.starts_with('<'))
+                .collect::<BTreeSet<_>>();
+            if used.len() == 1 && actuals.len() == 1 {
+                let field_lifetime = used.into_iter().next().expect("one field lifetime");
+                let actual = actuals.into_iter().next().expect("one actual lifetime");
+                candidates.entry(field_lifetime).or_default().insert(actual);
             }
         }
         declared
@@ -25937,11 +26363,15 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
+        let lifetime_binders = declared_lifetimes
+            .iter()
+            .map(|lifetime| lifetime.name.clone())
+            .collect::<BTreeSet<_>>();
         let (arguments, consts, lifetimes, values) =
             if let (None, Some(layout)) = (explicit, expected_layout) {
                 let arguments = self.types.enums[layout].arguments.clone();
                 let consts = self.types.enums[layout].consts.clone();
-                let lifetimes = self.types.enums[layout].lifetimes.clone();
+                let expected_lifetimes = self.types.enums[layout].lifetimes.clone();
                 let mut subst = crate::runtime_types::Subst::default();
                 let mut type_index = 0;
                 let mut const_index = 0;
@@ -25955,16 +26385,45 @@ impl Checker<'_, '_> {
                         type_index += 1;
                     }
                 }
-                for (declared, actual) in declared_lifetimes.iter().zip(&lifetimes) {
-                    subst
-                        .lifetimes
-                        .insert(declared.name.clone(), actual.clone());
+                // A call argument's expected record may carry freshly generated
+                // binder placeholders. Those placeholders make the fields local
+                // to this occurrence; they are not the literal's actual
+                // identity. Infer that identity from the checked field values
+                // instead of adopting the placeholder, so the enclosing call
+                // can relate the real provenance to the callee binder. Explicit
+                // caller labels keep their normal annotation obligation.
+                let has_placeholder = expected_lifetimes
+                    .iter()
+                    .any(|lifetime| lifetime.starts_with("<argument lifetime "));
+                for (declared, actual) in declared_lifetimes.iter().zip(&expected_lifetimes) {
+                    let actual = if has_placeholder && actual.starts_with("<argument lifetime ") {
+                        self.types.fresh_lifetime("argument lifetime")
+                    } else {
+                        actual.clone()
+                    };
+                    subst.lifetimes.insert(declared.name.clone(), actual);
                 }
                 let mut values = Vec::new();
                 for (declared, value) in &pairs {
                     let wanted = self.types.ty_in(declared, &subst)?;
                     values.push(self.expr_expected(value, Some(wanted))?);
                 }
+                let lifetimes = if has_placeholder {
+                    let inferred = self.infer_record_lifetimes(&pairs, &values, declared_lifetimes);
+                    expected_lifetimes
+                        .iter()
+                        .zip(inferred)
+                        .map(|(expected, inferred)| {
+                            if expected.starts_with("<argument lifetime ") {
+                                inferred
+                            } else {
+                                expected.clone()
+                            }
+                        })
+                        .collect()
+                } else {
+                    expected_lifetimes
+                };
                 (arguments, consts, lifetimes, values)
             } else {
                 // When the literal has no expected type, its own declared
@@ -25978,7 +26437,7 @@ impl Checker<'_, '_> {
                     for lifetime in declared_lifetimes {
                         placeholder_substitution.lifetimes.insert(
                             lifetime.name.clone(),
-                            self.types.fresh_lifetime("record field lifetime"),
+                            self.types.fresh_lifetime("argument lifetime"),
                         );
                     }
                 }
@@ -25995,7 +26454,7 @@ impl Checker<'_, '_> {
                     // actual values, not from the enclosing declaration's
                     // lifetime names. The final construct validates explicit
                     // outer lifetime relationships against field provenance.
-                    true,
+                    Some(&lifetime_binders),
                     None,
                     Some(&placeholder_substitution),
                     "this record",

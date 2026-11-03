@@ -43,14 +43,22 @@ and layouts as before.
   declared labels authoritative and preserves the existing owner-loan rules.
 - Same-scope conversions in the executable checker run the contextual witness
   for every borrowed conversion, including call results and coerced values.
-  Direct and indirect call results are relabeled from the actual argument
-  labels before a later conversion is checked, so an unclassified callee
-  binder is not treated as free identity. At an invariant position, an
-  internal/fresh or unclassified label without an identity proof is rejected;
-  outside an invariant position the call/provenance evidence still owns the
-  relation. Calls through a callee contract instantiate their parameter
-  lifetimes from the actual arguments, and the ownership mapping retains the
-  result provenance.
+  Direct, indirect, and statically dispatched method calls collect each
+  declared callee binder occurrence across every argument. Invariant
+  occurrences must agree on one actual lifetime identity; covariant and
+  contravariant occurrences may use a different actual lifetime only when an
+  established caller outlives edge proves the required direction, and declared
+  callee bounds are checked after instantiation. Resolution is per call, not a
+  blanket same-label rule. Record literal inference uses only fields whose
+  declared type mentions the lifetime, so an unrelated field cannot supply or
+  poison the identity.
+- A fresh argument placeholder is not compared as a caller identity; the call
+  occurrence constraints own that relation. In contrast, a nested block, `if`,
+  `match`, or immediately called lambda used as an argument keeps its normal
+  same-scope obligations. An unresolved callee binder with no parameter
+  occurrence becomes a distinct opaque identity rather than keeping its raw
+  printed name, so a caller binder with the same name cannot masquerade as the
+  callee identity.
 
 ## Tests
 
@@ -87,5 +95,12 @@ and layouts as before.
   label is rejected without an identity proof; a non-invariant occurrence may
   still defer to the existing call/provenance evidence rather than inventing a
   relation.
+- Call constraints see lifetime labels carried by record slots and container
+  elements. An outer reference or slice label with no record occurrence remains
+  represented by the ownership provenance pass rather than a named type label,
+  so that established contract is preserved; indirect calls currently check
+  record/container occurrences but do not re-check canonical arrow bounds.
+- Dynamic `dyn` dispatch and compiler builtins keep their existing contracts and
+  are not broadened by these call constraints.
 - No new higher-rank callable inference is added. Canonical arrow labels are
   still mapped by the established positional instantiation rule.
