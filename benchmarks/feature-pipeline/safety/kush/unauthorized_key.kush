@@ -1,0 +1,3 @@
+prop AuthorizedKey<key: i64> { Standard: AuthorizedKey<23130> }
+fn approve(key: i64, erased approved: AuthorizedKey<key>) -> i64 ! {} { key }
+fn main() -> i64 ! {} { approve(0, AuthorizedKey.Standard::<23130>) }

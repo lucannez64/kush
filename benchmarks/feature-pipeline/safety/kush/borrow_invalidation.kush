@@ -1,0 +1,1 @@
+fn main() -> i64 ! {alloc, panic} { let values: Vec<i64> = [1]; let view = &values[..]; drop(values); Slice.get(view, 0) }

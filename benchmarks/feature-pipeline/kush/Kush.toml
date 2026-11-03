@@ -1,0 +1,5 @@
+[package]
+name = "feature_pipeline"
+version = "0.1.0"
+entry = "main.kush"
+test = "tests/main.kush"

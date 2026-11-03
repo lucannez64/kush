@@ -1,0 +1,28 @@
+cargo-features = ["codegen-backend"]
+
+[package]
+name = "feature-pipeline-rust"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "feature-pipeline-rust"
+path = "main.rs"
+
+[workspace]
+
+[profile.dev]
+codegen-backend = "cranelift"
+opt-level = 0
+overflow-checks = true
+panic = "abort"
+
+[profile.release]
+codegen-backend = "cranelift"
+opt-level = 3
+overflow-checks = true
+panic = "abort"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(instrument)'] }

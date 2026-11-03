@@ -1,0 +1,25 @@
+module feature_pipeline;
+
+use std.result.Result;
+use std.text;
+use feature_pipeline.pipeline;
+
+fn argument(index: i64) -> i64 ! {io, alloc, panic} {
+    let bytes = match ENV.arg(index, Bytes.with_capacity(64)) { Ok(value) => value, Err(_) => { return -1; } };
+    match text.parse_i64(&bytes) { Ok(value) => value, Err(_) => -1 }
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let n = argument(1);
+    let rounds = argument(2);
+    let mode = argument(3);
+    if n < 1 || n > 8000000 || rounds < 0 || rounds > 32 || mode < 0 || mode > 1 { return 2; }
+    let mut result = 0;
+    let mut round = 0;
+    while round < rounds {
+        result = result + pipeline.batch(n, mode == 1);
+        round = round + 1;
+    }
+    print_i64(result);
+    0
+}

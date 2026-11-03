@@ -1,0 +1,1275 @@
+{
+  "metadata": {
+    "utc": "2026-11-03T01:04:10.539506+00:00",
+    "host": "Linux-7.2.11-zen1-1-zen-x86_64-with-glibc2.44",
+    "cpu_model": "AMD Ryzen 5 PRO 5675U with Radeon Graphics",
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "pinned_cpu": 11,
+    "load_before": [
+      2.68798828125,
+      2.61376953125,
+      2.6181640625
+    ],
+    "warmups": 2,
+    "repetitions": 7,
+    "workload_sources": {
+      "kush/main.kush": "e8848e86853572efcc3e687e0bd0620a1ceb407135c1e53b70a0ddab59caf4e5",
+      "kush/src/pipeline.kush": "19407c88956b5917648bb64bb2defdb47c46deb1f86f34bdf4bc6c848a0b1057",
+      "kush/tests/main.kush": "ccedff56e7a4fa73d96281dafe7b5cde152b2c36d77e59266775d6b592921a85",
+      "rust/allocation.rs": "6fa71c7b8bf44e2e26364fccf9781e0b82539e296f1b3337124bfbfa85c7ea52",
+      "rust/main.rs": "2a16dd29ee66e08c588c963103eac8390311530ae1475e9e37314fba400c7d2e",
+      "rust/pipeline.rs": "0cdb46b91b258d5307bbf85da99c1e5f88be7c60be96567126a6e629cbd87d26"
+    },
+    "kush_version": "kush 0.1.0",
+    "kush_binary_sha256": "74f59c22e863c1601d13beebd6a230ff5b5e8ac7c17f5de62650a091ca0072a7",
+    "git_head": "b2bfdbc6b7d0553dc4f862124b3f65202a35b10d",
+    "rustc": "rustc 1.100.0-nightly (cea272fa3 2026-09-07)\nbinary: rustc\ncommit-hash: cea272fa356e94bd2ee2cadf376630aa0683867a\ncommit-date: 2026-09-07\nhost: x86_64-unknown-linux-gnu\nrelease: 1.100.0-nightly\nLLVM version: 23.1.1",
+    "kush_cranelift_dependency": "=0.135.0",
+    "rust_flags": [
+      "rustc",
+      "+nightly",
+      "-Zcodegen-backend=cranelift",
+      "-Copt-level=3",
+      "-Coverflow-checks=yes",
+      "-Cpanic=abort",
+      "-Ctarget-cpu=x86-64",
+      "--edition=2024"
+    ],
+    "builds": [
+      {
+        "variant": "kush-fused",
+        "command": [
+          "/home/hirew/.cache/kush-mbx-otp-compiler/debug/kush",
+          "build",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-fused.kush",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-fused"
+        ],
+        "wall_s": 1.0552250669861678,
+        "stderr": "",
+        "source_sha256": "cafd7a051c4b826027b1b2a768ea06238b37ed8ccc5175736a6dfefce5382a20",
+        "binary_sha256": "90ef03069ade8cb012fd3d74add371311891a234203cb8643cb4764ab44487d3",
+        "binary_bytes": 81160
+      },
+      {
+        "variant": "kush-fused-stats",
+        "command": [
+          "/home/hirew/.cache/kush-mbx-otp-compiler/debug/kush",
+          "build",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-fused.kush",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-fused-stats",
+          "--stats"
+        ],
+        "wall_s": 1.041443561000051,
+        "stderr": "",
+        "source_sha256": "cafd7a051c4b826027b1b2a768ea06238b37ed8ccc5175736a6dfefce5382a20",
+        "binary_sha256": "cb8688662b9febf1ceff6f22c6c3cf189c78bb849ec8c0fe90361892bb68737a",
+        "binary_bytes": 81160
+      },
+      {
+        "variant": "kush-plain",
+        "command": [
+          "/home/hirew/.cache/kush-mbx-otp-compiler/debug/kush",
+          "build",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-plain.kush",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-plain"
+        ],
+        "wall_s": 1.2394338020094438,
+        "stderr": "",
+        "source_sha256": "844a6d50604dd94ba0c13a2f9ce746f7f8b6cc8bb8cbda72007ba614cf5145a6",
+        "binary_sha256": "90ef03069ade8cb012fd3d74add371311891a234203cb8643cb4764ab44487d3",
+        "binary_bytes": 81160
+      },
+      {
+        "variant": "kush-plain-stats",
+        "command": [
+          "/home/hirew/.cache/kush-mbx-otp-compiler/debug/kush",
+          "build",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-plain.kush",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-plain-stats",
+          "--stats"
+        ],
+        "wall_s": 1.1176407339953585,
+        "stderr": "",
+        "source_sha256": "844a6d50604dd94ba0c13a2f9ce746f7f8b6cc8bb8cbda72007ba614cf5145a6",
+        "binary_sha256": "cb8688662b9febf1ceff6f22c6c3cf189c78bb849ec8c0fe90361892bb68737a",
+        "binary_bytes": 81160
+      },
+      {
+        "variant": "kush-staged",
+        "command": [
+          "/home/hirew/.cache/kush-mbx-otp-compiler/debug/kush",
+          "build",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-staged.kush",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-staged"
+        ],
+        "wall_s": 1.0503230320027797,
+        "stderr": "",
+        "source_sha256": "127312ee2a7fbdec1850779573414c06969a4b5ddf7331d9e000628ced10444f",
+        "binary_sha256": "08cf1ede8bcd1a3cd65e231b2cd72ada5ecd9632edd2550b460f2f1a881f1732",
+        "binary_bytes": 81160
+      },
+      {
+        "variant": "kush-staged-stats",
+        "command": [
+          "/home/hirew/.cache/kush-mbx-otp-compiler/debug/kush",
+          "build",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-staged.kush",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/kush-staged-stats",
+          "--stats"
+        ],
+        "wall_s": 1.0862281680019805,
+        "stderr": "",
+        "source_sha256": "127312ee2a7fbdec1850779573414c06969a4b5ddf7331d9e000628ced10444f",
+        "binary_sha256": "f55de341c0f8356eaa25f95b8ba69adc081a818b4ed026dc580de8a5bfc8ea37",
+        "binary_bytes": 85256
+      },
+      {
+        "variant": "rust-o3",
+        "command": [
+          "rustc",
+          "+nightly",
+          "-Zcodegen-backend=cranelift",
+          "-Copt-level=3",
+          "-Coverflow-checks=yes",
+          "-Cpanic=abort",
+          "-Ctarget-cpu=x86-64",
+          "--edition=2024",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/rust/main.rs",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/rust-o3"
+        ],
+        "wall_s": 0.09656123700551689,
+        "stderr": "",
+        "binary_sha256": "4707f62402e7839d9eae723242783f5669d231898701965526189518d73b966d",
+        "binary_bytes": 4570072
+      },
+      {
+        "variant": "rust-o3-stats",
+        "command": [
+          "rustc",
+          "+nightly",
+          "-Zcodegen-backend=cranelift",
+          "-Copt-level=3",
+          "-Coverflow-checks=yes",
+          "-Cpanic=abort",
+          "-Ctarget-cpu=x86-64",
+          "--edition=2024",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/rust/main.rs",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/rust-o3-stats",
+          "--cfg",
+          "instrument"
+        ],
+        "wall_s": 0.11178171999927144,
+        "stderr": "",
+        "binary_sha256": "82747e0f615f20cdc8aef1551cbd1ac3587ad413da9c674e419febe2b24367c9",
+        "binary_bytes": 4584864
+      },
+      {
+        "variant": "rust-o0",
+        "command": [
+          "rustc",
+          "+nightly",
+          "-Zcodegen-backend=cranelift",
+          "-Copt-level=0",
+          "-Coverflow-checks=yes",
+          "-Cpanic=abort",
+          "-Ctarget-cpu=x86-64",
+          "--edition=2024",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/rust/main.rs",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/rust-o0"
+        ],
+        "wall_s": 0.08967957299319096,
+        "stderr": "",
+        "binary_sha256": "3aaaa514db134d84e1b4298282a22e75523f1756768a27a89fdb3700e505b5ec",
+        "binary_bytes": 4592896
+      },
+      {
+        "variant": "rust-o0-stats",
+        "command": [
+          "rustc",
+          "+nightly",
+          "-Zcodegen-backend=cranelift",
+          "-Copt-level=0",
+          "-Coverflow-checks=yes",
+          "-Cpanic=abort",
+          "-Ctarget-cpu=x86-64",
+          "--edition=2024",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/rust/main.rs",
+          "-o",
+          "/home/hirew/Projects/kush/benchmarks/feature-pipeline/build/rust-o0-stats",
+          "--cfg",
+          "instrument"
+        ],
+        "wall_s": 0.10441864299355075,
+        "stderr": "",
+        "binary_sha256": "d04c008566c8d7c45fd6d3cbf1aee3787f483969605e95621dbc44891cae98db",
+        "binary_bytes": 4618048
+      }
+    ],
+    "method": "fresh processes; shuffled blocks; pinned child CPU; high-resolution parent wall clock includes GNU time/spawn/startup/output; RSS from GNU time; stats builds excluded from timing",
+    "stdlib_caveat": "Rust uses installed prebuilt standard libraries, potentially LLVM-built; Cranelift is explicitly selected for this crate and its monomorphizations. Kush links a cc-built C runtime. Backend versions/optimization pipelines need not match.",
+    "load_after": [
+      2.912109375,
+      2.66650390625,
+      2.63623046875
+    ],
+    "rust_backend_libraries": [
+      {
+        "file": "/home/hirew/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/codegen-backends/librustc_codegen_cranelift-1.100.0-nightly.so",
+        "sha256": "05a09a27d60d0ec6f6ea9ba67c028549088a54c5945db3d7f2fe3cccc27a9eb6"
+      }
+    ],
+    "python": "3.14.9",
+    "c_compiler": "cc (GCC) 16.2.1 20260810",
+    "workload_source_state": "New benchmark sources were uncommitted during this run; recorded source hashes match the subsequently committed inputs. Git head records the base repository/compiler checkpoint.",
+    "shuffle_seed": 20261103
+  },
+  "safety": [
+    {
+      "case": "use_after_move",
+      "kush_compile": "rejected",
+      "rust_compile": "rejected",
+      "kush_diagnostic": "error: cannot borrow a moved owner",
+      "rust_diagnostic": "error[E0382]: borrow of moved value: `values`\n --> /home/hirew/Projects/kush/benchmarks/feature-pipeline/safety/rust/use_after_move.rs:1:67\n  |\n1 | fn main() { let values = vec![1i64]; drop(values); println!(\"{}\", values.len()); }\n  |                 ------                    ------                  ^^^^^^ value borrowed here after move\n  |                 |                         |\n  |                 |                         value moved here\n  |                 move occurs because `values` has type `Vec<i64>`, which does not implement the `Copy` trait\n  |\nhelp: consider cloning the value if the performance cost is acceptable\n  |\n1 | fn main() { let values = vec![1i64]; drop(values.clone()); println!(\"{}\", values.len()); }\n  |                                                 ++++++++\n\nerror: aborting due to 1 previous error\n\nFor more information about this error, try `rustc --explain E0382`.\n"
+    },
+    {
+      "case": "borrow_invalidation",
+      "kush_compile": "rejected",
+      "rust_compile": "rejected",
+      "kush_diagnostic": "error: cannot move or drop an owner or view while a slice view derived from it is live",
+      "rust_diagnostic": "error[E0505]: cannot move out of `values` because it is borrowed\n --> /home/hirew/Projects/kush/benchmarks/feature-pipeline/safety/rust/borrow_invalidation.rs:1:67\n  |\n1 | fn main() { let values = vec![1i64]; let view = &values[..]; drop(values); println!(\"{}\", view[0]); }\n  |                 ------                           ------           ^^^^^^                  ------- borrow later used here\n  |                 |                                |                |\n  |                 |                                |                move out of `values` occurs here\n  |                 |                                borrow of `values` occurs here\n  |                 binding `values` declared here\n  |\nhelp: consider cloning the value if the performance cost is acceptable\n  |\n1 | fn main() { let values = vec![1i64]; let view = &values.clone()[..]; drop(values); println!(\"{}\", view[0]); }\n  |                                                        ++++++++\n\nerror: aborting due to 1 previous error\n\nFor more information about this error, try `rustc --explain E0505`.\n"
+    },
+    {
+      "case": "exclusive_alias",
+      "kush_compile": "rejected",
+      "rust_compile": "rejected",
+      "kush_diagnostic": "error: cannot create an exclusive '&mut [T]' view while another view of the same owner is live; split siblings require one checked Slice.split_at_mut pair, and independent disjoint ranges are not inferred",
+      "rust_diagnostic": "error[E0499]: cannot borrow `values` as mutable more than once at a time\n --> /home/hirew/Projects/kush/benchmarks/feature-pipeline/safety/rust/exclusive_alias.rs:1:79\n  |\n1 | fn main() { let mut values = [1i64, 2]; let a = &mut values[..]; let b = &mut values[..]; a[0] = 3; println!(\"{}\", b[0]); }\n  |                                                      ------                   ^^^^^^      ---- first borrow later used here\n  |                                                      |                        |\n  |                                                      |                        second mutable borrow occurs here\n  |                                                      first mutable borrow occurs here\n\nerror: aborting due to 1 previous error\n\nFor more information about this error, try `rustc --explain E0499`.\n"
+    },
+    {
+      "case": "exact_use_grade",
+      "kush_compile": "rejected",
+      "rust_compile": "accepted",
+      "kush_diagnostic": "error: a value graded @[2] is not used consistently before the function returns; the value is used 1 time(s) on this path; the annotation requires exactly 2",
+      "rust_diagnostic": ""
+    },
+    {
+      "case": "linear_discard",
+      "kush_compile": "rejected",
+      "rust_compile": "accepted",
+      "kush_diagnostic": "error: linear values cannot be dropped; consume them by matching or passing them on",
+      "rust_diagnostic": "",
+      "rust_runtime": "drop guard aborts"
+    },
+    {
+      "case": "unauthorized_key",
+      "kush_compile": "rejected",
+      "rust_compile": "rejected",
+      "kush_diagnostic": "error: proof does not establish the erased proposition: type mismatch: expected App(Global(\"AuthorizedKey\"), ScalarLiteral(I64(0))), inferred App(Global(\"AuthorizedKey\"), ScalarLiteral(I64(23130)))",
+      "rust_diagnostic": "error[E0603]: tuple struct constructor `AuthorizedKey` is private\n --> /home/hirew/Projects/kush/benchmarks/feature-pipeline/safety/rust/unauthorized_key.rs:4:47\n  |\n4 | fn main() { let _ = pipeline::issue(pipeline::AuthorizedKey(0), pipeline::Audit); }\n  |                                               ^^^^^^^^^^^^^ private tuple struct constructor\n  |\n ::: /home/hirew/Projects/kush/benchmarks/feature-pipeline/safety/rust/../../rust/pipeline.rs:3:26\n  |\n3 | pub struct AuthorizedKey(i64);\n  |                          --- a constructor is private if any of the fields is private\n  |\nnote: the tuple struct constructor `AuthorizedKey` is defined here\n --> /home/hirew/Projects/kush/benchmarks/feature-pipeline/safety/rust/../../rust/pipeline.rs:3:1\n  |\n3 | pub struct AuthorizedKey(i64);\n  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nhelp: consider making the field publicly accessible\n --> /home/hirew/Projects/kush/benchmarks/feature-pipeline/safety/rust/../../rust/pipeline.rs:3:26\n  |\n3 | pub struct AuthorizedKey(pub i64);\n  |                          +++\n\nerror: aborting due to 1 previous error\n\nFor more information about this error, try `rustc --explain E0603`.\n"
+    },
+    {
+      "case": "noalloc_violation",
+      "kush_compile": "rejected",
+      "rust_compile": "accepted",
+      "kush_diagnostic": "error: noalloc contract forbids the alloc effect",
+      "rust_diagnostic": ""
+    },
+    {
+      "case": "erased_observation",
+      "kush_compile": "rejected",
+      "rust_compile": "rejected",
+      "kush_diagnostic": "error: a value graded @[0] is not used consistently before the function returns; the value is used 1 time(s) on this path; grade @[0] forbids runtime observation",
+      "rust_diagnostic": "error[E0308]: mismatched types\n --> /home/hirew/Projects/kush/benchmarks/feature-pipeline/safety/rust/erased_observation.rs:2:35\n  |\n2 | fn observe(audit: Audit) -> i64 { audit }\n  |                             ---   ^^^^^ expected `i64`, found `Audit`\n  |                             |\n  |                             expected `i64` because of return type\n\nerror: aborting due to 1 previous error\n\nFor more information about this error, try `rustc --explain E0308`.\n"
+    },
+    {
+      "case": "forget_ticket",
+      "kush_compile": "no corresponding safe forget builtin in this API",
+      "rust_compile": "accepted",
+      "rust_runtime": "exits normally; bypasses Drop guard"
+    }
+  ],
+  "allocations": [
+    {
+      "variant": "kush-fused",
+      "allocations": 11,
+      "deallocations": 11,
+      "peak_live": 2,
+      "buffer_growths": 0,
+      "reuses": 0,
+      "static_fusions": 1,
+      "whole_process_baseline": {
+        "allocations": 3,
+        "deallocations": 3,
+        "peak_live": 1,
+        "buffer_growths": 0,
+        "reuses": 0,
+        "static_fusions": 1
+      },
+      "workload_logical_allocations": 8
+    },
+    {
+      "variant": "kush-plain",
+      "allocations": 11,
+      "deallocations": 11,
+      "peak_live": 2,
+      "buffer_growths": 0,
+      "reuses": 0,
+      "static_fusions": 1,
+      "whole_process_baseline": {
+        "allocations": 3,
+        "deallocations": 3,
+        "peak_live": 1,
+        "buffer_growths": 0,
+        "reuses": 0,
+        "static_fusions": 1
+      },
+      "workload_logical_allocations": 8
+    },
+    {
+      "variant": "kush-staged",
+      "allocations": 11,
+      "deallocations": 11,
+      "peak_live": 2,
+      "buffer_growths": 0,
+      "reuses": 0,
+      "static_fusions": 0,
+      "whole_process_baseline": {
+        "allocations": 3,
+        "deallocations": 3,
+        "peak_live": 1,
+        "buffer_growths": 0,
+        "reuses": 0,
+        "static_fusions": 0
+      },
+      "workload_logical_allocations": 8
+    },
+    {
+      "variant": "rust-manual",
+      "workload_allocator_calls": 8,
+      "workload_deallocator_calls": 8,
+      "reallocations": 0,
+      "live_requested_bytes": 0,
+      "peak_requested_bytes": 16777224
+    },
+    {
+      "variant": "rust-iter",
+      "workload_allocator_calls": 8,
+      "workload_deallocator_calls": 8,
+      "reallocations": 0,
+      "live_requested_bytes": 0,
+      "peak_requested_bytes": 16777224
+    },
+    {
+      "variant": "rust-staged",
+      "workload_allocator_calls": 8,
+      "workload_deallocator_calls": 8,
+      "reallocations": 0,
+      "live_requested_bytes": 0,
+      "peak_requested_bytes": 16777224
+    },
+    {
+      "variant": "rust-o0",
+      "workload_allocator_calls": 8,
+      "workload_deallocator_calls": 8,
+      "reallocations": 0,
+      "live_requested_bytes": 0,
+      "peak_requested_bytes": 16777224
+    }
+  ],
+  "source_lines": {
+    "Kush production": {
+      "files": [
+        "kush/main.kush",
+        "kush/src/pipeline.kush"
+      ],
+      "nonblank_noncomment_lines": 76
+    },
+    "Rust production": {
+      "files": [
+        "rust/main.rs",
+        "rust/pipeline.rs"
+      ],
+      "nonblank_noncomment_lines": 107
+    },
+    "Rust allocation instrumentation (excluded)": {
+      "files": [
+        "rust/allocation.rs"
+      ],
+      "nonblank_noncomment_lines": 70
+    }
+  },
+  "text_sections": {
+    "available": true,
+    "hashes": {
+      "kush-fused": "0d38015e010b1501c0112aa40217ca65a6f76562486cc41dbf26be2bf4bbcfee",
+      "kush-plain": "0d38015e010b1501c0112aa40217ca65a6f76562486cc41dbf26be2bf4bbcfee"
+    },
+    "identical_text": true
+  },
+  "measurements": [
+    {
+      "variant": "kush-fused",
+      "label": "Kush / automatic fusion",
+      "n": 262144,
+      "rounds": 8,
+      "observations": [
+        {
+          "wall_ms": 44.889942,
+          "peak_rss_kib": 4332,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 43.467322,
+          "peak_rss_kib": 4308,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 42.503553,
+          "peak_rss_kib": 4204,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 43.094793,
+          "peak_rss_kib": 4308,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 45.127327,
+          "peak_rss_kib": 4316,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 42.865754,
+          "peak_rss_kib": 4356,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 43.718453,
+          "peak_rss_kib": 4268,
+          "user_s": 0.03,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "kush-plain",
+      "label": "Kush / fusion, contracts removed",
+      "n": 262144,
+      "rounds": 8,
+      "observations": [
+        {
+          "wall_ms": 45.68317,
+          "peak_rss_kib": 4348,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 44.712799,
+          "peak_rss_kib": 4204,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 42.308137,
+          "peak_rss_kib": 4356,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 43.053495,
+          "peak_rss_kib": 4364,
+          "user_s": 0.03,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 45.014756,
+          "peak_rss_kib": 4312,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 43.953374,
+          "peak_rss_kib": 4220,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 44.805774,
+          "peak_rss_kib": 4364,
+          "user_s": 0.03,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "kush-staged",
+      "label": "Kush / two passes",
+      "n": 262144,
+      "rounds": 8,
+      "observations": [
+        {
+          "wall_ms": 46.115091,
+          "peak_rss_kib": 4224,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 45.641071,
+          "peak_rss_kib": 4300,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 45.092862,
+          "peak_rss_kib": 4316,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 45.292467,
+          "peak_rss_kib": 4292,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 45.087522,
+          "peak_rss_kib": 4304,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 46.906857,
+          "peak_rss_kib": 4192,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 45.658925,
+          "peak_rss_kib": 4308,
+          "user_s": 0.04,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "rust-manual",
+      "label": "Rust CLIF O3 / manual fusion",
+      "n": 262144,
+      "rounds": 8,
+      "observations": [
+        {
+          "wall_ms": 17.871058,
+          "peak_rss_kib": 4452,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 18.17658,
+          "peak_rss_kib": 4464,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 18.158166,
+          "peak_rss_kib": 4556,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 17.826414,
+          "peak_rss_kib": 4548,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 18.534141,
+          "peak_rss_kib": 4580,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 18.024816,
+          "peak_rss_kib": 4412,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 18.13872,
+          "peak_rss_kib": 4460,
+          "user_s": 0.01,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "rust-iter",
+      "label": "Rust CLIF O3 / iterator chain",
+      "n": 262144,
+      "rounds": 8,
+      "observations": [
+        {
+          "wall_ms": 51.435375,
+          "peak_rss_kib": 4464,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 51.858369,
+          "peak_rss_kib": 4464,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 51.37441,
+          "peak_rss_kib": 4452,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 51.761537,
+          "peak_rss_kib": 4436,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 51.284902,
+          "peak_rss_kib": 4444,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 51.478175,
+          "peak_rss_kib": 4528,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 51.918652,
+          "peak_rss_kib": 4520,
+          "user_s": 0.04,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "rust-staged",
+      "label": "Rust CLIF O3 / two passes",
+      "n": 262144,
+      "rounds": 8,
+      "observations": [
+        {
+          "wall_ms": 21.062446,
+          "peak_rss_kib": 4556,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 20.865577,
+          "peak_rss_kib": 4544,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 21.321673,
+          "peak_rss_kib": 4444,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 21.166592,
+          "peak_rss_kib": 4520,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 20.931901,
+          "peak_rss_kib": 4464,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 22.005767,
+          "peak_rss_kib": 4496,
+          "user_s": 0.01,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 21.583895,
+          "peak_rss_kib": 4600,
+          "user_s": 0.01,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "rust-o0",
+      "label": "Rust CLIF O0 / manual fusion",
+      "n": 262144,
+      "rounds": 8,
+      "observations": [
+        {
+          "wall_ms": 55.894042,
+          "peak_rss_kib": 4444,
+          "user_s": 0.04,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 56.405091,
+          "peak_rss_kib": 4448,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 55.819022,
+          "peak_rss_kib": 4544,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 56.368863,
+          "peak_rss_kib": 4448,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 56.325542,
+          "peak_rss_kib": 4584,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 55.880648,
+          "peak_rss_kib": 4416,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 55.783866,
+          "peak_rss_kib": 4468,
+          "user_s": 0.04,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "kush-fused",
+      "label": "Kush / automatic fusion",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 179.29305,
+          "peak_rss_kib": 18520,
+          "user_s": 0.17,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 161.131789,
+          "peak_rss_kib": 18500,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 160.451032,
+          "peak_rss_kib": 18484,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 158.967488,
+          "peak_rss_kib": 18636,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 160.002352,
+          "peak_rss_kib": 18672,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 175.142415,
+          "peak_rss_kib": 18488,
+          "user_s": 0.16,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 171.770968,
+          "peak_rss_kib": 18556,
+          "user_s": 0.16,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "kush-plain",
+      "label": "Kush / fusion, contracts removed",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 160.971928,
+          "peak_rss_kib": 18516,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 160.560115,
+          "peak_rss_kib": 18576,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 159.81588,
+          "peak_rss_kib": 18552,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 161.112454,
+          "peak_rss_kib": 18500,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 160.550329,
+          "peak_rss_kib": 18524,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 167.330995,
+          "peak_rss_kib": 18664,
+          "user_s": 0.15,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 171.682593,
+          "peak_rss_kib": 18608,
+          "user_s": 0.16,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "kush-staged",
+      "label": "Kush / two passes",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 180.684461,
+          "peak_rss_kib": 18560,
+          "user_s": 0.17,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 170.151686,
+          "peak_rss_kib": 18608,
+          "user_s": 0.16,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 171.103212,
+          "peak_rss_kib": 18676,
+          "user_s": 0.16,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 170.006895,
+          "peak_rss_kib": 18656,
+          "user_s": 0.16,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 168.01101,
+          "peak_rss_kib": 18628,
+          "user_s": 0.16,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 171.513224,
+          "peak_rss_kib": 18640,
+          "user_s": 0.16,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 182.754041,
+          "peak_rss_kib": 18588,
+          "user_s": 0.17,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "rust-manual",
+      "label": "Rust CLIF O3 / manual fusion",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 69.293049,
+          "peak_rss_kib": 18880,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 60.317154,
+          "peak_rss_kib": 18736,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 60.917692,
+          "peak_rss_kib": 18844,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 60.333807,
+          "peak_rss_kib": 18756,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 60.674256,
+          "peak_rss_kib": 18776,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 63.986512,
+          "peak_rss_kib": 18796,
+          "user_s": 0.05,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 64.362347,
+          "peak_rss_kib": 18796,
+          "user_s": 0.05,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "rust-iter",
+      "label": "Rust CLIF O3 / iterator chain",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 218.339715,
+          "peak_rss_kib": 18772,
+          "user_s": 0.21,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 193.304395,
+          "peak_rss_kib": 18800,
+          "user_s": 0.18,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 192.144469,
+          "peak_rss_kib": 18908,
+          "user_s": 0.18,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 192.408245,
+          "peak_rss_kib": 18796,
+          "user_s": 0.18,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 196.616985,
+          "peak_rss_kib": 18872,
+          "user_s": 0.18,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 191.406137,
+          "peak_rss_kib": 18808,
+          "user_s": 0.18,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 192.794824,
+          "peak_rss_kib": 18796,
+          "user_s": 0.18,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "rust-staged",
+      "label": "Rust CLIF O3 / two passes",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 73.473474,
+          "peak_rss_kib": 18800,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 73.310368,
+          "peak_rss_kib": 18876,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 73.063124,
+          "peak_rss_kib": 18844,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 73.110033,
+          "peak_rss_kib": 18748,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 73.639216,
+          "peak_rss_kib": 18840,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 73.316611,
+          "peak_rss_kib": 18816,
+          "user_s": 0.06,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 78.546797,
+          "peak_rss_kib": 18792,
+          "user_s": 0.07,
+          "system_s": 0.0
+        }
+      ]
+    },
+    {
+      "variant": "rust-o0",
+      "label": "Rust CLIF O0 / manual fusion",
+      "n": 2097152,
+      "rounds": 4,
+      "observations": [
+        {
+          "wall_ms": 219.243151,
+          "peak_rss_kib": 18784,
+          "user_s": 0.2,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 214.865177,
+          "peak_rss_kib": 18772,
+          "user_s": 0.2,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 211.588759,
+          "peak_rss_kib": 18852,
+          "user_s": 0.2,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 210.166542,
+          "peak_rss_kib": 18784,
+          "user_s": 0.2,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 212.438165,
+          "peak_rss_kib": 18784,
+          "user_s": 0.2,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 224.347587,
+          "peak_rss_kib": 18820,
+          "user_s": 0.21,
+          "system_s": 0.0
+        },
+        {
+          "wall_ms": 214.514335,
+          "peak_rss_kib": 18820,
+          "user_s": 0.2,
+          "system_s": 0.0
+        }
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "variant": "kush-fused",
+      "label": "Kush / automatic fusion",
+      "n": 262144,
+      "rounds": 8,
+      "median_wall_ms": 43.467322,
+      "min_wall_ms": 42.503553,
+      "max_wall_ms": 45.127327,
+      "median_peak_rss_kib": 4308
+    },
+    {
+      "variant": "kush-plain",
+      "label": "Kush / fusion, contracts removed",
+      "n": 262144,
+      "rounds": 8,
+      "median_wall_ms": 44.712799,
+      "min_wall_ms": 42.308137,
+      "max_wall_ms": 45.68317,
+      "median_peak_rss_kib": 4348
+    },
+    {
+      "variant": "kush-staged",
+      "label": "Kush / two passes",
+      "n": 262144,
+      "rounds": 8,
+      "median_wall_ms": 45.641071,
+      "min_wall_ms": 45.087522,
+      "max_wall_ms": 46.906857,
+      "median_peak_rss_kib": 4300
+    },
+    {
+      "variant": "rust-manual",
+      "label": "Rust CLIF O3 / manual fusion",
+      "n": 262144,
+      "rounds": 8,
+      "median_wall_ms": 18.13872,
+      "min_wall_ms": 17.826414,
+      "max_wall_ms": 18.534141,
+      "median_peak_rss_kib": 4464
+    },
+    {
+      "variant": "rust-iter",
+      "label": "Rust CLIF O3 / iterator chain",
+      "n": 262144,
+      "rounds": 8,
+      "median_wall_ms": 51.478175,
+      "min_wall_ms": 51.284902,
+      "max_wall_ms": 51.918652,
+      "median_peak_rss_kib": 4464
+    },
+    {
+      "variant": "rust-staged",
+      "label": "Rust CLIF O3 / two passes",
+      "n": 262144,
+      "rounds": 8,
+      "median_wall_ms": 21.166592,
+      "min_wall_ms": 20.865577,
+      "max_wall_ms": 22.005767,
+      "median_peak_rss_kib": 4520
+    },
+    {
+      "variant": "rust-o0",
+      "label": "Rust CLIF O0 / manual fusion",
+      "n": 262144,
+      "rounds": 8,
+      "median_wall_ms": 55.894042,
+      "min_wall_ms": 55.783866,
+      "max_wall_ms": 56.405091,
+      "median_peak_rss_kib": 4448
+    },
+    {
+      "variant": "kush-fused",
+      "label": "Kush / automatic fusion",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 161.131789,
+      "min_wall_ms": 158.967488,
+      "max_wall_ms": 179.29305,
+      "median_peak_rss_kib": 18520
+    },
+    {
+      "variant": "kush-plain",
+      "label": "Kush / fusion, contracts removed",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 160.971928,
+      "min_wall_ms": 159.81588,
+      "max_wall_ms": 171.682593,
+      "median_peak_rss_kib": 18552
+    },
+    {
+      "variant": "kush-staged",
+      "label": "Kush / two passes",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 171.103212,
+      "min_wall_ms": 168.01101,
+      "max_wall_ms": 182.754041,
+      "median_peak_rss_kib": 18628
+    },
+    {
+      "variant": "rust-manual",
+      "label": "Rust CLIF O3 / manual fusion",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 60.917692,
+      "min_wall_ms": 60.317154,
+      "max_wall_ms": 69.293049,
+      "median_peak_rss_kib": 18796
+    },
+    {
+      "variant": "rust-iter",
+      "label": "Rust CLIF O3 / iterator chain",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 192.794824,
+      "min_wall_ms": 191.406137,
+      "max_wall_ms": 218.339715,
+      "median_peak_rss_kib": 18800
+    },
+    {
+      "variant": "rust-staged",
+      "label": "Rust CLIF O3 / two passes",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 73.316611,
+      "min_wall_ms": 73.063124,
+      "max_wall_ms": 78.546797,
+      "median_peak_rss_kib": 18816
+    },
+    {
+      "variant": "rust-o0",
+      "label": "Rust CLIF O0 / manual fusion",
+      "n": 2097152,
+      "rounds": 4,
+      "median_wall_ms": 214.514335,
+      "min_wall_ms": 210.166542,
+      "max_wall_ms": 224.347587,
+      "median_peak_rss_kib": 18784
+    }
+  ]
+}

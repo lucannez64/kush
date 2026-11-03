@@ -1,0 +1,74 @@
+module feature_pipeline.pipeline;
+
+// Only the named calibration value can obtain this kernel-checked witness.
+// The witness is erased; this is a configuration whitelist, NOT a proof of
+// arithmetic correctness, termination, or bounds-check elimination.
+prop AuthorizedKey<key: i64> {
+    Standard: AuthorizedKey<23130>,
+}
+
+// Audit metadata has grade zero: its argument is evaluated but no ABI slot or
+// runtime value is materialized. The returned owning value is exactly-once.
+pub fn issue(key: i64, erased approved: AuthorizedKey<key>, audit: i64 @[0]) -> Box<i64> @[1] ! {alloc, panic} {
+    Box.new(key)
+}
+
+pub fn standard_ticket(audit: i64) -> Box<i64> @[1] ! {alloc, panic} {
+    issue(23130, AuthorizedKey.Standard::<23130>, audit)
+}
+
+// Exactly two syntactic uses. Both callbacks are total straight-line bitwise
+// expressions with empty effect rows, making this eligible for automatic fusion.
+#[noalloc]
+#[nosuspend]
+pub fn scrub(x: i64 @[2]) -> i64 ! {} { (x & 65535) ^ (x & 255) }
+
+#[noalloc]
+#[nosuspend]
+pub fn tag(x: i64) -> i64 ! {} { x ^ 23130 }
+
+#[noalloc]
+#[nosuspend]
+pub fn fused(values: Vec<i64>) -> Vec<i64> ! {} {
+    Vec.map_in_place(Vec.map_in_place(values, scrub), tag)
+}
+
+// Intentional two-pass control. The intermediate is not nested in the second
+// map expression. The harness verifies the compiler fusion diagnostic is zero.
+#[noalloc]
+#[nosuspend]
+pub fn staged(values: Vec<i64>) -> Vec<i64> ! {} {
+    let intermediate = Vec.map_in_place(values, scrub);
+    Vec.map_in_place(intermediate, tag)
+}
+
+#[noalloc]
+#[nosuspend]
+pub fn checksum(values: &[i64]) -> i64 ! {panic} {
+    let mut sum = 0;
+    let mut i = 0;
+    while i < Slice.len(values) {
+        sum = sum + Slice.get(values, i);
+        i = i + 1;
+    }
+    sum
+}
+
+// The ticket must reach this consuming boundary, not an implicit destructor.
+pub fn finish(ticket: Box<i64> @[1], sum: i64) -> i64 ! {panic} {
+    sum + Box.take(ticket)
+}
+
+pub fn batch(n: i64, fused_mode: Bool) -> i64 ! {alloc, panic} {
+    let ticket = standard_ticket(n);
+    let mut values: Vec<i64> = Vec.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        values = Vec.push(values, i & 65535);
+        i = i + 1;
+    }
+    let transformed = if fused_mode { fused(values) } else { staged(values) };
+    let view = &transformed[..];
+    let sum = checksum(view);
+    finish(ticket, sum)
+}

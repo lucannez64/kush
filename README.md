@@ -229,6 +229,12 @@ application: Kush controls the UI and CLI while generated Rust adapters reuse
 RustCrypto and crossterm. It includes TOTP/HOTP, hidden URI entry, navigation,
 clipboard requests, headless codes, RFC vectors, and pseudo-terminal tests.
 
+[Feature pipeline benchmark](benchmarks/feature-pipeline) pairs Kush's grades,
+linear completion ticket, erased proof, borrowing and automatic fusion with
+safe Rust compiled using Cranelift. It includes reproducible timings, process
+RSS, separate allocation diagnostics, misuse fixtures, and a measured laptop
+snapshot with explicit fairness limits.
+
 The standalone [project demo](examples/project-demo) exercises a local module, a
 local dependency, tests, and formatting.
 
