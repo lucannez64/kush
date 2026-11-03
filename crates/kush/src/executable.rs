@@ -13,6 +13,8 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod recursive_lifetimes;
+
 type Result<T> = std::result::Result<T, Diagnostic>;
 pub(crate) const PANIC: u16 = 1;
 pub(crate) const IO: u16 = 2;
@@ -3914,6 +3916,9 @@ type WitnessLifetimes = (
 /// function gets one per distinct list of type arguments that is used.
 struct Functions<'a> {
     declared: BTreeMap<BindingId, Declared<'a>>,
+    /// Frozen recursive result-origin summaries, solved once before any body
+    /// is checked. Provisional summaries never reach signature construction.
+    summaries: recursive_lifetimes::Summaries,
     signatures: Vec<Signature>,
     /// Checked bodies aligned with `signatures`; `None` still needs checking,
     /// `Some` is a synthetic lambda/adapter body.
@@ -4184,6 +4189,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     let mut types = Types::new(module, resolution, &logical, dynamic_traits)?;
     let mut functions = Functions {
         declared: BTreeMap::new(),
+        summaries: recursive_lifetimes::Summaries::default(),
         signatures: Vec::new(),
         bodies: Vec::new(),
         instances: BTreeMap::new(),
@@ -4479,6 +4485,11 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         &mut functions,
     )?;
     prepare_trait_objects(&mut types, resolution, &mut functions)?;
+    // Recursive borrow summaries are solved before any body is checked, so a
+    // signature, callable arrow, or ownership judgment observes only the frozen
+    // least fixed point. The solver rejects unseeded cycles and unsupported
+    // boundaries instead of publishing a provisional contract.
+    functions.summaries = recursive_lifetimes::solve(resolution, &functions.declared)?;
     // Generic methods are monomorphized on demand at each call site. Only
     // monomorphic methods get an eagerly checked instance here.
     monomorphic.extend(method_bindings.into_iter().filter(|binding| {
@@ -9129,6 +9140,7 @@ impl<'a> Functions<'a> {
         let mut parameters = Vec::new();
         let mut parameter_grades = Vec::new();
         let mut parameter_lifetimes = Vec::new();
+        let mut parameter_binders = Vec::new();
         let mut parameter_binder_lifetimes = BTreeMap::new();
         let mut parameter_field_lifetimes: BTreeMap<BindingId, BTreeMap<String, String>> =
             BTreeMap::new();
@@ -9189,6 +9201,7 @@ impl<'a> Functions<'a> {
             }
             parameter_lifetimes.push(lifetime.clone());
             let binder = resolution.binder(p.span);
+            parameter_binders.push(binder);
             if let (Some(binder), Some(name)) = (binder, &lifetime) {
                 parameter_binder_lifetimes.insert(binder, name.clone());
             }
@@ -9269,6 +9282,27 @@ impl<'a> Functions<'a> {
         let written_result = split_grade(&f.result).0;
         let explicit_result_lifetime = borrow_lifetime(written_result);
         let result_was_explicit = explicit_result_lifetime.is_some();
+        // Stable parameter-leaf origins solved over the concrete call graph.
+        // Map each origin back to this instance's declared or elided lifetime
+        // labels; a path that is not a declared leaf contributes nothing.
+        let mut summary_sources = BTreeSet::new();
+        if let Some(summary) = self.summaries.get(binding) {
+            for origin in &summary.origins {
+                let lifetime = if origin.path.is_empty() {
+                    parameter_lifetimes.get(origin.parameter).cloned().flatten()
+                } else {
+                    parameter_binders
+                        .get(origin.parameter)
+                        .copied()
+                        .flatten()
+                        .and_then(|binder| parameter_field_lifetimes.get(&binder))
+                        .and_then(|fields| fields.get(&origin.path.join(".")).cloned())
+                };
+                if let Some(lifetime) = lifetime {
+                    summary_sources.insert(lifetime);
+                }
+            }
+        }
         let result_lifetime = match explicit_result_lifetime {
             Some(lifetime) => Some(lifetime),
             None if (result.is_view() || result.is_ref())
@@ -9310,7 +9344,13 @@ impl<'a> Functions<'a> {
                                 &mut body_lifetimes,
                             );
                         }
-                        let inferred = body_lifetimes.iter().cloned().collect::<Vec<_>>();
+                        // The finite fixed point over direct call edges adds
+                        // origins that no single syntactic return exposes,
+                        // including mutually recursive forwarding. It is a
+                        // union with the local seed, never a replacement: every
+                        // owner seen either way stays in the summary.
+                        body_lifetimes.extend(summary_sources.iter().cloned());
+                        let inferred = body_lifetimes.into_iter().collect::<Vec<_>>();
                         if let [only] = inferred.as_slice() {
                             Some(only.clone())
                         } else if inferred.len() > 1 {
@@ -9393,6 +9433,9 @@ impl<'a> Functions<'a> {
                     &mut sources,
                 );
             }
+            // Recursive forwarding contributes its frozen fixed-point origins
+            // in addition to the local syntactic seed.
+            sources.extend(summary_sources.iter().cloned());
             // An explicit result may only receive bounds from a parameter's
             // own declared lifetime: selecting a different field lifetime of a
             // multi-lifetime record stays an explicit error. An inferred

@@ -1282,7 +1282,19 @@ impl Checker<'_> {
             merged.mutable |= loan.mutable;
             merged.splits = intersect_splits(&merged.splits, &loan.splits);
             if loan.lifetime != merged.lifetime {
-                merged.lifetime = None;
+                // Join branch view lifetimes to their shortest provable common
+                // label. Unioning origins keeps every owner loaned; choosing a
+                // shorter label only narrows how long the joined view can be
+                // used. Incomparable labels keep an anonymous intersection.
+                merged.lifetime = match (&merged.lifetime, &loan.lifetime) {
+                    (Some(long), Some(short)) if self.actual_outlives(long, short) => {
+                        Some(short.clone())
+                    }
+                    (Some(long), Some(short)) if self.actual_outlives(short, long) => {
+                        Some(long.clone())
+                    }
+                    _ => None,
+                };
             }
             if loan.field != merged.field {
                 merged.field = None;
