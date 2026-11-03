@@ -1808,9 +1808,9 @@
       "deps": [
         "BORROW"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Tree Borrows-informed subset mapping and access traces; distinguish static rejection from dynamic invalidity and prove optimization assumptions before adding raw-pointer behavior.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 17:47:08",
@@ -1831,6 +1831,11 @@
           "time": "2026-11-03 17:54:33",
           "who": "agent",
           "text": "Five focused lifetime baseline tests and strict Clippy pass on Boat; accepted case compares evaluator/default/release native; current parent/derived-view restriction explicitly preserved."
+        },
+        {
+          "time": "2026-11-03 17:54:33",
+          "who": "agent",
+          "text": "Immediate checked-subset operational contract and access-trace audit completed; five focused Boat tests and strict Clippy pass. No Tree Borrows implementation or formal simulation claimed."
         }
       ]
     },
