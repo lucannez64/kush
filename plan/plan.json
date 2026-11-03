@@ -645,6 +645,11 @@
           "time": "2026-11-03 21:10:36",
           "who": "agent",
           "text": "Independent source review reports recursive leaf enumeration and contextual invariant-check gaps; corrective implementation in progress. Previous 1215-test gate is insufficient to close safety review."
+        },
+        {
+          "time": "2026-11-03 21:17:33",
+          "who": "agent",
+          "text": "Integrated corrective commit 864f56e: checked recursive leaf rejection, declared nested witness labels, nested invariant composition, static destination write authority, checked witness budget. Worker reproduced earlier crashes/acceptance; combined full Boat gate now pending."
         }
       ]
     },
