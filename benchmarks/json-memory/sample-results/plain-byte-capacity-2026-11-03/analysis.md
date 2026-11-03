@@ -122,3 +122,30 @@ The validated compiler was installed atomically; its SHA-256 is
 `bcb2bd5dbfb5290ef067de0bbe86cc8aad4d5f6b355c5b9fafbff1991165ae5e`.
 The installed niche example prints `42`, `42`, `65`. Boat was stopped after
 the gate and measurement run.
+
+## Laptop slowdown follow-up: code layout, not extra work
+
+On the laptop (Ryzen 5 PRO 5675U), this build ran about 4% slower than the
+previous headerless build, while Boat showed a large gain. Disassembly showed
+the hottest loop has **identical instructions** in both builds; inlining
+elsewhere only moves it to a different address. That points to instruction
+fetch/layout sensitivity on the older core, not to more work per iteration.
+
+Two candidate fixes were measured with hash-verified binaries:
+
+| Candidate | Laptop median wall ms (CPU 7, 9 reps) | Boat median CPU ms (9700X, CPU 0, 9 reps) |
+|---|---:|---:|
+| Previous headerless Kush | 504 | 340 |
+| This build (broad inlining) | 522 | **272** |
+| Capacity-only inlining | **503** | 285 |
+| Broad inlining + 32-byte function alignment | 526 | not run |
+
+Forcing 32-byte function alignment did not help, so this is not a simple
+function-alignment effect (Cranelift has no loop-header alignment option).
+Capacity-only inlining removes the laptop regression but gives back about 5%
+of the Boat gain; neither variant wins on both hosts. The broad inlining is
+kept: its gain on the newer core is larger than its loss on the older one, and
+the loss comes from placement rather than added instructions. Boat wall times
+in this cohort were noisy right after VM resume (load 1.4 → 5.5), so CPU time
+is the comparison column. Raw data: `selective-inlining-boat.json`,
+`selective-inlining-laptop.json`.
