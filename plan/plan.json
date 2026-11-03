@@ -1315,14 +1315,19 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Normalise indentation and blank lines between top-level item groups while preserving comments/strings; verified idempotent and check-parity on all tracked .kush files.",
-      "commit": null,
+      "commit": "ede160b",
       "log": [
         {
           "time": "2026-11-03 12:52:55",
           "who": "agent",
           "text": "Resumed after context handoff"
+        },
+        {
+          "time": "2026-11-03 13:38:06",
+          "who": "agent",
+          "text": "Layout pass plus repository reformat; Boat gate 1174 tests"
         }
       ]
     }
