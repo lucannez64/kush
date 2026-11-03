@@ -973,7 +973,7 @@ impl Checker<'_> {
     /// The record field index at a word offset (word 0 is the tag).
     fn field_index(&self, ty: Type, offset: usize) -> Option<usize> {
         let id = ty.layout().filter(|id| self.enums[*id].record)?;
-        let mut at = 1;
+        let mut at = self.enums[id].tag_words();
         for (index, field) in self.enums[id].variants[0].fields.iter().enumerate() {
             if at == offset {
                 return Some(index);
@@ -2480,7 +2480,7 @@ impl Checker<'_> {
             Pattern::Type { member, inner, .. } => {
                 self.bind_task_exit_provenance(inner, *member, provenance)
             }
-            Pattern::Variant { tag, fields } => {
+            Pattern::Variant { tag, fields, .. } => {
                 let Some(id) = ty.layout() else {
                     return Ok(());
                 };
@@ -5959,7 +5959,7 @@ impl Checker<'_> {
                     )
             }
             Pattern::Or(ps) => ps.iter().any(|p| self.ignores_linear(p, ty, whole_linear)),
-            Pattern::Variant { tag, fields } => ty.layout().is_some_and(|id| {
+            Pattern::Variant { tag, fields, .. } => ty.layout().is_some_and(|id| {
                 fields
                     .iter()
                     .zip(&self.enums[id].variants[*tag].fields)

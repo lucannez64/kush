@@ -147,7 +147,7 @@ the same logical vector with a possibly wider element type:
 - Native relocation moves elements with `memmove`: backwards for a wider
   stride and forwards for a narrower one, so no unread source element is
   overwritten. Callbacks then run in forward order at the final stride.
-- The vector header records the final element width before callbacks run, so a
+- The result type records the final element width statically, so a
   later `Vec.get`, `Vec.push`, slice, or destruction uses the new layout.
   Owning source elements are moved into the callback and are released exactly
   once; owning results are stored in the same slot.

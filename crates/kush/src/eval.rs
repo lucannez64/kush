@@ -1654,7 +1654,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             return Some(((offset - 1) / width, element));
         }
         let variant = &self.program.enums[id].variants[0];
-        let mut at = 1;
+        let mut at = self.program.enums[id].tag_words();
         for (index, field) in variant.fields.iter().enumerate() {
             if at == offset {
                 return Some((index, *field));
@@ -3277,7 +3277,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     items: Vec::new(),
                     capacity,
                     usable: box_allocation_capacity(
-                        24 + capacity * self.program.width(element) * 8,
+                        16 + capacity * self.program.width(element) * 8,
                     ),
                 }))
             }
@@ -3332,7 +3332,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let mut capacity = capacity;
                 if needed > capacity {
                     capacity = needed;
-                    let requested = 24 + capacity * self.program.width(element) * 8;
+                    let requested = 16 + capacity * self.program.width(element) * 8;
                     if requested > usable {
                         usable = box_allocation_capacity(requested);
                     }
@@ -3403,7 +3403,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 // not speculate capacity beyond `len + additional`.
                 if needed > capacity {
                     capacity = needed;
-                    let requested = 24 + capacity * self.program.width(element) * 8;
+                    let requested = 16 + capacity * self.program.width(element) * 8;
                     if requested > usable {
                         usable = box_allocation_capacity(requested);
                     }
@@ -3438,7 +3438,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     .and_then(|needed| {
                         needed
                             .checked_mul(self.program.width(element) * 8)
-                            .and_then(|bytes| bytes.checked_add(24))
+                            .and_then(|bytes| bytes.checked_add(16))
                             .filter(|bytes| *bytes <= i64::MAX as usize)
                             .map(|bytes| (needed, bytes))
                     });
@@ -3527,7 +3527,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     }
                     capacity = next;
                     usable =
-                        box_allocation_capacity(24 + capacity * self.program.width(element) * 8);
+                        box_allocation_capacity(16 + capacity * self.program.width(element) * 8);
                     self.stats.growth();
                 }
                 items.push(value);
@@ -3585,7 +3585,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         ));
                     }
                     capacity = next;
-                    let requested = 24 + capacity * self.program.width(element) * 8;
+                    let requested = 16 + capacity * self.program.width(element) * 8;
                     if requested > usable {
                         usable = box_allocation_capacity(requested);
                     }
@@ -3629,7 +3629,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             ));
         };
         if grow {
-            let requested = 24usize.saturating_add(
+            let requested = 16usize.saturating_add(
                 capacity
                     .checked_mul(target_width)
                     .and_then(|words| words.checked_mul(8))
@@ -6267,6 +6267,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
             ExprKind::RefAssign(reference_expr, offset, replacement) => {
                 let reference = value!(self.expr(reference_expr, frame));
+                let replacement_ty = replacement.ty;
                 let replacement = value!(self.expr(replacement, frame));
                 let pointer = reference_expr
                     .ty
@@ -6282,6 +6283,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         ty,
                         whole,
                         *offset,
+                        replacement_ty,
                         replacement,
                     )
                 };
@@ -6543,7 +6545,7 @@ fn pattern_test(pattern: &Pattern, value: &Value) -> bool {
         Pattern::Any | Pattern::Bind(_) => true,
         Pattern::Literal(n) => value.scalar() == *n,
         Pattern::Or(ps) => ps.iter().any(|p| pattern_test(p, value)),
-        Pattern::Variant { tag, fields } => {
+        Pattern::Variant { tag, fields, .. } => {
             let Value::Enum {
                 tag: actual,
                 fields: values,
@@ -6693,7 +6695,7 @@ fn project(
         unreachable!("projection from a record")
     };
     let id = ty.layout().unwrap();
-    let mut at = 1;
+    let mut at = enums[id].tag_words();
     for (field, field_ty) in fields.into_iter().zip(&enums[id].variants[0].fields) {
         if at == offset {
             return field;
@@ -6714,16 +6716,17 @@ fn assign_project(
     ty: Type,
     value: &mut Value,
     offset: usize,
+    replacement_ty: Type,
     replacement: Value,
 ) -> bool {
     let Value::Enum { fields, .. } = value else {
         return false;
     };
     let id = ty.layout().unwrap();
-    let mut at = 1;
+    let mut at = enums[id].tag_words();
     for (index, field_ty) in enums[id].variants[0].fields.iter().enumerate() {
         let width = crate::runtime_types::width(pointees, enums, unions, functions, *field_ty);
-        if at == offset {
+        if at == offset && *field_ty == replacement_ty {
             fields[index] = replacement;
             return true;
         }
@@ -6736,6 +6739,7 @@ fn assign_project(
                 *field_ty,
                 &mut fields[index],
                 offset - at,
+                replacement_ty,
                 replacement,
             );
         }

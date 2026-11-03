@@ -18,7 +18,7 @@ fn lower(p: &Pattern) -> Pat {
     match p {
         Pattern::Any | Pattern::Bind(_) => Pat::Wild,
         Pattern::Literal(n) => Pat::Scalar(*n),
-        Pattern::Variant { tag, fields } => {
+        Pattern::Variant { tag, fields, .. } => {
             Pat::Variant(*tag, fields.iter().map(|(_, p)| lower(p)).collect())
         }
         Pattern::Type { tag, inner, .. } => Pat::Variant(*tag, vec![lower(inner)]),

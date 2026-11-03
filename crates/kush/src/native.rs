@@ -1704,7 +1704,7 @@ int64_t kush_net_tcp_exchange(uint64_t host_handle, int64_t port,
     return 0;
 }
 /* Vectors store fixed-width elements of `width` 64-bit words each. */
-typedef struct { uint64_t length; uint64_t capacity; uint64_t width; uint64_t data[]; } KushVec;
+typedef struct { uint64_t length; uint64_t capacity; uint64_t data[]; } KushVec;
 static uint64_t kush_vec_bytes(uint64_t capacity, uint64_t width) {
     if (width == 0 || capacity > ((uint64_t)INT64_MAX - sizeof(KushVec)) / 8 / width) kush_panic();
     return sizeof(KushVec) + capacity * width * 8;
@@ -1712,68 +1712,68 @@ static uint64_t kush_vec_bytes(uint64_t capacity, uint64_t width) {
 uint64_t kush_vec_with_capacity(int64_t capacity, int64_t width) {
     if (capacity < 0 || width <= 0) kush_panic();
     KushVec *v = (KushVec *)(uintptr_t)kush_alloc(kush_vec_bytes((uint64_t)capacity, (uint64_t)width));
-    v->length = 0; v->capacity = (uint64_t)capacity; v->width = (uint64_t)width;
+    v->length = 0; v->capacity = (uint64_t)capacity;
     return (uint64_t)(uintptr_t)v;
 }
 int64_t kush_vec_len(uint64_t handle) { return (int64_t)((KushVec *)(uintptr_t)handle)->length; }
-void kush_vec_get(uint64_t handle, int64_t index, uint64_t *out) {
+void kush_vec_get(uint64_t handle, int64_t index, uint64_t *out, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     if (index < 0 || (uint64_t)index >= v->length) kush_panic();
-    memcpy(out, v->data + (uint64_t)index * v->width, (size_t)(v->width * 8));
+    memcpy(out, v->data + (uint64_t)index * width, (size_t)(width * 8));
 }
-uint64_t kush_vec_push(uint64_t handle, const uint64_t *item) {
+uint64_t kush_vec_push(uint64_t handle, const uint64_t *item, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     if (v->length == v->capacity) {
         uint64_t next = v->capacity == 0 ? 4 : v->capacity * 2;
         if (next <= v->capacity) kush_panic();
-        uint64_t bytes = kush_vec_bytes(next, v->width);
+        uint64_t bytes = kush_vec_bytes(next, width);
         v = (KushVec *)kush_grow(v, bytes);
         v->capacity = next; ++kush_buffer_growths;
     }
-    memcpy(v->data + v->length * v->width, item, (size_t)(v->width * 8));
+    memcpy(v->data + v->length * width, item, (size_t)(width * 8));
     v->length++;
     return (uint64_t)(uintptr_t)v;
 }
-uint64_t kush_vec_set(uint64_t handle, int64_t index, const uint64_t *item, uint64_t *old) {
+uint64_t kush_vec_set(uint64_t handle, int64_t index, const uint64_t *item, uint64_t *old, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     if (index < 0 || (uint64_t)index >= v->length) kush_panic();
-    uint64_t *slot = v->data + (uint64_t)index * v->width;
-    memcpy(old, slot, (size_t)(v->width * 8));
-    memcpy(slot, item, (size_t)(v->width * 8));
+    uint64_t *slot = v->data + (uint64_t)index * width;
+    memcpy(old, slot, (size_t)(width * 8));
+    memcpy(slot, item, (size_t)(width * 8));
     return handle;
 }
 /* Address of one checked vector element. The reference evaluator and native
    backend agree that an element reference is only formed while the vector
    owner is loaned, so no growth can move this storage. */
-uint64_t kush_vec_element(uint64_t handle, int64_t index) {
+uint64_t kush_vec_element(uint64_t handle, int64_t index, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     if (index < 0 || (uint64_t)index >= v->length) kush_panic();
-    return (uint64_t)(uintptr_t)(v->data + (uint64_t)index * v->width);
+    return (uint64_t)(uintptr_t)(v->data + (uint64_t)index * width);
 }
 /* Ensure room for `additional` elements after the current length. Growth
    happens at most once, to exactly the requested length, and only when the
    retained capacity is insufficient. Negative or overflowing requests panic. */
-uint64_t kush_vec_reserve(uint64_t handle, int64_t additional) {
+uint64_t kush_vec_reserve(uint64_t handle, int64_t additional, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     if (additional < 0) kush_panic();
     uint64_t needed;
     if (__builtin_add_overflow(v->length, (uint64_t)additional, &needed)) kush_panic();
     if (needed <= v->capacity) return handle;
-    KushVec *replacement = (KushVec *)kush_grow(v, kush_vec_bytes(needed, v->width));
+    KushVec *replacement = (KushVec *)kush_grow(v, kush_vec_bytes(needed, width));
     replacement->capacity = needed;
     ++kush_buffer_growths;
     return (uint64_t)(uintptr_t)replacement;
 }
 /* On refusal or invalid capacity, the original allocation/header/elements
    remain untouched. Zero is an out-of-band failure handle, never an owner. */
-uint64_t kush_vec_try_reserve(uint64_t handle, int64_t additional) {
+uint64_t kush_vec_try_reserve(uint64_t handle, int64_t additional, uint64_t width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     if (additional < 0) return 0;
     uint64_t needed;
     if (__builtin_add_overflow(v->length, (uint64_t)additional, &needed)) return 0;
     if (needed <= v->capacity) return handle;
-    if (v->width == 0 || needed > ((uint64_t)INT64_MAX - sizeof(KushVec)) / 8 / v->width) return 0;
-    uint64_t bytes = sizeof(KushVec) + needed * v->width * 8;
+    if (width == 0 || needed > ((uint64_t)INT64_MAX - sizeof(KushVec)) / 8 / width) return 0;
+    uint64_t bytes = sizeof(KushVec) + needed * width * 8;
     KushVec *replacement = (KushVec *)kush_try_grow(v, bytes);
     if (replacement == NULL) return 0;
     replacement->capacity = needed;
@@ -1791,7 +1791,6 @@ uint64_t kush_vec_try_reserve(uint64_t handle, int64_t additional) {
 uint64_t kush_vec_restride(uint64_t handle, int64_t source_width, int64_t target_width) {
     KushVec *v = (KushVec *)(uintptr_t)handle;
     if (source_width <= 0 || target_width <= 0) kush_panic();
-    if (v->width != (uint64_t)source_width) kush_panic();
     uint64_t bytes = kush_vec_bytes(v->capacity, (uint64_t)target_width);
     KushVec *replacement = (KushVec *)kush_grow(v, bytes);
     if (replacement != v) ++kush_buffer_growths;
@@ -1812,7 +1811,6 @@ uint64_t kush_vec_restride(uint64_t handle, int64_t source_width, int64_t target
             }
         }
     }
-    v->width = (uint64_t)target_width;
     return (uint64_t)(uintptr_t)v;
 }
 /* Stackful cooperative tasks. One OS thread; strict handoff. */
@@ -2863,7 +2861,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
     let mut vec_element_sig = module.make_signature();
     vec_element_sig
         .params
-        .extend([AbiParam::new(I64), AbiParam::new(I64)]);
+        .extend([AbiParam::new(I64), AbiParam::new(I64), AbiParam::new(I64)]);
     vec_element_sig.returns.push(AbiParam::new(I64));
     let vec_element = module
         .declare_function("kush_vec_element", Linkage::Import, &vec_element_sig)
@@ -2871,23 +2869,23 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
     let mut vec_ops = BTreeMap::new();
     for (op, name, params, returns) in [
         (VecOp::WithCapacity, "kush_vec_with_capacity", 2, true),
-        (VecOp::Reserve, "kush_vec_reserve", 2, true),
+        (VecOp::Reserve, "kush_vec_reserve", 3, true),
         (
             VecOp::TryReserve {
                 ok_tag: 0,
                 err_tag: 0,
             },
             "kush_vec_try_reserve",
-            2,
+            3,
             true,
         ),
         (VecOp::Len, "kush_vec_len", 1, true),
-        (VecOp::Get, "kush_vec_get", 3, false),
-        (VecOp::Push, "kush_vec_push", 2, true),
-        (VecOp::Set, "kush_vec_set", 4, true),
-        (VecOp::PushBorrowed, "kush_vec_push", 2, true),
-        (VecOp::SetBorrowed, "kush_vec_set", 4, true),
-        (VecOp::ReserveBorrowed, "kush_vec_reserve", 2, true),
+        (VecOp::Get, "kush_vec_get", 4, false),
+        (VecOp::Push, "kush_vec_push", 3, true),
+        (VecOp::Set, "kush_vec_set", 5, true),
+        (VecOp::PushBorrowed, "kush_vec_push", 3, true),
+        (VecOp::SetBorrowed, "kush_vec_set", 5, true),
+        (VecOp::ReserveBorrowed, "kush_vec_reserve", 3, true),
     ] {
         let mut sig = module.make_signature();
         sig.params.extend((0..params).map(|_| AbiParam::new(I64)));
@@ -3835,7 +3833,7 @@ fn synthesize_drops(
                                 I64,
                                 ir::MemFlagsData::new(),
                                 base,
-                                (24 + k * 8) as i32,
+                                (16 + k * 8) as i32,
                             )
                         })
                         .collect::<Vec<_>>();
@@ -3895,10 +3893,14 @@ fn synthesize_drops(
                     for (tag, variant) in program.enums[index].variants.iter().enumerate() {
                         let hit = builder.create_block();
                         let next = builder.create_block();
-                        let condition = builder.ins().icmp_imm_s(IntCC::Equal, args[0], tag as i64);
+                        let condition = if program.enums[index].tag_words() == 0 {
+                            builder.ins().iconst(ir::types::I8, 1)
+                        } else {
+                            builder.ins().icmp_imm_s(IntCC::Equal, args[0], tag as i64)
+                        };
                         builder.ins().brif(condition, hit, &[], next, &[]);
                         builder.switch_to_block(hit);
-                        let mut offset = 1;
+                        let mut offset = program.enums[index].tag_words();
                         let mut fields = Vec::new();
                         for ty in &variant.fields {
                             fields.push((*ty, offset));
@@ -6579,7 +6581,7 @@ impl Generator<'_, '_> {
                                         base_values[0],
                                         0,
                                     );
-                                    let data = self.builder.ins().iadd_imm_s(handle, 24);
+                                    let data = self.builder.ins().iadd_imm_s(handle, 16);
                                     let length = self.builder.ins().load(
                                         I64,
                                         ir::MemFlagsData::new(),
@@ -6682,7 +6684,11 @@ impl Generator<'_, '_> {
                 tag,
                 fields,
             } => {
-                let mut values = vec![self.constant(*tag as i64)];
+                let mut values = if self.program.enums[*enum_id].tag_words() == 0 {
+                    Vec::new()
+                } else {
+                    vec![self.constant(*tag as i64)]
+                };
                 for field in fields {
                     values.extend(lower!(self.expr(field)));
                 }
@@ -6941,7 +6947,7 @@ impl Generator<'_, '_> {
                 // The destination stride is the final width, but the value
                 // currently in the slot still has the source width until the
                 // first callback consumes it.
-                let mut current = self.load_words(address, 24, source_width);
+                let mut current = self.load_words(address, 16, source_width);
                 for ((code, callback), plan) in codes.iter().zip(callbacks.iter()).zip(&plans) {
                     if let Some(plan) = plan
                         && current.len() == 1
@@ -6988,17 +6994,13 @@ impl Generator<'_, '_> {
                         ir::MemFlagsData::new(),
                         *value,
                         destination,
-                        (24 + word * 8) as i32,
+                        (16 + word * 8) as i32,
                     );
                 }
                 let next = self.builder.ins().iadd_imm_s(index, 1);
                 self.jump(head, &[next]);
                 self.builder.switch_to_block(done);
-                // Later vector operations use the compacted element width.
-                let width = self.constant(target_width as i64);
-                self.builder
-                    .ins()
-                    .store(ir::MemFlagsData::new(), width, handle, 16);
+                // Subsequent monomorphized operations use the result's static width.
                 handle
             }
             ExprKind::TaskSpawn {
@@ -7565,9 +7567,11 @@ impl Generator<'_, '_> {
             ExprKind::PlaceIndex { base, index } => {
                 let location = lower!(self.place_address(base));
                 let index = lower!(self.scalar(index));
-                if matches!(base.ty, Type::Vec(_)) {
+                if let Type::Vec(element) = base.ty {
                     let handle = self.load_words(location, 0, 1)[0];
-                    return Some(self.runtime_call(self.vec_element, &[handle, index]));
+                    let width =
+                        self.constant(self.program.width(self.program.pointees[element]) as i64);
+                    return Some(self.runtime_call(self.vec_element, &[handle, index, width]));
                 }
                 let (element, length) = base
                     .ty
@@ -7680,7 +7684,7 @@ impl Generator<'_, '_> {
             .expect("checked structural equality has a layout");
         let types = self.program.enums[layout].variants[0].fields.clone();
         let mut result: Option<Value> = None;
-        let mut offset = 1usize;
+        let mut offset = self.program.enums[layout].tag_words();
         for field in types {
             let width = self.program.width(field);
             if width > 0 {
@@ -7723,7 +7727,7 @@ impl Generator<'_, '_> {
         let source_id = source.layout().expect("checked structural source layout");
         let source_fields = self.program.enums[source_id].variants[0].fields.clone();
         let mut offsets = Vec::with_capacity(source_fields.len());
-        let mut offset = 1usize;
+        let mut offset = self.program.enums[source_id].tag_words();
         for field in &source_fields {
             offsets.push(offset);
             offset += self.program.width(*field);
@@ -7886,10 +7890,11 @@ impl Generator<'_, '_> {
         let callee = self
             .module
             .declare_func_in_func(self.vec_ops[&VecOp::Push], self.builder.func);
+        let width = self.constant(words.len() as i64);
         if self.codegen.optimization != Optimization::Speed {
             let item = self.stack_words(words.len());
             self.store_words(item, words);
-            let call = self.builder.ins().call(callee, &[handle, item]);
+            let call = self.builder.ins().call(callee, &[handle, item, width]);
             return self.builder.inst_results(call)[0];
         }
         let length = self
@@ -7920,7 +7925,7 @@ impl Generator<'_, '_> {
                 ir::MemFlagsData::new(),
                 *value,
                 address,
-                (24 + word * 8) as i32,
+                (16 + word * 8) as i32,
             );
         }
         let next = self.builder.ins().iadd_imm_s(length, 1);
@@ -7931,7 +7936,7 @@ impl Generator<'_, '_> {
         self.builder.switch_to_block(slow);
         let item = self.stack_words(words.len());
         self.store_words(item, words);
-        let call = self.builder.ins().call(callee, &[handle, item]);
+        let call = self.builder.ins().call(callee, &[handle, item, width]);
         let grown = self.builder.inst_results(call)[0];
         self.jump(join, &[grown]);
         self.builder.switch_to_block(join);
@@ -8388,7 +8393,11 @@ impl Generator<'_, '_> {
             let callee = g
                 .module
                 .declare_func_in_func(g.vec_ops[&op], g.builder.func);
-            let call = g.builder.ins().call(callee, args);
+            let mut args = args.to_vec();
+            if !matches!(op, VecOp::WithCapacity | VecOp::Len) {
+                args.push(g.constant(width as i64));
+            }
+            let call = g.builder.ins().call(callee, &args);
             g.builder.inst_results(call).to_vec()
         };
         match op {
@@ -8437,7 +8446,7 @@ impl Generator<'_, '_> {
                     let previous = self.builder.ins().iadd_imm_s(index, -1);
                     let stride = self.builder.ins().imul_imm_s(previous, (width * 8) as i64);
                     let slot = self.builder.ins().iadd(handle, stride);
-                    let fields = self.load_words(slot, 24, width);
+                    let fields = self.load_words(slot, 16, width);
                     self.drop_value(element, &fields);
                     self.jump(head, &[previous]);
                     self.builder.switch_to_block(done);
@@ -8508,7 +8517,7 @@ impl Generator<'_, '_> {
                     let previous = self.builder.ins().iadd_imm_s(index, -1);
                     let stride = self.builder.ins().imul_imm_s(previous, (width * 8) as i64);
                     let slot = self.builder.ins().iadd(handle, stride);
-                    let fields = self.load_words(slot, 24, width);
+                    let fields = self.load_words(slot, 16, width);
                     self.drop_value(element, &fields);
                     self.jump(head, &[previous]);
                     self.builder.switch_to_block(done);
@@ -8536,14 +8545,14 @@ impl Generator<'_, '_> {
                 self.load_words(out, 0, width)
             }
             VecOp::At => {
-                // Proved in bounds: direct load after the 24-byte header.
+                // Proved in bounds: direct load after the 16-byte header.
                 let handle = self
                     .builder
                     .ins()
                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
                 let stride = self.builder.ins().imul_imm_s(values[1], (width * 8) as i64);
                 let base = self.builder.ins().iadd(handle, stride);
-                self.load_words(base, 24, width)
+                self.load_words(base, 16, width)
             }
             VecOp::Push => {
                 vec![self.push_vector(values[0], &values[1..1 + width])]
@@ -8853,11 +8862,18 @@ impl Generator<'_, '_> {
         match pattern {
             Pattern::Any | Pattern::Bind(_) => self.builder.ins().iconst(ir::types::I8, 1),
             Pattern::Literal(n) => self.builder.ins().icmp_imm_s(IntCC::Equal, values[0], *n),
-            Pattern::Variant { tag, fields } => {
-                let mut result =
+            Pattern::Variant {
+                tag,
+                fields,
+                tagged,
+            } => {
+                let mut result = if *tagged {
                     self.builder
                         .ins()
-                        .icmp_imm_s(IntCC::Equal, values[0], *tag as i64);
+                        .icmp_imm_s(IntCC::Equal, values[0], *tag as i64)
+                } else {
+                    self.builder.ins().iconst(ir::types::I8, 1)
+                };
                 for (offset, p) in fields {
                     let field = self.pattern(p, &values[*offset..]);
                     result = self.builder.ins().band(result, field);
@@ -8912,7 +8928,7 @@ impl Generator<'_, '_> {
         match pattern {
             Pattern::Any => self.drop_value(ty, values),
             Pattern::Bind(slot) => self.activate_local(*slot),
-            Pattern::Variant { tag, fields } => {
+            Pattern::Variant { tag, fields, .. } => {
                 let Some(id) = ty.layout() else {
                     unreachable!()
                 };

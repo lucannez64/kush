@@ -1471,6 +1471,7 @@ pub(crate) enum Pattern {
     Or(Vec<Pattern>),
     Variant {
         tag: usize,
+        tagged: bool,
         fields: Vec<(usize, Pattern)>,
     },
     /// Match one normalized union alternative and apply `inner` to the
@@ -11083,10 +11084,11 @@ impl Checker<'_, '_> {
         let id = ty.layout().filter(|id| self.types.enums[*id].record)?;
         let variant = &self.types.enums[id].variants[0];
         let index = variant.names.iter().position(|field| field == name)?;
-        let offset = 1 + variant.fields[..index]
-            .iter()
-            .map(|field| self.types.width(*field))
-            .sum::<usize>();
+        let offset = self.types.enums[id].tag_words()
+            + variant.fields[..index]
+                .iter()
+                .map(|field| self.types.width(*field))
+                .sum::<usize>();
         Some((offset, variant.fields[index]))
     }
     /// Drain hidden temporary-owner statements created while checking the
@@ -11218,10 +11220,11 @@ impl Checker<'_, '_> {
                             format!("no field named '{name}'"),
                         ));
                     };
-                    let offset = 1 + variant.fields[..index]
-                        .iter()
-                        .map(|field| self.types.width(*field))
-                        .sum::<usize>();
+                    let offset = self.types.enums[id].tag_words()
+                        + variant.fields[..index]
+                            .iter()
+                            .map(|field| self.types.width(*field))
+                            .sum::<usize>();
                     (offset, variant.fields[index])
                 } else {
                     let base_ty = base.ty;
@@ -13352,6 +13355,7 @@ impl Checker<'_, '_> {
                 (
                     Pattern::Variant {
                         tag: 0,
+                        tagged: true,
                         fields: vec![
                             (1, Pattern::Bind(updated)),
                             (1 + object_width, Pattern::Bind(extracted)),
@@ -13386,6 +13390,7 @@ impl Checker<'_, '_> {
                 (
                     Pattern::Variant {
                         tag: 0,
+                        tagged: true,
                         fields: vec![
                             (1, Pattern::Bind(updated)),
                             (1 + object_width, Pattern::Bind(extracted)),
@@ -13419,6 +13424,7 @@ impl Checker<'_, '_> {
                 (
                     Pattern::Variant {
                         tag: 0,
+                        tagged: true,
                         fields: vec![
                             (1, Pattern::Any),
                             (1 + object_width, Pattern::Bind(extracted)),
@@ -19896,6 +19902,7 @@ impl Checker<'_, '_> {
                             if mask & (1 << tag) == 0 {
                                 coverage.add(&Pattern::Variant {
                                     tag,
+                                    tagged: true,
                                     fields: variant.fields.iter().map(|_| (0, Pattern::Any)).collect(),
                                 });
                             }
@@ -23060,7 +23067,7 @@ impl Checker<'_, '_> {
                 ExprKind::Project(base, offset) => {
                     let id = base.ty.layout().filter(|id| self.types.enums[*id].record)?;
                     let variant = &self.types.enums[id].variants[0];
-                    let mut field_offset = 1;
+                    let mut field_offset = self.types.enums[id].tag_words();
                     let mut index = None;
                     for (position, field) in variant.fields.iter().enumerate() {
                         if field_offset == *offset {
@@ -23117,10 +23124,11 @@ impl Checker<'_, '_> {
                 ))
             };
         };
-        let offset = 1 + variant.fields[..index]
-            .iter()
-            .map(|t| self.types.width(*t))
-            .sum::<usize>();
+        let offset = self.types.enums[id].tag_words()
+            + variant.fields[..index]
+                .iter()
+                .map(|t| self.types.width(*t))
+                .sum::<usize>();
         Ok((offset, variant.fields[index]))
     }
     fn field(
@@ -25796,7 +25804,7 @@ impl Checker<'_, '_> {
         };
         let variant = self.types.enums[layout].variants[0].clone();
         let mut checked = Vec::new();
-        let mut offset = 1;
+        let mut offset = self.types.enums[layout].tag_words();
         for (index, field_ty) in variant.fields.iter().enumerate() {
             let sub = fields.iter().find(|(n, _)| *n == variant.names[index]);
             let p = match sub {
@@ -25814,6 +25822,7 @@ impl Checker<'_, '_> {
         }
         Ok(Pattern::Variant {
             tag: 0,
+            tagged: self.types.enums[layout].tag_words() != 0,
             fields: checked,
         })
     }
@@ -28635,7 +28644,7 @@ impl Checker<'_, '_> {
                 };
                 let variant = c.types.enums[layout].variants[0].clone();
                 let mut checked = Vec::new();
-                let mut offset = 1;
+                let mut offset = c.types.enums[layout].tag_words();
                 for (index, field_ty) in variant.fields.iter().enumerate() {
                     let sub = fields.iter().find(|(n, _)| *n == variant.names[index]);
                     let p = match sub {
@@ -28652,7 +28661,7 @@ impl Checker<'_, '_> {
                     ));
                 }
                 let inner = Pattern::Variant {
-                    tag: 0,
+                    tag: 0, tagged: c.types.enums[layout].tag_words() != 0,
                     fields: checked,
                 };
                 if narrowed {
@@ -28823,7 +28832,7 @@ impl Checker<'_, '_> {
                         "wrong enum pattern payload arity",
                     ));
                 }
-                let mut offset = 1;
+                let mut offset = c.types.enums[index].tag_words();
                 let mut checked = Vec::new();
                 for (field, ty) in fields.iter().zip(variant.fields) {
                     checked.push((offset, c.pattern(field, ty, bindings)?));
@@ -28831,6 +28840,7 @@ impl Checker<'_, '_> {
                 }
                 return Ok(Pattern::Variant {
                     tag,
+                    tagged: c.types.enums[index].tag_words() != 0,
                     fields: checked,
                 });
             }
@@ -28926,7 +28936,7 @@ impl Checker<'_, '_> {
                         c.pattern(part, element, bindings)?,
                     ));
                 }
-                return Ok(Pattern::Variant { tag: 0, fields });
+                return Ok(Pattern::Variant { tag: 0, tagged: true, fields });
             }
             if let ast::PatternKind::Record { fields, .. } = &pattern.kind {
                 return c.record_pattern(pattern, fields, ty, bindings);
@@ -28990,7 +29000,7 @@ impl Checker<'_, '_> {
                         fields.push((offset, c.pattern(value, element, bindings)?));
                         offset += c.types.width(element);
                     }
-                    Ok(Pattern::Variant { tag: 0, fields })
+                    Ok(Pattern::Variant { tag: 0, tagged: true, fields })
                 }
                 ast::PatternKind::Tuple(values) if values.is_empty() => {
                     c.expect(ty, Type::Unit, pattern.span)?;
@@ -29533,7 +29543,9 @@ fn covered_variants(pattern: &Pattern) -> u64 {
     }
     match pattern {
         Pattern::Any | Pattern::Bind(_) => u64::MAX,
-        Pattern::Variant { tag, fields } if fields.iter().all(|(_, p)| irrefutable(p)) => 1 << tag,
+        Pattern::Variant { tag, fields, .. } if fields.iter().all(|(_, p)| irrefutable(p)) => {
+            1 << tag
+        }
         Pattern::Type { tag, .. } => 1 << tag,
         Pattern::Or(ps) => ps.iter().map(covered_variants).fold(0, |a, b| a | b),
         _ => 0,

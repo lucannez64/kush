@@ -105,6 +105,25 @@ pub(crate) struct Enum {
     /// and the call count, not the foreign implementation's memory safety.
     pub foreign: Option<ForeignResource>,
 }
+impl Enum {
+    /// Physical prefix for this layout. Nonempty nominal structs have exactly
+    /// one constructor and need no discriminator. Empty structs keep their
+    /// existing one-word unit representation; tuples/rows/arrays keep their ABI.
+    pub(crate) fn tag_words(&self) -> usize {
+        usize::from(
+            !(self.record
+                && !self.tuple
+                && !self.structural
+                && self.dynamic_array.is_none()
+                && self.foreign.is_none()
+                && self
+                    .variants
+                    .first()
+                    .is_some_and(|variant| !variant.fields.is_empty())),
+        )
+    }
+}
+
 /// A trusted foreign contract: the exact C symbol used to release an opaque
 /// host-owned resource exactly once.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3896,7 +3915,7 @@ impl<'a> Types<'a> {
             active[id] = true;
             let mut largest = 1;
             for variant in &enums[id].variants {
-                let mut words = 1;
+                let mut words = enums[id].tag_words();
                 for ty in &variant.fields {
                     words += size_of_type(*ty, enums, unions, sizes, active, span)?;
                 }

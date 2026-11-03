@@ -717,15 +717,15 @@ fn narrowing_reuse_keeps_capacity_for_later_fallible_growth() {
 #[test]
 fn fallible_growth_capacity_is_exact_and_not_rounded_by_a_later_noop() {
     let source = r#"enum Result<T, E> { Ok(T), Err(E) }
-        struct Wide { x: i64, y: i64 }
-        struct Wider { x: i64, y: i64, z: i64 }
+        struct Wide { x: i64, y: i64, z: i64 }
+        struct Wider { x: i64, y: i64, z: i64, w: i64 }
         fn main() -> i64 ! {alloc, panic} {
             let owner = Box.new(0);
-            match Box.try_reuse(owner, Wide { x: 1, y: 2 }) {
+            match Box.try_reuse(owner, Wide { x: 1, y: 2, z: 3 }) {
                 Ok(b) => {
-                    let b = Box.reuse_grow(b, Wide { x: 2, y: 3 });
+                    let b = Box.reuse_grow(b, Wide { x: 2, y: 3, z: 4 });
                     let b = Box.reuse(b, 1);
-                    match Box.try_reuse(b, Wider { x: 1, y: 2, z: 3 }) {
+                    match Box.try_reuse(b, Wider { x: 1, y: 2, z: 3, w: 4 }) {
                         Ok(wider) => { drop(wider); 99 },
                         Err(old) => Box.take(old),
                     }
@@ -811,12 +811,12 @@ fn fallible_vector_reserve_fits_size_class_without_spending_the_budget() {
     let stats = reserve_budget_agrees(
         r#"enum Result<T, E> { Ok(T), Err(E) }
         fn main() -> i64 ! {alloc, panic} {
-            let values: Vec<i64> = Vec.with_capacity(0);
-            let values = match values.try_reserve(1) {
+            let values: Vec<i64> = Vec.with_capacity(1);
+            let values = match values.try_reserve(2) {
                 Ok(v) => v, Err(v) => { drop(v); return 1; }
             };
             let values = Vec.push(values, 42);
-            let values = match Vec.try_reserve(values, 1) {
+            let values = match Vec.try_reserve(values, 2) {
                 Ok(v) => { drop(v); return 2; }, Err(v) => v
             };
             Vec.get(&values, 0)

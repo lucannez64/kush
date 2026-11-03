@@ -328,7 +328,8 @@ fn buffer_growth_from_pooled_storage_preserves_contents() {
         "three grown buffers exceed the class limit"
     );
     assert_eq!(
-        pool.peak_retained, 1280,
+        pool.peak_retained,
+        6 * (16 + 16) + (4 + 8 + 16 + 32 + 64) * 8,
         "header plus padded payload per retained block"
     );
     assert_eq!(pool.drained, 6);

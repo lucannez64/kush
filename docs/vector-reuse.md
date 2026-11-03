@@ -167,7 +167,8 @@ Each callback is a reusable, noncapturing `fn(S) -> S'` value:
   in both backends.
 - The **final** element layout must be no wider than the source layout:
   `width(U) <= width(T)`. Native execution compacts elements to the final
-  stride in place and updates the vector header; reference execution models the
+  stride in place; subsequent operations use the result type’s static width.
+  Reference execution models the
   values directly. A widening result is rejected with a request to build a new
   vector instead.
 - The final layout must equal the callback result layout. An explicit result
