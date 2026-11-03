@@ -134,3 +134,22 @@ OSC 52 sequence, not the user's actual clipboard.
 
 Specifications: [RFC 4226](https://www.rfc-editor.org/rfc/rfc4226) and
 [RFC 6238](https://www.rfc-editor.org/rfc/rfc6238).
+
+## Verified checkpoint
+
+Validated locally and on Boat (Ubuntu 24.04, Rust 1.97.1, GCC 13.3.0):
+
+- Five Rust test functions, including all 28 public HOTP/TOTP RFC vectors.
+- Five Kush project tests, using the real generated native bridge.
+- Rust formatting, Kush formatting, adapter Clippy with warnings denied, and
+  generated-file drift checking.
+- Native build, headless fixtures/errors, and real PTY add/delete/copy/HOTP/
+  navigation/resize/hidden-input tests. Terminal flags are restored after both
+  `q` and Ctrl-C. Ten repeated local Ctrl-C sequences also passed after the
+  harness was synchronized to acknowledged resize frames.
+
+Compiler sources were unchanged. These are application/adapter checks, not a
+new run or an increased count of the compiler workspace's test suite. Boat
+stopped with its build-cache snapshot preserved. Machine-local logs:
+`/tmp/kush-boat-otp-tui-final.log` and
+`/tmp/kush-boat-otp-tui-pty-final.log`.

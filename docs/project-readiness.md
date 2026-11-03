@@ -311,3 +311,24 @@ symbols/semantic tokens (completion, rename, references, incremental sync),
 ENV duplicate-variance and monotonic-clock absolute-value documentation gaps,
 BINDGEN output-pair rollback (documented as regenerate-on-failure), and the
 remaining documented readiness limits.
+
+## OTP TUI recreation
+
+`examples/otp-tui` is a working native Kush project recreating the local Zig
+OTP TUI. Kush owns CLI dispatch, session UI state, navigation, viewport and
+screen composition; a declarative Rust adapter reuses RustCrypto HMAC/SHA and
+crossterm for opaque secret storage, URI validation and terminal access.
+TOTP/HOTP, hidden URI entry, delete/copy, explicit HOTP advance, navigation,
+resize and headless fixed-time codes are implemented. Like the original app,
+entries remain session-only; there is no encrypted vault or persistence.
+
+The application build and tests pass locally and on Boat: five Rust tests
+(including 28 RFC vectors), five Kush project tests, generated-file drift,
+formatting, adapter Clippy, and native CLI/PTY checks. The PTY harness drains
+output during shutdown and waits for acknowledged resize frames; tests verify
+terminal restoration after q/Ctrl-C and no URI-secret echo. This is separate
+from the compiler workspace test count. Source checkpoint `984e1b1`, final
+PTY harness `d431137`; logs `/tmp/kush-boat-otp-tui-final.log` and
+`/tmp/kush-boat-otp-tui-pty-final.log`. Boat stopped with its snapshot preserved.
+See [the application README](../examples/otp-tui/README.md) for launch commands,
+architecture and exact clipboard, memory-erasure and state limits.
