@@ -86,7 +86,7 @@ It acquires no heap storage. The callable is a first-class value:
   element. A representation-changing coercion is rejected inside this operation.
 - The result element layout must be no wider than the source element layout:
   `width(U) <= width(T)`. Native execution compacts elements to the new stride
-  in place and updates the vector header, so later `Vec.get`, `Vec.at`, slices,
+  in place; the result type’s static width makes later `Vec.get`, `Vec.at`, slices,
   push, and destruction all observe the compacted layout. Reference execution
   models elements directly and performs the same logical transformation.
 - Owning affine elements are moved into the callback and are not copied as

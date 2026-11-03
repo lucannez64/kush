@@ -219,6 +219,44 @@ PY
 fi
 printf '%s\n' "$KUSH_SOURCE" > "$workspace_marker"
 
+# Uploads/snapshots can preserve source mtimes older than a cached compilation.
+# Cargo's mtime freshness check can then reuse a test built from different bytes.
+# Compare file contents across syncs and refresh only changed inputs, retaining
+# dependency artifacts and avoiding recompilation for unchanged Rust sources.
+python3 - "$KUSH_SOURCE" "$CARGO_TARGET_DIR/.kush-source-digests.json" <<'PYHASH'
+import hashlib, json, os, sys, tempfile
+root, marker = sys.argv[1:]
+try:
+    with open(marker) as file:
+        previous = json.load(file)
+except (FileNotFoundError, ValueError):
+    previous = {}
+current = {}
+changed = 0
+for directory, directories, names in os.walk(root):
+    directories.sort()
+    for name in sorted(names):
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path):
+            continue
+        relative = os.path.relpath(path, root)
+        with open(path, "rb") as file:
+            digest = hashlib.sha256(file.read()).hexdigest()
+        current[relative] = digest
+        if previous.get(relative) != digest:
+            os.utime(path, None)
+            changed += 1
+fd, temporary = tempfile.mkstemp(prefix=".kush-digests-", dir=os.path.dirname(marker))
+try:
+    with os.fdopen(fd, "w") as file:
+        json.dump(current, file, sort_keys=True)
+    os.replace(temporary, marker)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+print(f"FRESHNESS: refreshed {changed} content-changed source files")
+PYHASH
+
 echo "== remote =="
 uname -srm
 rustc --version
