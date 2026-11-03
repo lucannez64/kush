@@ -264,6 +264,35 @@ it formats all root-package `.kush` files, excluding `target/`, hidden
 directories, and dependency package roots.
 
 It normalizes layout; it is not a line-wrapping or comment-reflow tool.
+It normalizes layout; it is not a line-wrapping or comment-reflow tool.
+
+### Redundant drops (`kush lint`)
+
+`drop(x)` is optional for affine values: the checker frees them at the end of
+their declaring block. `kush lint [--fix] [--manifest-path <Kush.toml>] [FILE...]`
+reports explicit drops whose removal cannot be observed, and removes them with
+`--fix`:
+
+- `drop` of a copyable local is always reported: it releases nothing.
+- `drop` of an affine owning local is reported only when nothing that can
+  allocate, perform I/O, run user code, or otherwise observe the free time
+  executes between the drop and the cleanup point. The rest of a block is
+  "inert" when it is scalars, copies/moves, pure value construction, arithmetic,
+  and assignments to copyable locals; a `return` with an inert value ends the
+  path at the function exit.
+- A value holding a user release hook (`AllocBox`, `AllocVec`, allocator
+  contexts, arenas, closures, task handles, dynamic objects) is never reported:
+  an explicit drop can order those callbacks, and that ordering is observable.
+- Linear `@[1]`/`@[n]` values are never reported; the checker rejects `drop`
+  for them, and implicit drop is an error.
+
+So `drop(x); return ..;`, a drop as the last statement of a function or a
+match-tail arm, and a trailing `drop` before returning an owned value are
+reported, while an early release followed by more work is kept. Findings print
+as `path:line:column`; a second `--fix` run is clean. The command exits 1 while
+findings remain (fixable or not), and statements carrying a trailing comment
+are reported but never rewritten, because deleting them would comment out the
+following code.
 
 ## Editor support
 

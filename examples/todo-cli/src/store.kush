@@ -127,25 +127,21 @@ pub fn save(path: &Bytes, data: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic
                 temporary = candidate;
                 done = true;
             },
-            Result.Err(17) => { drop(candidate); attempt = attempt + 1; },
+            Result.Err(17) => { attempt = attempt + 1; },
             Result.Err(code) => {
-                drop(candidate);
                 return Result.Err(code);
             },
         }
     }
     if !done {
-        drop(temporary);
         return Result.Err(17);
     }
     match FS.rename(&temporary, path) {
         Result.Ok(_) => {
-            drop(temporary);
             Result.Ok(())
         },
         Result.Err(code) => {
             let _ = FS.remove(&temporary);
-            drop(temporary);
             Result.Err(code)
         },
     }
@@ -186,11 +182,8 @@ fn rewrite(data: Bytes, id: i64, mode: i64, state: i64) -> Result<Bytes, i64> ! 
         line = line + 1;
     }
     if !changed {
-        drop(out);
-        drop(data);
         return Result.Err(22);
     }
-    drop(data);
     Result.Ok(out)
 }
 

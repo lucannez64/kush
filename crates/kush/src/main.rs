@@ -42,7 +42,7 @@ Build/run use Cranelift on Linux x86-64 and require cc. Eval is the bounded refe
 Check accepts mixed programs: total logical definitions are kernel-checked and erased before executable checking.\n\
 --stats writes one 'allocation-stats:' line to stderr; program stdout and exit status are unchanged.\n\
 Project commands search upward for Kush.toml. Arguments after '--' are forwarded unchanged to the program.\n\
-Test targets declare tests with #[test]; see docs/projects.md. kush fmt only normalizes trailing whitespace and the final newline.\n\
+Test targets declare tests with #[test]; see docs/projects.md. kush fmt normalizes layout. kush lint reports explicit drops that automatic cleanup makes redundant; --fix removes them.\n\
 kush bindgen reads a strict Bridge.toml, writes generated Rust shims and a matching Kush module,\n\
 and with --check reports drift without writing. It never overwrites files without the generated marker.\n";
 
@@ -71,6 +71,7 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
         "new" => new_command(rest, out),
         "bindgen" => bindgen_command(rest, out),
         "fmt" => format_command(rest, out),
+        "lint" => lint_command(rest, out),
         "test" => test_command(rest, out),
         "check" | "build" | "run" if is_project_invocation(rest) => {
             project_command(name.as_ref(), rest, out)
@@ -353,6 +354,169 @@ fn format_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, St
         writeln!(out, "{} files already formatted", files.len()).map_err(output_error)?;
     }
     Ok(u8::from(check && changed != 0))
+}
+
+/// `kush lint`: report (and with `--fix`, remove) explicit `drop(x)` calls
+/// whose effect is already provided by automatic cleanup. See
+/// `executable::redundant_drops` for the exact, conservative conditions.
+fn lint_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {
+    let mut fix = false;
+    let mut manifest = None;
+    let mut files = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match argument(args, index, "lint")? {
+            "--fix" => fix = true,
+            "--manifest-path" => {
+                manifest = Some(PathBuf::from(value(args, &mut index, "lint")?));
+            }
+            other if other.starts_with('-') => return Err(usage_error("lint", other)),
+            other => files.push(PathBuf::from(other)),
+        }
+        index += 1;
+    }
+    let mut programs = Vec::new();
+    if files.is_empty() {
+        let project = open_project(manifest)?;
+        let entry = project.package.entry_path();
+        programs.push(project.load_program(&entry).map_err(project_error)?);
+    } else {
+        for path in &files {
+            let name = path.to_string_lossy().into_owned();
+            programs.push(kush::program::load_path(path).map_err(|(sources, error)| {
+                (
+                    1,
+                    sources
+                        .map_or_else(|| error.render(&name, ""), |sources| sources.render(&error)),
+                )
+            })?);
+        }
+    }
+    // Collect findings per concrete file (the project program maps every
+    // module into one span space).
+    let mut per_file: std::collections::BTreeMap<PathBuf, Vec<Span>> =
+        std::collections::BTreeMap::new();
+    for program in &programs {
+        let executable = kush::executable::check_program(program)
+            .map_err(|error| (1, program.sources.render(&error)))?;
+        for drop in executable.redundant_drops() {
+            let Some(file) = program.sources.files.iter().find(|file| {
+                drop.span.start >= file.base && drop.span.end <= file.base + file.text.len()
+            }) else {
+                continue;
+            };
+            if file.name.starts_with('<') {
+                continue;
+            }
+            let local = Span::new(drop.span.start - file.base, drop.span.end - file.base);
+            per_file
+                .entry(PathBuf::from(&file.name))
+                .or_default()
+                .push(local);
+        }
+    }
+    let mut remaining = 0usize;
+    let mut fixed_total = 0usize;
+    for (path, mut spans) in per_file {
+        let name = path.display().to_string();
+        let source =
+            fs::read_to_string(&path).map_err(|e| (1, format!("cannot read {name}: {e}")))?;
+        spans.sort_by_key(|span| span.start);
+        let mut edits = Vec::new();
+        for span in spans {
+            let Some((start, end)) = drop_statement_range(&source, span) else {
+                remaining += 1;
+                let (line, column) = line_column(&source, span.start);
+                writeln!(
+                    out,
+                    "{name}:{line}:{column}: redundant drop; automatic cleanup already releases this value (not removed: the statement is not alone on its line)"
+                )
+                .map_err(output_error)?;
+                continue;
+            };
+            let (line, column) = line_column(&source, span.start);
+            if !fix {
+                remaining += 1;
+                writeln!(
+                    out,
+                    "{name}:{line}:{column}: redundant drop; automatic cleanup releases this value"
+                )
+                .map_err(output_error)?;
+            } else {
+                edits.push((start, end));
+            }
+        }
+        if fix && !edits.is_empty() {
+            let mut edited = source.clone();
+            for (start, end) in edits.iter().rev() {
+                edited.replace_range(*start..*end, "");
+            }
+            if kush::parser::parse(&edited).is_err() {
+                writeln!(
+                    out,
+                    "{name}: skipped {} fix(es): the edited source would not parse",
+                    edits.len()
+                )
+                .map_err(output_error)?;
+                remaining += edits.len();
+                continue;
+            }
+            project::format::write_source_atomically(&path, &edited).map_err(project_error)?;
+            fixed_total += edits.len();
+            writeln!(out, "removed {} redundant drop(s) in {name}", edits.len())
+                .map_err(output_error)?;
+        }
+    }
+    if fixed_total == 0 && remaining == 0 {
+        writeln!(out, "no redundant drops").map_err(output_error)?;
+    }
+    Ok(u8::from(remaining != 0))
+}
+
+/// The byte range to delete for one `drop(x);` statement. A statement alone on
+/// its line removes the whole line; an inline statement (`{ drop(x); return .. }`)
+/// removes just the statement and the space that joined it to its neighbour.
+/// A trailing `//` comment keeps the statement in place, because deleting it
+/// would comment out whatever follows.
+fn drop_statement_range(source: &str, span: Span) -> Option<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let mut end = span.end;
+    while end < bytes.len() && matches!(bytes[end], b' ' | b'\t') {
+        end += 1;
+    }
+    if bytes.get(end) != Some(&b';') {
+        return None;
+    }
+    end += 1;
+    let line_start = source[..span.start].rfind('\n').map_or(0, |at| at + 1);
+    let line_end = source[end..]
+        .find('\n')
+        .map_or(source.len(), |at| end + at + 1);
+    let suffix = source[end..line_end.min(source.len())].trim();
+    if suffix.starts_with("//") || suffix.starts_with("/*") {
+        return None;
+    }
+    if source[line_start..span.start].trim().is_empty() && suffix.is_empty() {
+        return Some((line_start, line_end));
+    }
+    // Inline statement: drop the text and one adjoining space.
+    let mut start = span.start;
+    if start > 0
+        && matches!(bytes[start - 1], b' ' | b'\t')
+        && end < bytes.len()
+        && matches!(bytes[end], b' ' | b'\t')
+    {
+        start -= 1;
+    }
+    Some((start, end))
+}
+
+/// 1-based line and column of a byte offset.
+fn line_column(source: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(source.len());
+    let line = source[..offset].matches('\n').count() + 1;
+    let line_start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
+    (line, offset - line_start + 1)
 }
 
 fn open_project(manifest: Option<PathBuf>) -> Result<Project, (u8, String)> {

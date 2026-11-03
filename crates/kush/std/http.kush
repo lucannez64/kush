@@ -73,13 +73,11 @@ fn status_line(text: &Bytes, line_end: i64) -> Result<i64, i64> ! {panic} {
 fn parse(raw: Bytes) -> Result<Response, i64> ! {alloc, panic} {
     let line_end = find_pair(&raw, 13, 10, 0);
     if line_end < 0 {
-        drop(raw);
         return Result.Err(22);
     }
     let status = match status_line(&raw, line_end) {
         Result.Ok(code) => code,
         Result.Err(code) => {
-            drop(raw);
             return Result.Err(code);
         }
     };
@@ -94,25 +92,21 @@ fn parse(raw: Bytes) -> Result<Response, i64> ! {alloc, panic} {
         at = at + 1;
     }
     if headers_end < 0 {
-        drop(raw);
         return Result.Err(22);
     }
     let headers_stop = if headers_end < line_end + 2 { line_end + 2 } else { headers_end };
     let headers = match text.slice(&raw, line_end + 2, headers_stop) {
         Result.Ok(value) => value,
         Result.Err(code) => {
-            drop(raw);
             return Result.Err(code);
         }
     };
     let body = match text.slice(&raw, headers_end + 4, Bytes.len(&raw)) {
         Result.Ok(value) => value,
         Result.Err(code) => {
-            drop(raw);
             return Result.Err(code);
         }
     };
-    drop(raw);
     Result.Ok(Response { status: status, headers: headers, body: body })
 }
 

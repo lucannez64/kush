@@ -223,3 +223,74 @@ fn eval_and_native_run_receive_program_arguments_and_environment() {
         assert_eq!(output.stdout, b"3\n11\n7\n");
     }
 }
+
+fn lint_scratch(label: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("kush lint {label} {}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+const LINT_SAMPLE: &str = "module lint_sample;\n\nuse std.result.Result;\n\nfn make() -> Bytes ! {alloc, panic} {\n    Bytes.with_capacity(8)\n}\n\nfn tail() -> Result<Unit, i64> ! {alloc, panic} {\n    let value = make();\n    drop(value);\n    Result.Ok(())\n}\n\nfn early() -> Result<Unit, i64> ! {alloc, panic} {\n    let value = make();\n    drop(value);\n    let after = make();\n    drop(after);\n    Result.Ok(())\n}\n\nfn one_line() -> Result<Unit, i64> ! {alloc, panic} {\n    let value = make();\n    match Bytes.len(&value) {\n        0 => { drop(value); return Result.Err(1); },\n        _ => Result.Ok(()),\n    }\n}\n";
+
+#[test]
+fn lint_reports_and_fixes_redundant_drops() {
+    let scratch = lint_scratch("fix");
+    let file = scratch.join("sample.kush");
+    std::fs::write(&file, LINT_SAMPLE).unwrap();
+    let output = command()
+        .args(["lint", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // tail, early's second drop, and the one-line arm: the early first drop
+    // stays because an allocation follows it.
+    assert_eq!(stdout.matches("redundant drop").count(), 3, "{stdout}");
+    assert!(stdout.contains("sample.kush:11:5"), "{stdout}");
+    assert!(!stdout.contains("sample.kush:18:5"), "{stdout}");
+
+    let output = command()
+        .args(["lint", "--fix", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let fixed = std::fs::read_to_string(&file).unwrap();
+    assert!(!fixed.contains("drop(after)"), "{fixed}");
+    assert!(
+        !fixed.contains("drop(value);\n    Result.Ok(())"),
+        "{fixed}"
+    );
+    assert!(fixed.contains("drop(value);\n    let after"), "{fixed}");
+    assert!(fixed.contains("0 => { return Result.Err(1); }"), "{fixed}");
+
+    // A second run has nothing left to report.
+    let output = command()
+        .args(["lint", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("no redundant drops"));
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+#[test]
+fn lint_keeps_commented_and_linear_drops() {
+    let scratch = lint_scratch("keep");
+    let file = scratch.join("sample.kush");
+    let source = "module keep;\n\nfn main() -> Unit ! {alloc, panic} {\n    let value = Bytes.with_capacity(4);\n    drop(value); // documented early release\n}\n";
+    std::fs::write(&file, source).unwrap();
+    let output = command()
+        .args(["lint", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    // The trailing comment keeps the statement: it is reported but not fixed.
+    assert_eq!(output.status.code(), Some(1));
+    let output = command()
+        .args(["lint", "--fix", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
+    let _ = std::fs::remove_dir_all(&scratch);
+}

@@ -46,7 +46,7 @@ pub fn tokenize(source: &Bytes) -> Result<Vec<Token>, LexError> ! {alloc, panic}
             index = next;
         } else {
             match symbol(byte) {
-                Token.Number(_) => { drop(tokens); return Err(LexError.UnexpectedByte(index)); },
+                Token.Number(_) => { return Err(LexError.UnexpectedByte(index)); },
                 token => { tokens = Vec.push(tokens, token); index = index + 1; },
             }
         }

@@ -191,7 +191,6 @@ pub fn replace(text: Bytes, needle: &Bytes, replacement: &Bytes) -> Bytes ! {all
             i = i + 1;
         }
     }
-    drop(text);
     out
 }
 

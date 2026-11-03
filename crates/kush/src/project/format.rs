@@ -89,14 +89,14 @@ pub fn format_file(path: &Path, check: bool) -> Result<bool, Failure> {
         return Ok(false);
     }
     if !check {
-        write_formatted(path, &formatted)?;
+        write_source_atomically(path, &formatted)?;
     }
     Ok(true)
 }
 
 /// Exclusive temporary file in the source's directory, then an atomic rename:
 /// a crash cannot truncate the source and concurrent runs never share state.
-fn write_formatted(path: &Path, formatted: &str) -> Result<(), Failure> {
+pub fn write_source_atomically(path: &Path, formatted: &str) -> Result<(), Failure> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = path.file_name().map_or_else(
         || "source".to_owned(),
