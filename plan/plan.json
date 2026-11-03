@@ -665,6 +665,11 @@
           "time": "2026-11-03 22:00:42",
           "who": "agent",
           "text": "Integrated 8b808a4: actual-argument relabeling for call results and inferred record labels, invariant identity required at typed bindings, removed blanket call/unclassified witness fallbacks. Worker reproduced reported probes and focused regressions pass. Full Boat gate pending."
+        },
+        {
+          "time": "2026-11-03 22:52:23",
+          "who": "agent",
+          "text": "Integrated 2182f7e: call-wide lifetime occurrence constraints, direct/indirect/static method agreement, narrow outer placeholder handling, opaque unresolved result labels and field-specific literal inference. Worker full local suite1242 passed; full Boat pending. Canonical indirect-arrow bounds and outer-only provenance remain review boundaries."
         }
       ]
     },
