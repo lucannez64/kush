@@ -1,0 +1,137 @@
+[
+  {
+    "variant": "kush-default",
+    "observations": [
+      {
+        "initialize_ms": 52.27223,
+        "map_ms": 92.521371,
+        "checksum_ms": 14.354768
+      },
+      {
+        "initialize_ms": 51.556752,
+        "map_ms": 92.028615,
+        "checksum_ms": 13.645635
+      },
+      {
+        "initialize_ms": 53.230821,
+        "map_ms": 92.288993,
+        "checksum_ms": 13.715859
+      },
+      {
+        "initialize_ms": 52.384319,
+        "map_ms": 92.352672,
+        "checksum_ms": 13.534728
+      },
+      {
+        "initialize_ms": 53.287858,
+        "map_ms": 93.712531,
+        "checksum_ms": 13.751515
+      },
+      {
+        "initialize_ms": 52.133337,
+        "map_ms": 93.849668,
+        "checksum_ms": 13.771163
+      },
+      {
+        "initialize_ms": 51.489325,
+        "map_ms": 94.714917,
+        "checksum_ms": 13.867142
+      }
+    ],
+    "medians": {
+      "initialize_ms": 52.27223,
+      "map_ms": 92.521371,
+      "checksum_ms": 13.751515
+    }
+  },
+  {
+    "variant": "kush-release",
+    "observations": [
+      {
+        "initialize_ms": 49.841595,
+        "map_ms": 7.519474,
+        "checksum_ms": 15.706862
+      },
+      {
+        "initialize_ms": 48.291439,
+        "map_ms": 7.525434,
+        "checksum_ms": 15.918021
+      },
+      {
+        "initialize_ms": 50.596145,
+        "map_ms": 7.499786,
+        "checksum_ms": 16.188519
+      },
+      {
+        "initialize_ms": 47.792873,
+        "map_ms": 8.205373,
+        "checksum_ms": 16.137923
+      },
+      {
+        "initialize_ms": 49.170803,
+        "map_ms": 8.260358,
+        "checksum_ms": 15.943989
+      },
+      {
+        "initialize_ms": 49.081355,
+        "map_ms": 7.800582,
+        "checksum_ms": 15.741248
+      },
+      {
+        "initialize_ms": 50.835815,
+        "map_ms": 8.131475,
+        "checksum_ms": 16.587859
+      }
+    ],
+    "medians": {
+      "initialize_ms": 49.170803,
+      "map_ms": 7.800582,
+      "checksum_ms": 15.943989
+    }
+  },
+  {
+    "variant": "rust-manual",
+    "observations": [
+      {
+        "initialize_ms": 29.423472,
+        "map_ms": 16.67838,
+        "checksum_ms": 9.456116
+      },
+      {
+        "initialize_ms": 29.222684,
+        "map_ms": 16.686555,
+        "checksum_ms": 9.562998
+      },
+      {
+        "initialize_ms": 29.819787,
+        "map_ms": 16.791132,
+        "checksum_ms": 9.57002
+      },
+      {
+        "initialize_ms": 29.618328,
+        "map_ms": 16.721982,
+        "checksum_ms": 9.217798
+      },
+      {
+        "initialize_ms": 29.552766,
+        "map_ms": 16.780852,
+        "checksum_ms": 9.289212
+      },
+      {
+        "initialize_ms": 29.942127,
+        "map_ms": 16.884027,
+        "checksum_ms": 9.64411
+      },
+      {
+        "initialize_ms": 31.932752,
+        "map_ms": 17.538998,
+        "checksum_ms": 9.823176
+      }
+    ],
+    "medians": {
+      "initialize_ms": 29.618328,
+      "map_ms": 16.780852,
+      "checksum_ms": 9.562998
+    }
+  }
+]

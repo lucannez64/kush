@@ -105,3 +105,19 @@ borrowed checksum; they do not time initialization/output as part of the map.
 Keep comparisons within one cohort: laptop frequency/temperature/background
 load can shift absolute numbers between runs. See the generated JSON for every
 sample and the benchmark README for other fairness limits.
+
+### Laptop checkpoint (2026-11-03)
+
+At compiler checkpoint `a4060de`, 2,097,152 elements × four batches, seven
+shuffled samples after two warmups: default Kush 161.274 ms, speed-only
+157.479 ms, inline-only 77.645 ms, release 74.736 ms, Rust Cranelift O3 manual
+fusion 61.495 ms. Release reduces whole-process time by 53.7% versus default;
+it remains 21.5% slower than the manual Rust control. Median RSS stays near
+18 MiB for every implementation.
+
+Separate instrumented probes measure the transform at 7.801 ms for Kush
+release versus 16.781 ms for Rust manual fusion. Initialization (49.171 versus
+29.618 ms) and checksum (15.944 versus 9.563 ms) remain the next targets.
+This is one workload, not a general performance ranking. Raw samples, commands,
+source hashes, and phase data are in
+`benchmarks/feature-pipeline/sample-results/release-2026-11-03/`.
