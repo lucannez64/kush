@@ -1,0 +1,362 @@
+module json_memory;
+use std.result.Result;
+use std.text;
+use std.json;
+foreign "memory_begin" fn memory_begin()->Unit ! {
+    io
+};
+foreign "memory_stage" fn memory_stage(stage:i64)->Unit ! {
+    io
+};
+foreign "memory_end" fn memory_end()->Unit ! {
+    io
+};
+struct Seed {
+    revision:i64, text:Bytes, children:Vec<i64>
+}
+struct Node {
+    id:i64, revision:i64
+}
+struct Document {
+    node:Box<Node>, text:Bytes, children:Vec<i64>
+}
+fn equal(a:&Bytes,b:&Bytes)->Bool ! {
+    panic
+} {
+    if Bytes.len(a)!=Bytes.len(b) {
+        return false;
+    }
+    let mut i=0;
+    while i<Bytes.len(a) {
+        if Bytes.get(a,i)!=Bytes.get(b,i) {
+            return false;
+        }i=i+1;
+    }
+    true
+}
+fn seed()->Seed ! {
+    alloc,panic
+} {
+    let source=Bytes.from("{\"revision\":0,\"text\":\"seed\",\"children\":[1,2,3,4]}");
+    let value=match json.parse(&source[..]) {
+        Ok(v)=>v,Err(_)=>panic()
+    };
+    let members=match value {
+        json.Value.Object(m)=>m,_=>panic()
+    };
+    let mut members=members;
+    let mut revision=0;
+    let mut content=Bytes.with_capacity(0);
+    let mut children:Vec<i64> =[];
+    let mut found=0;
+    loop {
+        match Box.take(members) {
+            json.Members.End=> {
+                break;
+            },
+            json.Members.More(key,value,tail)=> {
+                members=tail;
+                if equal(&key,&Bytes.from("revision")) {
+                    revision=match value {
+                        json.Value.Number(v)=>match text.parse_i64(&v) {
+                            Ok(n)=>n,Err(_)=>panic()
+                        },_=>panic()
+                    };
+                    found=found+1;
+                } else {
+                    if equal(&key,&Bytes.from("text")) {
+                        content=match value {
+                            json.Value.String(v)=>v,_=>panic()
+                        };
+                        found=found+1;
+                    } else {
+                        if equal(&key,&Bytes.from("children")) {
+                            let mut items=match value {
+                                json.Value.Array(items)=>items,_=>panic()
+                            };
+                            loop {
+                                match Box.take(items) {
+                                    json.Items.End=> {
+                                        break;
+                                    },
+                                    json.Items.More(value,tail)=> {
+                                        let number=match value {
+                                            json.Value.Number(v)=>match text.parse_i64(&v) {
+                                                Ok(n)=>n,Err(_)=>panic()
+                                            },_=>panic()
+                                        };
+                                        children=Vec.push(children,number);
+                                        items=tail;
+                                    },
+                                }
+                            }
+                            found=found+1;
+                        } else {
+                            panic();
+                        }
+                    }
+                }
+            },
+        }
+    }
+    if found!=3 {
+        panic();
+    }
+    Seed {
+        revision:revision,text:content,children:children
+    }
+}
+fn create(id:i64,initial:&Seed)->Document ! {
+    alloc,panic
+} {
+    let mut children:Vec<i64> =Vec.with_capacity(Vec.len(&initial.children));
+    let mut i=0;
+    while i<Vec.len(&initial.children) {
+        children=Vec.push(children,Vec.get(&initial.children,i));
+        i=i+1;
+    }
+    Document {
+        node:Box.new(Node {
+            id:id,revision:initial.revision
+        }),text:Bytes.copy(&initial.text),children:children
+    }
+}
+fn corpus(count:i64,initial:&Seed)->Vec<Document> ! {
+    alloc,panic
+} {
+    let mut documents:Vec<Document> =Vec.with_capacity(count);
+    let mut i=0;
+    while i<count {
+        documents=Vec.push(documents,create(i,initial));
+        i=i+1;
+    }
+    documents
+}
+fn content(out:Bytes,id:i64,revision:i64)->Bytes ! {
+    alloc,panic
+} {
+    let mut out=out;
+    let size=if revision%2==1 {
+        512
+    }else {
+        16
+    };
+    let mut i=0;
+    while i<size {
+        out=Bytes.push(out,65+(id+revision+i)%26);
+        i=i+1;
+    }
+    out
+}
+fn subtree(out:Vec<i64>,id:i64,revision:i64)->Vec<i64> ! {
+    alloc,panic
+} {
+    let mut out=out;
+    let size=if revision%2==1 {
+        32
+    }else {
+        4
+    };
+    let mut i=0;
+    while i<size {
+        out=Vec.push(out,id+revision+i);
+        i=i+1;
+    }
+    out
+}
+fn rebuild(doc:Document)->Document ! {
+    alloc,panic
+} {
+    let Document {
+        node:node,text:old_text,children:old_children
+    }=doc;
+    let previous=Box.read(&node);
+    let revision=previous.revision+1;
+    let text=content(Bytes.with_capacity(16),previous.id,revision);
+    let children=subtree(Vec.with_capacity(4),previous.id,revision);
+    let next=Box.new(Node {
+        id:previous.id,revision:revision
+    });
+    drop(node);
+    drop(old_text);
+    drop(old_children);
+    Document {
+        node:next,text:text,children:children
+    }
+}
+fn reuse(doc:Document)->Document ! {
+    alloc,panic
+} {
+    let Document {
+        node:node,text:old_text,children:old_children
+    }=doc;
+    let previous=Box.read(&node);
+    let revision=previous.revision+1;
+    let target=if revision%2==1 {
+        512
+    }else {
+        16
+    };
+    let buffer=if Bytes.capacity(&old_text)<target {
+        drop(old_text);
+        Bytes.with_capacity(target)
+    }else {
+        Bytes.clear(old_text)
+    };
+    let text=content(buffer,previous.id,revision);
+    let target_children=if revision%2==1 {
+        32
+    }else {
+        4
+    };
+    let children=subtree(Vec.reserve(Vec.clear(old_children),target_children),previous.id,revision);
+    let next=Box.reuse(node,Node {
+        id:previous.id,revision:revision
+    });
+    Document {
+        node:next,text:text,children:children
+    }
+}
+fn literal(out:Bytes,value:&[i64])->Bytes ! {
+    alloc,panic
+} {
+    let mut out=out;
+    let mut i=0;
+    while i<Slice.len(value) {
+        out=Bytes.push(out,Slice.get(value,i));
+        i=i+1;
+    }out
+}
+fn serialize(doc:Document)->Bytes ! {
+    alloc,panic
+} {
+    let Document {
+        node:node,text:content,children:children
+    }=doc;
+    let meta=Box.read(&node);
+    let mut out=Bytes.with_capacity(128+Bytes.len(&content)+Vec.len(&children)*24);
+    out= {
+        let token:[i64;6]=[123,34,105,100,34,58];
+        literal(out,&token[..])
+    };
+    out=text.format_i64_into(out,meta.id);
+    out= {
+        let token:[i64;12]=[44,34,114,101,118,105,115,105,111,110,34,58];
+        literal(out,&token[..])
+    };
+    out=text.format_i64_into(out,meta.revision);
+    out= {
+        let token:[i64;9]=[44,34,116,101,120,116,34,58,34];
+        literal(out,&token[..])
+    };
+    let mut i=0;
+    while i<Bytes.len(&content) {
+        out=Bytes.push(out,Bytes.get(&content,i));
+        i=i+1;
+    }
+    out= {
+        let token:[i64;14]=[34,44,34,99,104,105,108,100,114,101,110,34,58,91];
+        literal(out,&token[..])
+    };
+    let mut j=0;
+    while j<Vec.len(&children) {
+        if j!=0 {
+            out=Bytes.push(out,44);
+        }out=text.format_i64_into(out,Vec.get(&children,j));
+        j=j+1;
+    }
+    {
+        let token:[i64;2]=[93,125];
+        literal(out,&token[..])
+    }
+}
+fn finish(doc:Document,emit:Bool)->i64 ! {
+    io,alloc,panic
+} {
+    let mut out=serialize(doc);
+    let mut hash=0;
+    let mut i=0;
+    while i<Bytes.len(&out) {
+        hash=(hash*131+Bytes.get(&out,i))%1000000007;
+        i=i+1;
+    }
+    if emit {
+        out=Bytes.push(out,10);
+        match IO.write(IO.stdout(),&out) {
+            Ok(_)=> {
+            },Err(_)=>panic()
+        };
+    }
+    hash
+}
+fn quiet(doc:Document)->i64 ! {
+    io,alloc,panic
+} {
+    finish(doc,false)
+}
+fn verbose(doc:Document)->i64 ! {
+    io,alloc,panic
+} {
+    finish(doc,true)
+}
+fn consume(documents:Vec<Document>,emit:Bool)->i64 ! {
+    io,alloc,panic
+} {
+    let sums=if emit {
+        Vec.map_in_place(documents,verbose)
+    }else {
+        Vec.map_in_place(documents,quiet)
+    };
+    let mut sum=0;
+    let mut i=0;
+    while i<Vec.len(&sums) {
+        sum=sum+Vec.get(&sums,i);
+        i=i+1;
+    }sum
+}
+fn argument(index:i64)->i64 ! {
+    io,alloc,panic
+} {
+    let value=match ENV.arg(index,Bytes.with_capacity(32)) {
+        Ok(v)=>v,Err(_)=> {
+            return -1;
+        }
+    };
+    match text.parse_i64(&value) {
+        Ok(n)=>n,Err(_)=>-1
+    }
+}
+fn main()->i64 ! {
+    io,alloc,panic
+} {
+    let count=argument(1);
+    let rounds=argument(2);
+    let mode=argument(3);
+    let emit=argument(4);
+    if count<1||count>32768||rounds<0||rounds>63||mode<0||mode>1||emit<0||emit>1 {
+        return 2;
+    }
+    memory_begin();
+    let initial=seed();
+    let mut documents=corpus(count,&initial);
+    memory_stage(1);
+    let mut round=0;
+    while round<rounds {
+        documents=if mode==1 {
+            Vec.map_in_place(documents,reuse)
+        }else {
+            Vec.map_in_place(documents,rebuild)
+        };
+        round=round+1;
+    }
+    memory_stage(2);
+    let sum=consume(documents,emit==1);
+    memory_stage(3);
+    let small=corpus(16,&initial);
+    memory_stage(4);
+    let sum=sum+consume(small,emit==1);
+    drop(initial);
+    memory_end();
+    print_i64(sum);
+    0
+}

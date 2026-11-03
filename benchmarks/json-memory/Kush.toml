@@ -1,0 +1,7 @@
+[package]
+name = "json_memory"
+version = "0.1.0"
+entry = "kush/main.kush"
+
+[native]
+libraries = ["build/probe-plain.o"]
