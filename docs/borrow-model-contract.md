@@ -23,7 +23,11 @@ shared-to-exclusive upgrade is rejected. Disjoint structural fields, constant
 indices and established split identities keep their existing explicit proofs.
 Unknown dynamic index/range relationships remain conflicting, not disjoint.
 
-Ending one view's use does not invalidate another live shared copy. A mutable
+Ending one view's use does not invalidate another live shared copy. In the
+current checker an assignment from a view can be represented as a derived view:
+its parent binding may not be dropped while that child remains live. This is a
+conservative static restriction; independent shared borrows of the owner need
+not retain one another's binding. The baseline tests distinguish these cases. A mutable
 view is not copyable. Moving an owning carrier transfers its leaf provenance;
 dropping it releases only that carrier's obligations, not another value's loans.
 Owner mutation, replacement, drop or move must conflict with every retained
@@ -37,7 +41,9 @@ Rust unsafe code or permission to run an invalid access in native code.
 
 | Trace | Required outcome |
 | --- | --- |
-| owner -> shared view -> shared copy -> drop first view -> mutate owner -> use second | reject owner mutation; the second view keeps its loan |
+| owner -> two independent shared borrows -> drop first -> mutate owner -> use second | reject owner mutation; the second borrow keeps its loan |
+| shared parent view -> derived view by assignment -> drop parent -> use child | current checker rejects parent drop; do not relax this silently |
+| shared parent and derived view -> last child use -> parent drop -> owner mutation | accept when all checked loans have ended |
 | owner -> exclusive parent -> exclusive child -> access overlapping parent -> use child | reject parent access while child remains live |
 | same sequence, child last use then parent access | accept when the current last-use rules release the child |
 | exclusive root -> two proven disjoint field/split children -> writes to each | accept; destroying/replacing the whole root while either child is live rejects |
@@ -99,3 +105,11 @@ This contract completes the immediate subset audit and trace plan. A formal
 simulation, Tree Borrows interpreter, raw-pointer support and optimizer alias
 proofs are not completed by it. The scope is a precise operational review
 contract for current checked Kush and the upcoming LIFE changes.
+
+
+Validation: the five focused `lifetime_integration_baseline` tests and strict
+Clippy passed on Boat. The accepted last-use case also compares reference,
+default native and release native execution. This is focused baseline evidence,
+not a full-suite result for the upcoming delegated implementations. The initial
+probe confirmed a conservative derived-view parent-drop restriction; tests and
+this contract preserve it rather than claiming Rust-style view-copy semantics.

@@ -1821,6 +1821,16 @@
           "time": "2026-11-03 17:47:08",
           "who": "agent",
           "text": "Documented explicit Kush root/path/capability contract and access-trace matrix; distinguishes static restrictions from Tree Borrows semantics and adds LIFE cross-boundary review obligations. No formal simulation or new alias optimization claimed."
+        },
+        {
+          "time": "2026-11-03 17:52:39",
+          "who": "agent",
+          "text": "Fresh baseline run initially exposed a conservative derived-view parent-drop rule, not an owner escape. Updated trace distinctions and five baseline tests; corrected cases prechecked with installed CLI; fresh Boat validation running."
+        },
+        {
+          "time": "2026-11-03 17:54:33",
+          "who": "agent",
+          "text": "Five focused lifetime baseline tests and strict Clippy pass on Boat; accepted case compares evaluator/default/release native; current parent/derived-view restriction explicitly preserved."
         }
       ]
     },
@@ -1890,9 +1900,9 @@
       "deps": [
         "LT-VARIANCE-DESIGN"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Label-aware canonical rows, residual-row substitution, exact path correspondence and actual-origin return validation before enabling borrowed structural results.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 17:45:03",
@@ -1908,6 +1918,11 @@
           "time": "2026-11-03 17:49:40",
           "who": "agent",
           "text": "Design review complete: complete field descriptors must survive interning/lowering/residual rows and use actual owner roots at result validation; keep the existing result gate until end-to-end metadata and witnesses are integrated."
+        },
+        {
+          "time": "2026-11-03 17:49:40",
+          "who": "agent",
+          "text": "Metadata, residual-row specialization, result provenance and hostile validation contract completed; no result rejection removed."
         }
       ]
     }
