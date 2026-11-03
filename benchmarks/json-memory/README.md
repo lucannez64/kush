@@ -210,3 +210,9 @@ Timing samples now also record process-tree CPU time via child `getrusage`
 (including the GNU time wrapper) and start/end host load. `confirm.py` can
 measure an already-built hash-verified binary bundle without compiling, using
 per-child `wait4` for CPU time and peak RSS. Both tools validate checksums.
+
+
+Latest: [plain byte capacity speed/memory follow-up](sample-results/plain-byte-capacity-2026-11-03/analysis.md)
+retains the header savings, removes capacity decoding from byte appends and
+inlines checked byte access. Includes original/headerless/new Kush, Rust,
+a measured intermediate candidate, and both Boat/laptop results.

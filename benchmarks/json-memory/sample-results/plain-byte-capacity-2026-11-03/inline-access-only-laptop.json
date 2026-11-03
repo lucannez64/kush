@@ -1,0 +1,195 @@
+{
+  "metadata": {
+    "host": {
+      "system": "Linux",
+      "node": "hirew",
+      "release": "7.2.11-zen1-1-zen",
+      "version": "#1 ZEN SMP PREEMPT_DYNAMIC Fri, 16 Oct 2026 00:28:42 +0000",
+      "machine": "x86_64",
+      "processor": ""
+    },
+    "libc": [
+      "glibc",
+      "2.44"
+    ],
+    "cpu": 7,
+    "cpu_model": "AMD Ryzen 5 PRO 5675U with Radeon Graphics",
+    "cpu_max": null,
+    "count": 16384,
+    "rounds": 31,
+    "repetitions": 5,
+    "warmups": 1,
+    "load_average_start": [
+      8.30615234375,
+      6.77490234375,
+      6.7265625
+    ],
+    "load_average_end": [
+      8.74853515625,
+      6.98291015625,
+      6.79736328125
+    ],
+    "scope": "prebuilt hash-verified binaries; wait4 per child, no compilation",
+    "manifest": {
+      "layout": "inline metadata",
+      "binaries": [
+        {
+          "name": "kush-original",
+          "label": "Kush before header elision",
+          "sha256": "04148c53c5c591ec7f4c54a034852da8b3a9c363c782986003fe63b1c5a46727"
+        },
+        {
+          "name": "kush-headerless",
+          "label": "Headerless Kush before access inlining",
+          "sha256": "4dde68fce7379bee264e555a8f5896a55e06bc266e82ec0ab70e5fab03880701"
+        },
+        {
+          "name": "rust-plain",
+          "label": "Rust CLIF",
+          "sha256": "72daf15fd288a473cd1f1fe9a1659c4c07de318390ed6ed6019365b3b1eeb7d3"
+        },
+        {
+          "name": "kush-access",
+          "label": "Kush with inline byte access",
+          "sha256": "ce7e75dbb954f31ac35c6de9b5e8563438b2ea45b713a11091dfdfc53c692c91"
+        }
+      ]
+    }
+  },
+  "observations": {
+    "kush-original": [
+      {
+        "wall_ms": 995.3653979755472,
+        "cpu_ms": 937.5699999999999,
+        "peak_rss_kib": 16604
+      },
+      {
+        "wall_ms": 873.6993999918923,
+        "cpu_ms": 860.501,
+        "peak_rss_kib": 16572
+      },
+      {
+        "wall_ms": 837.702235992765,
+        "cpu_ms": 825.4309999999999,
+        "peak_rss_kib": 16604
+      },
+      {
+        "wall_ms": 835.7156949932687,
+        "cpu_ms": 823.6469999999999,
+        "peak_rss_kib": 16580
+      },
+      {
+        "wall_ms": 833.9125659840647,
+        "cpu_ms": 821.4039999999999,
+        "peak_rss_kib": 16620
+      }
+    ],
+    "kush-headerless": [
+      {
+        "wall_ms": 810.1821450109128,
+        "cpu_ms": 794.8729999999999,
+        "peak_rss_kib": 16064
+      },
+      {
+        "wall_ms": 768.6154370021541,
+        "cpu_ms": 752.8079999999999,
+        "peak_rss_kib": 16116
+      },
+      {
+        "wall_ms": 775.0976360111963,
+        "cpu_ms": 763.046,
+        "peak_rss_kib": 16048
+      },
+      {
+        "wall_ms": 709.3970720015932,
+        "cpu_ms": 698.7679999999999,
+        "peak_rss_kib": 15968
+      },
+      {
+        "wall_ms": 889.487361011561,
+        "cpu_ms": 811.9699999999999,
+        "peak_rss_kib": 16100
+      }
+    ],
+    "rust-plain": [
+      {
+        "wall_ms": 1153.4184869960882,
+        "cpu_ms": 1135.189,
+        "peak_rss_kib": 16272
+      },
+      {
+        "wall_ms": 1147.3862940038089,
+        "cpu_ms": 1131.185,
+        "peak_rss_kib": 16148
+      },
+      {
+        "wall_ms": 1136.4734609960578,
+        "cpu_ms": 1119.753,
+        "peak_rss_kib": 16280
+      },
+      {
+        "wall_ms": 1083.820061001461,
+        "cpu_ms": 1070.0800000000002,
+        "peak_rss_kib": 16156
+      },
+      {
+        "wall_ms": 1052.4868399952538,
+        "cpu_ms": 1039.155,
+        "peak_rss_kib": 16264
+      }
+    ],
+    "kush-access": [
+      {
+        "wall_ms": 829.8700639861636,
+        "cpu_ms": 816.6919999999999,
+        "peak_rss_kib": 16108
+      },
+      {
+        "wall_ms": 1039.6977410127874,
+        "cpu_ms": 1003.2329999999998,
+        "peak_rss_kib": 16060
+      },
+      {
+        "wall_ms": 791.0921380098443,
+        "cpu_ms": 779.7199999999999,
+        "peak_rss_kib": 16052
+      },
+      {
+        "wall_ms": 791.0948589851614,
+        "cpu_ms": 779.949,
+        "peak_rss_kib": 16064
+      },
+      {
+        "wall_ms": 792.0360650168732,
+        "cpu_ms": 780.613,
+        "peak_rss_kib": 16068
+      }
+    ]
+  },
+  "summary": [
+    {
+      "name": "kush-original",
+      "wall_ms": 837.702235992765,
+      "cpu_ms": 825.4309999999999,
+      "peak_rss_kib": 16604
+    },
+    {
+      "name": "kush-headerless",
+      "wall_ms": 775.0976360111963,
+      "cpu_ms": 763.046,
+      "peak_rss_kib": 16064
+    },
+    {
+      "name": "rust-plain",
+      "wall_ms": 1136.4734609960578,
+      "cpu_ms": 1119.753,
+      "peak_rss_kib": 16264
+    },
+    {
+      "name": "kush-access",
+      "wall_ms": 792.0360650168732,
+      "cpu_ms": 780.613,
+      "peak_rss_kib": 16064
+    }
+  ]
+}

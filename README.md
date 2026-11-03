@@ -264,3 +264,8 @@ this milestone. See [the runnable example](examples/niches.kush).
 reduce ordinary-buffer overhead while preserving capacity/refusal contracts.
 The [matched speed/memory measurements](benchmarks/json-memory/sample-results/headerless-buffers-2026-11-03/analysis.md)
 include the remaining tradeoff versus previous Kush and the boxed/inline distinction.
+
+The [plain byte-capacity follow-up](benchmarks/json-memory/sample-results/plain-byte-capacity-2026-11-03/analysis.md)
+keeps those memory savings and removes decoding from byte-append hot paths.
+Its matched Boat cohort improves speed versus both previous Kush versions;
+the report also preserves the mixed busy-laptop results and exact Rust scope.

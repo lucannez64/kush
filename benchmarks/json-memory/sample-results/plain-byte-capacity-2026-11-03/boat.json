@@ -1,0 +1,510 @@
+{
+  "metadata": {
+    "host": {
+      "system": "Linux",
+      "node": "box-node-6bd2af7454df9602",
+      "release": "6.8.0-117-generic",
+      "version": "#117-Ubuntu SMP PREEMPT_DYNAMIC Tue May  5 19:26:24 UTC 2026",
+      "machine": "x86_64",
+      "processor": "x86_64"
+    },
+    "libc": [
+      "glibc",
+      "2.39"
+    ],
+    "cpu": 0,
+    "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor",
+    "cpu_max": null,
+    "count": 16384,
+    "rounds": 31,
+    "repetitions": 9,
+    "warmups": 1,
+    "load_average_start": [
+      3.0087890625,
+      5.2353515625,
+      3.85107421875
+    ],
+    "load_average_end": [
+      2.5,
+      4.9755859375,
+      3.79443359375
+    ],
+    "scope": "prebuilt hash-verified binaries; wait4 per child, no compilation",
+    "manifest": {
+      "layout": "inline metadata",
+      "binaries": [
+        {
+          "name": "kush-original",
+          "label": "Kush before header elision",
+          "sha256": "04148c53c5c591ec7f4c54a034852da8b3a9c363c782986003fe63b1c5a46727"
+        },
+        {
+          "name": "kush-headerless",
+          "label": "Headerless Kush before access inlining",
+          "sha256": "4dde68fce7379bee264e555a8f5896a55e06bc266e82ec0ab70e5fab03880701"
+        },
+        {
+          "name": "rust-plain",
+          "label": "Rust CLIF",
+          "sha256": "72daf15fd288a473cd1f1fe9a1659c4c07de318390ed6ed6019365b3b1eeb7d3"
+        },
+        {
+          "name": "kush-access",
+          "label": "Kush with inline byte access",
+          "sha256": "ce7e75dbb954f31ac35c6de9b5e8563438b2ea45b713a11091dfdfc53c692c91"
+        },
+        {
+          "name": "kush-plain-capacity",
+          "label": "Kush plain byte capacity + inline access",
+          "sha256": "209ce36dc403b4e2a6a0f308e9689e7de57d9b93e806e9d17212928d12e77082"
+        }
+      ],
+      "candidate_compiler_sha256": "bcb2bd5dbfb5290ef067de0bbe86cc8aad4d5f6b355c5b9fafbff1991165ae5e",
+      "candidate_native_source_sha256": "ffbc456176b16ffb88eec81fbdd8a33a6df5f45cc4f25a43f9edb44103d67e28",
+      "workload_sha256": "7b1d51d16e70932382a88be2004e269716b64614effdbf999e857b4ab9aba397",
+      "probe_sha256": "6ef1012e3a9d35fe4424e842129da9e8bdf73b7cd46057a4ebacd6d55126e617",
+      "controls_manifest": {
+        "layout": "inline metadata in both languages",
+        "compiler_checkpoint": "516b360",
+        "binaries": [
+          {
+            "name": "kush-before-plain",
+            "label": "Previous Kush",
+            "sha256": "04148c53c5c591ec7f4c54a034852da8b3a9c363c782986003fe63b1c5a46727"
+          },
+          {
+            "name": "kush-plain",
+            "label": "Current Kush",
+            "sha256": "4dde68fce7379bee264e555a8f5896a55e06bc266e82ec0ab70e5fab03880701"
+          },
+          {
+            "name": "rust-plain",
+            "label": "Rust CLIF",
+            "sha256": "72daf15fd288a473cd1f1fe9a1659c4c07de318390ed6ed6019365b3b1eeb7d3"
+          }
+        ],
+        "build_manifest": {
+          "inline_metadata": true,
+          "builds": [
+            {
+              "name": "kush-plain",
+              "command": [
+                "/tmp/kush-buffer-header-fast/kush",
+                "build",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/build/kush-inline.kush",
+                "-o",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/build/kush-plain",
+                "--release",
+                "--link",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/build/probe-plain-6ef1012e3a9d35fe.o"
+              ],
+              "wall_s": 5.044396837998647,
+              "sha256": "4dde68fce7379bee264e555a8f5896a55e06bc266e82ec0ab70e5fab03880701"
+            },
+            {
+              "name": "rust-plain",
+              "command": [
+                "mbx",
+                "rustc",
+                "--manifest-path",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/rust/Cargo.toml",
+                "--release",
+                "--offline",
+                "-j",
+                "2",
+                "--features",
+                "inline-metadata",
+                "--",
+                "-C",
+                "link-arg=/home/hirew/Projects/kush/benchmarks/json-memory/build/probe-plain-6ef1012e3a9d35fe.o"
+              ],
+              "environment": {
+                "RUSTUP_TOOLCHAIN": "nightly",
+                "CARGO_PROFILE_RELEASE_DEBUG": "0",
+                "CARGO_TARGET_DIR": "/home/hirew/.cache/kush-json-memory-rust",
+                "RUSTFLAGS": "-Zcodegen-backend=cranelift -Ctarget-cpu=x86-64 -Coverflow-checks=yes"
+              },
+              "wall_s": 0.5117564190004487,
+              "sha256": "72daf15fd288a473cd1f1fe9a1659c4c07de318390ed6ed6019365b3b1eeb7d3"
+            },
+            {
+              "name": "kush-trace",
+              "command": [
+                "/tmp/kush-buffer-header-fast/kush",
+                "build",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/build/kush-inline.kush",
+                "-o",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/build/kush-trace",
+                "--release",
+                "--link",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/build/probe-trace-6ef1012e3a9d35fe.o",
+                "--stats"
+              ],
+              "wall_s": 5.807726695988094,
+              "sha256": "51730866356d29c8c162ea8c8d84fcc43a9b1a3be34259e618f936267722f984"
+            },
+            {
+              "name": "rust-trace",
+              "command": [
+                "mbx",
+                "rustc",
+                "--manifest-path",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/rust/Cargo.toml",
+                "--release",
+                "--offline",
+                "-j",
+                "2",
+                "--features",
+                "inline-metadata",
+                "--",
+                "-C",
+                "link-arg=/home/hirew/Projects/kush/benchmarks/json-memory/build/probe-trace-6ef1012e3a9d35fe.o",
+                "-C",
+                "link-arg=-Wl,--wrap=malloc",
+                "-C",
+                "link-arg=-Wl,--wrap=calloc",
+                "-C",
+                "link-arg=-Wl,--wrap=realloc",
+                "-C",
+                "link-arg=-Wl,--wrap=aligned_alloc",
+                "-C",
+                "link-arg=-Wl,--wrap=posix_memalign",
+                "-C",
+                "link-arg=-Wl,--wrap=free"
+              ],
+              "environment": {
+                "RUSTUP_TOOLCHAIN": "nightly",
+                "CARGO_PROFILE_RELEASE_DEBUG": "0",
+                "CARGO_TARGET_DIR": "/home/hirew/.cache/kush-json-memory-rust",
+                "RUSTFLAGS": "-Zcodegen-backend=cranelift -Ctarget-cpu=x86-64 -Coverflow-checks=yes"
+              },
+              "wall_s": 8.285779114987236,
+              "sha256": "e56951237438d65030976a1862b0023c5a9fde053af2eecc23961b43e2d91490"
+            },
+            {
+              "name": "kush-rss",
+              "command": [
+                "/tmp/kush-buffer-header-fast/kush",
+                "build",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/build/kush-inline.kush",
+                "-o",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/build/kush-rss",
+                "--release",
+                "--link",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/build/probe-rss-6ef1012e3a9d35fe.o"
+              ],
+              "wall_s": 3.3785002770018764,
+              "sha256": "539ed31b31068fd22b6b334e1bb1736e8624bd0ea81f2689128a7011e4255a5e"
+            },
+            {
+              "name": "rust-rss",
+              "command": [
+                "mbx",
+                "rustc",
+                "--manifest-path",
+                "/home/hirew/Projects/kush/benchmarks/json-memory/rust/Cargo.toml",
+                "--release",
+                "--offline",
+                "-j",
+                "2",
+                "--features",
+                "inline-metadata",
+                "--",
+                "-C",
+                "link-arg=/home/hirew/Projects/kush/benchmarks/json-memory/build/probe-rss-6ef1012e3a9d35fe.o"
+              ],
+              "environment": {
+                "RUSTUP_TOOLCHAIN": "nightly",
+                "CARGO_PROFILE_RELEASE_DEBUG": "0",
+                "CARGO_TARGET_DIR": "/home/hirew/.cache/kush-json-memory-rust",
+                "RUSTFLAGS": "-Zcodegen-backend=cranelift -Ctarget-cpu=x86-64 -Coverflow-checks=yes"
+              },
+              "wall_s": 0.5092213430034462,
+              "sha256": "7d09181d13a87e1fc65b2d73fd0d8160e4c0cc656146bc7771a0ea1173564e1e"
+            }
+          ],
+          "compiler_sha256": "3153476046530ad689830f091f6d8203bb438e73ede77e41a30a15da92f0e25f",
+          "sources": {
+            "/home/hirew/Projects/kush/benchmarks/json-memory/kush/main.kush": "c14f753360339179a2d8aad4ef3d259c6cb4e1e9d1b8bbb2cfea7d400a6c2406",
+            "/home/hirew/Projects/kush/benchmarks/json-memory/rust/src/main.rs": "ec717980afb5052bad213d7901991e2e5317c1352af76f58f09375d0b1afc390",
+            "/home/hirew/Projects/kush/benchmarks/json-memory/probe.c": "6ef1012e3a9d35fe4424e842129da9e8bdf73b7cd46057a4ebacd6d55126e617",
+            "/home/hirew/Projects/kush/benchmarks/json-memory/probe_self_test.c": "af046584058e5a49fb9d3787d0d05ac5695e0ffa536dc0a94233bdcaa8d73124",
+            "/home/hirew/Projects/kush/benchmarks/json-memory/seed.json": "569cfb74fe872545914d25f091b80aa263afd25bfa751ed4211a65c51e849fcb",
+            "/home/hirew/Projects/kush/benchmarks/json-memory/rust/Cargo.toml": "c45be38730f02adf60106e5bca673bd104623107c1c17dcd051b779545127f57",
+            "/home/hirew/Projects/kush/benchmarks/json-memory/rust/Cargo.lock": "6739656f8d3858d3b6b9f353b2db6d4fdfa91dcbb23d58a1d68399da941a9ca1",
+            "/home/hirew/Projects/kush/benchmarks/json-memory/build/kush-inline.kush": "7b1d51d16e70932382a88be2004e269716b64614effdbf999e857b4ab9aba397"
+          }
+        }
+      }
+    }
+  },
+  "observations": {
+    "kush-original": [
+      {
+        "wall_ms": 1358.8963440000725,
+        "cpu_ms": 378.91600000000005,
+        "peak_rss_kib": 16256
+      },
+      {
+        "wall_ms": 318.80981300002986,
+        "cpu_ms": 318.29699999999997,
+        "peak_rss_kib": 16128
+      },
+      {
+        "wall_ms": 314.6634490000224,
+        "cpu_ms": 313.99399999999997,
+        "peak_rss_kib": 16128
+      },
+      {
+        "wall_ms": 305.8019320000085,
+        "cpu_ms": 305.31499999999994,
+        "peak_rss_kib": 16128
+      },
+      {
+        "wall_ms": 317.1911550000459,
+        "cpu_ms": 316.48199999999997,
+        "peak_rss_kib": 16128
+      },
+      {
+        "wall_ms": 335.93466600007105,
+        "cpu_ms": 335.381,
+        "peak_rss_kib": 16256
+      },
+      {
+        "wall_ms": 345.69982499999696,
+        "cpu_ms": 345.056,
+        "peak_rss_kib": 16128
+      },
+      {
+        "wall_ms": 298.2970949999526,
+        "cpu_ms": 297.75699999999995,
+        "peak_rss_kib": 16128
+      },
+      {
+        "wall_ms": 315.4796210000086,
+        "cpu_ms": 314.905,
+        "peak_rss_kib": 16128
+      }
+    ],
+    "kush-headerless": [
+      {
+        "wall_ms": 398.63851699999486,
+        "cpu_ms": 397.75199999999995,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 352.32794199998807,
+        "cpu_ms": 350.843,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 332.25811099998737,
+        "cpu_ms": 331.57699999999994,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 343.7935389999893,
+        "cpu_ms": 343.092,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 351.339261000021,
+        "cpu_ms": 350.605,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 330.89977199995246,
+        "cpu_ms": 330.41700000000003,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 344.99709399995027,
+        "cpu_ms": 344.518,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 332.4252389999174,
+        "cpu_ms": 331.82399999999996,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 338.7103569999681,
+        "cpu_ms": 338.125,
+        "peak_rss_kib": 15616
+      }
+    ],
+    "rust-plain": [
+      {
+        "wall_ms": 464.08620700003667,
+        "cpu_ms": 461.414,
+        "peak_rss_kib": 16000
+      },
+      {
+        "wall_ms": 450.09948599999916,
+        "cpu_ms": 449.16999999999996,
+        "peak_rss_kib": 16000
+      },
+      {
+        "wall_ms": 378.40341000003264,
+        "cpu_ms": 377.779,
+        "peak_rss_kib": 16000
+      },
+      {
+        "wall_ms": 375.62846599996647,
+        "cpu_ms": 374.88699999999994,
+        "peak_rss_kib": 16128
+      },
+      {
+        "wall_ms": 373.1407530000297,
+        "cpu_ms": 372.604,
+        "peak_rss_kib": 16128
+      },
+      {
+        "wall_ms": 382.27318200006266,
+        "cpu_ms": 381.76099999999997,
+        "peak_rss_kib": 16128
+      },
+      {
+        "wall_ms": 388.66544199993314,
+        "cpu_ms": 388.091,
+        "peak_rss_kib": 16000
+      },
+      {
+        "wall_ms": 391.190153000025,
+        "cpu_ms": 390.494,
+        "peak_rss_kib": 16128
+      },
+      {
+        "wall_ms": 387.77721200006,
+        "cpu_ms": 387.301,
+        "peak_rss_kib": 16000
+      }
+    ],
+    "kush-access": [
+      {
+        "wall_ms": 306.0482130000537,
+        "cpu_ms": 296.64099999999996,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 293.0188070000668,
+        "cpu_ms": 291.894,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 294.2873719999852,
+        "cpu_ms": 293.75499999999994,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 300.39885600001526,
+        "cpu_ms": 299.791,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 313.1156209999517,
+        "cpu_ms": 312.714,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 280.77880899991214,
+        "cpu_ms": 280.333,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 361.46826399999554,
+        "cpu_ms": 360.84399999999994,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 287.55253999997876,
+        "cpu_ms": 287.09,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 287.32882099996004,
+        "cpu_ms": 286.83699999999993,
+        "peak_rss_kib": 15744
+      }
+    ],
+    "kush-plain-capacity": [
+      {
+        "wall_ms": 402.80235800003084,
+        "cpu_ms": 389.383,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 261.76847599992925,
+        "cpu_ms": 261.292,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 300.74393000006694,
+        "cpu_ms": 300.125,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 259.66091199995844,
+        "cpu_ms": 259.024,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 259.8273529999915,
+        "cpu_ms": 259.304,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 272.0223789999636,
+        "cpu_ms": 271.585,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 291.61149499998373,
+        "cpu_ms": 291.024,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 255.95086300006642,
+        "cpu_ms": 255.34099999999998,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 257.5067850000323,
+        "cpu_ms": 256.97099999999995,
+        "peak_rss_kib": 15616
+      }
+    ]
+  },
+  "summary": [
+    {
+      "name": "kush-original",
+      "wall_ms": 317.1911550000459,
+      "cpu_ms": 316.48199999999997,
+      "peak_rss_kib": 16128
+    },
+    {
+      "name": "kush-headerless",
+      "wall_ms": 343.7935389999893,
+      "cpu_ms": 343.092,
+      "peak_rss_kib": 15616
+    },
+    {
+      "name": "rust-plain",
+      "wall_ms": 387.77721200006,
+      "cpu_ms": 387.301,
+      "peak_rss_kib": 16000
+    },
+    {
+      "name": "kush-access",
+      "wall_ms": 294.2873719999852,
+      "cpu_ms": 293.75499999999994,
+      "peak_rss_kib": 15616
+    },
+    {
+      "name": "kush-plain-capacity",
+      "wall_ms": 261.76847599992925,
+      "cpu_ms": 261.292,
+      "peak_rss_kib": 15616
+    }
+  ]
+}
