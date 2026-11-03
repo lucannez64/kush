@@ -1,0 +1,419 @@
+{
+  "title": "Kush plan",
+  "nodes": [
+    {
+      "id": "BORROW",
+      "title": "Borrowing core",
+      "size": "XL",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Shared/exclusive references, reborrow, record/container provenance, place references, mutable owner borrows.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "TRAITS",
+      "title": "Traits core",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Associated items, generic/blanket impls, specialization, open dynamic objects.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GRADES",
+      "title": "Grades and linear resources",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Grade inference, user grade algebras, exact-use transfer, erasure, cancellation cleanup.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STRUCT",
+      "title": "Structural records",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Rows, row variables, renaming, structural equality, adapters.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "ROWS",
+      "title": "Effect row constraints",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Per-bit solver, principal defaults, row aliases, declared effect rows.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "MEM",
+      "title": "Memory: allocators, fallible, fusion",
+      "size": "XL",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Custom allocator contexts, fallible cleanup, widening reuse, fusion, benchmarks.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PERF-INLINE",
+      "title": "Byte access inlining layout fix",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "MEM"
+      ],
+      "status": "done",
+      "desc": "Keep checked byte reads out of line; best on both Zen 3 laptop and Zen 5 Boat.",
+      "commit": "0c15289",
+      "log": [
+        {
+          "time": "2026-11-03 12:13:25",
+          "who": "claude",
+          "text": "Laptop 499 ms / Boat 246 ms CPU; full Boat gate 1170 tests"
+        }
+      ]
+    },
+    {
+      "id": "REF-MUTSTR",
+      "title": "&mut str with checked UTF-8 writes",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "BORROW"
+      ],
+      "status": "todo",
+      "desc": "&mut str is rejected: unrestricted byte writes could break UTF-8. Needs a checked write API or a documented language decision.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "REF",
+      "title": "General reference support (closing)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "REF-MUTSTR"
+      ],
+      "status": "todo",
+      "desc": "Backlog item: General shared/exclusive reference support.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LIFE-MULTI",
+      "title": "Results borrowing several lifetimes",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "BORROW"
+      ],
+      "status": "todo",
+      "desc": "Infer the intersection/required outlives bounds for results that depend on more than one lifetime.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LIFE-DESTRUCT",
+      "title": "Lifetime inference through destructuring",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "BORROW"
+      ],
+      "status": "todo",
+      "desc": "Flow lifetimes through `let Pair { left, right } = pair` and nested patterns.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LIFE-UNIFY",
+      "title": "General lifetime unification",
+      "size": "XL",
+      "hard": true,
+      "deps": [
+        "LIFE-MULTI",
+        "LIFE-DESTRUCT"
+      ],
+      "status": "todo",
+      "desc": "Constraint-based lifetime solver with documented decidability.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LIFE",
+      "title": "Broader lifetime inference (closing)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "LIFE-UNIFY"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "DYN-RECV-VIEW",
+      "title": "Receiver-tied / elided borrowed results on dyn",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "TRAITS",
+        "LIFE-MULTI"
+      ],
+      "status": "todo",
+      "desc": "Elided or receiver-tied views returned through dyn dispatch are rejected.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "DYN-ASSOC",
+      "title": "Parameter-dependent associated projections on dyn",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "TRAITS"
+      ],
+      "status": "todo",
+      "desc": "Projections supplied only by a parameter-dependent generic impl.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "DYN-GENERIC",
+      "title": "Generic methods through dyn",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "TRAITS"
+      ],
+      "status": "todo",
+      "desc": "Monomorphized member tables or dictionary passing for generic object methods.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "DYN",
+      "title": "Trait objects (closing)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "DYN-RECV-VIEW",
+        "DYN-ASSOC",
+        "DYN-GENERIC"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "INF-INDEXED",
+      "title": "Indexed/dependent union inference",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "STRUCT"
+      ],
+      "status": "todo",
+      "desc": "`Option<i64> | Option<Bool>` style unions; currently explicit-specialization boundary.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "INF-PRINCIPAL",
+      "title": "Principal multi-variable partitions",
+      "size": "XL",
+      "hard": true,
+      "deps": [
+        "STRUCT"
+      ],
+      "status": "todo",
+      "desc": "Multi-variable union partitions are deterministic but not principal.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "INF",
+      "title": "Algebraic subtype inference (closing)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "INF-INDEXED",
+        "INF-PRINCIPAL"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-CPS",
+      "title": "State-machine lowering of handled bodies",
+      "size": "XL",
+      "hard": true,
+      "deps": [
+        "ROWS",
+        "GRADES"
+      ],
+      "status": "todo",
+      "desc": "CPS / resumable state machine for handled bodies and effectful callees; prerequisite for general continuations.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-EXPR",
+      "title": "perform in any expression, many per body",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "EFF-CPS"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-DYN",
+      "title": "Non-tail resumption through called functions",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "EFF-CPS"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-MULTI",
+      "title": "Multishot with copyable captures / declared ops",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "EFF-CPS"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF",
+      "title": "Effect handlers (closing)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "EFF-EXPR",
+        "EFF-DYN",
+        "EFF-MULTI"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PROOF-LIVE",
+      "title": "Mutable captures as live views",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LIFE-UNIFY"
+      ],
+      "status": "todo",
+      "desc": "Needs checked closure borrow lifetimes so an environment cannot outlive the captured location.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PROOF",
+      "title": "Runtime-dependent proofs (closing)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "PROOF-LIVE"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "DA-RUNTIME",
+      "title": "Runtime-sized [T; n]",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "MEM",
+        "BORROW"
+      ],
+      "status": "todo",
+      "desc": "Array length in a type annotation is still a compile-time Nat.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "DA-PLACE-VIEW",
+      "title": "DynArray views through place/temporary records",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "BORROW"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "DA",
+      "title": "Runtime-sized inline arrays (closing)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "DA-RUNTIME",
+        "DA-PLACE-VIEW"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "DONE",
+      "title": "All backlog items closed",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "REF",
+        "LIFE",
+        "DYN",
+        "INF",
+        "EFF",
+        "PROOF",
+        "DA",
+        "PERF-INLINE"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    }
+  ]
+}

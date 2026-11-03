@@ -26,3 +26,7 @@ workloads to Boat when local capacity is constrained.
 - If Boat is unavailable, report the blocker. Local checks are authorized when
   there is spare capacity; keep resource use conservative and report where checks ran.
 - Preserve all existing uncommitted work. The initial cooperative task system is implemented; see `docs/async.md` for its limits.
+- Work plan: `plan/plan.json` is the dependency graph of remaining work. View it
+  with `scripts/plan-server.py` (http://127.0.0.1:4318/). Update it with
+  `scripts/plan.py start|done|log|add ID ...` when starting, finishing (with
+  `--commit`), or noting progress on a node, and add nodes for new work.
