@@ -207,3 +207,9 @@ The [variance design](lifetime-variance-design.md) is not a hard implementation 
 existing invariant/substitution rules suffice. More permissive nested container
 or arrow coercions must wait for LT-VARIANCE and use its lifetime-aware judgment,
 not erased-shape compatibility.
+
+
+Research clarification: accumulating may-origins and required preconditions
+both grow by union in this design, so both use a least fixed point. A general
+may/must slogan or categorical interpretation does not select a greatest fixed
+point for these equations. See [research actions](research-actions.md).

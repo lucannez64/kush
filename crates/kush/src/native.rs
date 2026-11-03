@@ -2684,6 +2684,24 @@ impl Drop for Scratch {
     }
 }
 
+/// Only HandlerPush changes the local dynamic-handler depth. The exhaustive
+/// child walker includes guards, initializers, conditions and capture operands;
+/// separately compiled callback bodies perform their own analysis.
+fn block_installs_handler(block: &ex::Block) -> bool {
+    fn expression(expr: &Expr) -> bool {
+        if matches!(expr.kind, ExprKind::HandlerPush { .. }) {
+            return true;
+        }
+        let mut found = false;
+        expr.for_each_child(&mut |child| found |= expression(child));
+        found
+    }
+    block.statements.iter().any(|statement| match statement {
+        ex::Statement::Let(_, value) | ex::Statement::Expr(value) => expression(value),
+        ex::Statement::Declare(_) => false,
+    }) || block.tail.as_ref().is_some_and(|value| expression(value))
+}
+
 fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         return Err(error(
@@ -3373,7 +3391,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
             handler_push,
             handler_pop,
             handler_lookup,
-            handler_base: Variable::from_u32(0),
+            handler_base: None,
             task_wrappers: &task_wrappers,
             task_pointer_drops: &task_pointer_drops,
             loops: Vec::new(),
@@ -3383,10 +3401,12 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
         let entry = g.builder.create_block();
         g.builder.append_block_params_for_function_params(entry);
         g.builder.switch_to_block(entry);
-        let handler_base = g.builder.declare_var(I64);
-        g.handler_base = handler_base;
-        let base = g.runtime_call(g.handler_depth, &[]);
-        g.builder.def_var(handler_base, base);
+        if block_installs_handler(&f.body) {
+            let handler_base = g.builder.declare_var(I64);
+            g.handler_base = Some(handler_base);
+            let base = g.runtime_call(g.handler_depth, &[]);
+            g.builder.def_var(handler_base, base);
+        }
         for local in &f.locals {
             let variables = (0..program.width(local.ty))
                 .map(|_| g.builder.declare_var(I64))
@@ -4461,7 +4481,7 @@ struct Generator<'a, 'b> {
     /// (continue target, break target, break carries a value, handler depth at
     /// loop entry). Break/continue restore the handler depth so a dynamic
     /// handler frame inside the body cannot survive an early loop exit.
-    loops: Vec<(ir::Block, ir::Block, bool, Variable)>,
+    loops: Vec<(ir::Block, ir::Block, bool, Option<Variable>)>,
     literal_data: &'b BTreeMap<usize, DataId>,
     allocate: FuncId,
     try_allocate: FuncId,
@@ -4495,7 +4515,7 @@ struct Generator<'a, 'b> {
     handler_lookup: FuncId,
     /// Entry handler-stack depth for this function; every return restores it so
     /// an early `return` cannot leave a dynamic handler frame visible.
-    handler_base: Variable,
+    handler_base: Option<Variable>,
     task_wrappers: &'b BTreeMap<usize, FuncId>,
     task_pointer_drops: &'b BTreeMap<Type, FuncId>,
     tracked: Vec<Tracked>,
@@ -4819,9 +4839,23 @@ impl Generator<'_, '_> {
             }
         }
     }
+    /// Callees restore their own local frames. If this function never installs
+    /// a handler, neither its returns nor loop exits can strand a local frame.
+    fn capture_handler_depth(&mut self) -> Option<Variable> {
+        self.handler_base?;
+        let depth = self.builder.declare_var(I64);
+        let value = self.runtime_call(self.handler_depth, &[]);
+        self.builder.def_var(depth, value);
+        Some(depth)
+    }
+    fn restore_handler_depth(&mut self, depth: Option<Variable>) {
+        if let Some(depth) = depth {
+            let value = self.builder.use_var(depth);
+            self.runtime_void(self.handler_restore, &[value]);
+        }
+    }
     fn return_value(&mut self, values: &[Value]) {
-        let base = self.builder.use_var(self.handler_base);
-        self.runtime_void(self.handler_restore, &[base]);
+        self.restore_handler_depth(self.handler_base);
         if let Some(pointer) = self.return_pointer {
             for (index, value) in values.iter().enumerate() {
                 self.builder.ins().store(
@@ -6793,9 +6827,7 @@ impl Generator<'_, '_> {
             ExprKind::Loop(body) => {
                 let head = self.builder.create_block();
                 let exit = self.join(expr.ty);
-                let depth = self.builder.declare_var(I64);
-                let at_entry = self.runtime_call(self.handler_depth, &[]);
-                self.builder.def_var(depth, at_entry);
+                let depth = self.capture_handler_depth();
                 self.jump(head, &[]);
                 self.builder.switch_to_block(head);
                 // A loop without break has type Never; its exit is never targeted.
@@ -6824,8 +6856,7 @@ impl Generator<'_, '_> {
                 for id in cleanup {
                     self.cleanup(Some(*id));
                 }
-                let depth = self.builder.use_var(depth);
-                self.runtime_void(self.handler_restore, &[depth]);
+                self.restore_handler_depth(depth);
                 self.jump(exit, &values);
                 return None;
             }
@@ -6834,8 +6865,7 @@ impl Generator<'_, '_> {
                 for id in cleanup {
                     self.cleanup(Some(*id));
                 }
-                let depth = self.builder.use_var(depth);
-                self.runtime_void(self.handler_restore, &[depth]);
+                self.restore_handler_depth(depth);
                 self.jump(head, &[]);
                 return None;
             }
@@ -8341,9 +8371,7 @@ impl Generator<'_, '_> {
         let head = self.builder.create_block();
         let enter = self.builder.create_block();
         let exit = self.builder.create_block();
-        let depth = self.builder.declare_var(I64);
-        let at_entry = self.runtime_call(self.handler_depth, &[]);
-        self.builder.def_var(depth, at_entry);
+        let depth = self.capture_handler_depth();
         self.jump(head, &[]);
         self.builder.switch_to_block(head);
         if let Some(test) = self.scalar(condition) {
@@ -9341,6 +9369,54 @@ fn has_bindings(p: &Pattern) -> bool {
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod scalar_inline_codegen_tests {
     use super::*;
+
+    #[test]
+    fn depth_guards_exist_only_in_functions_that_install_handlers() {
+        if Command::new("objdump").arg("--version").output().is_err() {
+            return;
+        }
+        let program=ex::check(r#"
+            effect Op:i64->i64;
+            fn leaf(n:i64)->i64 ! {panic} {let mut i=0;while i<n {i=i+1;if i==2 {continue;}if i==4 {break;}}loop {break i;}}
+            fn install()->i64 ! {panic} {
+                handle Op:i64->i64 with fn(x:i64,r:linear once fn(i64)->i64 ! {})->i64 ! {} {r(x)} {leaf(8)}
+            }
+            fn main()->i64 ! {panic} {install()}
+        "#).unwrap();
+        let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+        for options in [CodegenOptions::default(), CodegenOptions::release()] {
+            let path = scratch.path().join("guards.o");
+            fs::write(&path, object(&program, options).unwrap()).unwrap();
+            for name in ["leaf", "install", "main"] {
+                let index = program
+                    .functions
+                    .iter()
+                    .position(|f| f.name.rsplit('.').next() == Some(name))
+                    .unwrap();
+                let output = Command::new("objdump")
+                    .args([
+                        "-dr",
+                        "--no-show-raw-insn",
+                        &format!("--disassemble=kush_fn_{index}"),
+                    ])
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                let assembly = String::from_utf8(output.stdout).unwrap();
+                assert_eq!(
+                    assembly.contains("kush_handler_depth"),
+                    name == "install",
+                    "{name}: {assembly}"
+                );
+                assert_eq!(
+                    assembly.contains("kush_handler_restore"),
+                    name == "install",
+                    "{name}: {assembly}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn map_callback_inlining_removes_machine_calls_without_backend_optimization() {

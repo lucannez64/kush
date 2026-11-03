@@ -971,7 +971,13 @@
       "status": "todo",
       "desc": "Frame layout, states per perform point, ownership of captured live values.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 17:27:25",
+          "who": "agent",
+          "text": "Research action: compare OCaml PLDI2021 one-shot stack segments with explicit state-machine plan; lexical Zero Lexa is a separate semantics/rare-effect design, not a drop-in dynamic handler replacement."
+        }
+      ]
     },
     {
       "id": "E-CPS-IR",
@@ -1255,7 +1261,13 @@
       "status": "todo",
       "desc": "Close the rational-feasible-but-integer-infeasible gap, with verified certificates.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 17:27:25",
+          "who": "agent",
+          "text": "Research action: Omega-guided bounded integer fallback must extend independently verified facts.rs certificates; unknown/exhaustion stays conservative. See docs/research-actions.md; implementation still open."
+        }
+      ]
     },
     {
       "id": "P-REVIEW",
@@ -1438,7 +1450,14 @@
         "OPS-PUSH",
         "OPS-WORKTREES",
         "OPS-STEP-GATE",
-        "PLAN-ORDER"
+        "PLAN-ORDER",
+        "RES-AUDIT",
+        "RES-HANDLER-ELIDE",
+        "RES-BORROW-MODEL",
+        "RES-GRADE-MODEL",
+        "RES-EFFECT-CAPABILITY",
+        "RES-INFERENCE-PROTOTYPE",
+        "RES-UNBOX-CERT"
       ],
       "status": "todo",
       "desc": "",
@@ -1692,6 +1711,128 @@
       ],
       "status": "todo",
       "desc": "Algebra, aliasing attacks, callable occurrence environments, source-copy loans, anonymous intersections, parity and independent soundness review.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "RES-HANDLER-ELIDE",
+      "title": "Elide native handler-depth bookkeeping in functions without local handlers",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "ROWS"
+      ],
+      "status": "in_progress",
+      "desc": "Local exhaustive IR scan; skip prologue/return/loop depth calls only when no HandlerPush occurs. Preserve dynamic lookup and full restoration for handler-owning functions.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-03 17:20:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-03 17:26:16",
+          "who": "agent",
+          "text": "75 existing advanced type/effect tests and two new default/release parity regressions passed locally; codegen relocation test verifies removed/retained depth calls. Full Boat gate running; callback inlining cannot introduce HandlerPush."
+        },
+        {
+          "time": "2026-11-03 17:31:40",
+          "who": "agent",
+          "text": "Full Boat integration gate: 1182 tests, fmt and strict Clippy pass. Generated-call elimination verified for both native modes; no numerical performance claim."
+        }
+      ]
+    },
+    {
+      "id": "RES-AUDIT",
+      "title": "Verify research applicability and correct overclaims",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "in_progress",
+      "desc": "Primary papers mapped to actual Kush semantics; explicit acceptance gates, not wholesale replacement claims.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-03 17:20:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-03 17:24:01",
+          "who": "agent",
+          "text": "Verified primary Tree Borrows, SuperF, Zero Lexa, CSL mixed logic and unboxed-constructor sources; corrected dynamic/lexical and least/greatest-fixed-point overclaims; research-actions.md maps concrete gates and open work."
+        }
+      ]
+    },
+    {
+      "id": "RES-BORROW-MODEL",
+      "title": "Map Kush loans to an explicit operational alias model",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "BORROW"
+      ],
+      "status": "todo",
+      "desc": "Tree Borrows-informed subset mapping and access traces; distinguish static rejection from dynamic invalidity and prove optimization assumptions before adding raw-pointer behavior.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "RES-GRADE-MODEL",
+      "title": "Specify mixed linear and graded semantics and erasure obligations",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "GRADES"
+      ],
+      "status": "todo",
+      "desc": "CSL 2025 mixed logic and ICFP 2023 erasure used as proof-obligation guides; preserve Kush must-use vs owning linear distinction; no transferred soundness claim.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "RES-EFFECT-CAPABILITY",
+      "title": "Design lexical capability handlers alongside declared dynamic handlers",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "ROWS"
+      ],
+      "status": "todo",
+      "desc": "Use Lexa 2024/2025 as design inputs; preserve current dynamic lookup semantics and separate frequent/resumptive effects from rare exceptional paths.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-03 17:29:52",
+          "who": "agent",
+          "text": "Katsumata POPL2014 supplies semantic proof obligations for composition/subeffecting; no monadic source rewrite or claim that row bitsets alone prove soundness."
+        }
+      ]
+    },
+    {
+      "id": "RES-INFERENCE-PROTOTYPE",
+      "title": "Evaluate bounded multi-bound polymorphic inference prototype",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "I-PRINC-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "SuperF-inspired isolated corpus and annotation escape hatch, termination budget and ownership/grade/effect integration criteria; not a lifetime-solver replacement.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "RES-UNBOX-CERT",
+      "title": "Design representation-disjointness evidence for further unboxing",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "MEM"
+      ],
+      "status": "todo",
+      "desc": "POPL 2024 constructor unboxing informs collision certificates and recursive expansion bounds; preserve current niche tags, drops and FFI layout contracts.",
       "commit": null,
       "log": []
     }

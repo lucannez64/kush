@@ -258,3 +258,15 @@ operation results, capture-free multishot resumption, rejected multishot with
 captures, capturing dynamic handler ownership and early-exit cleanup, one-shot
 dynamic consumption, task inheritance and capturing-frame isolation, and
 user-declared effect-row checking and discharge.
+
+
+## Native bookkeeping on handler-free paths
+
+Functions with no local dynamic `HandlerPush` omit function/loop handler-depth
+snapshots and exit restorations in both default and release native builds.
+An exhaustive checked-IR child scan determines this property. Called functions
+restore their own local frames; a function that may install a handler retains
+the original guards, including early return, break and continue paths. Dynamic
+lookup and task inheritance rules above are unchanged. See [research actions](research-actions.md)
+for the proof boundary, codegen tests and paper applicability. This is not a
+claim that all Kush effect handling is zero-overhead.

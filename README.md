@@ -269,3 +269,8 @@ The [plain byte-capacity follow-up](benchmarks/json-memory/sample-results/plain-
 keeps those memory savings and removes decoding from byte-append hot paths.
 Its matched Boat cohort improves speed versus both previous Kush versions;
 the report also preserves the mixed busy-laptop results and exact Rust scope.
+
+Verified research follow-ups and their implementation gates are tracked in
+[research actions](docs/research-actions.md), including native handler-free
+bookkeeping elision and the remaining borrowing, grade, inference and layout
+research work.
