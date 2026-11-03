@@ -575,6 +575,11 @@
           "time": "2026-11-03 20:32:43",
           "who": "agent",
           "text": "Combined a7fd5bf Boat gate passes: 1215 tests, formatting, strict Clippy. Direct-call scalar result fragment integrated; result-field, method and concrete-instance generality remain open."
+        },
+        {
+          "time": "2026-11-03 21:10:36",
+          "who": "agent",
+          "text": "Integrated reviewed fixes c4adae9: erased argument mapping, propagated unsupported channels, checked local budget exhaustion and missing paths. Focused Boat gate running; independent caller-requirement summary remains unimplemented."
         }
       ]
     },
@@ -630,6 +635,11 @@
           "time": "2026-11-03 20:32:43",
           "who": "agent",
           "text": "Combined a7fd5bf Boat gate passes: 1215 tests, formatting, strict Clippy. Independent safety review pending; exact conservative boundaries retained."
+        },
+        {
+          "time": "2026-11-03 21:10:36",
+          "who": "agent",
+          "text": "Independent source review reports recursive leaf enumeration and contextual invariant-check gaps; corrective implementation in progress. Previous 1215-test gate is insufficient to close safety review."
         }
       ]
     },
