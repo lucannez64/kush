@@ -3139,9 +3139,11 @@ fn bind_nested_record_lifetime(
     }
 }
 
-/// Parameter indices of `callee` whose written borrow lifetime supplies its
-/// result. An explicit result lifetime selects every parameter that mentions
+/// AST argument positions of `callee` whose written borrow lifetime supplies
+/// its result. An explicit result lifetime selects every parameter that mentions
 /// it; an elided borrowed result selects the single input lifetime, if any.
+/// Positions are source positions because a call keeps erased proof arguments
+/// in its AST argument list; they are not runtime parameter indices.
 fn helper_result_parameters<'a>(
     resolution: &Resolution,
     declared: &BTreeMap<BindingId, Declared<'a>>,
@@ -3168,15 +3170,13 @@ fn helper_result_parameters<'a>(
     }
     let explicit = borrow_lifetime(result);
     let mut inputs: Vec<(usize, Option<String>)> = Vec::new();
-    for (index, parameter) in function
-        .parameters
-        .iter()
-        .filter(|parameter| !parameter.erased)
-        .enumerate()
-    {
+    for (position, parameter) in function.parameters.iter().enumerate() {
+        if parameter.erased {
+            continue;
+        }
         let ty = crate::grades::split(&parameter.ty).0;
         if matches!(ty.kind, ast::TypeKind::Borrow { .. }) {
-            inputs.push((index, borrow_lifetime(ty)));
+            inputs.push((position, borrow_lifetime(ty)));
         }
     }
     let Some(explicit) = explicit else {
@@ -3184,18 +3184,62 @@ fn helper_result_parameters<'a>(
         // which argument supplies it.
         let distinct = inputs
             .iter()
-            .map(|(index, name)| name.clone().unwrap_or_else(|| format!("#{index}")))
+            .map(|(position, name)| name.clone().unwrap_or_else(|| format!("#{position}")))
             .collect::<BTreeSet<_>>();
         if distinct.len() == 1 {
-            return inputs.iter().map(|(index, _)| *index).collect();
+            return inputs.iter().map(|(position, _)| *position).collect();
         }
         return Vec::new();
     };
     inputs
         .iter()
         .filter(|(_, name)| name.as_deref() == Some(explicit.as_str()))
-        .map(|(index, _)| *index)
+        .map(|(position, _)| *position)
         .collect()
+}
+
+/// Map one solved stable origin onto this instance's declared lifetime. A
+/// direct borrowed parameter owns every path through it. A by-value record
+/// parameter uses its source field path. A missing mapping is an error, never a
+/// silently dropped origin that would make the summary look smaller than it is.
+fn summary_origin_lifetime(
+    origin: &recursive_lifetimes::Origin,
+    parameter_lifetimes: &[Option<String>],
+    parameter_binders: &[Option<BindingId>],
+    parameter_field_lifetimes: &BTreeMap<BindingId, BTreeMap<String, String>>,
+) -> std::result::Result<String, String> {
+    if let Some(lifetime) = parameter_lifetimes
+        .get(origin.parameter)
+        .and_then(|lifetime| lifetime.as_ref())
+    {
+        return Ok(lifetime.clone());
+    }
+    if origin.path.is_empty() {
+        return Err(format!(
+            "runtime parameter #{} has no inferred borrow lifetime; no borrowed input lifetime was recorded for this position",
+            origin.parameter
+        ));
+    }
+    let binder = parameter_binders
+        .get(origin.parameter)
+        .copied()
+        .flatten()
+        .ok_or_else(|| {
+            format!(
+                "runtime parameter #{} has no source binder",
+                origin.parameter
+            )
+        })?;
+    let path = origin.path.join(".");
+    parameter_field_lifetimes
+        .get(&binder)
+        .and_then(|fields| fields.get(&path).cloned())
+        .ok_or_else(|| {
+            format!(
+                "cannot be returned: runtime parameter #{} field path '{path}' has no declared lifetime",
+                origin.parameter
+            )
+        })
 }
 fn block_value_lifetime_candidates<'a>(
     resolution: &Resolution,
@@ -9291,23 +9335,26 @@ impl<'a> Functions<'a> {
         let result_was_explicit = explicit_result_lifetime.is_some();
         // Stable parameter-leaf origins solved over the concrete call graph.
         // Map each origin back to this instance's declared or elided lifetime
-        // labels; a path that is not a declared leaf contributes nothing.
+        // labels. Every origin must map to a real lifetime: rejecting an
+        // unmapped path keeps a partial summary from masquerading as complete.
         let mut summary_sources = BTreeSet::new();
         if let Some(summary) = self.summaries.get(binding) {
             for origin in &summary.origins {
-                let lifetime = if origin.path.is_empty() {
-                    parameter_lifetimes.get(origin.parameter).cloned().flatten()
-                } else {
-                    parameter_binders
-                        .get(origin.parameter)
-                        .copied()
-                        .flatten()
-                        .and_then(|binder| parameter_field_lifetimes.get(&binder))
-                        .and_then(|fields| fields.get(&origin.path.join(".")).cloned())
-                };
-                if let Some(lifetime) = lifetime {
-                    summary_sources.insert(lifetime);
-                }
+                let lifetime = summary_origin_lifetime(
+                    origin,
+                    &parameter_lifetimes,
+                    &parameter_binders,
+                    &parameter_field_lifetimes,
+                )
+                .map_err(|what| {
+                    Diagnostic::new(
+                        f.result.span,
+                        format!(
+                            "cannot map a recursive lifetime summary origin to a declared lifetime: {what}. Annotate the result lifetime explicitly or name the borrowed field's lifetime"
+                        ),
+                    )
+                })?;
+                summary_sources.insert(lifetime);
             }
         }
         let result_lifetime = match explicit_result_lifetime {
@@ -30093,5 +30140,44 @@ impl Executable {
             }
         }
         go(self, ty, 0, &mut Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod recursive_summary_mapping_tests {
+    use super::*;
+
+    fn origin(parameter: usize, path: &[&str]) -> recursive_lifetimes::Origin {
+        recursive_lifetimes::Origin {
+            parameter,
+            path: path.iter().map(|part| (*part).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_direct_parameter_origin_maps_even_when_a_field_path_is_present() {
+        let lifetime = summary_origin_lifetime(
+            &origin(0, &["view"]),
+            &[Some("'a".to_owned())],
+            &[],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(lifetime, "'a");
+    }
+
+    #[test]
+    fn a_missing_field_path_is_rejected_instead_of_dropped() {
+        let error =
+            summary_origin_lifetime(&origin(0, &["missing"]), &[None], &[], &BTreeMap::new())
+                .unwrap_err();
+        assert!(error.contains("no source binder"), "{error}");
+    }
+
+    #[test]
+    fn an_unborrowed_empty_path_origin_is_rejected() {
+        let error =
+            summary_origin_lifetime(&origin(0, &[]), &[None], &[], &BTreeMap::new()).unwrap_err();
+        assert!(error.contains("no inferred borrow lifetime"), "{error}");
     }
 }

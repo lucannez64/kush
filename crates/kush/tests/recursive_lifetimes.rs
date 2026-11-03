@@ -414,3 +414,111 @@ fn main() -> Unit ! {} {}
         "shared storage cannot be returned mutably",
     );
 }
+
+#[test]
+fn erased_proof_parameters_do_not_shift_recursive_argument_mapping() {
+    // The call keeps the erased proof hole in its AST argument list. A summary
+    // origin names runtime parameter 1 (`y`), which must map to source argument
+    // 2 (`y`), not to `x` at source position 1.
+    agrees(
+        r#"
+fn second<'a, 'b>(erased p: { 0 == 0 }, x: &'a [i64], y: &'b [i64]) -> &'b [i64] ! {panic} { y }
+fn forward<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> &[i64] ! {panic} { second(_, x, y) }
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(forward(&a[..], &b[..]), 0)
+}
+"#,
+        3,
+        "",
+    );
+}
+
+#[test]
+fn erased_proof_parameters_in_the_middle_keep_source_argument_mapping() {
+    agrees(
+        r#"
+fn second<'a, 'b>(x: &'a [i64], erased p: { 0 == 0 }, y: &'b [i64]) -> &'b [i64] ! {panic} { y }
+fn forward<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> &[i64] ! {panic} { second(x, _, y) }
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(forward(&a[..], &b[..]), 0)
+}
+"#,
+        3,
+        "",
+    );
+}
+
+#[test]
+fn an_acyclic_indirect_result_requires_an_explicit_contract() {
+    rejects(
+        r#"
+fn helper<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} { a }
+fn indirect<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    let f: fn<'a, 'b>(&'a [i64], &'b [i64], i64) -> &'a [i64] ! {panic} = helper;
+    f(a, b, n)
+}
+fn main() -> Unit ! {} {}
+"#,
+        "cannot use this result origin",
+    );
+}
+
+#[test]
+fn an_acyclic_borrowed_record_channel_cannot_become_empty_provenance() {
+    rejects(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+    Pair { left: a, right: b }
+}
+fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {panic} {
+    make(a, b).left
+}
+fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
+    unsupported(a, b)
+}
+fn main() -> Unit ! {} {}
+"#,
+        "cannot use this result origin",
+    );
+    // The explicit contract makes the same acyclic boundary usable.
+    check(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+    Pair { left: a, right: b }
+}
+fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {panic} {
+    make(a, b).left
+}
+fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {panic} {
+    unsupported(a, b)
+}
+fn main() -> Unit ! {} {}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_unrelated_explicit_result_call_does_not_seed_a_no_origin_cycle() {
+    rejects(
+        r#"
+fn annotated<'a>(a: &'a [i64]) -> &'a [i64] ! {panic} { a }
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    let local: [i64; 1] = [9];
+    let _ = annotated(a);
+    if n == 0 { &local[..] } else { right(a, b, n - 1) }
+}
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    left(a, b, n)
+}
+fn main() -> Unit ! {} {}
+"#,
+        "no independently justified result origin",
+    );
+}

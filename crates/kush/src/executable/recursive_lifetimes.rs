@@ -15,13 +15,23 @@
 //!
 //! Scope limits:
 //! - Direct and lexically resolved static calls only. Indirect, dynamic, and
-//!   method calls are unsupported boundaries: a recursive summary that needs
-//!   one is rejected unless the function has an explicit result lifetime.
+//!   method calls are unsupported boundaries: a summary that needs one keeps
+//!   that `unknown` channel and is rejected unless the function has an
+//!   explicit result lifetime. A caller of an explicit-result boundary still
+//!   sees the preserved `unknown` instead of an empty origin set.
 //! - One root result slot (a borrowed slice, text view, or reference) is
 //!   summarized. Borrowed-record field results keep their existing declared
 //!   field lifetimes; this pass does not infer per-field result binders.
-//! - An unseeded cycle is rejected. An explicit result contract remains a
-//!   parametric forwarding signature and is validated by the ownership pass.
+//! - An unseeded cycle is rejected unless every result path is syntactically
+//!   returned from an explicit-result boundary. Merely containing an unrelated
+//!   explicit-result call is not evidence for the returned value.
+//! - This pass computes result-derived may-origins, not an independent
+//!   required-precondition set `R[f]`. Bounds are exported only from the
+//!   origins a result can actually return; independent caller requirements
+//!   still need an explicit contract, and are never invented here.
+//! - Aggregate budgets are checked errors, never partial successes:
+//!   `MAX_ANALYSIS_STEPS` = 250_000 steps, `MAX_ORIGIN_FACTS` = 16_384 facts,
+//!   `MAX_LOCAL_PASSES` = 64 local fixed-point passes.
 
 use super::{Declared, Resolution, borrow_lifetime, type_lifetimes};
 use crate::{Diagnostic, Span, ast, lexer::Kind, resolve::BindingId};
@@ -39,10 +49,13 @@ pub(super) struct Origin {
 
 /// The result-origin summary of one declaration. `origins` is the union over
 /// every normal return path; no alternative is dropped because a scalar
-/// condition could prune it.
+/// condition could prune it. `unknown` preserves an unsupported result channel
+/// discovered in the body so a caller cannot read it as an empty (unrestricted)
+/// provenance.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct FunctionSummary {
     pub origins: BTreeSet<Origin>,
+    unknown: Option<Unsupported>,
 }
 
 /// Solved declaration summaries, sorted by binding for deterministic replay.
@@ -181,18 +194,34 @@ impl Flow {
     /// a matching field leaf supplies it directly; a whole-record actual value
     /// supplies the nested path through its root origin; a more specific actual
     /// subfield still names caller-owned storage inside the requested path.
-    fn select(&self, path: &[String], out: &mut BTreeSet<Origin>, work: &mut usize) -> bool {
+    ///
+    /// A non-empty path that matches no actual leaf is a mismatch, not an empty
+    /// provenance: it requests an explicit contract instead of silently
+    /// dropping the callee's origin. The work budget is reported separately so
+    /// the caller can turn it into a checked diagnostic.
+    fn select(
+        &self,
+        path: &[String],
+        out: &mut BTreeSet<Origin>,
+        work: &mut usize,
+    ) -> Result<(), SelectFailure> {
         if path.is_empty() {
             out.extend(self.all_origins());
-            return self.unknown.is_none();
+            return if self.unknown.is_none() {
+                Ok(())
+            } else {
+                Err(SelectFailure::Missing)
+            };
         }
+        let mut matched = false;
         for (actual_path, origins) in &self.leaves {
             *work = work.saturating_add(1);
             if *work > MAX_ANALYSIS_STEPS {
-                return false;
+                return Err(SelectFailure::Budget);
             }
             if actual_path == path {
                 out.extend(origins.iter().cloned());
+                matched = true;
             } else if actual_path.is_empty() {
                 out.extend(origins.iter().map(|origin| {
                     Origin {
@@ -205,6 +234,7 @@ impl Flow {
                             .collect(),
                     }
                 }));
+                matched = true;
             } else if path.starts_with(actual_path) {
                 out.extend(origins.iter().map(|origin| {
                     Origin {
@@ -217,12 +247,26 @@ impl Flow {
                             .collect(),
                     }
                 }));
+                matched = true;
             } else if actual_path.starts_with(path) {
                 out.extend(origins.iter().cloned());
+                matched = true;
             }
         }
-        self.unknown.is_none()
+        if self.unknown.is_some() || !matched {
+            Err(SelectFailure::Missing)
+        } else {
+            Ok(())
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectFailure {
+    /// The actual value has no leaf for the callee's declared field path.
+    Missing,
+    /// `MAX_ANALYSIS_STEPS` was exceeded while matching leaves.
+    Budget,
 }
 
 struct Solver<'a, 'r> {
@@ -276,6 +320,27 @@ impl<'a, 'r> Solver<'a, 'r> {
             .enumerate()
             .collect()
     }
+    /// The source argument for one runtime parameter index. Calls keep erased
+    /// proof positions in the AST argument list, so a runtime index must skip
+    /// those positions instead of indexing the AST list directly. A missing
+    /// position is an unsupported call shape, not argument zero.
+    fn runtime_argument<'e>(
+        declared: &Declared<'a>,
+        arguments: &'e [ast::Expr],
+        runtime_index: usize,
+    ) -> Option<&'e ast::Expr> {
+        let mut runtime = 0usize;
+        for (position, parameter) in declared.ast.parameters.iter().enumerate() {
+            if parameter.erased {
+                continue;
+            }
+            if runtime == runtime_index {
+                return arguments.get(position);
+            }
+            runtime = runtime.saturating_add(1);
+        }
+        None
+    }
     /// Whether the written result is a borrowed slice/text view/reference. Only
     /// these root result slots are summarized here.
     fn has_borrowed_result(f: &ast::Function) -> bool {
@@ -304,6 +369,32 @@ impl<'a, 'r> Solver<'a, 'r> {
             }
         }
         names.len() + elided
+    }
+    /// Whether any runtime input type can carry a borrow at all, including a
+    /// borrowed record field. A no-input elided borrowed result is already
+    /// rejected by the ordinary "cannot be returned" rule, so an unsupported
+    /// channel there must not replace the more precise existing diagnostic.
+    fn input_has_borrow_shape(f: &ast::Function) -> bool {
+        fn mentioned(ty: &ast::Type) -> bool {
+            match &ty.kind {
+                ast::TypeKind::Borrow { .. } => true,
+                ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => {
+                    arguments.iter().any(mentioned)
+                }
+                ast::TypeKind::Slice(inner)
+                | ast::TypeKind::Array(inner, _)
+                | ast::TypeKind::Dyn(inner) => mentioned(inner),
+                ast::TypeKind::Structural { fields, .. } => {
+                    fields.iter().any(|field| mentioned(&field.ty))
+                }
+                ast::TypeKind::Graded { inner, .. } => mentioned(inner),
+                _ => false,
+            }
+        }
+        f.parameters
+            .iter()
+            .filter(|parameter| !parameter.erased)
+            .any(|parameter| mentioned(crate::grades::split(&parameter.ty).0))
     }
     fn seed_locals(
         &self,
@@ -433,28 +524,33 @@ impl<'a, 'r> Solver<'a, 'r> {
             // A declaration with a borrowed result is summarized (possibly
             // empty before the first iteration). Anything else can only be a
             // non-borrowed scalar result; a record that carries borrows is an
-            // unsupported boundary for this root-slot fragment.
+            // unsupported boundary for this root-slot fragment. The written
+            // shape matters here: an elided `&[T]` mentions no named lifetime,
+            // but it is still a borrowed shape and must never look scalar.
             let mut mentioned = BTreeSet::new();
             type_lifetimes(crate::grades::split(&declared.ast.result).0, &mut mentioned);
-            return Ok(if mentioned.is_empty() {
-                Flow::empty()
-            } else {
-                Flow::unknown(
-                    span,
-                    "a call returning a borrowed record in result position is not part of the root-slot recursive fragment; annotate the result lifetime",
-                )
-            });
+            return Ok(
+                if !Self::has_borrowed_result(declared.ast) && mentioned.is_empty() {
+                    Flow::empty()
+                } else {
+                    Flow::unknown(
+                        span,
+                        "a call returning a borrowed result without a summary is not part of the root-slot recursive fragment; annotate the result lifetime",
+                    )
+                },
+            );
         };
+        let callee_name = declared.ast.name.clone();
         let mut out = BTreeSet::new();
         let mut unknown = None;
         for origin in &summary.origins {
-            let Some(argument) = arguments.get(origin.parameter) else {
+            let Some(argument) = Self::runtime_argument(declared, arguments, origin.parameter)
+            else {
                 unknown = Some(Unsupported {
                     span,
                     what: format!(
-                        "a summary origin names parameter {} but the call has only {} arguments",
-                        origin.parameter,
-                        arguments.len()
+                        "a summary origin names runtime parameter {} but the call has no corresponding source argument",
+                        origin.parameter
                     ),
                 });
                 continue;
@@ -469,19 +565,43 @@ impl<'a, 'r> Solver<'a, 'r> {
                 continue;
             }
             let mut selected = BTreeSet::new();
-            if !flow.select(&origin.path, &mut selected, &mut self.steps)
-                || self.steps > MAX_ANALYSIS_STEPS
-            {
-                return Err(Diagnostic::new(
-                    span,
-                    "recursive lifetime inference exceeded its finite work budget while substituting a call summary",
-                ));
+            match flow.select(&origin.path, &mut selected, &mut self.steps) {
+                Ok(()) => {}
+                Err(SelectFailure::Missing) => {
+                    unknown = Some(Unsupported {
+                        span: argument.span,
+                        what: format!(
+                            "a borrowed call argument does not expose the callee result's field path '{}'; annotate the result lifetime or route the value through a direct checked function",
+                            origin.path.join(".")
+                        ),
+                    });
+                    continue;
+                }
+                Err(SelectFailure::Budget) => {
+                    return Err(Diagnostic::new(
+                        span,
+                        "recursive lifetime inference exceeded its finite work budget while substituting a call summary",
+                    ));
+                }
             }
             for selected in selected {
                 if out.insert(selected) {
                     self.charge_fact(span)?;
                 }
             }
+        }
+        if let Some(summary_unknown) = &summary.unknown {
+            let candidate = Unsupported {
+                span,
+                what: format!(
+                    "a call to '{callee_name}' returns through an unsupported result channel: {}",
+                    summary_unknown.what
+                ),
+            };
+            unknown = Some(match unknown.take() {
+                Some(current) if current.precedes(&candidate) => current,
+                Some(_) | None => candidate,
+            });
         }
         let mut flow = Flow::root(out);
         flow.unknown = unknown;
@@ -504,7 +624,9 @@ impl<'a, 'r> Solver<'a, 'r> {
         Ok(flow)
     }
     /// Bind `let` patterns and record assignments until local origin sets stop
-    /// growing. This is the finite local half of the same union lattice.
+    /// growing. This is the finite local half of the same union lattice. The
+    /// pass cap is a checked error: returning the last partial walk as success
+    /// would publish a summary that silently dropped a local origin.
     fn analyze_locals(
         &mut self,
         f: &ast::Function,
@@ -514,19 +636,12 @@ impl<'a, 'r> Solver<'a, 'r> {
         let Some(body) = &f.body else {
             return Ok(());
         };
-        for _ in 0..MAX_LOCAL_PASSES {
+        let span = f.result.span;
+        run_local_fixed_point(MAX_LOCAL_PASSES, span, || {
             let before = locals.clone();
             self.walk_block(body, locals)?;
-            if *locals == before {
-                return Ok(());
-            }
-        }
-        // A last pass at the fixed point keeps the result deterministic even if
-        // a pathological declaration reaches the pass cap; the step and fact
-        // budgets still bound the work, and the caller's diagnostics decide
-        // whether an unsupported origin remains.
-        self.walk_block(body, locals)?;
-        Ok(())
+            Ok(*locals == before)
+        })
     }
     fn walk_block(
         &mut self,
@@ -705,7 +820,10 @@ impl<'a, 'r> Solver<'a, 'r> {
                 self.analyze_locals(declared.ast, &mut locals)?;
                 let flow = self.block_flow(body, &locals)?;
                 let origins = flow.all_origins();
-                let summary = FunctionSummary { origins };
+                let summary = FunctionSummary {
+                    origins,
+                    unknown: flow.unknown.clone(),
+                };
                 let previous = self.summaries[binding].clone();
                 if summary != previous {
                     self.summaries.insert(*binding, summary);
@@ -718,36 +836,74 @@ impl<'a, 'r> Solver<'a, 'r> {
         }
         self.diagnose()
     }
-    /// Whether any direct call in this body targets a declaration with an
-    /// explicit borrowed result. Such a call is a parametric seed handled by
-    /// the existing syntactic inference; it is not an unseeded cycle.
-    fn body_calls_explicit_result(&self, f: &ast::Function) -> bool {
-        let Some(body) = &f.body else {
-            return false;
-        };
-        let mut calls = BTreeSet::new();
-        collect_direct_calls(self.resolution, self.declared, body, &mut calls);
-        calls.iter().any(|(binding, _, _)| {
-            self.declared.get(binding).is_some_and(|declared| {
+    /// Whether a direct call target has an explicit borrowed result contract.
+    fn explicit_result_call(&self, callee: &ast::Expr) -> bool {
+        self.callee_binding(callee).is_some_and(|binding| {
+            self.declared.get(&binding).is_some_and(|declared| {
                 Self::has_borrowed_result(declared.ast)
                     && borrow_lifetime(crate::grades::split(&declared.ast.result).0).is_some()
             })
         })
     }
+    /// Evidence that a returned value is syntactically a call through an
+    /// explicit-result boundary. An unrelated explicit call elsewhere in the
+    /// body is not evidence; every result-producing path must carry it. This
+    /// only suppresses the unseeded-cycle error, it never invents an origin.
+    fn result_evidence(&self, expr: &ast::Expr) -> bool {
+        use ast::ExprKind as K;
+        match &expr.kind {
+            K::Call { callee, .. } => self.explicit_result_call(callee),
+            K::Field { value, .. }
+            | K::Slice { value, .. }
+            | K::Index { value, .. }
+            | K::Unary { operand: value, .. }
+            | K::Try(value)
+            | K::Cast { value, .. }
+            | K::Return(Some(value))
+            | K::Break(Some(value)) => self.result_evidence(value),
+            K::Block(block) => self.block_result_evidence(block),
+            K::If {
+                then, otherwise, ..
+            } => {
+                self.block_result_evidence(then)
+                    && otherwise
+                        .as_ref()
+                        .is_some_and(|otherwise| self.result_evidence(otherwise))
+            }
+            K::Match { arms, .. } => {
+                !arms.is_empty() && arms.iter().all(|arm| self.result_evidence(&arm.body))
+            }
+            _ => false,
+        }
+    }
+    fn block_result_evidence(&self, block: &ast::Block) -> bool {
+        let mut returns = Vec::new();
+        block_returns(block, &mut returns);
+        let tail = block
+            .tail
+            .as_ref()
+            .is_some_and(|tail| self.result_evidence(tail));
+        let tail_ok = if block.tail.is_some() {
+            tail
+        } else {
+            !returns.is_empty()
+        };
+        returns.iter().all(|value| self.result_evidence(value)) && tail_ok
+    }
     fn diagnose(&mut self) -> Result<(), Diagnostic> {
         let sccs = self.sccs();
         let mut errors = Vec::new();
         for group in &sccs {
-            if group.len() == 1
-                && !self
+            let cyclic = group.len() > 1
+                || self
                     .edges
                     .get(&group[0])
-                    .is_some_and(|e| e.contains(&group[0]))
-            {
-                continue;
-            }
+                    .is_some_and(|edges| edges.contains(&group[0]));
             // Recompute the same flows once to distinguish a legitimate empty
-            // base from an unsupported boundary.
+            // base from an unsupported boundary. Acyclic declarations are
+            // checked too: an unsupported channel must not become an empty
+            // provenance at their callers just because the declaration does not
+            // participate in a cycle.
             for binding in group {
                 let declared = self.declared[binding];
                 if !Self::has_borrowed_result(declared.ast)
@@ -764,19 +920,38 @@ impl<'a, 'r> Solver<'a, 'r> {
                 self.analyze_locals(declared.ast, &mut locals)?;
                 let flow = self.block_flow(body, &locals)?;
                 if let Some(unknown) = &flow.unknown {
-                    errors.push((
-                        declared.span,
-                        self.unsupported_diagnostic(*binding, &unknown.what, unknown.span, group),
-                    ));
-                } else if flow.all_origins().is_empty()
+                    // A no-input elided result already has a more precise
+                    // "cannot be returned" rejection in the ordinary pass. For
+                    // an acyclic declaration a single input lifetime already
+                    // fixes the result provenance, so the existing pass keeps
+                    // its more specific mutability/escape diagnostic. Multiple
+                    // independent inputs are where an empty summary would
+                    // silently choose no owner.
+                    let report = if cyclic {
+                        Self::input_has_borrow_shape(declared.ast)
+                    } else {
+                        Self::input_lifetime_count(declared.ast) > 1
+                    };
+                    if report {
+                        errors.push((
+                            declared.span,
+                            self.unsupported_diagnostic(
+                                *binding,
+                                &unknown.what,
+                                unknown.span,
+                                group,
+                            ),
+                        ));
+                    }
+                } else if cyclic
+                    && flow.all_origins().is_empty()
                     && Self::input_lifetime_count(declared.ast) > 1
-                    && !self.body_calls_explicit_result(declared.ast)
+                    && !self.block_result_evidence(body)
                 {
-                    // A direct call to an explicitly annotated borrowed result
-                    // is already a parametric seed for the existing syntactic
-                    // inference, even though this root-slot pass cannot derive
-                    // an origin through it. Leave that case to the ordinary
-                    // inference and ownership validation.
+                    // Only returned evidence from an explicit-result boundary
+                    // is a parametric seed for the existing syntactic
+                    // inference. An unrelated explicit call in the body cannot
+                    // justify an otherwise unseeded cycle.
                     errors.push((declared.span, self.no_seed_diagnostic(*binding, group)));
                 }
             }
@@ -914,6 +1089,27 @@ impl<'a, 'r> Solver<'a, 'r> {
         }
         error
     }
+}
+
+/// Run one monotone local fixed-point loop. `pass` returns whether the state
+/// did not change. Exhausting the exact pass budget is a checked error, never a
+/// silent partial result.
+fn run_local_fixed_point(
+    max_passes: usize,
+    span: Span,
+    mut pass: impl FnMut() -> Result<bool, Diagnostic>,
+) -> Result<(), Diagnostic> {
+    for _ in 0..max_passes {
+        if pass()? {
+            return Ok(());
+        }
+    }
+    Err(Diagnostic::new(
+        span,
+        format!(
+            "recursive lifetime inference exceeded its finite local fixed-point pass budget ({max_passes} passes); annotate the result lifetime explicitly or simplify the local borrow aliases"
+        ),
+    ))
 }
 
 /// Collect every `Return(Some(value))` reachable in a block, including nested
@@ -1101,4 +1297,81 @@ pub(super) fn solve<'a>(
     Ok(Summaries {
         functions: solver.summaries,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_local_pass_budget_reports_its_exact_limit() {
+        let error =
+            run_local_fixed_point(MAX_LOCAL_PASSES, Span::new(0, 1), || Ok(false)).unwrap_err();
+        assert!(
+            error.message.contains("pass budget (64 passes)"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn convergence_on_the_last_allowed_pass_is_not_an_exhaustion() {
+        let mut passes = 0usize;
+        run_local_fixed_point(MAX_LOCAL_PASSES, Span::new(0, 1), || {
+            passes += 1;
+            Ok(passes == MAX_LOCAL_PASSES)
+        })
+        .unwrap();
+        assert_eq!(passes, MAX_LOCAL_PASSES);
+    }
+
+    fn origin(parameter: usize, path: &[&str]) -> Origin {
+        Origin {
+            parameter,
+            path: path.iter().map(|part| (*part).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_select_path_mismatch_is_not_an_empty_provenance() {
+        let mut leaves = BTreeMap::new();
+        leaves.insert(vec!["right".to_owned()], BTreeSet::from([origin(0, &[])]));
+        let flow = Flow {
+            leaves,
+            unknown: None,
+        };
+        let mut selected = BTreeSet::new();
+        let mut work = 0usize;
+        assert_eq!(
+            flow.select(&["left".to_owned()], &mut selected, &mut work),
+            Err(SelectFailure::Missing)
+        );
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn a_select_budget_exhaustion_is_reported_separately() {
+        let mut leaves = BTreeMap::new();
+        leaves.insert(Vec::new(), BTreeSet::from([origin(0, &[])]));
+        let flow = Flow {
+            leaves,
+            unknown: None,
+        };
+        let mut selected = BTreeSet::new();
+        let mut work = MAX_ANALYSIS_STEPS;
+        assert_eq!(
+            flow.select(&["view".to_owned()], &mut selected, &mut work),
+            Err(SelectFailure::Budget)
+        );
+    }
+
+    #[test]
+    fn selecting_through_an_unknown_flow_stays_unknown() {
+        let flow = Flow::unknown(Span::new(0, 1), "indirect call");
+        let mut selected = BTreeSet::new();
+        let mut work = 0usize;
+        assert_eq!(
+            flow.select(&["view".to_owned()], &mut selected, &mut work),
+            Err(SelectFailure::Missing)
+        );
+    }
 }

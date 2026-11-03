@@ -193,7 +193,13 @@ API only for validating/closing justified finite bounds.
   permutation on recursive calls. Every reachable source owner remains loaned.
 - A local or temporary returned only on a recursive path remains rejected;
   mutable duplicates and capability upgrades remain rejected.
-- No-seed cycles cannot manufacture origins, lifetime equality or `Never`.
+- No-seed cycles cannot manufacture origins, lifetime equality or `Never`; an
+  unrelated explicit-result call in the body is not returned evidence.
+- Erased proof parameters, including ones before or between borrowed runtime
+  parameters, do not shift the selected call argument.
+- Acyclic unsupported channels and unmapped summary field paths are rejected
+  instead of becoming empty origins; an explicit contract keeps the supported
+  acyclic path usable.
 - A caller that lacks a newly inferred requirement is rejected even if checked
   before the callee; exact trait and arrow contracts cannot be strengthened.
 - Calls through explicit arrows/boundaries retain existing guarantees; unknown
@@ -213,6 +219,10 @@ Implemented in this fragment:
 
 - Stable origins are a runtime parameter index plus a source field path. The
   origin set is a power set of those leaves; join is union and facts only grow.
+  Call substitution maps a runtime index back through the callee's source
+  parameter list, so an erased proof position never shifts the selected
+  argument. The same explicit source-position mapping is used by the syntactic
+  helper-result seed.
 - Direct static calls compose through helpers, self recursion, and mutual
   recursion. Local `let` aliases, record destructuring, field projections,
   record literals, blocks, branches, and matches carry origins; assignments are
@@ -220,22 +230,43 @@ Implemented in this fragment:
   every actual alternative.
 - Call-graph condensation is separate from the outlives solver. Iteration and
   diagnostics are sorted by declaration name plus binding for deterministic
-  results under declaration permutation. The aggregate step/fact budget
-  returns a checked diagnostic instead of a partial summary.
+  results under declaration permutation. The aggregate budgets are checked
+  errors instead of partial summaries: 250,000 analysis steps, 16,384 origin
+  facts, and exactly 64 local fixed-point passes. Exhausting a pass budget asks
+  for an explicit result lifetime and never returns the last partial walk.
+- An unsupported result channel is stored in the solved summary, not discarded.
+  Indirect, dynamic, method, loop, perform, and borrowed-record channels keep an
+  `unknown` fact: an elided multi-input declaration is rejected, and a caller of
+  an explicit-result boundary still sees the preserved `unknown` rather than an
+  empty origin set. A single-input or no-input acyclic declaration keeps its
+  existing more specific diagnostic because its result lifetime is already
+  determined by the ordinary rule.
+- Elided borrowed result shapes are recognized by their written borrow shape,
+  not by whether a named lifetime is printed (`&[T]` mentions no lifetime but is
+  still borrowed). The public helper-result seed and the summary mapping agree
+  on source argument positions.
 - An elided multi-source result becomes the existing anonymous intersection
   lifetime with bounds from every contributed input. Unioning origins retains
   every owner loan; a branch join now keeps the shortest provable common view
   lifetime rather than dropping to `None`, which lets explicit recursive
   contracts use their propagated `b: a` precondition.
 - A cycle with several independent direct input lifetimes and no base origin is
-  rejected with the recursive call chain. A single unambiguous elided input
-  keeps the existing parametric elision, and an explicit result contract
-  remains parametric forwarding validated by ownership, including no-base
-  cycles. Inference never invents `Never`, lifetime equality, or a fresh label
-  per iteration.
-- Inferred requirements are exported on the recursive declaration and checked
-  at every caller. A frozen function value carries the same bounds, so an
-  unconstrained arrow cannot silently strengthen or erase them.
+  rejected with the recursive call chain. The exemption for an explicit-result
+  boundary is evidence-based: every returned result path must be the boundary
+  call. An unrelated explicit-result call elsewhere in the body does not seed
+  the cycle. A single unambiguous elided input keeps the existing parametric
+  elision, and an explicit result contract remains parametric forwarding
+  validated by ownership, including no-base cycles. Inference never invents
+  `Never`, lifetime equality, or a fresh label per iteration.
+- Result-derived bounds are exported on the recursive declaration and checked at
+  every caller. This is not an independent required-precondition summary `R[f]`:
+  requirements not implied by a possible returned origin remain outside this
+  fragment and need an explicit contract. A frozen function value carries the
+  same result-derived bounds, so an unconstrained arrow cannot silently
+  strengthen or erase them.
+- Every solved origin must map to a declared input lifetime. A missing field
+  path is rejected with a checked diagnostic that asks for an explicit result
+  lifetime; it is never silently omitted from the summary.
 - Local/temporary escape, mutable capability upgrades, grade/effect checks, and
   the existing 256-instance cap are unchanged. Callers are revalidated by the
   ordinary ownership pass after bodies are checked.
@@ -247,9 +278,14 @@ Remaining limits, deliberately not claimed as complete:
   field lifetimes; per-field recursive result summaries are not inferred.
 - Direct and lexically resolved static calls participate. Indirect calls,
   dynamic dispatch, method calls, effect-operation results, and loop results are
-  unsupported boundaries: a recursive result that needs one is rejected and
-  asks for an explicit annotation (or must route through a direct checked
-  function).
+  unsupported boundaries. Their `unknown` fact is preserved in the solved
+  summary; an elided multi-input result is rejected with an explicit-contract
+  request (or must route through a direct checked function), and an acyclic
+  caller of an explicit boundary cannot read the channel as empty provenance.
+- Requirements are derived from possible result origins only. A separate
+  finite required-precondition summary `R[f]` for constraints not implied by a
+  returned origin is not implemented; such cases require an explicit contract
+  rather than an inferred one. No claim of full `R[f]` completeness is made.
 - Summaries are solved per declaration. Lifetime labels do not vary with type
   substitution in the supported fragment, so concrete instances map the same
   stable parameter-leaf IDs onto their own frozen labels. Instance-specific
