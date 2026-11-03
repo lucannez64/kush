@@ -660,6 +660,11 @@
           "time": "2026-11-03 21:23:58",
           "who": "agent",
           "text": "Full combined f752ba5 Boat gate passed: 1234 tests, formatting and strict Clippy. Independent corrective safety recheck pending; LT-VARIANCE and LIFE remain open."
+        },
+        {
+          "time": "2026-11-03 22:00:42",
+          "who": "agent",
+          "text": "Integrated 8b808a4: actual-argument relabeling for call results and inferred record labels, invariant identity required at typed bindings, removed blanket call/unclassified witness fallbacks. Worker reproduced reported probes and focused regressions pass. Full Boat gate pending."
         }
       ]
     },
