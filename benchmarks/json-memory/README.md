@@ -117,7 +117,7 @@ allocation request, and an OS page allocation are different events.
   allocations differ and are included, so this is not a parser comparison or
   a perfectly identical representation experiment.
 - Kush has thin heap handles, untagged nonempty nominal records, runtime buffer headers,
-  16-byte allocation headers, padding and a bounded 1 MiB pool. Rust has inline
+  private allocation headers where needed, padding and a bounded 1 MiB pool. Rust has inline
   Vec descriptors and normal Box allocations. Physical metrics include these
   differences rather than pretending payload sizes are the same.
 - Kush can reuse the document vector when consuming it into scalar hashes.
@@ -195,3 +195,18 @@ explicitly inline in both languages, peak requested heap is within 3.9% and
 median peak RSS within 1.5% on this workload. Full Boat validation: 1,152 tests,
 formatting and strict Clippy passed. These are measured limits, not a general
 parity or automatic box-elimination claim.
+
+## Headerless buffers and speed measurements
+
+The [headerless checkpoint](sample-results/headerless-buffers-2026-11-03/analysis.md)
+records small-buffer header elision, checked byte-append fast paths, and both
+speed and memory. It retains boxed/inline controls, all raw samples, a measured
+initial speed regression, and a low-load Boat confirmation. The inline
+application beats Rust CLIF on wall time and peak RSS there; requested heap
+is essentially tied, and previous Kush remains faster on Boat. The boxed
+application still uses more memory than Rust. See the report's scope and tradeoffs.
+
+Timing samples now also record process-tree CPU time via child `getrusage`
+(including the GNU time wrapper) and start/end host load. `confirm.py` can
+measure an already-built hash-verified binary bundle without compiling, using
+per-child `wait4` for CPU time and peak RSS. Both tools validate checksums.

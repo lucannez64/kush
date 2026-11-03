@@ -53,3 +53,15 @@ class-count reset, final drain and retained double-release rejection. Local
 AddressSanitizer/UndefinedBehaviorSanitizer probes exercise the same small-to-
 large transitions. Language tests cover allocator containers, fallible memory,
 vector reuse, host APIs and physical pool accounting.
+
+## Validation and measurements
+
+Compiler checkpoint `516b360`: the full Boat gate passed **1,169 tests**,
+formatting and strict Clippy. Direct AddressSanitizer/UndefinedBehaviorSanitizer
+checks passed locally. The sandbox was stopped after validation and confirmation.
+
+The [matched speed/memory report](../benchmarks/json-memory/sample-results/headerless-buffers-2026-11-03/analysis.md)
+includes old/current Kush and Rust controls, boxed/inline layouts, an initial
+header-only speed regression, a corrected append fast path, and a low-load Boat
+confirmation. It records the remaining speed tradeoff versus previous Kush and
+the distinction between peak RSS and requested heap.

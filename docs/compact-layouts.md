@@ -2,8 +2,7 @@
 
 Nonempty nominal structs have no runtime discriminator. Their native words are
 exactly their fields in declaration order. For example, `struct Node { id: i64,
-revision: i64 }` occupies 16 payload bytes rather than 24. A real enum still
-needs its tag. Empty structs, tuple layouts, anonymous structural rows, inline
+revision: i64 }` occupies 16 payload bytes rather than 24. Enums keep a tag unless eligible for [niche encoding](niche-layouts.md). Empty structs, tuple layouts, anonymous structural rows, inline
 arrays, dynamic arrays and opaque foreign resources retain their existing ABI.
 These are compiler-private representations, not a C or Rust aggregate ABI.
 
@@ -23,8 +22,9 @@ physical-capacity model uses the same 16-byte header for fallible-growth
 budget decisions. Stateful user-allocator `AllocVec` has a separate protocol
 and retains its own metadata.
 
-This leaves the existing 16-byte allocation header, padding and bounded pool
-unchanged. It does not erase ownership, borrow checks, effects or fallible
+The subsequent [headerless buffer change](headerless-buffers.md) removes the
+private allocation header from ordinary buffers of at most 1024 requested
+bytes. Other storage retains the 16-byte header, padding and bounded pool. It does not erase ownership, borrow checks, effects or fallible
 allocation semantics. A smaller value can legitimately need fewer physical
 growths; layout-dependent failure-injection tests must select sizes that still
 cross the intended boundary.

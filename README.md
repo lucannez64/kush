@@ -259,3 +259,8 @@ Native [enum niche encoding](docs/niche-layouts.md) stores eligible optional
 boxes, booleans, characters, and lexical references in one 64-bit word. General
 borrowed enum signatures and nested/multi-variant niche packing remain outside
 this milestone. See [the runnable example](examples/niches.kush).
+
+[Headerless small buffers and checked append fast paths](docs/headerless-buffers.md)
+reduce ordinary-buffer overhead while preserving capacity/refusal contracts.
+The [matched speed/memory measurements](benchmarks/json-memory/sample-results/headerless-buffers-2026-11-03/analysis.md)
+include the remaining tradeoff versus previous Kush and the boxed/inline distinction.

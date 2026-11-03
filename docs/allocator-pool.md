@@ -5,8 +5,9 @@ optimization, not a source-language feature, a memory-safety proof, or a
 real-time latency guarantee.
 
 Native programs allocate owning storage (`Box`, `Bytes`, `Vec`, string copies,
-closure environments, task control and result blocks) through the C runtime's
-`kush_alloc`/`kush_free`. Small blocks now come from a bounded size-class cache
+closure environments, task control and result blocks) through typed C runtime
+allocation/release helpers. Ordinary small buffers use a headerless family;
+other storage uses `kush_alloc`/`kush_free`. Small blocks come from a bounded size-class cache
 instead of always reaching the system allocator. The reference evaluator is
 unchanged and never runs compiled code.
 
@@ -21,7 +22,12 @@ exit status are unchanged in both cases.
 
 ## Block layout
 
-Every native allocation has a 16-byte header immediately before its payload:
+Boxes, closures, task blocks, large ordinary buffers and exact fallible-grown
+buffers have a 16-byte header immediately before their payload. Ordinary small
+`Bytes`/`String`/`Vec` buffers omit it and record their physical size class in
+spare capacity bits; see [headerless buffers](headerless-buffers.md).
+
+The header-bearing layout is:
 
 | Field | Meaning |
 | --- | --- |
@@ -45,8 +51,8 @@ a pointer to system-freed memory can be invalid to inspect, and a stale handle
 can match a new allocation after a block is reused. Memory safety still depends
 on the compiler's ownership and borrowing checks.
 
-`kush_grow` replaces the runtime's former direct `realloc` calls (byte-buffer
-push, vector push, and vector reserve). It checks the header, returns the same
+`kush_grow` handles header-bearing storage. Ordinary buffer operations use
+`kush_buffer_grow`, which recognizes either buffer family. Growth returns the same
 payload when the requested capacity already fits in `usable`, and otherwise
 allocates a replacement, copies the live capacity, and releases the old block
 exactly once. Growth is non-counting in both directions: logical allocation
@@ -60,11 +66,12 @@ is why the reference and native diagnostics still agree.
   smallest class.
 - Requests above 1024 bytes are unpooled: exact-size system blocks that are
   released immediately on free.
-- A freed small block returns to its class free list only while the total
-  retained physical size (16-byte header plus padded payload) stays at or below
+- A freed small block returns to its family’s class free list only while the
+  total retained physical size (header plus padded payload for header-bearing
+  blocks, size class alone for headerless buffers) stays at or below
   1 MiB (1048576 bytes). Blocks that would exceed the cap go back to the system
   immediately, so the cache can never grow without bound.
-- Each size class retains at most 64 free blocks. Excess blocks return to libc
+- Each size class retains at most 64 free blocks across both families. Excess blocks return to libc
   even while the global budget has space. This prevents a past burst in one
   size class from keeping thousands of blocks and crowding out other classes.
   Class counts decrease on both ordinary and fallible claims and reset on drain.
@@ -89,8 +96,8 @@ The stable line is unchanged, byte for byte:
 allocation-stats: allocations=<n> deallocations=<n> peak-live=<n> buffer-growths=<n> reuses=<n> fusions=<n>
 ```
 
-`allocations`, `deallocations`, and `peak-live` count logical
-`kush_alloc`/`kush_free` calls. A pooled physical hand-off is not an allocation
+`allocations`, `deallocations`, and `peak-live` count logical owning
+allocation/release operations across both families. A pooled physical hand-off is not an allocation
 and a retained block is not a live owner, so these counters are identical to the
 pre-pool runtime and, apart from tasks and stacks, to the reference evaluator.
 `buffer-growths` still counts one successful capacity change per logical growth,
