@@ -301,6 +301,10 @@ pub(crate) struct Function {
     /// `(long, short)` means `'long: 'short`: storage named by `long` outlives
     /// storage named by `short`. Reflexivity is implicit.
     pub lifetime_bounds: BTreeSet<(String, String)>,
+    /// Lifetime binders declared by this function or method. They are rigid
+    /// destinations for mutable container/record writes; labels that appear
+    /// only in an expected instantiation are placeholders, not destinations.
+    pub declared_lifetimes: BTreeSet<String>,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Local {
@@ -3292,7 +3296,7 @@ fn collect_parameter_field_lifetimes(
     types: &crate::runtime_types::Types<'_>,
     ty: Type,
     out: &mut BTreeMap<String, String>,
-) {
+) -> Result<()> {
     fn names(types: &crate::runtime_types::Types<'_>, ty: Type, path: &[usize]) -> Option<String> {
         let mut current = ty;
         let mut names = Vec::with_capacity(path.len());
@@ -3304,7 +3308,7 @@ fn collect_parameter_field_lifetimes(
         }
         Some(names.join("."))
     }
-    for leaf in crate::runtime_types::borrow_leaves(types, ty) {
+    for leaf in crate::runtime_types::borrow_leaves(types, ty)? {
         let Some(lifetime) = leaf.lifetime else {
             continue;
         };
@@ -3312,6 +3316,7 @@ fn collect_parameter_field_lifetimes(
             out.insert(name, lifetime);
         }
     }
+    Ok(())
 }
 /// Whether `long` outlives `short` under a reflexive-transitive bound set.
 /// Every lifetime outlives itself; declared bounds supply the strict steps.
@@ -4593,8 +4598,14 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             slots: BTreeMap::new(),
             result: sig.result,
             parameter_lifetimes: sig.parameter_lifetimes.clone(),
+            declared_lifetimes: f
+                .lifetimes
+                .iter()
+                .map(|lifetime| lifetime.name.clone())
+                .collect(),
             result_lifetime: sig.result_lifetime.clone(),
             lifetime_bounds: sig.lifetime_bounds.clone(),
+            call_boundary: 0,
             result_grade: sig.result_grade,
             effects: sig.effects,
             depth: 0,
@@ -4726,6 +4737,11 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             parameter_lifetimes: sig.parameter_lifetimes.clone(),
             result_lifetime: sig.result_lifetime.clone(),
             lifetime_bounds: sig.lifetime_bounds.clone(),
+            declared_lifetimes: f
+                .lifetimes
+                .iter()
+                .map(|lifetime| lifetime.name.clone())
+                .collect(),
         });
     }
     // Re-check every proof certificate without the search that produced it.
@@ -9262,7 +9278,7 @@ impl<'a> Functions<'a> {
                     types,
                     parameters.last().copied().unwrap(),
                     &mut fields,
-                );
+                )?;
                 if !fields.is_empty() {
                     parameter_field_lifetimes.insert(binder, fields);
                 }
@@ -9274,7 +9290,7 @@ impl<'a> Functions<'a> {
             {
                 let mut record_lifetimes = BTreeSet::new();
                 for leaf in
-                    crate::runtime_types::borrow_leaves(types, parameters.last().copied().unwrap())
+                    crate::runtime_types::borrow_leaves(types, parameters.last().copied().unwrap())?
                 {
                     if let Some(name) = leaf.lifetime {
                         record_lifetimes.insert(name.clone());
@@ -9539,21 +9555,25 @@ impl<'a> Functions<'a> {
                     },
                 ));
             };
+            let parameter_leaf_sets = parameters
+                .iter()
+                .map(|ty| crate::runtime_types::borrow_leaves(types, *ty))
+                .collect::<Result<Vec<_>>>()?;
             let matching = parameter_lifetimes
                 .iter()
                 .zip(parameters.iter())
-                .filter(|(parameter, ty)| {
+                .zip(&parameter_leaf_sets)
+                .filter(|((parameter, _), leaves)| {
                     parameter
                         .as_ref()
                         .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
-                        || crate::runtime_types::borrow_leaves(types, **ty)
-                            .iter()
-                            .any(|leaf| {
-                                leaf.lifetime
-                                    .as_ref()
-                                    .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
-                            })
+                        || leaves.iter().any(|leaf| {
+                            leaf.lifetime
+                                .as_ref()
+                                .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
+                        })
                 })
+                .map(|((parameter, ty), leaves)| (parameter, ty, leaves))
                 .collect::<Vec<_>>();
             if matching.is_empty() {
                 return Err(Diagnostic::new(
@@ -9564,16 +9584,15 @@ impl<'a> Functions<'a> {
                 ));
             }
             if result.is_mut_slice()
-                && !matching.iter().any(|(_, ty)| {
+                && !matching.iter().any(|(_, ty, leaves)| {
                     ty.is_mut_slice()
-                        || crate::runtime_types::borrow_leaves(types, **ty)
-                            .iter()
-                            .any(|leaf| {
-                                leaf.mutable
-                                    && leaf.lifetime.as_ref().is_some_and(|name| {
-                                        outlives(&lifetime_bounds, name, lifetime)
-                                    })
-                            })
+                        || leaves.iter().any(|leaf| {
+                            leaf.mutable
+                                && leaf
+                                    .lifetime
+                                    .as_ref()
+                                    .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
+                        })
                 })
             {
                 return Err(Diagnostic::new(
@@ -9608,36 +9627,46 @@ impl<'a> Functions<'a> {
                             .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
                 })
                 .collect::<Vec<_>>();
+            let parameter_leaf_sets = parameters
+                .iter()
+                .map(|ty| crate::runtime_types::borrow_leaves(types, *ty))
+                .collect::<Result<Vec<_>>>()?;
+            let referent_leaf_sets = parameters
+                .iter()
+                .map(|ty| match ty.ref_pointee() {
+                    Some(pointer) => {
+                        crate::runtime_types::borrow_leaves(types, types.pointees[pointer])
+                    }
+                    None => Ok(Vec::new()),
+                })
+                .collect::<Result<Vec<_>>>()?;
             // A reference element stored in a by-value container parameter is
             // backed by caller-owned storage too; its declared element
             // lifetime supplies the same outlives relation.
-            let container_leaf = parameters.iter().any(|ty| {
-                crate::runtime_types::borrow_leaves(types, *ty)
-                    .iter()
-                    .any(|leaf| {
-                        leaf.lifetime
-                            .as_ref()
-                            .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
-                    })
+            let container_leaf = parameter_leaf_sets.iter().any(|leaves| {
+                leaves.iter().any(|leaf| {
+                    leaf.lifetime
+                        .as_ref()
+                        .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
+                })
             });
             // A shared reference field stored inside the referent of a
             // reference parameter is caller-owned storage too. Its declared
             // field lifetime was instantiated in the parameter's record type,
             // so projecting it through the reference keeps that relation.
             let referent_field_leaf = |wanted_mutable: bool| {
-                parameters.iter().any(|ty| {
-                    ty.is_ref()
-                        && ty.ref_pointee().is_some_and(|pointer| {
-                            crate::runtime_types::borrow_leaves(types, types.pointees[pointer])
-                                .iter()
-                                .any(|leaf| {
-                                    leaf.mutable == wanted_mutable
-                                        && leaf.lifetime.as_ref().is_some_and(|name| {
-                                            outlives(&lifetime_bounds, name, lifetime)
-                                        })
-                                })
-                        })
-                })
+                parameters
+                    .iter()
+                    .zip(&referent_leaf_sets)
+                    .any(|(ty, leaves)| {
+                        ty.is_ref()
+                            && leaves.iter().any(|leaf| {
+                                leaf.mutable == wanted_mutable
+                                    && leaf.lifetime.as_ref().is_some_and(|name| {
+                                        outlives(&lifetime_bounds, name, lifetime)
+                                    })
+                            })
+                    })
             };
             if matching.is_empty() && !container_leaf && !referent_field_leaf(mutable_result) {
                 return Err(Diagnostic::new(
@@ -9651,16 +9680,14 @@ impl<'a> Functions<'a> {
             if mutable_result
                 && !matching.iter().any(|(_, ty)| matches!(ty, Type::RefMut(_)))
                 && !referent_field_leaf(true)
-                && !parameters.iter().any(|ty| {
-                    crate::runtime_types::borrow_leaves(types, *ty)
-                        .iter()
-                        .any(|leaf| {
-                            leaf.mutable
-                                && leaf
-                                    .lifetime
-                                    .as_ref()
-                                    .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
-                        })
+                && !parameter_leaf_sets.iter().any(|leaves| {
+                    leaves.iter().any(|leaf| {
+                        leaf.mutable
+                            && leaf
+                                .lifetime
+                                .as_ref()
+                                .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
+                    })
                 })
             {
                 return Err(Diagnostic::new(
@@ -9678,7 +9705,11 @@ impl<'a> Functions<'a> {
         {
             // A returned borrowed record may mention only declared lifetime
             // parameters that also describe some parameter's borrowed field.
-            for leaf in crate::runtime_types::borrow_leaves(types, result) {
+            let parameter_leaf_sets = parameters
+                .iter()
+                .map(|ty| crate::runtime_types::borrow_leaves(types, *ty))
+                .collect::<Result<Vec<_>>>()?;
+            for leaf in crate::runtime_types::borrow_leaves(types, result)? {
                 let Some(lifetime) = &leaf.lifetime else {
                     // Structural rows do not record field lifetime labels, so a
                     // borrowed leaf there has no declared lifetime to check.
@@ -9699,20 +9730,19 @@ impl<'a> Functions<'a> {
                     parameter_lifetimes
                         .iter()
                         .zip(parameters.iter())
-                        .any(|(parameter, ty)| {
+                        .zip(&parameter_leaf_sets)
+                        .any(|((parameter, ty), leaves)| {
                             (parameter
                                 .as_ref()
                                 .is_some_and(|name| outlives(&lifetime_bounds, name, lifetime))
                                 && (!leaf.mutable
                                     || ty.is_mut_slice()
                                     || matches!(ty, Type::RefMut(_))))
-                                || crate::runtime_types::borrow_leaves(types, *ty).iter().any(
-                                    |parameter_leaf| {
-                                        parameter_leaf.lifetime.as_ref().is_some_and(|name| {
-                                            outlives(&lifetime_bounds, name, lifetime)
-                                        }) && (!leaf.mutable || parameter_leaf.mutable)
-                                    },
-                                )
+                                || leaves.iter().any(|parameter_leaf| {
+                                    parameter_leaf.lifetime.as_ref().is_some_and(|name| {
+                                        outlives(&lifetime_bounds, name, lifetime)
+                                    }) && (!leaf.mutable || parameter_leaf.mutable)
+                                })
                         });
                 if !carried {
                     return Err(Diagnostic::new(
@@ -9871,6 +9901,12 @@ impl<'a> Functions<'a> {
                 parameter_lifetimes: parameter_lifetimes.clone(),
                 result_lifetime: result_lifetime.clone(),
                 lifetime_bounds: lifetime_bounds.clone(),
+                declared_lifetimes: declared
+                    .ast
+                    .lifetimes
+                    .iter()
+                    .map(|lifetime| lifetime.name.clone())
+                    .collect(),
             }));
         } else {
             self.bodies.push(None);
@@ -10468,6 +10504,11 @@ struct Checker<'a, 't> {
     /// function currently being checked. Lambda captures inherit a declared
     /// parameter lifetime so a captured slice keeps the caller's identity.
     parameter_lifetimes: Vec<Option<String>>,
+    /// Every lifetime declared by the function currently being checked. Nested
+    /// record instantiations may mention these labels even when no runtime
+    /// parameter is itself a reference, so the contextual witness classifies
+    /// them as free occurrence labels instead of dropping the whole check.
+    declared_lifetimes: BTreeSet<String>,
     /// Static result-transfer contract of the function/lambda currently being
     /// checked. Distinguishes owning `@[1]` transfers from must-use copyable
     /// transfers when a returned value is observed.
@@ -10477,6 +10518,12 @@ struct Checker<'a, 't> {
     /// witnesses; the witness never invents an edge.
     result_lifetime: Option<String>,
     lifetime_bounds: BTreeSet<(String, String)>,
+    /// Nonzero while checking an expression that is being coerced into a
+    /// callee parameter. Callee-declared labels are instantiated by the call
+    /// and are governed by the callee contract plus the ownership provenance
+    /// mapping, so the same-scope contextual witness does not reinterpret them
+    /// as the caller's declared lifetimes.
+    call_boundary: usize,
     effects: u16,
     depth: usize,
     loops: Vec<Loop>,
@@ -13018,12 +13065,12 @@ impl Checker<'_, '_> {
         let mut values = vec![receiver];
         if let Some(prechecked) = prechecked {
             for (value, ty) in prechecked.into_iter().zip(&contract.parameters) {
-                values.push(self.coerce(value, *ty, span)?);
+                values.push(self.coerce_argument(value, *ty, span)?);
             }
         } else {
             for (argument, ty) in arguments.iter().zip(&contract.parameters) {
                 let value = self.expr_expected(argument, Some(*ty))?;
-                values.push(self.coerce(value, *ty, span)?);
+                values.push(self.coerce_argument(value, *ty, span)?);
             }
         }
         self.ensure_dyn_method(object, &key, &contract, span)?;
@@ -13271,7 +13318,7 @@ impl Checker<'_, '_> {
             let mut values = vec![receiver];
             for (argument, ty) in arguments.iter().zip(&contract.parameters) {
                 let value = self.expr_expected(argument, Some(*ty))?;
-                values.push(self.coerce(value, *ty, span)?);
+                values.push(self.coerce_argument(value, *ty, span)?);
             }
             let members = self.union_member_functions(trait_id, &trait_arguments, name, span)?;
             let spec = self.functions.union_calls.len();
@@ -13395,7 +13442,7 @@ impl Checker<'_, '_> {
         let mut values = vec![receiver];
         for (argument, ty) in arguments.iter().zip(&signature.parameters[1..]) {
             let value = self.expr_expected(argument, Some(*ty))?;
-            values.push(self.coerce(value, *ty, span)?);
+            values.push(self.coerce_argument(value, *ty, span)?);
         }
         if receiver_mode == ReceiverMode::Mutable {
             // The receiver was rewritten to a local/parameter place when it is
@@ -13925,6 +13972,7 @@ impl Checker<'_, '_> {
             parameter_lifetimes: witness_parameter_lifetimes.clone(),
             result_lifetime: witness_result_lifetime.clone(),
             lifetime_bounds: witness_bounds.clone(),
+            declared_lifetimes: BTreeSet::new(),
         };
         let signature = Signature {
             binding: usize::MAX,
@@ -14154,7 +14202,7 @@ impl Checker<'_, '_> {
         let mut coerced = Vec::with_capacity(values.len());
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
             diverges |= value.ty == Type::Never;
-            coerced.push(self.coerce(value, *ty, span)?);
+            coerced.push(self.coerce_argument(value, *ty, span)?);
         }
         let ty = if diverges {
             Type::Never
@@ -15330,15 +15378,21 @@ impl Checker<'_, '_> {
     /// Check a same-scope lifetime conversion with the occurrence-specific
     /// witness. Call and coercion expressions are skipped because a callee's
     /// declared labels are instantiated by the actual arguments; ownership
-    /// retains that provenance independently. Incomplete label metadata (a
-    /// label not declared by this function or recognizably internal) defers to
-    /// that same ownership evidence; it is never treated as erased proof.
+    /// retains that provenance independently. Every label reachable from the
+    /// two occurrences is classified from this function's declared lifetime
+    /// binders plus compiler-internal elided identities. A label that is not
+    /// declared here belongs to a callee or nested instantiation and defers
+    /// per occurrence to ownership evidence; every same-scope label that this
+    /// witness can classify must still satisfy the conversion.
     fn check_static_lifetime_witness(
         &self,
         value: &Expr,
         expected: Type,
         span: Span,
     ) -> Result<()> {
+        if self.call_boundary > 0 {
+            return Ok(());
+        }
         if matches!(
             value.kind,
             ExprKind::Call(_, _) | ExprKind::CallIndirect { .. } | ExprKind::Coerce { .. }
@@ -15356,21 +15410,14 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         let mut env = crate::variance::LabelEnv::new();
+        for name in &self.declared_lifetimes {
+            env.free(name);
+        }
         for name in self.parameter_lifetimes.iter().flatten() {
             env.free(name);
         }
         if let Some(name) = &self.result_lifetime {
             env.free(name);
-        }
-        let mut labels = crate::runtime_types::borrow_lifetimes(self.types, value.ty);
-        labels.extend(crate::runtime_types::borrow_lifetimes(self.types, expected));
-        if !labels.iter().all(|label| {
-            matches!(
-                env.classify(label),
-                Some(crate::variance::LabelClass::Free | crate::variance::LabelClass::Bound(_))
-            )
-        }) {
-            return Ok(());
         }
         let evidence = crate::variance::ClosureEvidence {
             outlives: |long: &str, short: &str| {
@@ -15381,15 +15428,14 @@ impl Checker<'_, '_> {
         let target = crate::variance::TypeOccurrence::new(expected);
         match crate::variance::witness(self.types, &source, &target, &env, &evidence) {
             Ok(_) => Ok(()),
-            // Incomplete occurrence metadata is not a proof, but ownership
-            // already retains the elided loan/provenance independently. Only a
-            // fully classified contradictory pair is rejected here.
-            Err(
-                crate::variance::WitnessError::MissingLabel { .. }
-                | crate::variance::WitnessError::UnclassifiedLabel { .. }
-                | crate::variance::WitnessError::ShapeMismatch { .. }
-                | crate::variance::WitnessError::CallableContract,
-            ) => Ok(()),
+            // A label that is neither declared here nor compiler-internal is
+            // an instantiated callee/nested label, not a wildcard region. Its
+            // relation is owned by that occurrence's contract and provenance;
+            // every label this same-scope conversion can classify is still
+            // checked below. This is a per-occurrence deferral, never a
+            // whole-conversion erased fallback.
+            Err(crate::variance::WitnessError::MissingLabel { .. })
+            | Err(crate::variance::WitnessError::UnclassifiedLabel { .. }) => Ok(()),
             Err(error) => Err(Diagnostic::new(
                 span,
                 format!(
@@ -15400,6 +15446,16 @@ impl Checker<'_, '_> {
             )
             .with_note(span, error.message())),
         }
+    }
+    /// Coerce an expression into a callee parameter. Callee-declared lifetime
+    /// labels are instantiated by this call; the callable contract and the
+    /// ownership provenance mapping own that relation, so the same-scope
+    /// contextual witness must not reinterpret them as caller labels.
+    fn coerce_argument(&mut self, value: Expr, expected: Type, span: Span) -> Result<Expr> {
+        self.call_boundary += 1;
+        let result = self.coerce(value, expected, span);
+        self.call_boundary -= 1;
+        result
     }
     /// Insert the deterministic runtime conversion needed to use `value` as
     /// `expected`. Same-layout refinements stay narrow (no runtime work); atom
@@ -16142,6 +16198,7 @@ impl Checker<'_, '_> {
             parameter_lifetimes: parameter_lifetimes.clone(),
             result_lifetime: signature.borrows.result.clone(),
             lifetime_bounds: signature.borrows.bounds.clone(),
+            declared_lifetimes: BTreeSet::new(),
         };
         let synthetic = Signature {
             associated_consts: BTreeMap::new(),
@@ -16222,7 +16279,7 @@ impl Checker<'_, '_> {
                 span,
                 resource: None,
             };
-            arguments.push(self.coerce(argument, *source_parameter, span)?);
+            arguments.push(self.coerce_argument(argument, *source_parameter, span)?);
         }
         let erased_result = crate::runtime_types::grade_erases(source_signature.result_grade);
         let call = Expr {
@@ -16329,7 +16386,7 @@ impl Checker<'_, '_> {
                 span,
                 resource: None,
             };
-            arguments.push(self.coerce(argument, *source_parameter, span)?);
+            arguments.push(self.coerce_argument(argument, *source_parameter, span)?);
         }
         let erased_result = crate::runtime_types::grade_erases(source_signature.result_grade);
         let call = Expr {
@@ -16421,7 +16478,7 @@ impl Checker<'_, '_> {
                 span,
                 resource: None,
             };
-            arguments.push(self.coerce(argument, *source_parameter, span)?);
+            arguments.push(self.coerce_argument(argument, *source_parameter, span)?);
         }
         let erased_result = crate::runtime_types::grade_erases(source.result_grade);
         let call = Expr {
@@ -20572,10 +20629,10 @@ impl Checker<'_, '_> {
                 {
                     crate::runtime_types::borrow_leaves(self.types, *ty)
                 } else {
-                    Vec::new()
+                    Ok(Vec::new())
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         // Labels available from call parameters and from the closure
         // environment. Ambiguity between these origins is rejected: a scoped
         // capture result is only expressible when exactly one capture supplies
@@ -20623,7 +20680,7 @@ impl Checker<'_, '_> {
             if !crate::runtime_types::is_borrowed_record(self.types, ty) {
                 continue;
             }
-            for leaf in crate::runtime_types::borrow_leaves(self.types, ty) {
+            for leaf in crate::runtime_types::borrow_leaves(self.types, ty)? {
                 if let Some(label) = &leaf.lifetime {
                     capture_leaf_labels.entry(label.clone()).or_default().push((
                         index,
@@ -20820,7 +20877,7 @@ impl Checker<'_, '_> {
             || crate::runtime_types::is_reference_container(self.types, result)
             || crate::runtime_types::is_borrowed_task_exit(self.types, result)
         {
-            let leaves = crate::runtime_types::borrow_leaves(self.types, result);
+            let leaves = crate::runtime_types::borrow_leaves(self.types, result)?;
             let mut parameter_leaves = Vec::new();
             let mut capture_leaves = Vec::new();
             let slice_captures = capture_slice_labels.values().copied().collect::<Vec<_>>();
@@ -20977,6 +21034,7 @@ impl Checker<'_, '_> {
         let saved_slots = std::mem::take(&mut self.slots);
         let saved_result = self.result;
         let saved_parameter_lifetimes = std::mem::take(&mut self.parameter_lifetimes);
+        let saved_declared_lifetimes = std::mem::take(&mut self.declared_lifetimes);
         let saved_result_grade = self.result_grade;
         let saved_effects = self.effects;
         let saved_loops = std::mem::take(&mut self.loops);
@@ -21076,6 +21134,7 @@ impl Checker<'_, '_> {
         self.slots = saved_slots;
         self.result = saved_result;
         self.parameter_lifetimes = saved_parameter_lifetimes;
+        self.declared_lifetimes = saved_declared_lifetimes;
         self.result_grade = saved_result_grade;
         self.effects = saved_effects;
         self.loops = saved_loops;
@@ -21136,6 +21195,7 @@ impl Checker<'_, '_> {
             },
             result_lifetime: lambda_result_lifetime,
             lifetime_bounds: BTreeSet::new(),
+            declared_lifetimes: BTreeSet::new(),
         };
         let index = self.functions.add_synthetic(signature, function)?;
         let ty = if once {
@@ -21319,10 +21379,10 @@ impl Checker<'_, '_> {
                 {
                     crate::runtime_types::borrow_leaves(self.types, *ty)
                 } else {
-                    Vec::new()
+                    Ok(Vec::new())
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let result_lifetime = signature
             .result
             .is_slice()
@@ -21338,7 +21398,7 @@ impl Checker<'_, '_> {
                 || crate::runtime_types::is_reference_container(self.types, signature.result)
                 || crate::runtime_types::is_borrowed_task_exit(self.types, signature.result)
             {
-                crate::runtime_types::borrow_leaves(self.types, signature.result)
+                crate::runtime_types::borrow_leaves(self.types, signature.result)?
             } else {
                 Vec::new()
             };
@@ -21654,7 +21714,7 @@ impl Checker<'_, '_> {
             let wanted = self.types.freshen_borrows(*parameter, argument.span)?;
             let value = self.expr_expected(argument, Some(wanted))?;
             diverges |= value.ty == Type::Never;
-            values.push(self.coerce(value, *parameter, argument.span)?);
+            values.push(self.coerce_argument(value, *parameter, argument.span)?);
         }
         let ty = if diverges {
             Type::Never
@@ -25449,7 +25509,7 @@ impl Checker<'_, '_> {
         let mut coerced = Vec::with_capacity(values.len());
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
             diverges |= value.ty == Type::Never;
-            coerced.push(self.coerce(value, *ty, span)?);
+            coerced.push(self.coerce_argument(value, *ty, span)?);
         }
         let values = coerced;
         // Runtime parameter types aligned with the source parameter list. Erased
@@ -27174,7 +27234,7 @@ impl Checker<'_, '_> {
         }
         self.require(effects, span)?;
         let payload = self.expr_expected(value, Some(parameter_ty))?;
-        let payload = self.coerce(payload, handler_parameter, span)?;
+        let payload = self.coerce_argument(payload, handler_parameter, span)?;
         let mut result_slot = None;
         let mut result_id = None;
         if let Some(pattern) = pattern {
@@ -27482,7 +27542,7 @@ impl Checker<'_, '_> {
             let handler_ty = self.locals[slot].ty;
             self.require(effects | operation_effect, span)?;
             let payload = self.expr_expected(value, Some(parameter))?;
-            let payload = self.coerce(payload, handler_parameter, span)?;
+            let payload = self.coerce_argument(payload, handler_parameter, span)?;
             let resume = self.resume_value(result, multishot, span)?;
             let call = Expr {
                 kind: ExprKind::CallIndirect {
@@ -27518,7 +27578,7 @@ impl Checker<'_, '_> {
         // list it (a lexical handle removes it for its body).
         self.require(PANIC | operation_effect, span)?;
         let payload = self.expr_expected(value, Some(declared.parameter))?;
-        let payload = self.coerce(payload, declared.parameter, span)?;
+        let payload = self.coerce_argument(payload, declared.parameter, span)?;
         let resume = self.resume_value(declared.result, false, span)?;
         let handler = self.types.function_type_with(
             vec![declared.parameter, resume.ty],

@@ -1834,7 +1834,7 @@ impl<'a> Types<'a> {
                     // bound by the arrow itself, and the leaves travel in the
                     // callable contract so indirect calls keep the argument's
                     // owner loaned exactly like a direct call.
-                    leaves = borrow_leaves(self, ty);
+                    leaves = borrow_leaves(self, ty)?;
                     for leaf in &leaves {
                         let Some(name) = &leaf.lifetime else {
                             return Err(Diagnostic::new(
@@ -2033,7 +2033,7 @@ impl<'a> Types<'a> {
                 || is_reference_container(self, result)
                 || is_borrowed_task_exit(self, result)
             {
-                result_leaves = borrow_leaves(self, result);
+                result_leaves = borrow_leaves(self, result)?;
                 for leaf in &result_leaves {
                     let Some(name) = &leaf.lifetime else {
                         return Err(Diagnostic::new(
@@ -5115,38 +5115,62 @@ pub(crate) fn contains_task_exit_borrow(types: &Types<'_>, ty: Type) -> bool {
     go(types, ty, &mut BTreeSet::new())
 }
 
-pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {
+pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Result<Vec<BorrowLeaf>> {
     fn field_position(
         types: &Types<'_>,
         layout: usize,
         field: usize,
+        field_ty: Type,
         position: crate::variance::SignSet,
     ) -> crate::variance::SignSet {
-        let Some(label) = types.enums[layout]
+        let record = &types.enums[layout];
+        let definition = record.definition;
+        // The variance of a record's lifetime parameter is a property of the
+        // whole declaration (the join of all field occurrences). A leaf below a
+        // nested record or an owned container field must therefore compose the
+        // enclosing declaration's variance as well as its own constructor
+        // position; otherwise a parameter that is invariant through another
+        // field is silently treated as covariant at this leaf.
+        let mut wanted = crate::runtime_types::borrow_lifetimes(types, field_ty);
+        if let Some(label) = record.field_lifetimes.get(field).cloned().flatten() {
+            wanted.insert(label);
+        }
+        let mut composed = position;
+        let mut seen_label = BTreeSet::new();
+        for argument in &record.lifetimes {
+            if !wanted.contains(argument) || !seen_label.insert(argument.clone()) {
+                continue;
+            }
+            let mut variance = crate::variance::SignSet::UNUSED;
+            let mut found = false;
+            for (index, slot) in record.lifetimes.iter().enumerate() {
+                if slot == argument
+                    && let Some(value) = types.variance.of(definition, index)
+                {
+                    variance = variance.join(value);
+                    found = true;
+                }
+            }
+            // A declaration missing from the table, or an occurrence that did
+            // not produce a seed, is unknown, not covariant.
+            if !found || variance.is_unused() {
+                variance = crate::variance::SignSet::INVARIANT;
+            }
+            composed = composed.compose(variance);
+        }
+        // Inconsistent field metadata is conservative, never silently
+        // positive.
+        if record
             .field_lifetimes
             .get(field)
-            .cloned()
-            .flatten()
-        else {
-            return position;
-        };
-        let definition = types.enums[layout].definition;
-        let mut variance = crate::variance::SignSet::UNUSED;
-        let mut found = false;
-        for (index, argument) in types.enums[layout].lifetimes.iter().enumerate() {
-            if *argument == label
-                && let Some(value) = types.variance.of(definition, index)
-            {
-                variance = variance.join(value);
-                found = true;
-            }
+            .and_then(Option::as_ref)
+            .is_some_and(|label| !record.lifetimes.iter().any(|slot| slot == label))
+        {
+            composed = composed.compose(crate::variance::SignSet::INVARIANT);
         }
-        // A declaration missing from the table is unknown, not covariant.
-        if !found {
-            variance = crate::variance::SignSet::INVARIANT;
-        }
-        position.compose(variance)
+        composed
     }
+    #[allow(clippy::too_many_arguments)]
     fn go(
         types: &Types<'_>,
         ty: Type,
@@ -5154,109 +5178,152 @@ pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {
         position: crate::variance::SignSet,
         path: &mut Vec<usize>,
         out: &mut Vec<BorrowLeaf>,
-    ) {
-        if let Some(id) = ty.layout()
-            && let Some(reference) = types.enums[id].optional_reference()
-        {
-            // Optional-reference enums stay invariant until their payload
-            // mapping is explicit.
-            go(
-                types,
-                reference,
-                None,
-                position.compose(crate::variance::SignSet::INVARIANT),
-                path,
-                out,
-            );
-            return;
+        seen: &mut BTreeSet<Type>,
+        depth: usize,
+    ) -> Result<()> {
+        if depth >= 128 {
+            return Err(Diagnostic::new(
+                Span::default(),
+                "borrowed-leaf enumeration exceeded its finite nesting budget; this type is too deeply nested to summarize",
+            ));
         }
-        match ty {
-            Type::Slice(_) => out.push(BorrowLeaf {
-                path: path.clone(),
-                lifetime: hint,
-                mutable: false,
-                variance: position,
-            }),
-            Type::SliceMut(_) => out.push(BorrowLeaf {
-                path: path.clone(),
-                lifetime: hint,
-                mutable: true,
-                variance: position,
-            }),
-            Type::Str => out.push(BorrowLeaf {
-                path: path.clone(),
-                lifetime: hint,
-                mutable: false,
-                variance: position,
-            }),
-            Type::Ref(_) => out.push(BorrowLeaf {
-                path: path.clone(),
-                lifetime: hint,
-                mutable: false,
-                variance: position,
-            }),
-            Type::RefMut(_) => out.push(BorrowLeaf {
-                path: path.clone(),
-                lifetime: hint,
-                mutable: true,
-                variance: position,
-            }),
-            Type::Annotated(p, label) => out.push(BorrowLeaf {
-                path: path.clone(),
-                lifetime: types.reference_label_name(label),
-                mutable: matches!(types.pointees[p], Type::RefMut(_)),
-                variance: position,
-            }),
-            Type::Box(p) | Type::Vec(p) => go(
-                types,
-                types.pointees[p],
-                None,
-                position.compose(crate::variance::SignSet::POSITIVE),
-                path,
-                out,
-            ),
-            // Arena and custom-allocator storage retain their exact payload
-            // contract; no new borrowed payload variance is admitted.
-            Type::ArenaBox(p) | Type::AllocBox(p) | Type::AllocVec(p) => go(
-                types,
-                types.pointees[p],
-                None,
-                position.compose(crate::variance::SignSet::INVARIANT),
-                path,
-                out,
-            ),
-            Type::Enum(id) | Type::Variants(id, _)
-                if types.enums[id].record || types.enums[id].name == "TaskExit" =>
+        if !seen.insert(ty) {
+            let name = ty
+                .layout()
+                .map(|id| types.enums[id].name.clone())
+                .unwrap_or_else(|| types.name(ty));
+            return Err(Diagnostic::new(
+                Span::default(),
+                format!(
+                    "recursive borrowed type '{name}' stores a borrowed leaf through its own type; this recursive borrow shape is not supported by lifetime summaries. Store the owner outside the recursive type or return the borrow directly"
+                ),
+            ));
+        }
+        let result = (|| {
+            if let Some(id) = ty.layout()
+                && let Some(reference) = types.enums[id].optional_reference()
             {
-                if types.enums[id].record {
-                    for (index, field) in types.enums[id].variants[0].fields.iter().enumerate() {
-                        path.push(index);
-                        let field_hint = types.enums[id].field_lifetimes[index].clone();
-                        let position = field_position(types, id, index, position);
-                        go(types, *field, field_hint, position, path, out);
-                        path.pop();
-                    }
-                } else {
-                    // A borrowed `TaskExit<T>` payload travels at the same paths
-                    // as `T`: matching `Completed(value)` rebinds those leaves
-                    // directly to the inner value. No new payload variance is
-                    // introduced here.
-                    for variant in &types.enums[id].variants {
-                        for field in &variant.fields {
+                // Optional-reference enums stay invariant until their payload
+                // mapping is explicit.
+                go(
+                    types,
+                    reference,
+                    None,
+                    position.compose(crate::variance::SignSet::INVARIANT),
+                    path,
+                    out,
+                    seen,
+                    depth + 1,
+                )?;
+                return Ok(());
+            }
+            match ty {
+                Type::Slice(_) => out.push(BorrowLeaf {
+                    path: path.clone(),
+                    lifetime: hint,
+                    mutable: false,
+                    variance: position,
+                }),
+                Type::SliceMut(_) => out.push(BorrowLeaf {
+                    path: path.clone(),
+                    lifetime: hint,
+                    mutable: true,
+                    variance: position,
+                }),
+                Type::Str => out.push(BorrowLeaf {
+                    path: path.clone(),
+                    lifetime: hint,
+                    mutable: false,
+                    variance: position,
+                }),
+                Type::Ref(_) => out.push(BorrowLeaf {
+                    path: path.clone(),
+                    lifetime: hint,
+                    mutable: false,
+                    variance: position,
+                }),
+                Type::RefMut(_) => out.push(BorrowLeaf {
+                    path: path.clone(),
+                    lifetime: hint,
+                    mutable: true,
+                    variance: position,
+                }),
+                Type::Annotated(p, label) => out.push(BorrowLeaf {
+                    path: path.clone(),
+                    lifetime: types.reference_label_name(label),
+                    mutable: matches!(types.pointees[p], Type::RefMut(_)),
+                    variance: position,
+                }),
+                Type::Box(p) | Type::Vec(p) => go(
+                    types,
+                    types.pointees[p],
+                    None,
+                    position.compose(crate::variance::SignSet::POSITIVE),
+                    path,
+                    out,
+                    seen,
+                    depth + 1,
+                )?,
+                // Arena and custom-allocator storage retain their exact payload
+                // contract; no new borrowed payload variance is admitted.
+                Type::ArenaBox(p) | Type::AllocBox(p) | Type::AllocVec(p) => go(
+                    types,
+                    types.pointees[p],
+                    None,
+                    position.compose(crate::variance::SignSet::INVARIANT),
+                    path,
+                    out,
+                    seen,
+                    depth + 1,
+                )?,
+                Type::Enum(id) | Type::Variants(id, _)
+                    if types.enums[id].record || types.enums[id].name == "TaskExit" =>
+                {
+                    if types.enums[id].record {
+                        for (index, field) in types.enums[id].variants[0].fields.iter().enumerate()
+                        {
+                            path.push(index);
+                            let field_hint = types.enums[id].field_lifetimes[index].clone();
+                            let position = field_position(types, id, index, *field, position);
                             go(
                                 types,
                                 *field,
-                                None,
-                                position.compose(crate::variance::SignSet::INVARIANT),
+                                field_hint,
+                                position,
                                 path,
                                 out,
-                            );
+                                seen,
+                                depth + 1,
+                            )?;
+                            path.pop();
+                        }
+                    } else {
+                        // A borrowed `TaskExit<T>` payload travels at the same
+                        // paths as `T`: matching `Completed(value)` rebinds
+                        // those leaves directly to the inner value. No new
+                        // payload variance is introduced here.
+                        for variant in &types.enums[id].variants {
+                            for field in &variant.fields {
+                                go(
+                                    types,
+                                    *field,
+                                    None,
+                                    position.compose(crate::variance::SignSet::INVARIANT),
+                                    path,
+                                    out,
+                                    seen,
+                                    depth + 1,
+                                )?;
+                            }
                         }
                     }
                 }
+                _ => {}
             }
-            _ => {}
-        }
+            Ok(())
+        })();
+        seen.remove(&ty);
+        result
     }
     let mut out = Vec::new();
     go(
@@ -5266,8 +5333,10 @@ pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {
         crate::variance::SignSet::POSITIVE,
         &mut Vec::new(),
         &mut out,
-    );
-    out
+        &mut BTreeSet::new(),
+        0,
+    )?;
+    Ok(out)
 }
 
 /// Structural ownership for a lowered type, used while checking a result

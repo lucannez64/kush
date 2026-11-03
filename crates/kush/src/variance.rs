@@ -547,6 +547,13 @@ pub(crate) enum WitnessError {
         path: WitnessPath,
         fields: Vec<usize>,
     },
+    /// The witness hit its finite nesting budget. This is a checked rejection,
+    /// never a successful partial witness: silently skipping the remaining
+    /// obligations would accept an unproved conversion.
+    Budget {
+        path: WitnessPath,
+        fields: Vec<usize>,
+    },
     /// An arrow occurrence demanded a contract it cannot express.
     CallableContract,
 }
@@ -585,6 +592,9 @@ impl WitnessError {
             ),
             Self::ShapeMismatch { .. } => {
                 "internal error: lifetime witness received types with different erased shapes".to_owned()
+            }
+            Self::Budget { .. } => {
+                "the lifetime witness exceeded its finite nesting budget; this conversion is too deeply nested to prove and is rejected".to_owned()
             }
             Self::CallableContract => {
                 "the callable contracts are not compatible: parameter direction, result direction, or instantiated outlives bounds disagree".to_owned()
@@ -665,8 +675,9 @@ pub(crate) fn witness(
 ) -> Result<Witness, WitnessError> {
     let mut check = WitnessCheck {
         types,
-        env,
+        env: env.clone(),
         evidence,
+        canonical: None,
         witness: Witness::default(),
     };
     check.types(
@@ -683,8 +694,16 @@ pub(crate) fn witness(
 }
 struct WitnessCheck<'a, 'b> {
     types: &'a Types<'b>,
-    env: &'a LabelEnv,
+    /// Occurrence environment. Owned so a nested callable can install its own
+    /// canonical bound environment for its parameter/result records and restore
+    /// the enclosing one afterwards.
+    env: LabelEnv,
     evidence: &'a dyn Evidence,
+    /// The canonical borrow contract of the innermost callable occurrence.
+    /// Canonical `#k` labels are alpha-renamable binders of that occurrence, so
+    /// their outlives/identity evidence comes from the target contract rather
+    /// than from the enclosing function's printed lifetime bounds.
+    canonical: Option<BorrowSig>,
     witness: Witness,
 }
 impl WitnessCheck<'_, '_> {
@@ -726,9 +745,17 @@ impl WitnessCheck<'_, '_> {
             (Some(source), Some(target)) => {
                 self.classify(source, path, fields)?;
                 self.classify(target, path, fields)?;
+                // Elided and compiler-generated identities are rigid, but
+                // their actual outlives relation is established by ownership
+                // provenance, not by the named function bounds. Defer only the
+                // pairs that involve such an identity; every other pair still
+                // produces a checked obligation.
+                if source != target && (is_internal_label(source) || is_internal_label(target)) {
+                    return Ok(());
+                }
                 match polarity {
                     LabelPolarity::Positive => {
-                        if !self.evidence.outlives(source, target) {
+                        if !self.outlives(source, target) {
                             return Err(WitnessError::MissingOutlives {
                                 path: path.clone(),
                                 fields: fields.to_vec(),
@@ -738,7 +765,7 @@ impl WitnessCheck<'_, '_> {
                         }
                     }
                     LabelPolarity::Negative => {
-                        if !self.evidence.outlives(target, source) {
+                        if !self.outlives(target, source) {
                             return Err(WitnessError::MissingOutlives {
                                 path: path.clone(),
                                 fields: fields.to_vec(),
@@ -748,7 +775,7 @@ impl WitnessCheck<'_, '_> {
                         }
                     }
                     LabelPolarity::Invariant => {
-                        if !self.evidence.identical(source, target) {
+                        if !self.identical(source, target) {
                             return Err(WitnessError::NotIdentical {
                                 path: path.clone(),
                                 fields: fields.to_vec(),
@@ -773,6 +800,25 @@ impl WitnessCheck<'_, '_> {
             }),
         }
     }
+    /// Outlives evidence. Canonical arrow labels are resolved against the
+    /// innermost callable contract; ordinary declared labels use the enclosing
+    /// function's evidence.
+    fn outlives(&self, long: &str, short: &str) -> bool {
+        if let Some(contract) = &self.canonical
+            && (is_canonical_label(long) || is_canonical_label(short))
+        {
+            return contract.outlives(long, short);
+        }
+        self.evidence.outlives(long, short)
+    }
+    fn identical(&self, left: &str, right: &str) -> bool {
+        if self.canonical.is_some() && (is_canonical_label(left) || is_canonical_label(right)) {
+            // Canonical labels are alpha-renamed positionally by
+            // `borrow_witness`; after that instantiation, identity is exact.
+            return left == right;
+        }
+        self.evidence.identical(left, right)
+    }
     #[allow(clippy::too_many_arguments)]
     fn types(
         &mut self,
@@ -786,7 +832,7 @@ impl WitnessCheck<'_, '_> {
         depth: usize,
     ) -> Result<(), WitnessError> {
         if depth >= 64 {
-            return Err(WitnessError::ShapeMismatch {
+            return Err(WitnessError::Budget {
                 path: path.clone(),
                 fields: fields.clone(),
             });
@@ -873,6 +919,36 @@ impl WitnessCheck<'_, '_> {
                     depth + 1,
                 )
             }
+            // A container element annotation is metadata on the same erased
+            // reference type. Unwrap it when the other occurrence is a plain
+            // reference so the label still becomes a checked obligation rather
+            // than an internal shape mismatch.
+            (Type::Annotated(a, label), _) => {
+                let source_label = self.types.reference_label_name(label);
+                self.types(
+                    self.types.pointees[a],
+                    target,
+                    source_label.as_deref(),
+                    target_own,
+                    position,
+                    path,
+                    fields,
+                    depth + 1,
+                )
+            }
+            (_, Type::Annotated(b, label)) => {
+                let target_label = self.types.reference_label_name(label);
+                self.types(
+                    source,
+                    self.types.pointees[b],
+                    source_own,
+                    target_label.as_deref(),
+                    position,
+                    path,
+                    fields,
+                    depth + 1,
+                )
+            }
             (Type::Box(a), Type::Box(b)) | (Type::Vec(a), Type::Vec(b)) => self.types(
                 self.types.pointees[a],
                 self.types.pointees[b],
@@ -895,7 +971,10 @@ impl WitnessCheck<'_, '_> {
                 fields,
                 depth + 1,
             ),
-            (Type::Enum(a), Type::Enum(b)) | (Type::Variants(a, _), Type::Variants(b, _)) => {
+            (Type::Enum(a), Type::Enum(b))
+            | (Type::Enum(a), Type::Variants(b, _))
+            | (Type::Variants(a, _), Type::Enum(b))
+            | (Type::Variants(a, _), Type::Variants(b, _)) => {
                 let left_name = self.types.enums[a].name.clone();
                 let right_name = self.types.enums[b].name.clone();
                 if left_name == "TaskExit" || right_name == "TaskExit" {
@@ -1045,34 +1124,61 @@ impl WitnessCheck<'_, '_> {
         }
         let witness = borrow_witness(&source.borrows, &target.borrows)?;
         self.witness.obligations.extend(witness.obligations);
-        // Nested parameter and result records can carry lifetime arguments
-        // beyond the flat BorrowSig leaves. Compare them in the same
-        // occurrence environment with parameter contravariance applied once.
-        for (index, (source_ty, target_ty)) in
-            source.parameters.iter().zip(&target.parameters).enumerate()
+        // A nested callable is its own closed occurrence: its canonical arrow
+        // labels are bound here, not inherited from the enclosing function.
+        // Install that environment (and its canonical evidence) only while
+        // checking the callable's parameter/result records.
+        let mut env = LabelEnv::new();
+        for label in bound_labels(&source.borrows)
+            .into_iter()
+            .chain(bound_labels(&target.borrows))
         {
+            env.bind(&label, 0);
+        }
+        let saved_env = std::mem::replace(&mut self.env, env);
+        let saved_canonical = self.canonical.replace(target.borrows.clone());
+        let result = (|| {
+            // Nested parameter and result records can carry lifetime arguments
+            // beyond the flat BorrowSig leaves. Compare them in the callable's
+            // canonical bound environment with parameter contravariance applied
+            // once.
+            for (index, (source_ty, target_ty)) in
+                source.parameters.iter().zip(&target.parameters).enumerate()
+            {
+                self.types(
+                    *target_ty,
+                    *source_ty,
+                    None,
+                    None,
+                    SignSet::NEGATIVE,
+                    &WitnessPath::Parameter(index),
+                    &mut Vec::new(),
+                    depth + 1,
+                )?;
+            }
             self.types(
-                *target_ty,
-                *source_ty,
+                source.result,
+                target.result,
                 None,
                 None,
-                SignSet::NEGATIVE,
-                &WitnessPath::Parameter(index),
+                SignSet::POSITIVE,
+                &WitnessPath::Result,
                 &mut Vec::new(),
                 depth + 1,
-            )?;
-        }
-        self.types(
-            source.result,
-            target.result,
-            None,
-            None,
-            SignSet::POSITIVE,
-            &WitnessPath::Result,
-            &mut Vec::new(),
-            depth + 1,
-        )
+            )
+        })();
+        self.env = saved_env;
+        self.canonical = saved_canonical;
+        result
     }
+}
+fn is_canonical_label(label: &str) -> bool {
+    label
+        .strip_prefix('#')
+        .is_some_and(|index| index.parse::<u8>().is_ok())
+}
+fn is_internal_label(label: &str) -> bool {
+    label.starts_with('<')
 }
 fn bound_labels(sig: &BorrowSig) -> BTreeSet<String> {
     let mut labels = BTreeSet::new();
@@ -1472,5 +1578,41 @@ mod tests {
         assert!(pair(&env, &bounds, "long", "long", SignSet::INVARIANT).is_ok());
         assert!(pair(&env, &bounds, "long", "short", SignSet::INVARIANT).is_err());
         assert!(pair(&env, &bounds, "long", "missing", SignSet::POSITIVE).is_err());
+    }
+    #[test]
+    fn witness_nesting_budget_is_a_rejection_not_success() {
+        // A source-level type cannot normally exceed the witness budget before
+        // lowering's own nesting limit. Build the erased graph directly so the
+        // budget path stays covered: a conversion must never become `Ok` just
+        // because recursion was cut off.
+        let resolution = Resolution::default();
+        let logical = crate::check::LogicalEnvironment {
+            kernel: crate::kernel::Kernel::new(crate::kernel::Limits::default()),
+            names: BTreeMap::new(),
+            data: BTreeMap::new(),
+            constructors: BTreeMap::new(),
+            constructor_counts: BTreeMap::new(),
+            nullary: BTreeMap::new(),
+            definitions: Vec::new(),
+        };
+        let module = ast::Module { items: Vec::new() };
+        let mut types = Types::new(&module, &resolution, &logical, BTreeSet::new()).unwrap();
+        let mut ty = Type::I64;
+        for _ in 0..70 {
+            let pointee = types.pointees.len();
+            types.pointees.push(ty);
+            ty = Type::Box(pointee);
+        }
+        let env = LabelEnv::new();
+        let evidence = Bounds(BTreeSet::new());
+        let error = witness(
+            &types,
+            &TypeOccurrence::new(ty),
+            &TypeOccurrence::new(ty),
+            &env,
+            &evidence,
+        )
+        .expect_err("a depleted nesting budget is not a proof");
+        assert!(matches!(error, WitnessError::Budget { .. }), "{error:?}");
     }
 }

@@ -236,3 +236,123 @@ fn distinct_source_occurrences_can_share_an_interned_arrow_contract() {
         "",
     );
 }
+
+#[test]
+fn recursive_borrowed_records_are_reported_instead_of_exhausting_the_stack() {
+    // The leaf walk must terminate on a recursive borrowed record and report a
+    // checked limitation. Expanding `next` without a visited set previously
+    // overflowed the compiler stack.
+    rejects(
+        r#"struct Node<'a> { view: &'a [i64], next: Box<Node<'a>> }
+        fn read<'a>(node: Node<'a>) -> i64 ! {panic} {
+            Slice.get(node.view, 0)
+        }
+        fn main() -> Unit ! {} {}"#,
+        "recursive borrowed type",
+    );
+}
+
+#[test]
+fn result_only_declared_labels_are_classified_by_the_contextual_witness() {
+    // `'short` appears only in the by-value record result, so the old
+    // direct-parameter environment left it unclassified and skipped the whole
+    // conversion. Without `'long: 'short` the shortening has no proof.
+    rejects(
+        r#"struct Window<'a> { view: &'a [i64] }
+        fn bad<'long, 'short>(window: Window<'long>) -> Window<'short> ! {panic} {
+            window
+        }
+        fn main() -> Unit ! {} {}"#,
+        "outlive",
+    );
+    // With the declared edge the same result-only label is a proved covariant
+    // shortening, not an erased comparison.
+    check(
+        r#"struct Window<'a> { view: &'a [i64] }
+        fn ok<'long: 'short, 'short>(window: Window<'long>) -> Window<'short> ! {panic} {
+            window
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_and_container_invariant_shortening_is_rejected() {
+    // `'a` is nested under two mutable positions (`&'a mut Vec<&'a i64>` and
+    // the outer `Box`), while no direct parameter or result borrow names it.
+    // The declared-lifetime environment must still classify both labels.
+    rejects(
+        r#"struct Outer<'a> { cell: Box<&'a mut Vec<&'a i64>> }
+        fn bad<'long: 'short, 'short>(x: Outer<'long>) -> Outer<'short> ! {panic} {
+            x
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+    // A nested mutable box pointee is invariant even though the outer `&mut`
+    // lifetime itself could otherwise shorten.
+    rejects(
+        r#"fn bad<'long: 'short + 'x, 'short, 'x>(b: &'x mut Box<&'long mut i64>) -> &'x mut Box<&'short mut i64> ! {panic} {
+            b
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+    // Exact identity remains accepted for the same nested shape.
+    check(
+        r#"struct Outer<'a> { cell: Box<&'a mut Vec<&'a i64>> }
+        fn same<'a>(x: Outer<'a>) -> Outer<'a> ! {panic} {
+            x
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn mutable_container_writes_use_the_static_destination_label() {
+    // The local container has an explicit declared element lifetime but no
+    // stored provenance leaf yet. The static type is the destination
+    // authority, so a short write cannot be skipped.
+    rejects(
+        r#"fn attack<'long: 'short, 'short>(s: &'short i64) -> Unit ! {alloc, panic} {
+            let mut values: Vec<&'long i64> = Vec.new();
+            Vec.push(values, s);
+        }
+        fn main() -> Unit ! {} {}"#,
+        "outlive",
+    );
+    // The same rule applies through a `&mut Vec<&'a T>` parameter.
+    rejects(
+        r#"fn attack<'long: 'short, 'short>(values: &mut Vec<&'long i64>, s: &'short i64) -> Unit ! {alloc, panic} {
+            Vec.push(values, s);
+        }
+        fn main() -> Unit ! {} {}"#,
+        "outlive",
+    );
+    // A longer source written into a shorter declared element lifetime remains
+    // valid.
+    check(
+        r#"fn ok<'long: 'short, 'short>(values: &mut Vec<&'short i64>, s: &'long i64) -> Unit ! {alloc, panic} {
+            Vec.push(values, s);
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn nested_record_leaves_inherit_enclosing_invariant_variance() {
+    // `cell` is covariant on its own, but `Inner<'b>` is invariant in `'b`
+    // through `keep`. A returned/constructed leaf must not be recorded as a
+    // positive occurrence merely because the field is not a direct borrow.
+    rejects(
+        r#"struct Inner<'b> { keep: &'b mut Vec<&'b i64>, cell: Box<&'b i64> }
+        fn make<'long: 'short, 'short>(long: &'long i64, keep: &'short mut Vec<&'short i64>) -> Inner<'short> ! {alloc, panic} {
+            Inner { keep: keep, cell: Box.new(long) }
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant occurrence",
+    );
+}
