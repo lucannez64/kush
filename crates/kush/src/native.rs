@@ -59,9 +59,16 @@ const RUNTIME: &str = r#"
 #include <sys/wait.h>
 extern char **environ;
 extern int64_t kush_entry(void);
+/* Diagnostic/error-path writes intentionally do not retry or alter control
+   flow on failure. Assign the result so fortified libc headers also accept
+   the explicit best-effort policy under -Werror. */
+static void kush_best_effort_write(int fd, const void *data, size_t length) {
+    ssize_t result = write(fd, data, length);
+    (void)result;
+}
 _Noreturn void kush_panic(void) {
     static const char message[] = "panic: checked arithmetic, memory, or I/O failure\n";
-    (void)write(2, message, sizeof(message) - 1);
+    kush_best_effort_write(2, message, sizeof(message) - 1);
     abort();
 }
 int64_t kush_print_i64(int64_t value) {
@@ -1500,7 +1507,7 @@ int64_t kush_proc_run(uint64_t program_handle, uint64_t args_handle,
         (void)close(errpipe[0]);
         execvp(argv[0], argv);
         int failure = errno;
-        (void)write(errpipe[1], &failure, sizeof(failure));
+        kush_best_effort_write(errpipe[1], &failure, sizeof(failure));
         _exit(127);
     }
     (void)close(outpipe[1]);
@@ -2162,7 +2169,7 @@ int main(int argc, char **argv) {
             (unsigned long long)kush_allocations, (unsigned long long)kush_deallocations,
             (unsigned long long)kush_peak_live, (unsigned long long)kush_buffer_growths,
             (unsigned long long)kush_reuses, (long long)KUSH_FUSION_COUNT);
-        if (length > 0) (void)write(2, line, (size_t)(length < (int)sizeof(line) ? length : (int)sizeof(line) - 1));
+        if (length > 0) kush_best_effort_write(2, line, (size_t)(length < (int)sizeof(line) ? length : (int)sizeof(line) - 1));
     }
     /* Opt-in native-only allocator observation. It is guarded by both the
        stats build and this environment variable, so the stable one-line
@@ -2175,12 +2182,12 @@ int main(int argc, char **argv) {
             (unsigned long long)kush_pool_retains, (unsigned long long)kush_pool_releases,
             (unsigned long long)kush_pool_drains, (unsigned long long)kush_pool_retained,
             (unsigned long long)kush_pool_peak_retained);
-        if (length > 0) (void)write(2, line, (size_t)(length < (int)sizeof(line) ? length : (int)sizeof(line) - 1));
+        if (length > 0) kush_best_effort_write(2, line, (size_t)(length < (int)sizeof(line) ? length : (int)sizeof(line) - 1));
     }
 #endif
     if (kush_live_allocations != 0) {
         static const char message[] = "panic: live owning allocations after normal exit\n";
-        (void)write(2, message, sizeof(message)-1); abort();
+        kush_best_effort_write(2, message, sizeof(message)-1); abort();
     }
     return (int)((uint64_t)result & UINT64_C(255));
 }

@@ -6,6 +6,12 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
+#if defined(TRACE_ALLOC) || defined(PHASE_RSS)
+static void memory_best_effort_write(int fd, const void *data, size_t length) {
+    ssize_t result=write(fd,data,length);
+    (void)result;
+}
+#endif
 #ifdef TRACE_ALLOC
 #include <malloc.h>
 /* Fixed storage: instrumentation never allocates. It is absent from timing
@@ -19,7 +25,7 @@ static int active, ended;
 static uint64_t alloc_calls, realloc_calls, realloc_in_place, realloc_moved, freed_active, freed_after;
 static uint64_t requested_total, live_requested, live_usable, peak_requested, peak_usable;
 static uint64_t baseline_requested, baseline_usable, workload_live_requested, workload_live_allocations;
-static void die(void) { const char message[]="memory probe table overflow\n"; (void)write(2,message,sizeof(message)-1); _Exit(3); }
+static void die(void) { const char message[]="memory probe table overflow\n"; memory_best_effort_write(2,message,sizeof(message)-1); _Exit(3); }
 static size_t slot(void *pointer) { uintptr_t n=(uintptr_t)pointer >> 4;return (size_t)(n^(n>>19))&(SLOTS-1); }
 static Entry *find(void *pointer) {
     size_t at=slot(pointer);
@@ -33,8 +39,11 @@ static void remember(void *pointer,size_t size) {
     if(pointer==NULL||ended)return;
     size_t at=slot(pointer),available=SLOTS;
     for(size_t n=0;n<SLOTS;n++,at=(at+1)&(SLOTS-1)){
-        if(entries[at].pointer==(void *)(uintptr_t)1&&available==SLOTS)available=at;
-        if(entries[at].pointer==NULL){if(available==SLOTS)available=at;break;}
+        /* The allocator returned a fresh live address (realloc first removes
+           the old entry), so it cannot duplicate another live table key. Use
+           the first tombstone immediately instead of scanning an ever-growing
+           history of old addresses for an empty slot. */
+        if(entries[at].pointer==NULL||entries[at].pointer==(void *)(uintptr_t)1){available=at;break;}
     }
     if(available==SLOTS)die();
     size_t usable=malloc_usable_size(pointer);
@@ -82,7 +91,7 @@ void *__wrap_realloc(void *pointer,size_t size) {
 static void report(int64_t stage) {
     char line[1024];
     int length=snprintf(line,sizeof(line),"memory-alloc: {\"stage\":%lld,\"alloc_calls\":%llu,\"realloc_calls\":%llu,\"realloc_in_place_calls\":%llu,\"realloc_moved_calls\":%llu,\"frees_during_workload\":%llu,\"frees_after_workload\":%llu,\"requested_bytes_total\":%llu,\"live_requested_bytes\":%llu,\"live_usable_bytes\":%llu,\"peak_live_requested_bytes\":%llu,\"peak_live_usable_bytes\":%llu,\"workload_live_requested_bytes\":%llu,\"workload_live_allocations\":%llu,\"baseline_requested_bytes\":%llu,\"baseline_usable_bytes\":%llu}\n",(long long)stage,(unsigned long long)alloc_calls,(unsigned long long)realloc_calls,(unsigned long long)realloc_in_place,(unsigned long long)realloc_moved,(unsigned long long)freed_active,(unsigned long long)freed_after,(unsigned long long)requested_total,(unsigned long long)live_requested,(unsigned long long)live_usable,(unsigned long long)peak_requested,(unsigned long long)peak_usable,(unsigned long long)workload_live_requested,(unsigned long long)workload_live_allocations,(unsigned long long)baseline_requested,(unsigned long long)baseline_usable);
-    if(length>0&&(size_t)length<sizeof(line))(void)write(2,line,(size_t)length);
+    if(length>0&&(size_t)length<sizeof(line))memory_best_effort_write(2,line,(size_t)length);
 }
 static void final_report(void) {report(6);}
 #endif
@@ -93,7 +102,7 @@ static void rss(int64_t stage) {
     char *current=strstr(buffer,"VmRSS:"),*peak=strstr(buffer,"VmHWM:");if(!current||!peak)_Exit(4);
     unsigned long resident=strtoul(current+6,NULL,10),high=strtoul(peak+6,NULL,10);
     int length=snprintf(line,sizeof(line),"memory-rss: {\"stage\":%lld,\"rss_kib\":%lu,\"high_water_kib\":%lu}\n",(long long)stage,resident,high);
-    if(length>0&&(size_t)length<sizeof(line))(void)write(2,line,(size_t)length);
+    if(length>0&&(size_t)length<sizeof(line))memory_best_effort_write(2,line,(size_t)length);
 }
 #endif
 void memory_begin(void) {

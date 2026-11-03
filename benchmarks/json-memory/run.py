@@ -89,6 +89,21 @@ def build(kush, toolchain):
     (BUILD/"manifest.json").write_text(json.dumps({"builds":metadata,"compiler_sha256":sha(kush),"sources":{str(path):sha(path) for path in sources}},indent=2))
     return metadata
 
+def build_previous(compiler):
+    compiler=str(compiler.resolve())
+    metadata=[]
+    for kind in ["plain","trace","rss"]:
+        object_file=BUILD/f"probe-{kind}-{sha(ROOT/'probe.c')[:16]}.o"
+        environment=dict(os.environ)
+        if kind=="trace":
+            environment["PATH"]=str(BUILD/"trace-compiler")+os.pathsep+os.environ["PATH"]
+        output=BUILD/f"kush-before-{kind}"
+        command=[compiler,"build",ROOT/"kush/main.kush","-o",output,"--release","--link",object_file]
+        if kind=="trace":command.append("--stats")
+        run(command,env=environment)
+        metadata.append({"name":output.name,"command":list(map(str,command)),"sha256":sha(output),"compiler_sha256":sha(compiler),"shared_probe_sha256":sha(ROOT/"probe.c")})
+    return metadata
+
 def probe_correctness():
     result=run([BUILD/"probe-self-test"])
     frames=[json.loads(line.removeprefix("memory-alloc: ")) for line in result.stderr.splitlines() if line.startswith("memory-alloc: ")]
@@ -236,7 +251,9 @@ def main():
     parser.add_argument("--cpu",type=int,default=max(os.sched_getaffinity(0)))
     parser.add_argument("--output",type=Path,default=ROOT/"results/latest")
     parser.add_argument("--skip-build",action="store_true")
-    parser.add_argument("--previous",type=Path,help="preserved baseline directory with kush-plain/trace/rss and manifest.json")
+    baseline=parser.add_mutually_exclusive_group()
+    baseline.add_argument("--previous",type=Path,help="preserved baseline directory with kush-plain/trace/rss and manifest.json")
+    baseline.add_argument("--previous-compiler",type=Path,help="build baseline using this compiler and the same current probes")
     parser.add_argument("--validate-only",action="store_true")
     args=parser.parse_args()
     if not args.sizes or any(n<1 or n>32768 for n in args.sizes) or not 0<=args.rounds<=63 or args.repetitions<3 or args.cpu not in os.sched_getaffinity(0):parser.error("invalid size, rounds, repetitions or CPU")
@@ -263,6 +280,9 @@ def main():
             target=BUILD/f"kush-before-{kind}"
             shutil.copyfile(original,target);target.chmod(0o700)
             builds.append({"name":target.name,"sha256":sha(target),"preserved_path":str(original),"compiler_sha256":manifest["compiler_sha256"]})
+    if args.previous_compiler:
+        builds.extend(build_previous(args.previous_compiler))
+    if args.previous or args.previous_compiler:
         VARIANTS.insert(0,("kush-before-rebuild","Kush / previous rebuild","kush-before",0))
         VARIANTS.insert(1,("kush-before-reuse","Kush / previous reuse","kush-before",1))
     probe_correctness()

@@ -158,3 +158,11 @@ layout accounting is historical. A preserved-binary comparison can be run with
 `kush-rss`, and their `manifest.json`. The harness verifies the hashes and
 workload sources, reruns those binaries in the same cohort, and records the
 previous compiler identity separately.
+
+For runtime revisions, `--previous-compiler /path/to/old/kush` rebuilds the
+unchanged workload with the old compiler and the same current probe objects as
+the new controls. This avoids comparing different instrumentation revisions.
+The tracer reuses a hash-table tombstone immediately for a fresh allocation
+address; allocator uniqueness guarantees that no live key is duplicated. This
+keeps heavy reallocation tracing from scanning a long history of freed slots.
+Tracer time is excluded from application timing and RSS measurements.
