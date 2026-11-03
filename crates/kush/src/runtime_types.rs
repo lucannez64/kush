@@ -339,7 +339,7 @@ impl BorrowSig {
                 .collect(),
         }
     }
-    fn outlives(&self, long: &str, short: &str) -> bool {
+    pub(crate) fn outlives(&self, long: &str, short: &str) -> bool {
         crate::executable::outlives(&self.bounds, long, short)
     }
     /// Whether a callable with contract `self` may be used where `target` is
@@ -350,147 +350,16 @@ impl BorrowSig {
     /// into the source result must map to target lifetimes outliving the
     /// target result, so the target's call-site provenance covers it.
     pub fn usable_as(&self, target: &BorrowSig) -> bool {
-        // A closure result borrowed from its environment is not expressible by
-        // an ordinary arrow. Only an identical contract may be used in the
-        // same position; a representation-changing coercion would lose it.
-        if self.capture_result != target.capture_result {
-            return false;
-        }
-        let arity = self
-            .parameters
-            .len()
-            .max(target.parameters.len())
-            .max(self.parameter_leaves.len())
-            .max(target.parameter_leaves.len());
-        let at = |sig: &BorrowSig, i: usize| sig.parameters.get(i).cloned().flatten();
-        // One source lifetime maps to every target lifetime that occupies the
-        // same position. Record leaves add positions beyond the slice
-        // parameters; a leaf may only map to a leaf at the same path.
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        for i in 0..arity {
-            match (at(self, i), at(target, i)) {
-                (Some(source), Some(target)) => pairs.push((source, target)),
-                (None, None) => {}
-                _ => return false,
-            }
-            let source_leaves = self
-                .parameter_leaves
-                .get(i)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let target_leaves = target
-                .parameter_leaves
-                .get(i)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            if source_leaves.len() != target_leaves.len() {
-                return false;
-            }
-            for source in source_leaves {
-                let Some(target_leaf) = target_leaves.iter().find(|leaf| leaf.path == source.path)
-                else {
-                    return false;
-                };
-                match (&source.lifetime, &target_leaf.lifetime) {
-                    (Some(source), Some(target)) => pairs.push((source.clone(), target.clone())),
-                    (None, None) => {}
-                    _ => return false,
-                }
-            }
-        }
-        match (&self.result, &target.result) {
-            (Some(source), Some(target)) => pairs.push((source.clone(), target.clone())),
-            (None, None) => {}
-            _ => return false,
-        }
-        if self.result_leaves.len() != target.result_leaves.len() {
-            return false;
-        }
-        for source in &self.result_leaves {
-            let Some(target_leaf) = target
-                .result_leaves
-                .iter()
-                .find(|leaf| leaf.path == source.path)
-            else {
-                return false;
-            };
-            match (&source.lifetime, &target_leaf.lifetime) {
-                (Some(source), Some(target)) => pairs.push((source.clone(), target.clone())),
-                (None, None) => {}
-                _ => return false,
-            }
-        }
-        let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (source, target) in pairs {
-            map.entry(source).or_default().insert(target);
-        }
-        for (long, short) in &self.bounds {
-            let (Some(longs), Some(shorts)) = (map.get(long), map.get(short)) else {
-                continue;
-            };
-            if !longs
-                .iter()
-                .all(|l| shorts.iter().all(|s| target.outlives(l, s)))
-            {
-                return false;
-            }
-        }
-        if let (Some(source_result), Some(target_result)) = (&self.result, &target.result) {
-            for i in 0..arity {
-                let (Some(source), Some(mapped)) = (at(self, i), at(target, i)) else {
-                    continue;
-                };
-                if self.outlives(&source, source_result) && !target.outlives(&mapped, target_result)
-                {
-                    return false;
-                }
-            }
-        }
-        for i in 0..arity {
-            let source_leaves = self
-                .parameter_leaves
-                .get(i)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let target_leaves = target
-                .parameter_leaves
-                .get(i)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            for source in source_leaves {
-                let Some(target_leaf) = target_leaves.iter().find(|leaf| leaf.path == source.path)
-                else {
-                    return false;
-                };
-                let (Some(source_lifetime), Some(mapped)) =
-                    (&source.lifetime, &target_leaf.lifetime)
-                else {
-                    continue;
-                };
-                let Some(source_result) = self
-                    .result_leaves
-                    .iter()
-                    .find(|leaf| leaf.path == source.path)
-                else {
-                    continue;
-                };
-                let Some(target_result) = target
-                    .result_leaves
-                    .iter()
-                    .find(|leaf| leaf.path == source.path)
-                else {
-                    return false;
-                };
-                if let (Some(source_result), Some(target_result)) =
-                    (&source_result.lifetime, &target_result.lifetime)
-                    && self.outlives(source_lifetime, source_result)
-                    && !target.outlives(mapped, target_result)
-                {
-                    return false;
-                }
-            }
-        }
-        true
+        self.contract_witness(target).is_ok()
+    }
+    /// Occurrence-specific callable witness. Both contracts are canonical
+    /// arrow contracts, so canonical labels are bound by this occurrence; no
+    /// map is attached to the interned function-type ID.
+    pub(crate) fn contract_witness(
+        &self,
+        target: &BorrowSig,
+    ) -> std::result::Result<crate::variance::Witness, crate::variance::WitnessError> {
+        crate::variance::borrow_witness(self, target)
     }
 }
 /// Memoization key for one nominal layout: declaration, type arguments,
@@ -617,6 +486,9 @@ pub(crate) struct Types<'a> {
     /// containers. Index 0 is the empty/elided label, so an unannotated
     /// container element contributes no declared lifetime.
     pub reference_labels: Vec<String>,
+    /// Finite lifetime-only variance of every declared lifetime parameter.
+    /// This is checker-only metadata and never affects layout or interning.
+    pub(crate) variance: crate::variance::VarianceTable,
 }
 impl<'a> Types<'a> {
     pub fn new(
@@ -868,6 +740,7 @@ impl<'a> Types<'a> {
             dyn_errors: BTreeMap::new(),
             inferred_lifetimes: 0,
             reference_labels: vec![String::new()],
+            variance: crate::variance::infer(module, resolution)?,
         };
         for declaration in &module.items {
             if let ast::ItemKind::Trait { generics, .. } = &declaration.item.kind {
@@ -5099,13 +4972,21 @@ pub(crate) fn contains_linear(types: &Types<'_>, ty: Type) -> bool {
 /// Collect every erased lifetime label reachable through borrow leaves. A
 /// direct slice leaf carries its label in the enclosing record's
 /// `field_lifetimes`; nested records carry their own instantiated labels.
+pub(crate) fn borrow_lifetimes(types: &Types<'_>, ty: Type) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    collect_borrow_lifetimes(types, ty, &mut out);
+    out
+}
 fn collect_borrow_lifetimes(types: &Types<'_>, ty: Type, out: &mut BTreeSet<String>) {
     fn go(types: &Types<'_>, ty: Type, out: &mut BTreeSet<String>, seen: &mut BTreeSet<Type>) {
         if !seen.insert(ty) {
             return;
         }
         match ty {
-            Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::Ref(_) | Type::RefMut(_) => {}
+            Type::Slice(p) | Type::SliceMut(p) | Type::Ref(p) | Type::RefMut(p) | Type::Task(p) => {
+                go(types, types.pointees[p], out, seen)
+            }
+            Type::Str => {}
             Type::Annotated(_, label) => {
                 if let Some(name) = types.reference_label_name(label) {
                     out.insert(name);
@@ -5139,12 +5020,15 @@ fn collect_borrow_lifetimes(types: &Types<'_>, ty: Type, out: &mut BTreeSet<Stri
     go(types, ty, out, &mut BTreeSet::new());
 }
 /// One shared borrowed-slice leaf of a record value, addressed by field index
-/// path from the record root. Checker-only: erased at runtime.
+/// path from the record root. Checker-only: erased at runtime. `variance` is
+/// the required lifetime direction at this occurrence; it is derived from the
+/// declaration table and the constructors on the path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BorrowLeaf {
     pub path: Vec<usize>,
     pub lifetime: Option<String>,
     pub mutable: bool,
+    pub variance: crate::variance::SignSet,
 }
 /// Whether `ty` is a nominal record with at least one borrowed slice field.
 pub(crate) fn is_borrowed_record(types: &Types<'_>, ty: Type) -> bool {
@@ -5232,17 +5116,58 @@ pub(crate) fn contains_task_exit_borrow(types: &Types<'_>, ty: Type) -> bool {
 }
 
 pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {
+    fn field_position(
+        types: &Types<'_>,
+        layout: usize,
+        field: usize,
+        position: crate::variance::SignSet,
+    ) -> crate::variance::SignSet {
+        let Some(label) = types.enums[layout]
+            .field_lifetimes
+            .get(field)
+            .cloned()
+            .flatten()
+        else {
+            return position;
+        };
+        let definition = types.enums[layout].definition;
+        let mut variance = crate::variance::SignSet::UNUSED;
+        let mut found = false;
+        for (index, argument) in types.enums[layout].lifetimes.iter().enumerate() {
+            if *argument == label
+                && let Some(value) = types.variance.of(definition, index)
+            {
+                variance = variance.join(value);
+                found = true;
+            }
+        }
+        // A declaration missing from the table is unknown, not covariant.
+        if !found {
+            variance = crate::variance::SignSet::INVARIANT;
+        }
+        position.compose(variance)
+    }
     fn go(
         types: &Types<'_>,
         ty: Type,
         hint: Option<String>,
+        position: crate::variance::SignSet,
         path: &mut Vec<usize>,
         out: &mut Vec<BorrowLeaf>,
     ) {
         if let Some(id) = ty.layout()
             && let Some(reference) = types.enums[id].optional_reference()
         {
-            go(types, reference, None, path, out);
+            // Optional-reference enums stay invariant until their payload
+            // mapping is explicit.
+            go(
+                types,
+                reference,
+                None,
+                position.compose(crate::variance::SignSet::INVARIANT),
+                path,
+                out,
+            );
             return;
         }
         match ty {
@@ -5250,37 +5175,56 @@ pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {
                 path: path.clone(),
                 lifetime: hint,
                 mutable: false,
+                variance: position,
             }),
             Type::SliceMut(_) => out.push(BorrowLeaf {
                 path: path.clone(),
                 lifetime: hint,
                 mutable: true,
+                variance: position,
             }),
             Type::Str => out.push(BorrowLeaf {
                 path: path.clone(),
                 lifetime: hint,
                 mutable: false,
+                variance: position,
             }),
             Type::Ref(_) => out.push(BorrowLeaf {
                 path: path.clone(),
                 lifetime: hint,
                 mutable: false,
+                variance: position,
             }),
             Type::RefMut(_) => out.push(BorrowLeaf {
                 path: path.clone(),
                 lifetime: hint,
                 mutable: true,
+                variance: position,
             }),
             Type::Annotated(p, label) => out.push(BorrowLeaf {
                 path: path.clone(),
                 lifetime: types.reference_label_name(label),
                 mutable: matches!(types.pointees[p], Type::RefMut(_)),
+                variance: position,
             }),
-            Type::Box(p)
-            | Type::ArenaBox(p)
-            | Type::Vec(p)
-            | Type::AllocBox(p)
-            | Type::AllocVec(p) => go(types, types.pointees[p], None, path, out),
+            Type::Box(p) | Type::Vec(p) => go(
+                types,
+                types.pointees[p],
+                None,
+                position.compose(crate::variance::SignSet::POSITIVE),
+                path,
+                out,
+            ),
+            // Arena and custom-allocator storage retain their exact payload
+            // contract; no new borrowed payload variance is admitted.
+            Type::ArenaBox(p) | Type::AllocBox(p) | Type::AllocVec(p) => go(
+                types,
+                types.pointees[p],
+                None,
+                position.compose(crate::variance::SignSet::INVARIANT),
+                path,
+                out,
+            ),
             Type::Enum(id) | Type::Variants(id, _)
                 if types.enums[id].record || types.enums[id].name == "TaskExit" =>
             {
@@ -5288,16 +5232,25 @@ pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {
                     for (index, field) in types.enums[id].variants[0].fields.iter().enumerate() {
                         path.push(index);
                         let field_hint = types.enums[id].field_lifetimes[index].clone();
-                        go(types, *field, field_hint, path, out);
+                        let position = field_position(types, id, index, position);
+                        go(types, *field, field_hint, position, path, out);
                         path.pop();
                     }
                 } else {
                     // A borrowed `TaskExit<T>` payload travels at the same paths
                     // as `T`: matching `Completed(value)` rebinds those leaves
-                    // directly to the inner value.
+                    // directly to the inner value. No new payload variance is
+                    // introduced here.
                     for variant in &types.enums[id].variants {
                         for field in &variant.fields {
-                            go(types, *field, None, path, out);
+                            go(
+                                types,
+                                *field,
+                                None,
+                                position.compose(crate::variance::SignSet::INVARIANT),
+                                path,
+                                out,
+                            );
                         }
                     }
                 }
@@ -5306,7 +5259,14 @@ pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {
         }
     }
     let mut out = Vec::new();
-    go(types, ty, None, &mut Vec::new(), &mut out);
+    go(
+        types,
+        ty,
+        None,
+        crate::variance::SignSet::POSITIVE,
+        &mut Vec::new(),
+        &mut out,
+    );
     out
 }
 

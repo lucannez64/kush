@@ -27,6 +27,7 @@ pub mod project;
 pub mod resolve;
 mod runtime_types;
 pub mod source;
+mod variance;
 
 pub use check::check;
 pub use parser::parse;

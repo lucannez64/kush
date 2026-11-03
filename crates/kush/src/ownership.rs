@@ -88,12 +88,14 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                         path: vec![],
                         lifetime: function.parameter_lifetimes.get(index).cloned().flatten(),
                         mutable: local.ty.is_mut_slice(),
+                        variance: crate::variance::SignSet::POSITIVE,
                     }]);
                 } else if local.ty.is_ref() {
                     let mut leaves = vec![crate::runtime_types::BorrowLeaf {
                         path: vec![],
                         lifetime: function.parameter_lifetimes.get(index).cloned().flatten(),
                         mutable: matches!(local.ty, Type::RefMut(_)),
+                        variance: crate::variance::SignSet::POSITIVE,
                     }];
                     // A reference to a container exposes its element leaves as
                     // well, so a call that mutates the caller's container can
@@ -108,6 +110,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                             &program.enums,
                             &program.pointees,
                             &program.reference_labels,
+                            &program.variance,
                             container,
                         ) {
                             let mut path = vec![CONTAINER_LEAF];
@@ -116,6 +119,13 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                                 path,
                                 lifetime: leaf.lifetime,
                                 mutable: leaf.mutable,
+                                variance: leaf.variance.compose(
+                                    if matches!(local.ty, Type::RefMut(_)) {
+                                        crate::variance::SignSet::INVARIANT
+                                    } else {
+                                        crate::variance::SignSet::POSITIVE
+                                    },
+                                ),
                             });
                         }
                     }
@@ -125,6 +135,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                         &program.enums,
                         &program.pointees,
                         &program.reference_labels,
+                        &program.variance,
                         local.ty,
                     ));
                 }
@@ -149,6 +160,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                     &program.enums,
                     &program.pointees,
                     &program.reference_labels,
+                    &program.variance,
                     function.result,
                 ))
             } else {
@@ -243,6 +255,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             unions: &program.unions,
             pointees: &program.pointees,
             reference_labels: &program.reference_labels,
+            variance: &program.variance,
             functions: &program.function_types,
             result_grades: &result_grades,
             calls: &calls,
@@ -541,21 +554,61 @@ fn leaves_of(
     enums: &[crate::runtime_types::Enum],
     pointees: &[Type],
     labels: &[String],
+    variance_table: &crate::variance::VarianceTable,
     ty: Type,
 ) -> Vec<crate::runtime_types::BorrowLeaf> {
+    fn field_position(
+        enums: &[crate::runtime_types::Enum],
+        variance_table: &crate::variance::VarianceTable,
+        layout: usize,
+        field: usize,
+        position: crate::variance::SignSet,
+    ) -> crate::variance::SignSet {
+        let Some(label) = enums[layout].field_lifetimes.get(field).cloned().flatten() else {
+            return position;
+        };
+        let definition = enums[layout].definition;
+        let mut variance = crate::variance::SignSet::UNUSED;
+        let mut found = false;
+        for (index, argument) in enums[layout].lifetimes.iter().enumerate() {
+            if *argument == label
+                && let Some(value) = variance_table.of(definition, index)
+            {
+                variance = variance.join(value);
+                found = true;
+            }
+        }
+        if !found {
+            variance = crate::variance::SignSet::INVARIANT;
+        }
+        position.compose(variance)
+    }
+    #[allow(clippy::too_many_arguments)]
     fn go(
         enums: &[crate::runtime_types::Enum],
         pointees: &[Type],
         labels: &[String],
+        variance_table: &crate::variance::VarianceTable,
         ty: Type,
         hint: Option<String>,
+        position: crate::variance::SignSet,
         path: &mut Vec<usize>,
         out: &mut Vec<crate::runtime_types::BorrowLeaf>,
     ) {
         if let Some(id) = ty.layout()
             && let Some(reference) = enums[id].optional_reference()
         {
-            go(enums, pointees, labels, reference, None, path, out);
+            go(
+                enums,
+                pointees,
+                labels,
+                variance_table,
+                reference,
+                None,
+                position.compose(crate::variance::SignSet::INVARIANT),
+                path,
+                out,
+            );
             return;
         }
         match ty {
@@ -563,26 +616,31 @@ fn leaves_of(
                 path: path.clone(),
                 lifetime: hint,
                 mutable: false,
+                variance: position,
             }),
             Type::SliceMut(_) => out.push(crate::runtime_types::BorrowLeaf {
                 path: path.clone(),
                 lifetime: hint,
                 mutable: true,
+                variance: position,
             }),
             Type::Str => out.push(crate::runtime_types::BorrowLeaf {
                 path: path.clone(),
                 lifetime: hint,
                 mutable: false,
+                variance: position,
             }),
             Type::Ref(_) => out.push(crate::runtime_types::BorrowLeaf {
                 path: path.clone(),
                 lifetime: hint,
                 mutable: false,
+                variance: position,
             }),
             Type::RefMut(_) => out.push(crate::runtime_types::BorrowLeaf {
                 path: path.clone(),
                 lifetime: hint,
                 mutable: true,
+                variance: position,
             }),
             Type::Annotated(p, label) => out.push(crate::runtime_types::BorrowLeaf {
                 path: path.clone(),
@@ -591,12 +649,30 @@ fn leaves_of(
                     .filter(|label| !label.is_empty())
                     .cloned(),
                 mutable: matches!(pointees[p], Type::RefMut(_)),
+                variance: position,
             }),
-            Type::Box(p)
-            | Type::ArenaBox(p)
-            | Type::Vec(p)
-            | Type::AllocBox(p)
-            | Type::AllocVec(p) => go(enums, pointees, labels, pointees[p], None, path, out),
+            Type::Box(p) | Type::Vec(p) => go(
+                enums,
+                pointees,
+                labels,
+                variance_table,
+                pointees[p],
+                None,
+                position.compose(crate::variance::SignSet::POSITIVE),
+                path,
+                out,
+            ),
+            Type::ArenaBox(p) | Type::AllocBox(p) | Type::AllocVec(p) => go(
+                enums,
+                pointees,
+                labels,
+                variance_table,
+                pointees[p],
+                None,
+                position.compose(crate::variance::SignSet::INVARIANT),
+                path,
+                out,
+            ),
             Type::Enum(id) | Type::Variants(id, _)
                 if enums[id].record || enums[id].name == "TaskExit" =>
             {
@@ -604,13 +680,36 @@ fn leaves_of(
                     for (index, field) in enums[id].variants[0].fields.iter().enumerate() {
                         path.push(index);
                         let field_hint = enums[id].field_lifetimes[index].clone();
-                        go(enums, pointees, labels, *field, field_hint, path, out);
+                        let position = field_position(enums, variance_table, id, index, position);
+                        go(
+                            enums,
+                            pointees,
+                            labels,
+                            variance_table,
+                            *field,
+                            field_hint,
+                            position,
+                            path,
+                            out,
+                        );
                         path.pop();
                     }
                 } else {
+                    // A borrowed `TaskExit<T>` payload keeps its existing
+                    // scoped provenance; no new payload variance is admitted.
                     for variant in &enums[id].variants {
                         for field in &variant.fields {
-                            go(enums, pointees, labels, *field, None, path, out);
+                            go(
+                                enums,
+                                pointees,
+                                labels,
+                                variance_table,
+                                *field,
+                                None,
+                                position.compose(crate::variance::SignSet::INVARIANT),
+                                path,
+                                out,
+                            );
                         }
                     }
                 }
@@ -619,7 +718,17 @@ fn leaves_of(
         }
     }
     let mut out = Vec::new();
-    go(enums, pointees, labels, ty, None, &mut Vec::new(), &mut out);
+    go(
+        enums,
+        pointees,
+        labels,
+        variance_table,
+        ty,
+        None,
+        crate::variance::SignSet::POSITIVE,
+        &mut Vec::new(),
+        &mut out,
+    );
     out
 }
 /// A callee lifetime for diagnostics; canonical callable lifetimes `#k`
@@ -643,6 +752,17 @@ fn describe_actual(name: &str) -> String {
 }
 fn is_internal_lifetime(name: &str) -> bool {
     name.starts_with('<')
+}
+fn describe_variance(variance: crate::variance::SignSet) -> &'static str {
+    if variance.is_invariant() {
+        "invariant"
+    } else if variance.is_negative_only() {
+        "contravariant"
+    } else if variance.is_positive_only() {
+        "covariant"
+    } else {
+        "unused"
+    }
 }
 fn is_place_read(expr: &Expr) -> bool {
     match &expr.kind {
@@ -771,6 +891,7 @@ struct Checker<'a> {
     unions: &'a [crate::runtime_types::UnionType],
     pointees: &'a [Type],
     reference_labels: &'a [String],
+    variance: &'a crate::variance::VarianceTable,
     functions: &'a [crate::runtime_types::FunctionType],
     /// Static result contract of each checked function, by instance index:
     /// `(grade, owning)`. `owning` distinguishes an owning `@[1]` transfer
@@ -958,7 +1079,13 @@ impl Checker<'_> {
     }
     fn parameter_record_provenance(&self, slot: usize, ty: Type) -> RecordProvenance {
         let mut provenance = RecordProvenance::default();
-        for leaf in leaves_of(self.enums, self.pointees, self.reference_labels, ty) {
+        for leaf in leaves_of(
+            self.enums,
+            self.pointees,
+            self.reference_labels,
+            self.variance,
+            ty,
+        ) {
             let field = FieldBorrow {
                 root: slot,
                 path: leaf.path.clone(),
@@ -1419,8 +1546,13 @@ impl Checker<'_> {
                 provenance.leaves.insert(vec![index], loan);
             } else if self.is_carrier_type(field_ty) {
                 let nested = self.record_provenance(expr);
-                let expected =
-                    leaves_of(self.enums, self.pointees, self.reference_labels, field_ty);
+                let expected = leaves_of(
+                    self.enums,
+                    self.pointees,
+                    self.reference_labels,
+                    self.variance,
+                    field_ty,
+                );
                 for leaf in expected {
                     let Some(loan) = nested.leaves.get(&leaf.path) else {
                         return Err(Diagnostic::new(
@@ -1442,16 +1574,18 @@ impl Checker<'_> {
                     }
                     if let Some(lifetime) = &leaf.lifetime
                         && !is_internal_lifetime(lifetime)
-                        && !loan
-                            .lifetime
-                            .as_deref()
-                            .is_some_and(|source| self.actual_outlives(source, lifetime))
+                        && !self.lifetime_carried_at(
+                            loan.lifetime.as_deref(),
+                            lifetime,
+                            leaf.variance,
+                        )
                     {
                         return Err(Diagnostic::new(
                             expr.span,
                             format!(
-                                "nested field '{}' must be borrowed for lifetime '{lifetime}' or a lifetime that outlives it, but its source has lifetime {}",
+                                "nested field '{}' must satisfy the declared lifetime '{lifetime}' at its {} occurrence, but its source has lifetime {}",
                                 variant.names[index],
+                                describe_variance(leaf.variance),
                                 loan.lifetime
                                     .as_deref()
                                     .unwrap_or("a temporary or local owner")
@@ -1867,6 +2001,30 @@ impl Checker<'_> {
             None => self.fresh_call_lifetime(),
         };
         map.entry(declared.to_owned()).or_default().insert(actual);
+    }
+    /// Whether `actual` satisfies the lifetime occurrence `declared` at the
+    /// given variance. A positive occurrence requires the source to outlive the
+    /// declared label, a negative occurrence requires the reverse, and an
+    /// invariant occurrence requires identity (proved as mutual outlives in the
+    /// finite relation). An unused occurrence has no proof.
+    fn lifetime_carried_at(
+        &self,
+        actual: Option<&str>,
+        declared: &str,
+        variance: crate::variance::SignSet,
+    ) -> bool {
+        let Some(actual) = actual else {
+            return false;
+        };
+        if variance.is_positive_only() {
+            self.actual_outlives(actual, declared)
+        } else if variance.is_negative_only() {
+            self.actual_outlives(declared, actual)
+        } else if variance.is_invariant() {
+            self.actual_outlives(actual, declared) && self.actual_outlives(declared, actual)
+        } else {
+            false
+        }
     }
     /// Whether the caller can prove `long` outlives `short` for the current
     /// function's declared bounds. Anonymous and internal identities only prove
@@ -3271,6 +3429,7 @@ impl Checker<'_> {
             self.enums,
             self.pointees,
             self.reference_labels,
+            self.variance,
             self.result_type,
         );
         for leaf in &expected {
@@ -3286,18 +3445,15 @@ impl Checker<'_> {
                     "internal error: borrowed result record leaf has no declared lifetime",
                 ));
             };
-            if !loan
-                .lifetime
-                .as_ref()
-                .is_some_and(|source| self.actual_outlives(source, lifetime))
-            {
+            if !self.lifetime_carried_at(loan.lifetime.as_deref(), lifetime, leaf.variance) {
                 return Err(Diagnostic::new(
                     span,
                     format!(
-                        "returned borrowed record field has lifetime {}, which does not outlive the declared result lifetime '{lifetime}'",
+                        "returned borrowed record field has lifetime {}, which does not satisfy the declared result lifetime '{lifetime}' at its {} occurrence",
                         loan.lifetime
                             .as_deref()
-                            .unwrap_or("a temporary or local owner")
+                            .unwrap_or("a temporary or local owner"),
+                        describe_variance(leaf.variance)
                     ),
                 ));
             }
@@ -3312,7 +3468,7 @@ impl Checker<'_> {
                 ));
             }
             for origin in &loan.origins {
-                self.check_return_origin(*origin, lifetime, leaf.mutable, span)?;
+                self.check_return_origin(*origin, lifetime, leaf.mutable, leaf.variance, span)?;
             }
         }
         if provenance.leaves.len() != expected.len() {
@@ -3335,21 +3491,41 @@ impl Checker<'_> {
         ty.is_mut_slice()
             || matches!(ty, Type::RefMut(_))
             || (self.is_carrier_type(ty)
-                && leaves_of(self.enums, self.pointees, self.reference_labels, ty)
-                    .iter()
-                    .any(|leaf| leaf.mutable))
+                && leaves_of(
+                    self.enums,
+                    self.pointees,
+                    self.reference_labels,
+                    self.variance,
+                    ty,
+                )
+                .iter()
+                .any(|leaf| leaf.mutable))
     }
     /// Whether a parameter carries `lifetime` with a compatible capability for
     /// a returned view. An exclusive result requires an exclusive parameter or
     /// an exclusive record-field leaf; a shared result may narrow either.
     fn parameter_carries_lifetime(&self, slot: usize, lifetime: &str, mutable: bool) -> bool {
+        self.parameter_carries_lifetime_at(
+            slot,
+            lifetime,
+            mutable,
+            crate::variance::SignSet::POSITIVE,
+        )
+    }
+    fn parameter_carries_lifetime_at(
+        &self,
+        slot: usize,
+        lifetime: &str,
+        mutable: bool,
+        variance: crate::variance::SignSet,
+    ) -> bool {
         let local = &self.locals[slot];
         if local.ty.is_ref() {
             return self
                 .reference_lifetimes
                 .get(slot)
                 .and_then(|name| name.as_ref())
-                .is_some_and(|name| self.actual_outlives(name, lifetime))
+                .is_some_and(|name| self.lifetime_carried_at(Some(name), lifetime, variance))
                 && (!mutable || matches!(local.ty, Type::RefMut(_)));
         }
         if local.ty.is_view() {
@@ -3357,18 +3533,24 @@ impl Checker<'_> {
                 .parameter_lifetimes
                 .get(slot)
                 .and_then(|l| l.as_ref())
-                .is_some_and(|name| self.actual_outlives(name, lifetime))
+                .is_some_and(|name| self.lifetime_carried_at(Some(name), lifetime, variance))
                 && (!mutable || local.ty.is_mut_slice());
         }
         if self.is_carrier_type(local.ty) {
-            return leaves_of(self.enums, self.pointees, self.reference_labels, local.ty)
-                .iter()
-                .any(|leaf| {
-                    leaf.lifetime
-                        .as_deref()
-                        .is_some_and(|name| self.actual_outlives(name, lifetime))
-                        && (!mutable || leaf.mutable)
-                });
+            return leaves_of(
+                self.enums,
+                self.pointees,
+                self.reference_labels,
+                self.variance,
+                local.ty,
+            )
+            .iter()
+            .any(|leaf| {
+                leaf.lifetime
+                    .as_deref()
+                    .is_some_and(|name| self.lifetime_carried_at(Some(name), lifetime, variance))
+                    && (!mutable || leaf.mutable)
+            });
         }
         false
     }
@@ -3377,11 +3559,12 @@ impl Checker<'_> {
         origin: usize,
         lifetime: &str,
         mutable: bool,
+        variance: crate::variance::SignSet,
         span: Span,
     ) -> Result<()> {
         if origin < self.parameter_count {
             let local = &self.locals[origin];
-            if !self.parameter_carries_lifetime(origin, lifetime, mutable) {
+            if !self.parameter_carries_lifetime_at(origin, lifetime, mutable, variance) {
                 return Err(Diagnostic::new(
                     span,
                     if mutable {
@@ -5152,12 +5335,14 @@ impl Checker<'_> {
                                         path: vec![],
                                         lifetime: borrows.parameters.get(i).cloned().flatten(),
                                         mutable: ty.is_mut_slice(),
+                                        variance: crate::variance::SignSet::POSITIVE,
                                     }]
                                 } else if ty.is_ref() {
                                     vec![crate::runtime_types::BorrowLeaf {
                                         path: vec![],
                                         lifetime: borrows.parameters.get(i).cloned().flatten(),
                                         mutable: matches!(ty, Type::RefMut(_)),
+                                        variance: crate::variance::SignSet::POSITIVE,
                                     }]
                                 } else {
                                     Vec::new()
@@ -5168,6 +5353,7 @@ impl Checker<'_> {
                                             path: leaf.path.clone(),
                                             lifetime: leaf.lifetime.clone(),
                                             mutable: leaf.mutable,
+                                            variance: crate::variance::SignSet::POSITIVE,
                                         }
                                     }));
                                 }
@@ -5193,6 +5379,7 @@ impl Checker<'_> {
                                         path: leaf.path.clone(),
                                         lifetime: leaf.lifetime.clone(),
                                         mutable: leaf.mutable,
+                                        variance: crate::variance::SignSet::POSITIVE,
                                     })
                                     .collect(),
                             )

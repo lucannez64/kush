@@ -249,6 +249,10 @@ pub struct Executable {
     /// label. Ownership uses this table to recover a declared element lifetime
     /// from a container's pointee type.
     pub(crate) reference_labels: Vec<String>,
+    /// Finite lifetime-only variance of declared lifetime parameters. Ownership
+    /// uses the signed occurrence direction of each borrowed leaf; this table
+    /// is never consulted by either runtime backend.
+    pub(crate) variance: crate::variance::VarianceTable,
     pub(crate) owned_enums: Vec<bool>,
     pub(crate) linear_enums: Vec<bool>,
     /// Checked foreign imports aligned with `functions`; `Some` marks an
@@ -4545,6 +4549,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             slots: BTreeMap::new(),
             result: sig.result,
             parameter_lifetimes: sig.parameter_lifetimes.clone(),
+            result_lifetime: sig.result_lifetime.clone(),
+            lifetime_bounds: sig.lifetime_bounds.clone(),
             result_grade: sig.result_grade,
             effects: sig.effects,
             depth: 0,
@@ -4722,6 +4728,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         dyn_calls: functions.dyn_calls,
         union_calls: functions.union_calls,
         reference_labels: types.reference_labels,
+        variance: types.variance,
         owned_enums: vec![],
         linear_enums: vec![],
         foreign_functions,
@@ -10418,6 +10425,11 @@ struct Checker<'a, 't> {
     /// checked. Distinguishes owning `@[1]` transfers from must-use copyable
     /// transfers when a returned value is observed.
     result_grade: Option<Grade>,
+    /// Declared result lifetime and outlives bounds of the function currently
+    /// being checked. They are the evidence source for same-scope lifetime
+    /// witnesses; the witness never invents an edge.
+    result_lifetime: Option<String>,
+    lifetime_bounds: BTreeSet<(String, String)>,
     effects: u16,
     depth: usize,
     loops: Vec<Loop>,
@@ -15268,6 +15280,80 @@ impl Checker<'_, '_> {
                 }
             })
     }
+    /// Check a same-scope lifetime conversion with the occurrence-specific
+    /// witness. Call and coercion expressions are skipped because a callee's
+    /// declared labels are instantiated by the actual arguments; ownership
+    /// retains that provenance independently. Incomplete label metadata (a
+    /// label not declared by this function or recognizably internal) defers to
+    /// that same ownership evidence; it is never treated as erased proof.
+    fn check_static_lifetime_witness(
+        &self,
+        value: &Expr,
+        expected: Type,
+        span: Span,
+    ) -> Result<()> {
+        if matches!(
+            value.kind,
+            ExprKind::Call(_, _) | ExprKind::CallIndirect { .. } | ExprKind::Coerce { .. }
+        ) {
+            return Ok(());
+        }
+        if !crate::runtime_types::has_borrow(self.types, value.ty)
+            && !crate::runtime_types::has_borrow(self.types, expected)
+        {
+            return Ok(());
+        }
+        // Shape compatibility owns its own diagnostics. This judgment is a
+        // refinement, never a replacement for erased structure.
+        if !self.subtype(value.ty, expected) {
+            return Ok(());
+        }
+        let mut env = crate::variance::LabelEnv::new();
+        for name in self.parameter_lifetimes.iter().flatten() {
+            env.free(name);
+        }
+        if let Some(name) = &self.result_lifetime {
+            env.free(name);
+        }
+        let mut labels = crate::runtime_types::borrow_lifetimes(self.types, value.ty);
+        labels.extend(crate::runtime_types::borrow_lifetimes(self.types, expected));
+        if !labels.iter().all(|label| {
+            matches!(
+                env.classify(label),
+                Some(crate::variance::LabelClass::Free | crate::variance::LabelClass::Bound(_))
+            )
+        }) {
+            return Ok(());
+        }
+        let evidence = crate::variance::ClosureEvidence {
+            outlives: |long: &str, short: &str| {
+                crate::executable::outlives(&self.lifetime_bounds, long, short)
+            },
+        };
+        let source = crate::variance::TypeOccurrence::new(value.ty);
+        let target = crate::variance::TypeOccurrence::new(expected);
+        match crate::variance::witness(self.types, &source, &target, &env, &evidence) {
+            Ok(_) => Ok(()),
+            // Incomplete occurrence metadata is not a proof, but ownership
+            // already retains the elided loan/provenance independently. Only a
+            // fully classified contradictory pair is rejected here.
+            Err(
+                crate::variance::WitnessError::MissingLabel { .. }
+                | crate::variance::WitnessError::UnclassifiedLabel { .. }
+                | crate::variance::WitnessError::ShapeMismatch { .. }
+                | crate::variance::WitnessError::CallableContract,
+            ) => Ok(()),
+            Err(error) => Err(Diagnostic::new(
+                span,
+                format!(
+                    "lifetime mismatch: {} is not a lifetime-compatible {}",
+                    self.types.name(value.ty),
+                    self.types.name(expected)
+                ),
+            )
+            .with_note(span, error.message())),
+        }
+    }
     /// Insert the deterministic runtime conversion needed to use `value` as
     /// `expected`. Same-layout refinements stay narrow (no runtime work); atom
     /// injection and union repacking become explicit `Coerce` nodes.
@@ -15275,6 +15361,7 @@ impl Checker<'_, '_> {
         if value.ty == Type::Never || value.ty == expected {
             return Ok(value);
         }
+        self.check_static_lifetime_witness(&value, expected, span)?;
         if let Type::DynObj(object) = expected {
             // A concrete value becomes an open trait object by registering a
             // checked member vtable entry and allocating its payload. The

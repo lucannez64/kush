@@ -1,10 +1,13 @@
 # Design: lifetime variance
 
-Status: design only for LT-VARIANCE-DESIGN; LT-VARIANCE remains unimplemented.
-Reviewed against `edb9e6e` and the current `runtime_types.rs`, `ownership.rs`,
-`executable.rs` and `lifetimes.rs`. This document incorporates and corrects the
-initial delegated proposal (commit `6601d5b`). Its decisions below supersede
-that proposal's open questions. No new compiler acceptance is claimed.
+Status: design contract for LT-VARIANCE. The staged implementation status for
+LT-VAR-TABLE, LT-VAR-CONTEXT, LT-VAR-CHECK and LT-VAR-TESTS is recorded in
+[lifetime variance implementation](lifetime-variance.md); LT-VARIANCE remains
+the full compiler integration gate. Reviewed against `edb9e6e` and the current
+`runtime_types.rs`, `ownership.rs`, `executable.rs` and `lifetimes.rs`. This
+document incorporates and corrects the initial delegated proposal (commit
+`6601d5b`). Its decisions below supersede that proposal's open questions. No
+new compiler acceptance is claimed by this document alone.
 
 ## Scope and current integration points
 
