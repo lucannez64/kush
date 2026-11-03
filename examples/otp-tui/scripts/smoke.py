@@ -7,7 +7,6 @@ import fcntl
 import os
 from pathlib import Path
 import pty
-import re
 import select
 import struct
 import subprocess
@@ -53,7 +52,7 @@ def check_terminal(binary, quit_key=b"q"):
     child = subprocess.Popen([binary, "--demo"], stdin=slave, stdout=slave, stderr=slave, preexec_fn=controlling_terminal)
     transcript = bytearray()
 
-    def expect(fragment, send=None):
+    def expect(fragment, send=None, occurrences=1):
         if send is not None:
             os.write(master, send)
         received = bytearray()
@@ -71,7 +70,7 @@ def check_terminal(binary, quit_key=b"q"):
                     break
                 received.extend(chunk)
                 transcript.extend(chunk)
-                if fragment in received:
+                if received.count(fragment) >= occurrences:
                     return
             if child.poll() is not None:
                 break
@@ -88,9 +87,16 @@ def check_terminal(binary, quit_key=b"q"):
         expect(b"Paste URI (hidden)", b"a")
         expect(b"Added to this session", b"\x1b[200~" + HOTP.encode() + b"\x1b[201~\r")
         expect(b"Fixture")
-        # Resize to an ordinary 24-row terminal; redraw and navigate.
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        # Wait for two frames with the newly clipped width, so resize is
+        # acknowledged before injecting another key sequence. An old frame
+        # header already in the PTY buffer cannot acknowledge a resize.
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 16, 50, 0, 0))
+        expect(b"-" * 49 + b"\r\n", occurrences=4)
         expect(b"OTP TUI", b"\x1b[H\x1b[F")
+        # A frame header can already be queued before resize is processed.
+        # A fresh clipboard response acknowledges the final navigation event
+        # before we test shutdown, rather than racing buffered escape sequences.
+        expect(base64.b64encode(b"755224"), b"c")
         os.write(master, quit_key)
         # Keep draining the PTY until exit: otherwise queued redraws can fill
         # its small output buffer before the child reaches the quit event.
@@ -105,7 +111,10 @@ def check_terminal(binary, quit_key=b"q"):
                         break
                     raise
                 transcript.extend(chunk)
-        assert child.wait(timeout=1) == 0
+        try:
+            assert child.wait(timeout=1) == 0
+        except subprocess.TimeoutExpired as error:
+            raise AssertionError(f"quit was not handled; terminal tail={bytes(transcript[-1000:])!r}") from error
         restored = termios.tcgetattr(slave)
         assert restored == original, "terminal flags were not restored on exit"
         assert SECRET.encode() not in transcript, "URI secret was echoed to the terminal"
