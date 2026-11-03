@@ -1368,9 +1368,9 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Separate topological position from priority; document recommended waves and fix explicit gate omissions.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 15:23:22",
@@ -1381,6 +1381,11 @@
           "time": "2026-11-03 15:24:16",
           "who": "agent",
           "text": "Documented proposed execution waves and graph limitations; relabeled topological positions; added slice-place hostile-test gate, backend dependency and missing final operational gate."
+        },
+        {
+          "time": "2026-11-03 15:24:16",
+          "who": "agent",
+          "text": "Dependency order clarified; targeted graph corrections validated across all nodes."
         }
       ]
     },
