@@ -585,6 +585,11 @@
           "time": "2026-11-03 21:16:09",
           "who": "agent",
           "text": "Stable 0b5ad39 focused Boat gate passed: 157 tests (lib, recursive, variance, baseline, lifetimes, strings), formatting and strict all-target Clippy. Initial attempt stopped before tests on sync mismatch caused by concurrent plan update; rerun verified stable upload. Not a full workspace rerun."
+        },
+        {
+          "time": "2026-11-03 21:23:58",
+          "who": "agent",
+          "text": "Full combined f752ba5 Boat gate passed: 1234 tests, formatting and strict Clippy, including recursive review regressions. Remaining result-field and independent caller-requirement summary work not closed."
         }
       ]
     },
@@ -650,6 +655,11 @@
           "time": "2026-11-03 21:17:33",
           "who": "agent",
           "text": "Integrated corrective commit 864f56e: checked recursive leaf rejection, declared nested witness labels, nested invariant composition, static destination write authority, checked witness budget. Worker reproduced earlier crashes/acceptance; combined full Boat gate now pending."
+        },
+        {
+          "time": "2026-11-03 21:23:58",
+          "who": "agent",
+          "text": "Full combined f752ba5 Boat gate passed: 1234 tests, formatting and strict Clippy. Independent corrective safety recheck pending; LT-VARIANCE and LIFE remain open."
         }
       ]
     },

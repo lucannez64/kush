@@ -1352,3 +1352,16 @@ recursive summaries cover direct calls and scalar borrowed results, while
 borrowed-record result-field inference, broader call boundaries, and structural
 row lifetime metadata still require work. Conservative variance boundaries are
 listed in `lifetime-variance.md`; passing this gate does not remove them.
+
+## Corrected lifetime safety checkpoint: f752ba5
+
+The combined recursive-summary and variance corrections passed the full Boat
+gate: 1234 tests, formatting, and strict Clippy. This supersedes the earlier
+1215-test checkpoint for regression evidence. It includes checked rejection of
+recursive borrowed leaf shapes, nested invariance and destination-label checks,
+erased-proof argument mapping, and explicit summary-budget/path failures.
+
+The independent corrective recheck is pending. This is regression evidence,
+not a soundness proof or closure of LIFE. Structural-row metadata, broader
+recursive result/call coverage, and independent caller-requirement summaries
+remain outstanding.
