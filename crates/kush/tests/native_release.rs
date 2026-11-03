@@ -135,6 +135,8 @@ fn release_does_not_remove_arithmetic_or_slice_panics() {
     for source in [
         "fn bad(x:i64)->i64 ! {panic} {x+1} fn main()->i64 ! {alloc,panic} {let v:Vec<i64> =[9223372036854775807];let out=Vec.map_in_place(v,bad);Vec.get(&out,0)}",
         "fn main()->i64 ! {alloc,panic} {let v:Vec<i64> =[1];let view=&v[..];Slice.get(view,2)}",
+        "fn bad(v:&[i64])->i64 ! {panic} {let mut i=0-1;while i<Slice.len(v){return Slice.get(v,i);}0} fn main()->i64 ! {panic} {let a:[i64;1]=[1];bad(&a[..])}",
+        "fn bad(v:&[i64])->i64 ! {panic} {let mut i=0;while i<Slice.len(v){i=Slice.len(v);return Slice.get(v,i);}0} fn main()->i64 ! {panic} {let a:[i64;1]=[1];bad(&a[..])}",
     ] {
         let program = executable::check(source).unwrap();
         assert!(program.evaluate(&mut Vec::new()).is_err());
@@ -205,4 +207,56 @@ fn cli_release_flags_work_for_files_projects_and_argument_forwarding() {
             .unwrap();
         assert_eq!(out.status.code(), Some(2));
     }
+}
+
+#[test]
+fn push_fast_paths_cover_growth_borrowed_owners_and_narrowed_vectors() {
+    agrees(
+        r#"
+        struct Pair { left:Box<i64>, right:Box<i64> }
+        fn narrow(x:[i64;2])->i64 ! {} {x[0]}
+        fn main()->Unit ! {alloc,panic,io} {
+            let mut values:Vec<i64> =Vec.with_capacity(1);
+            let mut i=0; while i<20 { values=Vec.push(values,i); i=i+1; }
+            Vec.push(&mut values,42); print_i64(Vec.get(&values,20));
+            let mut pairs:Vec<Pair> =Vec.with_capacity(1);
+            pairs=Vec.push(pairs,Pair{left:Box.new(1),right:Box.new(2)});
+            Vec.push(&mut pairs,Pair{left:Box.new(3),right:Box.new(4)});
+            Vec.clear(&mut pairs);
+            Vec.push(&mut pairs,Pair{left:Box.new(5),right:Box.new(6)});
+            let wide:Vec<[i64;2]> =[[7,8],[9,10]];
+            let mut small=Vec.map_in_place(wide,narrow);
+            small=Vec.push(small,11); print_i64(Vec.get(&small,2));
+        }
+    "#,
+    );
+}
+
+#[test]
+fn slice_loop_versions_preserve_byte_views_mutation_and_control_flow() {
+    agrees(
+        r#"
+        fn sum(view:&[i64])->i64 ! {panic} {
+            let mut result=0; let mut i=0;
+            while i<Slice.len(view) { result=result+Slice.get(view,i); i=i+1; }
+            result
+        }
+        fn edit(view:&mut [i64])->i64 ! {panic} {
+            let mut i=0;
+            while i<Slice.len(view) {
+                Slice.set(view,i,Slice.get(view,i)+1);
+                i=i+1; if i==2 {continue;} if i==3 {break;}
+            }
+            i
+        }
+        fn main()->Unit ! {alloc,panic,io} {
+            let mut bytes=Bytes.from("ABC"); print_i64(sum(&bytes[..]));
+            print_i64(edit(&mut bytes[..])); print_i64(sum(&bytes[..]));
+            let mut array:[i64;4]=[10,20,30,40];
+            print_i64(sum(&array[..])); print_i64(edit(&mut array[..]));
+            print_i64(sum(&array[..]));
+            let empty:Vec<i64> =[]; print_i64(sum(&empty[..]));
+        }
+    "#,
+    );
 }

@@ -18,7 +18,7 @@ spec.loader.exec_module(base)
 BUILD = base.BUILD / "optimizations"
 
 
-def phases(kush, toolchain, n, rounds, repetitions, cpu):
+def phases(kush, toolchain, n, rounds, repetitions, cpu, previous=None):
     source = base.kush_source("kush-fused")
     source = source.replace("pub fn batch(n: i64, fused_mode: Bool) -> i64 ! {alloc, panic}", "pub fn batch(n: i64, fused_mode: Bool) -> i64 ! {io, alloc, panic}")
     source = source.replace("    let ticket = standard_ticket(n);", "    let start = clock();\n    let ticket = standard_ticket(n);")
@@ -41,13 +41,17 @@ def phases(kush, toolchain, n, rounds, repetitions, cpu):
     (rust_dir / "main.rs").write_text((ROOT / "rust/main.rs").read_text())
     base.run(base.rust_flags(toolchain) + [rust_dir / "main.rs", "-o", BUILD / "phases-rust-manual"])
     names = ["kush-default", "kush-release", "rust-manual"]
+    binaries = {name: BUILD / ("phases-" + name) for name in names}
+    if previous:
+        names.insert(1, "kush-previous-release")
+        binaries["kush-previous-release"] = previous / "phases-kush-release"
     samples = {name: [] for name in names}
     rng = random.Random(20261103)
     for at in range(repetitions + 1):
         order = list(names)
         rng.shuffle(order)
         for name in order:
-            result = base.run([BUILD / ("phases-" + name), n, rounds, 1], preexec_fn=lambda: base.child_limits(cpu))
+            result = base.run([binaries[name], n, rounds, 1], preexec_fn=lambda: base.child_limits(cpu))
             lines = [int(line) for line in result.stdout.splitlines()]
             assert len(lines) == rounds * 3 + 1 and lines[-1] == base.expected(n, rounds), result
             if at:
@@ -65,11 +69,17 @@ def main():
     parser.add_argument("--rounds", type=int, default=4)
     parser.add_argument("--repetitions", type=int, default=7)
     parser.add_argument("--cpu", type=int, default=max(os.sched_getaffinity(0)))
+    parser.add_argument("--previous", type=Path, help="directory holding previous kush-release and phases-kush-release binaries for same-cohort comparison")
     parser.add_argument("--output", type=Path, default=ROOT / "results/optimization")
     args = parser.parse_args()
     if not 1 <= args.n <= 8000000 or not 1 <= args.rounds <= 32 or args.repetitions < 3 or args.cpu not in os.sched_getaffinity(0):
         parser.error("invalid workload, repetitions, or CPU")
     args.kush = str(Path(args.kush).resolve())
+    if args.previous:
+        args.previous = args.previous.resolve()
+        for name in ["kush-release", "phases-kush-release"]:
+            if not (args.previous/name).is_file():
+                parser.error(f"previous binary not found: {args.previous/name}")
     BUILD.mkdir(parents=True, exist_ok=True)
     args.output.mkdir(parents=True, exist_ok=True)
     source = BUILD / "pipeline.kush"
@@ -93,6 +103,9 @@ def main():
     # Runtime variants all have identical algorithms and safety/overflow policy.
     runtime = [(name, label, BUILD/name, 1) for name, label, _ in variants]
     runtime += [("rust-manual", "Rust CLIF O3 / manual fusion", rust_binary, 1), ("rust-iter", "Rust CLIF O3 / iterator chain", rust_binary, 2)]
+    if args.previous:
+        runtime.insert(1, ("kush-previous-release", "Kush / previous release", args.previous / "kush-release", 1))
+        builds.append({"variant": "kush-previous-release", "binary_sha256": base.sha(args.previous/"kush-release"), "phase_binary_sha256":base.sha(args.previous/"phases-kush-release"), "path": str(args.previous)})
     samples = {name: [] for name, _, _, _ in runtime}
     rng = random.Random(20261103)
     for at in range(args.repetitions + 2):
@@ -103,11 +116,11 @@ def main():
             if at >= 2:
                 samples[name].append(observation)
     # Clock probes are compiled separately and never used for headline timings.
-    phase_results = phases(args.kush, args.toolchain, args.n, args.rounds, args.repetitions, args.cpu)
+    phase_results = phases(args.kush, args.toolchain, args.n, args.rounds, args.repetitions, args.cpu, args.previous)
     data = {"metadata": {"utc":datetime.datetime.now(datetime.timezone.utc).isoformat(), "git_head":base.run(["git","rev-parse","HEAD"],cwd=base.REPO).stdout.strip(), "shuffle_seed":20261103, "warmups":2, "phase_warmups":1, "source_sha256":base.sha(source), "cpu_model": next(line.split(":",1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')), "kush_binary_sha256":base.sha(args.kush), "rustc":base.run(['rustc',f'+{args.toolchain}','-vV']).stdout, "pinned_cpu":args.cpu,"repetitions":args.repetitions,"builds":builds}, "measurements":[{"variant":name,"label":label,"n":args.n,"rounds":args.rounds,"observations":samples[name]} for name,label,_,_ in runtime], "phases":phase_results, "safety":[], "source_lines":base.source_lines(), "text_sections":{}}
     base.report(data,args.output)
     page = (args.output/'report.html').read_text()
-    page = re.sub(r'<p class="note">The plain Kush variant.*?</p>', '<p class="note">Only compiler controls differ between the four Kush variants. Release enables speed plus restricted scalar callback inlining. Rust uses the same Cranelift O3 builds as the original comparison. Phase timings use separate clock-probe binaries and are not included in the headline samples.</p>', page, flags=re.S)
+    page = re.sub(r'<p class="note">The plain Kush variant.*?</p>', '<p class="note">Only compiler controls differ between current Kush variants. Release enables speed, restricted scalar callback inlining, vector push fast paths and guarded slice-loop specialization. The optional previous-release control is a prebuilt binary with its hash recorded. Rust uses the same Cranelift O3 builds as the original comparison. Phase timings use separate clock-probe binaries and are not included in the headline samples.</p>', page, flags=re.S)
     (args.output/'report.html').write_text(page)
     lines = ["# Native release optimization ablation", "", f"Host: {data['metadata']['cpu_model']}; pinned CPU {args.cpu}; {args.repetitions} samples after two warmups.", "", f"Workload: {args.n} elements × {args.rounds} batches. Fresh processes and shuffled implementation order.", "", "| Build | Median wall ms | Median peak RSS KiB |", "|---|---:|---:|"]
     for row in data['summary']:

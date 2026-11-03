@@ -30,6 +30,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+mod runtime_cache;
+
 type Result<T> = std::result::Result<T, Diagnostic>;
 fn error(message: impl std::fmt::Display) -> Diagnostic {
     Diagnostic::new(Span::default(), message.to_string())
@@ -2426,16 +2428,23 @@ pub fn build_with_codegen(
         .unwrap_or_else(|| Path::new("."));
     let scratch = Scratch::new(parent)?;
     let object_path = scratch.path.join("program.o");
-    let runtime_path = scratch.path.join("runtime.c");
+    let mut defines = Vec::new();
+    if program.uses_tasks {
+        defines.push("-DKUSH_HAS_TASKS=1".to_owned());
+    }
+    if stats {
+        defines.push("-DKUSH_STATS=1".to_owned());
+        defines.push(format!("-DKUSH_FUSION_COUNT={}", program.fusion_count()));
+    }
+    let runtime_object = runtime_cache::compile(RUNTIME, &defines, &scratch)?;
     let binary_path = scratch.path.join("program");
     fs::write(&object_path, object).map_err(error)?;
-    fs::write(&runtime_path, RUNTIME).map_err(error)?;
     let mut command = Command::new("cc");
     command
         .arg("-std=c11")
         .arg("-O2")
         .arg(&object_path)
-        .arg(&runtime_path);
+        .arg(&runtime_object);
     for path in &links.objects {
         command.arg(path);
     }
@@ -2449,14 +2458,6 @@ pub fn build_with_codegen(
         command.arg(format!("-l{name}"));
     }
     command.arg("-o").arg(&binary_path).arg("-lm");
-    if program.uses_tasks {
-        command.arg("-DKUSH_HAS_TASKS=1");
-    }
-    if stats {
-        command
-            .arg("-DKUSH_STATS=1")
-            .arg(format!("-DKUSH_FUSION_COUNT={}", program.fusion_count()));
-    }
     let result = command
         .output()
         .map_err(|e| error(format!("could not start the native linker 'cc': {e}")))?;
@@ -3198,6 +3199,8 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
             task_wrappers: &task_wrappers,
             task_pointer_drops: &task_pointer_drops,
             loops: Vec::new(),
+            slice_layouts: BTreeMap::new(),
+            upper_bounds: Vec::new(),
         };
         let entry = g.builder.create_block();
         g.builder.append_block_params_for_function_params(entry);
@@ -4225,6 +4228,10 @@ struct Generator<'a, 'b> {
     foreign_ids: &'b [Option<FuncId>],
     program: &'b Executable,
     codegen: CodegenOptions,
+    // Runtime-guarded descriptor facts, scoped to one versioned loop.
+    slice_layouts: BTreeMap<usize, usize>,
+    // Dominating signed `index < length` tests, identified by SSA value.
+    upper_bounds: Vec<(Value, Value)>,
     print: FuncId,
     print_u64: FuncId,
     print_f64: FuncId,
@@ -6595,25 +6602,7 @@ impl Generator<'_, '_> {
                 return Some(vec![pointer, length, stride, bytes]);
             }
             ExprKind::While(condition, body) => {
-                let head = self.builder.create_block();
-                let enter = self.builder.create_block();
-                let exit = self.builder.create_block();
-                let depth = self.builder.declare_var(I64);
-                let at_entry = self.runtime_call(self.handler_depth, &[]);
-                self.builder.def_var(depth, at_entry);
-                self.jump(head, &[]);
-                self.builder.switch_to_block(head);
-                if let Some(test) = self.scalar(condition) {
-                    self.builder.ins().brif(test, enter, &[], exit, &[]);
-                    self.builder.switch_to_block(enter);
-                    self.loops.push((head, exit, false, depth));
-                    let finished = self.block(body);
-                    self.loops.pop();
-                    if finished.is_some() {
-                        self.jump(head, &[]);
-                    }
-                }
-                self.builder.switch_to_block(exit);
+                self.lower_while(condition, body);
                 self.constant(0)
             }
             ExprKind::Loop(body) => {
@@ -6666,16 +6655,7 @@ impl Generator<'_, '_> {
                 return None;
             }
             ExprKind::Local(slot) | ExprKind::Peek(slot) => {
-                if let Some(pointer) = self.locations[*slot] {
-                    let width = self.variables[*slot].len();
-                    return Some(self.load_words(pointer, 0, width));
-                }
-                return Some(
-                    self.variables[*slot]
-                        .iter()
-                        .map(|v| self.builder.use_var(*v))
-                        .collect(),
-                );
+                return Some(self.local_words(*slot));
             }
             ExprKind::Block(block) => return self.block(block),
             ExprKind::Construct {
@@ -7459,10 +7439,15 @@ impl Generator<'_, '_> {
             let width = self.variables[slot].len();
             return self.load_words(pointer, 0, width);
         }
-        self.variables[slot]
+        let mut words: Words = self.variables[slot]
             .iter()
             .map(|v| self.builder.use_var(*v))
-            .collect()
+            .collect();
+        if let Some(width) = self.slice_layouts.get(&slot).copied() {
+            words[2] = self.constant((width * 8) as i64);
+            words[3] = self.constant(0);
+        }
+        words
     }
     /// Store a temporary-owner initializer in its already-declared hidden
     /// slot, releasing any previous value from an earlier loop evaluation.
@@ -7875,6 +7860,201 @@ impl Generator<'_, '_> {
             }
         }
     }
+    /// A checked vector has `length <= capacity` and an allocation large
+    /// enough for every capacity slot. The fast arm neither grows nor changes
+    /// ownership; the original helper handles all capacity/overflow cases.
+    fn push_vector(&mut self, handle: Value, words: &[Value]) -> Value {
+        let callee = self
+            .module
+            .declare_func_in_func(self.vec_ops[&VecOp::Push], self.builder.func);
+        if self.codegen.optimization != Optimization::Speed {
+            let item = self.stack_words(words.len());
+            self.store_words(item, words);
+            let call = self.builder.ins().call(callee, &[handle, item]);
+            return self.builder.inst_results(call)[0];
+        }
+        let length = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), handle, 0);
+        let capacity = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), handle, 8);
+        let room = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, length, capacity);
+        let fast = self.builder.create_block();
+        let slow = self.builder.create_block();
+        let join = self.builder.create_block();
+        self.builder.append_block_param(join, I64);
+        self.builder.ins().brif(room, fast, &[], slow, &[]);
+        self.builder.switch_to_block(fast);
+        let offset = self
+            .builder
+            .ins()
+            .imul_imm_s(length, (words.len() * 8) as i64);
+        let address = self.builder.ins().iadd(handle, offset);
+        for (word, value) in words.iter().enumerate() {
+            self.builder.ins().store(
+                ir::MemFlagsData::new(),
+                *value,
+                address,
+                (24 + word * 8) as i32,
+            );
+        }
+        let next = self.builder.ins().iadd_imm_s(length, 1);
+        self.builder
+            .ins()
+            .store(ir::MemFlagsData::new(), next, handle, 0);
+        self.jump(join, &[handle]);
+        self.builder.switch_to_block(slow);
+        let item = self.stack_words(words.len());
+        self.store_words(item, words);
+        let call = self.builder.ins().call(callee, &[handle, item]);
+        let grown = self.builder.inst_results(call)[0];
+        self.jump(join, &[grown]);
+        self.builder.switch_to_block(join);
+        self.builder.block_params(join)[0]
+    }
+
+    fn slice_out_of_bounds(&mut self, index: Value, length: Value) -> Value {
+        if self.codegen.optimization == Optimization::Speed
+            && self.upper_bounds.iter().any(|(known_index, known_length)| {
+                self.builder.func.dfg.resolve_aliases(*known_index)
+                    == self.builder.func.dfg.resolve_aliases(index)
+                    && self.builder.func.dfg.resolve_aliases(*known_length)
+                        == self.builder.func.dfg.resolve_aliases(length)
+            })
+        {
+            // The exact SSA pair already passed `index < length`. A negative
+            // index can still pass a signed loop condition, so retain its check
+            // at the original access site, after all preceding effects.
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedLessThan, index, 0)
+        } else {
+            // Length is always nonnegative; unsigned comparison rejects both
+            // negative indices and indices at/above length in one test.
+            self.builder
+                .ins()
+                .icmp(IntCC::UnsignedGreaterThanOrEqual, index, length)
+        }
+    }
+
+    fn loop_slice(&self, condition: &Expr) -> Option<(usize, usize, usize)> {
+        let ExprKind::Binary(Kind::Lt, index, length) = &condition.kind else {
+            return None;
+        };
+        let (ExprKind::Local(index_slot) | ExprKind::Peek(index_slot)) = index.kind else {
+            return None;
+        };
+        let ExprKind::Call(Target::Slice(SliceOp::Len, element), arguments) = &length.kind else {
+            return None;
+        };
+        let [view] = arguments.as_slice() else {
+            return None;
+        };
+        let (ExprKind::Local(view_slot) | ExprKind::Peek(view_slot)) = view.kind else {
+            return None;
+        };
+        let locals = &self.program.functions[self.function_index].locals;
+        if locals[index_slot].ty != Type::I64
+            || locals[index_slot].pinned
+            || locals[view_slot].mutable
+            || locals[view_slot].pinned
+        {
+            return None;
+        }
+        Some((index_slot, view_slot, self.program.width(*element)))
+    }
+
+    fn lower_while(&mut self, condition: &Expr, body: &ex::Block) {
+        let candidate = self.loop_slice(condition);
+        // Bound code growth and avoid recursively duplicating nested loops.
+        fn eligible(expr: &Expr, budget: &mut usize) -> bool {
+            if *budget == 0 || matches!(expr.kind, ExprKind::While(..) | ExprKind::Loop(..)) {
+                return false;
+            }
+            *budget -= 1;
+            let mut safe = true;
+            expr.for_each_child(&mut |child| safe &= eligible(child, budget));
+            safe
+        }
+        let mut budget = 96;
+        let small = body.statements.iter().all(|statement| match statement {
+            ex::Statement::Let(_, expr) | ex::Statement::Expr(expr) => eligible(expr, &mut budget),
+            ex::Statement::Declare(_) => false,
+        }) && body
+            .tail
+            .as_ref()
+            .is_none_or(|expr| eligible(expr, &mut budget));
+        if self.codegen.optimization == Optimization::Speed
+            && self.slice_layouts.is_empty()
+            && small
+            && let Some((_, slot, width)) = candidate
+        {
+            let words = self.local_words(slot);
+            let stride = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, words[2], (width * 8) as i64);
+            let normal = self.builder.ins().icmp_imm_s(IntCC::Equal, words[3], 0);
+            let matches = self.builder.ins().band(stride, normal);
+            let fast = self.builder.create_block();
+            let generic = self.builder.create_block();
+            let join = self.builder.create_block();
+            self.builder.ins().brif(matches, fast, &[], generic, &[]);
+            self.builder.switch_to_block(fast);
+            self.slice_layouts.insert(slot, width);
+            self.while_body(condition, body, candidate);
+            self.slice_layouts.remove(&slot);
+            self.jump(join, &[]);
+            self.builder.switch_to_block(generic);
+            self.while_body(condition, body, candidate);
+            self.jump(join, &[]);
+            self.builder.switch_to_block(join);
+        } else {
+            self.while_body(condition, body, candidate);
+        }
+    }
+
+    fn while_body(
+        &mut self,
+        condition: &Expr,
+        body: &ex::Block,
+        candidate: Option<(usize, usize, usize)>,
+    ) {
+        let head = self.builder.create_block();
+        let enter = self.builder.create_block();
+        let exit = self.builder.create_block();
+        let depth = self.builder.declare_var(I64);
+        let at_entry = self.runtime_call(self.handler_depth, &[]);
+        self.builder.def_var(depth, at_entry);
+        self.jump(head, &[]);
+        self.builder.switch_to_block(head);
+        if let Some(test) = self.scalar(condition) {
+            let fact = candidate
+                .map(|(index, view, _)| (self.local_words(index)[0], self.local_words(view)[1]));
+            self.builder.ins().brif(test, enter, &[], exit, &[]);
+            self.builder.seal_block(enter);
+            self.builder.switch_to_block(enter);
+            let saved = self.upper_bounds.len();
+            if let Some(fact) = fact {
+                self.upper_bounds.push(fact);
+            }
+            self.loops.push((head, exit, false, depth));
+            let finished = self.block(body);
+            self.loops.pop();
+            self.upper_bounds.truncate(saved);
+            if finished.is_some() {
+                self.jump(head, &[]);
+            }
+        }
+        self.builder.switch_to_block(exit);
+    }
+
     fn slice_call(&mut self, op: SliceOp, element: Type, values: Words) -> Words {
         let element_width = self.program.width(element);
         let (pointer, length, stride, bytes) = (values[0], values[1], values[2], values[3]);
@@ -7883,15 +8063,7 @@ impl Generator<'_, '_> {
         }
         let index = values[4];
         if op == SliceOp::Set {
-            let negative = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::SignedLessThan, index, 0);
-            let beyond = self
-                .builder
-                .ins()
-                .icmp(IntCC::SignedGreaterThanOrEqual, index, length);
-            let invalid = self.builder.ins().bor(negative, beyond);
+            let invalid = self.slice_out_of_bounds(index, length);
             self.guard(invalid);
             let offset = self.builder.ins().imul(index, stride);
             let address = self.builder.ins().iadd(pointer, offset);
@@ -7941,15 +8113,7 @@ impl Generator<'_, '_> {
             option,
         } = op
         {
-            let negative = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::SignedLessThan, index, 0);
-            let beyond = self
-                .builder
-                .ins()
-                .icmp(IntCC::SignedGreaterThanOrEqual, index, length);
-            let invalid = self.builder.ins().bor(negative, beyond);
+            let invalid = self.slice_out_of_bounds(index, length);
             let valid = self.builder.ins().icmp_imm_s(IntCC::Equal, invalid, 0);
             // Use the real instantiated enum layout rather than deriving it
             // from the element width, so aggregate and union payloads keep
@@ -8010,15 +8174,7 @@ impl Generator<'_, '_> {
             return self.builder.block_params(join).to_vec();
         }
         if op == SliceOp::Get {
-            let negative = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::SignedLessThan, index, 0);
-            let beyond = self
-                .builder
-                .ins()
-                .icmp(IntCC::SignedGreaterThanOrEqual, index, length);
-            let invalid = self.builder.ins().bor(negative, beyond);
+            let invalid = self.slice_out_of_bounds(index, length);
             self.guard(invalid);
         }
         let offset = self.builder.ins().imul(index, stride);
@@ -8291,9 +8447,7 @@ impl Generator<'_, '_> {
                     .builder
                     .ins()
                     .load(I64, ir::MemFlagsData::new(), reference, 0);
-                let item = self.stack_words(width);
-                self.store_words(item, &values[1..1 + width]);
-                let grown = call(self, VecOp::Push, &[handle, item])[0];
+                let grown = self.push_vector(handle, &values[1..1 + width]);
                 self.builder
                     .ins()
                     .store(ir::MemFlagsData::new(), grown, reference, 0);
@@ -8373,9 +8527,7 @@ impl Generator<'_, '_> {
                 self.load_words(base, 24, width)
             }
             VecOp::Push => {
-                let item = self.stack_words(width);
-                self.store_words(item, &values[1..1 + width]);
-                call(self, op, &[values[0], item])
+                vec![self.push_vector(values[0], &values[1..1 + width])]
             }
             VecOp::Set => {
                 let item = self.stack_words(width);

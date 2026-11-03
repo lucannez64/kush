@@ -129,3 +129,57 @@ build artifact; the retry completed successfully and the sandbox stopped with
 its snapshot preserved. Logs: `/tmp/kush-boat-native-release-full.log` and
 `/tmp/kush-boat-native-release-retry.log`. Local release regression and
 machine-code tests also passed using mbx with two jobs.
+
+## Runtime object cache and collection fast paths
+
+Native builds cache the compiled C runtime under
+`$XDG_CACHE_HOME/kush/native-runtime-v1` (default
+`~/.cache/kush/native-runtime-v1`). `KUSH_RUNTIME_CACHE=/path/to/private/cache`
+selects another directory; setting `KUSH_NO_RUNTIME_CACHE` disables it.
+The cache is shared across source programs and optimization modes.
+
+A key includes runtime contents, C flags, task/statistics defines and fusion
+count, resolved compiler identity/version/target, working directory, a hash of
+the environment, and dependency-header paths/sizes/modification times. Every
+lookup preprocesses the runtime's include graph, but skips C object compilation
+on a hit. Header checks use normal file metadata, not a content-addressed
+snapshot. Environment changes can cause conservative misses; environment values
+are not stored in plaintext. Cache filenames use a noncryptographic hash;
+entries also verify the complete key and an object checksum. This is a private
+same-user build cache, not an interface for untrusted object files.
+
+Publication is atomic, parallel cold builds may compile independently, and each
+link uses its own scratch-local object copy. Symlinked/unusable caches and
+malformed entries fall back to compilation. On Unix the cache leaf must be
+owned by the compiling user and private (mode 0700). An optional cache failure
+does not prevent a build. To clear it, remove only the selected runtime cache
+directory. Other build caches are independent.
+
+`--opt-level speed` (including `--release`) now also:
+
+- Inlines the capacity-available path of owned and borrowed `Vec.push`, including
+  aggregate/owning elements. Full vectors retain the original C growth helper
+  and overflow/capacity checks; allocation/growth/drop counters are unchanged.
+- Versions small `while i < Slice.len(view)` loops over immutable, unpinned
+  descriptors. One runtime check selects a fixed word-stride path; other
+  descriptors, including byte-backed views, retain generic lowering. Nested
+  loops/large bodies are not duplicated. Descriptor assignment/address-taking
+  prevents this specialization; element mutation is still supported.
+- Reuses a dominating signed upper-bound comparison only for the exact SSA
+  index/length pair. Negative indices remain checked at the original access
+  site. Changed indices require their own full check. Other slice accesses use
+  one unsigned comparison to reject both negative and too-large indices.
+
+This is bounded code generation, not general range analysis or general
+inlining. Overflow checks, negative-index failures, byte-write validation,
+ownership cleanup, effect order, and the generic ABI remain enforced.
+
+Reproduce build-time measurements with:
+
+```sh
+python3 benchmarks/feature-pipeline/build_time.py --kush /path/to/kush
+```
+
+The optimization benchmark optionally accepts `--previous /path/to/binaries`
+containing a previous `kush-release` and `phases-kush-release`; hashes are
+recorded and those controls run in the same shuffled cohort as the new builds.
