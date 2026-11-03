@@ -1336,6 +1336,23 @@
           "text": "Layout pass plus repository reformat; Boat gate 1174 tests"
         }
       ]
+    },
+    {
+      "id": "FMT-LINT",
+      "title": "Redundant-drop lint and repository sweep",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "kush lint reports drops whose removal is unobservable (conservative continuation/hook analysis); --fix applies them.",
+      "commit": "HEAD",
+      "log": [
+        {
+          "time": "2026-11-03 15:12:27",
+          "who": "agent",
+          "text": "16 drops removed across std, todo-cli, calc; Boat gate 1176 tests"
+        }
+      ]
     }
   ]
 }
