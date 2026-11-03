@@ -1790,7 +1790,13 @@
       "status": "todo",
       "desc": "Single pair/path witness for callable and type checks; retain owners and declared mutable destination labels; lifetime-only, no erased fallback.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-04 00:34:09",
+          "who": "agent",
+          "text": "Checked branch labels before instantiating a call argument (40547d6): the reviewer's laundering case now rejects with its labels intact; Boat gate 1243 tests."
+        }
+      ]
     },
     {
       "id": "LT-VAR-TESTS",
