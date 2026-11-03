@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Local plan viewer: serves plan/index.html and live plan + repository state.
 
-Usage: scripts/plan-server.py [--port 4318]
+Usage: scripts/plan-server.py [--port 4318] [--host 127.0.0.1]
 Open http://127.0.0.1:4318/. Edit plan/plan.json directly or with scripts/plan.py.
 """
 import argparse
@@ -103,9 +103,14 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=4318)
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="address to listen on; use this machine's Tailscale IP to reach it from the tailnet",
+    )
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"Plan viewer on http://127.0.0.1:{args.port}/")
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"Plan viewer on http://{args.host}:{args.port}/")
     server.serve_forever()
 
 
