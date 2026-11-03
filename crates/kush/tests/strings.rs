@@ -789,9 +789,13 @@ fn borrowed_text_task_and_generic_positions_are_rejected() {
     // An explicit shorter text result infers its outlives bound from the
     // returned text parameter.
     check("fn escape<'a, 'b>(text: &'a str) -> &'b str ! {} { text }").unwrap();
+    // The summary exports 'a: 'b for both branch origins. A caller must
+    // establish that bound; accepting the declaration does not erase it.
+    check("fn ambiguous<'a, 'b>(first: &'a str, second: &'b str) -> &'b str ! {} { if true { first } else { second } }").unwrap();
     rejects(
-        "fn ambiguous<'a, 'b>(first: &'a str, second: &'b str) -> &'b str ! {} { if true { first } else { second } }",
-        "borrowed return would dangle",
+        "fn caller<'a, 'b>(first: &'a str, second: &'b str) -> i64 ! {} { Str.len(ambiguous(first, second)) }
+        fn ambiguous<'a, 'b>(first: &'a str, second: &'b str) -> &'b str ! {} { if true { first } else { second } }",
+        "cannot establish the callee's outlives constraint 'a: 'b",
     );
     // An elided text result with several sources is an anonymous intersection
     // outlived by every source; it cannot be named as a caller lifetime.

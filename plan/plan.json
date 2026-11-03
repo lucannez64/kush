@@ -565,6 +565,11 @@
           "time": "2026-11-03 16:06:27",
           "who": "agent",
           "text": "Implementation split into provisional IR, flow, SCC solve, finalization, diagnostics and adversarial gate. No compiler behavior has changed."
+        },
+        {
+          "time": "2026-11-03 20:28:04",
+          "who": "agent",
+          "text": "Integrated direct-call scalar-result summary implementation at 8c6f178; combined Boat gate exposed stale text-result rejection expectation. Full recursive result-field and method/instance coverage remains open."
         }
       ]
     },
@@ -610,7 +615,13 @@
       "status": "todo",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 20:28:04",
+          "who": "agent",
+          "text": "Integrated variance stages at c186c68; formatting and strict Clippy pass on Boat, combined acceptance and independent review pending."
+        }
+      ]
     },
     {
       "id": "LT-ROWVARS",
