@@ -1722,9 +1722,9 @@
       "deps": [
         "ROWS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Local exhaustive IR scan; skip prologue/return/loop depth calls only when no HandlerPush occurs. Preserve dynamic lookup and full restoration for handler-owning functions.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 17:20:32",
@@ -1740,6 +1740,11 @@
           "time": "2026-11-03 17:31:40",
           "who": "agent",
           "text": "Full Boat integration gate: 1182 tests, fmt and strict Clippy pass. Generated-call elimination verified for both native modes; no numerical performance claim."
+        },
+        {
+          "time": "2026-11-03 17:31:40",
+          "who": "agent",
+          "text": "Implemented exhaustive local IR analysis and elided function/loop depth guards only where no local handler can be installed; codegen and behavior regressions plus full Boat gate pass."
         }
       ]
     },
@@ -1749,9 +1754,9 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Primary papers mapped to actual Kush semantics; explicit acceptance gates, not wholesale replacement claims.",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 17:20:32",
@@ -1762,6 +1767,11 @@
           "time": "2026-11-03 17:24:01",
           "who": "agent",
           "text": "Verified primary Tree Borrows, SuperF, Zero Lexa, CSL mixed logic and unboxed-constructor sources; corrected dynamic/lexical and least/greatest-fixed-point overclaims; research-actions.md maps concrete gates and open work."
+        },
+        {
+          "time": "2026-11-03 17:31:40",
+          "who": "agent",
+          "text": "Primary research mapped to scoped compiler actions, explicit proof boundaries and open implementation gates; least/greatest and lexical/dynamic overclaims corrected."
         }
       ]
     },
