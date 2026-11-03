@@ -711,3 +711,234 @@ fn source_symlinks_do_not_make_build_and_format_disagree() {
             .contains("symlinked source")
     );
 }
+
+// ---- Reviewed hardening regressions -----------------------------------------
+
+#[test]
+fn a_symlinked_lock_is_refused_and_never_followed() {
+    let scratch = Scratch::new("lock-symlink");
+    let root = scratch.join("app");
+    project::new::create(&root, Some("app")).unwrap();
+    assert_success(&run_in(&root, &["check"]));
+    let victim = scratch.write("victim.txt", "keep\n");
+    fs::remove_file(root.join("Kush.lock")).unwrap();
+    std::os::unix::fs::symlink(&victim, root.join("Kush.lock")).unwrap();
+    let output = run_in(&root, &["check"]);
+    assert_failure(&output);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("not a regular file"), "{error}");
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+    // A stale regular lock still gets replaced atomically.
+    fs::remove_file(root.join("Kush.lock")).unwrap();
+    fs::write(root.join("Kush.lock"), "stale").unwrap();
+    assert_success(&run_in(&root, &["check"]));
+    assert!(
+        fs::read_to_string(root.join("Kush.lock"))
+            .unwrap()
+            .starts_with('#')
+    );
+}
+
+#[test]
+fn kush_new_refuses_existing_and_symlinked_paths_without_clobbering() {
+    let scratch = Scratch::new("new-race");
+    let existing = scratch.join("existing");
+    fs::create_dir_all(&existing).unwrap();
+    fs::write(existing.join("data.txt"), "precious").unwrap();
+    let output = run_in(&scratch.path, &["new", "existing"]);
+    assert_failure(&output);
+    assert_eq!(
+        fs::read_to_string(existing.join("data.txt")).unwrap(),
+        "precious"
+    );
+
+    let link = scratch.join("linked");
+    let target = scratch.join("target");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("data.txt"), "precious").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let output = run_in(&scratch.path, &["new", "linked"]);
+    assert_failure(&output);
+    assert_eq!(
+        fs::read_to_string(target.join("data.txt")).unwrap(),
+        "precious"
+    );
+
+    let inside = scratch.join("via-symlink");
+    fs::create_dir_all(&inside).unwrap();
+    std::os::unix::fs::symlink(&target, inside.join("hop")).unwrap();
+    let output = run_in(&scratch.path, &["new", "via-symlink/hop/child"]);
+    assert_failure(&output);
+    assert!(fs::read_to_string(target.join("data.txt")).is_ok());
+}
+
+#[test]
+fn native_paths_may_not_escape_through_in_package_symlinks() {
+    let scratch = Scratch::new("native-escape");
+    let root = scratch.join("app");
+    project::new::create(&root, Some("app")).unwrap();
+    let outside = scratch.join("cargo-adapters");
+    fs::create_dir_all(&outside).unwrap();
+    scratch.write(
+        "cargo-adapters/Cargo.toml",
+        "[package]\nname = \"ad\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[lib]\ncrate-type = [\"staticlib\"]\n",
+    );
+    let branch = root.join("link");
+    std::os::unix::fs::symlink(&outside, &branch).unwrap();
+    fs::write(
+        root.join("Kush.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.kush\"\n\n[native]\ncargo-manifests = [\"link/Cargo.toml\"]\n",
+    )
+    .unwrap();
+    let error = project::load(&root).unwrap_err().message().to_owned();
+    assert!(error.contains("outside the package"), "{error}");
+
+    // An in-package manifest through a real directory still works.
+    fs::remove_file(&branch).unwrap();
+    fs::create_dir(root.join("adapters")).unwrap();
+    fs::copy(
+        scratch.path.join("cargo-adapters/Cargo.toml"),
+        root.join("adapters/Cargo.toml"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("Kush.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.kush\"\n\n[native]\ncargo-manifests = [\"adapters/Cargo.toml\"]\n",
+    )
+    .unwrap();
+    assert!(project::load(&root).is_ok());
+}
+
+#[test]
+fn check_fails_projects_that_cannot_build_natively() {
+    let scratch = Scratch::new("check-validates-native");
+    let root = scratch.join("app");
+    project::new::create(&root, Some("app")).unwrap();
+    fs::write(
+        root.join("Kush.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.kush\"\n\n[native]\nlibraries = [\"-Wl,--version-script=x\"]\n",
+    )
+    .unwrap();
+    let output = run_in(&root, &["check"]);
+    assert_failure(&output);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("must not start with '-'"), "{error}");
+    assert!(
+        !root.join("Kush.lock").exists(),
+        "a rejected project must not produce a lock file"
+    );
+
+    // A path-like library entry without a file is also a check failure.
+    fs::write(
+        root.join("Kush.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.kush\"\n\n[native]\nlibraries = [\"native/missing.a\"]\n",
+    )
+    .unwrap();
+    let output = run_in(&root, &["check"]);
+    assert_failure(&output);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("does not point at an existing file"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_transitive_dependency_cannot_claim_the_root_name() {
+    let scratch = Scratch::new("transitive-name");
+    let root = scratch.join("app");
+    project::new::create(&root, Some("app")).unwrap();
+    let other = scratch.join("other-app");
+    project::new::create(&other, Some("app")).unwrap();
+    let helper = scratch.join("helper");
+    project::new::create(&helper, Some("helper")).unwrap();
+    fs::write(
+        helper.join("Kush.toml"),
+        "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nentry = \"src/main.kush\"\n\n[dependencies]\napp = { path = \"../other-app\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("Kush.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.kush\"\n\n[dependencies]\nhelper = { path = \"../helper\" }\n",
+    )
+    .unwrap();
+    let error = project::load(&root).unwrap_err().message().to_owned();
+    assert!(
+        error.contains("is provided by both")
+            && error.contains(root.display().to_string().as_str()),
+        "{error}"
+    );
+}
+
+#[test]
+fn test_targets_require_their_module_header_anywhere() {
+    let scratch = Scratch::new("test-header");
+    let root = scratch.join("app");
+    project::new::create(&root, Some("app")).unwrap();
+    // The language requires the header first; imports come after it.
+    fs::write(
+        root.join("tests/main.kush"),
+        "module app.tests.main;\n\nuse std.test;\n\n#[test]\nfn it_works() -> Unit ! {panic} { test.is_true(1 == 1); }\n",
+    )
+    .unwrap();
+    assert_success(&run_in(&root, &["test"]));
+
+    // A wrong header does not silently map the file: the mismatch is explicit.
+    fs::write(
+        root.join("tests/main.kush"),
+        "module other.app;\n\nuse std.test;\n\n#[test]\nfn it_works() -> Unit ! {panic} { test.is_true(1 == 1); }\n",
+    )
+    .unwrap();
+    let output = run_in(&root, &["test"]);
+    assert_failure(&output);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("but this file maps to"), "{error}");
+}
+
+#[test]
+fn manifest_path_directories_find_their_manifest_upward() {
+    let scratch = Scratch::new("manifest-dir");
+    let root = scratch.join("app");
+    project::new::create(&root, Some("app")).unwrap();
+    assert_success(&run_in(
+        &root,
+        &["check", "--manifest-path", root.to_str().unwrap()],
+    ));
+    assert_success(&run_in(
+        &root.join("src"),
+        &[
+            "check",
+            "--manifest-path",
+            root.join("src").to_str().unwrap(),
+        ],
+    ));
+}
+
+#[test]
+fn formatting_refuses_symlinks_and_writes_atomically() {
+    let scratch = Scratch::new("fmt-symlink");
+    let root = scratch.join("app");
+    project::new::create(&root, Some("app")).unwrap();
+    let victim = scratch.write(
+        "victim.kush",
+        "fn main() -> Unit ! {panic} { print_i64(1); }\n",
+    );
+    let target = root.join("src/unformatted.kush");
+    std::os::unix::fs::symlink(&victim, &target).unwrap();
+    let output = run_in(&root, &["fmt", "src/unformatted.kush"]);
+    assert_failure(&output);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("symbolic link"), "{error}");
+    assert_eq!(
+        fs::read_to_string(&victim).unwrap(),
+        "fn main() -> Unit ! {panic} { print_i64(1); }\n"
+    );
+    let _ = fs::remove_file(&target);
+    // A non-file operand (here a directory named like a source) fails the
+    // regular-file check instead of reading blindly.
+    fs::create_dir(scratch.join("pipe.kush")).unwrap();
+    let output = run_in(&scratch.path, &["fmt", "pipe.kush"]);
+    assert_failure(&output);
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("not a regular file"), "{error}");
+}

@@ -181,6 +181,13 @@ pub fn resolve_native(
     manifest_path: &Path,
 ) -> Result<NativeOptions, Failure> {
     let mut native = relative.clone();
+    let bound = fs::canonicalize(root).map_err(|e| {
+        Failure::new(format!(
+            "{}: cannot resolve the package root {}: {e}",
+            manifest_path.display(),
+            root.display()
+        ))
+    })?;
     for path in &mut native.library_paths {
         let resolved = root.join(&*path);
         let resolved = fs::canonicalize(&resolved).map_err(|e| {
@@ -190,6 +197,13 @@ pub fn resolve_native(
                 path.display()
             ))
         })?;
+        if !resolved.starts_with(&bound) {
+            return Err(Failure::new(format!(
+                "{}: native.library-paths entry '{}' resolves outside the package; native paths must stay inside the package (a symlink that escapes is not followed)",
+                manifest_path.display(),
+                path.display()
+            )));
+        }
         if !resolved.is_dir() {
             return Err(Failure::new(format!(
                 "{}: native.library-paths entry '{}' is not a directory",
@@ -208,6 +222,13 @@ pub fn resolve_native(
                 path.display()
             ))
         })?;
+        if !resolved.starts_with(&bound) {
+            return Err(Failure::new(format!(
+                "{}: native.cargo-manifests entry '{}' resolves outside the package; a Cargo manifest must live inside the package (a symlink that escapes is not followed)",
+                manifest_path.display(),
+                path.display()
+            )));
+        }
         if !resolved.is_file() {
             return Err(Failure::new(format!(
                 "{}: native.cargo-manifests entry '{}' is not a file",
@@ -216,6 +237,25 @@ pub fn resolve_native(
             )));
         }
         *path = resolved;
+    }
+    // Path-like `libraries` entries are file operands; a stale or mistyped path
+    // used to surface only deep inside the linker invocation.
+    for library in &native.libraries {
+        let path_like = library.contains('/')
+            || library.ends_with(".a")
+            || library.ends_with(".o")
+            || library.ends_with(".so");
+        if !path_like {
+            continue;
+        }
+        let resolved = root.join(library);
+        if !fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_file()) {
+            return Err(Failure::new(format!(
+                "{}: native.libraries entry '{}' does not point at an existing file in the package",
+                manifest_path.display(),
+                library
+            )));
+        }
     }
     Ok(native)
 }

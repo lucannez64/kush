@@ -20,21 +20,13 @@ pub fn create(directory: &Path, requested_name: Option<&str>) -> Result<CreatedP
         None => derive_name(directory),
     };
     manifest::validate_package_name(&name)?;
-    if directory.exists() {
-        return Err(Failure::new(format!(
-            "cannot create {}: the path already exists",
-            directory.display()
-        )));
-    }
-    fs::create_dir_all(directory).map_err(|e| {
-        Failure::new(format!(
-            "cannot create project directory {}: {e}",
-            directory.display()
-        ))
-    })?;
+    create_project_directory(directory)?;
     let result = write_files(directory, &name);
     if result.is_err() {
-        let _ = fs::remove_dir_all(directory);
+        // Remove only what this scaffold wrote; `remove_dir` refuses when
+        // anything else occupies the directory, so a swapped-in attacker
+        // directory is never deleted through.
+        remove_new_scaffold(directory);
     }
     result?;
     Ok(CreatedProject {
@@ -109,6 +101,105 @@ fn write_files(directory: &Path, name: &str) -> Result<(), Failure> {
         ),
     )?;
     Ok(())
+}
+
+/// Create the project directory and its missing parents without following
+/// any symbolic link that races the creation: an existing component that is
+/// a symlink, or a non-directory, stops the creation at that component.
+fn create_project_directory(directory: &Path) -> Result<(), Failure> {
+    let absolute = if directory.is_absolute() {
+        directory.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(directory)
+    };
+    match fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(Failure::new(format!(
+                "cannot create project directory {}: '{}' is a symbolic link",
+                directory.display(),
+                directory.display()
+            )));
+        }
+        Ok(_) => {
+            return Err(Failure::new(format!(
+                "cannot create {}: the path already exists",
+                directory.display()
+            )));
+        }
+        Err(_) => {}
+    }
+    // Keep the root component so `built` stays absolute: a relative prefix
+    // would silently resolve against the caller's current directory. Missing
+    // ancestors are created one by one; symlinks and non-directories stop.
+    let total = absolute.components().count();
+    let mut built = PathBuf::new();
+    for (position, component) in absolute.components().enumerate() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                built.push(component.as_os_str());
+                continue;
+            }
+            _ => {}
+        }
+        if position + 1 == total {
+            break;
+        }
+        built.push(component.as_os_str());
+        match fs::symlink_metadata(&built) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(Failure::new(format!(
+                    "cannot create project directory {}: '{}' is a symbolic link",
+                    directory.display(),
+                    built.display()
+                )));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(Failure::new(format!(
+                    "cannot create project directory {}: '{}' already exists and is not a directory",
+                    directory.display(),
+                    built.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(_) => {
+                fs::create_dir(&built)
+                    .map_err(|e| Failure::new(format!("cannot create {}: {e}", built.display())))?;
+            }
+        }
+    }
+    match fs::create_dir(&absolute) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(Failure::new(format!(
+                "cannot create {}: the path already exists",
+                directory.display()
+            )))
+        }
+        Err(error) => Err(Failure::new(format!(
+            "cannot create {}: {error}",
+            directory.display()
+        ))),
+    }
+}
+
+/// Remove the files the failed scaffold wrote and the empty directories it
+/// may have created. A directory that still holds unexpected content is left
+/// in place; a swapped-in attacker directory is never deleted recursively.
+fn remove_new_scaffold(directory: &Path) {
+    for relative in [
+        "src/main.kush",
+        "tests/main.kush",
+        "Kush.toml",
+        ".gitignore",
+        "README.md",
+    ] {
+        let _ = fs::remove_file(directory.join(relative));
+    }
+    let _ = fs::remove_dir(directory.join("src"));
+    let _ = fs::remove_dir(directory.join("tests"));
+    let _ = fs::remove_dir(directory);
 }
 
 fn write(path: &Path, contents: &str) -> Result<(), Failure> {

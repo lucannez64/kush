@@ -7,6 +7,7 @@
 use super::{Failure, Project};
 use std::{
     fs,
+    io::Write,
     path::{Component, Path, PathBuf},
 };
 
@@ -74,10 +75,49 @@ pub fn verify_or_write(project: &Project, locked: bool) -> Result<PathBuf, Failu
         }
     }
     if existing.as_deref() != Some(expected.as_str()) {
-        fs::write(&path, expected)
-            .map_err(|e| Failure::new(format!("cannot write {}: {e}", path.display())))?;
+        write_lock(&path, &expected)?;
     }
     Ok(path)
+}
+
+/// Atomic and symlink-safe: an existing symbolic link at the lock path is
+/// refused instead of being followed, and the replacement goes through a
+/// per-process temporary file so a crash never leaves half a lock.
+fn write_lock(path: &Path, text: &str) -> Result<(), Failure> {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(Failure::new(format!(
+            "{} is not a regular file; remove it and run the command again",
+            path.display()
+        )));
+    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = path.file_name().map_or_else(
+        || "Kush.lock".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let temporary = path.with_file_name(format!(
+        ".{name}.{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let result = (|| -> Result<(), Failure> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|e| Failure::new(format!("cannot write {}: {e}", path.display())))?;
+        file.write_all(text.as_bytes())
+            .map_err(|e| Failure::new(format!("cannot write {}: {e}", path.display())))?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .map_err(|e| Failure::new(format!("cannot replace {}: {e}", path.display())))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn relative_path(root: &Path, target: &Path) -> String {

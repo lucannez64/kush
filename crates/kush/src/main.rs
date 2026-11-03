@@ -78,7 +78,12 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
 fn is_project_invocation(rest: &[OsString]) -> bool {
     rest.is_empty()
         || rest.first().is_some_and(|argument| {
-            argument.to_string_lossy().starts_with('-') && !Path::new(argument).is_file()
+            // A dash-prefixed argument that names a Kush source routes through
+            // the single-file flow, so a missing file keeps its "cannot read"
+            // error instead of usage help. Flags (`-o`, `--locked`,
+            // `--manifest-path`) stay project arguments.
+            argument.to_string_lossy().starts_with('-')
+                && !argument.to_string_lossy().ends_with(".kush")
         })
 }
 
@@ -337,13 +342,18 @@ fn format_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, St
 fn open_project(manifest: Option<PathBuf>) -> Result<Project, (u8, String)> {
     let manifest = match manifest {
         Some(path) => {
-            if !path.exists() {
+            if path.is_dir() {
+                // `--manifest-path <dir>` behaves like the default search.
+                project::find_manifest(&path)
+                    .ok_or_else(|| (2, format!("no Kush.toml found in {}", path.display())))?
+            } else if !path.exists() {
                 return Err((
                     2,
                     format!("project manifest {} does not exist", path.display()),
                 ));
+            } else {
+                path
             }
-            path
         }
         None => {
             let current = env::current_dir()

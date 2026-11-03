@@ -34,16 +34,24 @@ pub fn discover(
         .map_err(|e| Failure::new(format!("cannot read test target {name}: {e}")))?;
     let module = parser::parse(&source)
         .map_err(|diagnostic| Failure::new(diagnostic.render(&name, &source)))?;
-    if let Some(first) = module.items.first()
-        && let ast::ItemKind::Module(module_path) = &first.item.kind
-    {
-        let declared = module_path.join(".");
-        match project.modules.module_for_file(path) {
-            Some(expected) if expected == declared => {}
-            Some(expected) => {
+    // Every test target has a declared header, first item or not, so a
+    // missing or mismatched `module <path>;` cannot slip past the check.
+    let declared = module
+        .items
+        .iter()
+        .find_map(|declaration| match &declaration.item.kind {
+            ast::ItemKind::Module(module_path) => {
+                Some((module_path.join("."), declaration.item.span))
+            }
+            _ => None,
+        });
+    match project.modules.module_for_file(path) {
+        Some(expected) => match declared {
+            Some((declared, _span)) if declared == expected => {}
+            Some((declared, span)) => {
                 return Err(Failure::new(
                     crate::Diagnostic::new(
-                        first.item.span,
+                        span,
                         format!(
                             "test module is declared as '{declared}', but this file maps to '{expected}'"
                         ),
@@ -53,9 +61,14 @@ pub fn discover(
             }
             None => {
                 return Err(Failure::new(format!(
-                    "{name}: test target is not part of the package module index; put it under tests/"
+                    "{name}: test target must declare its module header 'module {expected};'; add it as the first declaration"
                 )));
             }
+        },
+        None => {
+            return Err(Failure::new(format!(
+                "{name}: test target is not part of the package module index; place it under the package's src/ or tests/ tree"
+            )));
         }
     }
     let mut tests = Vec::new();

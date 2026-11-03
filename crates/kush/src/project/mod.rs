@@ -165,6 +165,19 @@ pub fn load_manifest(path: &Path) -> Result<Project, Failure> {
         load_dependency(name, relative, &root, &mut dependencies, &mut stack)?;
     }
     let dependencies = dependencies.into_values().collect::<Vec<_>>();
+    // A transitive package may claim the root's name; direct dependencies are
+    // rejected above, but the deeper graph reached them only here.
+    if let Some(conflict) = dependencies
+        .iter()
+        .find(|package| package.name == root_name)
+    {
+        return Err(Failure::new(format!(
+            "package name '{}' is provided by both '{}' and '{}'",
+            root_name,
+            manifest_path.display(),
+            conflict.manifest_path.display()
+        )));
+    }
     let mut all = Vec::with_capacity(dependencies.len() + 1);
     all.push(package.clone());
     all.extend(dependencies.iter().cloned());
@@ -470,6 +483,9 @@ impl CheckSummary {
 }
 
 pub fn check(project: &Project, locked: bool) -> Result<Vec<CheckSummary>, Failure> {
+    // `check` is the fast wiring gate: the native extension points a build
+    // would reject now fail here too, before any lock file is written.
+    project.native_links()?;
     lock::verify_or_write(project, locked)?;
     let mut summaries = Vec::new();
     let entry = project.package.entry_path();
@@ -635,10 +651,26 @@ pub fn test_project(
         let program = project.load_program_source(&name, &generated)?;
         let checked = crate::executable::check_program(&program)
             .map_err(|error| Failure::new(program.sources.render(&error)))?;
+        // Concurrent `kush test` runs must not build into the same final
+        // filename: each artifact is built under a process-unique temporary
+        // name and installed with an atomic rename.
         let artifact =
             artifact_directory.join(format!("{target_stem}__{:02}_{}", index + 1, test.name));
-        crate::native::build_with_options(&checked, &artifact, false, &links)
+        let temporary = artifact_directory.join(format!(
+            "{target_stem}__{:02}_{}.{}.tmp",
+            index + 1,
+            test.name,
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&temporary);
+        crate::native::build_with_options(&checked, &temporary, false, &links)
             .map_err(|error| Failure::new(program.sources.render(&error)))?;
+        fs::rename(&temporary, &artifact).map_err(|e| {
+            Failure::new(format!(
+                "cannot install test binary {}: {e}",
+                artifact.display()
+            ))
+        })?;
         let invocation =
             runtime::ProgramInvocation::new(&artifact, std::iter::empty::<std::ffi::OsString>());
         let output = invocation

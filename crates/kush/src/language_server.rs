@@ -1450,7 +1450,9 @@ fn semantic_token_data(text: &str) -> Value {
                 // The row can list several operations before `}`.
             }
             Kind::Ident(name)
-                if tokens.get(index + 1).is_some_and(|next| matches!(next.kind, Kind::LParen)) =>
+                if tokens
+                    .get(index + 1)
+                    .is_some_and(|next| matches!(next.kind, Kind::LParen)) =>
             {
                 // A call or constructor: function-name in function position.
                 events.push((start, end, FUNCTION_TOKEN));

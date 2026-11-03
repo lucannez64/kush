@@ -7,6 +7,7 @@
 use super::{Failure, Package};
 use crate::program::ModuleSource;
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
@@ -25,13 +26,16 @@ struct WalkContext<'a> {
     package: &'a Package,
     entry: &'a Path,
     skip: &'a [PathBuf],
-    file_count: usize,
+    /// Shared across packages: MAX_SOURCE_FILES bounds the project, not a
+    /// single package's contribution to it.
+    file_count: &'a Cell<usize>,
     tests: bool,
 }
 
 impl ModuleIndex {
     pub fn build(packages: &[Package]) -> Result<Self, Failure> {
         let mut index = Self::default();
+        let file_count = Cell::new(0);
         for package in packages {
             let entry = package.entry_path();
             if !entry.is_file() {
@@ -68,7 +72,7 @@ impl ModuleIndex {
                 package,
                 entry: &entry,
                 skip: &skip,
-                file_count: index.files.len(),
+                file_count: &file_count,
                 tests: false,
             };
             for (base, tests) in [
@@ -144,8 +148,8 @@ impl ModuleIndex {
                 // The entry file was registered under the package name above.
                 continue;
             }
-            context.file_count += 1;
-            if context.file_count > MAX_SOURCE_FILES {
+            context.file_count.set(context.file_count.get() + 1);
+            if context.file_count.get() > MAX_SOURCE_FILES {
                 return Err(Failure::new(format!(
                     "project contains more than {MAX_SOURCE_FILES} Kush source files"
                 )));

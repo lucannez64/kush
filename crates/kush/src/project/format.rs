@@ -11,6 +11,7 @@ use super::{Failure, Project};
 use crate::lexer;
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -57,6 +58,20 @@ pub fn format_source(name: &str, source: &str) -> Result<String, Failure> {
 
 pub fn format_file(path: &Path, check: bool) -> Result<bool, Failure> {
     let name = path.display().to_string();
+    // One write policy for explicit paths and walked files: symlinks are
+    // refused (never written through) and only regular files are touched.
+    let metadata =
+        fs::symlink_metadata(path).map_err(|e| Failure::new(format!("cannot read {name}: {e}")))?;
+    if metadata.file_type().is_symlink() {
+        return Err(Failure::new(format!(
+            "cannot format {name}: symbolic links are not followed; format the target file directly"
+        )));
+    }
+    if !metadata.is_file() {
+        return Err(Failure::new(format!(
+            "cannot format {name}: not a regular file"
+        )));
+    }
     let source =
         fs::read_to_string(path).map_err(|e| Failure::new(format!("cannot read {name}: {e}")))?;
     let formatted = format_source(&name, &source)?;
@@ -64,10 +79,40 @@ pub fn format_file(path: &Path, check: bool) -> Result<bool, Failure> {
         return Ok(false);
     }
     if !check {
-        fs::write(path, formatted)
-            .map_err(|e| Failure::new(format!("cannot write {name}: {e}")))?;
+        write_formatted(path, &formatted)?;
     }
     Ok(true)
+}
+
+/// Exclusive temporary file in the source's directory, then an atomic rename:
+/// a crash cannot truncate the source and concurrent runs never share state.
+fn write_formatted(path: &Path, formatted: &str) -> Result<(), Failure> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = path.file_name().map_or_else(
+        || "source".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let temporary = path.with_file_name(format!(
+        ".{name}.{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let result = (|| -> Result<(), Failure> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|e| Failure::new(format!("cannot write {}: {e}", path.display())))?;
+        file.write_all(formatted.as_bytes())
+            .map_err(|e| Failure::new(format!("cannot write {}: {e}", path.display())))?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .map_err(|e| Failure::new(format!("cannot replace {}: {e}", path.display())))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 pub fn format_project(project: &Project, check: bool) -> Result<FormatOutcome, Failure> {
