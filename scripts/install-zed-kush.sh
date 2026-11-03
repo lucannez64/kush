@@ -22,7 +22,7 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/tree-sitter-kush" "$stage/zed-kush"
 cp -r "$root/editors/tree-sitter-kush/"{grammar.js,tree-sitter.json,src,queries} "$stage/tree-sitter-kush/"
-cp -r "$root/editors/zed-kush/"{extension.toml,Cargo.toml,src,languages} "$stage/zed-kush/"
+cp -r "$root/editors/zed-kush/"{extension.toml,Cargo.toml,src,languages,.cargo} "$stage/zed-kush/"
 cp "$binary" "$stage/kush"
 
 remote_script='

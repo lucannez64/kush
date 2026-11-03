@@ -1,0 +1,7 @@
+# Zed compiles this extension to wasm32-wasip2. Cranelift cannot target wasm,
+# so override a user-wide `codegen-backend = "cranelift"` for this crate only.
+[profile.dev]
+codegen-backend = "llvm"
+
+[profile.release]
+codegen-backend = "llvm"
