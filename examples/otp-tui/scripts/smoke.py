@@ -92,7 +92,20 @@ def check_terminal(binary, quit_key=b"q"):
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         expect(b"OTP TUI", b"\x1b[H\x1b[F")
         os.write(master, quit_key)
-        assert child.wait(timeout=5) == 0
+        # Keep draining the PTY until exit: otherwise queued redraws can fill
+        # its small output buffer before the child reaches the quit event.
+        deadline = time.monotonic() + 10
+        while child.poll() is None and time.monotonic() < deadline:
+            readable, _, _ = select.select([master], [], [], 0.1)
+            if readable:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError as error:
+                    if error.errno == errno.EIO:
+                        break
+                    raise
+                transcript.extend(chunk)
+        assert child.wait(timeout=1) == 0
         restored = termios.tcgetattr(slave)
         assert restored == original, "terminal flags were not restored on exit"
         assert SECRET.encode() not in transcript, "URI secret was echoed to the terminal"
