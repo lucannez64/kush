@@ -402,6 +402,7 @@ impl Project {
 
 #[derive(Debug, Clone, Default)]
 pub struct BuildOptions {
+    pub codegen: crate::native::CodegenOptions,
     pub output: Option<PathBuf>,
     pub stats: bool,
     pub locked: bool,
@@ -445,7 +446,7 @@ pub fn build(project: &Project, options: &BuildOptions) -> Result<BuildOutcome, 
         })?;
     }
     let links = project.native_links()?;
-    crate::native::build_with_options(&checked, &output, options.stats, &links)
+    crate::native::build_with_codegen(&checked, &output, options.stats, &links, options.codegen)
         .map_err(|error| Failure::new(program.sources.render(&error)))?;
     Ok(BuildOutcome {
         output,
@@ -536,6 +537,7 @@ pub fn check(project: &Project, locked: bool) -> Result<Vec<CheckSummary>, Failu
 
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
+    pub codegen: crate::native::CodegenOptions,
     pub output: Option<PathBuf>,
     pub stats: bool,
     pub locked: bool,
@@ -546,6 +548,7 @@ pub fn run(project: &Project, options: &RunOptions) -> Result<u8, Failure> {
     let built = build(
         project,
         &BuildOptions {
+            codegen: options.codegen,
             output: options.output.clone(),
             stats: options.stats,
             locked: options.locked,

@@ -32,6 +32,10 @@ Native adapters (Bridge.toml):\n\
   kush bindgen <Bridge.toml> [--check]\n\n\
 Editors:\n\
   kush lsp\n\n\
+Native optimization (build/run, files or projects):\n\
+  --release           Cranelift speed optimization + scalar callback inlining\n\
+  --opt-level <none|speed>  select backend optimization independently\n\
+  --inline-scalars / --no-inline-scalars  control the restricted inliner\n\n\
   kush --help\n\
   kush --version\n\n\
 Build/run use Cranelift on Linux x86-64 and require cc. Eval is the bounded reference interpreter.\n\
@@ -118,6 +122,7 @@ fn project_command(
             let mut manifest = None;
             let mut output = None;
             let mut stats = false;
+            let mut codegen = kush::native::CodegenOptions::default();
             let mut locked = false;
             let mut index = 0;
             while index < args.len() {
@@ -130,7 +135,11 @@ fn project_command(
                     }
                     "--stats" => stats = true,
                     "--locked" => locked = true,
-                    other => return Err(usage_error(command, other)),
+                    other => {
+                        if !codegen_argument(args, &mut index, &mut codegen, command)? {
+                            return Err(usage_error(command, other));
+                        }
+                    }
                 }
                 index += 1;
             }
@@ -138,6 +147,7 @@ fn project_command(
             let built = project::build(
                 &project,
                 &project::BuildOptions {
+                    codegen,
                     output,
                     stats,
                     locked,
@@ -151,6 +161,7 @@ fn project_command(
         "run" => {
             let mut manifest = None;
             let mut stats = false;
+            let mut codegen = kush::native::CodegenOptions::default();
             let mut locked = false;
             let mut program_arguments = Vec::new();
             let mut index = 0;
@@ -166,7 +177,11 @@ fn project_command(
                     }
                     "--stats" => stats = true,
                     "--locked" => locked = true,
-                    other => return Err(usage_error(command, other)),
+                    other => {
+                        if !codegen_argument(args, &mut index, &mut codegen, command)? {
+                            return Err(usage_error(command, other));
+                        }
+                    }
                 }
                 index += 1;
             }
@@ -175,6 +190,7 @@ fn project_command(
             project::run(
                 &project,
                 &project::RunOptions {
+                    codegen,
                     output: None,
                     stats,
                     locked,
@@ -406,12 +422,35 @@ fn usage_error(command: &str, argument: &str) -> (u8, String) {
     )
 }
 
+fn codegen_argument(
+    args: &[OsString],
+    index: &mut usize,
+    options: &mut kush::native::CodegenOptions,
+    command: &str,
+) -> Result<bool, (u8, String)> {
+    match args[*index].to_str() {
+        Some("--release") => *options = kush::native::CodegenOptions::release(),
+        Some("--inline-scalars") => options.inline_scalar_callbacks = true,
+        Some("--no-inline-scalars") => options.inline_scalar_callbacks = false,
+        Some("--opt-level") => {
+            options.optimization = match value(args, index, command)?.to_str() {
+                Some("none") => kush::native::Optimization::None,
+                Some("speed") => kush::native::Optimization::Speed,
+                _ => return Err((2, "--opt-level requires 'none' or 'speed'".into())),
+            };
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {
     let Some(command) = args.first() else {
         return Err((2, HELP.into()));
     };
     let run_like = command == "run" || command == "eval";
     let ast = command == "parse" && args.len() == 3 && args[2] == "--ast";
+    let mut codegen = kush::native::CodegenOptions::default();
     let mut links = kush::native::LinkSpec::default();
     let mut build = false;
     let mut build_stats = false;
@@ -435,8 +474,10 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
                     }
                 }
                 _ => {
-                    build = false;
-                    break;
+                    if !codegen_argument(args, &mut index, &mut codegen, "build")? {
+                        build = false;
+                        break;
+                    }
                 }
             }
             index += 1;
@@ -446,17 +487,21 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
         || (command == "build" && build_stats);
     let mut program_arguments = Vec::new();
     let mut run_file_valid = false;
-    if run_like && args.len() >= 3 && args[1] != "--stats" {
+    if run_like {
         let mut index = 2;
-        if args.get(index).is_some_and(|value| value == "--stats") {
-            stats = true;
+        run_file_valid = true;
+        while index < args.len() {
+            if args[index] == "--" {
+                program_arguments.extend(args[index + 1..].iter().cloned());
+                break;
+            } else if args[index] == "--stats" {
+                stats = true;
+            } else if command != "run" || !codegen_argument(args, &mut index, &mut codegen, "run")?
+            {
+                run_file_valid = false;
+                break;
+            }
             index += 1;
-        }
-        if index == args.len() {
-            run_file_valid = true;
-        } else if args.get(index).is_some_and(|value| value == "--") {
-            run_file_valid = true;
-            program_arguments.extend(args[index + 1..].iter().cloned());
         }
     }
 
@@ -563,13 +608,14 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
                     "output must not overwrite the source file",
                 )));
             }
-            kush::native::build_with_options(&checked, output, stats, &links)
+            kush::native::build_with_codegen(&checked, output, stats, &links, codegen)
                 .map_err(diagnostic)?;
             writeln!(out, "Built {} with Cranelift.", output.display()).map_err(output_error)?;
         } else {
             let scratch = kush::native::Scratch::new(&env::temp_dir()).map_err(diagnostic)?;
             let binary = scratch.path().join("program");
-            kush::native::build_with_stats(&checked, &binary, stats).map_err(diagnostic)?;
+            kush::native::build_with_codegen(&checked, &binary, stats, &links, codegen)
+                .map_err(diagnostic)?;
             return kush::project::runtime::run_artifact(&binary, &program_arguments)
                 .map_err(project_error);
         }

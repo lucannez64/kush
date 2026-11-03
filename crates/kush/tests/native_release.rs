@@ -1,0 +1,208 @@
+#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use kush::{
+    executable,
+    native::{self, CodegenOptions, LinkSpec, Optimization, Scratch},
+};
+use std::{fs, process::Command};
+
+const OPTIONS: [CodegenOptions; 4] = [
+    CodegenOptions {
+        optimization: Optimization::None,
+        inline_scalar_callbacks: false,
+    },
+    CodegenOptions {
+        optimization: Optimization::Speed,
+        inline_scalar_callbacks: false,
+    },
+    CodegenOptions {
+        optimization: Optimization::None,
+        inline_scalar_callbacks: true,
+    },
+    CodegenOptions::release(),
+];
+fn agrees(source: &str) {
+    let program = executable::check(source).unwrap();
+    let mut expected = Vec::new();
+    let (status, stats) = program.evaluate_with_stats(&mut expected).unwrap();
+    assert_eq!(stats.allocations, stats.deallocations);
+    let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+    for (at, options) in OPTIONS.into_iter().enumerate() {
+        let binary = scratch.path().join(format!("release-{at}"));
+        native::build_with_codegen(&program, &binary, true, &LinkSpec::default(), options).unwrap();
+        let output = Command::new(binary).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some((status as u64 & 255) as i32),
+            "{options:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, expected, "{options:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            stderr
+                .lines()
+                .find(|line| line.starts_with("allocation-stats:")),
+            Some(stats.report().as_str()),
+            "{options:?}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn graded_bitwise_maps_and_negative_values_agree_in_all_modes() {
+    agrees(
+        r#"
+        fn mask(x:i64 @[2])->i64 ! {} { (x & 65535) ^ (x & 255) }
+        fn tag(x:i64)->i64 ! {} { x ^ 23130 }
+        fn main()->Unit ! {io,alloc,panic} {
+            let values:Vec<i64> =[-9223372036854775808,-1,0,255,256,9223372036854775807];
+            let out=Vec.map_in_place(Vec.map_in_place(values,mask),tag);
+            let mut i=0; while i<Vec.len(&out) { print_i64(Vec.get(&out,i)); i=i+1; }
+            let empty:Vec<i64> =[]; let empty=Vec.map_in_place(empty,tag); print_i64(Vec.len(&empty));
+        }"#,
+    );
+}
+#[test]
+fn unsupported_callbacks_preserve_effects_owning_cleanup_and_abi() {
+    agrees(
+        r#"
+        fn noisy(x:i64)->i64 ! {io,panic} { print_i64(x); x+1 }
+        fn owning(x:Box<i64>)->i64 ! {} { Box.take(x) }
+        fn main()->Unit ! {io,alloc,panic} {
+            let values:Vec<i64> =[1,2];
+            let mapped=Vec.map_in_place(values,{print_i64(99);noisy});
+            print_i64(Vec.get(&mapped,1));
+            let owners:Vec<Box<i64>> =[Box.new(4),Box.new(5)];
+            let out=Vec.map_in_place(owners,owning); print_i64(Vec.get(&out,1));
+        }"#,
+    );
+}
+#[test]
+fn erased_proof_linear_and_borrowed_programs_keep_their_contracts() {
+    agrees(
+        r#"
+        prop Approved<key:i64> { Yes:Approved<7> }
+        fn issue(key:i64,erased proof:Approved<key>,audit:i64 @[0])->Box<i64> @[1] ! {alloc,panic} {Box.new(key)}
+        fn finish(owner:Box<i64> @[1],view:&[i64])->i64 ! {panic} {Box.take(owner)+Slice.get(view,0)}
+        fn main()->Unit ! {io,alloc,panic} {
+            let owner=issue(7,Approved.Yes::<7>,123);
+            let mut values:[i64;2]=[20,30];
+            let view=&mut values[..]; Slice.set(view,0,35);
+            print_i64(finish(owner,&values[..]));
+        }"#,
+    );
+}
+#[test]
+fn non_bitwise_callbacks_and_dynamic_handlers_keep_the_fallback_path() {
+    agrees(
+        r#"
+        effect Read:i64->i64;
+        fn call(value:i64)->i64 ! {Read,panic} {perform Read(value)}
+        fn branch(x:i64)->i64 ! {panic} {if x>0 {x+1}else{0}}
+        fn main()->Unit ! {io,alloc,panic} {
+            let values:Vec<i64> =[0,1,2]; let out=Vec.map_in_place(values,branch);
+            print_i64(Vec.get(&out,2));
+            print_i64(handle Read:i64->i64 with fn(value:i64,resume:linear once fn(i64)->i64 ! {})->i64 ! {} {resume(value ^ 1)} {call(42)});
+        }"#,
+    );
+    // Grade contracts also remain unchanged under backend optimization.
+    agrees(include_str!("../../../examples/grades.kush"));
+}
+#[test]
+fn aggregate_intermediates_boolean_callbacks_and_delegating_bodies_fall_back() {
+    agrees(
+        r#"
+        struct Pair { a:i64, b:i64 }
+        fn split(x:i64)->Pair ! {} {Pair{a:x,b:x ^ 7}}
+        fn join(p:Pair)->i64 ! {} {p.a ^ p.b}
+        fn tag(x:i64)->i64 ! {} {x ^ 1}
+        fn forward(x:i64)->i64 ! {} {tag(x)}
+        fn flip(x:Bool)->Bool ! {} {!x}
+        fn main()->Unit ! {io,alloc,panic} {
+            let values:Vec<i64> = [1,2];
+            let out=Vec.map_chain_in_place(values,split,join);
+            let out=Vec.map_in_place(Vec.map_in_place(out,forward),tag);
+            print_i64(Vec.get(&out,1));
+            let flags:Vec<Bool> = [true,false];
+            let flags=Vec.map_in_place(flags,flip);
+            print_i64(if Vec.get(&flags,1){1}else{0});
+        }"#,
+    );
+}
+
+#[test]
+fn release_does_not_remove_arithmetic_or_slice_panics() {
+    for source in [
+        "fn bad(x:i64)->i64 ! {panic} {x+1} fn main()->i64 ! {alloc,panic} {let v:Vec<i64> =[9223372036854775807];let out=Vec.map_in_place(v,bad);Vec.get(&out,0)}",
+        "fn main()->i64 ! {alloc,panic} {let v:Vec<i64> =[1];let view=&v[..];Slice.get(view,2)}",
+    ] {
+        let program = executable::check(source).unwrap();
+        assert!(program.evaluate(&mut Vec::new()).is_err());
+        let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+        for (at, options) in OPTIONS.into_iter().enumerate() {
+            let binary = scratch.path().join(format!("panic-{at}"));
+            native::build_with_codegen(&program, &binary, false, &LinkSpec::default(), options)
+                .unwrap();
+            let output = Command::new(binary).output().unwrap();
+            assert!(!output.status.success(), "{options:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("panic:"));
+        }
+    }
+}
+#[test]
+fn cli_release_flags_work_for_files_projects_and_argument_forwarding() {
+    let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+    fs::write(
+        scratch.path().join("Kush.toml"),
+        "[package]\nname=\"release_cli\"\nversion=\"0.1.0\"\nentry=\"main.kush\"\n",
+    )
+    .unwrap();
+    let source = scratch.path().join("main.kush");
+    fs::write(&source,"module release_cli; use std.result.Result; fn main()->Unit ! {io,panic} {print_i64(match ENV.arg_count(){Ok(n)=>n,Err(_)=>0});}").unwrap();
+    let cli = env!("CARGO_BIN_EXE_kush");
+    for args in [
+        vec!["run", "--release", "--", "--release"],
+        vec!["run", "main.kush", "--release", "--", "--release"],
+    ] {
+        let out = Command::new(cli)
+            .args(args)
+            .current_dir(scratch.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, b"2\n");
+    }
+    for flags in [
+        vec!["--release"],
+        vec!["--opt-level", "speed", "--no-inline-scalars"],
+        vec!["--inline-scalars"],
+    ] {
+        let out = Command::new(cli)
+            .args(["build", "main.kush", "-o", "output"])
+            .args(flags)
+            .current_dir(scratch.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    for args in [
+        vec!["eval", "main.kush", "--release"],
+        vec!["build", "--opt-level", "wrong"],
+        vec!["build", "main.kush", "-o", "output", "--opt-level"],
+    ] {
+        let out = Command::new(cli)
+            .args(args)
+            .current_dir(scratch.path())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+    }
+}

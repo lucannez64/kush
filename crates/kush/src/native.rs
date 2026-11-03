@@ -2367,6 +2367,28 @@ pub fn build_cargo_static_library(manifest: &Path) -> Result<PathBuf> {
 
 /// Compile and link atomically in the output's directory. No shell expansion or
 /// user-supplied flags; a failed build leaves the previous output intact.
+/// Native optimization controls. Defaults preserve the existing fast-build path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Optimization {
+    #[default]
+    None,
+    Speed,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CodegenOptions {
+    pub optimization: Optimization,
+    pub inline_scalar_callbacks: bool,
+}
+impl CodegenOptions {
+    pub const fn release() -> Self {
+        Self {
+            optimization: Optimization::Speed,
+            inline_scalar_callbacks: true,
+        }
+    }
+}
+
 pub fn build(program: &Executable, output: &Path) -> Result<()> {
     build_with_options(program, output, false, &LinkSpec::default())
 }
@@ -2385,8 +2407,19 @@ pub fn build_with_options(
     stats: bool,
     links: &LinkSpec,
 ) -> Result<()> {
+    build_with_codegen(program, output, stats, links, CodegenOptions::default())
+}
+
+/// Build with explicit, independently selectable optimization controls.
+pub fn build_with_codegen(
+    program: &Executable,
+    output: &Path,
+    stats: bool,
+    links: &LinkSpec,
+    codegen: CodegenOptions,
+) -> Result<()> {
     links.validate()?;
-    let object = object(program)?;
+    let object = object(program, codegen)?;
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -2479,7 +2512,7 @@ impl Drop for Scratch {
     }
 }
 
-fn object(program: &Executable) -> Result<Vec<u8>> {
+fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         return Err(error(
             "the first native backend supports Linux x86-64 hosts only",
@@ -2488,6 +2521,15 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
     let entry = program.entry()?;
     let mut flags = settings::builder();
     flags.set("is_pic", "true").map_err(error)?;
+    flags
+        .set(
+            "opt_level",
+            match codegen.optimization {
+                Optimization::None => "none",
+                Optimization::Speed => "speed",
+            },
+        )
+        .map_err(error)?;
     let isa = cranelift_native::builder_with_options(false)
         .map_err(error)?
         .finish(settings::Flags::new(flags))
@@ -3088,6 +3130,7 @@ fn object(program: &Executable) -> Result<Vec<u8>> {
             ids: &ids,
             foreign_ids: &foreign_ids,
             program,
+            codegen,
             print,
             print_u64,
             print_f64,
@@ -4099,12 +4142,89 @@ struct Tracked {
     location: Option<Value>,
 }
 type Words = Vec<Value>;
+#[derive(Debug)]
+enum ScalarCallback {
+    Input,
+    Constant(i64),
+    Bitwise(Kind, Box<Self>, Box<Self>),
+}
+impl ScalarCallback {
+    fn expression(expr: &Expr, budget: &mut usize) -> Option<Self> {
+        if *budget == 0 || expr.ty != Type::I64 || expr.resource.is_some() {
+            return None;
+        }
+        *budget -= 1;
+        match &expr.kind {
+            ExprKind::Local(0) | ExprKind::Peek(0) => Some(Self::Input),
+            ExprKind::Constant(value) => Some(Self::Constant(*value)),
+            ExprKind::Binary(op @ (Kind::Amp | Kind::Pipe | Kind::Caret), left, right) => {
+                Some(Self::Bitwise(
+                    op.clone(),
+                    Box::new(Self::expression(left, budget)?),
+                    Box::new(Self::expression(right, budget)?),
+                ))
+            }
+            _ => None,
+        }
+    }
+    fn callback(program: &Executable, callback: &Expr) -> Option<Self> {
+        let ExprKind::FnValue { function, captures } = &callback.kind else {
+            return None;
+        };
+        let Type::Fn(signature) = callback.ty else {
+            return None;
+        };
+        let signature = &program.function_types[signature];
+        let function = &program.functions[*function];
+        if !captures.is_empty()
+            || signature.effects != 0
+            || signature.parameters != [Type::I64]
+            || signature.result != Type::I64
+            || signature.once
+            || signature.linear
+            || signature.parameter_erased(0)
+            || signature.result_erased()
+            || function.closure.is_some()
+            || function.parameters != 1
+            || function.locals.len() != 1
+            || function.locals[0].ty != Type::I64
+            || function.locals[0].grade.is_some_and(Grade::is_zero)
+            || function.result_grade.is_some_and(Grade::is_zero)
+            || function.locals[0].pinned
+            || function.locals[0].mutable
+            || function.result != Type::I64
+            || !function.resources.is_empty()
+            || !function.body.statements.is_empty()
+        {
+            return None;
+        }
+        Self::expression(function.body.tail.as_deref()?, &mut 32)
+    }
+    fn emit(&self, builder: &mut FunctionBuilder<'_>, input: Value) -> Value {
+        match self {
+            Self::Input => input,
+            Self::Constant(value) => builder.ins().iconst(I64, *value),
+            Self::Bitwise(op, left, right) => {
+                let left = left.emit(builder, input);
+                let right = right.emit(builder, input);
+                match op {
+                    Kind::Amp => builder.ins().band(left, right),
+                    Kind::Pipe => builder.ins().bor(left, right),
+                    Kind::Caret => builder.ins().bxor(left, right),
+                    _ => unreachable!("validated scalar callback operator"),
+                }
+            }
+        }
+    }
+}
+
 struct Generator<'a, 'b> {
     builder: FunctionBuilder<'a>,
     module: &'b mut ObjectModule,
     ids: &'b [FuncId],
     foreign_ids: &'b [Option<FuncId>],
     program: &'b Executable,
+    codegen: CodegenOptions,
     print: FuncId,
     print_u64: FuncId,
     print_f64: FuncId,
@@ -6763,6 +6883,15 @@ impl Generator<'_, '_> {
                 grow,
             } => {
                 let mut handle = lower!(self.scalar(vector));
+                let plans = callbacks
+                    .iter()
+                    .map(|callback| {
+                        self.codegen
+                            .inline_scalar_callbacks
+                            .then(|| ScalarCallback::callback(self.program, callback))
+                            .flatten()
+                    })
+                    .collect::<Vec<_>>();
                 let mut codes = Vec::with_capacity(callbacks.len());
                 for callback in callbacks {
                     codes.push(lower!(self.scalar(callback)));
@@ -6814,7 +6943,13 @@ impl Generator<'_, '_> {
                 // currently in the slot still has the source width until the
                 // first callback consumes it.
                 let mut current = self.load_words(address, 24, source_width);
-                for (code, callback) in codes.iter().zip(callbacks.iter()) {
+                for ((code, callback), plan) in codes.iter().zip(callbacks.iter()).zip(&plans) {
+                    if let Some(plan) = plan
+                        && current.len() == 1
+                    {
+                        current = vec![plan.emit(&mut self.builder, current[0])];
+                        continue;
+                    }
                     let Type::Fn(id) = callback.ty else {
                         unreachable!("checked map callback")
                     };
@@ -8736,5 +8871,70 @@ fn has_bindings(p: &Pattern) -> bool {
             ..
         } => rest_binding.is_some() || prefix.iter().any(has_bindings),
         _ => false,
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod scalar_inline_codegen_tests {
+    use super::*;
+
+    #[test]
+    fn map_callback_inlining_removes_machine_calls_without_backend_optimization() {
+        if Command::new("objdump").arg("--version").output().is_err() {
+            eprintln!("objdump unavailable; machine-code inspection skipped");
+            return;
+        }
+        let program = ex::check("fn first(x:i64)->i64 ! {} {x & 255} fn second(x:i64)->i64 ! {} {x ^ 7} fn mapped(v:Vec<i64>)->Vec<i64> ! {} {Vec.map_in_place(Vec.map_in_place(v,first),second)} fn main()->i64 ! {alloc,panic} {let v:Vec<i64> = [1];Vec.get(&mapped(v),0)}").unwrap();
+        let index = program
+            .functions
+            .iter()
+            .position(|function| function.name.rsplit('.').next() == Some("mapped"))
+            .unwrap();
+        let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+        let mut calls = Vec::new();
+        for enabled in [false, true] {
+            let path = scratch.path().join(format!("inline-{enabled}.o"));
+            fs::write(
+                &path,
+                object(
+                    &program,
+                    CodegenOptions {
+                        optimization: Optimization::None,
+                        inline_scalar_callbacks: enabled,
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let output = Command::new("objdump")
+                .args([
+                    "-dr",
+                    "--no-show-raw-insn",
+                    &format!("--disassemble=kush_fn_{index}"),
+                ])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let assembly = String::from_utf8(output.stdout).unwrap();
+            assert!(
+                assembly.contains(&format!("<kush_fn_{index}>:")),
+                "{assembly}"
+            );
+            calls.push(
+                assembly
+                    .lines()
+                    .filter(|line| {
+                        line.split_whitespace()
+                            .nth(1)
+                            .is_some_and(|word| word.starts_with("call"))
+                    })
+                    .count(),
+            );
+        }
+        assert!(
+            calls[0] >= calls[1] + 2,
+            "callback calls were not removed: {calls:?}"
+        );
     }
 }

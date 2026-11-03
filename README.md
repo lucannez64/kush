@@ -234,6 +234,9 @@ linear completion ticket, erased proof, borrowing and automatic fusion with
 safe Rust compiled using Cranelift. It includes reproducible timings, process
 RSS, separate allocation diagnostics, misuse fixtures, and a measured laptop
 snapshot with explicit fairness limits.
+Native build/run now also accept `--release` for Cranelift speed optimization
+and restricted pure-scalar map callback inlining; see
+[native optimization controls](docs/native-optimizations.md).
 
 The standalone [project demo](examples/project-demo) exercises a local module, a
 local dependency, tests, and formatting.

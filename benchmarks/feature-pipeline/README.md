@@ -218,3 +218,19 @@ performance superiority claim is made.
 Sources for backend selection:
 [Rust codegen-backend flag](https://doc.rust-lang.org/beta/unstable-book/compiler-flags/codegen-backend.html),
 [rustc_codegen_cranelift](https://github.com/rust-lang/rustc_codegen_cranelift).
+
+
+## Release optimization study
+
+The original snapshot above uses Kush's unchanged default build mode. The new
+native release mode can be measured independently:
+
+```sh
+python3 benchmarks/feature-pipeline/optimize.py --kush /path/to/new/kush
+```
+
+This builds default, speed-only, inline-only and release Kush binaries, plus
+Rust's manual/iterator Cranelift controls. Separate clock-probe binaries measure
+initialization, transformation and checksum. They are excluded from headline
+end-to-end samples. See [native optimizations](../../docs/native-optimizations.md)
+for exact eligibility, API/CLI controls, validation and remaining limitations.
