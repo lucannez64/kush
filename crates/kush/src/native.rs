@@ -498,7 +498,7 @@ void *kush_try_grow(void *payload, uint64_t bytes) {
    full positive capacity word. Size classes, not libc usable-size guesses,
    preserve deterministic retained-capacity/refusal behavior after map changes. */
 #define KUSH_BUFFER_RAW UINT64_C(0x8000000000000000)
-#define KUSH_BUFFER_CAP_MASK UINT64_C(0x00ffffffffffffff)
+#define KUSH_BUFFER_CAP_MASK UINT64_C(0xffff)
 static uint64_t kush_buffer_capacity(const void *payload) {
     uint64_t word = ((const uint64_t *)payload)[1];
     return (word & KUSH_BUFFER_RAW) ? word & KUSH_BUFFER_CAP_MASK : word;
@@ -7362,7 +7362,13 @@ impl Generator<'_, '_> {
                                     .ins()
                                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
                         }
-                        self.runtime_call(self.bytes_ops[op], &values)
+                        if matches!(op, BytesOp::Push | BytesOp::PushReserved)
+                            && self.codegen.optimization == Optimization::Speed
+                        {
+                            self.push_bytes(values[0], values[1], *op)
+                        } else {
+                            self.runtime_call(self.bytes_ops[op], &values)
+                        }
                     }
                     Target::String(op) => {
                         if op.borrowed() {
@@ -8039,6 +8045,60 @@ impl Generator<'_, '_> {
             }
         }
     }
+    /// Decode ordinary buffer capacity. Headerless buffers have at most 1008
+    /// data bytes, so their logical capacity fits in 16 bits. Header-bearing
+    /// buffers retain the complete positive word, including large capacities.
+    fn buffer_capacity(&mut self, handle: Value) -> Value {
+        let word = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), handle, 8);
+        let raw = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::SignedLessThan, word, 0);
+        let decoded = self.builder.ins().band_imm_s(word, 0xffff);
+        self.builder.ins().select(raw, decoded, word)
+    }
+    /// Release-mode byte append avoids a C call when capacity is available.
+    /// The unsigned range check also rejects negative values. The cold helper
+    /// keeps all existing growth, overflow and reserved-capacity failures.
+    fn push_bytes(&mut self, handle: Value, value: Value, op: BytesOp) -> Value {
+        let invalid = self
+            .builder
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedGreaterThan, value, 255);
+        self.guard(invalid);
+        let length = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), handle, 0);
+        let capacity = self.buffer_capacity(handle);
+        let room = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, length, capacity);
+        let fast = self.builder.create_block();
+        let slow = self.builder.create_block();
+        let join = self.builder.create_block();
+        self.builder.append_block_param(join, I64);
+        self.builder.ins().brif(room, fast, &[], slow, &[]);
+        self.builder.switch_to_block(fast);
+        let address = self.builder.ins().iadd(handle, length);
+        self.builder
+            .ins()
+            .istore8(ir::MemFlagsData::new(), value, address, 16);
+        let next = self.builder.ins().iadd_imm_s(length, 1);
+        self.builder
+            .ins()
+            .store(ir::MemFlagsData::new(), next, handle, 0);
+        self.jump(join, &[handle]);
+        self.builder.switch_to_block(slow);
+        let grown = self.runtime_call(self.bytes_ops[&op], &[handle, value]);
+        self.jump(join, &[grown]);
+        self.builder.switch_to_block(join);
+        self.builder.block_params(join)[0]
+    }
     /// A checked vector has `length <= capacity` and an allocation large
     /// enough for every capacity slot. The fast arm neither grows nor changes
     /// ownership; the original helper handles all capacity/overflow cases.
@@ -8057,16 +8117,7 @@ impl Generator<'_, '_> {
             .builder
             .ins()
             .load(I64, ir::MemFlagsData::new(), handle, 0);
-        let capacity = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), handle, 8);
-        let raw = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::SignedLessThan, capacity, 0);
-        let decoded = self.builder.ins().band_imm_s(capacity, 0x00ffffffffffffff);
-        let capacity = self.builder.ins().select(raw, decoded, capacity);
+        let capacity = self.buffer_capacity(handle);
         let room = self
             .builder
             .ins()

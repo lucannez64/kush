@@ -7,7 +7,7 @@ one allocation header per qualifying buffer, without removing bounds checks,
 changing public logical capacity, or relying on libc's incidental usable size.
 
 The capacity word uses its high byte for a marker and a 16-byte allocation
-size class (1 through 64). Its remaining bits hold logical capacity. Small
+size class (1 through 64). Its low 16 bits hold logical capacity; the intervening bits stay reserved. Small
 buffers cannot approach that capacity-bit limit: their physical allocation
 already bounds the logical value. Larger buffers retain the original header
 and their complete positive capacity word, so large supported capacities are
@@ -34,6 +34,10 @@ Every runtime capacity read decodes the logical value. The release-mode
 blocks and the Rust/C bridge keep the same data offsets and opaque handles.
 User-allocator container descriptors (`AllocBox`/`AllocVec`) have their own
 protocol and remain header-bearing.
+
+Release byte appends use an inline, range-checked fast path when capacity
+is available; the original runtime helper handles cold growth and full-buffer
+failures. Vector appends share the compact capacity decoder.
 
 The tradeoff is a few instructions for decoding and separate pool families.
 Some mixed allocation workloads may get fewer cross-type pool hits. Larger
