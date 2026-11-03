@@ -270,3 +270,44 @@ Full Boat gate at `4d183b8`: **1123 workspace tests**, formatting, and Clippy
 pass. The sandbox stopped with its snapshot preserved.
 Log: `/tmp/kush-boat-lsp-review-gate.log` (machine-local). Host
 timeout/persistence work remains outstanding.
+
+## Project-workflow and host-surface reviews
+
+Two independent reviews (project workflow; interop and host APIs, including the
+generated C runtime and both host backends) each returned concrete findings;
+corrective commits followed, each with its own regression tests.
+
+The interop review produced commit `c0f874f`: the native poll loops re-check
+the shared deadline after the capped poll window, so budgets longer than a
+minute no longer expire spuriously; deadlines saturate instead of wrapping;
+the native TCP host is text (`EINVAL` on non-UTF-8) like the evaluator; a
+failed close no longer hides write errors; the evaluator reports overflow
+before a concurrent timeout, stops waiting on a reader error instead of
+hanging, and seeds an empty address resolution like native. Generated
+resource shims check the out slot before boxing, bindgen rejects hardlinked
+output pairs, and the todo app removes a failed exclusive temp file. The
+shared-budget TCP contract is documented as one budget across connect, send,
+and receive. `FS.write_exclusive` (`1d85a84`) closes the todo app's atomic
+replacement against planted temporary files with `0600` exclusive creation.
+
+The project-workflow review produced commit `445014e`: `Kush.lock` writes
+refuse a symlink and are atomic; `kush new` creates directories without
+following a racing symlink and removes only its own scaffold on failure;
+native `library-paths`/`cargo-manifests` must resolve inside the package and
+path-like `libraries` must exist; `kush check` validates native link specs
+before writing a lock; a transitive dependency claiming the root package's
+name fails with the two-provider diagnostic; test targets always require
+their declared module header; `MAX_SOURCE_FILES` bounds the project instead
+of a single package; `--manifest-path` accepts directories; the formatter
+refuses symlinks and writes through an exclusive temp file plus rename; and
+test artifacts install under process-unique temporaries.
+
+Full Boat gate at `445014e`: **1133 workspace tests**, formatting, and Clippy
+pass. The sandbox stopped with its snapshot preserved.
+Log: `/tmp/kush-boat-project-review-gate.log` (machine-local).
+
+Still unresolved: fuller editor features beyond hover/document
+symbols/semantic tokens (completion, rename, references, incremental sync),
+ENV duplicate-variance and monotonic-clock absolute-value documentation gaps,
+BINDGEN output-pair rollback (documented as regenerate-on-failure), and the
+remaining documented readiness limits.
