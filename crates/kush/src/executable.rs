@@ -1472,6 +1472,7 @@ pub(crate) enum Pattern {
     Variant {
         tag: usize,
         tagged: bool,
+        niche: Option<crate::runtime_types::Niche>,
         fields: Vec<(usize, Pattern)>,
     },
     /// Match one normalized union alternative and apply `inner` to the
@@ -9387,6 +9388,9 @@ impl<'a> Functions<'a> {
             }
             None => None,
         };
+        for ty in parameters.iter().chain([&result]) {
+            crate::runtime_types::reject_optional_reference_boundary(types, *ty, f.result.span)?;
+        }
         // An explicit result lifetime need not repeat the caller's declared
         // outlives bounds: when the body returns a parameter borrow that does
         // not already outlive the result, infer that relation. Every returned
@@ -13356,6 +13360,7 @@ impl Checker<'_, '_> {
                     Pattern::Variant {
                         tag: 0,
                         tagged: true,
+                        niche: None,
                         fields: vec![
                             (1, Pattern::Bind(updated)),
                             (1 + object_width, Pattern::Bind(extracted)),
@@ -13391,6 +13396,7 @@ impl Checker<'_, '_> {
                     Pattern::Variant {
                         tag: 0,
                         tagged: true,
+                        niche: None,
                         fields: vec![
                             (1, Pattern::Bind(updated)),
                             (1 + object_width, Pattern::Bind(extracted)),
@@ -13425,6 +13431,7 @@ impl Checker<'_, '_> {
                     Pattern::Variant {
                         tag: 0,
                         tagged: true,
+                        niche: None,
                         fields: vec![
                             (1, Pattern::Any),
                             (1 + object_width, Pattern::Bind(extracted)),
@@ -19902,7 +19909,7 @@ impl Checker<'_, '_> {
                             if mask & (1 << tag) == 0 {
                                 coverage.add(&Pattern::Variant {
                                     tag,
-                                    tagged: true,
+                                    tagged: true, niche: None,
                                     fields: variant.fields.iter().map(|_| (0, Pattern::Any)).collect(),
                                 });
                             }
@@ -20487,6 +20494,11 @@ impl Checker<'_, '_> {
         candidates.dedup();
         let mut lambda_result_lifetime = None;
         let mut borrow_result_lifetime = None;
+        crate::runtime_types::reject_optional_reference_boundary(
+            self.types,
+            result,
+            lambda.result.span,
+        )?;
         let mut borrow_result_leaves: Vec<crate::runtime_types::BorrowLeaf> = Vec::new();
         let mut capture_result = crate::runtime_types::CaptureResultSig::default();
         let mut capture_result_used = false;
@@ -25823,6 +25835,7 @@ impl Checker<'_, '_> {
         Ok(Pattern::Variant {
             tag: 0,
             tagged: self.types.enums[layout].tag_words() != 0,
+            niche: self.types.enums[layout].niche(),
             fields: checked,
         })
     }
@@ -28661,7 +28674,7 @@ impl Checker<'_, '_> {
                     ));
                 }
                 let inner = Pattern::Variant {
-                    tag: 0, tagged: c.types.enums[layout].tag_words() != 0,
+                    tag: 0, tagged: c.types.enums[layout].tag_words() != 0, niche: c.types.enums[layout].niche(),
                     fields: checked,
                 };
                 if narrowed {
@@ -28841,6 +28854,7 @@ impl Checker<'_, '_> {
                 return Ok(Pattern::Variant {
                     tag,
                     tagged: c.types.enums[index].tag_words() != 0,
+                    niche: c.types.enums[index].niche(),
                     fields: checked,
                 });
             }
@@ -28936,7 +28950,7 @@ impl Checker<'_, '_> {
                         c.pattern(part, element, bindings)?,
                     ));
                 }
-                return Ok(Pattern::Variant { tag: 0, tagged: true, fields });
+                return Ok(Pattern::Variant { tag: 0, tagged: true, niche: None, fields });
             }
             if let ast::PatternKind::Record { fields, .. } = &pattern.kind {
                 return c.record_pattern(pattern, fields, ty, bindings);
@@ -29000,7 +29014,7 @@ impl Checker<'_, '_> {
                         fields.push((offset, c.pattern(value, element, bindings)?));
                         offset += c.types.width(element);
                     }
-                    Ok(Pattern::Variant { tag: 0, tagged: true, fields })
+                    Ok(Pattern::Variant { tag: 0, tagged: true, niche: None, fields })
                 }
                 ast::PatternKind::Tuple(values) if values.is_empty() => {
                     c.expect(ty, Type::Unit, pattern.span)?;

@@ -254,3 +254,8 @@ Bounded [result-grade inference and result aliases](docs/result-grade-inference.
 are available: an expected `@[1]` arrow can determine a bare result-only grade
 parameter. Parameter-grade inference and a general grade solver remain outside
 this subset.
+
+Native [enum niche encoding](docs/niche-layouts.md) stores eligible optional
+boxes, booleans, characters, and lexical references in one 64-bit word. General
+borrowed enum signatures and nested/multi-variant niche packing remain outside
+this milestone. See [the runnable example](examples/niches.kush).

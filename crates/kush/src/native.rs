@@ -3893,7 +3893,17 @@ fn synthesize_drops(
                     for (tag, variant) in program.enums[index].variants.iter().enumerate() {
                         let hit = builder.create_block();
                         let next = builder.create_block();
-                        let condition = if program.enums[index].tag_words() == 0 {
+                        let condition = if let Some(niche) = program.enums[index].niche() {
+                            builder.ins().icmp_imm_s(
+                                if tag == niche.empty_tag {
+                                    IntCC::Equal
+                                } else {
+                                    IntCC::NotEqual
+                                },
+                                args[0],
+                                niche.sentinel,
+                            )
+                        } else if program.enums[index].tag_words() == 0 {
                             builder.ins().iconst(ir::types::I8, 1)
                         } else {
                             builder.ins().icmp_imm_s(IntCC::Equal, args[0], tag as i64)
@@ -4503,16 +4513,7 @@ impl Generator<'_, '_> {
         let word = values[0];
         let option =
             |g: &mut Self, present: Value, payload: Value, some: usize, none: usize| -> Words {
-                let some_tag = g.constant(some as i64);
-                let none_tag = g.constant(none as i64);
-                let tag = g.builder.ins().select(present, some_tag, none_tag);
-                let zero = g.constant(0);
-                let payload = g.builder.ins().select(present, payload, zero);
-                let mut words = vec![tag, payload];
-                while words.len() < g.program.width(ty) {
-                    words.push(g.constant(0));
-                }
-                words
+                g.optional_words(ty, present, &[payload], some, none)
             };
         match op {
             FloatOp::Abs(kind) => {
@@ -6684,21 +6685,14 @@ impl Generator<'_, '_> {
                 tag,
                 fields,
             } => {
-                let mut values = if self.program.enums[*enum_id].tag_words() == 0 {
-                    Vec::new()
-                } else {
-                    vec![self.constant(*tag as i64)]
-                };
+                let mut payload = Vec::new();
                 for field in fields {
-                    values.extend(lower!(self.expr(field)));
+                    payload.extend(lower!(self.expr(field)));
                 }
                 for field in fields {
                     self.consume(field);
                 }
-                while values.len() < self.program.enums[*enum_id].words {
-                    values.push(self.constant(0));
-                }
-                return Some(values);
+                return Some(self.encode_variant(Type::Enum(*enum_id), *tag, &payload));
             }
             ExprKind::Try {
                 value,
@@ -7119,19 +7113,12 @@ impl Generator<'_, '_> {
                     .brif(condition, completed, &[], cancelled, &[]);
                 self.builder.switch_to_block(completed);
                 let payload = self.load_words(out, 0, width);
-                let mut values = vec![self.constant(exit.completed_tag as i64)];
-                values.extend(payload);
-                while values.len() < self.program.width(exit.result) {
-                    values.push(self.constant(0));
-                }
+                let values = self.encode_variant(exit.result, exit.completed_tag, &payload);
                 self.jump(join, &values);
                 self.builder.switch_to_block(cancelled);
                 let payload = self.load_words(out, 0, width);
                 self.drop_value(exit.payload, &payload);
-                let mut values = vec![self.constant(exit.cancelled_tag as i64)];
-                while values.len() < self.program.width(exit.result) {
-                    values.push(self.constant(0));
-                }
+                let values = self.encode_variant(exit.result, exit.cancelled_tag, &[]);
                 self.jump(join, &values);
                 self.builder.switch_to_block(join);
                 return Some(self.builder.block_params(join).to_vec());
@@ -7264,17 +7251,13 @@ impl Generator<'_, '_> {
                                     codepoint,
                                     0,
                                 );
-                                let some = self.constant(*some_tag as i64);
-                                let none = self.constant(*none_tag as i64);
-                                let tag = self.builder.ins().select(present, some, none);
-                                let zero = self.constant(0);
-                                let payload = self.builder.ins().select(present, codepoint, zero);
-                                let width = self.program.width(expr.ty);
-                                let mut words = vec![tag, payload];
-                                while words.len() < width {
-                                    words.push(zero);
-                                }
-                                return Some(words);
+                                return Some(self.optional_words(
+                                    expr.ty,
+                                    present,
+                                    &[codepoint],
+                                    *some_tag,
+                                    *none_tag,
+                                ));
                             }
                             StringOp::FromUtf8 { ok_tag, err_tag } => {
                                 let valid = self.runtime_call(self.string_validate, &values);
@@ -7292,7 +7275,7 @@ impl Generator<'_, '_> {
                             }
                         }
                     }
-                    Target::Str(op) => return Some(self.str_call(*op, values)),
+                    Target::Str(op) => return Some(self.str_call(*op, values, expr.ty)),
                     Target::Foreign(index) => return self.foreign_call(*index, &values),
                     Target::Function(index)
                     | Target::ObjectFunction {
@@ -7648,7 +7631,44 @@ impl Generator<'_, '_> {
         let invalid = self.builder.ins().bor(invalid, beyond);
         self.guard(invalid);
     }
-    fn str_call(&mut self, op: StrOp, values: Words) -> Words {
+    fn encode_variant(&mut self, ty: Type, tag: usize, payload: &[Value]) -> Words {
+        let layout = ty.layout().expect("enum constructor layout");
+        let definition = &self.program.enums[layout];
+        if let Some(niche) = definition.niche() {
+            return if tag == niche.empty_tag {
+                vec![self.constant(niche.sentinel)]
+            } else {
+                debug_assert_eq!(tag, niche.payload_tag);
+                debug_assert_eq!(payload.len(), 1);
+                payload.to_vec()
+            };
+        }
+        let mut words = Vec::with_capacity(definition.words);
+        if definition.tag_words() != 0 {
+            words.push(self.constant(tag as i64));
+        }
+        words.extend_from_slice(payload);
+        while words.len() < self.program.width(ty) {
+            words.push(self.constant(0));
+        }
+        words
+    }
+    fn optional_words(
+        &mut self,
+        ty: Type,
+        present: Value,
+        payload: &[Value],
+        some: usize,
+        none: usize,
+    ) -> Words {
+        let some = self.encode_variant(ty, some, payload);
+        let none = self.encode_variant(ty, none, &[]);
+        some.into_iter()
+            .zip(none)
+            .map(|(some, none)| self.builder.ins().select(present, some, none))
+            .collect()
+    }
+    fn str_call(&mut self, op: StrOp, values: Words, ty: Type) -> Words {
         let (pointer, length) = (values[0], values[1]);
         match op {
             StrOp::Len => vec![length],
@@ -7663,12 +7683,7 @@ impl Generator<'_, '_> {
                     self.builder
                         .ins()
                         .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, codepoint, 0);
-                let some = self.constant(some_tag as i64);
-                let none = self.constant(none_tag as i64);
-                let tag = self.builder.ins().select(present, some, none);
-                let zero = self.constant(0);
-                let payload = self.builder.ins().select(present, codepoint, zero);
-                vec![tag, payload]
+                self.optional_words(ty, present, &[codepoint], some_tag, none_tag)
             }
             StrOp::ToString => {
                 vec![self.runtime_call(self.str_to_string, &[pointer, length])]
@@ -8176,23 +8191,10 @@ impl Generator<'_, '_> {
                 self.builder.switch_to_block(loaded);
                 self.builder.block_params(loaded).to_vec()
             };
-            let mut some_values = Vec::with_capacity(option_width);
-            some_values.push(self.constant(some_tag as i64));
-            some_values.extend(payload);
-            while some_values.len() < option_width {
-                some_values.push(self.constant(0));
-            }
+            let some_values = self.encode_variant(Type::Enum(option), some_tag, &payload);
             self.jump(join, &some_values);
             self.builder.switch_to_block(none);
-            let none_values: Vec<Value> = (0..option_width)
-                .map(|word| {
-                    if word == 0 {
-                        self.constant(none_tag as i64)
-                    } else {
-                        self.constant(0)
-                    }
-                })
-                .collect();
+            let none_values = self.encode_variant(Type::Enum(option), none_tag, &[]);
             self.jump(join, &none_values);
             self.builder.switch_to_block(join);
             return self.builder.block_params(join).to_vec();
@@ -8736,16 +8738,7 @@ impl Generator<'_, '_> {
         };
         let option =
             |g: &mut Self, present: Value, payload: Value, some: usize, none: usize| -> Words {
-                let some_tag = g.constant(some as i64);
-                let none_tag = g.constant(none as i64);
-                let tag = g.builder.ins().select(present, some_tag, none_tag);
-                let zero = g.constant(0);
-                let payload = g.builder.ins().select(present, payload, zero);
-                let mut words = vec![tag, payload];
-                while words.len() < g.program.width(ty) {
-                    words.push(g.constant(0));
-                }
-                words
+                g.optional_words(ty, present, &[payload], some, none)
             };
         let a = values[0];
         match op {
@@ -8866,8 +8859,19 @@ impl Generator<'_, '_> {
                 tag,
                 fields,
                 tagged,
+                niche,
             } => {
-                let mut result = if *tagged {
+                let mut result = if let Some(niche) = niche {
+                    self.builder.ins().icmp_imm_s(
+                        if *tag == niche.empty_tag {
+                            IntCC::Equal
+                        } else {
+                            IntCC::NotEqual
+                        },
+                        values[0],
+                        niche.sentinel,
+                    )
+                } else if *tagged {
                     self.builder
                         .ins()
                         .icmp_imm_s(IntCC::Equal, values[0], *tag as i64)

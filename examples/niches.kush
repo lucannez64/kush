@@ -1,0 +1,22 @@
+use std.option.Option;
+struct Point { x: i64 }
+fn owned(yes: Bool) -> Option<Box<i64>> ! {alloc, panic} {
+    if yes { Option.Some(Box.new(42)) } else { Option.None }
+}
+fn main() -> Unit ! {io, alloc, panic} {
+    match owned(true) {
+        Option.Some(value) => print_i64(Box.take(value)),
+        Option.None => print_i64(0),
+    }
+    let point = Point { x: 42 };
+    let reference: Option<&Point> = Option.Some(&point);
+    match reference {
+        Option.Some(value) => print_i64(value.x),
+        Option.None => print_i64(0),
+    }
+    let character = Char.from_code(65);
+    match character {
+        Option.Some(value) => print_int(Char.code(value)),
+        Option.None => print_i64(0),
+    }
+}

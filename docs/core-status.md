@@ -463,3 +463,12 @@ denied, including native/reference agreement for every positive case in
 `tests/borrowing_extensions.rs`. This sub-milestone ran locally under the shared
 Cargo cache; an integrated Boat gate remains for the parent milestone. See
 [expanded borrowing contracts](borrowing-extensions.md).
+
+## Native enum niche encoding
+
+Two-variant enums with one empty variant and one `Box<T>`, `Bool`, `Char`,
+`&T` or `&mut T` payload use one native word. Construction, matching, cleanup
+and builtin option/task producers share the encoding. Optional references
+are lexical capability carriers; signatures and declared record fields that
+contain them are explicit rejections until named enum lifetime provenance is
+implemented. See [niche layouts](niche-layouts.md) for the exact scope.

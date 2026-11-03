@@ -552,6 +552,12 @@ fn leaves_of(
         path: &mut Vec<usize>,
         out: &mut Vec<crate::runtime_types::BorrowLeaf>,
     ) {
+        if let Some(id) = ty.layout()
+            && let Some(reference) = enums[id].optional_reference()
+        {
+            go(enums, pointees, labels, reference, None, path, out);
+            return;
+        }
         match ty {
             Type::Slice(_) => out.push(crate::runtime_types::BorrowLeaf {
                 path: path.clone(),
@@ -2428,7 +2434,18 @@ impl Checker<'_> {
                     self.acquire_record(*slot, provenance.clone(), splits);
                 }
             }
-            Pattern::Variant { fields, .. } => {
+            Pattern::Variant { tag, fields, .. } => {
+                if let Some(id) = ty.layout()
+                    && let Some(reference) = self.enums[id].optional_reference()
+                {
+                    let niche = self.enums[id].niche().expect("optional reference niche");
+                    if *tag == niche.payload_tag {
+                        for (_, inner) in fields {
+                            self.bind_pattern_provenance(inner, reference, provenance)?;
+                        }
+                    }
+                    return Ok(());
+                }
                 for (offset, inner) in fields {
                     let Some(index) = self.field_index(ty, *offset) else {
                         continue;
@@ -5540,6 +5557,19 @@ impl Checker<'_> {
                 }
                 if self.enums[*enum_id].record {
                     let provenance = self.construct_record_provenance(*enum_id, fields)?;
+                    self.construct_records.insert(expr_ptr, provenance);
+                } else if self.enums[*enum_id].optional_reference().is_some() {
+                    let mut provenance = RecordProvenance::default();
+                    if let Some(field) = fields.first() {
+                        let loan = self.view_loan(field);
+                        if loan.origins.is_empty() {
+                            return Err(Diagnostic::new(
+                                field.span,
+                                "optional reference payload has no checked capability provenance",
+                            ));
+                        }
+                        provenance.leaves.insert(Vec::new(), loan);
+                    }
                     self.construct_records.insert(expr_ptr, provenance);
                 }
             }

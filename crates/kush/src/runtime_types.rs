@@ -105,11 +105,52 @@ pub(crate) struct Enum {
     /// and the call count, not the foreign implementation's memory safety.
     pub foreign: Option<ForeignResource>,
 }
+/// One empty variant is represented by an invalid one-word payload value.
+/// The populated variant retains the payload's ordinary representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Niche {
+    pub payload_tag: usize,
+    pub empty_tag: usize,
+    pub sentinel: i64,
+}
 impl Enum {
+    /// Borrowed optional references are lexical carriers with one root leaf.
+    pub(crate) fn optional_reference(&self) -> Option<Type> {
+        let niche = self.niche()?;
+        let payload = self.variants[niche.payload_tag].fields[0];
+        payload.is_ref().then_some(payload)
+    }
+    pub(crate) fn niche(&self) -> Option<Niche> {
+        if self.record || self.foreign.is_some() || self.variants.len() != 2 {
+            return None;
+        }
+        let empty_tag = self
+            .variants
+            .iter()
+            .position(|variant| variant.fields.is_empty())?;
+        let payload_tag = 1 - empty_tag;
+        let [payload] = self.variants[payload_tag].fields.as_slice() else {
+            return None;
+        };
+        let sentinel = match payload {
+            Type::Box(_) | Type::Ref(_) | Type::RefMut(_) => 0,
+            Type::Bool => 2,
+            Type::Char => 0x110000,
+            _ => return None,
+        };
+        Some(Niche {
+            payload_tag,
+            empty_tag,
+            sentinel,
+        })
+    }
     /// Physical prefix for this layout. Nonempty nominal structs have exactly
     /// one constructor and need no discriminator. Empty structs keep their
     /// existing one-word unit representation; tuples/rows/arrays keep their ABI.
     pub(crate) fn tag_words(&self) -> usize {
+        if self.niche().is_some() {
+            return 0;
+        }
         usize::from(
             !(self.record
                 && !self.tuple
@@ -1894,6 +1935,7 @@ impl<'a> Types<'a> {
                     ));
                 }
                 let ty = self.lower(inner, substitution, depth + 1)?;
+                reject_optional_reference_boundary(self, ty, parameter.ty.span)?;
                 if matches!(ty, Type::Never) {
                     return Err(Diagnostic::new(
                         parameter.ty.span,
@@ -1988,6 +2030,7 @@ impl<'a> Types<'a> {
                 }
             }
             let mut result_lifetime = None;
+            reject_optional_reference_boundary(self, result, result_ast.span)?;
             let mut result_leaves: Vec<BorrowLeaf> = Vec::new();
             // Every input lifetime that can supply a borrowed slice result:
             // explicit slice parameters and borrowed record field leaves.
@@ -3600,6 +3643,7 @@ impl<'a> Types<'a> {
                 let mut types = Vec::new();
                 for field in fields {
                     let ty = self.lower(&field.ty, &substitution, 0).map(Type::full)?;
+                    reject_optional_reference_boundary(self, ty, field.span)?;
                     let direct = match &field.ty.kind {
                         ast::TypeKind::Borrow { lifetime, .. } => {
                             let Some(name) = lifetime else {
@@ -3798,10 +3842,18 @@ impl<'a> Types<'a> {
                     && cancelled.is_some_and(|index| {
                         !variants[index].tuple && variants[index].fields.is_empty()
                     });
-                if !conventional {
+                let optional_reference = def.name != "TaskExit"
+                    && variants.len() == 2
+                    && variants.iter().filter(|v| v.fields.is_empty()).count() == 1
+                    && variants
+                        .iter()
+                        .filter(|v| v.fields.len() == 1 && v.fields[0].is_ref())
+                        .count()
+                        == 1;
+                if !conventional && !optional_reference {
                     return Err(Diagnostic::new(
                         span,
-                        "enums cannot store borrowed references or slice views (or borrowed records); only TaskExit<T> may carry a borrowed task result, and only Task.join produces it",
+                        "enums cannot store borrowed references or slice views (or borrowed records); only TaskExit<T> may carry a borrowed task result, and lexical optional references may wrap one direct reference",
                     ));
                 }
             }
@@ -5187,6 +5239,12 @@ pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Vec<BorrowLeaf> {
         path: &mut Vec<usize>,
         out: &mut Vec<BorrowLeaf>,
     ) {
+        if let Some(id) = ty.layout()
+            && let Some(reference) = types.enums[id].optional_reference()
+        {
+            go(types, reference, None, path, out);
+            return;
+        }
         match ty {
             Type::Slice(_) => out.push(BorrowLeaf {
                 path: path.clone(),
@@ -5497,5 +5555,97 @@ fn arrow_explicit_lifetime(ty: &ast::Type, declared: &BTreeSet<String>) -> Resul
             ),
         )),
         None => Ok(None),
+    }
+}
+
+/// Optional reference enums currently have lexical provenance, not named
+/// lifetime contracts across signatures or declared record fields.
+pub(crate) fn reject_optional_reference_boundary(
+    types: &Types<'_>,
+    ty: Type,
+    span: Span,
+) -> Result<()> {
+    fn contains(types: &Types<'_>, ty: Type, seen: &mut BTreeSet<Type>) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        match ty {
+            Type::Enum(id) | Type::Variants(id, _) => {
+                types.enums[id].optional_reference().is_some()
+                    || types.enums[id].variants.iter().any(|variant| {
+                        variant
+                            .fields
+                            .iter()
+                            .any(|field| contains(types, *field, seen))
+                    })
+            }
+            Type::Box(p)
+            | Type::Vec(p)
+            | Type::ArenaBox(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p)
+            | Type::Ref(p)
+            | Type::RefMut(p)
+            | Type::Slice(p)
+            | Type::SliceMut(p)
+            | Type::Task(p)
+            | Type::Annotated(p, _) => contains(types, types.pointees[p], seen),
+            Type::Union(id) => types.unions[id]
+                .members
+                .iter()
+                .any(|member| contains(types, *member, seen)),
+            Type::Fn(id) | Type::Once(id) => {
+                let f = &types.function_types[id];
+                f.parameters
+                    .iter()
+                    .chain([&f.result])
+                    .any(|ty| contains(types, *ty, seen))
+            }
+            _ => false,
+        }
+    }
+    if contains(types, ty, &mut BTreeSet::new()) {
+        Err(Diagnostic::new(
+            span,
+            "optional references are lexical values; function signatures and record fields require named enum lifetime provenance, which is not supported yet",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod niche_layout_tests {
+    fn words(payload: &str) -> usize {
+        let source = format!(
+            "struct P {{ x: i64 }} enum Option<T> {{ None, Some(T) }} fn main() -> Unit ! {{}} {{ let value: Option<{payload}> = Option.None; drop(value); }}"
+        );
+        let program = crate::executable::check(&source).unwrap();
+        program
+            .enums
+            .iter()
+            .rfind(|layout| layout.name == "Option")
+            .unwrap()
+            .words
+    }
+    #[test]
+    fn supported_niches_remove_exactly_one_tag_word() {
+        for payload in ["Box<i64>", "Bool", "Char", "&P", "&mut P"] {
+            assert_eq!(words(payload), 1, "{payload}");
+        }
+    }
+    #[test]
+    fn full_range_and_unmodeled_nested_payloads_keep_tags() {
+        for payload in [
+            "i64",
+            "u64",
+            "f64",
+            "Bytes",
+            "Vec<i64>",
+            "Option<Box<i64>>",
+            "fn() -> i64 ! {}",
+        ] {
+            assert_eq!(words(payload), 2, "{payload}");
+        }
     }
 }
