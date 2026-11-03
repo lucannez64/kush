@@ -121,3 +121,11 @@ release versus 16.781 ms for Rust manual fusion. Initialization (49.171 versus
 This is one workload, not a general performance ranking. Raw samples, commands,
 source hashes, and phase data are in
 `benchmarks/feature-pipeline/sample-results/release-2026-11-03/`.
+
+Full integration validation of compiler checkpoint `a4060de`: Boat passed
+all 1,141 workspace tests and strict workspace/all-target Clippy; formatting
+also passed. The first test attempt stopped on a missing cached dependency
+build artifact; the retry completed successfully and the sandbox stopped with
+its snapshot preserved. Logs: `/tmp/kush-boat-native-release-full.log` and
+`/tmp/kush-boat-native-release-retry.log`. Local release regression and
+machine-code tests also passed using mbx with two jobs.

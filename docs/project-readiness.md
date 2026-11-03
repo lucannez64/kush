@@ -332,3 +332,12 @@ PTY harness `d431137`; logs `/tmp/kush-boat-otp-tui-final.log` and
 `/tmp/kush-boat-otp-tui-pty-final.log`. Boat stopped with its snapshot preserved.
 See [the application README](../examples/otp-tui/README.md) for launch commands,
 architecture and exact clipboard, memory-erasure and state limits.
+
+## Native release checkpoint (2026-11-03)
+
+Compiler `a4060de` adds explicit release optimization and bounded scalar map
+callback inlining. Boat passed 1,141 workspace tests and strict all-target
+Clippy; formatting passed separately. A retry resolved a missing cached
+dependency artifact from the first test attempt. The sandbox stopped with its
+snapshot preserved. See [native optimizations](native-optimizations.md) for
+controls, safety boundaries, measurements, and local/remote verification.
