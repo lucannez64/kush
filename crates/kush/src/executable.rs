@@ -20554,6 +20554,15 @@ impl Checker<'_, '_> {
                     then,
                     otherwise,
                 } => {
+                    // Infer a branch join from its actual occurrences before
+                    // instantiating an outer call parameter. Coercing both arms
+                    // to an argument placeholder would erase their distinct
+                    // lifetime identities before the join can compare them.
+                    let expected = expected.filter(|ty| {
+                        !crate::runtime_types::borrow_lifetimes(c.types, *ty)
+                            .iter()
+                            .any(|label| label.starts_with("<argument "))
+                    });
                     let condition = c.expr(condition)?;
                     c.expect(condition.ty, Type::Bool, condition.span)?;
                     let baseline = c.facts.clone();
@@ -20572,13 +20581,10 @@ impl Checker<'_, '_> {
                     let otherwise = if let Some(otherwise) = otherwise {
                         let facts = c.facts.condition(&condition, false);
                         c.facts.add(facts);
-                        let context = match expected {
-                            Some(expected) => Some(expected),
-                            None if c.needs_context(otherwise) && then.ty != Type::Never => {
-                                Some(c.types.full(then.ty, span)?)
-                            }
-                            None => None,
-                        };
+                        // With the call-argument expectation deferred above,
+                        // no fallback context may erase the arm's actual
+                        // labels either.
+                        let context = expected;
                         let tail = c.expr_expected_result(otherwise, context);
 
                         let tail = tail?;
@@ -20611,6 +20617,13 @@ impl Checker<'_, '_> {
                         {
                             (c.erase_block_value(then, span), c.erase_block_value(otherwise, span), Type::Unit)
                         } else {
+                            // Branch arms must not launder an invariant record
+                            // lifetime through one another: the call or the
+                            // surrounding context derives identities from
+                            // these actual labels. If they disagree, the
+                            // union's label-erased normalization would silently
+                            // absorb one arm into the other.
+                            check_branch_record_labels(c.types, then.ty, otherwise.ty, span)?;
                             let ty = c.join(then.ty, otherwise.ty, span)?;
                             let then = c.coerce_block(then, ty, span)?;
                             let otherwise = c.coerce_block(otherwise, ty, span)?;
@@ -30462,6 +30475,95 @@ fn collect_expr_refs(resolution: &Resolution, expr: &ast::Expr, out: &mut BTreeS
             collect_lambda_refs(resolution, body, out);
         }
         ast::ExprKind::Loop(body) => collect_lambda_refs(resolution, body, out),
+    }
+}
+
+/// Two branch arms that produce the same borrowed record type must agree on
+/// every invariant lifetime binder. For covariant or contravariant binders a
+/// different label composes by polarity; for an invariant one the labels are
+/// identity, and joining both would let one arm's provenance be laundered into
+/// the other's by the label-erased normalization of the joined value.
+fn check_branch_record_labels(
+    types: &crate::runtime_types::Types<'_>,
+    left: Type,
+    right: Type,
+    span: Span,
+) -> Result<()> {
+    if branch_record_label_mismatch(types, left, right, 0, &mut BTreeSet::new()) {
+        return Err(Diagnostic::new(
+            span,
+            format!(
+                "lifetime mismatch: {} is not a lifetime-compatible {}",
+                types.name(left),
+                types.name(right)
+            ),
+        )
+        .with_note(
+            span,
+            "one branch reinterprets the other's provenance over an invariant record lifetime",
+        ));
+    }
+    Ok(())
+}
+
+fn branch_record_label_mismatch(
+    types: &crate::runtime_types::Types<'_>,
+    left: Type,
+    right: Type,
+    depth: usize,
+    seen: &mut BTreeSet<(Type, Type)>,
+) -> bool {
+    if left == right {
+        return false;
+    }
+    if depth >= 32 || !seen.insert((left, right)) {
+        return false;
+    }
+    match (left, right) {
+        (Type::Box(a), Type::Box(b)) | (Type::Vec(a), Type::Vec(b)) => {
+            branch_record_label_mismatch(
+                types,
+                types.pointees[a],
+                types.pointees[b],
+                depth + 1,
+                seen,
+            )
+        }
+        (Type::Enum(a), Type::Enum(b))
+            if a != b
+                && types.enums[a].record
+                && types.enums[b].record
+                && types.enums[a].definition == types.enums[b].definition =>
+        {
+            let (a, b) = (&types.enums[a], &types.enums[b]);
+            if a.lifetimes.len() != b.lifetimes.len() {
+                return false;
+            }
+            let disagreement =
+                (0..a.lifetimes.len()).any(|index| a.lifetimes[index] != b.lifetimes[index]);
+            if disagreement {
+                return true;
+            }
+            // Same shape, possibly differing only in checked positions: the
+            // fields may still nest instantiations of the same definition.
+            for (left_variant, right_variant) in a.variants.iter().zip(b.variants.iter()) {
+                for (left_field, right_field) in
+                    left_variant.fields.iter().zip(right_variant.fields.iter())
+                {
+                    if branch_record_label_mismatch(
+                        types,
+                        *left_field,
+                        *right_field,
+                        depth + 1,
+                        seen,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
     }
 }
 

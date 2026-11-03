@@ -802,3 +802,29 @@ fn record_literal_inference_uses_only_fields_that_mention_the_lifetime() {
         "invariant",
     );
 }
+
+#[test]
+fn call_argument_if_joins_preserve_actual_lifetime_obligations() {
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+fn id<'x>(p: Inv<'x>) -> Inv<'x> ! {panic} { p }
+fn bad<'long: 'short, 'short>(c: Bool, p: Inv<'long>, q: Inv<'short>) -> Unit ! {panic} {
+    let r = id(if c { p } else { q });
+    let x: Inv<'long> = r;
+    let _ = x;
+}
+fn main() -> Unit ! {} {}
+"#,
+        "lifetime",
+    );
+    rejects(
+        r#"struct View<'a> { r: &'a i64 }
+fn take<'x>(v: View<'x>) -> Unit ! {panic} { let _ = v; }
+fn bad<'long: 'short, 'short>(c: Bool, p: View<'long>, q: View<'short>) -> Unit ! {panic} {
+    take(if c { p } else { q });
+}
+fn main() -> Unit ! {} {}
+"#,
+        "lifetime",
+    );
+}
