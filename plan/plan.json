@@ -118,10 +118,21 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "41 worktrees; keep only ones with unmerged work.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 15:28:24",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-03 15:29:47",
+          "who": "agent",
+          "text": "Audited all 41 delegate worktrees; zero clean ancestor-tip candidates. Preserved all checkouts/branches because cherry-pick equivalence and inactivity need further evidence."
+        }
+      ]
     },
     {
       "id": "OPS-STEP-GATE",
@@ -130,10 +141,21 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Each step: fmt, strict Clippy, targeted tests locally with mbx, full Boat gate before merge, review for soundness steps.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 15:28:23",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-03 15:29:47",
+          "who": "agent",
+          "text": "Documented per-step fmt/Clippy/focused parity tests, integrated Boat gate, soundness review and safe cleanup rules in docs/working-gates.md."
+        }
+      ]
     },
     {
       "id": "R-STR-DESIGN",
