@@ -6,12 +6,20 @@ most 1024 bytes now omit the separate 16-byte `KushAllocHeader`. Their existing
 one allocation header per qualifying buffer, without removing bounds checks,
 changing public logical capacity, or relying on libc's incidental usable size.
 
-The capacity word uses its high byte for a marker and a 16-byte allocation
-size class (1 through 64). Its low 16 bits hold logical capacity; the intervening bits stay reserved. Small
-buffers cannot approach that capacity-bit limit: their physical allocation
-already bounds the logical value. Larger buffers retain the original header
-and their complete positive capacity word, so large supported capacities are
-not truncated or capped by this encoding.
+Vectors encode a marker and their physical 16-byte size class (1 through 64)
+in the high byte of the capacity word; its low 16 bits hold logical capacity.
+The intervening bits stay reserved. Small vectors cannot approach that limit.
+Larger and exact fallible-grown vectors retain the original allocation header
+and complete positive capacity word.
+
+Bytes and strings keep an ordinary, unencoded capacity word on the hot path.
+Their element width never changes, and their public capacity never shrinks:
+the raw physical class is always `round_up(16 + capacity, 16)`. This remains
+true when a push grows logical capacity within existing class slack. Growth
+and typed byte-buffer release reconstruct the pool encoding immediately
+before calling the shared buffer allocator. Byte appends and capacity reads
+therefore need no tag test, mask, or conditional move. Large byte buffers keep
+the original private header. No full-width supported capacity is truncated.
 
 The encoded physical class survives `clear`, narrowing maps, logical capacity
 changes, and subsequent widening. Growth copies the recorded usable extent,
@@ -25,19 +33,24 @@ Headerless and header-bearing blocks use separate intrusive free lists and
 share the existing 64-block-per-size-class and 1 MiB physical-byte limits.
 Inactive headerless blocks keep the next pointer in the unused length word
 and an invalid class marker in the capacity word. Normal exit drains both
-families. Typed buffer destruction uses `kush_buffer_free`; boxes, task blocks,
+families. Typed destruction uses `kush_bytes_free` for Bytes/String and
+`kush_buffer_free` for vectors; boxes, task blocks,
 closures and allocator contexts continue to use the original header-aware
 release. Logical allocation diagnostics retain their existing meaning.
 
-Every runtime capacity read decodes the logical value. The release-mode
-`Vec.push` fast path does so inline. Host I/O, custom-allocator backing byte
+Vector capacity reads decode the logical value; release-mode `Vec.push` does
+so inline. Bytes/String capacity reads load the plain word. Host I/O, custom-allocator backing byte
 blocks and the Rust/C bridge keep the same data offsets and opaque handles.
 User-allocator container descriptors (`AllocBox`/`AllocVec`) have their own
 protocol and remain header-bearing.
 
 Release byte appends use an inline, range-checked fast path when capacity
 is available; the original runtime helper handles cold growth and full-buffer
-failures. Vector appends share the compact capacity decoder.
+failures. Release-mode length, capacity, checked byte reads and clear operations
+are lowered directly into Cranelift, including String byte length and byte
+reads. An unsigned index check still rejects negative and out-of-range reads;
+UTF-8 scalar operations retain their original runtime. Vector appends keep the
+compact capacity decoder.
 
 The tradeoff is a few instructions for decoding and separate pool families.
 Some mixed allocation workloads may get fewer cross-type pool hits. Larger
@@ -65,3 +78,11 @@ includes old/current Kush and Rust controls, boxed/inline layouts, an initial
 header-only speed regression, a corrected append fast path, and a low-load Boat
 confirmation. It records the remaining speed tradeoff versus previous Kush and
 the distinction between peak RSS and requested heap.
+
+
+The [plain-capacity follow-up](../benchmarks/json-memory/sample-results/plain-byte-capacity-2026-11-03/analysis.md)
+removes byte-buffer decoding from the hot path while keeping those allocation
+savings. The combined code passed 1,170 tests, formatting and strict Clippy on
+Boat. Its matched Boat cohort improves speed versus both earlier Kush versions
+and Rust, with the same requested heap as the earlier headerless implementation;
+the busy-laptop speed result remains mixed. Raw data and exact scope are linked.

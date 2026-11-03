@@ -24,8 +24,9 @@ exit status are unchanged in both cases.
 
 Boxes, closures, task blocks, large ordinary buffers and exact fallible-grown
 buffers have a 16-byte header immediately before their payload. Ordinary small
-`Bytes`/`String`/`Vec` buffers omit it and record their physical size class in
-spare capacity bits; see [headerless buffers](headerless-buffers.md).
+`Bytes`/`String`/`Vec` buffers omit it. Vectors record their physical size class
+in spare capacity bits; byte buffers recover it from their plain capacity at
+growth/release boundaries. See [headerless buffers](headerless-buffers.md).
 
 The header-bearing layout is:
 

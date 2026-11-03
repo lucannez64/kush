@@ -88,3 +88,23 @@ fn reserved_push_checks_logical_capacity_despite_physical_slack() {
         None,
     );
 }
+
+#[test]
+fn inline_byte_access_preserves_bounds_and_clear_capacity() {
+    for capacity in [0, 1, 1008, 1009, 65537] {
+        compare(
+            &format!(
+                "fn main()->i64 ! {{alloc,panic}} {{let b=Bytes.with_capacity({capacity});let b=Bytes.push(b,255);let n=Bytes.len(&b);let x=Bytes.get(&b,0);let c=Bytes.capacity(&b);let b=Bytes.clear(b);let answer=n+x+Bytes.len(&b)+Bytes.capacity(&b)-c;drop(b);answer}}"
+            ),
+            Some(256),
+        );
+        for index in [-1, 1, i64::MAX] {
+            compare(
+                &format!(
+                    "fn main()->i64 ! {{alloc,panic}} {{let b=Bytes.push(Bytes.with_capacity({capacity}),42);Bytes.get(&b,{index})}}"
+                ),
+                None,
+            );
+        }
+    }
+}

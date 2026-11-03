@@ -774,17 +774,34 @@ void kush_arena_box_release(uint64_t payload) {
 }
 typedef struct { uint64_t length; uint64_t capacity; unsigned char data[]; } KushBytes;
 #define KUSH_MAX_CAPACITY ((uint64_t)INT64_MAX - (uint64_t)sizeof(KushBytes))
+/* Byte buffers never change element width or shrink logical capacity. Their
+   physical class is exactly round_up(sizeof(KushBytes)+capacity,16), including
+   growth that fits existing class slack. Keep the hot capacity word plain;
+   reconstruct the generic pool encoding only at growth/release boundaries.
+   Vectors still need their encoded class because maps may change width. */
+static void kush_bytes_encode(KushBytes *b) {
+    if (b->capacity <= KUSH_POOL_MAX - sizeof(KushBytes)) {
+        uint64_t bytes = sizeof(KushBytes) + b->capacity;
+        uint64_t code = (bytes + KUSH_ALLOC_ALIGN - 1) / KUSH_ALLOC_ALIGN;
+        b->capacity |= (UINT64_C(0x80) | code) << 56;
+    }
+}
+void kush_bytes_free(uint64_t handle) {
+    if (handle == 0) kush_panic();
+    kush_bytes_encode((KushBytes *)(uintptr_t)handle);
+    kush_buffer_free(handle);
+}
 uint64_t kush_bytes_with_capacity(int64_t capacity) {
     if (capacity < 0 || (uint64_t)capacity > KUSH_MAX_CAPACITY) kush_panic();
     KushBytes *b = (KushBytes *)(uintptr_t)kush_buffer_alloc(sizeof(KushBytes) + (uint64_t)capacity, (uint64_t)capacity, 0);
-    b->length = 0; return (uint64_t)(uintptr_t)b;
+    b->length = 0; b->capacity = (uint64_t)capacity; return (uint64_t)(uintptr_t)b;
 }
 uint64_t kush_try_bytes_with_capacity(int64_t capacity) {
     if (capacity < 0 || (uint64_t)capacity > KUSH_MAX_CAPACITY) return 0;
     uint64_t handle = kush_buffer_alloc(sizeof(KushBytes) + (uint64_t)capacity, (uint64_t)capacity, 1);
     if (handle == 0) return 0;
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
-    b->length = 0;
+    b->length = 0; b->capacity = (uint64_t)capacity;
     return handle;
 }
 uint64_t kush_bytes_from(const unsigned char *source, int64_t length) {
@@ -883,7 +900,7 @@ uint64_t kush_alloc_block_try(uint64_t allocator, uint64_t release, uint64_t con
         block = ((KushAllocBlockFn)(uintptr_t)allocator)(bytes);
     }
     if (block == 0) return 0;
-    if (kush_buffer_capacity((const void *)(uintptr_t)block) < bytes) {
+    if (((const KushBytes *)(uintptr_t)block)->capacity < bytes) {
         kush_alloc_block_release(release, context, block);
         return 0;
     }
@@ -943,7 +960,7 @@ static uint64_t kush_alloc_block_grow(uint64_t grow, uint64_t context, uint64_t 
     } else {
         grown = ((KushReallocBlockFn)(uintptr_t)grow)(block, old_bytes, bytes);
     }
-    if (grown == 0 || kush_buffer_capacity((const void *)(uintptr_t)grown) < bytes) {
+    if (grown == 0 || ((const KushBytes *)(uintptr_t)grown)->capacity < bytes) {
         free(saved);
         kush_panic();
     }
@@ -1058,7 +1075,7 @@ void kush_alloc_vec_release(uint64_t handle) {
     kush_free(handle);
 }
 int64_t kush_bytes_len(uint64_t handle) { return (int64_t)((KushBytes *)(uintptr_t)handle)->length; }
-int64_t kush_bytes_capacity(uint64_t handle) { return (int64_t)kush_buffer_capacity((const void *)(uintptr_t)handle); }
+int64_t kush_bytes_capacity(uint64_t handle) { return (int64_t)((const KushBytes *)(uintptr_t)handle)->capacity; }
 int64_t kush_bytes_get(uint64_t handle, int64_t index) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
     if (index < 0 || (uint64_t)index >= b->length) kush_panic();
@@ -1073,12 +1090,13 @@ uint64_t kush_bytes_copy(uint64_t handle) {
 static uint64_t kush_bytes_push_impl(uint64_t handle, int64_t value, int grow) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
     if (value < 0 || value > 255) kush_panic();
-    if (b->length == kush_buffer_capacity(b)) {
+    if (b->length == b->capacity) {
         if (!grow) kush_panic();
-        uint64_t next = kush_buffer_capacity(b) == 0 ? 8 : (kush_buffer_capacity(b) <= KUSH_MAX_CAPACITY / 2 ? kush_buffer_capacity(b) * 2 : KUSH_MAX_CAPACITY);
-        if (next <= kush_buffer_capacity(b) || next > KUSH_MAX_CAPACITY) kush_panic();
+        uint64_t next = b->capacity == 0 ? 8 : (b->capacity <= KUSH_MAX_CAPACITY / 2 ? b->capacity * 2 : KUSH_MAX_CAPACITY);
+        if (next <= b->capacity || next > KUSH_MAX_CAPACITY) kush_panic();
+        kush_bytes_encode(b);
         b = (KushBytes *)kush_buffer_grow(b, sizeof(KushBytes) + next);
-        kush_buffer_set_capacity(b, next); ++kush_buffer_growths;
+        b->capacity = next; ++kush_buffer_growths;
     }
     b->data[b->length++] = (unsigned char)value; return (uint64_t)(uintptr_t)b;
 }
@@ -1183,14 +1201,14 @@ int64_t kush_io_read_all(int64_t stream, uint64_t handle) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
     unsigned char probe;
     for (;;) {
-        int full = b->length == kush_buffer_capacity(b);
+        int full = b->length == b->capacity;
         void *destination = full ? (void *)&probe : (void *)(b->data + b->length);
-        size_t count = full ? 1 : (size_t)(kush_buffer_capacity(b) - b->length);
+        size_t count = full ? 1 : (size_t)(b->capacity - b->length);
         ssize_t received = read((int)stream, destination, count);
         if (received < 0 && errno == EINTR) continue;
-        if (received < 0) { int code = errno; kush_buffer_free(handle); return code; }
+        if (received < 0) { int code = errno; kush_bytes_free(handle); return code; }
         if (received == 0) return 0;
-        if (full) { kush_buffer_free(handle); return EFBIG; }
+        if (full) { kush_bytes_free(handle); return EFBIG; }
         b->length += (uint64_t)received;
     }
 }
@@ -1202,9 +1220,9 @@ int64_t kush_io_read_line(int64_t stream, uint64_t handle) {
         unsigned char byte;
         ssize_t received = read((int)stream, &byte, 1);
         if (received < 0 && errno == EINTR) continue;
-        if (received < 0) { int code = errno; kush_buffer_free(handle); return code; }
+        if (received < 0) { int code = errno; kush_bytes_free(handle); return code; }
         if (received == 0) return 0;
-        if (b->length == kush_buffer_capacity(b)) { kush_buffer_free(handle); return EFBIG; }
+        if (b->length == b->capacity) { kush_bytes_free(handle); return EFBIG; }
         b->data[b->length++] = byte;
         if (byte == '\n') return 0;
     }
@@ -1212,11 +1230,11 @@ int64_t kush_io_read_line(int64_t stream, uint64_t handle) {
 /* One successful read, never an excess-byte probe. Full input is EFBIG. */
 int64_t kush_io_read_chunk(int64_t stream, uint64_t handle) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
-    if (b->length == kush_buffer_capacity(b)) { kush_buffer_free(handle); return EFBIG; }
+    if (b->length == b->capacity) { kush_bytes_free(handle); return EFBIG; }
     for (;;) {
-        ssize_t n = read((int)stream, b->data + b->length, (size_t)(kush_buffer_capacity(b) - b->length));
+        ssize_t n = read((int)stream, b->data + b->length, (size_t)(b->capacity - b->length));
         if (n < 0 && errno == EINTR) continue;
-        if (n < 0) { int code = errno; kush_buffer_free(handle); return code; }
+        if (n < 0) { int code = errno; kush_bytes_free(handle); return code; }
         b->length += (uint64_t)n; return 0;
     }
 }
@@ -1260,7 +1278,7 @@ static int kush_host_open(const char *path, int flags, int with_mode, mode_t mod
     }
 }
 static int64_t kush_host_append(KushBytes *b, const unsigned char *data, uint64_t length) {
-    if (b->length > kush_buffer_capacity(b) || length > kush_buffer_capacity(b) - b->length) return EFBIG;
+    if (b->length > b->capacity || length > b->capacity - b->length) return EFBIG;
     if (length != 0) memcpy(b->data + b->length, data, (size_t)length);
     b->length += length;
     return 0;
@@ -1268,16 +1286,16 @@ static int64_t kush_host_append(KushBytes *b, const unsigned char *data, uint64_
 int64_t kush_fs_read(uint64_t path_handle, uint64_t buffer_handle, uint64_t *out) {
     int code = 0;
     char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
-    if (path == NULL) { kush_buffer_free(buffer_handle); return code; }
+    if (path == NULL) { kush_bytes_free(buffer_handle); return code; }
     int fd = kush_host_open(path, O_RDONLY | O_CLOEXEC, 0, 0);
     free(path);
-    if (fd < 0) { code = errno; kush_buffer_free(buffer_handle); return code; }
+    if (fd < 0) { code = errno; kush_bytes_free(buffer_handle); return code; }
     KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
     unsigned char probe;
     for (;;) {
-        int full = b->length == kush_buffer_capacity(b);
+        int full = b->length == b->capacity;
         void *destination = full ? (void *)&probe : (void *)(b->data + b->length);
-        size_t count = full ? 1 : (size_t)(kush_buffer_capacity(b) - b->length);
+        size_t count = full ? 1 : (size_t)(b->capacity - b->length);
         ssize_t received = read(fd, destination, count);
         if (received < 0 && errno == EINTR) continue;
         if (received < 0) { code = errno; break; }
@@ -1286,7 +1304,7 @@ int64_t kush_fs_read(uint64_t path_handle, uint64_t buffer_handle, uint64_t *out
         b->length += (uint64_t)received;
     }
     (void)close(fd);
-    if (code != 0) { kush_buffer_free(buffer_handle); return code; }
+    if (code != 0) { kush_bytes_free(buffer_handle); return code; }
     *out = buffer_handle;
     return 0;
 }
@@ -1396,10 +1414,10 @@ int64_t kush_fs_rename(uint64_t from_handle, uint64_t to_handle, uint64_t *out) 
 int64_t kush_fs_list(uint64_t path_handle, uint64_t buffer_handle, uint64_t *out) {
     int code = 0;
     char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
-    if (path == NULL) { kush_buffer_free(buffer_handle); return code; }
+    if (path == NULL) { kush_bytes_free(buffer_handle); return code; }
     DIR *directory = opendir(path);
     free(path);
-    if (directory == NULL) { code = errno; kush_buffer_free(buffer_handle); return code; }
+    if (directory == NULL) { code = errno; kush_bytes_free(buffer_handle); return code; }
     KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
     for (;;) {
         errno = 0;
@@ -1414,7 +1432,7 @@ int64_t kush_fs_list(uint64_t path_handle, uint64_t buffer_handle, uint64_t *out
         if (status != 0) { code = status; break; }
     }
     (void)closedir(directory);
-    if (code != 0) { kush_buffer_free(buffer_handle); return code; }
+    if (code != 0) { kush_bytes_free(buffer_handle); return code; }
     *out = buffer_handle;
     return 0;
 }
@@ -1459,11 +1477,11 @@ int64_t kush_env_arg_count(uint64_t *out) {
 int64_t kush_env_arg(int64_t index, uint64_t buffer_handle, uint64_t *out) {
     KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
     if (index < 0 || index >= (int64_t)kush_host_argc || kush_host_argv == NULL) {
-        kush_buffer_free(buffer_handle); return ENOENT;
+        kush_bytes_free(buffer_handle); return ENOENT;
     }
     const char *value = kush_host_argv[index];
     int64_t code = kush_host_append(b, (const unsigned char *)value, (uint64_t)strlen(value));
-    if (code != 0) { kush_buffer_free(buffer_handle); return code; }
+    if (code != 0) { kush_bytes_free(buffer_handle); return code; }
     *out = buffer_handle;
     return 0;
 }
@@ -1480,13 +1498,13 @@ int64_t kush_env_var_count(uint64_t *out) {
 int64_t kush_env_var(const KushBytes *name, uint64_t buffer_handle, uint64_t *out) {
     int code = 0;
     char *text = kush_host_c_path(name, &code);
-    if (text == NULL) { kush_buffer_free(buffer_handle); return code; }
+    if (text == NULL) { kush_bytes_free(buffer_handle); return code; }
     const char *value = getenv(text);
     free(text);
-    if (value == NULL) { kush_buffer_free(buffer_handle); return ENOENT; }
+    if (value == NULL) { kush_bytes_free(buffer_handle); return ENOENT; }
     code = (int)kush_host_append((KushBytes *)(uintptr_t)buffer_handle,
         (const unsigned char *)value, (uint64_t)strlen(value));
-    if (code != 0) { kush_buffer_free(buffer_handle); return code; }
+    if (code != 0) { kush_bytes_free(buffer_handle); return code; }
     *out = buffer_handle;
     return 0;
 }
@@ -1522,12 +1540,12 @@ int64_t kush_time_sleep_ms(int64_t milliseconds, uint64_t *out) {
     return 0;
 }
 int64_t kush_os_strerror(int64_t code, uint64_t buffer_handle, uint64_t *out) {
-    if (code < 0 || code > 4095) { kush_buffer_free(buffer_handle); return EINVAL; }
+    if (code < 0 || code > 4095) { kush_bytes_free(buffer_handle); return EINVAL; }
     const char *text = strerror((int)code);
     if (text == NULL) text = "Unknown error";
     int64_t status = kush_host_append((KushBytes *)(uintptr_t)buffer_handle,
         (const unsigned char *)text, (uint64_t)strlen(text));
-    if (status != 0) { kush_buffer_free(buffer_handle); return status; }
+    if (status != 0) { kush_bytes_free(buffer_handle); return status; }
     *out = buffer_handle;
     return 0;
 }
@@ -1655,7 +1673,7 @@ int64_t kush_proc_run(uint64_t program_handle, uint64_t args_handle,
     int64_t deadline = kush_host_deadline(timeout_ms);
     int failed = 0, timed_out = 0;
     for (;;) {
-        int full = length == kush_buffer_capacity(b);
+        int full = length == b->capacity;
         struct pollfd waiting = { outpipe[0], POLLIN | POLLHUP, 0 };
         int ready = poll(&waiting, 1, kush_host_remaining(deadline));
         if (ready < 0) {
@@ -1676,7 +1694,7 @@ int64_t kush_proc_run(uint64_t program_handle, uint64_t args_handle,
             if (received == 0) break;
             code = EFBIG; failed = 1; break;
         }
-        ssize_t received = read(outpipe[0], b->data + length, (size_t)(kush_buffer_capacity(b) - length));
+        ssize_t received = read(outpipe[0], b->data + length, (size_t)(b->capacity - length));
         if (received < 0 && (errno == EINTR || errno == EAGAIN)) continue;
         if (received < 0) { code = errno; failed = 1; break; }
         if (received == 0) break;
@@ -1814,7 +1832,7 @@ int64_t kush_net_tcp_exchange(uint64_t host_handle, int64_t port,
     uint64_t length = b->length;
     uint64_t received_total = 0;
     while (code == 0) {
-        int full = length == kush_buffer_capacity(b);
+        int full = length == b->capacity;
         struct pollfd waiting = { fd, POLLIN | POLLHUP, 0 };
         int ready = poll(&waiting, 1, kush_host_remaining(deadline));
         if (ready < 0) { if (errno == EINTR) continue; code = errno; break; }
@@ -1824,7 +1842,7 @@ int64_t kush_net_tcp_exchange(uint64_t host_handle, int64_t port,
         }
         unsigned char probe;
         void *destination = full ? (void *)&probe : (void *)(b->data + length);
-        size_t room = full ? 1 : (size_t)(kush_buffer_capacity(b) - length);
+        size_t room = full ? 1 : (size_t)(b->capacity - length);
         ssize_t count = recv(fd, destination, room, 0);
         if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
         if (count < 0) { code = errno; break; }
@@ -2767,6 +2785,9 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
     let free = module
         .declare_function("kush_free", Linkage::Import, &free_sig)
         .map_err(error)?;
+    let bytes_free = module
+        .declare_function("kush_bytes_free", Linkage::Import, &free_sig)
+        .map_err(error)?;
     let buffer_free = module
         .declare_function("kush_buffer_free", Linkage::Import, &free_sig)
         .map_err(error)?;
@@ -3196,7 +3217,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
         &mut module,
         program,
         free,
-        buffer_free,
+        (buffer_free, bytes_free),
         arena_release,
         arena_box_release,
         &alloc_ops,
@@ -3751,11 +3772,12 @@ fn synthesize_drops(
     module: &mut ObjectModule,
     program: &Executable,
     free: FuncId,
-    buffer_free: FuncId,
+    buffer_frees: (FuncId, FuncId),
     arena_release: FuncId,
     arena_box_release: FuncId,
     alloc_ops: &AllocOps,
 ) -> Result<DropTables> {
+    let (buffer_free, bytes_free) = buffer_frees;
     let mut types = (0..program.pointees.len())
         .map(Type::Box)
         .chain((0..program.pointees.len()).map(Type::ArenaBox))
@@ -3825,7 +3847,7 @@ fn synthesize_drops(
         let args = builder.block_params(entry).to_vec();
         match ty {
             Type::Bytes | Type::String => {
-                emit_drop(&mut builder, module, buffer_free, &args);
+                emit_drop(&mut builder, module, bytes_free, &args);
                 builder.ins().return_(&[]);
             }
             Type::Box(index) | Type::ArenaBox(index) => {
@@ -7366,6 +7388,13 @@ impl Generator<'_, '_> {
                             && self.codegen.optimization == Optimization::Speed
                         {
                             self.push_bytes(values[0], values[1], *op)
+                        } else if self.codegen.optimization == Optimization::Speed
+                            && matches!(
+                                op,
+                                BytesOp::Len | BytesOp::Capacity | BytesOp::Get | BytesOp::Clear
+                            )
+                        {
+                            self.bytes_access(*op, &values)
                         } else {
                             self.runtime_call(self.bytes_ops[op], &values)
                         }
@@ -7378,11 +7407,19 @@ impl Generator<'_, '_> {
                                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
                         }
                         match op {
+                            StringOp::Len if self.codegen.optimization == Optimization::Speed => {
+                                self.bytes_access(BytesOp::Len, &values)
+                            }
                             StringOp::Len => {
                                 self.runtime_call(self.bytes_ops[&BytesOp::Len], &values)
                             }
                             StringOp::ScalarLen => {
                                 self.runtime_call(self.string_scalar_len, &values)
+                            }
+                            StringOp::ByteAt
+                                if self.codegen.optimization == Optimization::Speed =>
+                            {
+                                self.bytes_access(BytesOp::Get, &values)
                             }
                             StringOp::ByteAt => {
                                 self.runtime_call(self.bytes_ops[&BytesOp::Get], &values)
@@ -8045,6 +8082,45 @@ impl Generator<'_, '_> {
             }
         }
     }
+    /// Lower small byte-buffer operations directly so hot loops can keep their
+    /// length loads and bounds checks visible to Cranelift's optimizer. The
+    /// unsigned comparison rejects negative indices as well as the upper bound.
+    fn bytes_access(&mut self, op: BytesOp, values: &[Value]) -> Value {
+        let handle = values[0];
+        match op {
+            BytesOp::Len => self
+                .builder
+                .ins()
+                .load(I64, ir::MemFlagsData::new(), handle, 0),
+            BytesOp::Capacity => self
+                .builder
+                .ins()
+                .load(I64, ir::MemFlagsData::new(), handle, 8),
+            BytesOp::Get => {
+                let length = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), handle, 0);
+                let invalid =
+                    self.builder
+                        .ins()
+                        .icmp(IntCC::UnsignedGreaterThanOrEqual, values[1], length);
+                self.guard(invalid);
+                let address = self.builder.ins().iadd(handle, values[1]);
+                self.builder
+                    .ins()
+                    .uload8(I64, ir::MemFlagsData::new(), address, 16)
+            }
+            BytesOp::Clear => {
+                let zero = self.constant(0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), zero, handle, 0);
+                handle
+            }
+            _ => unreachable!("checked byte-buffer access"),
+        }
+    }
     /// Decode ordinary buffer capacity. Headerless buffers have at most 1008
     /// data bytes, so their logical capacity fits in 16 bits. Header-bearing
     /// buffers retain the complete positive word, including large capacities.
@@ -8073,7 +8149,10 @@ impl Generator<'_, '_> {
             .builder
             .ins()
             .load(I64, ir::MemFlagsData::new(), handle, 0);
-        let capacity = self.buffer_capacity(handle);
+        let capacity = self
+            .builder
+            .ins()
+            .load(I64, ir::MemFlagsData::new(), handle, 8);
         let room = self
             .builder
             .ins()
@@ -9345,8 +9424,8 @@ int main(int argc, char **argv) {
     if (argc > 1) {
         uint64_t handle=kush_bytes_with_capacity(0), guard=kush_alloc(8);
         (void)argv; (void)guard;
-        kush_buffer_free(handle);
-        kush_buffer_free(handle);
+        kush_bytes_free(handle);
+        kush_bytes_free(handle);
         return 90;
     }
     assert(sizeof(KushBytes)==16 && sizeof(KushVec)==16);
@@ -9359,13 +9438,13 @@ int main(int argc, char **argv) {
         KushBytes *b=(KushBytes *)(uintptr_t)handle;
         assert(((uintptr_t)b & 15)==0);
         assert(kush_bytes_capacity(handle)==capacity);
-        assert((b->capacity & KUSH_BUFFER_RAW)!=0 ? capacity<=1008 : capacity>1008);
+        assert(b->capacity==(uint64_t)capacity);
         for (int64_t i=0;i<capacity;i++) handle=kush_bytes_push(handle,i%256);
         assert(kush_bytes_len(handle)==capacity);
         for (int64_t i=0;i<capacity;i++) assert(kush_bytes_get(handle,i)==i%256);
         handle=kush_bytes_push(handle,42);
         assert(kush_bytes_get(handle,capacity)==42);
-        kush_buffer_free(handle);
+        kush_bytes_free(handle);
     }
     kush_pool_drain();
     for(size_t i=0;i<KUSH_POOL_CLASSES;i++) assert(kush_pool_counts[i]==0);
