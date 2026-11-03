@@ -570,6 +570,11 @@
           "time": "2026-11-03 20:28:04",
           "who": "agent",
           "text": "Integrated direct-call scalar-result summary implementation at 8c6f178; combined Boat gate exposed stale text-result rejection expectation. Full recursive result-field and method/instance coverage remains open."
+        },
+        {
+          "time": "2026-11-03 20:32:43",
+          "who": "agent",
+          "text": "Combined a7fd5bf Boat gate passes: 1215 tests, formatting, strict Clippy. Direct-call scalar result fragment integrated; result-field, method and concrete-instance generality remain open."
         }
       ]
     },
@@ -620,6 +625,11 @@
           "time": "2026-11-03 20:28:04",
           "who": "agent",
           "text": "Integrated variance stages at c186c68; formatting and strict Clippy pass on Boat, combined acceptance and independent review pending."
+        },
+        {
+          "time": "2026-11-03 20:32:43",
+          "who": "agent",
+          "text": "Combined a7fd5bf Boat gate passes: 1215 tests, formatting, strict Clippy. Independent safety review pending; exact conservative boundaries retained."
         }
       ]
     },

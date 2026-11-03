@@ -1339,3 +1339,16 @@ provenance, and bounded replay. It found four defects, fixed with regressions:
   error".
 Full Boat gate after these fixes (`50c5e50`): **1046 tests**, formatting, and
 Clippy pass.
+
+## Lifetime integration checkpoint: a7fd5bf
+
+The combined recursive-summary and lifetime-variance implementation passed the
+full Boat gate: 1215 tests, formatting, and strict Clippy. The sole initial
+failure was an obsolete text-result rejection expectation; the replacement
+also checks that callers cannot bypass the inferred outlives requirement.
+
+Independent safety review is pending. LIFE remains open: declaration-level
+recursive summaries cover direct calls and scalar borrowed results, while
+borrowed-record result-field inference, broader call boundaries, and structural
+row lifetime metadata still require work. Conservative variance boundaries are
+listed in `lifetime-variance.md`; passing this gate does not remove them.
