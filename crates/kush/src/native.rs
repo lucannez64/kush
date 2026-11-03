@@ -7389,10 +7389,11 @@ impl Generator<'_, '_> {
                         {
                             self.push_bytes(values[0], values[1], *op)
                         } else if self.codegen.optimization == Optimization::Speed
-                            && matches!(
-                                op,
-                                BytesOp::Len | BytesOp::Capacity | BytesOp::Get | BytesOp::Clear
-                            )
+                            // Checked indexed reads stay a runtime call. Inlining
+                            // them moved the JSON benchmark's hot loop and cost
+                            // ~6% on an older Zen 3 laptop for ~1% on Zen 5;
+                            // see the plain-byte-capacity benchmark analysis.
+                            && matches!(op, BytesOp::Len | BytesOp::Capacity | BytesOp::Clear)
                         {
                             self.bytes_access(*op, &values)
                         } else {
@@ -7415,11 +7416,6 @@ impl Generator<'_, '_> {
                             }
                             StringOp::ScalarLen => {
                                 self.runtime_call(self.string_scalar_len, &values)
-                            }
-                            StringOp::ByteAt
-                                if self.codegen.optimization == Optimization::Speed =>
-                            {
-                                self.bytes_access(BytesOp::Get, &values)
                             }
                             StringOp::ByteAt => {
                                 self.runtime_call(self.bytes_ops[&BytesOp::Get], &values)

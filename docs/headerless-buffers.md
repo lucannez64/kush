@@ -46,10 +46,11 @@ protocol and remain header-bearing.
 
 Release byte appends use an inline, range-checked fast path when capacity
 is available; the original runtime helper handles cold growth and full-buffer
-failures. Release-mode length, capacity, checked byte reads and clear operations
-are lowered directly into Cranelift, including String byte length and byte
-reads. An unsigned index check still rejects negative and out-of-range reads;
-UTF-8 scalar operations retain their original runtime. Vector appends keep the
+failures. Release-mode length, capacity and clear operations are lowered
+directly into Cranelift, including String byte length. Checked byte reads stay
+a runtime call: inlining them shifted a hot loop and slowed an older core (see
+the plain-capacity analysis). UTF-8 scalar operations retain their original
+runtime. Vector appends keep the
 compact capacity decoder.
 
 The tradeoff is a few instructions for decoding and separate pool families.

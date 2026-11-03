@@ -149,3 +149,25 @@ the loss comes from placement rather than added instructions. Boat wall times
 in this cohort were noisy right after VM resume (load 1.4 → 5.5), so CPU time
 is the comparison column. Raw data: `selective-inlining-boat.json`,
 `selective-inlining-laptop.json`.
+
+## Resolution: inline everything except checked indexed reads
+
+Splitting the inlining by operation isolated the cause. Every build that inlines
+the checked byte read (`Bytes.get`/`String.byte_at`) is slow on the laptop, and
+every build without it is fast:
+
+| Inlined byte ops | Laptop median CPU ms | Boat median CPU ms |
+|---|---:|---:|
+| none (previous headerless) | 509 | 311 |
+| capacity only | 507 | 252 |
+| capacity + length + clear (**adopted**) | **499** | 246 |
+| capacity + length + read + clear (previous) | 531 | **243** |
+| capacity + length + read | 531 | not run |
+| capacity + read + clear | 539 | not run |
+
+The adopted set keeps checked reads as a runtime call. It is the fastest
+laptop build and stays within about 1% of the best Boat build, so it removes
+the laptop regression while keeping essentially all of the Boat gain. The Boat
+cohort ran under high host load (1-minute load ≈16 → 14) but all builds were
+shuffled within the same rounds. Raw data: `inline-subsets-laptop.json`,
+`inline-subsets-boat.json`.

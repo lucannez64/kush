@@ -1,0 +1,275 @@
+{
+  "metadata": {
+    "host": {
+      "system": "Linux",
+      "node": "box-node-aebaa170a64db170",
+      "release": "6.8.0-117-generic",
+      "version": "#117-Ubuntu SMP PREEMPT_DYNAMIC Tue May  5 19:26:24 UTC 2026",
+      "machine": "x86_64",
+      "processor": "x86_64"
+    },
+    "libc": [
+      "glibc",
+      "2.39"
+    ],
+    "cpu": 0,
+    "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor",
+    "cpu_max": null,
+    "count": 16384,
+    "rounds": 31,
+    "repetitions": 9,
+    "warmups": 1,
+    "load_average_start": [
+      16.44970703125,
+      5.82373046875,
+      2.09130859375
+    ],
+    "load_average_end": [
+      14.07421875,
+      5.6640625,
+      2.0791015625
+    ],
+    "scope": "prebuilt hash-verified binaries; wait4 per child, no compilation",
+    "manifest": {
+      "layout": "inline metadata",
+      "binaries": [
+        {
+          "name": "k-c",
+          "label": "k-c",
+          "sha256": "e96e22f1434b6607d877405c1d0ad972fe6c355fee9101628c2ef6b8143adb2d"
+        },
+        {
+          "name": "k-clgk",
+          "label": "k-clgk",
+          "sha256": "209ce36dc403b4e2a6a0f308e9689e7de57d9b93e806e9d17212928d12e77082"
+        },
+        {
+          "name": "k-clk",
+          "label": "k-clk",
+          "sha256": "2346d72b8c56d5fde95dee1050a7333eea6a6e92add156f26651cfbb958cda68"
+        },
+        {
+          "name": "k-headerless",
+          "label": "k-headerless",
+          "sha256": "4dde68fce7379bee264e555a8f5896a55e06bc266e82ec0ab70e5fab03880701"
+        }
+      ]
+    }
+  },
+  "observations": {
+    "k-c": [
+      {
+        "wall_ms": 251.34523500000228,
+        "cpu_ms": 248.69799999999998,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 256.0002630000042,
+        "cpu_ms": 255.47799999999998,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 254.09440499998937,
+        "cpu_ms": 252.471,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 251.1583069999972,
+        "cpu_ms": 250.59199999999998,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 252.39367900002208,
+        "cpu_ms": 251.89499999999998,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 249.36626499999193,
+        "cpu_ms": 248.865,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 256.0105549999889,
+        "cpu_ms": 255.23999999999998,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 257.63153399998373,
+        "cpu_ms": 256.96200000000005,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 252.65800400001126,
+        "cpu_ms": 252.21699999999996,
+        "peak_rss_kib": 15616
+      }
+    ],
+    "k-clgk": [
+      {
+        "wall_ms": 242.05706500001156,
+        "cpu_ms": 241.40099999999998,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 241.36764799999355,
+        "cpu_ms": 240.815,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 241.33677599999714,
+        "cpu_ms": 240.834,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 243.67672500000026,
+        "cpu_ms": 243.227,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 243.445338999976,
+        "cpu_ms": 242.939,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 242.3757319999993,
+        "cpu_ms": 241.84499999999997,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 248.93037399999685,
+        "cpu_ms": 248.439,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 244.664403999991,
+        "cpu_ms": 244.084,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 246.06037099999867,
+        "cpu_ms": 245.553,
+        "peak_rss_kib": 15616
+      }
+    ],
+    "k-clk": [
+      {
+        "wall_ms": 243.33801399998833,
+        "cpu_ms": 242.916,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 245.0069729999882,
+        "cpu_ms": 244.532,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 243.8058349999892,
+        "cpu_ms": 243.37199999999999,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 248.26215100000582,
+        "cpu_ms": 246.629,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 245.1173989999802,
+        "cpu_ms": 244.54399999999998,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 246.46426300000712,
+        "cpu_ms": 246.09,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 252.26042599999232,
+        "cpu_ms": 251.74600000000004,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 249.81480299999248,
+        "cpu_ms": 249.29299999999998,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 251.54344300000275,
+        "cpu_ms": 251.02199999999996,
+        "peak_rss_kib": 15616
+      }
+    ],
+    "k-headerless": [
+      {
+        "wall_ms": 310.36428100000535,
+        "cpu_ms": 309.81199999999995,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 311.3149220000082,
+        "cpu_ms": 310.89599999999996,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 311.9720050000012,
+        "cpu_ms": 311.36299999999994,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 310.29691999998477,
+        "cpu_ms": 309.118,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 309.45806500000117,
+        "cpu_ms": 308.65500000000003,
+        "peak_rss_kib": 15744
+      },
+      {
+        "wall_ms": 316.31280099998094,
+        "cpu_ms": 315.7,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 315.43230599999106,
+        "cpu_ms": 314.688,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 319.6616449999965,
+        "cpu_ms": 313.05899999999997,
+        "peak_rss_kib": 15616
+      },
+      {
+        "wall_ms": 324.97665099998585,
+        "cpu_ms": 324.445,
+        "peak_rss_kib": 15616
+      }
+    ]
+  },
+  "summary": [
+    {
+      "name": "k-c",
+      "wall_ms": 252.65800400001126,
+      "cpu_ms": 252.21699999999996,
+      "peak_rss_kib": 15616
+    },
+    {
+      "name": "k-clgk",
+      "wall_ms": 243.445338999976,
+      "cpu_ms": 242.939,
+      "peak_rss_kib": 15616
+    },
+    {
+      "name": "k-clk",
+      "wall_ms": 246.46426300000712,
+      "cpu_ms": 246.09,
+      "peak_rss_kib": 15616
+    },
+    {
+      "name": "k-headerless",
+      "wall_ms": 311.9720050000012,
+      "cpu_ms": 311.36299999999994,
+      "peak_rss_kib": 15616
+    }
+  ]
+}
