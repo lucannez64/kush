@@ -200,8 +200,8 @@ fn repeated_boxes_reuse_one_retained_size_class() {
     assert_eq!(pool.drained, 1, "only one distinct block was ever retained");
     assert_eq!(pool.releases, 0);
     assert_eq!(
-        pool.peak_retained, 48,
-        "32-byte header plus a 16-byte class"
+        pool.peak_retained, 32,
+        "16-byte header plus a 16-byte class"
     );
 }
 
@@ -250,8 +250,8 @@ fn zero_capacity_and_the_size_class_boundary_are_exact() {
     assert_eq!(stats.allocations, 1);
     assert_eq!(pool.misses, 1);
     assert_eq!(
-        pool.peak_retained, 48,
-        "32-byte header plus a 16-byte class"
+        pool.peak_retained, 32,
+        "16-byte header plus a 16-byte class"
     );
 
     // A 1024-byte payload is the largest pooled block (struct header 16 +
@@ -271,8 +271,8 @@ fn zero_capacity_and_the_size_class_boundary_are_exact() {
     assert_eq!(pool.retains, 1);
     assert_eq!(pool.releases, 0);
     assert_eq!(
-        pool.peak_retained, 1056,
-        "32-byte header plus a 1024-byte class"
+        pool.peak_retained, 1040,
+        "16-byte header plus a 1024-byte class"
     );
 
     // One byte more (1025-byte payload) is unpooled: no miss, no retention,
@@ -328,7 +328,7 @@ fn buffer_growth_from_pooled_storage_preserves_contents() {
         "three grown buffers exceed the class limit"
     );
     assert_eq!(
-        pool.peak_retained, 1376,
+        pool.peak_retained, 1280,
         "header plus padded payload per retained block"
     );
     assert_eq!(pool.drained, 6);
@@ -363,7 +363,7 @@ fn buffer_growth_from_pooled_storage_preserves_contents() {
     assert_eq!(pool.retains, 7);
     assert_eq!(pool.releases, 3);
     assert_eq!(
-        pool.peak_retained, 1344,
+        pool.peak_retained, 1232,
         "header plus padded payload per retained block"
     );
 }
@@ -389,7 +389,7 @@ fn clear_reserve_and_push_reserved_integrate_with_the_pool() {
     assert_eq!(stats.deallocations, 1);
     assert_eq!(stats.buffer_growths, 2, "first push plus reserve");
     assert!(
-        pool.peak_retained >= 576,
+        pool.peak_retained >= 560,
         "header plus the grown 544-byte class"
     );
 
@@ -410,15 +410,15 @@ fn clear_reserve_and_push_reserved_integrate_with_the_pool() {
     assert_eq!(stats.buffer_growths, 0);
     assert_eq!(pool.misses, 1);
     assert_eq!(
-        pool.peak_retained, 64,
-        "32-byte header plus the 32-byte class"
+        pool.peak_retained, 48,
+        "16-byte header plus the 32-byte class"
     );
 }
 
 #[test]
 fn retention_never_exceeds_the_one_mebibyte_cap() {
-    // 70000 distinct 16-byte class blocks are retained until the cap; the rest
-    // must return to the system instead of growing the cache without bound.
+    // A burst of 70000 class-16 boxes must not leave thousands of blocks
+    // retained in one size class. The global byte cap is checked separately.
     // The reference evaluator's step budget cannot model this many allocations,
     // so the native totals are pinned directly; every other test compares the
     // stable line with the reference.
@@ -444,8 +444,8 @@ fn retention_never_exceeds_the_one_mebibyte_cap() {
         "the cap is never exceeded"
     );
     assert!(
-        pool.peak_retained >= RETAIN_CAP - 1024,
-        "the cache fills to the cap before overflow blocks are released"
+        pool.peak_retained < 8192,
+        "one hot size class cannot monopolize the byte budget"
     );
     assert!(
         pool.releases > 0,
@@ -491,7 +491,7 @@ fn task_blocks_use_the_same_header_aware_path_and_stats_are_unchanged() {
         "the second task result buffer reuses the first class"
     );
     assert_eq!(pool.drained, 1);
-    assert_eq!(pool.peak_retained, 48, "one task result class block");
+    assert_eq!(pool.peak_retained, 32, "one task result class block");
 }
 
 #[test]
@@ -516,7 +516,7 @@ fn nested_owner_cleanup_and_invalid_free_contracts_are_unchanged() {
         pool.drained, 2,
         "both 8-byte blocks are retained and drained"
     );
-    assert_eq!(pool.peak_retained, 96, "two class-16 blocks with headers");
+    assert_eq!(pool.peak_retained, 64, "two class-16 blocks with headers");
 
     // The `alloc` effect and `#[noalloc]` rejection are source contracts and
     // must not be weakened by the physical pool.
@@ -563,4 +563,33 @@ fn nested_owner_cleanup_and_invalid_free_contracts_are_unchanged() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn many_size_classes_still_obey_the_global_byte_cap() {
+    // Every class gets 64 simultaneous blocks. The aggregate exceeds 1 MiB,
+    // so the byte cap remains independently necessary with a class limit.
+    let source = "fn main()->i64 ! {alloc,panic} {
+        let mut blocks:Vec<Bytes> =Vec.with_capacity(4096);
+        let mut class=1;
+        while class<=64 {
+            let mut i=0;
+            while i<64 {
+                blocks=Vec.push(blocks,Bytes.with_capacity(class*16-16));
+                i=i+1;
+            }
+            class=class+1;
+        }
+        drop(blocks);0
+    }";
+    let run = run_with(source, true);
+    assert_eq!(run.exit, Some(0), "{}", run.stderr);
+    let stats = parse_stats(stats_line(&run));
+    assert_eq!(stats.allocations, 4097);
+    assert_eq!(stats.allocations, stats.deallocations);
+    let pool = pool_line(&run).unwrap();
+    assert!(pool.peak_retained <= RETAIN_CAP);
+    assert!(pool.peak_retained >= RETAIN_CAP - 1040, "{pool:?}");
+    assert!(pool.releases > 0);
+    assert_eq!(pool.retained, 0);
 }

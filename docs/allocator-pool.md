@@ -21,14 +21,19 @@ exit status are unchanged in both cases.
 
 ## Block layout
 
-Every native allocation has a 32-byte header immediately before its payload:
+Every native allocation has a 16-byte header immediately before its payload:
 
 | Field | Meaning |
 | --- | --- |
-| `magic` | Live-block marker checked when freeing or growing a valid allocation handle. |
 | `usable` | Payload capacity in bytes, recorded at allocation time. |
-| `pooled` | Whether this physical block belongs to a size class. |
-| `next` | Free-list link while the block is retained. |
+| union: `magic` | While live, one of two markers records live state and pool eligibility. |
+| union: `next` | While retained, the same word holds the next free-list block. |
+
+The free-list link and live marker are never needed at the same time. Claiming
+from a list reads the link before installing the live marker; release validates
+that marker before writing a link. The exact-size/unpooled marker keeps growth
+and free classification separate without another header word. Header size is
+statically asserted to be 16 bytes.
 
 The header size is a multiple of the requested 16-byte alignment and the
 runtime asks the system allocator for 16-byte-aligned storage, so payloads
@@ -56,9 +61,15 @@ is why the reference and native diagnostics still agree.
 - Requests above 1024 bytes are unpooled: exact-size system blocks that are
   released immediately on free.
 - A freed small block returns to its class free list only while the total
-  retained physical size (32-byte header plus padded payload) stays at or below
+  retained physical size (16-byte header plus padded payload) stays at or below
   1 MiB (1048576 bytes). Blocks that would exceed the cap go back to the system
   immediately, so the cache can never grow without bound.
+- Each size class retains at most 64 free blocks. Excess blocks return to libc
+  even while the global budget has space. This prevents a past burst in one
+  size class from keeping thousands of blocks and crowding out other classes.
+  Class counts decrease on both ordinary and fallible claims and reset on drain.
+  This is a bound on retained blocks/bytes, not a bound on RSS: libc may keep
+  pages after free.
 - `aligned_alloc` sizes are checked for overflow (`header + payload + padding`)
   and allocation failure still aborts through `kush_panic`.
 - Every retained block is released by `kush_pool_drain` on a normal exit,
@@ -146,7 +157,10 @@ counting and fallible operations use separate non-aborting runtime entry points.
   the `#[noalloc]` contract;
 - task result blocks served from the same header-aware path;
 - nested owner cleanup and checked overflow rejection; and
-- the 1 MiB retention cap with a full drain at exit.
+- per-class burst retention, the independent 1 MiB global cap, and a full drain at exit;
+- direct C-runtime checks for the compact header, payload alignment, live/free
+  marker transitions, corruption/double-release rejection, growth contents,
+  fallible pool hits, and class-count reset.
 
 Run them with:
 

@@ -83,8 +83,8 @@ measurements:
    A realloc's hidden transient peak is not observable from these hooks.
 3. **Phase RSS:** no allocation recorder; snapshots of `/proc/self/status`
    VmRSS/VmHWM. These include all process residency, including libc-retained
-   pages. Phase snapshots are diagnostic single runs; headline peak RSS is a
-   median across the plain runs.
+   pages. Phase values are medians of three independent diagnostic runs (raw frames
+   retained); headline peak RSS is a median across the plain timing runs.
 
 The allocation recorder uses a fixed BSS table and performs no bookkeeping
 allocations. Its own table inflates trace-process RSS, so that RSS is never
@@ -117,7 +117,7 @@ allocation request, and an OS page allocation are different events.
   allocations differ and are included, so this is not a parser comparison or
   a perfectly identical representation experiment.
 - Kush has thin heap handles, word-granular record tags, runtime buffer headers,
-  32-byte allocation headers, padding and a bounded 1 MiB pool. Rust has inline
+  16-byte allocation headers, padding and a bounded 1 MiB pool. Rust has inline
   Vec descriptors and normal Box allocations. Physical metrics include these
   differences rather than pretending payload sizes are the same.
 - Kush can reuse the document vector when consuming it into scalar hashes.
@@ -150,3 +150,11 @@ The content-hashed probe object filenames force Cargo to relink if the C probe
 changes. `--skip-build` checks source/compiler/binary hashes before accepting
 existing binaries. Raw data records both the measurement script hash and, when
 regenerated later, the report-generator hash.
+
+The current pool also limits each size class to 64 retained blocks. The original
+laptop snapshot predates this change and used 32-byte allocation headers; its
+layout accounting is historical. A preserved-binary comparison can be run with
+`--previous /path/to/baseline`, holding the original `kush-plain`, `kush-trace`,
+`kush-rss`, and their `manifest.json`. The harness verifies the hashes and
+workload sources, reruns those binaries in the same cohort, and records the
+previous compiler identity separately.

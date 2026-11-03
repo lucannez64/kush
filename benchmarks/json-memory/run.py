@@ -174,6 +174,18 @@ def trace(kind,count,rounds):
         observations.append(row)
     return observations
 
+def phase_rss(count, rounds):
+    runs=[trace("rss",count,rounds) for _ in range(3)]
+    rows=[]
+    for name,_,_,_ in VARIANTS:
+        observations=[next(row for row in run if row["variant"]==name) for run in runs]
+        row={key:value for key,value in observations[0].items() if key not in ("frames","stderr")}
+        row["samples"]=[{"frames":observation["frames"],"stderr":observation["stderr"]} for observation in observations]
+        row["frames"]=[{"stage":stage,"rss_kib":statistics.median(observation["frames"][stage]["rss_kib"] for observation in observations),"high_water_kib":statistics.median(observation["frames"][stage]["high_water_kib"] for observation in observations)} for stage in range(6)]
+        row["aggregation"]="median of three independent phase probes"
+        rows.append(row)
+    return rows
+
 def measure(language,count,rounds,mode,cpu):
     marker="__memory_bench__"
     start=time.perf_counter()
@@ -204,13 +216,13 @@ def report(data,output):
     lines += ["", "Allocator calls are client-visible libc requests, not OS page allocations. Requested bytes include Kush's allocation headers/padding; usable bytes use glibc malloc_usable_size and exclude allocator metadata. Realloc transient internal peaks are not visible. Peak RSS comes from uninstrumented processes, not the fixed-table tracing binary.", "", "## Phase RSS (separate uninstrumented phase probe)","", "| Documents | Implementation | Before workload KiB | Loaded KiB | Edited KiB | Large corpus dropped KiB | Small corpus KiB | Workload dropped KiB |", "|---|---|---:|---:|---:|---:|---:|---:|"]
     for row in data["phase_rss"]:
         lines.append(f"| {row['count']} | {row['label']} | "+" | ".join(str(f['rss_kib']) for f in row['frames'])+" |")
-    lines += ["", "Phase RSS values are single diagnostic snapshots, not medians. Memory can remain resident after logical frees because both the Kush pool and libc retain storage. Parser implementations differ (Kush std.json / Rust serde_json); parsing the small common seed is included. See README.md for representation differences, measurement scope and reproduction."]
+    lines += ["", "Phase RSS values are medians of three independent diagnostic runs; every raw phase frame is retained. Memory can remain resident after logical frees because both the Kush pool and libc retain storage. Parser implementations differ (Kush std.json / Rust serde_json); parsing the small common seed is included. See README.md for representation differences, measurement scope and reproduction."]
     (output/"report.md").write_text("\n".join(lines)+"\n")
     # Self-contained theme-aware interactive comparison; no external resources.
     payload=json.dumps(rows)
     page='''<!doctype html><html><head><meta charset="utf-8"><style>
     :root{font-family:var(--font-sans);color:var(--foreground)}body{margin:0}h3{font-size:15px}p{color:var(--muted-foreground);font-size:13px;line-height:1.5}select{color:var(--foreground);background:var(--secondary);border:1px solid var(--border);padding:6px;border-radius:var(--radius)}.row{display:grid;grid-template-columns:minmax(140px,1fr) 1.3fr 90px;align-items:center;gap:10px;margin:15px 0;font-size:13px}.bar{height:25px;background:var(--secondary);border-radius:4px;overflow:hidden}.fill{height:100%;background:var(--chart-1)}.rust{background:var(--chart-2)}#chart{min-height:190px;margin-top:20px}.value{text-align:right;font-family:var(--font-mono)}label{font-size:13px;margin-right:12px;display:inline-block;margin-bottom:8px}
-    </style></head><body><h3>Owned JSON documents · memory and allocation</h3><p>Matched edits and output. Lower is better. Rust uses Cranelift; this is one workload, not a general language ranking.</p><label>Documents <select id="size"></select></label><label>Metric <select id="metric"><option value="median_peak_rss_kib">Peak RSS (KiB)</option><option value="allocator_requests">Allocator requests (alloc + realloc)</option><option value="allocator_calls">Allocation calls only</option><option value="realloc_calls">Reallocation calls</option><option value="requested_bytes_total">Bytes requested cumulatively</option><option value="peak_live_requested_bytes">Peak live requested bytes</option><option value="median_wall_ms">Wall time (ms)</option><option value="after_drop_rss_kib">After-drop RSS (KiB, single probe)</option></select></label><div id="chart"></div><p>Allocation tracing and timing/RSS use separate binaries. Allocator requests are not OS allocations. Kush's headers/padding and pool retention count toward physical requested memory. Phase snapshots and raw data are in the linked report.</p><script>const rows=PAYLOAD;const sizes=[...new Set(rows.map(x=>x.count))];size.innerHTML=sizes.map(n=>`<option>${n}</option>`).join('');size.value=sizes[sizes.length-1];function draw(){const data=rows.filter(x=>x.count==size.value),key=metric.value,max=Math.max(...data.map(x=>x[key]),1);chart.innerHTML=data.map(x=>`<div class="row"><span>${x.label}</span><div class="bar"><div class="fill ${x.variant.startsWith('rust')?'rust':''}" style="width:${100*x[key]/max}%"></div></div><span class="value">${x[key].toLocaleString(undefined,{maximumFractionDigits:2})}</span></div>`).join('')}size.onchange=metric.onchange=draw;draw();</script></body></html>'''.replace("PAYLOAD",payload)
+    </style></head><body><h3>Owned JSON documents · memory and allocation</h3><p>Matched edits and output. Lower is better. Rust uses Cranelift; this is one workload, not a general language ranking.</p><label>Documents <select id="size"></select></label><label>Metric <select id="metric"><option value="median_peak_rss_kib">Peak RSS (KiB)</option><option value="allocator_requests">Allocator requests (alloc + realloc)</option><option value="allocator_calls">Allocation calls only</option><option value="realloc_calls">Reallocation calls</option><option value="requested_bytes_total">Bytes requested cumulatively</option><option value="peak_live_requested_bytes">Peak live requested bytes</option><option value="median_wall_ms">Wall time (ms)</option><option value="after_drop_rss_kib">After-drop RSS (KiB, 3-probe median)</option></select></label><div id="chart"></div><p>Allocation tracing and timing/RSS use separate binaries. Allocator requests are not OS allocations. Kush's headers/padding and pool retention count toward physical requested memory. Phase snapshots and raw data are in the linked report.</p><script>const rows=PAYLOAD;const sizes=[...new Set(rows.map(x=>x.count))];size.innerHTML=sizes.map(n=>`<option>${n}</option>`).join('');size.value=sizes[sizes.length-1];function draw(){const data=rows.filter(x=>x.count==size.value),key=metric.value,max=Math.max(...data.map(x=>x[key]),1);chart.innerHTML=data.map(x=>`<div class="row"><span>${x.label}</span><div class="bar"><div class="fill ${x.variant.startsWith('rust')?'rust':''}" style="width:${100*x[key]/max}%"></div></div><span class="value">${x[key].toLocaleString(undefined,{maximumFractionDigits:2})}</span></div>`).join('')}size.onchange=metric.onchange=draw;draw();</script></body></html>'''.replace("PAYLOAD",payload)
     (output/"report.html").write_text(page)
     print("\n".join(lines[:8+len(rows)]))
 
@@ -224,6 +236,7 @@ def main():
     parser.add_argument("--cpu",type=int,default=max(os.sched_getaffinity(0)))
     parser.add_argument("--output",type=Path,default=ROOT/"results/latest")
     parser.add_argument("--skip-build",action="store_true")
+    parser.add_argument("--previous",type=Path,help="preserved baseline directory with kush-plain/trace/rss and manifest.json")
     parser.add_argument("--validate-only",action="store_true")
     args=parser.parse_args()
     if not args.sizes or any(n<1 or n>32768 for n in args.sizes) or not 0<=args.rounds<=63 or args.repetitions<3 or args.cpu not in os.sched_getaffinity(0):parser.error("invalid size, rounds, repetitions or CPU")
@@ -238,15 +251,29 @@ def main():
             assert sha(BUILD/item["name"])==item["sha256"],f"binary changed: {item['name']}"
     else:
         builds=build(kush,args.toolchain)
+    if args.previous:
+        previous=args.previous.resolve()
+        manifest=json.loads((previous/"manifest.json").read_text())
+        for path,digest in manifest["sources"].items():
+            assert sha(path)==digest,f"previous workload source differs: {path}"
+        for kind in ["plain","trace","rss"]:
+            original=previous/f"kush-{kind}"
+            prior=next(item for item in manifest["builds"] if item["name"]==original.name)
+            assert sha(original)==prior["sha256"],f"previous binary differs: {original}"
+            target=BUILD/f"kush-before-{kind}"
+            shutil.copyfile(original,target);target.chmod(0o700)
+            builds.append({"name":target.name,"sha256":sha(target),"preserved_path":str(original),"compiler_sha256":manifest["compiler_sha256"]})
+        VARIANTS.insert(0,("kush-before-rebuild","Kush / previous rebuild","kush-before",0))
+        VARIANTS.insert(1,("kush-before-reuse","Kush / previous reuse","kush-before",1))
     probe_correctness()
     checks=correctness(kush)
     print(f"Correctness: {len(checks)} JSON output cases; reference/native agreement and invalid arguments passed.",flush=True)
     if args.validate_only:return
-    data={"metadata":{"utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"git_head":run(["git","rev-parse","HEAD"],cwd=REPO).stdout.strip(),"compiler_sha256":sha(kush),"libc":platform.libc_ver(),"kernel":platform.release(),"cc":run(["cc","--version"]).stdout,"allocator_environment":{key:os.environ.get(key) for key in ["MALLOC_ARENA_MAX","MALLOC_TRIM_THRESHOLD_","MALLOC_MMAP_THRESHOLD_","GLIBC_TUNABLES","LD_PRELOAD"]},"rustc":run(["rustc",f"+{args.toolchain}","-vV"]).stdout,"cpu_model":next(line.split(":",1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')),"pinned_cpu":args.cpu,"repetitions":args.repetitions,"warmups":2,"shuffle_seed":20261103,"builds":builds,"sources":{str(p.relative_to(ROOT)):sha(p) for p in [ROOT/"kush/main.kush",ROOT/"rust/src/main.rs",ROOT/"probe.c",ROOT/"probe_self_test.c",ROOT/"seed.json",ROOT/"rust/Cargo.lock",ROOT/"rust/Cargo.toml",ROOT/"Kush.toml",ROOT/"run.py"]}},"correctness":checks,"allocations":[],"phase_rss":[],"timings":[]}
+    data={"metadata":{"utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"git_head":run(["git","rev-parse","HEAD"],cwd=REPO).stdout.strip(),"compiler_sha256":sha(kush),"libc":platform.libc_ver(),"kernel":platform.release(),"cc":run(["cc","--version"]).stdout,"allocator_environment":{key:os.environ.get(key) for key in ["MALLOC_ARENA_MAX","MALLOC_TRIM_THRESHOLD_","MALLOC_MMAP_THRESHOLD_","GLIBC_TUNABLES","LD_PRELOAD"]},"rustc":run(["rustc",f"+{args.toolchain}","-vV"]).stdout,"cpu_model":next(line.split(":",1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')),"pinned_cpu":args.cpu,"repetitions":args.repetitions,"warmups":2,"phase_rss_repetitions":3,"shuffle_seed":20261103,"builds":builds,"sources":{str(p.relative_to(ROOT)):sha(p) for p in [ROOT/"kush/main.kush",ROOT/"rust/src/main.rs",ROOT/"probe.c",ROOT/"probe_self_test.c",ROOT/"seed.json",ROOT/"rust/Cargo.lock",ROOT/"rust/Cargo.toml",ROOT/"Kush.toml",ROOT/"run.py"]}},"correctness":checks,"allocations":[],"phase_rss":[],"timings":[]}
     rng=random.Random(20261103)
     for count in args.sizes:
         data["allocations"]+=trace("trace",count,args.rounds)
-        data["phase_rss"]+=trace("rss",count,args.rounds)
+        data["phase_rss"]+=phase_rss(count,args.rounds)
         observations={name:[] for name,_,_,_ in VARIANTS}
         for at in range(args.repetitions+2):
             order=list(VARIANTS);rng.shuffle(order)

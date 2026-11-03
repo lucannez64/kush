@@ -246,16 +246,17 @@ static void kush_note_deallocation(void) {
     --kush_live_allocations; ++kush_deallocations;
 }
 /* ---- Bounded size-class pool for small native allocations ----------------
-   Every native allocation carries a 32-byte header in front of its payload.
+   Every native allocation carries a 16-byte header in front of its payload.
    The header size is a multiple of the 16-byte alignment requested from the
    system allocator, so payloads stay 16-byte aligned. `usable` records the
-   payload capacity in bytes, `magic` checks the live-block invariant for valid
-   allocation handles, and `next` links retained blocks. The marker is not a
-   general detector for invalid pointers or stale handles after block reuse. Requests up to
+   payload capacity in bytes. A union stores either the live-block marker
+   (including pool eligibility) or the free-list link while retained. The marker
+   is not a general detector for invalid pointers or stale handles after block
+   reuse. Requests up to
    KUSH_POOL_MAX bytes use 16-byte size classes; a freed block returns to its
    class only while the retained total (header plus padded payload) stays at or
-   below KUSH_POOL_RETAIN_CAP. Pooling is a physical optimization only: the
-   logical counters still count one kush_alloc/kush_free call, so
+   below KUSH_POOL_RETAIN_CAP, with a per-class block limit. Pooling is a
+   physical optimization only: the logical counters still count one kush_alloc/kush_free call, so
    allocation-stats stays byte-identical. Headers also let buffer growth copy
    exactly the live capacity. All retained storage is drained back to the
    system on a normal exit. */
@@ -263,17 +264,27 @@ static void kush_note_deallocation(void) {
 #define KUSH_POOL_MAX ((uint64_t)1024)
 #define KUSH_POOL_CLASSES ((size_t)(KUSH_POOL_MAX / KUSH_ALLOC_ALIGN))
 #define KUSH_POOL_RETAIN_CAP ((uint64_t)1024 * 1024)
+#define KUSH_POOL_CLASS_CAP ((size_t)64)
 #define KUSH_ALLOC_MAGIC UINT64_C(0x4b555348414c4c4f)
 typedef struct KushAllocHeader KushAllocHeader;
+/* A live block never needs a next pointer. The alternate live marker keeps
+   exact/unpooled blocks distinct without another header word. Free-list links
+   only occupy the union after the owner has been released. */
+#define KUSH_ALLOC_UNPOOLED (KUSH_ALLOC_MAGIC ^ UINT64_C(1))
 struct KushAllocHeader {
-    uint64_t magic;
     uint64_t usable;
-    uint64_t pooled;
-    KushAllocHeader *next;
+    union {
+        uint64_t magic;
+        KushAllocHeader *next;
+    };
 };
-_Static_assert(sizeof(KushAllocHeader) % KUSH_ALLOC_ALIGN == 0,
-               "allocation header must preserve 16-byte payload alignment");
+_Static_assert(sizeof(KushAllocHeader) == 16,
+               "compact header must preserve 16-byte payload alignment");
+static int kush_block_live(const KushAllocHeader *header) {
+    return header->magic == KUSH_ALLOC_MAGIC || header->magic == KUSH_ALLOC_UNPOOLED;
+}
 static KushAllocHeader *kush_pool_lists[KUSH_POOL_CLASSES];
+static size_t kush_pool_counts[KUSH_POOL_CLASSES];
 static uint64_t kush_pool_retained = 0;
 static uint64_t kush_pool_peak_retained = 0;
 static uint64_t kush_pool_hits = 0;
@@ -298,10 +309,8 @@ static KushAllocHeader *kush_try_system_block(uint64_t usable) {
     KushAllocHeader *header =
         (KushAllocHeader *)aligned_alloc((size_t)KUSH_ALLOC_ALIGN, (size_t)total);
     if (header == NULL) return NULL;
-    header->magic = KUSH_ALLOC_MAGIC;
+    header->magic = usable <= KUSH_POOL_MAX ? KUSH_ALLOC_MAGIC : KUSH_ALLOC_UNPOOLED;
     header->usable = usable;
-    header->pooled = usable <= KUSH_POOL_MAX ? 1 : 0;
-    header->next = NULL;
     return header;
 }
 static KushAllocHeader *kush_system_block(uint64_t usable) {
@@ -323,10 +332,10 @@ static KushAllocHeader *kush_block_claim(uint64_t bytes) {
         return kush_system_block(class_size);
     }
     kush_pool_lists[class] = header->next;
+    --kush_pool_counts[class];
     kush_pool_retained -= kush_block_bytes(header->usable);
     header->magic = KUSH_ALLOC_MAGIC;
     header->usable = class_size;
-    header->next = NULL;
     ++kush_pool_hits;
     return header;
 }
@@ -334,13 +343,15 @@ static KushAllocHeader *kush_block_claim(uint64_t bytes) {
    other block goes straight back to the system allocator exactly once. */
 static void kush_block_release(KushAllocHeader *header) {
     uint64_t usable = header->usable, block = kush_block_bytes(usable);
-    int poolable = header->pooled != 0 && usable >= KUSH_ALLOC_ALIGN
+    int poolable = header->magic == KUSH_ALLOC_MAGIC && usable >= KUSH_ALLOC_ALIGN
         && usable <= KUSH_POOL_MAX && usable % KUSH_ALLOC_ALIGN == 0;
     header->magic = 0;
-    if (poolable && kush_pool_retained + block <= KUSH_POOL_RETAIN_CAP) {
-        size_t class = kush_pool_class(usable);
+    size_t class = poolable ? kush_pool_class(usable) : 0;
+    if (poolable && kush_pool_counts[class] < KUSH_POOL_CLASS_CAP
+        && kush_pool_retained + block <= KUSH_POOL_RETAIN_CAP) {
         header->next = kush_pool_lists[class];
         kush_pool_lists[class] = header;
+        ++kush_pool_counts[class];
         kush_pool_retained += block;
         if (kush_pool_retained > kush_pool_peak_retained) kush_pool_peak_retained = kush_pool_retained;
         ++kush_pool_retains;
@@ -354,6 +365,7 @@ static void kush_pool_drain(void) {
     for (size_t class = 0; class < KUSH_POOL_CLASSES; ++class) {
         KushAllocHeader *header = kush_pool_lists[class];
         kush_pool_lists[class] = NULL;
+        kush_pool_counts[class] = 0;
         while (header != NULL) {
             KushAllocHeader *next = header->next;
             free(header);
@@ -371,7 +383,7 @@ uint64_t kush_alloc(uint64_t bytes) {
 void kush_free(uint64_t handle) {
     if (handle == 0 || kush_live_allocations == 0) kush_panic();
     KushAllocHeader *header = (KushAllocHeader *)(uintptr_t)handle - 1;
-    if (header->magic != KUSH_ALLOC_MAGIC) kush_panic();
+    if (!kush_block_live(header)) kush_panic();
     kush_note_deallocation();
     kush_block_release(header);
 }
@@ -381,7 +393,7 @@ void kush_free(uint64_t handle) {
    and alignment are preserved, and the old block is released once. */
 void *kush_grow(void *payload, uint64_t bytes) {
     KushAllocHeader *header = (KushAllocHeader *)payload - 1;
-    if (header->magic != KUSH_ALLOC_MAGIC) kush_panic();
+    if (!kush_block_live(header)) kush_panic();
     uint64_t copy = header->usable;
     if (bytes <= copy) return payload;
     KushAllocHeader *replacement = kush_block_claim(bytes);
@@ -436,10 +448,10 @@ uint64_t kush_try_alloc(uint64_t bytes) {
         if (header == NULL) return 0;
     } else {
         kush_pool_lists[class] = header->next;
+        --kush_pool_counts[class];
         kush_pool_retained -= kush_block_bytes(header->usable);
         header->magic = KUSH_ALLOC_MAGIC;
         header->usable = class_size;
-        header->next = NULL;
         ++kush_pool_hits;
     }
     kush_note_allocation();
@@ -451,7 +463,7 @@ uint64_t kush_try_alloc(uint64_t bytes) {
    is left completely untouched for the checked error path. */
 void *kush_try_grow(void *payload, uint64_t bytes) {
     KushAllocHeader *header = (KushAllocHeader *)payload - 1;
-    if (header->magic != KUSH_ALLOC_MAGIC) return NULL;
+    if (!kush_block_live(header)) return NULL;
     uint64_t copy = header->usable;
     if (bytes <= copy) return payload;
     if (kush_try_refuses()) return NULL;
@@ -9088,5 +9100,110 @@ mod scalar_inline_codegen_tests {
             calls[0] >= calls[1] + 2,
             "callback calls were not removed: {calls:?}"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod allocator_runtime_tests {
+    use super::*;
+
+    #[test]
+    fn compact_headers_preserve_alignment_markers_growth_and_class_counts() {
+        let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+        let source = scratch.path().join("runtime-test.c");
+        let binary = scratch.path().join("runtime-test");
+        let test = r#"
+#undef main
+#include <assert.h>
+int64_t kush_entry(void) { return 0; }
+int main(int argc, char **argv) {
+    if (argc > 1) {
+        uint64_t first=kush_alloc(8), guard=kush_alloc(8);
+        (void)guard;
+        if (strcmp(argv[1], "double") == 0) kush_free(first);
+        else ((KushAllocHeader *)(uintptr_t)first-1)->magic=0;
+        kush_free(first);
+        return 90;
+    }
+    assert(sizeof(KushAllocHeader)==16);
+    const uint64_t sizes[]={0,1,16,17,1024,1025};
+    for (size_t i=0;i<sizeof(sizes)/sizeof(sizes[0]);i++) {
+        uint64_t handle=kush_alloc(sizes[i]);
+        assert((handle & 15)==0);
+        KushAllocHeader *header=(KushAllocHeader *)(uintptr_t)handle-1;
+        assert(kush_block_live(header));
+        assert(header->magic==(sizes[i]<=1024 ? KUSH_ALLOC_MAGIC : KUSH_ALLOC_UNPOOLED));
+        memset((void *)(uintptr_t)handle,0x5a,(size_t)sizes[i]);
+        void *grown=kush_grow((void *)(uintptr_t)handle,sizes[i]+2048);
+        assert(((uintptr_t)grown & 15)==0);
+        for (uint64_t j=0;j<sizes[i];j++) assert(((unsigned char *)grown)[j]==0x5a);
+        kush_free((uint64_t)(uintptr_t)grown);
+    }
+    kush_pool_drain();
+    uint64_t owner=kush_alloc(17);
+    KushAllocHeader *header=(KushAllocHeader *)(uintptr_t)owner-1;
+    header->magic=0;
+    assert(kush_try_grow((void *)(uintptr_t)owner,64)==NULL);
+    header->magic=KUSH_ALLOC_MAGIC;
+    kush_free(owner);
+    owner=kush_try_alloc(17);
+    assert(owner!=0 && ((KushAllocHeader *)(uintptr_t)owner-1)->magic==KUSH_ALLOC_MAGIC);
+    kush_free(owner);
+    kush_pool_drain();
+    uint64_t blocks[128];
+    for (size_t i=0;i<128;i++) blocks[i]=kush_alloc(1);
+    for (size_t i=0;i<128;i++) kush_free(blocks[i]);
+    assert(kush_pool_counts[0]==KUSH_POOL_CLASS_CAP);
+    assert(kush_pool_retained==KUSH_POOL_CLASS_CAP*32);
+    for (size_t i=0;i<64;i++) blocks[i]=kush_try_alloc(1);
+    assert(kush_pool_counts[0]==0 && kush_pool_retained==0);
+    for (size_t i=0;i<64;i++) kush_free(blocks[i]);
+    kush_pool_drain();
+    for (size_t i=0;i<KUSH_POOL_CLASSES;i++) assert(kush_pool_counts[i]==0);
+    assert(kush_pool_retained==0 && kush_live_allocations==0);
+    return 0;
+}
+"#;
+        fs::write(
+            &source,
+            format!("#define main kush_runtime_process_main\n{RUNTIME}\n{test}"),
+        )
+        .unwrap();
+        let output = Command::new("cc")
+            .args([
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-DKUSH_HAS_TASKS=1",
+                "-DKUSH_STATS=1",
+                "-DKUSH_FUSION_COUNT=0",
+            ])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .arg("-lm")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(&binary)
+            .env_remove("KUSH_ALLOC_FAIL_AFTER")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for argument in ["double", "corrupt"] {
+            let output = Command::new(&binary).arg(argument).output().unwrap();
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("panic:"));
+        }
     }
 }
