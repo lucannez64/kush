@@ -187,3 +187,11 @@ and stores only length/capacity in ordinary vector headers (16 bytes). Element
 width is a monomorphized constant at every runtime call. Genuine sum tags,
 empty structs, tuples, structural rows and inline array ABIs retain their
 existing representations. Older snapshots below predate these changes.
+
+The [compact-layout checkpoint](sample-results/compact-layout-2026-11-03/analysis.md)
+records matched boxed and inline controls. The compiler-only change reduces
+the large boxed reuse heap gap versus Rust from 10.5% to 5.8%. With metadata
+explicitly inline in both languages, peak requested heap is within 3.9% and
+median peak RSS within 1.5% on this workload. Full Boat validation: 1,152 tests,
+formatting and strict Clippy passed. These are measured limits, not a general
+parity or automatic box-elimination claim.
