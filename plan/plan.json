@@ -555,12 +555,18 @@
       "size": "L",
       "hard": true,
       "deps": [
-        "LT-SOLVER"
+        "LT-REC-TESTS"
       ],
       "status": "todo",
       "desc": "Fixpoint over mutually recursive signatures; principal result documented.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 16:06:27",
+          "who": "agent",
+          "text": "Implementation split into provisional IR, flow, SCC solve, finalization, diagnostics and adversarial gate. No compiler behavior has changed."
+        }
+      ]
     },
     {
       "id": "LT-VARIANCE-DESIGN",
@@ -571,10 +577,16 @@
       "deps": [
         "LT-SOLVER"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Box/Vec covariant, &mut invariant, fn parameters contravariant, records by field.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-03 16:00:42",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "LT-VARIANCE",
@@ -1499,6 +1511,114 @@
       ],
       "status": "todo",
       "desc": "Aliasing through slice roots, split halves, bounds, escape, owner invalidation and native/evaluator parity.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LT-RECURSIVE-DESIGN",
+      "title": "Design recursive lifetime inference across call-graph SCCs",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "LT-SOLVER"
+      ],
+      "status": "in_progress",
+      "desc": "Define finite summaries, caller obligations, recursive fixpoint, termination, ambiguity and failure diagnostics before implementation.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-03 16:00:43",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-03 16:03:34",
+          "who": "agent",
+          "text": "Drafted finite may-origin/precondition summaries, call-graph SCC fixpoint, no-seed rejection, freeze/recheck protocol and hostile test matrix; reconciling with variance design."
+        },
+        {
+          "time": "2026-11-03 16:05:13",
+          "who": "agent",
+          "text": "Design review: SCCs over concrete call instances are separate from lifetime SCCs; preserve actual_outlives lexical rules and prohibit growing recursive field-path domains."
+        }
+      ]
+    },
+    {
+      "id": "LT-REC-IR",
+      "title": "Provisional recursive borrow-summary representation",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LT-RECURSIVE-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "Stable instance/leaf IDs, finite domain and discovery/freeze states; no backend consumes provisional contracts.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LT-REC-FLOW",
+      "title": "Compose nonrecursive borrow origins and caller obligations",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LT-REC-IR"
+      ],
+      "status": "todo",
+      "desc": "Seed from checked provenance and propagate all actual argument alternatives; never assume inferred requirements to prove themselves.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LT-REC-FIXPOINT",
+      "title": "Solve concrete call-graph SCC borrow summaries",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LT-REC-FLOW"
+      ],
+      "status": "todo",
+      "desc": "Monotone worklist, stable anonymous result IDs, no-seed rejection and finite work budgets.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LT-REC-FINALIZE",
+      "title": "Freeze recursive signatures and revalidate callers",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LT-REC-FIXPOINT"
+      ],
+      "status": "todo",
+      "desc": "Validate rigid contracts, replay dependent bodies, invalidate arrow/adapter caches and prohibit provisional metadata in codegen.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LT-REC-DIAG",
+      "title": "Explain recursive lifetime obligations and inference failures",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "LT-REC-FIXPOINT"
+      ],
+      "status": "todo",
+      "desc": "Call/return witnesses; distinguish missing seed, unsupported boundary, incompatible rigid contract and exhausted budget.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LT-REC-TESTS",
+      "title": "Validate recursive lifetime summaries adversarially",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LT-REC-FINALIZE",
+        "LT-REC-DIAG"
+      ],
+      "status": "todo",
+      "desc": "Order independence, all-owner retention, mutable aliases, local escape, cache replay, budgets and native/reference parity; soundness review.",
       "commit": null,
       "log": []
     }
