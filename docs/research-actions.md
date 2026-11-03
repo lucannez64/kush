@@ -199,3 +199,11 @@ passed **1,182 tests**, formatting and strict workspace/all-target Clippy.
 The sandbox was stopped afterwards. No workload timing or claimed percentage
 speedup accompanies this change; generated-call elimination is the measured
 codegen property. Other research nodes remain open.
+
+
+The immediate borrowing subset audit is recorded in the [operational loan
+contract](borrow-model-contract.md), with focused baseline regressions in
+`lifetime_integration_baseline.rs`. A formal Tree Borrows simulation is still
+not claimed. Active implementation work now prioritizes LIFE's variance,
+recursive-summary and row/result dependency chains; unrelated research changes
+remain open and do not block that chain.

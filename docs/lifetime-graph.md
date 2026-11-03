@@ -61,3 +61,8 @@ locally. No recursive inference or variance node is closed by this result.
 Follow-up designs (implementation remains open): [lifetime variance](lifetime-variance-design.md)
 and [recursive lifetime summaries](recursive-lifetime-design.md). The latter
 separates call-graph fixed points from this module's outlives reachability.
+
+
+For LIFE integration, use the [operational loan contract](borrow-model-contract.md)
+and [borrowed structural row contract](lifetime-rows-design.md). They specify
+root/path preservation and metadata gates; neither enables new programs alone.
