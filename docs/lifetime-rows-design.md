@@ -104,6 +104,60 @@ construction. Only after those paths and variance witnesses are integrated
 should LT-STRUCT-RESULT enable supported borrowed result forms. Finalize with
 independent review plus the integrated Boat gate before LT-REVIEW/LIFE close.
 
+## Implementation status
+
+LT-ROWVARS stages 1-2 are implemented (2026-11-04). The remaining
+LT-STRUCT-RESULT work is not started.
+
+- `runtime_types::RowField` is the canonical field descriptor: name, lowered
+  runtime type, and the outer borrow label erased from a direct view. The
+  structural interning cache is keyed by the complete name-sorted descriptors,
+  so rows that differ only in `'a` versus `'b` are distinct checker types while
+  their runtime layout and canonical field order are unchanged. Direct
+  structural annotations lower their label through the current lifetime
+  substitution instead of discarding it.
+- `Types::structural_row_fields` (structural layouts) and
+  `Types::record_row_fields` (any instantiated record) expose the metadata-
+  preserving view. `Types::lower` row-tail expansion, ordinary call residual
+  inference, repeated-row-variable checks, and impl-header matching in
+  `executable.rs` use that view. `Types::structural_row` remains the erased
+  `(name, type)` convenience view for layout-only consumers.
+- A row specialization is still a concrete structural `Type`, now including
+  labels, so `InstanceKey` and the impl-instantiation cache separate call sites
+  with different labels. No canonical-label map is attached to the interned
+  row type; each specialization constructs its own parameter/result shapes from
+  the resolved substitution. Residual fields are sorted by their canonical
+  target names and coercions map them by source field name, not by retained
+  source indices.
+- Structural conversion keeps retained borrowed leaves invariant: a concrete
+  source label must equal the target label. An unlabelled literal or an
+  opaque/fresh inferred label may acquire the target annotation only through
+  the ordinary checked coercion, which retains the value's actual origins.
+- Borrowed structural **results** remain rejected by an explicit result gate
+  that inspects the complete result type, including rows nested behind owned
+  containers. Concrete labels on a specialized `..r` result therefore do not
+  open the LT-STRUCT-RESULT boundary.
+
+Coverage is in `crates/kush/tests/lifetime_rowvars.rs`: direct annotation
+labels, residual borrowed reads, distinct call-site labels, matching repeated
+rows, impl-row methods, owner mutation/drop while a residual loan is live,
+reordered nonzero source indices, label invariance, and continued structural
+result rejection. Positive cases are checked by the reference evaluator and the
+native backend with balanced allocation statistics.
+
+Deliberate limits left for later nodes:
+
+- Structural **literals** remain unlabelled: an unannotated literal does not
+  copy its expected type's label, because its field provenance has no declared
+  identity. An explicit structural annotation may supply the label through the
+  checked conversion.
+- A structural borrowed result, including a row-variable result whose
+  specialization now carries a concrete label, stays an explicit rejection
+  until LT-STRUCT-RESULT defines its origin contract.
+- The row fragment remains finite and first-order: no row unification with
+  outlives-related but distinct labels, no general binder inference, and no new
+  width/drop behavior for borrowed fields.
+
 The test matrix must include:
 
 - A named slice parameter returned in a labelled structural field; a nominal

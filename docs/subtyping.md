@@ -186,6 +186,19 @@ variable is type information, so a function that mentions it in its result must
 be called with a record argument (or an explicit structural row
 specialization) that determines the tail.
 
+The canonical row is interned from complete field descriptors: name, runtime
+type, and the outer borrow label of a direct `&'a [T]`, `&'a mut [T]`, or
+`&'a str` field. Rows that differ only in `'a` versus `'b` are different checker
+types, although their runtime layout is identical. Residual inference projects
+those descriptors from the actual record, so a borrowed field keeps its label
+through `..r`; one row variable must receive the same complete residual row,
+including labels, from every parameter. A call site with a different label gets
+its own specialization rather than reusing the first call's binder environment.
+Retained borrowed fields stay invariant under a structural conversion: a
+concrete source label must match the target label exactly. An unlabelled
+literal or a fresh inferred identity may acquire the target annotation only
+through the ordinary checked coercion, which keeps the value's actual origins.
+
 A row variable may also appear in an impl header:
 
 ```rust
@@ -206,11 +219,13 @@ coherence error, and an open header and an exact structural header follow the
 ordinary concrete-over-generic rule. A bare `..` impl header has no parameter
 to bind the residual row and remains an explicit rejection.
 
-Borrowed structural **results** remain an explicit boundary: structural rows
-carry no declared field-lifetime labels, so returning `struct { view: &[i64], ..r }`
-is rejected. The view may travel through a row-variable parameter and be read or
-consumed inside the call, but a caller-owned structural result must be a nominal
-record with declared lifetimes.
+Borrowed structural **results** remain an explicit boundary: although a
+specialized row now carries its fields' erased borrow labels, structural rows
+declare no lifetime parameters that could be related to the caller's outlives
+bounds, so returning `struct { view: &[i64], ..r }` is rejected. The view may
+travel through a row-variable parameter and be read or consumed inside the
+call, but a caller-owned structural result must be a nominal record with
+declared lifetimes.
 
 **Field renaming** is an explicit conversion, written with `from`:
 

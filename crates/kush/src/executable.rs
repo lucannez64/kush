@@ -7369,15 +7369,16 @@ fn match_type_pattern(
             // Structural impl headers match an anonymous structural row.
             // Nominal records are deliberately not matched here: they keep
             // their own identity, so a structural impl cannot silently overlap
-            // a nominal impl. A `..r` tail binds the residual canonical row.
-            let Some(row_fields) = types.structural_row(actual) else {
+            // a nominal impl. A `..r` tail binds the residual canonical row,
+            // complete with each field's erased borrow label.
+            let Some(row_fields) = types.structural_row_fields(actual) else {
                 return Ok(false);
             };
             if row.is_none() && row_fields.len() != fields.len() {
                 return Ok(false);
             }
             for field in fields {
-                let Some((_, actual_ty)) = row_fields.iter().find(|(name, _)| name == &field.name)
+                let Some(actual_field) = row_fields.iter().find(|actual| actual.name == field.name)
                 else {
                     return Ok(false);
                 };
@@ -7385,7 +7386,7 @@ fn match_type_pattern(
                     resolution,
                     types,
                     &field.ty,
-                    *actual_ty,
+                    actual_field.ty,
                     bindings,
                     depth + 1,
                 )? {
@@ -7401,13 +7402,12 @@ fn match_type_pattern(
                     .map(|field| field.name.as_str())
                     .collect::<BTreeSet<_>>();
                 let residual = row_fields
-                    .iter()
-                    .filter(|(name, _)| !declared.contains(name.as_str()))
-                    .cloned()
+                    .into_iter()
+                    .filter(|field| !declared.contains(field.name.as_str()))
                     .collect::<Vec<_>>();
-                let residual = types.structural(residual, row.span)?;
+                let residual = types.structural_fields(residual, row.span)?;
                 if let Some(bound) = bindings.types.get(&binder).copied() {
-                    if types.structural_row(bound) != types.structural_row(residual) {
+                    if types.structural_row_fields(bound) != types.structural_row_fields(residual) {
                         return Ok(false);
                     }
                 } else {
@@ -9765,6 +9765,17 @@ impl<'a> Functions<'a> {
                 lifetime_bounds.insert((source, result_lifetime.clone()));
             }
             lifetime_bounds = close_lifetime_bounds(lifetime_bounds);
+        }
+        // Structural rows now carry concrete labels through `..r`
+        // specializations, but a borrowed structural result is still an
+        // explicit boundary: the row itself declares no lifetime parameters
+        // that could be related to the caller's outlives bounds. The next
+        // node (LT-STRUCT-RESULT) owns relaxing this gate.
+        if crate::runtime_types::contains_borrowed_structural(types, result) {
+            return Err(Diagnostic::new(
+                f.result.span,
+                "a returned record cannot carry a borrowed field without a declared lifetime; anonymous 'struct { ... }' rows have none, so return a nominal record with declared field lifetimes instead",
+            ));
         }
         if result.is_view() {
             let Some(lifetime) = &result_lifetime else {
@@ -16577,18 +16588,40 @@ impl Checker<'_, '_> {
                     ),
                 ));
             }
-            if (crate::runtime_types::has_borrow(self.types, *target_ty)
-                || crate::runtime_types::has_mutable_borrow(self.types, *target_ty))
-                && source_ty != *target_ty
+            if crate::runtime_types::has_borrow(self.types, *target_ty)
+                || crate::runtime_types::has_mutable_borrow(self.types, *target_ty)
             {
-                return Err(Diagnostic::new(
-                    span,
-                    format!(
-                        "cannot convert field '{source_name}' from {} to {}: borrowed leaves are invariant under structural conversion",
-                        self.types.name(source_ty),
-                        self.types.name(*target_ty)
-                    ),
-                ));
+                if source_ty != *target_ty {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "cannot convert field '{source_name}' from {} to {}: borrowed leaves are invariant under structural conversion",
+                            self.types.name(source_ty),
+                            self.types.name(*target_ty)
+                        ),
+                    ));
+                }
+                let source_label = self.types.enums[source_layout]
+                    .field_lifetimes
+                    .get(source_index)
+                    .cloned()
+                    .flatten();
+                let target_label = self.types.enums[expected.layout().expect("structural target")]
+                    .field_lifetimes
+                    .get(target_index)
+                    .cloned()
+                    .flatten();
+                if let (Some(source_label), Some(target_label)) = (source_label, target_label)
+                    && !crate::runtime_types::is_opaque_row_label(&source_label)
+                    && source_label != target_label
+                {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "cannot convert field '{source_name}' from a '{source_label}' borrow to an '{target_label}' borrow: borrowed leaves are invariant under structural conversion"
+                        ),
+                    ));
+                }
             }
             let nested = self.nested_field_coercion(source_ty, *target_ty, span, depth + 1)?;
             kept.push((target_index, source_index, nested));
@@ -24950,6 +24983,9 @@ impl Checker<'_, '_> {
                     // declared row does not mention. It is monomorphized per
                     // concrete residual row, so the binding is a structural
                     // record type whose canonical row is exactly the residual.
+                    // The complete descriptors carry each field's erased borrow
+                    // label, keeping call sites with distinct labels in
+                    // separate specializations.
                     if let Some(row) = row {
                         let Some(binder) = self.resolution.reference(row.span) else {
                             return Err(Diagnostic::new(
@@ -24962,18 +24998,18 @@ impl Checker<'_, '_> {
                                 .iter()
                                 .map(|field| field.name.as_str())
                                 .collect::<BTreeSet<_>>();
-                            let residual = variant
-                                .names
-                                .iter()
-                                .cloned()
-                                .zip(variant.fields.iter().copied())
-                                .filter(|(name, _)| !declared.contains(name.as_str()))
+                            let residual = self
+                                .types
+                                .record_row_fields(Type::Enum(layout))
+                                .expect("a checked record has a canonical row")
+                                .into_iter()
+                                .filter(|field| !declared.contains(field.name.as_str()))
                                 .collect::<Vec<_>>();
-                            let residual = self.types.structural(residual, span)?;
+                            let residual = self.types.structural_fields(residual, span)?;
                             match subst.types.get(&binder).copied() {
                                 Some(bound) => {
-                                    if self.types.structural_row(bound)
-                                        != self.types.structural_row(residual)
+                                    if self.types.structural_row_fields(bound)
+                                        != self.types.structural_row_fields(residual)
                                     {
                                         return Err(Diagnostic::new(
                                             span,
