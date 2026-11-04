@@ -1212,10 +1212,26 @@
       "deps": [
         "I-REVIEW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "65c8721",
+      "log": [
+        {
+          "time": "2026-11-05 00:03:17",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 00:03:17",
+          "who": "agent",
+          "text": "Closed after I-REVIEW: indexed unions, principal unique-or-reject inference, decidability boundary doc"
+        },
+        {
+          "time": "2026-11-05 00:03:17",
+          "who": "agent",
+          "text": "done 65c8721"
+        }
+      ]
     },
     {
       "id": "E-CPS-DESIGN",
