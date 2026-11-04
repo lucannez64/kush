@@ -449,3 +449,47 @@ fn nested_lambda_and_loop_writes_agree_between_backends() {
         "",
     );
 }
+
+#[test]
+fn constructing_an_unused_writer_preserves_loop_facts() {
+    agrees(
+        r"fn below(i: i64, n: i64, erased p: { i < n }) -> i64 ! {} { i }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut i = 0;
+            let mut j = 0;
+            while j < 2 {
+                let unused = fn() -> Unit ! {panic} { i = 20; };
+                let x = below(i, 10, _);
+                j = j + 1;
+            }
+            i
+        }",
+        0,
+        "",
+    );
+}
+
+#[test]
+fn executing_a_writer_discards_loop_facts() {
+    for invocation in [
+        "let writer = fn() -> Unit ! {panic} { i = 20; }; writer();",
+        "(fn() -> Unit ! {panic} { i = 20; })();",
+        "let writer = fn() -> Unit ! {panic} { i = 20; }; let alias = writer; alias();",
+    ] {
+        rejects(
+            &format!(
+                r"fn below(i: i64, n: i64, erased p: {{ i < n }}) -> i64 ! {{}} {{ i }}
+                fn main() -> i64 ! {{alloc, panic}} {{
+                    let mut i = 0; let mut j = 0;
+                    while j < 2 {{
+                        {invocation}
+                        let x = below(i, 10, _);
+                        j = j + 1;
+                    }}
+                    i
+                }}"
+            ),
+            "cannot prove",
+        );
+    }
+}

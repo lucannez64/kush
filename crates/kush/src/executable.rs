@@ -29754,22 +29754,129 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
-    /// Facts about locals assigned anywhere in a loop body do not survive
-    /// into it: the next iteration may observe the new value.
+    /// Facts about locals assigned anywhere in a loop body, or written by a
+    /// callable the loop may execute, do not survive into it: the next
+    /// iteration may observe the new value.
     fn bump_assigned(&mut self, body: &ast::Block, condition: Option<&ast::Expr>) {
         type Out<'e> = Vec<(Span, Option<&'e ast::Expr>)>;
-        fn block<'e>(b: &'e ast::Block, out: &mut Out<'e>) {
+        struct Calls<'e, 'r> {
+            resolution: &'r Resolution,
+            values: BTreeMap<BindingId, Vec<&'e ast::Expr>>,
+            active: BTreeSet<BindingId>,
+            invoked: BTreeSet<BindingId>,
+            handlers: Vec<&'e ast::Expr>,
+            may_execute: bool,
+            collecting: bool,
+        }
+        fn invoke<'e>(value: &'e ast::Expr, out: &mut Out<'e>, calls: &mut Calls<'e, '_>) {
+            if calls.collecting {
+                return;
+            }
+            match &value.kind {
+                ast::ExprKind::Lambda(lambda) => {
+                    let mut writes = Vec::new();
+                    block(&lambda.body, &mut writes, calls);
+                    out.extend(writes.into_iter().map(|(span, _)| (span, None)));
+                }
+                ast::ExprKind::Name(_) => {
+                    if let Some(id) = calls.resolution.reference(value.span) {
+                        calls.invoked.insert(id);
+                        if calls.active.insert(id) {
+                            if let Some(values) = calls.values.get(&id).cloned() {
+                                for value in values {
+                                    invoke(value, out, calls);
+                                }
+                            }
+                            calls.active.remove(&id);
+                        }
+                    }
+                }
+                ast::ExprKind::Block(body) => {
+                    if let Some(tail) = &body.tail {
+                        invoke(tail, out, calls);
+                    }
+                }
+                ast::ExprKind::If {
+                    then, otherwise, ..
+                } => {
+                    if let Some(tail) = &then.tail {
+                        invoke(tail, out, calls);
+                    }
+                    if let Some(otherwise) = otherwise {
+                        invoke(otherwise, out, calls);
+                    }
+                }
+                ast::ExprKind::Match { arms, .. } => {
+                    for arm in arms {
+                        invoke(&arm.body, out, calls);
+                    }
+                }
+                // A callable taken from a tuple, array, or record may be one
+                // of several stored values, so every element may execute.
+                ast::ExprKind::Tuple(values) | ast::ExprKind::Array(values) => {
+                    for value in values {
+                        invoke(value, out, calls);
+                    }
+                }
+                ast::ExprKind::StructuralLiteral(fields) | ast::ExprKind::Record { fields, .. } => {
+                    for (_, value) in fields {
+                        invoke(value, out, calls);
+                    }
+                }
+                ast::ExprKind::Field { value: base, .. }
+                | ast::ExprKind::Index { value: base, .. } => invoke(base, out, calls),
+                ast::ExprKind::Specialize { callee, .. }
+                | ast::ExprKind::Cast { value: callee, .. } => invoke(callee, out, calls),
+                _ => {
+                    // An unknown invoked value can contain any referenced callable.
+                    let mut references = BTreeSet::new();
+                    collect_expr_refs(calls.resolution, value, &mut references);
+                    for id in references {
+                        calls.invoked.insert(id);
+                        if calls.active.insert(id) {
+                            if let Some(values) = calls.values.get(&id).cloned() {
+                                for value in values {
+                                    invoke(value, out, calls);
+                                }
+                            }
+                            calls.active.remove(&id);
+                        }
+                    }
+                }
+            }
+        }
+        fn effects<'e>(out: &mut Out<'e>, calls: &mut Calls<'e, '_>) {
+            if calls.collecting {
+                return;
+            }
+            calls.may_execute = true;
+            // Unknown calls may perform an operation handled here. Temporarily
+            // remove the handlers while expanding them to avoid resumption cycles.
+            let handlers = std::mem::take(&mut calls.handlers);
+            for handler in &handlers {
+                invoke(handler, out, calls);
+            }
+            calls.handlers = handlers;
+        }
+        fn block<'e>(b: &'e ast::Block, out: &mut Out<'e>, calls: &mut Calls<'e, '_>) {
             for s in &b.statements {
                 match s {
-                    ast::Statement::Let { value, .. } => expr(value, out),
-                    ast::Statement::Expr(e) => expr(e, out),
+                    ast::Statement::Let { pattern, value, .. } => {
+                        expr(value, out, calls);
+                        if calls.collecting
+                            && let Some(id) = calls.resolution.binder(pattern.span)
+                        {
+                            calls.values.entry(id).or_default().push(value);
+                        }
+                    }
+                    ast::Statement::Expr(e) => expr(e, out, calls),
                 }
             }
             if let Some(t) = &b.tail {
-                expr(t, out);
+                expr(t, out, calls);
             }
         }
-        fn expr<'e>(e: &'e ast::Expr, out: &mut Out<'e>) {
+        fn expr<'e>(e: &'e ast::Expr, out: &mut Out<'e>, calls: &mut Calls<'e, '_>) {
             use ast::ExprKind as K;
             match &e.kind {
                 K::Binary {
@@ -29778,73 +29885,90 @@ impl Checker<'_, '_> {
                     right,
                 } => {
                     out.push((left.span, Some(right)));
-                    expr(right, out);
+                    expr(right, out, calls);
+                    if calls.collecting
+                        && let Some(id) = calls.resolution.reference(left.span)
+                    {
+                        calls.values.entry(id).or_default().push(right);
+                    }
                 }
                 K::Binary { left, right, .. }
                 | K::Index {
                     value: left,
                     index: right,
                 } => {
-                    expr(left, out);
-                    expr(right, out);
+                    expr(left, out, calls);
+                    expr(right, out, calls);
                 }
                 K::Slice { value, start, end } => {
-                    expr(value, out);
+                    expr(value, out, calls);
                     if let Some(start) = start {
-                        expr(start, out);
+                        expr(start, out, calls);
                     }
                     if let Some(end) = end {
-                        expr(end, out);
+                        expr(end, out, calls);
                     }
                 }
                 K::Unary { operand, .. }
                 | K::Try(operand)
                 | K::Cast { value: operand, .. }
-                | K::Field { value: operand, .. } => expr(operand, out),
-                K::Return(Some(v)) | K::Break(Some(v)) => expr(v, out),
-                K::Tuple(vs) | K::Array(vs) => vs.iter().for_each(|v| expr(v, out)),
+                | K::Field { value: operand, .. } => expr(operand, out, calls),
+                K::Return(Some(v)) | K::Break(Some(v)) => expr(v, out, calls),
+                K::Tuple(vs) | K::Array(vs) => vs.iter().for_each(|v| expr(v, out, calls)),
                 K::Call { callee, arguments } => {
-                    expr(callee, out);
-                    arguments.iter().for_each(|v| expr(v, out));
+                    effects(out, calls);
+                    expr(callee, out, calls);
+                    invoke(callee, out, calls);
+                    // Callbacks passed to unknown callees may execute, including
+                    // Task.scope callbacks and effect resumptions.
+                    for argument in arguments {
+                        invoke(argument, out, calls);
+                    }
+                    arguments.iter().for_each(|v| expr(v, out, calls));
                 }
                 K::Lambda(lambda) => {
-                    let mut writes = Vec::new();
-                    block(&lambda.body, &mut writes);
-                    out.extend(writes.into_iter().map(|(span, _)| (span, None)));
+                    if calls.collecting {
+                        block(&lambda.body, out, calls);
+                    }
                 }
                 K::Handle { handler, body, .. } => {
-                    expr(handler, out);
-                    block(body, out);
+                    expr(handler, out, calls);
+                    calls.handlers.push(handler);
+                    block(body, out, calls);
+                    calls.handlers.pop();
                 }
-                K::Perform { value, .. } => expr(value, out),
-                K::Specialize { callee, .. } => expr(callee, out),
-                K::Block(b) | K::Loop(b) => block(b, out),
+                K::Perform { value, .. } => {
+                    effects(out, calls);
+                    expr(value, out, calls);
+                }
+                K::Specialize { callee, .. } => expr(callee, out, calls),
+                K::Block(b) | K::Loop(b) => block(b, out, calls),
                 K::While { condition, body } => {
-                    expr(condition, out);
-                    block(body, out);
+                    expr(condition, out, calls);
+                    block(body, out, calls);
                 }
                 K::If {
                     condition,
                     then,
                     otherwise,
                 } => {
-                    expr(condition, out);
-                    block(then, out);
+                    expr(condition, out, calls);
+                    block(then, out, calls);
                     if let Some(o) = otherwise {
-                        expr(o, out);
+                        expr(o, out, calls);
                     }
                 }
                 K::Match { value, arms } => {
-                    expr(value, out);
+                    expr(value, out, calls);
                     for arm in arms {
                         if let Some(g) = &arm.guard {
-                            expr(g, out);
+                            expr(g, out, calls);
                         }
-                        expr(&arm.body, out);
+                        expr(&arm.body, out, calls);
                     }
                 }
                 K::Record { fields, .. } | K::StructuralLiteral(fields) => {
-                    fields.iter().for_each(|(_, v)| expr(v, out))
+                    fields.iter().for_each(|(_, v)| expr(v, out, calls))
                 }
                 K::Name(_)
                 | K::Integer(_)
@@ -29857,10 +29981,27 @@ impl Checker<'_, '_> {
                 | K::Break(None) => {}
             }
         }
+        let mut calls = Calls {
+            resolution: self.resolution,
+            values: BTreeMap::new(),
+            active: BTreeSet::new(),
+            invoked: BTreeSet::new(),
+            handlers: Vec::new(),
+            may_execute: false,
+            collecting: true,
+        };
         let mut assignments = Vec::new();
-        block(body, &mut assignments);
+        block(body, &mut assignments, &mut calls);
         if let Some(condition) = condition {
-            expr(condition, &mut assignments);
+            expr(condition, &mut assignments, &mut calls);
+        }
+        // Resolve all callable alternatives before following calls: a value
+        // assigned later in the body may be invoked on the next iteration.
+        assignments.clear();
+        calls.collecting = false;
+        block(body, &mut assignments, &mut calls);
+        if let Some(condition) = condition {
+            expr(condition, &mut assignments, &mut calls);
         }
         // Per slot: +1 if every update is `x = x + c` (c >= 0), -1 if every
         // update is `x = x - c` (c >= 0), 0 otherwise.
@@ -29890,14 +30031,9 @@ impl Checker<'_, '_> {
                 })
                 .or_insert(step);
         }
-        // Existing closures referenced by this body may be invoked on any
-        // iteration. Include their summaries even through nested callables.
-        let mut references = BTreeSet::new();
-        collect_lambda_refs(self.resolution, body, &mut references);
-        if let Some(condition) = condition {
-            collect_expr_refs(self.resolution, condition, &mut references);
-        }
-        for id in references {
+        // Constructing or merely referencing a callable does not execute it.
+        // Only invoked values contribute their existing capture-write summaries.
+        for id in calls.invoked {
             if let Some(targets) = self
                 .slots
                 .get(&id)
@@ -29910,7 +30046,7 @@ impl Checker<'_, '_> {
         }
         // An operation in the loop may call an enclosing handler without
         // referring to its synthesized local binding in the source tree.
-        for handler in &self.handlers {
+        for handler in self.handlers.iter().filter(|_| calls.may_execute) {
             if let Some(targets) = self.closure_writes.get(&handler.slot) {
                 for target in targets {
                     direction.insert(*target, 0);

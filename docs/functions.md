@@ -255,8 +255,10 @@ native execution agree. Calling a closure that writes the capture invalidates
 erased proof facts about its old value; a call to a read-only closure leaves
 the established version intact. Write summaries also apply to immediate
 `Task.scope` callbacks and effect handlers, including resumed continuations.
-Loop headers discard facts for locations that a closure in the loop may write,
-even before the first checked iteration. Each captured location has its own
+Loop headers discard facts for locations that a callable the loop may execute
+can write, even before the first checked iteration; merely constructing a
+closure leaves those facts intact, and calls to callables the loop cannot
+resolve stay conservative. Each captured location has its own
 loan mutability: writing one capture leaves read-only captures shared. See
 [runtime scalar indices](runtime-indices.md#4-freezing-mutation-and-joins).
 
