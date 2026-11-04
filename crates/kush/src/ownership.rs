@@ -892,36 +892,25 @@ fn collect_borrow_lifetimes_in(
     }
     go(enums, pointees, labels, ty, out, &mut BTreeSet::new());
 }
-/// A callee lifetime for diagnostics; canonical callable lifetimes `#k`
-/// print as the arrow's 'a, 'b, ...
+/// A callee lifetime for diagnostics. Every name, including a canonical `#k`
+/// or an internal inference identity, uses the shared diagnostic spelling.
 fn describe_lifetime(name: &str) -> String {
-    match name.strip_prefix('#').and_then(|n| n.parse::<u8>().ok()) {
-        Some(index) if index < 26 => format!("'{}", (b'a' + index) as char),
-        _ if name.starts_with('<') => "an elided lifetime".to_owned(),
-        _ => format!("'{name}"),
-    }
+    crate::runtime_types::lifetime_label_text(name)
 }
 /// A caller-side lifetime for diagnostics, hiding internal labels.
 fn describe_actual(name: &str) -> String {
-    if name.starts_with("<local ") {
-        "a borrow of a local owner".to_owned()
-    } else if name.starts_with('<') {
-        "a borrow with no named lifetime".to_owned()
+    if name.starts_with('<') || name.starts_with('#') {
+        crate::runtime_types::lifetime_label_text(name)
     } else {
         format!("lifetime '{name}'")
     }
 }
 /// Name one actual lifetime inside a type-level message. A named caller label
 /// keeps its surface spelling; a canonical `#k` label is rendered like an arrow
-/// lifetime, and an internal inference identity stays explicit.
+/// lifetime, and an internal inference identity uses the same anonymous `'_N`
+/// spelling as the type display instead of leaking its `<...>` storage name.
 fn display_actual_lifetime(name: &str) -> String {
-    if name.starts_with('#') {
-        describe_lifetime(name)
-    } else if name.starts_with('<') {
-        name.to_owned()
-    } else {
-        format!("'{name}")
-    }
+    crate::runtime_types::lifetime_label_text(name)
 }
 fn is_internal_lifetime(name: &str) -> bool {
     name.starts_with('<')

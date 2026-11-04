@@ -156,17 +156,20 @@ impl LifetimeGraph {
             .collect();
         if known.is_empty() {
             format!(
-                "no established outlives edge leaves '{long}'; required endpoint is '{short}'. A missing constraint is not inferred from this call"
+                "no established outlives edge leaves {}; required endpoint is {}. A missing constraint is not inferred from this call",
+                crate::runtime_types::lifetime_label_text(long),
+                crate::runtime_types::lifetime_label_text(short)
             )
         } else {
             let target = known.last().unwrap();
             let path = self.path(long, target).unwrap();
             format!(
-                "known outlives chain: {}; no established path reaches required endpoint '{short}'. A missing constraint is not inferred from this call",
+                "known outlives chain: {}; no established path reaches required endpoint {}. A missing constraint is not inferred from this call",
                 path.iter()
-                    .map(|s| format!("'{s}"))
+                    .map(|s| crate::runtime_types::lifetime_label_text(s))
                     .collect::<Vec<_>>()
-                    .join(" -> ")
+                    .join(" -> "),
+                crate::runtime_types::lifetime_label_text(short)
             )
         }
     }

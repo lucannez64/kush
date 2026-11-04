@@ -494,3 +494,73 @@ fn same_named_callee_binder_still_requires_one_invariant_identity() {
         "invariantly from several argument lifetimes",
     );
 }
+
+/// An internal lifetime must print as one anonymous `'_N` spelling, never as
+/// its `<unlabelled structural row ...>` storage name or as a mix of the two.
+fn assert_anonymous_lifetime_spelling(lifetime: &str, message: &str) {
+    assert!(!message.contains("<unlabelled"), "{message}");
+    assert!(lifetime.starts_with("'_"), "{message}");
+    assert!(
+        !lifetime[2..].is_empty()
+            && lifetime[2..]
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '_'),
+        "{message}"
+    );
+}
+
+#[test]
+fn unlabelled_structural_row_lifetime_has_one_diagnostic_spelling() {
+    // The residual type and the actual-lifetime message must use the same
+    // anonymous spelling for the label attached to the unlabelled literal.
+    let error = check(
+        r#"fn pick<r>(a: struct { n: i64, ..r }, b: struct { n: i64, ..r }, c: Bool) -> struct { n: i64, ..r } ! {panic} { if c { a } else { b } }
+        fn bad<'a>(v: &'a [i64]) -> struct{n:i64, view:&'a [i64]} ! {panic} { let loc: [i64;1] = [1]; let first: struct{n:i64, view:&'a [i64]} = struct{n:1, view:v}; pick(first, struct{n:2, view:&loc[..]}, false) }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap_err();
+    let message = error.message;
+    let residual = message
+        .split("residual row is ")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("row-variable message names the residual row");
+    let start = residual.find("&'").expect("residual names its view label") + 1;
+    let end = residual[start..]
+        .find(' ')
+        .map(|offset| start + offset)
+        .expect("residual view label ends before its element type");
+    assert_anonymous_lifetime_spelling(&residual[start..end], &message);
+}
+
+#[test]
+fn branch_joined_unlabelled_row_lifetime_has_the_same_spelling() {
+    // The branch join inside `join` supplies the unlabelled row label as the
+    // actual result lifetime. The rejection must name it with the same `'_N`
+    // spelling used by the residual-row type display.
+    let error = check(
+        r#"fn join<'x, r>(a: struct { n: i64, ..r }, b: struct { n: i64, ..r }, x: &'x [i64], c: Bool) -> struct { n: i64, view: &'x [i64] } ! {panic} {
+            drop(x);
+            if c { a } else { b }
+        }
+        fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {panic} { v }
+        fn bad<'a>(v: &'a [i64]) -> struct { n: i64, view: &'a [i64] } ! {panic} {
+            let first = keep(struct { n: 1, view: &v[..] });
+            let second = keep(struct { n: 2, view: &v[..] });
+            join(first, second, v, false)
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap_err();
+    let message = error.message;
+    let actual = message
+        .split("has lifetime ")
+        .nth(1)
+        .and_then(|rest| rest.split(", which").next())
+        .expect("result message names the actual lifetime");
+    assert_anonymous_lifetime_spelling(actual, &message);
+    assert!(
+        message.contains("does not satisfy the declared result lifetime 'x'"),
+        "{message}"
+    );
+}

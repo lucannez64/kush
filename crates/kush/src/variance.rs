@@ -603,12 +603,8 @@ impl WitnessError {
     }
 }
 fn describe_label(label: &str) -> String {
-    if label.starts_with('<') {
-        "an internal lifetime".to_owned()
-    } else if let Some(index) = label.strip_prefix('#').and_then(|n| n.parse::<u8>().ok())
-        && index < 26
-    {
-        format!("'{}", (b'a' + index) as char)
+    if label.starts_with('<') || label.starts_with('#') {
+        crate::runtime_types::lifetime_label_text(label)
     } else {
         format!("lifetime '{label}'")
     }

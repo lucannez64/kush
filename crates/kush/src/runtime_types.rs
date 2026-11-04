@@ -137,11 +137,13 @@ impl RowField {
 pub(crate) fn is_opaque_row_label(label: &str) -> bool {
     label.is_empty() || label == "_" || label.starts_with('<')
 }
-/// Render an erased lifetime label for a type diagnostic. Canonical callable
-/// labels `#k` print as the arrow's `'a`, `'b`, ...; an internal inference
-/// identity prints as a compact anonymous label such as `'_1` so two distinct
-/// inferred rows never print as the same type.
-fn lifetime_label_text(name: &str) -> String {
+/// Render an erased lifetime label for a diagnostic. Canonical callable labels
+/// `#k` print as the arrow's `'a`, `'b`, ...; an internal inference identity
+/// prints as a compact anonymous label such as `'_1` so two distinct inferred
+/// rows never print as the same type, and its internal `<...>` spelling never
+/// reaches a user. Every lifetime-name display goes through this function so
+/// one identity keeps one spelling in types and in actual-lifetime messages.
+pub(crate) fn lifetime_label_text(name: &str) -> String {
     if let Some(index) = name.strip_prefix('#').and_then(|n| n.parse::<usize>().ok()) {
         let letter = (b'a' + (index % 26) as u8) as char;
         if index < 26 {
@@ -1823,19 +1825,9 @@ impl<'a> Types<'a> {
     fn function_name(&self, id: usize) -> String {
         let signature = &self.function_types[id];
         let borrows = &signature.borrows;
-        // Show canonical lifetimes `#k` as 'a, 'b, ... so contracts differ visibly.
-        let named = |canonical: &str| -> String {
-            let index = canonical
-                .trim_start_matches('#')
-                .parse::<usize>()
-                .unwrap_or(0);
-            let letter = (b'a' + (index % 26) as u8) as char;
-            if index < 26 {
-                format!("'{letter}")
-            } else {
-                format!("'{letter}{}", index / 26)
-            }
-        };
+        // Show canonical lifetimes `#k` as 'a, 'b, ..., and internal identities
+        // as the same anonymous `'_N` spelling used by every type display.
+        let named = lifetime_label_text;
         let with_lifetime = |ty: Type, lifetime: Option<&String>| -> String {
             let text = self.name(ty);
             match lifetime {
@@ -1958,7 +1950,7 @@ impl<'a> Types<'a> {
             layout
                 .lifetimes
                 .iter()
-                .cloned()
+                .map(|lifetime| lifetime_label_text(lifetime))
                 .chain(definition.generics.iter().filter_map(|generic| {
                     if is_const_generic(self.resolution, generic) {
                         consts.next().map(|value| value.to_string())
