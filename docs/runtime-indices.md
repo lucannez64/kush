@@ -221,20 +221,34 @@ exactly and the scaled bounds must sum to a negative value.
 
 Because the negation is the integer negation `not (c*x <= d) == c*x >= d+1`,
 integer strictness is respected without pretending every fact is real-valued.
+When the rational relaxation is feasible but the integer system is not, a
+bounded fallback tries Chvátal–Gomory rounding cuts and an integer case split.
+Both rules are part of the certificate and are re-checked independently: a cut
+is a non-negative integer combination of available constraints divided by the
+gcd of its coefficients with the bound rounded down, and a branch must refute
+both `x <= t` and `x >= t + 1`. This closes examples such as `2*x == 1`,
+`1 <= 2*x <= 1`, and parity equations. See
+[integer-refutation.md](integer-refutation.md) for the rules, certificate
+format, budgets, and limits.
+
 The fragment is still deliberately bounded and is not a full Presburger
 decision procedure:
 
 - division, modulo, nonlinear products, floats, and casts are not linear terms;
-- a system whose real relaxation is feasible but whose integer restriction is
-  infeasible (for example `2*x == 1`) is not detected as contradictory, because
-  there is no cutting-plane or branch-and-bound step;
-- the search has explicit limits of 64 distinct terms, 4096 rows, and 200000
-  bound pairs. Exceeding a limit means "not established", never a guessed proof;
+- the integer fallback runs at most 2 cut rounds, 8 cuts, 48 search nodes, and
+  depth 4, over systems with at most 16 distinct terms and 128 constraints.
+  Exceeding a limit means "not established", never a guessed proof;
+- the rational search has explicit limits of 64 distinct terms, 4096 rows, and
+  200000 bound pairs;
 - coefficient overflow aborts the search and leaves the obligation rejected.
 
 See `crates/kush/tests/arithmetic_proofs.rs` for coefficient scaling,
 multi-variable elimination, branch facts, integer strictness, native/reference
-agreement, and the explicit nonlinear and stale-version rejections.
+agreement, and the explicit nonlinear and stale-version rejections, and
+`crates/kush/tests/integer_refutation.rs` for rounding cuts, parity and tight
+bound refutations, independent certificate checking, and budget-limited
+rejection. The `facts.rs` unit tests tamper with cut divisors, rounded results,
+branch thresholds, and Farkas multipliers.
 
 ## 5. Erasure, grades, ownership, and `Prop`
 

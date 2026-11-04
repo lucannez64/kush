@@ -6,10 +6,9 @@
 //! `sum coefficient * term <= bound`. Facts come from branch conditions,
 //! guards, loop conditions, early exits, and erased parameters.
 //!
-//! Discharging an obligation uses Fourier–Motzkin elimination over exact
-//! rational coefficients. The solver returns a refutation of the hypotheses
-//! together with the integer negation of the goal; the certificate records the
-//! non-negative multipliers of every hypothesis and of that negation.
+//! Discharging an obligation first runs Fourier–Motzkin elimination over exact
+//! rational coefficients. The rational certificate records the non-negative
+//! multipliers of the hypotheses and of the integer negation of the goal.
 //! [`verify`] checks the combination independently of the search that produced
 //! it. If the hypotheses and the negation derive `0 <= negative`, the goal holds
 //! for every *integer* assignment (all admitted terms are integer-valued).
@@ -19,19 +18,26 @@
 //! version so stale facts no longer match), and immutable borrows (a borrowed
 //! buffer's length cannot change during a call).
 //!
-//! The fragment is deliberately bounded. Elimination drops the eliminated
-//! variable existentially, which is complete for rational feasibility but not
-//! a full integer Presburger decision procedure: facts that need cutting
-//! planes (for example `2*x <= 1` implying `x <= 0`) are not proved by the
-//! rational relaxation alone. The search also has explicit row, pair, and
-//! coefficient budgets; exceeding one means "not established", never a guessed
-//! proof.
+//! When the rational relaxation is feasible but the integer system is not,
+//! a bounded integer fallback applies Chvátal–Gomory rounding cuts and an
+//! integer branch-and-bound split. Both rules are recorded in the certificate
+//! and re-checked by [`verify`]: a cut is a non-negative integer combination
+//! of available constraints divided by the gcd of its coefficients, with the
+//! bound rounded down; a branch proves both integer halves
+//! `x <= t` and `x >= t + 1` of one variable.
+//!
+//! The fragment is deliberately bounded. The integer fallback is not a full
+//! integer Presburger decision procedure: it explores a small number of cut
+//! rounds and a shallow case split, and it never accepts an unverified
+//! certificate. The rational search also has explicit row, pair, and
+//! coefficient budgets; exceeding any budget means "not established", never a
+//! guessed proof.
 use crate::{
     Diagnostic, Span,
     executable::{BytesOp, Expr, ExprKind, SliceOp, Target, VecOp},
     lexer::Kind,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A symbolic integer-valued term. `Zero` is never stored as a map key; it is
 /// kept as a variant so callers can refer to the constant term explicitly.
@@ -189,16 +195,43 @@ pub(crate) struct Proposition {
     pub text: String,
 }
 
-/// The search result behind one discharged obligation. The certificate keeps
-/// the non-negative rational multipliers of the hypotheses and of the integer
-/// negation of the goal.
+/// A checked Farkas refutation. The non-negative numerators are interpreted
+/// over the positive `denominator`; the weighted constraints cancel exactly
+/// and leave a negative constant bound.
 #[derive(Debug, Clone)]
-pub(crate) struct Proof {
+pub(crate) struct Farkas {
     pub steps: Vec<Constraint>,
     pub multipliers: Vec<i128>,
     pub denominator: i128,
-    /// Index in `steps` of the negation of the goal.
-    pub negation: usize,
+}
+
+/// A refutation of an integer linear system. Every step is checked in the
+/// context established by the enclosing cuts and branches.
+#[derive(Debug, Clone)]
+pub(crate) enum Refutation {
+    /// The goal is a non-negative constant and needs no hypotheses.
+    Trivial,
+    /// A non-negative rational combination of available constraints.
+    Farkas(Farkas),
+    /// A Chvátal–Gomory cut of the non-negative integer combination
+    /// `sum multipliers[i] * steps[i]`. The combination's coefficients are
+    /// divided by `divisor`, which must be their gcd, and its bound is rounded
+    /// down (`div_euclid`).
+    Cut {
+        steps: Vec<Constraint>,
+        multipliers: Vec<i128>,
+        divisor: i128,
+        result: Constraint,
+        then: Box<Refutation>,
+    },
+    /// An integer case split on `variable`: the left context adds
+    /// `variable <= threshold`, the right adds `variable >= threshold + 1`.
+    Branch {
+        variable: Term,
+        threshold: i128,
+        left: Box<Refutation>,
+        right: Box<Refutation>,
+    },
 }
 
 /// A discharged obligation and the facts that justify it.
@@ -207,11 +240,18 @@ pub struct Certificate {
     pub span: Span,
     pub obligation: String,
     pub(crate) goal: Constraint,
-    pub(crate) steps: Vec<Constraint>,
-    pub(crate) multipliers: Vec<i128>,
-    pub(crate) denominator: i128,
-    pub(crate) negation: usize,
+    pub(crate) proof: Refutation,
     pub(crate) hypotheses: Vec<Constraint>,
+}
+
+impl Certificate {
+    /// Independently check this certificate without the search that produced
+    /// it. Every Farkas combination, cut rounding, and branch split is
+    /// re-verified against the recorded hypotheses and the integer negation of
+    /// the goal.
+    pub fn verify(&self) -> bool {
+        verify(self)
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -225,6 +265,35 @@ pub(crate) struct Facts {
 const MAX_FM_ROWS: usize = 4096;
 const MAX_FM_PAIRS: usize = 200_000;
 const MAX_FM_TERMS: usize = 64;
+
+/// Bounds for the integer fallback. They bound the worst-case work after the
+/// rational search already failed; exhausting one means "not established".
+const MAX_INTEGER_DEPTH: usize = 4;
+const MAX_INTEGER_NODES: usize = 48;
+const MAX_INTEGER_CUTS: usize = 8;
+const MAX_INTEGER_CUT_ROUNDS: usize = 2;
+const MAX_INTEGER_CUT_PAIRS: usize = 64;
+const MAX_INTEGER_TERMS: usize = 16;
+const MAX_INTEGER_CONSTRAINTS: usize = 128;
+const MAX_INTEGER_BRANCH_ATTEMPTS: usize = 8;
+const MAX_INTEGER_THRESHOLDS: usize = 6;
+
+#[derive(Debug, Clone, Copy)]
+struct IntegerBudget {
+    nodes: usize,
+    cuts: usize,
+    cut_rounds: usize,
+}
+
+impl IntegerBudget {
+    fn standard() -> Self {
+        IntegerBudget {
+            nodes: MAX_INTEGER_NODES,
+            cuts: MAX_INTEGER_CUTS,
+            cut_rounds: MAX_INTEGER_CUT_ROUNDS,
+        }
+    }
+}
 
 impl Facts {
     pub fn same_versions(&self, other: &Self) -> bool {
@@ -452,10 +521,18 @@ impl Facts {
             });
         }
     }
-    /// Try to prove `goal`; returns a Farkas-style refutation certificate.
-    pub fn prove(&self, goal: &Constraint) -> Option<Proof> {
+    /// Try to prove `goal`; returns a refutation certificate. The rational
+    /// search runs first; only if it fails does the bounded integer fallback
+    /// try rounding cuts and case splits.
+    pub fn prove(&self, goal: &Constraint) -> Option<Refutation> {
+        if goal.coefficients.is_empty() {
+            return (goal.bound >= 0).then_some(Refutation::Trivial);
+        }
         let hypotheses = self.snapshot_universal();
-        prove_with(&hypotheses, goal)
+        if let Some(proof) = prove_with(&hypotheses, goal) {
+            return Some(Refutation::Farkas(proof));
+        }
+        prove_integer(&hypotheses, goal)
     }
     fn implicit(&self, goal: &Constraint) -> Vec<Constraint> {
         let mut terms = goal.coefficients.keys().copied().collect::<Vec<_>>();
@@ -570,22 +647,10 @@ fn negation(goal: &Constraint) -> Option<Constraint> {
     })
 }
 
-fn prove_with(hypotheses: &[Constraint], goal: &Constraint) -> Option<Proof> {
-    if goal.coefficients.is_empty() {
-        return (goal.bound >= 0).then(|| Proof {
-            steps: Vec::new(),
-            multipliers: Vec::new(),
-            denominator: 1,
-            negation: 0,
-        });
-    }
-    let negated = negation(goal)?;
-    let mut rows = Vec::with_capacity(hypotheses.len() + 1);
-    for hypothesis in hypotheses {
-        rows.push(Row::from_constraint(hypothesis, rows.len())?);
-    }
-    let negation_index = rows.len();
-    rows.push(Row::from_constraint(&negated, negation_index)?);
+/// Eliminate every variable with Fourier–Motzkin. The returned rows are the
+/// final `0 <= bound` consequences; `None` means a work budget was exceeded or
+/// exact rational arithmetic overflowed.
+fn eliminate(mut rows: Vec<Row>) -> Option<Vec<Row>> {
     let mut terms = BTreeMap::<Term, usize>::new();
     for row in &rows {
         for term in row.coefficients.keys() {
@@ -618,53 +683,32 @@ fn prove_with(hypotheses: &[Constraint], goal: &Constraint) -> Option<Proof> {
                 // up: au*x + ru <= bu, au > 0
                 // low: al*x + rl <= bl, al < 0
                 // (-al)*up + au*low eliminates x with both weights positive.
-                let weight_low = up_coefficient.abs();
-                let weight_up = low_coefficient.abs();
+                let weight_low = up_coefficient.checked_abs()?;
+                let weight_up = low_coefficient.checked_abs()?;
                 let combined = up.combine(low, weight_up, weight_low, &variable)?;
                 next.push(combined);
             }
         }
         rows = next;
     }
-    // After eliminating every variable, every row is `0 <= bound`. A negative
-    // bound is a contradiction. Prefer a contradiction that actually uses the
-    // goal's negation, so the certificate is a proof of the goal rather than
-    // merely an observation that the hypotheses are inconsistent.
-    let mut conflict = None;
-    for row in &rows {
-        if !row.coefficients.is_empty() {
-            continue;
-        }
-        if row.bound.is_negative()
-            && row
-                .origins
-                .get(&negation_index)
-                .is_some_and(|multiplier| multiplier.is_positive())
-        {
-            conflict = Some(row);
-            break;
-        }
-    }
-    let conflict = conflict?;
+    Some(rows)
+}
+
+/// Turn a contradictory row into a Farkas certificate over `sources`, whose
+/// indices are the row origins.
+fn farkas_from_conflict(conflict: &Row, sources: &[Constraint]) -> Option<Farkas> {
     let mut denominator = 1i128;
     for multiplier in conflict.origins.values() {
         denominator = lcm(denominator, multiplier.den);
     }
     let mut steps = Vec::new();
     let mut multipliers = Vec::new();
-    let mut used_negation = None;
     for (origin, multiplier) in &conflict.origins {
-        let source = if *origin == negation_index {
-            used_negation = Some(steps.len());
-            negated.clone()
-        } else {
-            hypotheses.get(*origin)?.clone()
-        };
+        let source = sources.get(*origin)?.clone();
         let numerator = multiplier.num.checked_mul(denominator / multiplier.den)?;
         steps.push(source);
         multipliers.push(numerator);
     }
-    let negation = used_negation?;
     // Reduce a common factor so certificates stay small.
     let mut divisor = denominator;
     for numerator in &multipliers {
@@ -676,12 +720,59 @@ fn prove_with(hypotheses: &[Constraint], goal: &Constraint) -> Option<Proof> {
             *numerator /= divisor;
         }
     }
-    Some(Proof {
+    Some(Farkas {
         steps,
         multipliers,
         denominator,
-        negation,
     })
+}
+
+fn prove_with(hypotheses: &[Constraint], goal: &Constraint) -> Option<Farkas> {
+    if goal.coefficients.is_empty() {
+        return (goal.bound >= 0).then(|| Farkas {
+            steps: Vec::new(),
+            multipliers: Vec::new(),
+            denominator: 1,
+        });
+    }
+    let negated = negation(goal)?;
+    let mut sources = Vec::with_capacity(hypotheses.len() + 1);
+    sources.extend(hypotheses.iter().cloned());
+    let negation_index = sources.len();
+    sources.push(negated);
+    let mut rows = Vec::with_capacity(sources.len());
+    for (index, source) in sources.iter().enumerate() {
+        rows.push(Row::from_constraint(source, index)?);
+    }
+    let rows = eliminate(rows)?;
+    // After eliminating every variable, every row is `0 <= bound`. A negative
+    // bound is a contradiction. Prefer a contradiction that actually uses the
+    // goal's negation, so the certificate is a proof of the goal rather than
+    // merely an observation that the hypotheses are inconsistent.
+    let conflict = rows.iter().find(|row| {
+        row.coefficients.is_empty()
+            && row.bound.is_negative()
+            && row
+                .origins
+                .get(&negation_index)
+                .is_some_and(|multiplier| multiplier.is_positive())
+    })?;
+    farkas_from_conflict(conflict, &sources)
+}
+
+/// Refute a complete integer system without a distinguished goal. This is the
+/// leaf rule used by the integer fallback: any negative constant consequence
+/// of the available constraints is a contradiction.
+fn refute_rational(system: &[Constraint]) -> Option<Farkas> {
+    let mut rows = Vec::with_capacity(system.len());
+    for (index, constraint) in system.iter().enumerate() {
+        rows.push(Row::from_constraint(constraint, index)?);
+    }
+    let rows = eliminate(rows)?;
+    let conflict = rows
+        .iter()
+        .find(|row| row.coefficients.is_empty() && row.bound.is_negative())?;
+    farkas_from_conflict(conflict, system)
 }
 
 /// Exact non-negative rational used by the Fourier–Motzkin search.
@@ -701,11 +792,11 @@ impl Ratio {
     fn is_negative(&self) -> bool {
         self.num < 0
     }
-    fn abs(self) -> Self {
-        Ratio {
-            num: self.num.abs(),
+    fn checked_abs(self) -> Option<Self> {
+        Some(Ratio {
+            num: self.num.checked_abs()?,
             den: self.den,
-        }
+        })
     }
     fn checked_add(self, other: Self) -> Option<Self> {
         let num = self
@@ -730,7 +821,7 @@ impl Ratio {
         } else {
             (num, den)
         };
-        let divisor = gcd(num.abs(), den);
+        let divisor = gcd(num, den);
         let divisor = if divisor == 0 { 1 } else { divisor };
         Some(Ratio {
             num: num / divisor,
@@ -829,13 +920,19 @@ impl Row {
     }
 }
 
-fn gcd(mut a: i128, mut b: i128) -> i128 {
+fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
         let remainder = a % b;
         a = b;
         b = remainder;
     }
-    a.abs().max(1)
+    a
+}
+
+fn gcd(a: i128, b: i128) -> i128 {
+    i128::try_from(gcd_u128(a.unsigned_abs(), b.unsigned_abs()))
+        .unwrap_or(i128::MAX)
+        .max(1)
 }
 
 fn lcm(a: i128, b: i128) -> i128 {
@@ -843,58 +940,448 @@ fn lcm(a: i128, b: i128) -> i128 {
     a / divisor * b
 }
 
-/// Independent certificate check: every step is a hypothesis or the integer
-/// negation of the goal, all multipliers are non-negative, the scaled
-/// coefficients cancel exactly, and the scaled bounds sum to a negative value.
-pub fn verify(certificate: &Certificate) -> bool {
-    if certificate.steps.is_empty() {
-        return certificate.goal.coefficients.is_empty() && certificate.goal.bound >= 0;
+/// One rounding cut produced by the search. `steps`/`multipliers` describe the
+/// non-negative integer combination that is rounded by `divisor`.
+#[derive(Debug, Clone)]
+struct CutRule {
+    steps: Vec<Constraint>,
+    multipliers: Vec<i128>,
+    divisor: i128,
+    result: Constraint,
+}
+
+fn prove_integer(hypotheses: &[Constraint], goal: &Constraint) -> Option<Refutation> {
+    prove_integer_with(hypotheses, goal, IntegerBudget::standard())
+}
+
+fn prove_integer_with(
+    hypotheses: &[Constraint],
+    goal: &Constraint,
+    mut budget: IntegerBudget,
+) -> Option<Refutation> {
+    let negated = negation(goal)?;
+    let mut system = Vec::with_capacity(hypotheses.len() + 1);
+    system.extend(hypotheses.iter().cloned());
+    system.push(negated);
+    if system.len() > MAX_INTEGER_CONSTRAINTS {
+        return None;
     }
-    if certificate.denominator <= 0
-        || certificate.steps.len() != certificate.multipliers.len()
-        || certificate.negation >= certificate.steps.len()
-        || certificate
-            .multipliers
-            .iter()
-            .any(|multiplier| *multiplier < 0)
+    solve_integer(&system, MAX_INTEGER_DEPTH, &mut budget)
+}
+
+fn solve_integer(
+    system: &[Constraint],
+    depth: usize,
+    budget: &mut IntegerBudget,
+) -> Option<Refutation> {
+    if budget.nodes == 0
+        || system.len() > MAX_INTEGER_CONSTRAINTS
+        || integer_term_count(system) > MAX_INTEGER_TERMS
     {
-        return false;
+        return None;
     }
-    let Some(negated) = negation(&certificate.goal) else {
-        return false;
-    };
-    if certificate.steps[certificate.negation] != negated
-        || certificate.multipliers[certificate.negation] <= 0
-    {
-        return false;
+    budget.nodes -= 1;
+    if let Some(farkas) = refute_rational(system) {
+        return Some(Refutation::Farkas(farkas));
     }
-    for (index, step) in certificate.steps.iter().enumerate() {
-        if index != certificate.negation && !certificate.hypotheses.contains(step) {
-            return false;
+
+    // Add a small batch of rounding cuts, then retry the rational refutation.
+    // The cuts are nested in `Refutation::Cut` in the order they were added so
+    // every cut's source is available when the verifier reaches it.
+    let mut local = system.to_vec();
+    let mut cuts = Vec::new();
+    for _ in 0..budget.cut_rounds.min(MAX_INTEGER_CUT_ROUNDS) {
+        if budget.cuts == 0 {
+            break;
         }
+        let candidates = cut_candidates(&local, budget.cuts);
+        let mut added = false;
+        for cut in candidates {
+            if budget.cuts == 0 {
+                break;
+            }
+            if local.contains(&cut.result) {
+                continue;
+            }
+            budget.cuts -= 1;
+            local.push(cut.result.clone());
+            cuts.push(cut);
+            added = true;
+        }
+        if !added {
+            break;
+        }
+        if let Some(farkas) = refute_rational(&local) {
+            return Some(wrap_cuts(cuts, Refutation::Farkas(farkas)));
+        }
+    }
+
+    if depth == 0 || budget.nodes == 0 {
+        return None;
+    }
+
+    let candidates = branch_candidates(&local);
+    for (attempted, (variable, threshold)) in candidates.into_iter().enumerate() {
+        if attempted >= MAX_INTEGER_BRANCH_ATTEMPTS || budget.nodes == 0 {
+            break;
+        }
+        let Some(above) = threshold.checked_add(1) else {
+            continue;
+        };
+        let Some(negated_above) = above.checked_neg() else {
+            continue;
+        };
+        let mut left_system = local.clone();
+        left_system.push(bound_constraint(variable, 1, threshold));
+        let Some(left) = solve_integer(&left_system, depth - 1, budget) else {
+            continue;
+        };
+        let mut right_system = local.clone();
+        right_system.push(bound_constraint(variable, -1, negated_above));
+        let Some(right) = solve_integer(&right_system, depth - 1, budget) else {
+            continue;
+        };
+        return Some(wrap_cuts(
+            cuts,
+            Refutation::Branch {
+                variable,
+                threshold,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        ));
+    }
+    None
+}
+
+fn wrap_cuts(cuts: Vec<CutRule>, mut inner: Refutation) -> Refutation {
+    for cut in cuts.into_iter().rev() {
+        inner = Refutation::Cut {
+            steps: cut.steps,
+            multipliers: cut.multipliers,
+            divisor: cut.divisor,
+            result: cut.result,
+            then: Box::new(inner),
+        };
+    }
+    inner
+}
+
+fn integer_term_count(system: &[Constraint]) -> usize {
+    let mut terms = BTreeSet::new();
+    for constraint in system {
+        for term in constraint.coefficients.keys() {
+            if *term != Term::Zero {
+                terms.insert(*term);
+            }
+        }
+    }
+    terms.len()
+}
+
+fn bound_constraint(variable: Term, coefficient: i128, bound: i128) -> Constraint {
+    let mut coefficients = BTreeMap::new();
+    if variable != Term::Zero && coefficient != 0 {
+        coefficients.insert(variable, coefficient);
+    }
+    Constraint {
+        coefficients,
+        bound,
+    }
+}
+
+fn combine_steps(
+    steps: &[&Constraint],
+    multipliers: &[i128],
+) -> Option<(BTreeMap<Term, i128>, i128)> {
+    if steps.len() != multipliers.len() || steps.is_empty() {
+        return None;
     }
     let mut coefficients: BTreeMap<Term, i128> = BTreeMap::new();
     let mut bound = 0i128;
-    for (step, multiplier) in certificate.steps.iter().zip(&certificate.multipliers) {
-        let Some(scaled_bound) = step.bound.checked_mul(*multiplier) else {
-            return false;
-        };
-        let Some(next) = bound.checked_add(scaled_bound) else {
-            return false;
-        };
-        bound = next;
+    for (step, multiplier) in steps.iter().zip(multipliers) {
+        if *multiplier < 0 {
+            return None;
+        }
+        bound = bound.checked_add(step.bound.checked_mul(*multiplier)?)?;
         for (term, coefficient) in &step.coefficients {
-            let Some(scaled) = coefficient.checked_mul(*multiplier) else {
-                return false;
-            };
+            let value = coefficient.checked_mul(*multiplier)?;
             let entry = coefficients.entry(*term).or_insert(0);
-            let Some(next) = entry.checked_add(scaled) else {
-                return false;
-            };
-            *entry = next;
+            *entry = entry.checked_add(value)?;
+            if *entry == 0 {
+                coefficients.remove(term);
+            }
         }
     }
-    coefficients.values().all(|coefficient| *coefficient == 0) && bound < 0
+    Some((coefficients, bound))
+}
+
+fn coefficient_gcd(coefficients: &BTreeMap<Term, i128>) -> Option<i128> {
+    let mut divisor = 0u128;
+    for coefficient in coefficients.values() {
+        divisor = gcd_u128(divisor, coefficient.unsigned_abs());
+    }
+    i128::try_from(divisor).ok().filter(|divisor| *divisor > 1)
+}
+
+fn rounded_cut(steps: &[&Constraint], multipliers: &[i128]) -> Option<(i128, Constraint)> {
+    let (coefficients, bound) = combine_steps(steps, multipliers)?;
+    if coefficients.is_empty() {
+        return None;
+    }
+    let divisor = coefficient_gcd(&coefficients)?;
+    // A cut with a divisible bound is just the combination divided by its gcd,
+    // so it adds no strength over the rational system. Keep only real rounds.
+    if bound.rem_euclid(divisor) == 0 {
+        return None;
+    }
+    let mut cut_coefficients = BTreeMap::new();
+    for (term, coefficient) in coefficients {
+        cut_coefficients.insert(term, coefficient.div_euclid(divisor));
+    }
+    Some((
+        divisor,
+        Constraint {
+            coefficients: cut_coefficients,
+            bound: bound.div_euclid(divisor),
+        },
+    ))
+}
+
+fn push_cut(
+    system: &[Constraint],
+    out: &mut Vec<CutRule>,
+    steps: Vec<Constraint>,
+    multipliers: Vec<i128>,
+    divisor: i128,
+    result: Constraint,
+    limit: usize,
+) {
+    if out.len() >= limit || system.contains(&result) || out.iter().any(|cut| cut.result == result)
+    {
+        return;
+    }
+    out.push(CutRule {
+        steps,
+        multipliers,
+        divisor,
+        result,
+    });
+}
+
+/// Single-constraint rounding cuts plus pairwise sums. The pairwise sums let a
+/// cut use a non-negative combination that cancels a term, for example
+/// `(x + y <= 1) + (x - y <= 0)` giving `2*x <= 1` and then `x <= 0`.
+fn cut_candidates(system: &[Constraint], limit: usize) -> Vec<CutRule> {
+    let mut out = Vec::new();
+    for constraint in system {
+        if out.len() >= limit {
+            return out;
+        }
+        let steps = [constraint];
+        if let Some((divisor, result)) = rounded_cut(&steps, &[1]) {
+            push_cut(
+                system,
+                &mut out,
+                vec![constraint.clone()],
+                vec![1],
+                divisor,
+                result,
+                limit,
+            );
+        }
+    }
+    let mut pairs = 0usize;
+    'pairs: for i in 0..system.len() {
+        for j in (i + 1)..system.len() {
+            if out.len() >= limit {
+                break 'pairs;
+            }
+            pairs += 1;
+            if pairs > MAX_INTEGER_CUT_PAIRS {
+                break 'pairs;
+            }
+            let steps = [&system[i], &system[j]];
+            if let Some((divisor, result)) = rounded_cut(&steps, &[1, 1]) {
+                push_cut(
+                    system,
+                    &mut out,
+                    vec![system[i].clone(), system[j].clone()],
+                    vec![1, 1],
+                    divisor,
+                    result,
+                    limit,
+                );
+            }
+        }
+    }
+    out
+}
+
+fn branch_candidates(system: &[Constraint]) -> Vec<(Term, i128)> {
+    let mut variables = BTreeSet::new();
+    for constraint in system {
+        for term in constraint.coefficients.keys() {
+            if *term != Term::Zero {
+                variables.insert(*term);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for variable in variables {
+        let mut thresholds = BTreeSet::new();
+        thresholds.insert(0i128);
+        for constraint in system {
+            let Some(&coefficient) = constraint.coefficients.get(&variable) else {
+                continue;
+            };
+            if coefficient == 0 {
+                continue;
+            }
+            if let Some(split) = constraint.bound.checked_div_euclid(coefficient) {
+                thresholds.insert(split);
+                if constraint.coefficients.len() == 1 {
+                    if let Some(previous) = split.checked_sub(1) {
+                        thresholds.insert(previous);
+                    }
+                    if let Some(next) = split.checked_add(1) {
+                        thresholds.insert(next);
+                    }
+                }
+            }
+        }
+        let mut ordered = vec![0i128];
+        ordered.extend(thresholds.into_iter().filter(|threshold| *threshold != 0));
+        for threshold in ordered.into_iter().take(MAX_INTEGER_THRESHOLDS) {
+            out.push((variable, threshold));
+        }
+        if out.len() >= MAX_INTEGER_BRANCH_ATTEMPTS {
+            break;
+        }
+    }
+    out
+}
+
+fn verify_farkas(context: &[Constraint], proof: &Farkas) -> bool {
+    if proof.denominator <= 0
+        || proof.steps.len() != proof.multipliers.len()
+        || proof.multipliers.iter().any(|multiplier| *multiplier < 0)
+        || !proof.steps.iter().all(|step| context.contains(step))
+    {
+        return false;
+    }
+    let steps = proof.steps.iter().collect::<Vec<_>>();
+    let Some((coefficients, bound)) = combine_steps(&steps, &proof.multipliers) else {
+        return false;
+    };
+    coefficients.is_empty() && bound < 0
+}
+
+fn verify_cut(
+    context: &[Constraint],
+    steps: &[Constraint],
+    multipliers: &[i128],
+    divisor: i128,
+    result: &Constraint,
+    then: &Refutation,
+) -> bool {
+    if divisor <= 1
+        || steps.is_empty()
+        || steps.len() != multipliers.len()
+        || multipliers.iter().any(|multiplier| *multiplier < 0)
+        || !steps.iter().all(|step| context.contains(step))
+    {
+        return false;
+    }
+    let borrowed = steps.iter().collect::<Vec<_>>();
+    let Some((coefficients, bound)) = combine_steps(&borrowed, multipliers) else {
+        return false;
+    };
+    let Some(expected_divisor) = coefficient_gcd(&coefficients) else {
+        return false;
+    };
+    if expected_divisor != divisor {
+        return false;
+    }
+    let mut cut_coefficients = BTreeMap::new();
+    for (term, coefficient) in coefficients {
+        cut_coefficients.insert(term, coefficient.div_euclid(divisor));
+    }
+    let expected = Constraint {
+        coefficients: cut_coefficients,
+        bound: bound.div_euclid(divisor),
+    };
+    if expected != *result {
+        return false;
+    }
+    let mut next = context.to_vec();
+    next.push(result.clone());
+    verify_refutation(&next, then)
+}
+
+fn verify_branch(
+    context: &[Constraint],
+    variable: Term,
+    threshold: i128,
+    left: &Refutation,
+    right: &Refutation,
+) -> bool {
+    if variable == Term::Zero {
+        return false;
+    }
+    let Some(above) = threshold.checked_add(1) else {
+        return false;
+    };
+    let Some(negated_above) = above.checked_neg() else {
+        return false;
+    };
+    let mut left_context = context.to_vec();
+    left_context.push(bound_constraint(variable, 1, threshold));
+    let mut right_context = context.to_vec();
+    right_context.push(bound_constraint(variable, -1, negated_above));
+    verify_refutation(&left_context, left) && verify_refutation(&right_context, right)
+}
+
+fn verify_refutation(context: &[Constraint], proof: &Refutation) -> bool {
+    match proof {
+        Refutation::Trivial => false,
+        Refutation::Farkas(farkas) => verify_farkas(context, farkas),
+        Refutation::Cut {
+            steps,
+            multipliers,
+            divisor,
+            result,
+            then,
+        } => verify_cut(context, steps, multipliers, *divisor, result, then),
+        Refutation::Branch {
+            variable,
+            threshold,
+            left,
+            right,
+        } => verify_branch(context, *variable, *threshold, left, right),
+    }
+}
+
+/// Independent certificate check. A `Trivial` goal is a non-negative constant.
+/// Otherwise the certificate must refute the hypotheses together with the
+/// integer negation of the goal. Each Farkas leaf is a non-negative rational
+/// combination with a negative bound; each cut must be a non-negative integer
+/// combination whose coefficients have exactly the recorded gcd and whose bound
+/// is the recorded floor; each branch must refute both integer halves.
+pub fn verify(certificate: &Certificate) -> bool {
+    match &certificate.proof {
+        Refutation::Trivial => {
+            certificate.goal.coefficients.is_empty() && certificate.goal.bound >= 0
+        }
+        proof => {
+            let Some(negated) = negation(&certificate.goal) else {
+                return false;
+            };
+            let mut context = certificate.hypotheses.clone();
+            context.push(negated);
+            verify_refutation(&context, proof)
+        }
+    }
 }
 
 pub(crate) fn describe(term: Term, names: &dyn Fn(usize) -> String) -> String {
@@ -970,12 +1457,24 @@ mod tests {
             span: Span::default(),
             obligation: "test".to_owned(),
             goal,
-            steps: proof.steps,
-            multipliers: proof.multipliers,
-            denominator: proof.denominator,
-            negation: proof.negation,
+            proof: Refutation::Farkas(proof),
             hypotheses,
         }
+    }
+
+    fn integer_certificate(
+        hypotheses: Vec<Constraint>,
+        goal: Constraint,
+        budget: IntegerBudget,
+    ) -> Option<Certificate> {
+        let proof = prove_integer_with(&hypotheses, &goal, budget)?;
+        Some(Certificate {
+            span: Span::default(),
+            obligation: "test".to_owned(),
+            goal,
+            proof,
+            hypotheses,
+        })
     }
 
     #[test]
@@ -985,6 +1484,7 @@ mod tests {
         let goal = inequality(&[(x, 1)], 2);
         let certificate = certificate(hypotheses, goal);
         assert!(verify(&certificate));
+        assert!(certificate.verify());
     }
 
     #[test]
@@ -996,12 +1496,82 @@ mod tests {
         assert!(verify(&good));
 
         let mut tampered = good.clone();
-        tampered.multipliers[0] += 1;
+        match &mut tampered.proof {
+            Refutation::Farkas(proof) => proof.multipliers[0] += 1,
+            _ => panic!("expected a Farkas certificate"),
+        }
         assert!(!verify(&tampered));
 
         let mut wrong_goal = good;
         wrong_goal.goal = inequality(&[(x, 1)], 1);
         assert!(!verify(&wrong_goal));
+    }
+
+    #[test]
+    fn integer_gap_is_closed_by_a_verified_cut() {
+        // 2*x == 1 is rationally feasible at x = 1/2 but has no integer
+        // solution. The goal 2*x <= 0 follows only after rounding 2*x <= 1.
+        let x = Term::Var(0, 0);
+        let hypotheses = vec![inequality(&[(x, 2)], 1), inequality(&[(x, -2)], -1)];
+        let goal = inequality(&[(x, 2)], 0);
+        let good = integer_certificate(hypotheses.clone(), goal.clone(), IntegerBudget::standard())
+            .expect("integer refutation");
+        assert!(verify(&good));
+        assert!(
+            matches!(&good.proof, Refutation::Cut { .. }),
+            "expected a rounding cut, got {:?}",
+            good.proof
+        );
+
+        let mut bad_divisor = good.clone();
+        match &mut bad_divisor.proof {
+            Refutation::Cut { divisor, .. } => *divisor += 1,
+            _ => unreachable!(),
+        }
+        assert!(!verify(&bad_divisor));
+
+        let mut bad_result = good;
+        match &mut bad_result.proof {
+            Refutation::Cut { result, .. } => result.bound += 1,
+            _ => unreachable!(),
+        }
+        assert!(!verify(&bad_result));
+    }
+
+    #[test]
+    fn integer_gap_is_closed_by_a_verified_branch_when_cuts_are_disabled() {
+        let x = Term::Var(0, 0);
+        let hypotheses = vec![inequality(&[(x, 2)], 1), inequality(&[(x, -2)], -1)];
+        let goal = inequality(&[(x, 2)], 0);
+        let mut budget = IntegerBudget::standard();
+        budget.cuts = 0;
+        let good = integer_certificate(hypotheses, goal, budget).expect("integer refutation");
+        assert!(verify(&good));
+        assert!(
+            matches!(&good.proof, Refutation::Branch { .. }),
+            "expected a branch, got {:?}",
+            good.proof
+        );
+
+        let mut bad_threshold = good;
+        match &mut bad_threshold.proof {
+            Refutation::Branch { threshold, .. } => *threshold += 1,
+            _ => unreachable!(),
+        }
+        assert!(!verify(&bad_threshold));
+    }
+
+    #[test]
+    fn integer_budget_exhaustion_returns_no_proof() {
+        let x = Term::Var(0, 0);
+        let hypotheses = vec![inequality(&[(x, 2)], 1), inequality(&[(x, -2)], -1)];
+        let goal = inequality(&[(x, 2)], 0);
+        let budget = IntegerBudget {
+            nodes: 0,
+            cuts: 0,
+            cut_rounds: 0,
+        };
+        assert!(integer_certificate(hypotheses, goal, budget).is_none());
     }
 
     #[test]

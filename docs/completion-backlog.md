@@ -299,8 +299,11 @@ outstanding implementation item.
   erased arithmetic `{ ... }` fragment now supports general linear expressions
   (`c * x`, `x + y`, lengths) and is discharged by exact Fourier–Motzkin
   elimination with an independently verified Farkas-style refutation
-  certificate; nonlinear terms, cutting planes, and the documented row/term
-  budgets remain explicit "not established" boundaries. Still absent: mutable
+  certificate. When the rational relaxation is feasible but the integer system
+  is not, bounded Chvátal–Gomory rounding cuts and integer case splits close the
+  gap with the same independent checking; nonlinear terms, full Presburger
+  completeness, and the documented row/term/integer budgets remain explicit
+  "not established" boundaries. Still absent: mutable
   captures as a live view. A closure capture is a sound copy/snapshot; live
   sharing needs a checked closure borrow lifetime so the environment cannot
   outlive the captured location, which is not implemented. See
@@ -903,11 +906,19 @@ allow, on top of `15f62d3`:
   `{ ... }` fragment. Linear expressions (`c * x`, `x + y`, lengths) become
   integer linear inequalities; Fourier–Motzkin elimination over exact rationals
   produces a refutation certificate whose non-negative multipliers are checked
-  independently by `facts::verify`. `tests/arithmetic_proofs.rs` covers
-  coefficient scaling, multi-variable elimination, branch facts, integer
+  independently by `facts::verify`. When the rational relaxation is feasible
+  but the integer system is not, a bounded fallback adds Chvátal–Gomory
+  rounding cuts and integer branch splits; cuts and both branch sides are part
+  of the same independently checked certificate. `tests/arithmetic_proofs.rs`
+  covers coefficient scaling, multi-variable elimination, branch facts, integer
   strictness, native/reference agreement, nonlinear rejection, and stale-version
-  rejection. Documented limits: no nonlinear terms, no cutting planes or full
-  Presburger completeness, and explicit 64-term/4096-row/200000-pair budgets.
+  rejection; `tests/integer_refutation.rs` covers the integer gap, parity and
+  tight bounds, independent certificate checking, and budget-limited rejection,
+  while unit tests in `facts.rs` tamper with cut divisors, rounded results,
+  branch thresholds, and Farkas multipliers. Documented limits: no nonlinear
+  terms, no full Presburger completeness or complete cutting-plane closure, and
+  explicit rational and integer budgets. See
+  [integer-refutation.md](integer-refutation.md).
 - **Mutable captures as a live view remain unimplemented and the runtime-proof
   backlog item stays unchecked.** A closure capture is still a sound copy /
   independent snapshot; live sharing would need a checked closure borrow
