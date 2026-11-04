@@ -644,3 +644,112 @@ fn main() -> Unit ! {} {}
     );
 }
 
+#[test]
+fn borrowed_record_results_keep_a_per_field_summary() {
+    // A recursive relay returns a record with two independently borrowed
+    // fields. Both field origins survive the call graph, and both owners stay
+    // loaned through the record's last use.
+    agrees(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn build<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+    Pair { left: a, right: b }
+}
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
+    if n == 0 { build(a, b) } else { relay(a, b, n - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    let pair = relay(&a[..], &b[..], 2);
+    Slice.get(pair.left, 1) + Slice.get(pair.right, 0)
+}
+"#,
+        5,
+        "",
+    );
+}
+
+#[test]
+fn a_recursive_record_result_keeps_every_owner_loaned() {
+    // Reading only `left` must not release the owner of `right`.
+    rejects(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn build<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+    Pair { left: a, right: b }
+}
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
+    if n == 0 { build(a, b) } else { relay(a, b, n - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let mut a: [i64; 2] = [1, 2];
+    let mut b: [i64; 2] = [3, 4];
+    let pair = relay(&a[..], &b[..], 1);
+    a = [5, 6];
+    b = [7, 8];
+    Slice.get(pair.left, 0)
+}
+"#,
+        "cannot replace an owner",
+    );
+}
+
+#[test]
+fn permuted_record_inputs_keep_all_owners_under_one_lifetime() {
+    // Both parameters share one declared lifetime, so permuting them retains
+    // both origins without inventing an equality. Replacing either owner while
+    // the record is live must remain rejected.
+    rejects(
+        r#"
+struct One<'a> { value: &'a [i64] }
+fn left<'a>(a: &'a [i64], b: &'a [i64], n: i64) -> One<'a> ! {panic} {
+    if n == 0 { One { value: a } } else { right(b, a, n - 1) }
+}
+fn right<'a>(a: &'a [i64], b: &'a [i64], n: i64) -> One<'a> ! {panic} {
+    if n == 0 { One { value: a } } else { left(b, a, n - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let mut a: [i64; 2] = [1, 2];
+    let mut b: [i64; 2] = [3, 4];
+    let one = left(&a[..], &b[..], 1);
+    b = [5, 6];
+    Slice.get(one.value, 0)
+}
+"#,
+        "cannot replace an owner",
+    );
+}
+
+#[test]
+fn a_local_record_field_on_a_recursive_path_stays_rejected() {
+    rejects(
+        r#"
+struct Holder<'a> { value: &'a [i64] }
+fn chase<'a>(a: &'a [i64], n: i64) -> Holder<'a> ! {panic} {
+    let local: [i64; 2] = [9, 9];
+    if n == 0 { Holder { value: a } } else { chase(&local[..], n - 1) }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "outlive the lexical scope",
+    );
+}
+
+#[test]
+fn a_no_seed_record_cycle_cannot_manufacture_field_origins() {
+    rejects(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> Pair<'a, 'b> ! {panic} {
+    right(a, b, stop)
+}
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> Pair<'a, 'b> ! {panic} {
+    left(a, b, stop)
+}
+fn main() -> Unit ! {} {}
+"#,
+        "no independently justified result origin",
+    );
+}
+
