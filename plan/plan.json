@@ -1389,9 +1389,9 @@
       "deps": [
         "GRADES"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Close the rational-feasible-but-integer-infeasible gap, with verified certificates.",
-      "commit": null,
+      "commit": "13dbab5",
       "log": [
         {
           "time": "2026-11-03 17:27:25",
@@ -1407,6 +1407,11 @@
           "time": "2026-11-04 15:53:33",
           "who": "agent",
           "text": "implemented a7692ae (branch t3/e34bd3b4); independent review running"
+        },
+        {
+          "time": "2026-11-04 17:34:04",
+          "who": "agent",
+          "text": "Codex review: math sound; fixed pre-existing i128 abs panic (632c323); Boat gate passed"
         }
       ]
     },
