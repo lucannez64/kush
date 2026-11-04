@@ -1464,3 +1464,24 @@ accepted boundaries listed in the checked LIFE item. Diagnostic follow-ups
 (field lifetime labels in type-mismatch messages, the source named for
 recursive argument swaps, unlabelled literals passed to `..r` helpers) are
 tracked in `plan/plan.json`.
+
+## LIFE follow-up: let-bound helper results (LT-FOLLOWUP-LETREC)
+
+A helper or recursive call result first bound with `let` on a recursive path
+keeps its per-field origin map. A later field projection such as `r.view`
+therefore carries the field's external owner, and the next recursive call is
+instantiated from those origins instead of the local record binding. Caller
+checks still keep every reachable owner loaned: replacing or dropping any owner
+while the result is live is rejected, while an unrelated owner remains usable.
+Local record bindings stay ancestor loans for ordinary uses; return validation
+follows only a borrowed field's external origins, and an owned-field projection
+from the same record is still rejected as local storage. Shadowing uses
+distinct resolver bindings and mutable reassignment unions every possible value
+(or keeps the unsupported `unknown` channel), so an overwritten value may
+contribute a conservative owner. The accepted limits from the recursive design
+still apply: indirect/dynamic calls, builtin/effect/loop/task result channels,
+and container-element summaries beyond the documented `R[f]` fragment need
+explicit contracts. Regressions are in
+`crates/kush/tests/recursive_lifetimes.rs`, including backend agreement and
+balanced allocations for accepted programs. Local gate: 1362 tests, formatting
+and strict Clippy.

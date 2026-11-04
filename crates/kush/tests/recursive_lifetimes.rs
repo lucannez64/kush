@@ -237,6 +237,165 @@ fn main() -> i64 ! {panic} {
     );
 }
 
+const LET_BOUND_PROJECT: &str = r#"
+fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+    struct { view: v }
+}
+fn project<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    if n == 0 {
+        wrap(a).view
+    } else {
+        let r = wrap(b);
+        let s = project(r.view, a, n - 1);
+        wrap(s).view
+    }
+}
+"#;
+
+#[test]
+fn let_bound_helper_results_follow_recursive_path_origins() {
+    // `r.view` carries `b`'s own origin, and `s` receives the recursive
+    // summary instantiated from that origin rather than the helper's record
+    // binding. The base visit in the nested call still retains `a`, so the
+    // result keeps both owners.
+    agrees(
+        &format!(
+            "{LET_BOUND_PROJECT}{}",
+            r#"
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [40, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(project(&a[..], &b[..], 1), 0) + 2
+}
+"#
+        ),
+        5,
+        "",
+    );
+}
+
+#[test]
+fn let_bound_recursive_result_keeps_each_reachable_owner_loaned() {
+    // The let-bound helper record is only a local carrier. Its `view` leaf
+    // still names `b`, so replacing either owner while the result is live is
+    // rejected.
+    for owner in ["a", "b"] {
+        let main = format!(
+            r#"
+fn main() -> i64 ! {{panic}} {{
+    let mut a: [i64; 2] = [1, 2];
+    let mut b: [i64; 2] = [3, 4];
+    let out = project(&a[..], &b[..], 1);
+    {owner} = [9, 9];
+    Slice.get(out, 0)
+}}
+"#
+        );
+        rejects(
+            &format!("{LET_BOUND_PROJECT}{main}"),
+            "cannot replace an owner",
+        );
+    }
+    // An owner the result cannot reach stays usable. `c` is unrelated to the
+    // projected field, so clearing it does not extend any result loan.
+    agrees(
+        &format!(
+            "{LET_BOUND_PROJECT}{}",
+            r#"
+fn main() -> i64 ! {alloc, panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    let mut c: Vec<i64> = [8, 9];
+    let out = project(&a[..], &b[..], 1);
+    Vec.clear(&mut c);
+    Slice.get(out, 0)
+}
+"#
+        ),
+        3,
+        "",
+    );
+}
+
+#[test]
+fn a_local_backed_let_binding_on_the_recursive_path_stays_rejected() {
+    rejects(
+        r#"
+fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+    struct { view: v }
+}
+fn project<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    if n == 0 {
+        wrap(a).view
+    } else {
+        let local: [i64; 2] = [9, 9];
+        let r = wrap(&local[..]);
+        let s = project(r.view, a, n - 1);
+        wrap(s).view
+    }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "outlive the lexical scope",
+    );
+}
+
+/// A shadowed or reassigned binding may stay accepted only while every owner
+/// it can reach is still loaned; otherwise the program must be rejected.
+fn accepted_binding_stays_owner_safe(source: &str, mutation: &str) {
+    if check(source).is_ok() {
+        run(source);
+        rejects(mutation, "cannot replace an owner");
+    }
+}
+
+fn project_variant(main: &str, replacement: &str) -> String {
+    format!("{LET_BOUND_PROJECT}{main}").replace("        let r = wrap(b);\n", replacement)
+}
+
+#[test]
+fn shadowed_and_reassigned_let_bindings_stay_sound() {
+    const RESULT_B: &str = r#"
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(project(&a[..], &b[..], 1), 0)
+}
+"#;
+    const MUTATE_B: &str = r#"
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let mut b: [i64; 2] = [3, 4];
+    let out = project(&a[..], &b[..], 1);
+    b = [9, 9];
+    Slice.get(out, 0)
+}
+"#;
+    const MUTATE_A: &str = r#"
+fn main() -> i64 ! {panic} {
+    let mut a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    let out = project(&a[..], &b[..], 1);
+    a = [9, 9];
+    Slice.get(out, 0)
+}
+"#;
+    // Shadowing introduces a distinct binding; the second helper result must
+    // remain the only source of `r.view` in the accepted fragment.
+    let shadow = "        let r = wrap(a);\n        let r = wrap(b);\n";
+    accepted_binding_stays_owner_safe(
+        &project_variant(RESULT_B, shadow),
+        &project_variant(MUTATE_B, shadow),
+    );
+    // Reassigning a mutable binding conservatively unions both values. The
+    // accepted fragment must still keep each possible owner loaned.
+    let reassign = "        let mut r = wrap(b);\n        r = wrap(a);\n";
+    accepted_binding_stays_owner_safe(
+        &project_variant(RESULT_B, reassign),
+        &project_variant(MUTATE_A, reassign),
+    );
+}
+
 #[test]
 fn recursive_projected_result_keeps_its_owner_loaned() {
     rejects(

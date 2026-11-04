@@ -370,7 +370,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                     .body
                     .tail
                     .as_ref()
-                    .map(|tail| checker.view_origins(tail))
+                    .map(|tail| checker.return_origins(tail))
                     .unwrap_or_default();
                 let lifetime = function
                     .body
@@ -388,7 +388,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                     .body
                     .tail
                     .as_ref()
-                    .map(|tail| checker.view_origins(tail))
+                    .map(|tail| checker.return_origins(tail))
                     .unwrap_or_default();
                 let lifetime = function
                     .body
@@ -435,6 +435,11 @@ struct Loan {
     /// of one record are separate capabilities; the record itself stays
     /// suspended for moves and whole-value access.
     field: Option<FieldBorrow>,
+    /// A local record root that was added only as an ancestor capability for a
+    /// borrowed field. Every use keeps it loaned, but a returned view does not
+    /// borrow the record's own storage, so return checks follow the field's
+    /// external origins instead.
+    ancestor: Option<usize>,
 }
 /// A borrowed record-field place: the local record root and the field index
 /// path from its tag. The path is a checker-only identity, not a runtime value.
@@ -1283,6 +1288,7 @@ impl Checker<'_> {
                     splits: SplitLabels::default(),
                     lifetime: leaf.lifetime,
                     field: Some(field),
+                    ancestor: None,
                 },
             );
         }
@@ -1399,6 +1405,7 @@ impl Checker<'_> {
             splits: SplitLabels::default(),
             lifetime: None,
             field: Some(FieldBorrow { root, path }),
+            ancestor: None,
         }
     }
     /// Static lifetime label and capability provenance of a checked slice
@@ -1429,6 +1436,7 @@ impl Checker<'_> {
                     splits: SplitLabels::default(),
                     lifetime: None,
                     field: self.projection_field(expr),
+                    ancestor: None,
                 }
             }
             ExprKind::InitOwner { slot, .. } if self.is_carrier_type(self.locals[*slot].ty) => {
@@ -1447,6 +1455,7 @@ impl Checker<'_> {
                     splits: SplitLabels::default(),
                     lifetime: None,
                     field: self.projection_field(expr),
+                    ancestor: None,
                 }
             }
             ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot)
@@ -1466,6 +1475,7 @@ impl Checker<'_> {
                             .clone()
                             .or_else(|| self.reference_lifetimes[*slot].clone()),
                         field: None,
+                        ancestor: None,
                     }
                 } else {
                     Loan {
@@ -1474,6 +1484,7 @@ impl Checker<'_> {
                         splits: SplitLabels::default(),
                         lifetime: self.reference_lifetimes[*slot].clone(),
                         field: None,
+                        ancestor: None,
                     }
                 }
             }
@@ -1485,6 +1496,7 @@ impl Checker<'_> {
                         splits: self.view_splits[*slot].clone(),
                         lifetime: self.view_lifetimes[*slot].clone(),
                         field: self.view_fields[*slot].clone(),
+                        ancestor: None,
                     }
                 } else {
                     Loan::default()
@@ -1507,6 +1519,7 @@ impl Checker<'_> {
                     }
                     _ => self.projection_field(base),
                 },
+                ancestor: None,
             },
             ExprKind::Project(base, offset) => {
                 if base.ty.is_ref() {
@@ -1531,6 +1544,7 @@ impl Checker<'_> {
                         splits: SplitLabels::default(),
                         lifetime: declared.or_else(|| self.view_loan(base).lifetime),
                         field: None,
+                        ancestor: None,
                     };
                 }
                 let Some(index) = self.field_index(base.ty, *offset) else {
@@ -1547,7 +1561,20 @@ impl Checker<'_> {
                     // The record binding is an ancestor capability: a field
                     // subview suspends it for moves and whole-value access,
                     // while structurally disjoint field subviews coexist.
+                    //
+                    // A borrowed leaf already names the external storage it
+                    // points at, so the binding is only an ancestor for local
+                    // lifetime purposes. Mark that separately: a returned
+                    // view does not borrow the record's own storage, but every
+                    // other use still keeps the record loaned. An owned field
+                    // has no leaf origin and the binding is its storage root;
+                    // a record *parameter* roots its own leaves, so it is a
+                    // real owner rather than an ancestor.
+                    let external_leaf = loan.origins.iter().any(|origin| *origin != field.root);
                     loan.origins.insert(field.root);
+                    if external_leaf {
+                        loan.ancestor = Some(field.root);
+                    }
                 }
                 loan
             }
@@ -1588,6 +1615,7 @@ impl Checker<'_> {
             splits: loans[0].splits.clone(),
             lifetime: loans[0].lifetime.clone(),
             field: loans[0].field.clone(),
+            ancestor: loans[0].ancestor,
         };
         for loan in &loans {
             merged.origins.extend(loan.origins.iter().copied());
@@ -1610,6 +1638,12 @@ impl Checker<'_> {
             }
             if loan.field != merged.field {
                 merged.field = None;
+            }
+            if loan.ancestor != merged.ancestor {
+                // One alternative may project an owned field from the same
+                // record; the binding is then real storage for that path and
+                // no return check may skip it.
+                merged.ancestor = None;
             }
         }
         merged
@@ -2377,7 +2411,7 @@ impl Checker<'_> {
                                     "internal error: borrowed call argument has no field provenance",
                                 )
                             })?;
-                        origins.extend(loan.origins.iter().copied());
+                        origins.extend(self.loan_return_origins(&loan));
                         splits = Some(match splits {
                             Some(current) => intersect_splits(&current, &loan.splits),
                             None => loan.splits,
@@ -2416,6 +2450,7 @@ impl Checker<'_> {
                         splits: splits.clone().unwrap_or_default(),
                         lifetime,
                         field,
+                        ancestor: None,
                     },
                 );
                 self.call_origins.insert(expr_ptr, origins);
@@ -2457,7 +2492,7 @@ impl Checker<'_> {
                                 )
                             },
                         )?;
-                        origins.extend(loan.origins.iter().copied());
+                        origins.extend(self.loan_return_origins(&loan));
                     }
                 }
                 if origins.is_empty() {
@@ -2481,6 +2516,7 @@ impl Checker<'_> {
                         splits: SplitLabels::default(),
                         lifetime,
                         field: None,
+                        ancestor: None,
                     },
                 );
                 self.call_origins.insert(expr_ptr, origins);
@@ -2528,7 +2564,7 @@ impl Checker<'_> {
                                     "a shared record field cannot be passed where an exclusive '&mut [T]' field is expected",
                                 ));
                             }
-                            origins.extend(loan.origins.iter().copied());
+                            origins.extend(self.loan_return_origins(&loan));
                             splits = Some(match splits {
                                 Some(current) => intersect_splits(&current, &loan.splits),
                                 None => loan.splits,
@@ -2549,6 +2585,7 @@ impl Checker<'_> {
                             splits: splits.unwrap_or_default(),
                             lifetime: self.instantiate_result_lifetime(&mapping, &bounds, declared),
                             field: None,
+                            ancestor: None,
                         },
                     );
                 }
@@ -3090,6 +3127,24 @@ impl Checker<'_> {
                     .as_ref()
                     .is_some_and(|field| field.disjoint(target))
         })
+    }
+    /// Owners behind one loan for a return check. An ancestor record root that
+    /// was added only because a field is a borrowed leaf stays loaned for every
+    /// ordinary use, but it does not own the returned storage: the leaf's own
+    /// origins are the owners. Owned field projections have no ancestor mark,
+    /// so their record binding is still checked as storage.
+    fn loan_return_origins(&self, loan: &Loan) -> BTreeSet<usize> {
+        let mut origins = loan.origins.clone();
+        if let Some(ancestor) = loan.ancestor {
+            origins.remove(&ancestor);
+        }
+        origins
+    }
+    /// Owners of a returned view/reference expression, using the same
+    /// ancestor rule as [`Self::loan_return_origins`].
+    fn return_origins(&self, expr: &Expr) -> BTreeSet<usize> {
+        let loan = self.view_loan(expr);
+        self.loan_return_origins(&loan)
     }
     /// Capability ancestry a slice-view expression exposes: the view slot
     /// itself plus every view and storage root it derives from.
@@ -3749,8 +3804,8 @@ impl Checker<'_> {
                     },
                 ));
             }
-            for origin in &loan.origins {
-                self.check_return_origin(*origin, lifetime, leaf.mutable, leaf.variance, span)?;
+            for origin in self.loan_return_origins(loan) {
+                self.check_return_origin(origin, lifetime, leaf.mutable, leaf.variance, span)?;
             }
         }
         if provenance.leaves.len() != expected.len() {
@@ -4974,7 +5029,7 @@ impl Checker<'_> {
                 self.check_pending_linear(0, expr.span)?;
                 self.expr(value)?;
                 if value.ty.is_view() {
-                    let origins = self.view_origins(value);
+                    let origins = self.return_origins(value);
                     let lifetime = self.view_loan(value).lifetime;
                     self.check_return_origins(
                         &origins,
@@ -4983,7 +5038,7 @@ impl Checker<'_> {
                         expr.span,
                     )?;
                 } else if value.ty.is_ref() {
-                    let origins = self.view_origins(value);
+                    let origins = self.return_origins(value);
                     let lifetime = self.view_loan(value).lifetime;
                     self.check_return_reference(
                         &origins,
