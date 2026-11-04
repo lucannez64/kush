@@ -817,6 +817,10 @@ enum Value {
     /// An inline array local whose storage has been pinned in a shared cell so
     /// a mutable slice view can alias it. Reads materialize a fresh array value.
     ArrayCell(Arc<Mutex<Value>>),
+    /// A scalar local whose address was captured by a live-view closure. Reads
+    /// materialize the current value and writes go through the cell, so the
+    /// closure and its caller observe one location.
+    ScalarCell(Arc<Mutex<Value>>),
     /// A nominal-record local promoted to shared storage so a call-scoped
     /// `&Record`/`&mut Record` can point at it. Reads materialize the current
     /// record value; writes through an exclusive reference update this cell.
@@ -1629,7 +1633,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     fn store_local(&self, slot: usize, value: Value, frame: &mut Frame) {
         let value = self.materialize(value);
         match &frame.locals[slot] {
-            Value::ArrayCell(cell) | Value::RecordCell(cell) => {
+            Value::ArrayCell(cell) | Value::RecordCell(cell) | Value::ScalarCell(cell) => {
                 *cell.lock().unwrap() = value;
             }
             _ => frame.locals[slot] = value,
@@ -1637,8 +1641,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     }
     fn materialize(&self, value: Value) -> Value {
         match value {
-            Value::ArrayCell(cell) | Value::RecordCell(cell) => cell.lock().unwrap().clone(),
+            Value::ArrayCell(cell) | Value::RecordCell(cell) | Value::ScalarCell(cell) => {
+                cell.lock().unwrap().clone()
+            }
             value => value,
+        }
+    }
+    /// Pin a mutable scalar local into shared storage and return the captured
+    /// location. The closure environment retains only this non-owning cell.
+    fn capture_scalar_reference(&self, slot: usize, frame: &mut Frame) -> Value {
+        match &frame.locals[slot] {
+            Value::ScalarCell(cell) => Value::ScalarCell(cell.clone()),
+            value => {
+                let cell = Arc::new(Mutex::new(value.clone()));
+                frame.locals[slot] = Value::ScalarCell(cell.clone());
+                Value::ScalarCell(cell)
+            }
         }
     }
     /// The child index and type at one relative word offset inside an inline
@@ -5629,9 +5647,25 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         environment: None,
                     }
                 } else {
+                    let capture_refs = self.program.functions[*function].capture_refs.clone();
                     let mut values = Vec::with_capacity(captures.len());
-                    for capture in captures {
-                        values.push(value!(self.expr(capture, frame)));
+                    for (index, capture) in captures.iter().enumerate() {
+                        if capture_refs.get(index).copied().unwrap_or(false) {
+                            let slot = match &capture.kind {
+                                ExprKind::Local(slot)
+                                | ExprKind::Peek(slot)
+                                | ExprKind::Move(slot) => *slot,
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        capture.span,
+                                        "internal error: by-reference scalar capture is not a local place",
+                                    ));
+                                }
+                            };
+                            values.push(self.capture_scalar_reference(slot, frame));
+                        } else {
+                            values.push(value!(self.expr(capture, frame)));
+                        }
                     }
                     for capture in captures {
                         self.consume(capture, frame);

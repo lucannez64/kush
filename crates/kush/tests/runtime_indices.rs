@@ -453,20 +453,21 @@ fn lambda_parameters_and_frozen_mutable_captures_are_symbolic_indices() {
         }
     "#;
     assert_eq!(evaluate(captured), 42);
-    // A mutable scalar is copied into the closure environment at construction.
-    // The proof is about that immutable copy, so assigning the outer binding
-    // afterwards cannot invalidate it or reinterpret it at the final value.
-    let frozen = r#"
+    // A mutable scalar capture is a live view, not a frozen copy. The closure
+    // keeps the caller's location loaned until its last call, so the outer
+    // binding may only be reassigned after the call has consumed the closure.
+    let live = r#"
         fn keep(n: i64, erased p: Eq<i64, n, n>) -> i64 ! {} { n }
         fn main() -> i64 ! {panic, alloc} {
             let mut n = 42;
             let f: once fn() -> i64 ! {alloc, panic} =
                 fn() -> i64 ! {alloc, panic} { keep(n, refl::<i64>(n)) };
+            let value = f();
             n = 7;
-            f() + n
+            value + n
         }
     "#;
-    assert_eq!(evaluate(frozen), 49);
+    assert_eq!(evaluate(live), 49);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

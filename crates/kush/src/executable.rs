@@ -281,6 +281,15 @@ pub(crate) struct Function {
     /// Number of leading locals captured from a closure environment. `None`
     /// for ordinary functions, noncapturing lambdas, and pure adapters.
     pub closure: Option<usize>,
+    /// One flag per capture position: the environment stores a pointer to the
+    /// captured caller location instead of a copy. Only call-scoped scalar
+    /// captures use this representation; the ownership pass guarantees the
+    /// closure cannot outlive the location.
+    pub capture_refs: Vec<bool>,
+    /// One flag per capture position: the lambda body may assign that captured
+    /// location. A writing capture is an exclusive loan; a read-only capture is
+    /// a shared loan.
+    pub capture_writes: Vec<bool>,
     pub locals: Vec<Local>,
     pub result: Type,
     pub body: Block,
@@ -4680,6 +4689,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             depth: 0,
             loops: Vec::new(),
             facts: crate::facts::Facts::default(),
+            written_slots: BTreeSet::new(),
+            closure_writes: BTreeMap::new(),
             proofs: BTreeMap::new(),
             logical: &logical,
             kernel_locals: Vec::new(),
@@ -4795,6 +4806,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             name: sig.name.clone(),
             parameters: sig.parameters.len(),
             closure: None,
+            capture_refs: vec![],
+            capture_writes: vec![],
             locals,
             result: sig.result,
             body,
@@ -10105,6 +10118,8 @@ impl<'a> Functions<'a> {
                 name: name.clone(),
                 parameters: parameters.len(),
                 closure: None,
+                capture_refs: vec![],
+                capture_writes: vec![],
                 locals,
                 result,
                 body: Block {
@@ -10752,6 +10767,14 @@ struct Checker<'a, 't> {
     depth: usize,
     loops: Vec<Loop>,
     facts: crate::facts::Facts,
+    /// Slots assigned by the function or lambda currently being checked.
+    /// A lambda turns this set into `Function::capture_writes`, which decides
+    /// whether a by-reference capture is a shared or exclusive loan.
+    written_slots: BTreeSet<usize>,
+    /// Captured outer slots that a call to a closure binding may write.
+    /// Populated when a local is bound to a capturing lambda and consulted by
+    /// indirect calls so proof facts never survive a writing call.
+    closure_writes: BTreeMap<usize, Vec<usize>>,
     /// Erased proof parameters in scope: binder -> proposition.
     proofs: BTreeMap<BindingId, crate::facts::Proposition>,
     /// Checked logical definitions and their kernel names.
@@ -13682,6 +13705,7 @@ impl Checker<'_, '_> {
             let value = self.expr_expected(argument, Some(*ty))?;
             values.push(self.coerce_argument(value, *ty, span)?);
         }
+        self.apply_effect_writes(signature.effects);
         if receiver_mode == ReceiverMode::Mutable {
             // The receiver was rewritten to a local/parameter place when it is
             // one. Move the object into the dispatcher, which returns the
@@ -14199,6 +14223,8 @@ impl Checker<'_, '_> {
             ),
             parameters: parameters.len(),
             closure: None,
+            capture_refs: vec![],
+            capture_writes: vec![],
             locals,
             result: function_result,
             body,
@@ -14468,6 +14494,7 @@ impl Checker<'_, '_> {
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
             coerced.push(self.coerce_argument(value, *ty, span)?);
         }
+        self.apply_effect_writes(signature.effects);
         let value = Expr {
             kind: ExprKind::Call(Target::Function(index), coerced),
             ty,
@@ -16962,6 +16989,8 @@ impl Checker<'_, '_> {
             closure: (captures != 0)
                 .then_some(captures)
                 .or(env_parameter.then_some(0)),
+            capture_refs: vec![false; captures],
+            capture_writes: vec![false; captures],
             locals,
             result: signature.result,
             body,
@@ -18482,6 +18511,10 @@ impl Checker<'_, '_> {
                         );
                     }
                     let slot = self.bind(pattern.span, ty, *mutable)?;
+                    self.closure_writes.remove(&slot);
+                    if let Some(targets) = self.closure_write_targets(&value) {
+                        self.closure_writes.insert(slot, targets);
+                    }
                     // Both immutable and mutable scalar bindings are symbolic
                     // index candidates. A mutable one is versioned: assignment
                     // appends a new binder instead of reinterpreting an old
@@ -19578,7 +19611,7 @@ impl Checker<'_, '_> {
                     );
                 }
                 ast::ExprKind::While { condition, body } => {
-                    c.bump_assigned(body);
+                    c.bump_assigned(body, Some(condition));
                     let condition = c.expr(condition)?;
                     c.expect(condition.ty, Type::Bool, condition.span)?;
                     let mark = c.facts.mark();
@@ -19598,7 +19631,7 @@ impl Checker<'_, '_> {
                     (ExprKind::While(Box::new(condition), body), Type::Unit)
                 }
                 ast::ExprKind::Loop(body) => {
-                    c.bump_assigned(body);
+                    c.bump_assigned(body, None);
                     let scalar_baseline = c.scalar_values.clone();
                     let scalar_live = c.kernel_locals.len();
                     c.loops.push(Loop { value: Some(Type::Never), is_while: false, expected });
@@ -19917,6 +19950,11 @@ impl Checker<'_, '_> {
                         c.locals[slot].linear |= c.value_moves_linear(&value);
                         c.facts.assign(slot, &value);
                         c.renew_scalar_index(slot, &value)?;
+                        c.written_slots.insert(slot);
+                        c.closure_writes.remove(&slot);
+                        if let Some(targets) = c.closure_write_targets(&value) {
+                            c.closure_writes.insert(slot, targets);
+                        }
                         let ty = if value.ty == Type::Never {
                             Type::Never
                         } else {
@@ -21246,6 +21284,17 @@ impl Checker<'_, '_> {
     ) -> Result<Expr> {
         let captures = self.lambda_captures(lambda);
         let once = !captures.is_empty();
+        // A mutable scalar capture is a live view: the environment stores the
+        // address of the caller's binding, not a copy. Immutable scalars keep
+        // their existing by-value snapshot contract, and affine/borrowed
+        // captures keep their existing owning/capability representation.
+        let capture_refs = captures
+            .iter()
+            .map(|slot| {
+                let local = self.locals[*slot];
+                local.mutable && !local.linear && local.grade.is_none() && is_live_scalar(local.ty)
+            })
+            .collect::<Vec<_>>();
         if once && matches!(expected, Some(Type::Fn(_))) {
             return Err(Diagnostic::new(
                 span,
@@ -21263,14 +21312,21 @@ impl Checker<'_, '_> {
             )
             .with_note(self.locals[*slot].span, "text view declared here"));
         }
-        let borrowed_capture = captures.iter().any(|slot| {
-            self.locals[*slot].ty.is_slice()
-                || self.carrier_type(self.locals[*slot].ty)
-                || crate::runtime_types::is_reference_container(self.types, self.locals[*slot].ty)
-        });
-        for slot in &captures {
+        let borrowed_capture = capture_refs.iter().any(|by_ref| *by_ref)
+            || captures.iter().any(|slot| {
+                self.locals[*slot].ty.is_slice()
+                    || self.carrier_type(self.locals[*slot].ty)
+                    || crate::runtime_types::is_reference_container(
+                        self.types,
+                        self.locals[*slot].ty,
+                    )
+            });
+        for (capture_index, slot) in captures.iter().enumerate() {
             let local = self.locals[*slot];
             let ty = local.ty;
+            if capture_refs[capture_index] {
+                self.locals[*slot].pinned = true;
+            }
             if crate::runtime_types::contains_task_exit_borrow(self.types, ty) {
                 return Err(Diagnostic::new(
                     span,
@@ -21810,11 +21866,10 @@ impl Checker<'_, '_> {
                 resource: None,
             })
             .collect::<Vec<_>>();
-        // Check the lambda body in a fresh function context.
-        let capture_mutable = captures
-            .iter()
-            .map(|slot| self.locals[*slot].mutable)
-            .collect::<Vec<_>>();
+        // Check the lambda body in a fresh function context. A by-reference
+        // scalar capture is writable inside the body; whether it actually is
+        // written decides the shared/exclusive loan and proof invalidation.
+        let capture_body_mutable = capture_refs.clone();
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_slots = std::mem::take(&mut self.slots);
         let saved_result = self.result;
@@ -21824,6 +21879,8 @@ impl Checker<'_, '_> {
         let saved_effects = self.effects;
         let saved_loops = std::mem::take(&mut self.loops);
         let saved_facts = std::mem::take(&mut self.facts);
+        let saved_written = std::mem::take(&mut self.written_slots);
+        let saved_closure_writes = std::mem::take(&mut self.closure_writes);
         let capture_ids = captures
             .iter()
             .map(|slot| {
@@ -21847,12 +21904,16 @@ impl Checker<'_, '_> {
         let checked = (|| {
             self.scope_depth = if scope_root { saved_scope_depth + 1 } else { 0 };
             self.parameter_lifetimes = child_parameter_lifetimes.clone();
-            for (ty, (grade, linear)) in capture_types.iter().zip(&capture_obligations) {
+            for ((ty, (grade, linear)), mutable) in capture_types
+                .iter()
+                .zip(&capture_obligations)
+                .zip(capture_body_mutable.iter())
+            {
                 self.locals.push(Local {
                     ty: *ty,
-                    mutable: false,
+                    mutable: *mutable,
                     linear: *linear,
-                    pinned: false,
+                    pinned: *mutable,
                     grade: *grade,
                     span,
                 });
@@ -21865,17 +21926,12 @@ impl Checker<'_, '_> {
                 }
             }
             self.slots = capture_binders;
-            // Captured immutable scalars are frozen in the closure environment
-            // at construction, so they are sound symbolic indices for proof
-            // terms in the body. Mutable captures stay rejected conservatively.
-            for ((id, ty), mutable) in capture_ids
-                .iter()
-                .zip(capture_types.iter())
-                .zip(capture_mutable.iter())
-            {
-                if let Some(id) = id
-                    && !*mutable
-                {
+            // Captured scalars are symbolic indices in the body. A by-value
+            // snapshot is frozen at construction; a by-reference mutable
+            // capture is a versioned local whose assignment appends a fresh
+            // binder exactly like any other mutable scalar.
+            for (id, ty) in capture_ids.iter().zip(capture_types.iter()) {
+                if let Some(id) = id {
                     self.admit_scalar_index(*id, *ty, Span::default())?;
                 }
             }
@@ -21908,7 +21964,8 @@ impl Checker<'_, '_> {
             // The lambda's own locals are in scope here, so the result-transfer
             // obligation is derived before restoring the outer checker state.
             let obligation = self.return_obligation(&body);
-            Ok((body, obligation))
+            let written = self.written_slots.clone();
+            Ok((body, obligation, written))
         })();
         self.truncate_kernel(kernel_mark);
         self.continuation_depth = saved_continuation_depth;
@@ -21924,7 +21981,12 @@ impl Checker<'_, '_> {
         self.effects = saved_effects;
         self.loops = saved_loops;
         self.facts = saved_facts;
-        let (body, obligation) = checked?;
+        self.written_slots = saved_written;
+        self.closure_writes = saved_closure_writes;
+        let (body, obligation, written) = checked?;
+        let capture_writes = (0..captures.len())
+            .map(|index| written.contains(&index))
+            .collect::<Vec<_>>();
         if let Some(span) = obligation
             && result_grade.is_none()
             && !self.linear_type(result)
@@ -21965,6 +22027,8 @@ impl Checker<'_, '_> {
             name: name.to_owned(),
             parameters: captures.len() + lambda.parameters.len(),
             closure: once.then_some(captures.len()),
+            capture_refs: capture_refs.clone(),
+            capture_writes,
             locals,
             result,
             body,
@@ -22009,6 +22073,78 @@ impl Checker<'_, '_> {
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
+        }
+    }
+    /// Outer scalar slots a call to this callable may write. A direct lambda
+    /// value reports the writing captures of its generated function; a local
+    /// reports the captured targets recorded when it was bound. Unknown forms
+    /// return `None` (they are never borrowed-capture closures in checked IR).
+    fn closure_write_targets(&self, expr: &Expr) -> Option<Vec<usize>> {
+        let mut current = expr;
+        loop {
+            match &current.kind {
+                ExprKind::Coerce { value, .. } => current = value,
+                ExprKind::FnValue { function, captures } => {
+                    let body = self.functions.bodies.get(*function)?.as_ref()?;
+                    let targets = body
+                        .capture_writes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, writes)| **writes)
+                        .filter_map(|(index, _)| match captures.get(index)?.kind {
+                            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
+                                Some(slot)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    return Some(targets);
+                }
+                ExprKind::Local(slot) | ExprKind::Peek(slot) => {
+                    return self.closure_writes.get(slot).cloned();
+                }
+                _ => return None,
+            }
+        }
+    }
+    /// Apply every callable execution path's may-write summary to the caller.
+    fn apply_closure_writes(&mut self, targets: impl IntoIterator<Item = usize>) {
+        for slot in targets {
+            self.invalidate_scalar_proofs(slot);
+            self.written_slots.insert(slot);
+        }
+    }
+    /// Calls with a declared operation can invoke its dynamically installed
+    /// handler even when there is no lexical perform in this function.
+    fn apply_effect_writes(&mut self, effects: u16) {
+        let slots = self
+            .handlers
+            .iter()
+            .filter(|handler| self.operation_effect(&handler.operation) & effects != 0)
+            .map(|handler| handler.slot)
+            .collect::<Vec<_>>();
+        for slot in slots {
+            self.apply_handler_writes(slot);
+        }
+    }
+    fn apply_handler_writes(&mut self, slot: usize) {
+        let targets = self.closure_writes.get(&slot).cloned().unwrap_or_default();
+        self.apply_closure_writes(targets);
+    }
+    /// Forget proof facts and symbolic versions about a scalar location that a
+    /// writing closure may have changed. The location itself remains live; only
+    /// old-value evidence is invalidated.
+    fn invalidate_scalar_proofs(&mut self, slot: usize) {
+        let ty = self.locals[slot].ty;
+        if ty.scalar_carrier().is_some() {
+            self.facts.bump(slot);
+            if let Some(id) = self
+                .slots
+                .iter()
+                .find_map(|(id, candidate)| (*candidate == slot).then_some(*id))
+            {
+                self.fresh_scalar_value(id, ty);
+            }
         }
     }
     /// Outer local slots referenced by a lambda body. Resolution already maps
@@ -22477,6 +22613,7 @@ impl Checker<'_, '_> {
                 ),
             ));
         };
+        let write_targets = self.closure_write_targets(&callee).unwrap_or_default();
         let signature = self.types.function_types[id].clone();
         if signature.parameters.len() != arguments.len() {
             return Err(Diagnostic::new(
@@ -22531,6 +22668,13 @@ impl Checker<'_, '_> {
             let value_span = value.span;
             values.push(self.coerce_argument(value, *parameter, value_span)?);
         }
+        // A writing closure may change a captured scalar location during the
+        // call. The callee and every argument have already been evaluated, so
+        // invalidate old-value facts only now: proofs established before the
+        // call cannot be reused after it, while argument checking still sees
+        // the pre-call value. Reading closures have no write targets.
+        self.apply_closure_writes(write_targets);
+        self.apply_effect_writes(signature.effects);
         let value = Expr {
             kind: ExprKind::CallIndirect {
                 callee: Box::new(callee),
@@ -25950,7 +26094,7 @@ impl Checker<'_, '_> {
                         ),
                     ));
                 }
-                let (body, result, _, result_grade) =
+                let (body, result, effects, result_grade) =
                     self.task_callable(&arguments[0], true, false, "Task.scope", span)?;
                 if crate::runtime_types::is_reference_container(self.types, result) {
                     return Err(Diagnostic::new(
@@ -25970,6 +26114,8 @@ impl Checker<'_, '_> {
                         "a task result supports exactly @[1] (owning transfer or copyable must-use) or no grade",
                     ));
                 }
+                self.apply_closure_writes(self.closure_write_targets(&body).unwrap_or_default());
+                self.apply_effect_writes(effects);
                 let obligation =
                     self.linear_type(result) || result_grade.is_some_and(Grade::is_one);
                 let failure = self.types.result(result, span).ok();
@@ -26422,6 +26568,7 @@ impl Checker<'_, '_> {
                 )?;
             }
         }
+        self.apply_effect_writes(signature.effects);
         let value = Expr {
             kind: ExprKind::Call(
                 if self.functions.foreign_functions.contains_key(&index) {
@@ -27931,6 +28078,9 @@ impl Checker<'_, '_> {
         let handler_type = handler_value.ty;
         let slot = self.fresh_local(span, handler_type)?;
         self.locals[slot].linear = signature.linear;
+        if let Some(targets) = self.closure_write_targets(&handler_value) {
+            self.closure_writes.insert(slot, targets);
+        }
         let handler_parameter = signature.parameters[0];
         let handler_result = signature.result;
         self.handlers.push(HandlerScope {
@@ -28230,6 +28380,8 @@ impl Checker<'_, '_> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        // The handler can write before invoking the resumed suffix.
+        self.apply_handler_writes(slot);
         let resume = self.resumption_continuation(
             captures,
             (result_id, result_ty, mutable),
@@ -28366,6 +28518,8 @@ impl Checker<'_, '_> {
         let saved_effects = self.effects;
         let saved_loops = std::mem::take(&mut self.loops);
         let saved_facts = std::mem::take(&mut self.facts);
+        let saved_written = std::mem::take(&mut self.written_slots);
+        let saved_closure_writes = std::mem::take(&mut self.closure_writes);
         let saved_handlers = std::mem::take(&mut self.handlers);
         let saved_scope_depth = self.scope_depth;
         let kernel_mark = self.kernel_locals.len();
@@ -28427,6 +28581,8 @@ impl Checker<'_, '_> {
         self.effects = saved_effects;
         self.loops = saved_loops;
         self.facts = saved_facts;
+        self.written_slots = saved_written;
+        self.closure_writes = saved_closure_writes;
         let body = checked?;
         if !captures.is_empty() {
             // Building an environment is a real allocation.
@@ -28486,6 +28642,7 @@ impl Checker<'_, '_> {
             self.require(effects | operation_effect, span)?;
             let payload = self.expr_expected(value, Some(parameter))?;
             let payload = self.coerce_argument(payload, handler_parameter, span)?;
+            self.apply_handler_writes(slot);
             let resume = self.resume_value(result, multishot, span)?;
             let call = Expr {
                 kind: ExprKind::CallIndirect {
@@ -29594,22 +29751,129 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
-    /// Facts about locals assigned anywhere in a loop body do not survive
-    /// into it: the next iteration may observe the new value.
-    fn bump_assigned(&mut self, body: &ast::Block) {
-        type Out<'e> = Vec<(Span, &'e ast::Expr)>;
-        fn block<'e>(b: &'e ast::Block, out: &mut Out<'e>) {
+    /// Facts about locals assigned anywhere in a loop body, or written by a
+    /// callable the loop may execute, do not survive into it: the next
+    /// iteration may observe the new value.
+    fn bump_assigned(&mut self, body: &ast::Block, condition: Option<&ast::Expr>) {
+        type Out<'e> = Vec<(Span, Option<&'e ast::Expr>)>;
+        struct Calls<'e, 'r> {
+            resolution: &'r Resolution,
+            values: BTreeMap<BindingId, Vec<&'e ast::Expr>>,
+            active: BTreeSet<BindingId>,
+            invoked: BTreeSet<BindingId>,
+            handlers: Vec<&'e ast::Expr>,
+            may_execute: bool,
+            collecting: bool,
+        }
+        fn invoke<'e>(value: &'e ast::Expr, out: &mut Out<'e>, calls: &mut Calls<'e, '_>) {
+            if calls.collecting {
+                return;
+            }
+            match &value.kind {
+                ast::ExprKind::Lambda(lambda) => {
+                    let mut writes = Vec::new();
+                    block(&lambda.body, &mut writes, calls);
+                    out.extend(writes.into_iter().map(|(span, _)| (span, None)));
+                }
+                ast::ExprKind::Name(_) => {
+                    if let Some(id) = calls.resolution.reference(value.span) {
+                        calls.invoked.insert(id);
+                        if calls.active.insert(id) {
+                            if let Some(values) = calls.values.get(&id).cloned() {
+                                for value in values {
+                                    invoke(value, out, calls);
+                                }
+                            }
+                            calls.active.remove(&id);
+                        }
+                    }
+                }
+                ast::ExprKind::Block(body) => {
+                    if let Some(tail) = &body.tail {
+                        invoke(tail, out, calls);
+                    }
+                }
+                ast::ExprKind::If {
+                    then, otherwise, ..
+                } => {
+                    if let Some(tail) = &then.tail {
+                        invoke(tail, out, calls);
+                    }
+                    if let Some(otherwise) = otherwise {
+                        invoke(otherwise, out, calls);
+                    }
+                }
+                ast::ExprKind::Match { arms, .. } => {
+                    for arm in arms {
+                        invoke(&arm.body, out, calls);
+                    }
+                }
+                // A callable taken from a tuple, array, or record may be one
+                // of several stored values, so every element may execute.
+                ast::ExprKind::Tuple(values) | ast::ExprKind::Array(values) => {
+                    for value in values {
+                        invoke(value, out, calls);
+                    }
+                }
+                ast::ExprKind::StructuralLiteral(fields) | ast::ExprKind::Record { fields, .. } => {
+                    for (_, value) in fields {
+                        invoke(value, out, calls);
+                    }
+                }
+                ast::ExprKind::Field { value: base, .. }
+                | ast::ExprKind::Index { value: base, .. } => invoke(base, out, calls),
+                ast::ExprKind::Specialize { callee, .. }
+                | ast::ExprKind::Cast { value: callee, .. } => invoke(callee, out, calls),
+                _ => {
+                    // An unknown invoked value can contain any referenced callable.
+                    let mut references = BTreeSet::new();
+                    collect_expr_refs(calls.resolution, value, &mut references);
+                    for id in references {
+                        calls.invoked.insert(id);
+                        if calls.active.insert(id) {
+                            if let Some(values) = calls.values.get(&id).cloned() {
+                                for value in values {
+                                    invoke(value, out, calls);
+                                }
+                            }
+                            calls.active.remove(&id);
+                        }
+                    }
+                }
+            }
+        }
+        fn effects<'e>(out: &mut Out<'e>, calls: &mut Calls<'e, '_>) {
+            if calls.collecting {
+                return;
+            }
+            calls.may_execute = true;
+            // Unknown calls may perform an operation handled here. Temporarily
+            // remove the handlers while expanding them to avoid resumption cycles.
+            let handlers = std::mem::take(&mut calls.handlers);
+            for handler in &handlers {
+                invoke(handler, out, calls);
+            }
+            calls.handlers = handlers;
+        }
+        fn block<'e>(b: &'e ast::Block, out: &mut Out<'e>, calls: &mut Calls<'e, '_>) {
             for s in &b.statements {
                 match s {
-                    ast::Statement::Let { value, .. } => expr(value, out),
-                    ast::Statement::Expr(e) => expr(e, out),
+                    ast::Statement::Let { pattern, value, .. } => {
+                        expr(value, out, calls);
+                        if calls.collecting
+                            && let Some(id) = calls.resolution.binder(pattern.span)
+                        {
+                            calls.values.entry(id).or_default().push(value);
+                        }
+                    }
+                    ast::Statement::Expr(e) => expr(e, out, calls),
                 }
             }
             if let Some(t) = &b.tail {
-                expr(t, out);
+                expr(t, out, calls);
             }
         }
-        fn expr<'e>(e: &'e ast::Expr, out: &mut Out<'e>) {
+        fn expr<'e>(e: &'e ast::Expr, out: &mut Out<'e>, calls: &mut Calls<'e, '_>) {
             use ast::ExprKind as K;
             match &e.kind {
                 K::Binary {
@@ -29617,79 +29881,137 @@ impl Checker<'_, '_> {
                     left,
                     right,
                 } => {
-                    out.push((left.span, right));
-                    expr(right, out);
+                    out.push((left.span, Some(right)));
+                    expr(right, out, calls);
+                    if calls.collecting
+                        && let Some(id) = calls.resolution.reference(left.span)
+                    {
+                        calls.values.entry(id).or_default().push(right);
+                    }
                 }
                 K::Binary { left, right, .. }
                 | K::Index {
                     value: left,
                     index: right,
                 } => {
-                    expr(left, out);
-                    expr(right, out);
+                    expr(left, out, calls);
+                    expr(right, out, calls);
                 }
                 K::Slice { value, start, end } => {
-                    expr(value, out);
+                    expr(value, out, calls);
                     if let Some(start) = start {
-                        expr(start, out);
+                        expr(start, out, calls);
                     }
                     if let Some(end) = end {
-                        expr(end, out);
+                        expr(end, out, calls);
                     }
                 }
-                K::Unary { operand, .. } | K::Try(operand) | K::Field { value: operand, .. } => {
-                    expr(operand, out)
-                }
-                K::Return(Some(v)) | K::Break(Some(v)) => expr(v, out),
-                K::Tuple(vs) | K::Array(vs) => vs.iter().for_each(|v| expr(v, out)),
+                K::Unary { operand, .. }
+                | K::Try(operand)
+                | K::Cast { value: operand, .. }
+                | K::Field { value: operand, .. } => expr(operand, out, calls),
+                K::Return(Some(v)) | K::Break(Some(v)) => expr(v, out, calls),
+                K::Tuple(vs) | K::Array(vs) => vs.iter().for_each(|v| expr(v, out, calls)),
                 K::Call { callee, arguments } => {
-                    expr(callee, out);
-                    arguments.iter().for_each(|v| expr(v, out));
+                    effects(out, calls);
+                    expr(callee, out, calls);
+                    invoke(callee, out, calls);
+                    // Callbacks passed to unknown callees may execute, including
+                    // Task.scope callbacks and effect resumptions.
+                    for argument in arguments {
+                        invoke(argument, out, calls);
+                    }
+                    arguments.iter().for_each(|v| expr(v, out, calls));
                 }
-                K::Specialize { callee, .. } => expr(callee, out),
-                K::Block(b) | K::Loop(b) => block(b, out),
+                K::Lambda(lambda) => {
+                    if calls.collecting {
+                        block(&lambda.body, out, calls);
+                    }
+                }
+                K::Handle { handler, body, .. } => {
+                    expr(handler, out, calls);
+                    calls.handlers.push(handler);
+                    block(body, out, calls);
+                    calls.handlers.pop();
+                }
+                K::Perform { value, .. } => {
+                    effects(out, calls);
+                    expr(value, out, calls);
+                }
+                K::Specialize { callee, .. } => expr(callee, out, calls),
+                K::Block(b) | K::Loop(b) => block(b, out, calls),
                 K::While { condition, body } => {
-                    expr(condition, out);
-                    block(body, out);
+                    expr(condition, out, calls);
+                    block(body, out, calls);
                 }
                 K::If {
                     condition,
                     then,
                     otherwise,
                 } => {
-                    expr(condition, out);
-                    block(then, out);
+                    expr(condition, out, calls);
+                    block(then, out, calls);
                     if let Some(o) = otherwise {
-                        expr(o, out);
+                        expr(o, out, calls);
                     }
                 }
                 K::Match { value, arms } => {
-                    expr(value, out);
+                    expr(value, out, calls);
                     for arm in arms {
                         if let Some(g) = &arm.guard {
-                            expr(g, out);
+                            expr(g, out, calls);
                         }
-                        expr(&arm.body, out);
+                        expr(&arm.body, out, calls);
                     }
                 }
-                K::Record { fields, .. } => fields.iter().for_each(|(_, v)| expr(v, out)),
-                _ => {}
+                K::Record { fields, .. } | K::StructuralLiteral(fields) => {
+                    fields.iter().for_each(|(_, v)| expr(v, out, calls))
+                }
+                K::Name(_)
+                | K::Integer(_)
+                | K::Float(_)
+                | K::String(_)
+                | K::Char(_)
+                | K::Bool(_)
+                | K::Continue
+                | K::Return(None)
+                | K::Break(None) => {}
             }
         }
+        let mut calls = Calls {
+            resolution: self.resolution,
+            values: BTreeMap::new(),
+            active: BTreeSet::new(),
+            invoked: BTreeSet::new(),
+            handlers: Vec::new(),
+            may_execute: false,
+            collecting: true,
+        };
         let mut assignments = Vec::new();
-        block(body, &mut assignments);
+        block(body, &mut assignments, &mut calls);
+        if let Some(condition) = condition {
+            expr(condition, &mut assignments, &mut calls);
+        }
+        // Resolve all callable alternatives before following calls: a value
+        // assigned later in the body may be invoked on the next iteration.
+        assignments.clear();
+        calls.collecting = false;
+        block(body, &mut assignments, &mut calls);
+        if let Some(condition) = condition {
+            expr(condition, &mut assignments, &mut calls);
+        }
         // Per slot: +1 if every update is `x = x + c` (c >= 0), -1 if every
         // update is `x = x - c` (c >= 0), 0 otherwise.
         let mut direction: BTreeMap<usize, i8> = BTreeMap::new();
         for (span, value) in &assignments {
             let Ok(slot) = self.slot(*span) else { continue };
             let step =
-                match &value.kind {
-                    ast::ExprKind::Binary {
+                match value.map(|value| &value.kind) {
+                    Some(ast::ExprKind::Binary {
                         op: op @ (Kind::Plus | Kind::Minus),
                         left,
                         right,
-                    } if matches!(&left.kind, ast::ExprKind::Name(_))
+                    }) if matches!(&left.kind, ast::ExprKind::Name(_))
                         && self.slot(left.span) == Ok(slot)
                         && matches!(&right.kind, ast::ExprKind::Integer(_)) =>
                     {
@@ -29706,9 +30028,31 @@ impl Checker<'_, '_> {
                 })
                 .or_insert(step);
         }
+        // Constructing or merely referencing a callable does not execute it.
+        // Only invoked values contribute their existing capture-write summaries.
+        for id in calls.invoked {
+            if let Some(targets) = self
+                .slots
+                .get(&id)
+                .and_then(|slot| self.closure_writes.get(slot))
+            {
+                for target in targets {
+                    direction.insert(*target, 0);
+                }
+            }
+        }
+        // An operation in the loop may call an enclosing handler without
+        // referring to its synthesized local binding in the source tree.
+        for handler in self.handlers.iter().filter(|_| calls.may_execute) {
+            if let Some(targets) = self.closure_writes.get(&handler.slot) {
+                for target in targets {
+                    direction.insert(*target, 0);
+                }
+            }
+        }
         for (slot, step) in direction {
             if step == 0 {
-                self.facts.bump(slot);
+                self.invalidate_scalar_proofs(slot);
             } else {
                 self.facts.bump_monotone(slot, step > 0);
             }
@@ -30583,6 +30927,15 @@ fn block_contains_lexical_perform(block: &ast::Block, operation: &str) -> bool {
         .tail
         .as_deref()
         .is_some_and(|tail| contains_lexical_perform(tail, operation))
+}
+
+/// A one-word scalar value that can be captured by reference without owning
+/// or borrowing storage. Mutable bindings of these types become live views.
+pub(crate) fn is_live_scalar(ty: Type) -> bool {
+    matches!(
+        ty,
+        Type::I64 | Type::Int(_) | Type::Float(_) | Type::Char | Type::Bool | Type::Unit
+    )
 }
 
 /// Collect runtime binding references in a lambda body so captures can be

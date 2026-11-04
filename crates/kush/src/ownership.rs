@@ -236,6 +236,16 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             })
         })
         .collect::<Vec<_>>();
+    let capture_refs = program
+        .functions
+        .iter()
+        .map(|function| function.capture_refs.clone())
+        .collect::<Vec<_>>();
+    let capture_writes = program
+        .functions
+        .iter()
+        .map(|function| function.capture_writes.clone())
+        .collect::<Vec<_>>();
     let foreign_functions = program.foreign_functions.clone();
     for (function_index, function) in program.functions.iter_mut().enumerate() {
         // A foreign declaration has a checked inert body but no source
@@ -257,6 +267,8 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             reference_labels: &program.reference_labels,
             variance: &program.variance,
             functions: &program.function_types,
+            capture_refs: &capture_refs,
+            capture_writes: &capture_writes,
             result_grades: &result_grades,
             calls: &calls,
             dyn_call_lifetimes: &dyn_call_lifetimes,
@@ -1000,7 +1012,8 @@ struct LoopState {
 #[derive(Clone, Default)]
 struct BorrowedCapture {
     origins: BTreeSet<usize>,
-    mutable: bool,
+    /// Only these origins are exclusive; the remaining captures stay shared.
+    exclusive_origins: BTreeSet<usize>,
     splits: SplitLabels,
     /// A slice result borrowed from one capture, resolved to the capture's
     /// outer provenance when the closure value is constructed.
@@ -1019,6 +1032,12 @@ struct Checker<'a> {
     reference_labels: &'a [String],
     variance: &'a crate::variance::VarianceTable,
     functions: &'a [crate::runtime_types::FunctionType],
+    /// Capture representation of each checked function instance. Scalar
+    /// captures marked `true` store a pointer to the caller's location.
+    capture_refs: &'a [Vec<bool>],
+    /// Capture write metadata: a writing by-reference capture is an exclusive
+    /// loan; a read-only one is shared.
+    capture_writes: &'a [Vec<bool>],
     /// Static result contract of each checked function, by instance index:
     /// `(grade, owning)`. `owning` distinguishes an owning `@[1]` transfer
     /// (which is a move) from a copyable must-use `@[1]` contract (which the
@@ -2878,13 +2897,28 @@ impl Checker<'_> {
                 .as_ref()
                 .is_some_and(|origins| origins.contains(&source))
     }
+    /// A live scoped closure captures this scalar storage. Used to give the
+    /// loan conflict a closure-specific diagnostic.
+    fn live_scalar_capture(&self, source: usize, ptr: usize) -> bool {
+        self.live_views_at(ptr).iter().any(|view| {
+            self.available[*view]
+                && self.borrowed_closures.contains_key(view)
+                && self.derives_from(*view, source)
+        })
+    }
     fn has_live_descendant(&self, source: usize, ptr: usize, mutable_only: bool) -> bool {
         self.live_views_at(ptr).iter().any(|view| {
             // A view that is not available here was moved, or is the binding
             // currently being initialized. Neither is an active capability.
             self.available[*view]
                 && self.derives_from(*view, source)
-                && (!mutable_only || self.view_mut[*view])
+                && (!mutable_only
+                    || self
+                        .borrowed_closures
+                        .get(view)
+                        .map_or(self.view_mut[*view], |capture| {
+                            capture.exclusive_origins.contains(&source)
+                        }))
         })
     }
     fn temporary_loan_at(&self, source: usize) -> bool {
@@ -2959,6 +2993,17 @@ impl Checker<'_> {
                 // views are all structurally disjoint from that field does not
                 // alias any exclusive field capability.
                 return Ok(());
+            }
+            if crate::executable::is_live_scalar(self.locals[slot].ty)
+                && self.live_scalar_capture(slot, ptr)
+            {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "cannot {what} a scalar location while a closure that exclusively captures it is live; call the closure first or move this access before its last use"
+                    ),
+                )
+                .with_note(self.locals[slot].span, "captured location declared here"));
             }
             return Err(Diagnostic::new(
                 span,
@@ -3291,7 +3336,15 @@ impl Checker<'_> {
                 // storage, and the record itself stays suspended for moves.
                 continue;
             }
-            if mutable || self.view_mut[*view] {
+            let exclusive_overlap =
+                self.borrowed_closures
+                    .get(view)
+                    .map_or(self.view_mut[*view], |capture| {
+                        !self
+                            .origins_roots(&capture.exclusive_origins)
+                            .is_disjoint(&roots)
+                    });
+            if mutable || exclusive_overlap {
                 let what = if mutable {
                     "cannot create an exclusive '&mut [T]' view while another view of the same owner is live; split siblings require one checked Slice.split_at_mut pair, and independent disjoint ranges are not inferred"
                 } else {
@@ -4006,7 +4059,7 @@ impl Checker<'_> {
             // capability live until its last call or enclosing-scope end.
             self.acquire_view(
                 slot,
-                capture.mutable,
+                !capture.exclusive_origins.is_empty(),
                 capture.origins.clone(),
                 capture.splits.clone(),
                 None,
@@ -5061,6 +5114,15 @@ impl Checker<'_> {
             ExprKind::Assign(slot, value) => {
                 let slot = *slot;
                 if self.any_loan_at(slot, expr_ptr) {
+                    if crate::executable::is_live_scalar(self.locals[slot].ty)
+                        && self.live_scalar_capture(slot, expr_ptr)
+                    {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "cannot assign to a scalar location while a closure capturing it is live; call the closure first or move this write after its last use",
+                        )
+                        .with_note(self.locals[slot].span, "captured location declared here"));
+                    }
                     return Err(Diagnostic::new(
                         expr.span,
                         "cannot replace an owner while a slice view or reference borrows it",
@@ -5503,20 +5565,32 @@ impl Checker<'_> {
                     .cloned()
                     .or(local_capture);
                 if let Some(info) = &capture_info {
-                    let roots = self.origins_roots(&info.origins);
-                    self.temporary_regions.push(RetainedView {
-                        origins: info.origins.clone(),
-                        roots,
-                        mutable: info.mutable,
-                        splits: info.splits.clone(),
-                        field: None,
-                    });
-                    self.loans.extend(info.origins.iter().copied());
-                    if info.mutable {
-                        self.temporary_exclusive
-                            .extend(info.origins.iter().copied());
-                    } else {
-                        self.temporary_shared.extend(info.origins.iter().copied());
+                    for mutable in [false, true] {
+                        let origins = if mutable {
+                            info.exclusive_origins.clone()
+                        } else {
+                            info.origins
+                                .difference(&info.exclusive_origins)
+                                .copied()
+                                .collect()
+                        };
+                        if origins.is_empty() {
+                            continue;
+                        }
+                        let roots = self.origins_roots(&origins);
+                        self.temporary_regions.push(RetainedView {
+                            origins: origins.clone(),
+                            roots,
+                            mutable,
+                            splits: info.splits.clone(),
+                            field: None,
+                        });
+                        self.loans.extend(origins.iter().copied());
+                        if mutable {
+                            self.temporary_exclusive.extend(origins);
+                        } else {
+                            self.temporary_shared.extend(origins);
+                        }
                     }
                 }
                 for argument in arguments.iter_mut() {
@@ -5785,13 +5859,32 @@ impl Checker<'_> {
                     self.wrapped_results.insert(expr_ptr, provenance);
                 }
             }
-            ExprKind::FnValue { captures, .. } => {
+            ExprKind::FnValue { function, captures } => {
                 // A borrowed-capture closure is a scoped lexical capability.
                 // It is legal only as a direct `let` initializer or as the
                 // immediate callee of an indirect call; both positions are
-                // marked by the enclosing statement. Captured slice views and
-                // borrowed records are both inert descriptors: the environment
-                // never owns the storage behind them.
+                // marked by the enclosing statement. Captured slice views,
+                // borrowed records, and by-reference scalar locations are all
+                // inert descriptors: the environment never owns the storage
+                // behind them.
+                let capture_ref = self
+                    .capture_refs
+                    .get(*function)
+                    .cloned()
+                    .unwrap_or_default();
+                let capture_write = self
+                    .capture_writes
+                    .get(*function)
+                    .cloned()
+                    .unwrap_or_default();
+                let scalars = captures
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, capture)| {
+                        capture_ref.get(*index).copied().unwrap_or(false)
+                            && crate::executable::is_live_scalar(capture.ty)
+                    })
+                    .collect::<Vec<_>>();
                 let borrowed = captures
                     .iter()
                     .filter(|capture| capture.ty.is_slice())
@@ -5800,7 +5893,7 @@ impl Checker<'_> {
                     .iter()
                     .filter(|capture| self.is_carrier_type(capture.ty))
                     .collect::<Vec<_>>();
-                if !borrowed.is_empty() || !records.is_empty() {
+                if !scalars.is_empty() || !borrowed.is_empty() || !records.is_empty() {
                     if self.capture_site != Some(expr_ptr) {
                         return Err(Diagnostic::new(
                             expr.span,
@@ -5809,7 +5902,35 @@ impl Checker<'_> {
                     }
                     let mut origins = BTreeSet::new();
                     let mut splits: Option<SplitLabels> = None;
-                    let mut mutable = false;
+                    let mut exclusive_origins = BTreeSet::new();
+                    for (index, capture) in &scalars {
+                        let slot = match &capture.kind {
+                            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
+                                *slot
+                            }
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    capture.span,
+                                    "internal error: by-reference scalar capture is not a local place",
+                                ));
+                            }
+                        };
+                        let capture_origins = BTreeSet::from([slot]);
+                        let capture_mut = capture_write.get(*index).copied().unwrap_or(false);
+                        self.check_view_creation(
+                            &capture_origins,
+                            capture_mut,
+                            &SplitLabels::default(),
+                            None,
+                            expr_ptr,
+                            capture.span,
+                        )?;
+                        if capture_mut {
+                            exclusive_origins.extend(capture_origins.iter().copied());
+                        }
+                        origins.extend(capture_origins);
+                        splits.get_or_insert_with(SplitLabels::default);
+                    }
                     for capture in &borrowed {
                         let capture_origins = self.view_origins(capture);
                         let labels = self.split_labels(capture);
@@ -5823,7 +5944,9 @@ impl Checker<'_> {
                             expr_ptr,
                             capture.span,
                         )?;
-                        mutable |= capture_mut;
+                        if capture_mut {
+                            exclusive_origins.extend(capture_origins.iter().copied());
+                        }
                         origins.extend(capture_origins);
                         splits = Some(match splits {
                             Some(mut current) => {
@@ -5841,7 +5964,9 @@ impl Checker<'_> {
                     for capture in &records {
                         let provenance = self.record_provenance(capture);
                         for loan in provenance.leaves.values() {
-                            mutable |= loan.mutable;
+                            if loan.mutable {
+                                exclusive_origins.extend(loan.origins.iter().copied());
+                            }
                             origins.extend(loan.origins.iter().copied());
                             splits = Some(match splits {
                                 Some(current) => intersect_splits(&current, &loan.splits),
@@ -5851,7 +5976,7 @@ impl Checker<'_> {
                     }
                     let mut info = BorrowedCapture {
                         origins,
-                        mutable,
+                        exclusive_origins,
                         splits: splits.unwrap_or_default(),
                         result_slice: None,
                         result_record: None,

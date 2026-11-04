@@ -154,6 +154,22 @@ borrowed capture cannot be moved to another local, returned, stored, passed to a
 helper, or captured by a task; see [lifetimes.md](lifetimes.md) and
 [functions.md](functions.md).
 
+A mutable scalar capture is also a scoped borrow rather than an owning move.
+The closure environment stores a non-owning pointer to the caller's binding.
+A writing capture is an exclusive loan: the captured location cannot be read,
+assigned, moved, or dropped while the closure is live. A read-only capture is a
+shared loan: other reads are allowed, but a write is rejected. The loan is
+tracked by the same backward last-use analysis as slice views and ends at the
+closure's checked last call or lexical scope end.
+The pointer is stack storage, never a heap owner; dropping an uncalled closure
+or calling it releases only the environment allocation. Escaping through a
+return, record, box, union, helper call, adapter, or spawned task is rejected
+before either backend sees the value. A writing call also invalidates erased
+proof facts about the captured location's old value, while a read-only call
+preserves them. Mutability is tracked per captured location, including during
+call argument evaluation; a closure that writes `j` and only reads `i` holds
+an exclusive loan on `j` and a shared loan on `i`.
+
 Borrow lifetimes include the remainder of argument evaluation and the call itself:
 
 ```rust

@@ -292,7 +292,10 @@ outstanding implementation item.
   version; assignment appends a fresh versioned binder or records an assigned
   canonical literal; an old literal proof is rejected against the new value; a
   by-value scalar alias keeps the copied binder across later mutation; a
-  closure capture is an independent frozen snapshot. Branch joins keep an
+  mutable scalar closure capture is now a checked live view, not a snapshot.
+  The closure environment stores the caller's location and the ownership pass
+  keeps it loaned until the closure's last call, so escapes and outliving data
+  are rejected. Branch joins keep an
   index only when every reaching branch agrees, and loop joins invalidate a
   changed scalar to a fresh binder. Erased proof-valued locals can alias
   checked logical terms and be re-passed to erased parameters. The separate
@@ -303,10 +306,9 @@ outstanding implementation item.
   is not, bounded Chvátal–Gomory rounding cuts and integer case splits close the
   gap with the same independent checking; nonlinear terms, full Presburger
   completeness, and the documented row/term/integer budgets remain explicit
-  "not established" boundaries. Still absent: mutable
-  captures as a live view. A closure capture is a sound copy/snapshot; live
-  sharing needs a checked closure borrow lifetime so the environment cannot
-  outlive the captured location, which is not implemented. See
+  "not established" boundaries. Calling a closure that
+  writes a captured scalar now invalidates old proof facts about that location,
+  while a read-only call preserves them. See
   [runtime-indices.md](runtime-indices.md#4-freezing-mutation-and-joins) and
   [runtime-indices.md](runtime-indices.md#4a-arithmetic-proof-search).
 - [ ] Runtime-sized inline arrays with checked lifetime/storage layout.
@@ -919,12 +921,11 @@ allow, on top of `15f62d3`:
   terms, no full Presburger completeness or complete cutting-plane closure, and
   explicit rational and integer budgets. See
   [integer-refutation.md](integer-refutation.md).
-- **Mutable captures as a live view remain unimplemented and the runtime-proof
-  backlog item stays unchecked.** A closure capture is still a sound copy /
-  independent snapshot; live sharing would need a checked closure borrow
-  lifetime so the environment cannot outlive the captured location.
-  `tests/runtime_indices.rs` and `tests/advanced_types_effects.rs` keep the
-  snapshot contract explicit.
+- **Mutable captures were a snapshot at this checkpoint; they are now live
+  views.** The scoped closure-borrow work in P-CLOSURE-LT/P-LIVE-CAPTURE gives
+  the environment a checked caller-location loan, and P-INVALIDATE drops old
+  proof versions when a writer closure is called. `tests/closure_captures.rs`
+  covers the live-view contract and the reader/writer distinction.
 
 Local Linux x86-64 validation used
 `CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/close-rows-proofs` with
