@@ -828,3 +828,16 @@ fn main() -> Unit ! {} {}
         "lifetime",
     );
 }
+
+#[test]
+fn laundering_coverage_through_union_typed_arms() {
+    // The arms' identities must survive the swap-in of either label flavor:
+    // the second arm uses a structural union against the same definition.
+    check(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        fn id<'x>(v: Inv<'x>) -> Unit ! {panic} { let _ = v; }
+        fn ok<'x>(v: Inv<'x>) -> Unit ! {panic} { id(v) }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap();
+}

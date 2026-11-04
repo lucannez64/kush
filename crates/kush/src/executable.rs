@@ -15798,8 +15798,10 @@ impl Checker<'_, '_> {
                     // The only occurrences are outer borrow positions whose
                     // actual lexical lifetime is owned by the ownership
                     // provenance pass, not by a record label in the checked
-                    // type. Preserve that established contract; inventing an
-                    // opaque identity here would erase real provenance.
+                    // type. Preserving the binder name keeps the declared
+                    // bounds between this call's own result labels provable
+                    // through their provenance; a fresh identity here would
+                    // reject legitimate result-parameter relabeling.
                     map.insert(binder.clone(), binder.clone());
                 }
                 continue;
@@ -15973,6 +15975,9 @@ impl Checker<'_, '_> {
             let (Some(long), Some(short)) = (map.get(long), map.get(short)) else {
                 continue;
             };
+            // An opaque label carries no caller identity, so there is no
+            // caller outlives edge to check; the ownership provenance pass
+            // owns the label relation for result-derived provenance.
             if long.starts_with('<') || short.starts_with('<') {
                 continue;
             }
@@ -30519,49 +30524,89 @@ fn branch_record_label_mismatch(
     if depth >= 32 || !seen.insert((left, right)) {
         return false;
     }
-    match (left, right) {
-        (Type::Box(a), Type::Box(b)) | (Type::Vec(a), Type::Vec(b)) => {
-            branch_record_label_mismatch(
-                types,
-                types.pointees[a],
-                types.pointees[b],
-                depth + 1,
-                seen,
-            )
+    // A wrapper whose coercions do not reinterpret a record's provenance
+    // label unwraps into the pointee comparison.
+    let pointee = |types: &crate::runtime_types::Types<'_>, value: Type| -> Option<Type> {
+        match value {
+            Type::Box(index)
+            | Type::Vec(index)
+            | Type::ArenaBox(index)
+            | Type::AllocBox(index)
+            | Type::AllocVec(index)
+            | Type::Slice(index)
+            | Type::SliceMut(index)
+            | Type::Ref(index)
+            | Type::RefMut(index) => Some(types.pointees[index]),
+            Type::Annotated(index, _) => Some(types.pointees[index]),
+            _ => None,
         }
-        (Type::Enum(a), Type::Enum(b))
-            if a != b
-                && types.enums[a].record
-                && types.enums[b].record
-                && types.enums[a].definition == types.enums[b].definition =>
-        {
-            let (a, b) = (&types.enums[a], &types.enums[b]);
-            if a.lifetimes.len() != b.lifetimes.len() {
-                return false;
-            }
-            let disagreement =
-                (0..a.lifetimes.len()).any(|index| a.lifetimes[index] != b.lifetimes[index]);
-            if disagreement {
-                return true;
-            }
-            // Same shape, possibly differing only in checked positions: the
-            // fields may still nest instantiations of the same definition.
-            for (left_variant, right_variant) in a.variants.iter().zip(b.variants.iter()) {
-                for (left_field, right_field) in
-                    left_variant.fields.iter().zip(right_variant.fields.iter())
+    };
+    if let (Some(left_pointee), Some(right_pointee)) = (pointee(types, left), pointee(types, right))
+    {
+        return branch_record_label_mismatch(types, left_pointee, right_pointee, depth + 1, seen);
+    }
+    match (left, right) {
+        (Type::Enum(a), Type::Enum(b)) if a != b => {
+            let left_def = &types.enums[a];
+            let right_def = &types.enums[b];
+            // Any same-declaration instantiation — record or a non-record
+            // enum carrying borrowed payloads — compares its erased labels:
+            // the arms' provenance identities must agree, or the truncating
+            // union merges one arm into the other.
+            if !left_def.structural
+                && !right_def.structural
+                && left_def.definition == right_def.definition
+            {
+                if left_def.lifetimes != right_def.lifetimes {
+                    return true;
+                }
+                for (left_variant, right_variant) in
+                    left_def.variants.iter().zip(right_def.variants.iter())
                 {
-                    if branch_record_label_mismatch(
-                        types,
-                        *left_field,
-                        *right_field,
-                        depth + 1,
-                        seen,
-                    ) {
-                        return true;
+                    for (left_field, right_field) in
+                        left_variant.fields.iter().zip(right_variant.fields.iter())
+                    {
+                        if branch_record_label_mismatch(
+                            types,
+                            *left_field,
+                            *right_field,
+                            depth + 1,
+                            seen,
+                        ) {
+                            return true;
+                        }
                     }
                 }
             }
             false
+        }
+        (Type::Union(a), Type::Union(b)) => {
+            // Composing arms keep their consumed labels as a laundering
+            // channel when any misaligned pair exists.
+            types.unions[a].members.len() != types.unions[b].members.len()
+                || types.unions[a]
+                    .members
+                    .iter()
+                    .zip(types.unions[b].members.iter())
+                    .any(|(left, right)| {
+                        branch_record_label_mismatch(types, *left, *right, depth + 1, seen)
+                    })
+        }
+        (Type::Union(a), other) | (other, Type::Union(a)) => {
+            // A same-definition union member against a single arm's value:
+            // every member must agree on the labels.
+            types.unions[a].members.iter().any(|member| {
+                let same_definition = match (member, &other) {
+                    (Type::Enum(m), Type::Enum(o)) => {
+                        !types.enums[*m].structural
+                            && !types.enums[*o].structural
+                            && types.enums[*m].definition == types.enums[*o].definition
+                    }
+                    _ => false,
+                };
+                same_definition
+                    && branch_record_label_mismatch(types, *member, other, depth + 1, seen)
+            })
         }
         _ => false,
     }
