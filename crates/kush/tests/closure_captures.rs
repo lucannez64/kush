@@ -78,6 +78,39 @@ fn a_writer_then_a_fresh_reader_sees_the_updated_value() {
 }
 
 #[test]
+fn a_shared_reader_allows_outer_reads_and_releases_at_its_last_call() {
+    agrees(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let mut n = 41;
+            let read = fn() -> i64 ! {panic} { n };
+            let observed = n;
+            let value = read();
+            n = 0;
+            observed + value
+        }
+        "#,
+        82,
+        "",
+    );
+}
+
+#[test]
+fn a_reader_loan_blocks_writing_while_the_closure_is_live() {
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let mut n = 41;
+            let read = fn() -> i64 ! {panic} { n };
+            n = 0;
+            read()
+        }
+        "#,
+        "while a closure capturing it is live",
+    );
+}
+
+#[test]
 fn an_exclusive_writer_blocks_outer_reads_while_it_is_live() {
     rejects(
         r#"

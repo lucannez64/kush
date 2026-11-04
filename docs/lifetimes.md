@@ -380,11 +380,13 @@ The surface is intentionally narrow:
 A mutable scalar local is captured the same way. The environment stores the
 address of the caller's stack binding instead of a copied value, so a lambda
 assignment writes the caller's location. The capture is a scoped capability:
-the environment cannot outlive that binding, and the location is conservatively
-loaned exclusively until the closure's checked last call or scope end. The
-pointer is never an owner; dropping an uncalled closure or calling it frees
-only the environment cell. Returning, storing, passing, adapting, or sending
-such a closure to a task is rejected exactly like a borrowed slice capture.
+the environment cannot outlive that binding, and the location is loaned until
+the closure's checked last call or scope end. A lambda that writes the capture
+takes an exclusive loan; a read-only lambda takes a shared loan, so unrelated
+reads remain allowed while writes are rejected. The pointer is never an owner;
+dropping an uncalled closure or calling it frees only the environment cell.
+Returning, storing, passing, adapting, or sending such a closure to a task is
+rejected exactly like a borrowed slice capture.
 
 Capturing a mutable view **moves** the capability into the closure. Capturing a
 shared view adds another shared alias but keeps the same owner-move and

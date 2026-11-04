@@ -1314,14 +1314,19 @@
       "deps": [
         "LT-SOLVER"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Non-escaping closures capture by reference; environment cannot outlive the location.",
-      "commit": null,
+      "commit": "54775f6",
       "log": [
         {
           "time": "2026-11-04 15:15:53",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-04 16:02:35",
+          "who": "agent",
+          "text": "Scoped by-reference scalar captures, checked loans, escapes and native/reference parity"
         }
       ]
     },
@@ -1334,10 +1339,16 @@
       "deps": [
         "P-CLOSURE-LT"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-04 16:02:35",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "P-INVALIDATE",

@@ -286,6 +286,10 @@ pub(crate) struct Function {
     /// captures use this representation; the ownership pass guarantees the
     /// closure cannot outlive the location.
     pub capture_refs: Vec<bool>,
+    /// One flag per capture position: the lambda body may assign that captured
+    /// location. A writing capture is an exclusive loan; a read-only capture is
+    /// a shared loan.
+    pub capture_writes: Vec<bool>,
     pub locals: Vec<Local>,
     pub result: Type,
     pub body: Block,
@@ -4685,6 +4689,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             depth: 0,
             loops: Vec::new(),
             facts: crate::facts::Facts::default(),
+            written_slots: BTreeSet::new(),
             proofs: BTreeMap::new(),
             logical: &logical,
             kernel_locals: Vec::new(),
@@ -4801,6 +4806,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             parameters: sig.parameters.len(),
             closure: None,
             capture_refs: vec![],
+            capture_writes: vec![],
             locals,
             result: sig.result,
             body,
@@ -10112,6 +10118,7 @@ impl<'a> Functions<'a> {
                 parameters: parameters.len(),
                 closure: None,
                 capture_refs: vec![],
+                capture_writes: vec![],
                 locals,
                 result,
                 body: Block {
@@ -10759,6 +10766,10 @@ struct Checker<'a, 't> {
     depth: usize,
     loops: Vec<Loop>,
     facts: crate::facts::Facts,
+    /// Slots assigned by the function or lambda currently being checked.
+    /// A lambda turns this set into `Function::capture_writes`, which decides
+    /// whether a by-reference capture is a shared or exclusive loan.
+    written_slots: BTreeSet<usize>,
     /// Erased proof parameters in scope: binder -> proposition.
     proofs: BTreeMap<BindingId, crate::facts::Proposition>,
     /// Checked logical definitions and their kernel names.
@@ -14207,6 +14218,7 @@ impl Checker<'_, '_> {
             parameters: parameters.len(),
             closure: None,
             capture_refs: vec![],
+            capture_writes: vec![],
             locals,
             result: function_result,
             body,
@@ -16971,6 +16983,7 @@ impl Checker<'_, '_> {
                 .then_some(captures)
                 .or(env_parameter.then_some(0)),
             capture_refs: vec![false; captures],
+            capture_writes: vec![false; captures],
             locals,
             result: signature.result,
             body,
@@ -19929,6 +19942,7 @@ impl Checker<'_, '_> {
                         c.locals[slot].linear |= c.value_moves_linear(&value);
                         c.facts.assign(slot, &value);
                         c.renew_scalar_index(slot, &value)?;
+                        c.written_slots.insert(slot);
                         let ty = if value.ty == Type::Never {
                             Type::Never
                         } else {
@@ -21853,6 +21867,7 @@ impl Checker<'_, '_> {
         let saved_effects = self.effects;
         let saved_loops = std::mem::take(&mut self.loops);
         let saved_facts = std::mem::take(&mut self.facts);
+        let saved_written = std::mem::take(&mut self.written_slots);
         let capture_ids = captures
             .iter()
             .map(|slot| {
@@ -21936,7 +21951,8 @@ impl Checker<'_, '_> {
             // The lambda's own locals are in scope here, so the result-transfer
             // obligation is derived before restoring the outer checker state.
             let obligation = self.return_obligation(&body);
-            Ok((body, obligation))
+            let written = self.written_slots.clone();
+            Ok((body, obligation, written))
         })();
         self.truncate_kernel(kernel_mark);
         self.continuation_depth = saved_continuation_depth;
@@ -21952,7 +21968,11 @@ impl Checker<'_, '_> {
         self.effects = saved_effects;
         self.loops = saved_loops;
         self.facts = saved_facts;
-        let (body, obligation) = checked?;
+        self.written_slots = saved_written;
+        let (body, obligation, written) = checked?;
+        let capture_writes = (0..captures.len())
+            .map(|index| written.contains(&index))
+            .collect::<Vec<_>>();
         if let Some(span) = obligation
             && result_grade.is_none()
             && !self.linear_type(result)
@@ -21994,6 +22014,7 @@ impl Checker<'_, '_> {
             parameters: captures.len() + lambda.parameters.len(),
             closure: once.then_some(captures.len()),
             capture_refs: capture_refs.clone(),
+            capture_writes,
             locals,
             result,
             body,

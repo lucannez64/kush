@@ -244,11 +244,13 @@ the address of the caller's binding rather than a copy; a write in the lambda
 updates that binding, and a later call observes the current value. These
 captures are call-scoped like borrowed views: the closure may only be built as
 a direct `let` initializer or called immediately, and the location stays
-loaned until the closure's checked last call or lexical scope end. While the
-closure is live the caller cannot read, assign, move, or drop the captured
-location. The same restrictions reject returning the closure, storing it in
-outliving data, passing it to another function, or sending it to a task. Both
-backends implement the pointer representation, so reference evaluation and
+loaned until the closure's checked last call or lexical scope end. A lambda
+that assigns the capture holds an exclusive loan: the caller cannot read,
+assign, move, or drop the location while the closure is live. A lambda that
+only reads it holds a shared loan, so unrelated reads remain allowed but a
+write is rejected. The same restrictions reject returning the closure, storing
+it in outliving data, passing it to another function, or sending it to a task.
+Both backends implement the pointer representation, so reference evaluation and
 native execution agree.
 
 A closure that captures a linear `@[1]`/`#[linear]` obligation (or a copyable

@@ -172,10 +172,12 @@ Implemented consequences:
 - An **immutable** scalar closure capture is a copy made when the closure is
   constructed. A **mutable** scalar capture is a live view: the environment
   stores the caller's location, and the ownership pass keeps it loaned until
-  the closure's checked last call. The outer binding cannot be assigned or read
-  through an exclusive capture while the closure is live, so the lambda and the
-  caller never disagree about the current value. The lambda admits the capture
-  as a versioned symbolic index exactly like any other mutable scalar local.
+  the closure's checked last call. A writing capture is exclusive, so the outer
+  binding cannot be read or assigned while the closure is live; a read-only
+  capture is shared, so unrelated reads remain allowed but a write is rejected.
+  The lambda and caller never disagree about the current value. The lambda
+  admits the capture as a versioned symbolic index exactly like any other
+  mutable scalar local.
 - Block scopes truncate symbolic binders, so a proof cannot mention a local
   after its scope. Local shadowing resolves to the innermost binder.
 - A proof parameter cannot be stored in a runtime value, returned as a runtime

@@ -241,6 +241,11 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
         .iter()
         .map(|function| function.capture_refs.clone())
         .collect::<Vec<_>>();
+    let capture_writes = program
+        .functions
+        .iter()
+        .map(|function| function.capture_writes.clone())
+        .collect::<Vec<_>>();
     let foreign_functions = program.foreign_functions.clone();
     for (function_index, function) in program.functions.iter_mut().enumerate() {
         // A foreign declaration has a checked inert body but no source
@@ -263,6 +268,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             variance: &program.variance,
             functions: &program.function_types,
             capture_refs: &capture_refs,
+            capture_writes: &capture_writes,
             result_grades: &result_grades,
             calls: &calls,
             dyn_call_lifetimes: &dyn_call_lifetimes,
@@ -1028,6 +1034,9 @@ struct Checker<'a> {
     /// Capture representation of each checked function instance. Scalar
     /// captures marked `true` store a pointer to the caller's location.
     capture_refs: &'a [Vec<bool>],
+    /// Capture write metadata: a writing by-reference capture is an exclusive
+    /// loan; a read-only one is shared.
+    capture_writes: &'a [Vec<bool>],
     /// Static result contract of each checked function, by instance index:
     /// `(grade, owning)`. `owning` distinguishes an owning `@[1]` transfer
     /// (which is a move) from a copyable must-use `@[1]` contract (which the
@@ -5836,6 +5845,11 @@ impl Checker<'_> {
                     .get(*function)
                     .cloned()
                     .unwrap_or_default();
+                let capture_write = self
+                    .capture_writes
+                    .get(*function)
+                    .cloned()
+                    .unwrap_or_default();
                 let scalars = captures
                     .iter()
                     .enumerate()
@@ -5862,7 +5876,7 @@ impl Checker<'_> {
                     let mut origins = BTreeSet::new();
                     let mut splits: Option<SplitLabels> = None;
                     let mut mutable = false;
-                    for (_, capture) in &scalars {
+                    for (index, capture) in &scalars {
                         let slot = match &capture.kind {
                             ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
                                 *slot
@@ -5875,7 +5889,7 @@ impl Checker<'_> {
                             }
                         };
                         let capture_origins = BTreeSet::from([slot]);
-                        let capture_mut = true;
+                        let capture_mut = capture_write.get(*index).copied().unwrap_or(false);
                         self.check_view_creation(
                             &capture_origins,
                             capture_mut,
