@@ -356,3 +356,30 @@ Research clarification: accumulating may-origins and required preconditions
 both grow by union in this design, so both use a least fixed point. A general
 may/must slogan or categorical interpretation does not select a greatest fixed
 point for these equations. See [research actions](research-actions.md).
+
+## Independent review follow-up
+
+An independent soundness review of the method, per-field and `R[f]` extension
+found no accepted program that outlives an owner, aliases mutably, or reads
+freed memory. It found four defects, fixed with regressions in
+`tests/recursive_lifetimes.rs`:
+
+- **Non-convergent unsupported relays.** A recursive call relaying a callee's
+  unsupported channel wrapped its witness text again on every pass, so the
+  fixed point never converged and source order changed the diagnostic. A
+  relayed fact is now wrapped at most once and never preferred over a root
+  cause (`Unsupported::relayed`).
+- **Generic receivers.** A receiver typed by a generic binder or alias
+  (`id(b).pick(..)`) matched an unrelated impl of the same name. Receiver
+  names now count only when they resolve to a concrete data declaration;
+  anything else is the explicit-contract boundary.
+- **Whole-record identity helpers.** A callee returning a whole parameter
+  merged every argument field owner into every result field, producing false
+  cross-field bounds. The argument's per-field leaves now map to the same
+  result fields.
+- **Inherent methods and `R[f]`.** Inferred requirements are now exported for
+  inherent methods. Trait impl, generic impl and default methods keep their
+  exact contracts.
+
+The branch-label check also now excuses only the slot whose own label is
+compiler-internal, instead of every slot when any label was internal.

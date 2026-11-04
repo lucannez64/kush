@@ -9629,7 +9629,14 @@ impl<'a> Functions<'a> {
         // Independent required preconditions. These are exported only for an
         // inferable declaration: an explicit outlives bound, trait/impl
         // contract, or function-value arrow is never silently strengthened.
-        if declared.self_ty.is_none()
+        // Inherent methods own their contract like free functions; a trait
+        // impl or generic impl method must match its trait/template exactly.
+        let trait_bound_method = declared.impl_template.is_some()
+            || self
+                .trait_impls
+                .values()
+                .any(|methods| methods.values().any(|method| method.binding == binding));
+        if !trait_bound_method
             && declared.default_specialization.is_none()
             && f.lifetimes
                 .iter()
@@ -30767,12 +30774,19 @@ fn branch_record_label_mismatch(
                 && !right_def.structural
                 && left_def.definition == right_def.definition
             {
-                if left_def.lifetimes != right_def.lifetimes
-                    && !left_def
+                // Compare slot by slot. Only a slot whose own label is
+                // compiler-internal (`<...>`) is excused; one internal label
+                // must not exempt every other invariant binder on the arms.
+                if left_def.lifetimes.len() != right_def.lifetimes.len()
+                    || left_def
                         .lifetimes
                         .iter()
-                        .chain(right_def.lifetimes.iter())
-                        .any(|label| label.starts_with('<'))
+                        .zip(right_def.lifetimes.iter())
+                        .any(|(left_label, right_label)| {
+                            left_label != right_label
+                                && !left_label.starts_with('<')
+                                && !right_label.starts_with('<')
+                        })
                 {
                     return true;
                 }

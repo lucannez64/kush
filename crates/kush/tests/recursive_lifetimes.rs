@@ -863,3 +863,131 @@ fn main() -> Unit ! {alloc, panic} {
         "type mismatch",
     );
 }
+
+
+// Regressions from the independent recursive-lifetime soundness review.
+
+#[test]
+fn unsupported_relays_converge_independent_of_branch_order() {
+    // A recursive call relaying an unsupported channel used to wrap the
+    // witness again on every pass, so the fixed point never converged.
+    for source in [r#"struct H<'a> { view: &'a [i64] }
+fn f<'a>(a: &'a [i64], g: fn<'a>(&'a [i64]) -> H<'a> ! {panic}, n: i64) -> H<'a> ! {panic} {
+    if n == 0 { f(a, g, n - 1) } else { g(a) }
+}
+fn main() -> Unit ! {} {}
+"#, r#"struct H<'a> { view: &'a [i64] }
+fn f<'a>(a: &'a [i64], g: fn<'a>(&'a [i64]) -> H<'a> ! {panic}, n: i64) -> H<'a> ! {panic} {
+    if n != 0 { g(a) } else { f(a, g, n - 1) }
+}
+fn main() -> Unit ! {} {}
+"#] {
+        rejects(source, "a call to a non-function or erased definition in result position");
+    }
+}
+
+#[test]
+fn a_generic_receiver_does_not_select_an_unrelated_impl_method() {
+    // `id(b).pick(..)` has a receiver typed by a generic binder `A`; it must
+    // stay an explicit-contract boundary, never resolve to `A::pick`.
+    rejects(r#"struct A { tag: i64 }
+struct B { tag: i64 }
+impl A {
+    fn pick<'a, 'b>(self: A, a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+        if n == 0 { a } else { self.pick(a, b, n - 1) }
+    }
+}
+impl B {
+    fn pick<'a, 'b>(self: B, a: &'a [i64], b: &'b [i64], n: i64) -> &'b [i64] ! {panic} {
+        if n == 0 { b } else { self.pick(a, b, n - 1) }
+    }
+}
+fn id<A>(x: A) -> A ! {} { x }
+fn use_it<'a, 'b>(b: B, a: &'a [i64], bb: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    let r = id(b);
+    r.pick(a, bb, n)
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(use_it(B { tag: 0 }, &a[..], &b[..], 0), 0)
+}
+"#, "unresolved call in result position");
+}
+
+#[test]
+fn whole_record_identity_helpers_keep_per_field_owners() {
+    agrees(r#"struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn id<'a, 'b>(p: Pair<'a, 'b>) -> Pair<'a, 'b> ! {panic} { p }
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
+    if n == 0 {
+        Pair { left: a, right: b }
+    } else {
+        let p = relay(a, b, n - 1);
+        id(p)
+    }
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    let pair = relay(&a[..], &b[..], 2);
+    Slice.get(pair.left, 1) + Slice.get(pair.right, 0)
+}
+"#, 5, "");
+    rejects(r#"struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn id<'a, 'b>(p: Pair<'a, 'b>) -> Pair<'a, 'b> ! {panic} { p }
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
+    if n == 0 {
+        Pair { left: a, right: b }
+    } else {
+        let p = relay(a, b, n - 1);
+        id(p)
+    }
+}
+fn main() -> i64 ! {panic} {
+    let mut a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    let pair = relay(&a[..], &b[..], 2);
+    a = [9, 9];
+    Slice.get(pair.left, 1) + Slice.get(pair.right, 0)
+}
+"#, "cannot replace an owner");
+}
+
+#[test]
+fn inherent_methods_publish_inferred_container_write_requirements() {
+    agrees(r#"struct Point { x: i64, y: i64 }
+struct Provider { tag: i64 }
+impl Provider {
+    fn fill<'a, 'b>(self: Provider, values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+        if n > 0 { self.fill(values, p, n - 1) } else { Vec.push(values, p) }
+    }
+}
+fn caller<'a, 'b: 'a>(provider: Provider, values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc, panic} {
+    provider.fill(values, p, 1)
+}
+fn main() -> i64 ! {alloc, panic} {
+    let p = Point { x: 7, y: 0 };
+    let values: Vec<&Point> = [&p];
+    let values = caller(Provider { tag: 0 }, values, &p);
+    Vec.get(&values, 0).x + Vec.get(&values, 1).x
+}
+"#, 14, "");
+    rejects(r#"struct Point { x: i64, y: i64 }
+struct Provider { tag: i64 }
+impl Provider {
+    fn fill<'a, 'b>(self: Provider, values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+        if n > 0 { self.fill(values, p, n - 1) } else { Vec.push(values, p) }
+    }
+}
+fn caller<'a, 'b>(provider: Provider, values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc, panic} {
+    provider.fill(values, p, 1)
+}
+fn main() -> i64 ! {alloc, panic} {
+    let p = Point { x: 7, y: 0 };
+    let values: Vec<&Point> = [&p];
+    let values = caller(Provider { tag: 0 }, values, &p);
+    Vec.get(&values, 0).x + Vec.get(&values, 1).x
+}
+"#, "cannot establish the callee's outlives constraint 'b: 'a");
+}

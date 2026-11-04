@@ -117,12 +117,17 @@ struct Flow {
 struct Unsupported {
     span: Span,
     what: String,
+    /// The fact was carried out of a callee's summary rather than observed
+    /// directly. A relayed fact is wrapped at most once and never preferred
+    /// over a root cause, so recursive relays cannot keep growing the witness
+    /// and the chosen witness does not depend on source order.
+    relayed: bool,
 }
 
 impl Unsupported {
     fn precedes(&self, other: &Unsupported) -> bool {
-        (self.span.start, self.span.end, &self.what)
-            < (other.span.start, other.span.end, &other.what)
+        (self.relayed, self.span.start, self.span.end, &self.what)
+            < (other.relayed, other.span.start, other.span.end, &other.what)
     }
 }
 
@@ -146,6 +151,7 @@ impl Flow {
             unknown: BTreeMap::from([(
                 Vec::new(),
                 Unsupported {
+                    relayed: false,
                     span,
                     what: what.into(),
                 },
@@ -541,7 +547,14 @@ impl<'a, 'r> Solver<'a, 'r> {
             ast::TypeKind::Borrow { inner, .. } | ast::TypeKind::Graded { inner, .. } => {
                 self.ast_type_name(inner)
             }
-            ast::TypeKind::Named { path, .. } => path.last().cloned(),
+            // Only a concrete nominal type identifies a receiver. A generic
+            // parameter (`fn id<A>(x: A) -> A`), alias, or projection could
+            // stand for any type, so it stays an unknown boundary rather than
+            // matching an unrelated impl of the same name.
+            ast::TypeKind::Named { path, .. } => match self.resolution.reference(ty.span) {
+                Some(id) if self.resolution.bindings[id].kind != BindingKind::Data => None,
+                _ => path.last().cloned(),
+            },
             ast::TypeKind::SelfType => self.self_type_name.clone(),
             _ => None,
         }
@@ -969,6 +982,7 @@ impl<'a, 'r> Solver<'a, 'r> {
                     note_unknown(
                         result_path.clone(),
                         Unsupported {
+                            relayed: false,
                             span,
                             what: format!(
                                 "a summary origin names runtime parameter {} but the call has no corresponding source argument",
@@ -983,11 +997,35 @@ impl<'a, 'r> Solver<'a, 'r> {
                     note_unknown(
                         result_path.clone(),
                         Unsupported {
+                            relayed: false,
                             span: argument.span,
                             what: "a borrowed call argument comes from an unsupported boundary; annotate the result lifetime"
                                 .to_owned(),
                         },
                     );
+                    continue;
+                }
+                // A callee that returns a whole parameter (`fn id(p: Pair) -> Pair
+                // { p }`) keeps the argument's own per-field structure: each
+                // actual field leaf maps to the same field of the result rather
+                // than every owner being merged into every result field.
+                if origin.path.is_empty() && !flow.has_unknown() && !flow.leaves.is_empty() {
+                    for (actual_path, actual_origins) in &flow.leaves {
+                        let target = result_path
+                            .iter()
+                            .chain(actual_path.iter())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        for selected in actual_origins {
+                            if leaves
+                                .entry(target.clone())
+                                .or_default()
+                                .insert(selected.clone())
+                            {
+                                self.charge_fact(span)?;
+                            }
+                        }
+                    }
                     continue;
                 }
                 let mut selected = BTreeSet::new();
@@ -997,6 +1035,7 @@ impl<'a, 'r> Solver<'a, 'r> {
                         note_unknown(
                             result_path.clone(),
                             Unsupported {
+                                relayed: false,
                                 span: argument.span,
                                 what: format!(
                                     "a borrowed call argument does not expose the callee result's field path '{}'; annotate the result lifetime or route the value through a direct checked function",
@@ -1038,12 +1077,17 @@ impl<'a, 'r> Solver<'a, 'r> {
             if !relevant {
                 continue;
             }
-            let candidate = Unsupported {
-                span,
-                what: format!(
-                    "a call to '{callee_name}' returns through an unsupported result channel: {}",
-                    summary_unknown.what
-                ),
+            let candidate = if summary_unknown.relayed {
+                summary_unknown.clone()
+            } else {
+                Unsupported {
+                    span,
+                    what: format!(
+                        "a call to '{callee_name}' returns through an unsupported result channel: {}",
+                        summary_unknown.what
+                    ),
+                    relayed: true,
+                }
             };
             note_unknown(path.clone(), candidate);
         }
