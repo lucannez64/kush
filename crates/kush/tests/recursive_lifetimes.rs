@@ -753,3 +753,113 @@ fn main() -> Unit ! {} {}
     );
 }
 
+#[test]
+fn a_recursive_container_write_exports_a_caller_precondition() {
+    // `fill` writes `p` into `values` through `Vec.push`, so its body needs
+    // `'b: 'a`. The requirement is independent of any returned origin and is
+    // exported as R[fill]; the body itself is accepted. The accepted program
+    // evaluates identically in the reference evaluator and native backend.
+    agrees(
+        r#"
+struct Point { x: i64, y: i64 }
+fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+    if n > 0 { fill(values, p, n - 1) } else { Vec.push(values, p) }
+}
+fn caller<'a, 'b: 'a>(values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc, panic} {
+    fill(values, p, 1)
+}
+fn main() -> i64 ! {alloc, panic} {
+    let p = Point { x: 7, y: 0 };
+    let values: Vec<&Point> = [&p];
+    let values = caller(values, &p);
+    Vec.get(&values, 0).x + Vec.get(&values, 1).x
+}
+"#,
+        14,
+        "",
+    );
+    // A caller that cannot prove the newly inferred requirement is rejected,
+    // even though its declaration appears before the recursive callee.
+    rejects(
+        r#"
+struct Point { x: i64, y: i64 }
+fn caller<'a, 'b>(values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc, panic} {
+    fill(values, p, 1)
+}
+fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+    if n > 0 { fill(values, p, n - 1) } else { Vec.push(values, p) }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "cannot establish the callee's outlives constraint 'b: 'a",
+    );
+}
+
+#[test]
+fn an_explicit_callee_bound_propagates_as_a_recursive_precondition() {
+    // `relay` never returns a borrow, but it calls `left`, whose explicit
+    // `'b: 'a` contract becomes relay's independent requirement.
+    check(
+        r#"
+fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { a } else { b }
+}
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {panic} {
+    if n == 0 { 0 } else { let _ = left(a, b, n - 1); relay(a, b, n - 1) }
+}
+fn caller<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+    relay(a, b, 1)
+}
+fn main() -> Unit ! {} {}
+"#,
+    )
+    .unwrap();
+    rejects(
+        r#"
+fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { a } else { b }
+}
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {panic} {
+    if n == 0 { 0 } else { let _ = left(a, b, n - 1); relay(a, b, n - 1) }
+}
+fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+    relay(a, b, 1)
+}
+fn main() -> Unit ! {} {}
+"#,
+        "cannot establish the callee's outlives constraint 'b: 'a",
+    );
+    // The same program with declarations permuted gives the same requirement.
+    rejects(
+        r#"
+fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+    relay(a, b, 1)
+}
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {panic} {
+    if n == 0 { 0 } else { let _ = left(a, b, n - 1); relay(a, b, n - 1) }
+}
+fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { a } else { b }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "cannot establish the callee's outlives constraint 'b: 'a",
+    );
+}
+
+#[test]
+fn a_frozen_arrow_cannot_erase_a_recursive_container_requirement() {
+    rejects(
+        r#"
+struct Point { x: i64, y: i64 }
+fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+    if n > 0 { fill(values, p, n - 1) } else { Vec.push(values, p) }
+}
+fn main() -> Unit ! {alloc, panic} {
+    let f: fn<'a, 'b>(Vec<&'a Point>, &'b Point, i64) -> Vec<&'a Point> ! {alloc, panic} = fill;
+    let _ = f;
+}
+"#,
+        "type mismatch",
+    );
+}
