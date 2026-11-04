@@ -2176,6 +2176,14 @@ impl<'a> Types<'a> {
                 }
             }
             let bounds = crate::executable::build_lifetime_bounds(lifetimes)?;
+            // The arrow's own lifetime binders shadow identically named
+            // lifetimes of an enclosing declaration. Lower the parameter and
+            // result types with that binder scope so a structural field label
+            // keeps the arrow identity instead of a substituted outer label.
+            let mut scoped = substitution.clone();
+            for name in &declared {
+                scoped.lifetimes.insert(name.clone(), name.clone());
+            }
             let mut parameter_lifetimes: Vec<Option<String>> = Vec::new();
             let mut parameter_mutable: Vec<bool> = Vec::new();
             let mut parameter_leaves: Vec<Vec<BorrowLeaf>> = Vec::new();
@@ -2195,7 +2203,7 @@ impl<'a> Types<'a> {
                         "function values cannot have erased proposition parameters; erase the proof at the direct call site instead",
                     ));
                 }
-                let ty = self.lower(inner, substitution, depth + 1)?;
+                let ty = self.lower(inner, &scoped, depth + 1)?;
                 reject_optional_reference_boundary(self, ty, parameter.ty.span)?;
                 if matches!(ty, Type::Never) {
                     return Err(Diagnostic::new(
@@ -2227,7 +2235,7 @@ impl<'a> Types<'a> {
                         let Some(name) = &leaf.lifetime else {
                             return Err(Diagnostic::new(
                                 parameter.ty.span,
-                                "internal error: borrowed record arrow parameter leaf has no lifetime",
+                                "a structural field in a function arrow parameter must name a lifetime bound by the arrow itself, as in fn<'a>(struct { view: &'a [T] }) -> ...; an arrow has no body from which to infer an elided field lifetime",
                             ));
                         };
                         if !declared.contains(name) {
@@ -2255,7 +2263,7 @@ impl<'a> Types<'a> {
                 grades.push(
                     grade
                         .map(|grade| {
-                            crate::grades::evaluate(self.resolution, &substitution.grades, grade)
+                            crate::grades::evaluate(self.resolution, &scoped.grades, grade)
                         })
                         .transpose()?,
                 );
@@ -2270,9 +2278,9 @@ impl<'a> Types<'a> {
             let result_ast = self.expand_result_alias(result)?;
             let (result_inner, result_grade) = crate::grades::split(&result_ast);
             let result_grade = result_grade
-                .map(|grade| crate::grades::evaluate(self.resolution, &substitution.grades, grade))
+                .map(|grade| crate::grades::evaluate(self.resolution, &scoped.grades, grade))
                 .transpose()?;
-            let result = self.lower(result_inner, substitution, depth + 1)?;
+            let result = self.lower(result_inner, &scoped, depth + 1)?;
             if result_grade.is_some() && !result_grade.is_some_and(Grade::is_one) {
                 if result_grade.is_some_and(Grade::is_zero) && !self.owns(result) {
                     // A copyable erased result carries no payload and no
@@ -2426,7 +2434,7 @@ impl<'a> Types<'a> {
                     let Some(name) = &leaf.lifetime else {
                         return Err(Diagnostic::new(
                             result_ast.span,
-                            "internal error: borrowed record arrow result leaf has no lifetime",
+                            "a structural field in a function arrow result must name a lifetime bound by the arrow itself, as in ... -> struct { view: &'a [T] }; an arrow has no body from which to infer an elided field lifetime",
                         ));
                     };
                     if !declared.contains(name) {
@@ -2437,30 +2445,38 @@ impl<'a> Types<'a> {
                             ),
                         ));
                     }
-                    let mut source = parameter_leaves
+                    let mut sources = parameter_leaves
                         .iter()
                         .flat_map(|leaves| leaves.iter())
-                        .filter(|input| {
-                            input.lifetime.as_ref().is_some_and(|input| {
-                                crate::executable::outlives(&bounds, input, name)
-                            })
-                        });
-                    let Some(first) = source.next() else {
+                        .filter_map(|leaf| leaf.lifetime.as_ref().map(|name| (name, leaf.mutable)))
+                        .collect::<Vec<_>>();
+                    // A plain slice or reference parameter whose lifetime
+                    // outlives the result field supplies the same caller-owned
+                    // storage as a borrowed record field does.
+                    sources.extend(
+                        parameter_lifetimes
+                            .iter()
+                            .zip(&parameter_mutable)
+                            .filter_map(|(lifetime, mutable)| {
+                                lifetime.as_ref().map(|name| (name, *mutable))
+                            }),
+                    );
+                    let matching = sources
+                        .iter()
+                        .filter(|(input, _)| crate::executable::outlives(&bounds, input, name))
+                        .collect::<Vec<_>>();
+                    if matching.is_empty() {
                         return Err(Diagnostic::new(
                             result_ast.span,
                             format!(
-                                "the arrow result field lifetime '{name}' is not outlived by any borrowed parameter field, so no call could produce it"
+                                "the arrow result field lifetime '{name}' is not outlived by any borrowed parameter or parameter field, so no call could produce it"
                             ),
                         ));
-                    };
-                    if leaf.mutable
-                        && !std::iter::once(first)
-                            .chain(source)
-                            .any(|input| input.mutable)
-                    {
+                    }
+                    if leaf.mutable && !matching.iter().any(|(_, mutable)| *mutable) {
                         return Err(Diagnostic::new(
                             result_ast.span,
-                            "an exclusive '&mut [T]' arrow result field needs an exclusive borrowed parameter field whose lifetime outlives it",
+                            "an exclusive '&mut [T]' arrow result field needs an exclusive slice, reference, or borrowed parameter field whose lifetime outlives it",
                         ));
                     }
                 }
@@ -2483,7 +2499,7 @@ impl<'a> Types<'a> {
                     "function values cannot return task handles; a child handle must not escape its scope",
                 ));
             }
-            let effects = effect_bits_with(self.resolution, effects, &substitution.effects)?;
+            let effects = effect_bits_with(self.resolution, effects, &scoped.effects)?;
             let id = self.function_type_with(
                 lowered,
                 result,
@@ -5068,6 +5084,11 @@ fn validate_record_declaration(
                     collect_lifetimes(argument, out);
                 }
             }
+            ast::TypeKind::Structural { fields, .. } => {
+                for field in fields {
+                    collect_lifetimes(&field.ty, out);
+                }
+            }
             ast::TypeKind::Lifetime(name) => {
                 out.insert(name.clone());
             }
@@ -5557,57 +5578,6 @@ pub(crate) fn contains_task_exit_borrow(types: &Types<'_>, ty: Type) -> bool {
     go(types, ty, &mut BTreeSet::new())
 }
 
-/// Whether any reachable borrowed leaf sits inside an anonymous structural
-/// row. Borrowed structural results remain an explicit boundary: unlike a
-/// nominal record they declare no field lifetimes that could be related to a
-/// caller's outlives bounds, even when a row specialization happens to carry a
-/// concrete label. Retained borrowed fields stay exact and readable through a
-/// row parameter, but a borrowed structural value may not be returned.
-pub(crate) fn contains_borrowed_structural(types: &Types<'_>, ty: Type) -> bool {
-    fn go(types: &Types<'_>, ty: Type, seen: &mut BTreeSet<Type>) -> bool {
-        if !seen.insert(ty) {
-            return false;
-        }
-        match ty {
-            Type::Enum(id) | Type::Variants(id, _) => {
-                let layout = &types.enums[id];
-                if layout.structural {
-                    return layout.borrowed;
-                }
-                if layout.record || layout.name == "TaskExit" {
-                    return layout
-                        .variants
-                        .iter()
-                        .flat_map(|variant| variant.fields.iter())
-                        .any(|field| go(types, *field, seen));
-                }
-                layout
-                    .arguments
-                    .iter()
-                    .chain(
-                        layout
-                            .variants
-                            .iter()
-                            .flat_map(|variant| variant.fields.iter()),
-                    )
-                    .any(|field| go(types, *field, seen))
-            }
-            Type::Box(p)
-            | Type::ArenaBox(p)
-            | Type::Vec(p)
-            | Type::AllocBox(p)
-            | Type::AllocVec(p)
-            | Type::Task(p) => go(types, types.pointees[p], seen),
-            Type::Union(id) => types.unions[id]
-                .members
-                .iter()
-                .any(|member| go(types, *member, seen)),
-            _ => false,
-        }
-    }
-    go(types, ty, &mut BTreeSet::new())
-}
-
 pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Result<Vec<BorrowLeaf>> {
     fn field_position(
         types: &Types<'_>,
@@ -5651,13 +5621,16 @@ pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Result<Vec<BorrowLea
             }
             composed = composed.compose(variance);
         }
-        // Inconsistent field metadata is conservative, never silently
-        // positive.
-        if record
-            .field_lifetimes
-            .get(field)
-            .and_then(Option::as_ref)
-            .is_some_and(|label| !record.lifetimes.iter().any(|slot| slot == label))
+        // A structural row declares no lifetime parameters: each field's
+        // label names the erased outer borrow of its own field type, and that
+        // constructor stays covariant. Inconsistent nominal metadata is
+        // conservative, never silently positive.
+        if !record.structural
+            && record
+                .field_lifetimes
+                .get(field)
+                .and_then(Option::as_ref)
+                .is_some_and(|label| !record.lifetimes.iter().any(|slot| slot == label))
         {
             composed = composed.compose(crate::variance::SignSet::INVARIANT);
         }

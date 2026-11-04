@@ -21,7 +21,10 @@ and layouts as before.
 - `Types` builds the finite table from record and alias declarations and caches
   it by declaration and lifetime slot. `Box`/`Vec` borrowed payloads compose
   positively, shared references and slices positively, `&mut` pointees and
-  mutable container elements invariantly, and structural rows conservatively.
+  mutable container elements invariantly, and a structural row's erased outer
+  field borrow positively (a row declares no lifetime parameters of its own;
+  retained borrowed fields remain exact under an actual structural
+  conversion).
   Arena/custom-allocator storage, `TaskExit`, optional-reference enums, foreign
   resources, trait objects and unknown generic arguments stay exact or
   invariant rather than acquiring covariance.
@@ -69,7 +72,8 @@ and layouts as before.
   extension failure, invariant mutable pointee identity, callable direction and
   alpha/many-to-one conversion, two occurrences sharing one interned arrow,
   anonymous intersections and elision, owner retention after shortening,
-  destination-declared mutable writes, and structural/TaskExit conservatism.
+  destination-declared mutable writes, structural result-field covariance with
+  exact structural conversions, and structural/TaskExit conservatism.
 - Existing `lifetimes`, `borrowed_records`, `borrowing_references`,
   `borrowing_extensions`, `subtyping`, `functions`, `generic_traits`, `traits`
   and `advanced_types_effects` suites remain green locally.

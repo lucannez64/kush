@@ -207,13 +207,30 @@ fn destination_declared_mutable_labels_still_reject_short_writes() {
 
 #[test]
 fn task_exit_and_structural_borrowed_leaves_stay_exact() {
-    rejects(
+    // A nominal borrowed value may narrow into a structural result when the
+    // label is the same. A structural conversion that relabels the leaf stays
+    // exact and is rejected; the result gate does not loosen that rule.
+    agrees(
         r#"struct Window<'a> { view: &'a [i64] }
         fn narrow<'a>(window: Window<'a>) -> struct { view: &'a [i64] } ! {panic} {
             window
         }
+        fn main() -> i64 ! {panic} {
+            let values: [i64; 2] = [40, 2];
+            let out = narrow(Window { view: &values[..] });
+            Slice.get(out.view, 0) + 2
+        }"#,
+        42,
+        "",
+    );
+    rejects(
+        r#"struct Window<'a> { view: &'a [i64] }
+        fn relabel<'long: 'short, 'short>(window: Window<'short>)
+            -> struct { view: &'long [i64] } ! {panic} {
+            window
+        }
         fn main() -> Unit ! {} {}"#,
-        "returned record cannot carry a borrowed field",
+        "does not appear on any parameter that outlives it",
     );
 }
 

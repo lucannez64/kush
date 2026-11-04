@@ -2600,16 +2600,25 @@ fn callable_field_adapters_inside_dynarray_push_build_natively() {
 }
 
 #[test]
-fn structural_borrowed_results_are_a_clean_rejection() {
-    rejects(
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn structural_borrowed_results_transfer_a_nominal_field() {
+    // A nominal borrowed field narrows into an anonymous structural result.
+    // The declared result label is tied to the parameter record's field
+    // lifetime, and the caller keeps the owner loaned until the result's last
+    // use.
+    agrees(
         r#"
         struct W<'a> { n: i64, view: &'a [i64] }
-        fn ret<'a>(v: W<'a>) -> struct { view: &'a [i64] } ! {} {
+        fn ret<'a>(v: W<'a>) -> struct { view: &'a [i64] } ! {panic} {
             let W { view, .. } = v;
             struct { view: view }
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
-        "cannot carry a borrowed field without a declared lifetime",
+        fn main() -> i64 ! {panic} {
+            let values: [i64; 2] = [40, 2];
+            let out = ret(W { n: 1, view: &values[..] });
+            Slice.get(out.view, 0) + 2
+        }"#,
+        42,
     );
 }
 
@@ -2751,8 +2760,10 @@ fn row_variables_reject_erased_linear_and_borrowed_escapes() {
         }"#,
         "exclusive '&mut Record'",
     );
-    // A returned structural row with a borrowed field is still an explicit
-    // boundary: structural rows carry no declared field lifetime labels.
+    // A returned structural row whose borrowed fields are elided on both the
+    // parameter and the result has no signature lifetime identity to relate
+    // them. An elided parameter field does not supply an input lifetime, so
+    // this remains an explicit rejection rather than an invented equality.
     rejects(
         r#"fn keep<r>(v: struct { view: &[i64], ..r })
             -> struct { view: &[i64], ..r } ! {panic} { v }
@@ -2761,7 +2772,7 @@ fn row_variables_reject_erased_linear_and_borrowed_escapes() {
             let out = keep(struct { view: &data[..], n: 1 });
             Slice.get(out.view, 0)
         }"#,
-        "cannot carry a borrowed field without a declared lifetime",
+        "no borrowed input to infer it from",
     );
     // One row variable must receive the same residual row from every
     // parameter; otherwise the specialization is not determined.

@@ -1962,6 +1962,11 @@ fn type_lifetimes(ty: &ast::Type, out: &mut BTreeSet<String>) {
                 type_lifetimes(argument, out);
             }
         }
+        ast::TypeKind::Structural { fields, .. } => {
+            for field in fields {
+                type_lifetimes(&field.ty, out);
+            }
+        }
         ast::TypeKind::Array(inner, length) => {
             type_lifetimes(inner, out);
             type_lifetimes(length, out);
@@ -3380,6 +3385,80 @@ fn field_chain(resolution: &Resolution, expr: &ast::Expr) -> Option<(BindingId, 
         _ => None,
     }
 }
+/// Resolve an elided borrowed field inside a structural record result from the
+/// function's single input borrow lifetime. Explicit labels, including the
+/// concrete label of a `..r` row specialization, are retained exactly. Only a
+/// direct structural view field without a label is filled, and only when one
+/// input borrow lifetime is available. Zero or several distinct inputs keep the
+/// field unresolved so the result gate reports the missing relation; a row
+/// hidden behind an owning container is likewise left for that gate.
+fn resolve_elided_structural_result(
+    types: &mut crate::runtime_types::Types<'_>,
+    result: Type,
+    input_lifetimes: &[(String, Span, Option<String>)],
+    span: Span,
+) -> Result<Type> {
+    fn go(
+        types: &mut crate::runtime_types::Types<'_>,
+        ty: Type,
+        label: Option<&str>,
+        no_input: bool,
+        span: Span,
+        depth: usize,
+    ) -> Result<Type> {
+        if depth >= 64 {
+            return Err(Diagnostic::new(
+                span,
+                "structural result nesting exceeded its finite lifetime-elision budget",
+            ));
+        }
+        let Some(_id) = ty.layout().filter(|id| types.enums[*id].structural) else {
+            return Ok(ty);
+        };
+        let fields = types
+            .structural_row_fields(ty)
+            .expect("structural layout has a canonical row");
+        let mut rebuilt = Vec::with_capacity(fields.len());
+        for field in &fields {
+            let mut field_ty = field.ty;
+            if field_ty
+                .layout()
+                .is_some_and(|id| types.enums[id].structural)
+            {
+                field_ty = go(types, field_ty, label, no_input, span, depth + 1)?;
+            }
+            let mut lifetime = field.lifetime.clone();
+            if lifetime.is_none() && field_ty.is_view() {
+                let Some(label) = label else {
+                    return Err(Diagnostic::new(
+                        span,
+                        if no_input {
+                            "a returned structural record field has an elided lifetime, but the function has no borrowed input to infer it from; write the field as '&'a [T]' with a declared lifetime or return a nominal record with declared field lifetimes"
+                        } else {
+                            "cannot recover the lifetime of an elided structural result field: the function has several distinct input borrow lifetimes; name the field's lifetime explicitly, as in 'struct { view: &'a [T] }'"
+                        },
+                    ));
+                };
+                lifetime = Some(label.to_owned());
+            }
+            rebuilt.push(crate::runtime_types::RowField::new(
+                field.name.clone(),
+                field_ty,
+                lifetime,
+            ));
+        }
+        if rebuilt == fields {
+            return Ok(ty);
+        }
+        types.structural_fields(rebuilt, span)
+    }
+    let label = match input_lifetimes {
+        [(only, _, _)] => Some(only.as_str()),
+        _ => None,
+    };
+    go(types, result, label, input_lifetimes.is_empty(), span, 0)
+}
+
 /// Map each borrowed field path of a parameter type to its declared lifetime,
 /// using source field names. Container element leaves use the container field's
 /// name; a direct slice or reference field uses its own name.
@@ -9457,6 +9536,12 @@ impl<'a> Functions<'a> {
         let written_result = split_grade(&f.result).0;
         let explicit_result_lifetime = borrow_lifetime(written_result);
         let result_was_explicit = explicit_result_lifetime.is_some();
+        // Resolve an elided borrowed structural result field from the
+        // function's single input borrow lifetime before result metadata is
+        // collected. This mirrors ordinary slice-result elision; every other
+        // case stays unresolved and is rejected below.
+        let result =
+            resolve_elided_structural_result(types, result, &input_lifetimes, f.result.span)?;
         // Stable parameter-leaf origins solved over the concrete call graph.
         // Map each origin back to this instance's declared or elided lifetime
         // labels. Every origin must map to a real lifetime: rejecting an
@@ -9799,17 +9884,11 @@ impl<'a> Functions<'a> {
             }
             lifetime_bounds = close_lifetime_bounds(lifetime_bounds);
         }
-        // Structural rows now carry concrete labels through `..r`
-        // specializations, but a borrowed structural result is still an
-        // explicit boundary: the row itself declares no lifetime parameters
-        // that could be related to the caller's outlives bounds. The next
-        // node (LT-STRUCT-RESULT) owns relaxing this gate.
-        if crate::runtime_types::contains_borrowed_structural(types, result) {
-            return Err(Diagnostic::new(
-                f.result.span,
-                "a returned record cannot carry a borrowed field without a declared lifetime; anonymous 'struct { ... }' rows have none, so return a nominal record with declared field lifetimes instead",
-            ));
-        }
+        // A structural row may now carry resolved borrow labels from its
+        // annotation or a `..r` specialization. Each borrowed leaf is checked
+        // below against the parameters that carry it; an unlabelled leaf stays
+        // an explicit rejection because no caller lifetime relation can be
+        // recovered for it.
         if result.is_view() {
             let Some(lifetime) = &result_lifetime else {
                 return Err(Diagnostic::new(
@@ -9971,29 +10050,25 @@ impl<'a> Functions<'a> {
             .is_some_and(|layout| types.enums[layout].borrowed)
             || crate::runtime_types::is_reference_container(types, result)
         {
-            // A returned borrowed record may mention only declared lifetime
-            // parameters that also describe some parameter's borrowed field.
+            // Every borrowed leaf of a returned record, including a structural
+            // row, must name a signature label that a parameter carries. A
+            // label from a `..r` specialization or an elided input is a rigid
+            // occurrence identity, not a callee declaration, so it is validated
+            // by the parameter relation rather than the declared-name set. The
+            // field annotation is an obligation only: the ownership pass checks
+            // each actual value origin against the same paths below.
             let parameter_leaf_sets = parameters
                 .iter()
                 .map(|ty| crate::runtime_types::borrow_leaves(types, *ty))
                 .collect::<Result<Vec<_>>>()?;
             for leaf in crate::runtime_types::borrow_leaves(types, result)? {
                 let Some(lifetime) = &leaf.lifetime else {
-                    // Structural rows do not record field lifetime labels, so a
-                    // borrowed leaf there has no declared lifetime to check.
-                    // Structural rows (also when nested inside a nominal
-                    // record) carry no declared field-lifetime labels.
-                    let message = "a returned record cannot carry a borrowed field without a declared lifetime; anonymous 'struct { ... }' rows have none, so return a nominal record with declared field lifetimes instead";
-                    return Err(Diagnostic::new(f.result.span, message));
-                };
-                if !declared_lifetimes.contains(lifetime) {
                     return Err(Diagnostic::new(
                         f.result.span,
-                        format!(
-                            "undeclared lifetime '{lifetime}' in a borrowed record result; declare it in the function's lifetime parameter list"
-                        ),
+                        "a returned record cannot carry a borrowed field without a declared lifetime; name the field's lifetime from a parameter, as in 'struct { view: &'a [T] }', or preserve it through a '..r' row variable",
                     ));
-                }
+                };
+                let declared_here = declared_lifetimes.contains(lifetime);
                 let carried =
                     parameter_lifetimes
                         .iter()
@@ -10013,15 +10088,22 @@ impl<'a> Functions<'a> {
                                 })
                         });
                 if !carried {
+                    let detail = if declared_here {
+                        String::new()
+                    } else {
+                        format!(
+                            " (lifetime '{lifetime}' is neither declared by this function nor supplied by a parameter's borrowed field)"
+                        )
+                    };
                     return Err(Diagnostic::new(
                         f.result.span,
                         if leaf.mutable {
                             format!(
-                                "exclusive borrowed record result lifetime '{lifetime}' does not appear on an exclusive '&mut [T]' parameter or mutable record-field parameter that outlives it; a returned mutable field must borrow caller-owned exclusive storage"
+                                "exclusive borrowed record result lifetime '{lifetime}' does not appear on an exclusive '&mut [T]' parameter or mutable record-field parameter that outlives it; a returned mutable field must borrow caller-owned exclusive storage{detail}"
                             )
                         } else {
                             format!(
-                                "borrowed record result lifetime '{lifetime}' does not appear on any parameter that outlives it; a returned record must borrow caller-owned storage"
+                                "borrowed record result lifetime '{lifetime}' does not appear on any parameter that outlives it; a returned record must borrow caller-owned storage{detail}"
                             )
                         },
                     ));

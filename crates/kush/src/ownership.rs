@@ -613,11 +613,16 @@ fn leaves_of(
             }
             composed = composed.compose(variance);
         }
-        if record
-            .field_lifetimes
-            .get(field)
-            .and_then(Option::as_ref)
-            .is_some_and(|label| !record.lifetimes.iter().any(|slot| slot == label))
+        // A structural row declares no lifetime parameters: each field label
+        // belongs to the erased outer borrow of its own field type, whose
+        // constructor is covariant. Only a nominal declaration whose label is
+        // not one of its own lifetime parameters is inconsistent metadata.
+        if !record.structural
+            && record
+                .field_lifetimes
+                .get(field)
+                .and_then(Option::as_ref)
+                .is_some_and(|label| !record.lifetimes.iter().any(|slot| slot == label))
         {
             composed = composed.compose(crate::variance::SignSet::INVARIANT);
         }
@@ -3650,7 +3655,7 @@ impl Checker<'_> {
             let Some(lifetime) = &leaf.lifetime else {
                 return Err(Diagnostic::new(
                     span,
-                    "internal error: borrowed result record leaf has no declared lifetime",
+                    "a returned record field carries a borrowed value but no resolved lifetime label; annotate the field with a lifetime from a parameter, as in 'struct { view: &'a [T] }', or preserve it through a '..r' row variable",
                 ));
             };
             if !self.lifetime_carried_at(loan.lifetime.as_deref(), lifetime, leaf.variance) {

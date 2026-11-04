@@ -219,13 +219,19 @@ coherence error, and an open header and an exact structural header follow the
 ordinary concrete-over-generic rule. A bare `..` impl header has no parameter
 to bind the residual row and remains an explicit rejection.
 
-Borrowed structural **results** remain an explicit boundary: although a
-specialized row now carries its fields' erased borrow labels, structural rows
-declare no lifetime parameters that could be related to the caller's outlives
-bounds, so returning `struct { view: &[i64], ..r }` is rejected. The view may
-travel through a row-variable parameter and be read or consumed inside the
-call, but a caller-owned structural result must be a nominal record with
-declared lifetimes.
+Borrowed structural **results** follow the same caller-owned-storage rule as
+nominal borrowed records. A result such as `-> struct { view: &'a [i64] }` or
+`-> struct { n: i64, ..r }` is accepted when every borrowed leaf names a
+lifetime carried by a parameter (a declared label, a rigid `..r` specialization
+label, or one elided input's checked identity), and the ownership pass proves
+each actual origin is a caller-owned parameter root carrying that label. The
+field annotation is only an obligation: a local, temporary, dead-scope storage
+or a child-task frame behind it is rejected, shared storage cannot become an
+exclusive field, and every branch/loop/helper alternative keeps its owner
+loaned until the result's last use. An unlabelled result field uses the
+function's single input borrow lifetime; zero or several distinct inputs is an
+explicit error. Direct structural owner-reference fields (`owner: &'a T`) and
+arrow-type structural fields without an arrow-bound lifetime remain rejected.
 
 **Field renaming** is an explicit conversion, written with `from`:
 
@@ -287,8 +293,9 @@ first-class row value; a row variable must be monomorphized by a concrete
 argument row. A bare `..` is erased, while `..r` preserves the residual row. The
 residual-row equality rule means a row variable cannot be solved from two
 parameters with different tails. Structural impl dispatch is exact-row or
-named-row-pattern; a bare `..` impl header is not accepted. Borrowed structural
-results remain rejected.
+named-row-pattern; a bare `..` impl header is not accepted. A borrowed
+structural result is accepted only through the checked caller-origin gate above,
+so it is not a general row-polymorphic escape hatch.
 
 ## Subtyping and conversions
 
@@ -509,11 +516,13 @@ Deliberately unsupported, with explicit diagnostics:
   variables that preserve unmentioned fields, explicit top-level field renaming
   through `value as struct { target: T from source }`, structural equality over
   comparable leaves, structural literals and patterns, and exact-row or
-  named-row-pattern structural impl headers, as described above. Remaining
-  boundaries: nested (non-top-level) field renaming, row subtraction/aliasing,
-  first-class row values, a bare `..` in an impl header, and borrowed structural
-  results. Nominal records remain invariant with respect to other nominal
-  records and do not match structural impl headers implicitly.
+  named-row-pattern structural impl headers, and checked borrowed structural
+  results, as described above. Remaining boundaries: nested (non-top-level)
+  field renaming, row subtraction/aliasing, first-class row values, a bare `..`
+  in an impl header, direct structural owner-reference fields, and elided
+  structural result fields whose input relation is not unique. Nominal records
+  remain invariant with respect to other nominal records and do not match
+  structural impl headers implicitly.
 - **Function subtyping:** arrow subtyping is implemented for first-class
   function values (`fn(...)`, owning `once fn(...)`, and `linear once fn(...)`),
   with contravariant parameters, covariant results, effect-row inclusion

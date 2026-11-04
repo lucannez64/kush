@@ -1,11 +1,14 @@
 # Borrowed structural rows and results: integration contract
 
 This design covers LT-ROWS-DESIGN, the interface between LT-VARIANCE,
-LT-ROWVARS and LT-STRUCT-RESULT. No current borrowed-result rejection is
-removed by this document. It is independent of unfinished effect, proof,
-layout and general polymorphism work.
+LT-ROWVARS and LT-STRUCT-RESULT. The design stage removed no rejection;
+LT-STRUCT-RESULT now implements the borrowed-result gate described here. It is
+independent of unfinished effect, proof, layout and general polymorphism work.
 
 ## Observed implementation gap
+
+This section records the pre-LT-ROWVARS gap; LT-ROWVARS closed it and
+LT-STRUCT-RESULT builds the result gate on the repaired metadata.
 
 `Types::structural` in `runtime_types.rs` interns rows using only sorted
 `(field name, Type)` pairs and initializes every `field_lifetimes` entry to
@@ -106,8 +109,8 @@ independent review plus the integrated Boat gate before LT-REVIEW/LIFE close.
 
 ## Implementation status
 
-LT-ROWVARS stages 1-2 are implemented (2026-11-04). The remaining
-LT-STRUCT-RESULT work is not started.
+LT-ROWVARS stages 1-2 are implemented (2026-11-04) and LT-STRUCT-RESULT
+implements the borrowed structural result gate (2026-11-04).
 
 - `runtime_types::RowField` is the canonical field descriptor: name, lowered
   runtime type, and the outer borrow label erased from a direct view. The
@@ -139,18 +142,39 @@ LT-STRUCT-RESULT work is not started.
   source label must equal the target label. An unlabelled literal or an
   opaque/fresh inferred label may acquire the target annotation only through
   the ordinary checked coercion, which retains the value's actual origins.
-- Borrowed structural **results** remain rejected by an explicit result gate
-  that inspects the complete result type, including rows nested behind owned
-  containers. Concrete labels on a specialized `..r` result therefore do not
-  open the LT-STRUCT-RESULT boundary.
+- Borrowed structural **results** are accepted through the same
+  `borrow_leaves` paths as nominal borrowed records. The blanket
+  `contains_borrowed_structural` rejection is gone. `Functions::instance`
+  requires every result leaf to name a signature label that a parameter carries
+  (relaxing the declared-name set only for rigid `..r` specialization labels
+  and elided input identities), and the ownership pass then validates each
+  actual origin: `check_return_record` requires a caller-owned parameter root
+  carrying the declared field label, matching mutability with preserved
+  ancestry, all branch/loop/call alternatives merged into the same leaf, and
+  the caller's owners loaned until the result's last use.
+- A field annotation is an obligation, never origin evidence. For lifetime
+  obligations, a structural field's erased outer borrow is covariant like any
+  other shared/exclusive view (a longer source satisfies a shorter declared
+  result label), while retained borrowed fields stay exact under an actual
+  structural conversion because `structural_subtype` still requires identical
+  concrete labels. Nested nominal invariance is still composed through the
+  declaration variance table.
+- Supported elision: an unlabelled borrowed field in a structural result is
+  resolved from the function's single distinct input borrow lifetime, mirroring
+  ordinary slice-result elision and including one elided input's fresh checked
+  identity. Zero or several distinct input lifetimes is an explicit rejection.
+  An arrow type has no body, so its structural fields must name an arrow-bound
+  lifetime.
 
-Coverage is in `crates/kush/tests/lifetime_rowvars.rs`: direct annotation
-labels, residual borrowed reads, distinct call-site labels, matching repeated
-rows, impl-row methods, owner mutation/drop while a residual loan is live,
-reordered nonzero source indices, label invariance through unlabelled intermediates, alpha-renamed call binders,
-repeated-binder conflicts, and continued structural
-result rejection. Positive cases are checked by the reference evaluator and the
-native backend with balanced allocation statistics.
+Coverage is in `crates/kush/tests/lifetime_rowvars.rs` and
+`crates/kush/tests/lifetime_struct_results.rs`: direct annotation labels,
+residual borrowed reads, distinct call-site labels, matching repeated rows,
+impl-row identity results, owner mutation/drop while a residual loan is live,
+reordered nonzero source indices, label invariance through unlabelled
+intermediates, alpha-renamed call binders, repeated-binder conflicts, and the
+full result matrix below. Positive cases are checked by the reference evaluator
+and the native backend (default and release codegen) with balanced allocation
+statistics.
 
 Deliberate limits left for later nodes:
 
@@ -158,9 +182,15 @@ Deliberate limits left for later nodes:
   copy its expected type's label, because its field provenance has no declared
   identity. An explicit structural annotation may supply the label through the
   checked conversion.
-- A structural borrowed result, including a row-variable result whose
-  specialization now carries a concrete label, stays an explicit rejection
-  until LT-STRUCT-RESULT defines its origin contract.
+- An elided borrowed field in a structural **parameter** has no signature
+  identity. A `..r` result field elided the same way is therefore an explicit
+  rejection rather than an invented equality; annotate the parameter field.
+- A borrowed structural row behind an owned container needs an explicit field
+  label in the result signature; result elision only descends through
+  structural fields, not containers.
+- Direct structural owner-reference fields (`owner: &'a T`) stay an explicit
+  rejection at row interning; only slice/text views and borrowed records are
+  admitted.
 - The row fragment remains finite and first-order: no row unification with
   outlives-related but distinct labels, no general binder inference, and no new
   width/drop behavior for borrowed fields.

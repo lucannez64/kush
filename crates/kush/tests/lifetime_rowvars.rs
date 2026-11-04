@@ -3,8 +3,9 @@
 //! The canonical row interning includes each field's erased outer borrow
 //! label, and `..r` specialization carries those descriptors through residual
 //! inference, callable construction, and impl-header matching. Borrowed
-//! structural results remain the next node's boundary: this suite only checks
-//! that labels travel through parameters and are not silently erased.
+//! structural result origin validation is covered separately by
+//! `lifetime_struct_results.rs`; this suite checks that labels travel through
+//! parameters and are not silently erased.
 use kush::executable::{MemoryStats, check};
 
 fn rejects(source: &str, fragment: &str) {
@@ -67,14 +68,16 @@ fn direct_structural_annotations_keep_their_borrow_labels() {
         "",
     );
     // Rows that differ only in the erased label are distinct checker rows.
-    // Converting the shorter view to the longer annotation has no witness.
+    // Converting the shorter view to the longer result annotation has no
+    // witness: the result label must be carried by a parameter that outlives
+    // it.
     rejects(
         r#"fn keep<'long: 'short, 'short>(
             v: struct { view: &'short [i64] }) -> struct { view: &'long [i64] } ! {panic} {
             v
         }
         fn main() -> Unit ! {} {}"#,
-        "cannot carry a borrowed field without a declared lifetime",
+        "does not appear on any parameter that outlives it",
     );
 }
 
@@ -262,26 +265,40 @@ fn residual_paths_are_rebased_for_reordered_sources() {
 }
 
 #[test]
-fn borrowed_structural_results_remain_rejected() {
-    // A direct structural result and a row-variable result both stay outside
-    // the initial fragment even though the specialization now carries `'a`.
-    rejects(
+fn borrowed_structural_results_keep_their_labels() {
+    // A direct structural result and a row-variable result now carry resolved
+    // labels. LT-STRUCT-RESULT removed the blanket rejection; the ownership
+    // pass still validates every actual origin. The full matrix lives in
+    // `lifetime_struct_results.rs`.
+    agrees(
         r#"fn keep<'a>(v: struct { view: &'a [i64], n: i64 })
             -> struct { view: &'a [i64], n: i64 } ! {panic} { v }
-        fn main() -> Unit ! {} {}"#,
-        "cannot carry a borrowed field without a declared lifetime",
+        fn run<'a>(view: &'a [i64]) -> i64 ! {panic} {
+            let out = keep(struct { n: 1, view: view });
+            Slice.get(out.view, 0) + out.n + 1
+        }
+        fn main() -> i64 ! {panic} {
+            let values: [i64; 2] = [40, 2];
+            run(&values[..])
+        }"#,
+        42,
+        "",
     );
-    rejects(
+    agrees(
         r#"struct Wide<'a> { n: i64, view: &'a [i64] }
         fn keep<r>(v: struct { n: i64, ..r })
             -> struct { n: i64, ..r } ! {panic} { v }
         fn run<'a>(view: &'a [i64]) -> i64 ! {panic} {
             let v: struct { n: i64, view: &'a [i64] } = struct { n: 1, view: view };
-            let _ = keep(v);
-            0
+            let out = keep(v);
+            Slice.get(out.view, 0) + out.n + 1
         }
-        fn main() -> i64 ! {panic} { 0 }"#,
-        "cannot carry a borrowed field without a declared lifetime",
+        fn main() -> i64 ! {panic} {
+            let values: [i64; 2] = [40, 2];
+            run(&values[..])
+        }"#,
+        42,
+        "",
     );
 }
 

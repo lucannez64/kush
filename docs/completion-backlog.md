@@ -216,10 +216,15 @@ outstanding implementation item.
   `value as struct { target: T from source }` with each source moved once.
   Structural `==`/`!=` compares every canonical field when leaves are copyable
   scalars or nested structural rows; both operands are evaluated once in both
-  backends. Remaining boundaries are documented, not silent: nested field
+  backends. A borrowed structural row may be returned when every borrowed
+  field names a lifetime carried by a caller-owned parameter, or when the
+  function has one unambiguous input borrow lifetime; the ownership pass checks
+  every actual origin, keeps branch/loop/helper alternatives loaned, and
+  rejects local, temporary, shared-to-exclusive, and duplicate-mutable escapes.
+  Remaining boundaries are documented, not silent: nested field
   renaming, row subtraction/aliasing, first-class row values, bare `..` impl
-  headers, borrowed structural results, and floating-point/owning/borrowed/
-  union/nominal structural equality. See
+  headers, direct structural owner-reference fields, and floating-point/
+  owning/borrowed/union/nominal structural equality. See
   [subtyping.md](subtyping.md#structural-records).
 - [ ] Broader algebraic subtype inference with documented decidability
   boundaries. **Partial:** contextual array/vector/tuple/structural literals
@@ -833,9 +838,11 @@ inference item remains unchecked because indexed/dependent union inference is
 still absent: it is an explicit-specialization boundary, not a silently guessed
 alternative. Cross-parameter partition replay is bounded at 4096 complete
 attempts; the single-variable residual rule is principal, while multi-variable
-partitions are deterministic but not principal. Borrowed structural results,
-nested field renaming, row subtraction/aliasing, first-class row values, and
-bare `..` impl headers remain explicit, tested rejections. See
+partitions are deterministic but not principal. Borrowed structural results now
+use the checked caller-origin gate; nested field renaming, row
+subtraction/aliasing, first-class row values, direct structural
+owner-reference fields, and bare `..` impl headers remain explicit, tested
+rejections. See
 [subtyping.md](subtyping.md#structural-records).
 
 ## Declared effect rows, owned dynamic frames, and task inheritance
@@ -1391,3 +1398,40 @@ Final targeted review is still required. LIFE remains open for structural row
 metadata/results and broader recursive summaries, including independent caller
 requirements. Outer-only reference provenance and canonical indirect-arrow
 bounds remain explicit review boundaries.
+
+## Borrowed structural results checkpoint (LT-STRUCT-RESULT)
+
+The blanket `contains_borrowed_structural` result rejection is removed. A
+function may return an anonymous `struct { ... }` row with borrowed fields when
+every borrowed leaf has a resolved signature label: a declared lifetime, a rigid
+`..r` specialization label carried by a parameter, or the checked identity of
+one elided input. `Functions::instance` checks each result leaf against the
+parameters that carry it, and the ownership pass validates every actual origin
+through the same `borrow_leaves` paths as nominal borrowed records
+(`check_return_record`): caller-owned parameter roots only, the actual origin
+outlives the declared field label, exclusive results require exclusive inputs
+with preserved ancestry, branch/loop/helper alternatives are merged, and every
+possible owner stays loaned until the result's last use. A field annotation is
+never treated as origin evidence.
+
+Structural result-field elision follows ordinary slice elision: one distinct
+input borrow lifetime fills an unlabelled result field, including one elided
+input's fresh checked identity; zero or several distinct inputs is an explicit
+error. Structural field labels remain covariant for result obligations (a
+longer source satisfies a shorter declared label) while retained borrowed fields
+stay exact under a structural conversion. Nominal records that contain a
+structural borrowed row are now classified as borrowed, arrow types protect
+their own lifetime binders from outer substitutions, and arrow structural
+fields must name an arrow-bound lifetime.
+
+Rejections still tested: local storage, block-local or temporary escapes,
+shared-to-exclusive upgrades, duplicate mutable fields, branch-selected short
+lifetimes, unlabelled arrows, unrecoverable elision, direct structural
+owner-reference fields, and the old structural-relabel conversion.
+
+Coverage is in `crates/kush/tests/lifetime_struct_results.rs` (34 tests) plus
+the updated `lifetime_rowvars.rs`, `lifetime_variance.rs` and
+`advanced_types_effects.rs`. The local gate passed 1339 tests, formatting, and
+strict Clippy; positive cases agree between the reference evaluator and the
+native backend in default and release codegen with balanced allocation
+statistics.
