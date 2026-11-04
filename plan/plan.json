@@ -744,10 +744,16 @@
       "deps": [
         "LT-ROWVARS"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Structural rows record field lifetime labels; remove the current clean rejection.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-04 20:07:26",
+          "who": "agent",
+          "text": "delegated"
+        }
+      ]
     },
     {
       "id": "LT-REVIEW",
