@@ -386,7 +386,9 @@ takes an exclusive loan; a read-only lambda takes a shared loan, so unrelated
 reads remain allowed while writes are rejected. The pointer is never an owner;
 dropping an uncalled closure or calling it frees only the environment cell.
 Returning, storing, passing, adapting, or sending such a closure to a task is
-rejected exactly like a borrowed slice capture.
+rejected exactly like a borrowed slice capture. Calling a writing lambda
+invalidates proof facts about the captured scalar's old value; a read-only
+lambda call preserves them.
 
 Capturing a mutable view **moves** the capability into the closure. Capturing a
 shared view adds another shared alias but keeps the same owner-move and

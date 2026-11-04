@@ -164,7 +164,9 @@ closure's checked last call or lexical scope end.
 The pointer is stack storage, never a heap owner; dropping an uncalled closure
 or calling it releases only the environment allocation. Escaping through a
 return, record, box, union, helper call, adapter, or spawned task is rejected
-before either backend sees the value.
+before either backend sees the value. A writing call also invalidates erased
+proof facts about the captured location's old value, while a read-only call
+preserves them.
 
 Borrow lifetimes include the remainder of argument evaluation and the call itself:
 

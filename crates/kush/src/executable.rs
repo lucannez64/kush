@@ -4690,6 +4690,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             loops: Vec::new(),
             facts: crate::facts::Facts::default(),
             written_slots: BTreeSet::new(),
+            closure_writes: BTreeMap::new(),
             proofs: BTreeMap::new(),
             logical: &logical,
             kernel_locals: Vec::new(),
@@ -10770,6 +10771,10 @@ struct Checker<'a, 't> {
     /// A lambda turns this set into `Function::capture_writes`, which decides
     /// whether a by-reference capture is a shared or exclusive loan.
     written_slots: BTreeSet<usize>,
+    /// Captured outer slots that a call to a closure binding may write.
+    /// Populated when a local is bound to a capturing lambda and consulted by
+    /// indirect calls so proof facts never survive a writing call.
+    closure_writes: BTreeMap<usize, Vec<usize>>,
     /// Erased proof parameters in scope: binder -> proposition.
     proofs: BTreeMap<BindingId, crate::facts::Proposition>,
     /// Checked logical definitions and their kernel names.
@@ -18507,6 +18512,10 @@ impl Checker<'_, '_> {
                         );
                     }
                     let slot = self.bind(pattern.span, ty, *mutable)?;
+                    self.closure_writes.remove(&slot);
+                    if let Some(targets) = self.closure_write_targets(&value) {
+                        self.closure_writes.insert(slot, targets);
+                    }
                     // Both immutable and mutable scalar bindings are symbolic
                     // index candidates. A mutable one is versioned: assignment
                     // appends a new binder instead of reinterpreting an old
@@ -19943,6 +19952,10 @@ impl Checker<'_, '_> {
                         c.facts.assign(slot, &value);
                         c.renew_scalar_index(slot, &value)?;
                         c.written_slots.insert(slot);
+                        c.closure_writes.remove(&slot);
+                        if let Some(targets) = c.closure_write_targets(&value) {
+                            c.closure_writes.insert(slot, targets);
+                        }
                         let ty = if value.ty == Type::Never {
                             Type::Never
                         } else {
@@ -22061,6 +22074,54 @@ impl Checker<'_, '_> {
             None => Ok(value),
         }
     }
+    /// Outer scalar slots a call to this callable may write. A direct lambda
+    /// value reports the writing captures of its generated function; a local
+    /// reports the captured targets recorded when it was bound. Unknown forms
+    /// return `None` (they are never borrowed-capture closures in checked IR).
+    fn closure_write_targets(&self, expr: &Expr) -> Option<Vec<usize>> {
+        let mut current = expr;
+        loop {
+            match &current.kind {
+                ExprKind::Coerce { value, .. } => current = value,
+                ExprKind::FnValue { function, captures } => {
+                    let body = self.functions.bodies.get(*function)?.as_ref()?;
+                    let targets = body
+                        .capture_writes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, writes)| **writes)
+                        .filter_map(|(index, _)| match captures.get(index)?.kind {
+                            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
+                                Some(slot)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    return Some(targets);
+                }
+                ExprKind::Local(slot) | ExprKind::Peek(slot) => {
+                    return self.closure_writes.get(slot).cloned();
+                }
+                _ => return None,
+            }
+        }
+    }
+    /// Forget proof facts and symbolic versions about a scalar location that a
+    /// writing closure may have changed. The location itself remains live; only
+    /// old-value evidence is invalidated.
+    fn invalidate_scalar_proofs(&mut self, slot: usize) {
+        let ty = self.locals[slot].ty;
+        if ty.scalar_carrier().is_some() {
+            self.facts.bump(slot);
+            if let Some(id) = self
+                .slots
+                .iter()
+                .find_map(|(id, candidate)| (*candidate == slot).then_some(*id))
+            {
+                self.fresh_scalar_value(id, ty);
+            }
+        }
+    }
     /// Outer local slots referenced by a lambda body. Resolution already maps
     /// every occurrence to its exact binder, so filtering by the current slot
     /// map removes lambda parameters, lambda locals, and type/grade binders.
@@ -22527,6 +22588,7 @@ impl Checker<'_, '_> {
                 ),
             ));
         };
+        let write_targets = self.closure_write_targets(&callee).unwrap_or_default();
         let signature = self.types.function_types[id].clone();
         if signature.parameters.len() != arguments.len() {
             return Err(Diagnostic::new(
@@ -22580,6 +22642,15 @@ impl Checker<'_, '_> {
         for (value, parameter) in checked.into_iter().zip(&signature.parameters) {
             let value_span = value.span;
             values.push(self.coerce_argument(value, *parameter, value_span)?);
+        }
+        // A writing closure may change a captured scalar location during the
+        // call. The callee and every argument have already been evaluated, so
+        // invalidate old-value facts only now: proofs established before the
+        // call cannot be reused after it, while argument checking still sees
+        // the pre-call value. Reading closures have no write targets.
+        for slot in write_targets {
+            self.invalidate_scalar_proofs(slot);
+            self.written_slots.insert(slot);
         }
         let value = Expr {
             kind: ExprKind::CallIndirect {

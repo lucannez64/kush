@@ -219,3 +219,46 @@ fn moving_a_captured_slice_owner_while_the_closure_is_live_is_rejected() {
         "cannot move or drop",
     );
 }
+
+#[test]
+fn proof_facts_before_a_writer_call_cannot_be_reused_after_it() {
+    rejects(
+        r#"
+        fn below(i: i64, n: i64, erased p: { i < n }) -> i64 ! {} { i }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut i = 0;
+            let n = 10;
+            if i < n {
+                let bump = fn() -> Unit ! {panic} { i = i + 1; };
+                bump();
+                below(i, n, _)
+            } else {
+                0
+            }
+        }
+        "#,
+        "cannot prove",
+    );
+}
+
+#[test]
+fn proof_facts_survive_a_reader_closure_call() {
+    agrees(
+        r#"
+        fn below(i: i64, n: i64, erased p: { i < n }) -> i64 ! {} { i }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut i = 0;
+            let n = 10;
+            if i < n {
+                let read = fn() -> i64 ! {panic} { i };
+                let value = read();
+                below(i, n, _) + value
+            } else {
+                0
+            }
+        }
+        "#,
+        0,
+        "",
+    );
+}

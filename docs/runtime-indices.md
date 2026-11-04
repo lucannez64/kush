@@ -323,10 +323,12 @@ fn consume(erased p: Eq<i64, 0, 0>); consume(n)
   implicit argument, tactic, or user-supplied axiom. The *separate* arithmetic
   `{ ... }` fragment has the bounded linear proof search described in 4a, but it
   never fabricates kernel evidence and never applies to a symbolic `Eq`/`prop`.
-- A mutable scalar capture is a live view, but a call to a closure that writes
-  it does not yet invalidate proof facts about the caller's older value. Keep
-  the proof inside the closure body or re-establish the needed arithmetic fact
-  after the call; automatic fact invalidation is the next proofs milestone.
+- A mutable scalar capture is a live view. Calling a closure that **writes** a
+  captured location appends a fresh symbolic version and drops arithmetic facts
+  about the old value, so a proof established before the call cannot be reused
+  afterwards. Calling a read-only closure leaves the version and its facts
+  intact. The invalidation happens after the callee and all arguments have been
+  evaluated, matching the runtime order.
 
 These are implementation budget and fragment limits, not claims that the full
 [v0.1 dependent design](spec-v0.1.md) is complete.

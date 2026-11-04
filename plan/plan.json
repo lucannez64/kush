@@ -1339,14 +1339,19 @@
       "deps": [
         "P-CLOSURE-LT"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "d14e7db",
       "log": [
         {
           "time": "2026-11-04 16:02:35",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-04 16:05:11",
+          "who": "agent",
+          "text": "Shared reader captures and exclusive writer captures with checked loans"
         }
       ]
     },
@@ -1359,10 +1364,26 @@
       "deps": [
         "P-LIVE-CAPTURE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "HEAD",
+      "log": [
+        {
+          "time": "2026-11-04 16:05:11",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-04 16:11:09",
+          "who": "agent",
+          "text": "Writing closure calls append fresh proof versions; reader calls preserve facts"
+        },
+        {
+          "time": "2026-11-04 16:11:24",
+          "who": "agent",
+          "text": "Record final amended commit at HEAD"
+        }
+      ]
     },
     {
       "id": "P-CUTS",

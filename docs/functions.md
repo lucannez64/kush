@@ -251,7 +251,10 @@ only reads it holds a shared loan, so unrelated reads remain allowed but a
 write is rejected. The same restrictions reject returning the closure, storing
 it in outliving data, passing it to another function, or sending it to a task.
 Both backends implement the pointer representation, so reference evaluation and
-native execution agree.
+native execution agree. Calling a closure that writes the capture invalidates
+erased proof facts about its old value; a call to a read-only closure leaves
+the established version intact. See
+[runtime scalar indices](runtime-indices.md#4-freezing-mutation-and-joins).
 
 A closure that captures a linear `@[1]`/`#[linear]` obligation (or a copyable
 value graded `@[1]`) is a `linear once fn(...)` value. Linearity is
@@ -425,12 +428,13 @@ converted by the same checked rules.
   function types intersect to themselves; mutually subtype arrows keep one
   deterministic representative; subtype-related arrows obey absorption.
   Incomparable callable intersections remain explicit diagnostics.
-- Scoped borrowed-capture `once fn(...)` closures are supported. Arrow types
-  describe borrows of their arguments, not of captured views, so a borrowed
-  capture still cannot be returned, stored, passed to an ordinary helper,
-  adapted, or captured by a task; those escapes are rejected explicitly rather
-  than erased. Lambdas may take slice parameters but cannot return slices yet;
-  a slice-returning function value must be a named function.
+- Scoped borrowed-capture `once fn(...)` closures are supported for borrowed
+  slice views and mutable scalar locations. Arrow types describe borrows of
+  their arguments, not of captured locations, so a borrowed capture still
+  cannot be returned, stored, passed to an ordinary helper, adapted, or
+  captured by a task; those escapes are rejected explicitly rather than erased.
+  Lambdas may take slice parameters but cannot return slices yet; a
+  slice-returning function value must be a named function.
 - No union-to-union repack that changes a callable's calling convention or
   argument/result representation. Bind/adapt the value as an explicit
   `once fn` first.

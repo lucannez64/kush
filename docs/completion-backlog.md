@@ -303,9 +303,9 @@ outstanding implementation item.
   (`c * x`, `x + y`, lengths) and is discharged by exact Fourier–Motzkin
   elimination with an independently verified Farkas-style refutation
   certificate; nonlinear terms, cutting planes, and the documented row/term
-  budgets remain explicit "not established" boundaries. Still absent: proof
-  facts about a captured location are not yet invalidated when a writing
-  closure is called. See
+  budgets remain explicit "not established" boundaries. Calling a closure that
+  writes a captured scalar now invalidates old proof facts about that location,
+  while a read-only call preserves them. See
   [runtime-indices.md](runtime-indices.md#4-freezing-mutation-and-joins) and
   [runtime-indices.md](runtime-indices.md#4a-arithmetic-proof-search).
 - [ ] Runtime-sized inline arrays with checked lifetime/storage layout.
@@ -910,12 +910,11 @@ allow, on top of `15f62d3`:
   strictness, native/reference agreement, nonlinear rejection, and stale-version
   rejection. Documented limits: no nonlinear terms, no cutting planes or full
   Presburger completeness, and explicit 64-term/4096-row/200000-pair budgets.
-- **Mutable captures as a live view remain unimplemented and the runtime-proof
-  backlog item stays unchecked.** A closure capture is still a sound copy /
-  independent snapshot; live sharing would need a checked closure borrow
-  lifetime so the environment cannot outlive the captured location.
-  `tests/runtime_indices.rs` and `tests/advanced_types_effects.rs` keep the
-  snapshot contract explicit.
+- **Mutable captures were a snapshot at this checkpoint; they are now live
+  views.** The scoped closure-borrow work in P-CLOSURE-LT/P-LIVE-CAPTURE gives
+  the environment a checked caller-location loan, and P-INVALIDATE drops old
+  proof versions when a writer closure is called. `tests/closure_captures.rs`
+  covers the live-view contract and the reader/writer distinction.
 
 Local Linux x86-64 validation used
 `CARGO_TARGET_DIR=/home/hirew/Projects/kush/target/close-rows-proofs` with
