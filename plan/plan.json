@@ -2245,10 +2245,16 @@
       "deps": [
         "LIFE"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "LT-REVIEW low findings 2-4: render structural field lifetime labels in type-mismatch messages; name the real parameter source for recursive argument swaps; accept or clearly diagnose unlabelled structural literals passed to ..r helpers.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-04 21:19:12",
+          "who": "agent",
+          "text": "delegated"
+        }
+      ]
     },
     {
       "id": "LT-FOLLOWUP-PROJ",
@@ -2258,10 +2264,16 @@
       "deps": [
         "LIFE"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "LT-REVIEW finding 5: wrap(a).view through a helper returning a structural record; nested structural row arguments rejected by conversion invariance (LT-STRUCT-RESULT review).",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-04 21:19:12",
+          "who": "agent",
+          "text": "delegated"
+        }
+      ]
     }
   ]
 }
