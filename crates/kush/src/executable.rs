@@ -1894,6 +1894,24 @@ fn borrow_lifetime(ty: &ast::Type) -> Option<String> {
     }
 }
 /// Every lifetime name mentioned by a type, including nested borrows.
+/// The first lifetime nested in a parameter's written type. A container such
+/// as `&mut Vec<&'a T>` has an elided outer borrow lifetime but a concrete
+/// element lifetime `'a`; the requirement mapper must use the element one.
+fn nested_borrow_lifetime(ty: &ast::Type) -> Option<String> {
+    match &ty.kind {
+        ast::TypeKind::Borrow {
+            lifetime, inner, ..
+        } => lifetime.clone().or_else(|| nested_borrow_lifetime(inner)),
+        ast::TypeKind::Lifetime(name) => Some(name.clone()),
+        ast::TypeKind::Graded { inner, .. }
+        | ast::TypeKind::Slice(inner)
+        | ast::TypeKind::Array(inner, _) => nested_borrow_lifetime(inner),
+        ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => {
+            arguments.iter().find_map(nested_borrow_lifetime)
+        }
+        _ => None,
+    }
+}
 fn type_lifetimes(ty: &ast::Type, out: &mut BTreeSet<String>) {
     match &ty.kind {
         ast::TypeKind::Lifetime(name) => {
@@ -3245,6 +3263,50 @@ fn summary_origin_lifetime(
             )
         })
 }
+/// Map one required-precondition endpoint onto this instance's declared input
+/// lifetime. Unlike a result origin, a root leaf may name a container element
+/// lifetime, which `collect_parameter_field_lifetimes` records at the empty
+/// path. A missing field path is an error, never a dropped requirement.
+fn requirement_origin_lifetime(
+    origin: &recursive_lifetimes::Origin,
+    parameter_lifetimes: &[Option<String>],
+    parameter_nested_lifetimes: &[Option<String>],
+    parameter_binders: &[Option<BindingId>],
+    parameter_field_lifetimes: &BTreeMap<BindingId, BTreeMap<String, String>>,
+) -> std::result::Result<String, String> {
+    if let Some(binder) = parameter_binders.get(origin.parameter).copied().flatten()
+        && let Some(lifetime) = parameter_field_lifetimes
+            .get(&binder)
+            .and_then(|fields| fields.get(&origin.path.join(".")))
+    {
+        return Ok(lifetime.clone());
+    }
+    if let Some(lifetime) = parameter_lifetimes
+        .get(origin.parameter)
+        .and_then(|lifetime| lifetime.as_ref())
+        && !lifetime.starts_with('<')
+    {
+        return Ok(lifetime.clone());
+    }
+    if let Some(lifetime) = parameter_nested_lifetimes
+        .get(origin.parameter)
+        .and_then(|lifetime| lifetime.as_ref())
+    {
+        return Ok(lifetime.clone());
+    }
+    if let Some(lifetime) = parameter_lifetimes
+        .get(origin.parameter)
+        .and_then(|lifetime| lifetime.as_ref())
+    {
+        return Ok(lifetime.clone());
+    }
+    summary_origin_lifetime(
+        origin,
+        parameter_lifetimes,
+        parameter_binders,
+        parameter_field_lifetimes,
+    )
+}
 fn block_value_lifetime_candidates<'a>(
     resolution: &Resolution,
     declared: &BTreeMap<BindingId, Declared<'a>>,
@@ -4549,7 +4611,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     // signature, callable arrow, or ownership judgment observes only the frozen
     // least fixed point. The solver rejects unseeded cycles and unsupported
     // boundaries instead of publishing a provisional contract.
-    functions.summaries = recursive_lifetimes::solve(resolution, &functions.declared)?;
+    functions.summaries = recursive_lifetimes::solve(resolution, &functions.declared, &types)?;
     // Generic methods are monomorphized on demand at each call site. Only
     // monomorphic methods get an eagerly checked instance here.
     monomorphic.extend(method_bindings.into_iter().filter(|binding| {
@@ -9330,6 +9392,12 @@ impl<'a> Functions<'a> {
                 &mut parameter_field_lifetimes,
             );
         }
+        let parameter_nested_lifetimes = f
+            .parameters
+            .iter()
+            .filter(|parameter| !parameter.erased)
+            .map(|parameter| nested_borrow_lifetime(&parameter.ty))
+            .collect::<Vec<_>>();
         let (result_ty, result_grade) =
             result_contract(resolution, types, &grade_substitution, &f.result)?;
         let result = types.ty_in(&result_ty, &substitution)?;
@@ -9361,9 +9429,15 @@ impl<'a> Functions<'a> {
         // labels. Every origin must map to a real lifetime: rejecting an
         // unmapped path keeps a partial summary from masquerading as complete.
         let mut summary_sources = BTreeSet::new();
+        // Per-result-leaf outlives edges inferred from the frozen summaries.
+        // They are added to `lifetime_bounds` after the result lifetime is
+        // chosen, so ownership sees every reachable owner.
+        let mut summary_bounds: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut result_field_lifetimes = BTreeMap::new();
+        collect_parameter_field_lifetimes(types, result, &mut result_field_lifetimes)?;
         if let Some(summary) = self.summaries.get(binding) {
-            for origin in &summary.origins {
-                let lifetime = summary_origin_lifetime(
+            let map_origin = |origin: &recursive_lifetimes::Origin| {
+                summary_origin_lifetime(
                     origin,
                     &parameter_lifetimes,
                     &parameter_binders,
@@ -9376,8 +9450,67 @@ impl<'a> Functions<'a> {
                             "cannot map a recursive lifetime summary origin to a declared lifetime: {what}. Annotate the result lifetime explicitly or name the borrowed field's lifetime"
                         ),
                     )
-                })?;
-                summary_sources.insert(lifetime);
+                })
+            };
+            let mut root_origins = BTreeSet::new();
+            for (path, origins) in &summary.leaves {
+                if path.is_empty() {
+                    root_origins.extend(origins.iter().cloned());
+                    if result.is_view() || result.is_ref() {
+                        for origin in origins {
+                            summary_sources.insert(map_origin(origin)?);
+                        }
+                    }
+                    continue;
+                }
+                let target = result_field_lifetimes
+                    .get(&path.join("."))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            f.result.span,
+                            format!(
+                                "cannot map a recursive lifetime summary result path '{}' to a declared result field lifetime. Annotate the result type explicitly or name the borrowed field's lifetime",
+                                path.join(".")
+                            ),
+                        )
+                    })?;
+                if summary.inferred_contract {
+                    for origin in origins {
+                        let source = map_origin(origin)?;
+                        if source != target {
+                            summary_bounds.insert((source, target.clone()));
+                        }
+                    }
+                }
+            }
+            // A whole-value origin on a record result contributes to every
+            // declared borrowed field. Try the leaf-specific input path first
+            // (an identity/forwarding function keeps each field's own owner),
+            // then conservatively fall back to the parameter root.
+            if summary.inferred_contract
+                && !root_origins.is_empty()
+                && !(result.is_view() || result.is_ref())
+            {
+                for (field_path, target) in &result_field_lifetimes {
+                    let components = field_path
+                        .split('.')
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>();
+                    for origin in &root_origins {
+                        let mut specific = origin.clone();
+                        specific
+                            .path
+                            .extend(components.iter().map(|part| (*part).to_owned()));
+                        let source = match map_origin(&specific) {
+                            Ok(source) => source,
+                            Err(_) => map_origin(origin)?,
+                        };
+                        if source != *target {
+                            summary_bounds.insert((source, target.clone()));
+                        }
+                    }
+                }
             }
         }
         let result_lifetime = match explicit_result_lifetime {
@@ -9476,6 +9609,83 @@ impl<'a> Functions<'a> {
             }
             None => None,
         };
+        // Per-field result summaries add the outlives relation needed for
+        // every declared result leaf. This is a guarantee, not a caller
+        // precondition: it is derived from a possible returned origin.
+        for (source, target) in &summary_bounds {
+            if source == target || outlives(&lifetime_bounds, source, target) {
+                continue;
+            }
+            if outlives(&lifetime_bounds, target, source) {
+                return Err(Diagnostic::new(
+                    f.result.span,
+                    format!(
+                        "cannot infer an outlives bound for result lifetime '{target}': the returned value can have both the longer lifetime '{source}' and the shorter one; use one shared lifetime or return the record fields with distinct lifetimes"
+                    ),
+                ));
+            }
+            lifetime_bounds.insert((source.clone(), target.clone()));
+        }
+        // Independent required preconditions. These are exported only for an
+        // inferable declaration: an explicit outlives bound, trait/impl
+        // contract, or function-value arrow is never silently strengthened.
+        if declared.self_ty.is_none()
+            && declared.default_specialization.is_none()
+            && f.lifetimes
+                .iter()
+                .all(|lifetime| lifetime.bounds.is_empty())
+            && self
+                .summaries
+                .get(binding)
+                .is_some_and(|summary| summary.inferred_contract)
+            && let Some(summary) = self.summaries.get(binding)
+        {
+            for requirement in &summary.requirements {
+                let long = requirement_origin_lifetime(
+                    &requirement.long,
+                    &parameter_lifetimes,
+                    &parameter_nested_lifetimes,
+                    &parameter_binders,
+                    &parameter_field_lifetimes,
+                )
+                .map_err(|what| {
+                    Diagnostic::new(
+                        f.result.span,
+                        format!(
+                            "cannot map a recursive lifetime requirement to a declared input lifetime: {what}. Annotate the outlives bound explicitly"
+                        ),
+                    )
+                })?;
+                let short = requirement_origin_lifetime(
+                    &requirement.short,
+                    &parameter_lifetimes,
+                    &parameter_nested_lifetimes,
+                    &parameter_binders,
+                    &parameter_field_lifetimes,
+                )
+                .map_err(|what| {
+                    Diagnostic::new(
+                        f.result.span,
+                        format!(
+                            "cannot map a recursive lifetime requirement to a declared input lifetime: {what}. Annotate the outlives bound explicitly"
+                        ),
+                    )
+                })?;
+                if long == short || outlives(&lifetime_bounds, &long, &short) {
+                    continue;
+                }
+                if outlives(&lifetime_bounds, &short, &long) {
+                    return Err(Diagnostic::new(
+                        f.result.span,
+                        format!(
+                            "cannot infer the recursive precondition '{long}: {short}': the opposite relation already holds; use one shared lifetime or bind the values to matching parameters"
+                        ),
+                    ));
+                }
+                lifetime_bounds.insert((long, short));
+            }
+        }
+        lifetime_bounds = close_lifetime_bounds(lifetime_bounds);
         for ty in parameters.iter().chain([&result]) {
             crate::runtime_types::reject_optional_reference_boundary(types, *ty, f.result.span)?;
         }
@@ -30557,7 +30767,13 @@ fn branch_record_label_mismatch(
                 && !right_def.structural
                 && left_def.definition == right_def.definition
             {
-                if left_def.lifetimes != right_def.lifetimes {
+                if left_def.lifetimes != right_def.lifetimes
+                    && !left_def
+                        .lifetimes
+                        .iter()
+                        .chain(right_def.lifetimes.iter())
+                        .any(|label| label.starts_with('<'))
+                {
                     return true;
                 }
                 for (left_variant, right_variant) in

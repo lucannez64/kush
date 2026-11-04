@@ -342,6 +342,9 @@ fn main() -> Unit ! {} {}
 
 #[test]
 fn an_unsupported_recursive_boundary_asks_for_an_explicit_contract() {
+    // A direct record-returning call is summarized per field. The same call
+    // through an unconstrained function value is an indirect boundary and must
+    // not be read as an empty field set.
     rejects(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
@@ -349,11 +352,12 @@ fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
     Pair { left: a, right: b }
 }
 fn f<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
-    if n == 0 { make(a, b).left } else { f(a, b, n - 1) }
+    let g: fn<'a, 'b>(&'a [i64], &'b [i64]) -> Pair<'a, 'b> ! {panic} = make;
+    if n == 0 { g(a, b).left } else { f(a, b, n - 1) }
 }
 fn main() -> Unit ! {} {}
 "#,
-        "not part of the root-slot recursive fragment",
+        "cannot use this result origin",
     );
 }
 
@@ -469,7 +473,10 @@ fn main() -> Unit ! {} {}
 
 #[test]
 fn an_acyclic_borrowed_record_channel_cannot_become_empty_provenance() {
-    rejects(
+    // A direct record call is now summarized per field, so its projection is
+    // usable. An indirect call through an unconstrained arrow still cannot be
+    // read as empty provenance.
+    check(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
 fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
@@ -477,6 +484,23 @@ fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
 }
 fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {panic} {
     make(a, b).left
+}
+fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
+    unsupported(a, b)
+}
+fn main() -> Unit ! {} {}
+"#,
+    )
+    .unwrap();
+    rejects(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+    Pair { left: a, right: b }
+}
+fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {panic} {
+    let g: fn<'a, 'b>(&'a [i64], &'b [i64]) -> Pair<'a, 'b> ! {panic} = make;
+    g(a, b).left
 }
 fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
     unsupported(a, b)
@@ -522,3 +546,101 @@ fn main() -> Unit ! {} {}
         "no independently justified result origin",
     );
 }
+
+#[test]
+fn statically_resolved_recursive_method_calls_compose_origins() {
+    // The receiver is an implicit source argument at position zero; the
+    // recursive branch permutes the two slice parameters. Both owners stay in
+    // the summary and the evaluator selects the permuted winner.
+    agrees(
+        r#"
+struct Provider { tag: i64 }
+impl Provider {
+    fn pick<'a, 'b>(self: Provider, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+        if n == 0 { a } else { self.pick(b, a, n - 1) }
+    }
+}
+fn main() -> i64 ! {panic} {
+    let provider = Provider { tag: 0 };
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(provider.pick(&a[..], &b[..], 1), 0)
+}
+"#,
+        3,
+        "",
+    );
+}
+
+#[test]
+fn a_recursive_method_with_erased_proof_positions_keeps_source_arguments() {
+    // The receiver occupies source position zero, so the erased hole after the
+    // first runtime argument must still map the selected parameter to `b`, not
+    // to the erased position or the receiver.
+    agrees(
+        r#"
+struct Provider { tag: i64 }
+impl Provider {
+    fn pick<'a, 'b>(
+        self: Provider,
+        a: &'a [i64],
+        erased proof: { 0 == 0 },
+        b: &'b [i64],
+        n: i64,
+    ) -> &'b [i64] ! {panic} {
+        if n == 0 { b } else { self.pick(a, _, b, n - 1) }
+    }
+}
+fn main() -> i64 ! {panic} {
+    let provider = Provider { tag: 0 };
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(provider.pick(&a[..], _, &b[..], 1), 1)
+}
+"#,
+        4,
+        "",
+    );
+}
+
+#[test]
+fn a_static_trait_method_cycle_participates_and_keeps_its_contract() {
+    agrees(
+        r#"
+struct Provider { tag: i64 }
+trait Pick {
+    fn pick<'a, 'b>(self: Self, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic};
+}
+impl Pick for Provider {
+    fn pick<'a, 'b>(self: Self, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+        if n == 0 { b } else { self.pick(a, b, n - 1) }
+    }
+}
+fn main() -> i64 ! {panic} {
+    let provider = Provider { tag: 0 };
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(provider.pick(&a[..], &b[..], 1), 0)
+}
+"#,
+        3,
+        "",
+    );
+}
+
+#[test]
+fn a_recursive_method_cycle_without_a_base_origin_is_rejected() {
+    rejects(
+        r#"
+struct Provider { tag: i64 }
+impl Provider {
+    fn chase<'a, 'b>(self: Provider, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+        self.chase(a, b, n)
+    }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "no independently justified result origin",
+    );
+}
+
