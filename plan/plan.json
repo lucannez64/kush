@@ -590,6 +590,11 @@
           "time": "2026-11-03 21:23:58",
           "who": "agent",
           "text": "Full combined f752ba5 Boat gate passed: 1234 tests, formatting and strict Clippy, including recursive review regressions. Remaining result-field and independent caller-requirement summary work not closed."
+        },
+        {
+          "time": "2026-11-04 02:58:36",
+          "who": "agent",
+          "text": "Methods, per-field borrowed-record summaries and independent R[f] completed. Remaining: indirect/dynamic/builtin/effect/loop/task boundary inference and general container-write R beyond Vec.push/Box.set; independent soundness review open."
         }
       ]
     },
@@ -746,6 +751,11 @@
           "time": "2026-11-03 17:40:41",
           "who": "agent",
           "text": "Active focus: two independent implementation tracks (variance and recursive summaries), then borrowed rows/results and integrated review. No dependency on unfinished effects/layout/research projects."
+        },
+        {
+          "time": "2026-11-04 02:58:36",
+          "who": "agent",
+          "text": "Recursive summary fragment extended to methods, records and R[f]. Broader indirect-boundary inference and soundness review remain."
         }
       ]
     },
@@ -1697,14 +1707,19 @@
       "deps": [
         "LT-REC-IR"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Seed from checked provenance and propagate all actual argument alternatives; never assume inferred requirements to prove themselves.",
-      "commit": null,
+      "commit": "5818a35",
       "log": [
         {
           "time": "2026-11-04 02:31:41",
           "who": "claude",
           "text": "Implementing record-field result summaries and static method participation (delegate)"
+        },
+        {
+          "time": "2026-11-04 02:58:36",
+          "who": "agent",
+          "text": "Static method calls, per-field record results and independent R[f] prerequisites implemented with adversarial tests"
         }
       ]
     },
@@ -1716,10 +1731,16 @@
       "deps": [
         "LT-REC-FLOW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Monotone worklist, stable anonymous result IDs, no-seed rejection and finite work budgets.",
-      "commit": null,
-      "log": []
+      "commit": "5818a35",
+      "log": [
+        {
+          "time": "2026-11-04 02:58:36",
+          "who": "agent",
+          "text": "SCC worklist unions origins and requirement facts; no-seed rejection, budget caps and declaration-order determinism retained"
+        }
+      ]
     },
     {
       "id": "LT-REC-FINALIZE",
@@ -1729,10 +1750,16 @@
       "deps": [
         "LT-REC-FIXPOINT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Validate rigid contracts, replay dependent bodies, invalidate arrow/adapter caches and prohibit provisional metadata in codegen.",
-      "commit": null,
-      "log": []
+      "commit": "5818a35",
+      "log": [
+        {
+          "time": "2026-11-04 02:58:36",
+          "who": "agent",
+          "text": "Summaries freeze before body checking; implicit parameters and arrows observe finalized bounds"
+        }
+      ]
     },
     {
       "id": "LT-REC-DIAG",
@@ -1742,10 +1769,16 @@
       "deps": [
         "LT-REC-FIXPOINT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Call/return witnesses; distinguish missing seed, unsupported boundary, incompatible rigid contract and exhausted budget.",
-      "commit": null,
-      "log": []
+      "commit": "5818a35",
+      "log": [
+        {
+          "time": "2026-11-04 02:58:36",
+          "who": "agent",
+          "text": "Checked diagnostics for unseeded cycles, unsupported boundaries, missing field paths, unmet requirements and budget exhaustion"
+        }
+      ]
     },
     {
       "id": "LT-REC-TESTS",
@@ -1759,7 +1792,13 @@
       "status": "todo",
       "desc": "Order independence, all-owner retention, mutable aliases, local escape, cache replay, budgets and native/reference parity; soundness review.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-04 02:58:36",
+          "who": "agent",
+          "text": "Method/record/R adversarial tests and eval+native agreement added; indirect/dynamic boundaries remain. Independent soundness review not run."
+        }
+      ]
     },
     {
       "id": "LT-VAR-TABLE",
