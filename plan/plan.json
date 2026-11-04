@@ -2289,6 +2289,44 @@
           "text": "Opus review CLOSE (21 probes); merged; Boat gate 1358 at 5f59397. Remaining: let-bound helper results on recursive edges not inferred"
         }
       ]
+    },
+    {
+      "id": "LT-FOLLOWUP-LABELS",
+      "title": "Never print internal lifetime labels in diagnostics",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "LT-FOLLOWUP-DIAG"
+      ],
+      "status": "in_progress",
+      "desc": "",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-04 21:59:45",
+          "who": "agent",
+          "text": "delegated"
+        }
+      ]
+    },
+    {
+      "id": "LT-FOLLOWUP-LETREC",
+      "title": "Infer let-bound helper results on recursive edges",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "LT-FOLLOWUP-PROJ"
+      ],
+      "status": "in_progress",
+      "desc": "",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-04 21:59:45",
+          "who": "agent",
+          "text": "delegated"
+        }
+      ]
     }
   ]
 }
