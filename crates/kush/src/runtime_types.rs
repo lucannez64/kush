@@ -105,6 +105,38 @@ pub(crate) struct Enum {
     /// and the call count, not the foreign implementation's memory safety.
     pub foreign: Option<ForeignResource>,
 }
+/// One canonical field of a record row. Anonymous structural rows use the
+/// same descriptor for interning, layout, and checker metadata: the declared
+/// outer borrow label (when the lowered runtime type has erased it) sorts
+/// together with the field name and type, so rows that differ only in `'a`
+/// versus `'b` never collapse into one checker type. Nominal records reuse the
+/// descriptor when a residual row is projected out of their instantiated
+/// fields.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct RowField {
+    pub name: String,
+    pub ty: Type,
+    pub lifetime: Option<String>,
+}
+impl RowField {
+    pub(crate) fn new(name: String, ty: Type, lifetime: Option<String>) -> Self {
+        Self { name, ty, lifetime }
+    }
+    pub(crate) fn unlabelled(name: String, ty: Type) -> Self {
+        Self {
+            name,
+            ty,
+            lifetime: None,
+        }
+    }
+}
+/// A row label that names no caller identity at this occurrence: an inferred
+/// record identity, a freshened argument placeholder, or an elided label. It
+/// may acquire a concrete annotation only through the ordinary checked
+/// coercion, which retains the value's actual origins.
+pub(crate) fn is_opaque_row_label(label: &str) -> bool {
+    label.is_empty() || label == "_" || label.starts_with('<')
+}
 /// One empty variant is represented by an invalid one-word payload value.
 /// The populated variant retains the payload's ordinary representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -454,9 +486,10 @@ pub(crate) struct Types<'a> {
     pub function_types: Vec<FunctionType>,
     cache: BTreeMap<LayoutKey, usize>,
     union_cache: BTreeMap<Vec<Type>, usize>,
-    /// Canonical structural record rows. Fields are sorted by name, so the key
-    /// is both the interning identity and the runtime storage order.
-    structural_cache: BTreeMap<Vec<(String, Type)>, usize>,
+    /// Canonical structural record rows. The complete field descriptors,
+    /// including the erased outer borrow label, are sorted by name; the key is
+    /// both the interning identity and the runtime storage order.
+    structural_cache: BTreeMap<Vec<RowField>, usize>,
     function_cache: BTreeMap<FunctionKey, usize>,
     active: BTreeSet<BindingId>,
     /// Trait objects by `(trait, trait arguments)`. A trait with a finite
@@ -899,11 +932,26 @@ impl<'a> Types<'a> {
         });
         Ok(Type::Enum(id))
     }
-    /// Intern an anonymous structural record row. Fields are sorted by name:
-    /// this is the canonical row representation used for layout, equality, and
-    /// field coercion. Duplicate names are rejected, so the ordering is total.
-    pub fn structural(&mut self, mut fields: Vec<(String, Type)>, span: Span) -> Result<Type> {
-        fields.sort_by(|left, right| left.0.cmp(&right.0));
+    /// Intern an anonymous structural record row without outer borrow labels.
+    /// Literals and other paths whose provenance is not a declared annotation
+    /// use this form; the metadata-preserving entry point is
+    /// [`Self::structural_fields`].
+    pub fn structural(&mut self, fields: Vec<(String, Type)>, span: Span) -> Result<Type> {
+        self.structural_fields(
+            fields
+                .into_iter()
+                .map(|(name, ty)| RowField::unlabelled(name, ty))
+                .collect(),
+            span,
+        )
+    }
+    /// Intern an anonymous structural record row. Complete field descriptors
+    /// are sorted by name: this is the canonical row representation used for
+    /// layout, equality, field coercion, and checker-only borrow metadata.
+    /// Duplicate names are rejected, so the ordering is total. Rows that differ
+    /// only in an erased borrow label remain distinct checker types.
+    pub fn structural_fields(&mut self, mut fields: Vec<RowField>, span: Span) -> Result<Type> {
+        fields.sort_by(|left, right| left.name.cmp(&right.name));
         if fields.len() > 64 {
             return Err(Diagnostic::new(
                 span,
@@ -911,14 +959,16 @@ impl<'a> Types<'a> {
             ));
         }
         for pair in fields.windows(2) {
-            if pair[0].0 == pair[1].0 {
+            if pair[0].name == pair[1].name {
                 return Err(Diagnostic::new(
                     span,
-                    format!("duplicate structural record field '{}'", pair[0].0),
+                    format!("duplicate structural record field '{}'", pair[0].name),
                 ));
             }
         }
-        for (name, ty) in &fields {
+        for field in &fields {
+            let name = &field.name;
+            let ty = &field.ty;
             if *ty == Type::Never {
                 return Err(Diagnostic::new(
                     span,
@@ -940,7 +990,10 @@ impl<'a> Types<'a> {
                 ));
             }
         }
-        let words = 1 + fields.iter().map(|(_, ty)| self.width(*ty)).sum::<usize>();
+        let words = 1 + fields
+            .iter()
+            .map(|field| self.width(field.ty))
+            .sum::<usize>();
         if words > MAX_WORDS {
             return Err(Diagnostic::new(
                 span,
@@ -956,34 +1009,36 @@ impl<'a> Types<'a> {
                 "structural record layout budget exhausted (256)",
             ));
         }
-        let borrowed = fields.iter().any(|(_, ty)| has_borrow(self, *ty));
-        let mutable_borrow = fields.iter().any(|(_, ty)| has_mutable_borrow(self, *ty));
-        let linear = fields.iter().any(|(_, ty)| contains_linear(self, *ty));
+        let borrowed = fields.iter().any(|field| has_borrow(self, field.ty));
+        let mutable_borrow = fields
+            .iter()
+            .any(|field| has_mutable_borrow(self, field.ty));
+        let linear = fields.iter().any(|field| contains_linear(self, field.ty));
         let id = self.enums.len();
         let name = format!(
             "struct {{ {} }}",
             fields
                 .iter()
-                .map(|(name, ty)| format!("{name}: {}", self.name(*ty)))
+                .map(|field| format!("{}: {}", field.name, self.name(field.ty)))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
         self.enums.push(Enum {
             definition: usize::MAX,
             name,
-            arguments: fields.iter().map(|(_, ty)| *ty).collect(),
+            arguments: fields.iter().map(|field| field.ty).collect(),
             consts: vec![],
             lifetimes: vec![],
             variants: vec![Variant {
                 name: "Struct".into(),
-                fields: fields.iter().map(|(_, ty)| *ty).collect(),
+                fields: fields.iter().map(|field| field.ty).collect(),
                 tuple: false,
-                names: fields.iter().map(|(name, _)| name.clone()).collect(),
+                names: fields.iter().map(|field| field.name.clone()).collect(),
             }],
             words,
             result: None,
             record: true,
-            field_lifetimes: vec![None; fields.len()],
+            field_lifetimes: fields.iter().map(|field| field.lifetime.clone()).collect(),
             borrowed,
             mutable_borrow,
             linear,
@@ -1311,7 +1366,21 @@ impl<'a> Types<'a> {
         span: Span,
     ) -> Result<Type> {
         match ty {
-            Type::Enum(id) if self.enums[id].structural => Ok(ty),
+            Type::Enum(id) if self.enums[id].structural => {
+                let mut fields = self.structural_row_fields(ty).expect("structural row");
+                for field in &mut fields {
+                    field.ty = self.freshen_borrows_with(field.ty, binders, map, span)?;
+                    if field
+                        .lifetime
+                        .as_ref()
+                        .is_some_and(|label| binders.contains(label))
+                    {
+                        // The argument supplies this occurrence's identity.
+                        field.lifetime = None;
+                    }
+                }
+                self.structural_fields(fields, span)
+            }
             Type::Enum(id) if self.enums[id].record && self.enums[id].borrowed => {
                 let definition = self.enums[id].definition;
                 let consts = self.enums[id].consts.clone();
@@ -1482,6 +1551,16 @@ impl<'a> Types<'a> {
             return Ok(ty);
         }
         match ty {
+            Type::Enum(id) if self.enums[id].structural => {
+                let mut fields = self.structural_row_fields(ty).expect("structural row");
+                for field in &mut fields {
+                    field.ty = self.relabel_lifetimes(field.ty, map, span)?;
+                    if let Some(label) = &field.lifetime {
+                        field.lifetime = Some(map.get(label).unwrap_or(label).clone());
+                    }
+                }
+                self.structural_fields(fields, span)
+            }
             Type::Enum(id) => {
                 let definition = self.enums[id].definition;
                 let consts = self.enums[id].consts.clone();
@@ -2016,10 +2095,26 @@ impl<'a> Types<'a> {
                         "a structural record field cannot carry a usage grade; grade the record value or binding instead",
                     ));
                 }
-                lowered.push((
-                    field.name.clone(),
-                    self.lower(inner, substitution, depth + 1)?,
-                ));
+                let field_ty = self.lower(inner, substitution, depth + 1)?;
+                // A direct `&'a [T]`/`&'a mut [T]`/`&'a str` field erases its
+                // outer label from the runtime type. Keep it in the canonical
+                // descriptor so a structurally identical row with `'b` stays a
+                // distinct checker type. Elided labels remain unknown rather
+                // than becoming an invented equality.
+                let lifetime = match &inner.kind {
+                    ast::TypeKind::Borrow {
+                        lifetime: Some(name),
+                        ..
+                    } if field_ty.is_view() => Some(
+                        substitution
+                            .lifetimes
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| name.clone()),
+                    ),
+                    _ => None,
+                };
+                lowered.push(RowField::new(field.name.clone(), field_ty, lifetime));
             }
             if let Some(row) = row {
                 let Some(binder) = self.resolution.reference(row.span) else {
@@ -2037,7 +2132,7 @@ impl<'a> Types<'a> {
                         ),
                     ));
                 };
-                let Some(row_fields) = self.structural_row(row_ty) else {
+                let Some(row_fields) = self.structural_row_fields(row_ty) else {
                     return Err(Diagnostic::new(
                         row.span,
                         format!(
@@ -2047,20 +2142,20 @@ impl<'a> Types<'a> {
                         ),
                     ));
                 };
-                for (name, field_ty) in row_fields {
-                    if lowered.iter().any(|(existing, _)| *existing == name) {
+                for field in row_fields {
+                    if lowered.iter().any(|existing| existing.name == field.name) {
                         return Err(Diagnostic::new(
                             row.span,
                             format!(
-                                "row variable '{}' repeats structural field '{name}'; explicit fields and the row tail must be disjoint",
-                                self.resolution.bindings[binder].name
+                                "row variable '{}' repeats structural field '{}'; explicit fields and the row tail must be disjoint",
+                                self.resolution.bindings[binder].name, field.name
                             ),
                         ));
                     }
-                    lowered.push((name, field_ty));
+                    lowered.push(field);
                 }
             }
-            return self.structural(lowered, ty.span);
+            return self.structural_fields(lowered, ty.span);
         }
         if let ast::TypeKind::Function {
             lifetimes,
@@ -3432,7 +3527,12 @@ impl<'a> Types<'a> {
         let target_enum = &self.enums[target];
         let source_variant = &source_enum.variants[0];
         let target_variant = &target_enum.variants[0];
-        for (target_name, target_ty) in target_variant.names.iter().zip(&target_variant.fields) {
+        for (target_index, (target_name, target_ty)) in target_variant
+            .names
+            .iter()
+            .zip(&target_variant.fields)
+            .enumerate()
+        {
             let Some(index) = source_variant
                 .names
                 .iter()
@@ -3445,8 +3545,25 @@ impl<'a> Types<'a> {
                 return false;
             }
             if has_borrow(self, *target_ty) || has_mutable_borrow(self, *target_ty) {
-                // Borrowed leaves are invariant under structural subtyping.
+                // Borrowed leaves are invariant under structural subtyping:
+                // no relabeling, reborrow, or mutability change. A concrete
+                // source label must survive exactly. A source without a
+                // declared annotation (for example a structural literal) may
+                // acquire the target's label only through the ordinary checked
+                // coercion, which retains the value's actual origins.
                 if source_ty != *target_ty {
+                    return false;
+                }
+                let source_label = source_enum.field_lifetimes.get(index).cloned().flatten();
+                let target_label = target_enum
+                    .field_lifetimes
+                    .get(target_index)
+                    .cloned()
+                    .flatten();
+                if let (Some(source_label), Some(target_label)) = (source_label, target_label)
+                    && !is_opaque_row_label(&source_label)
+                    && source_label != target_label
+                {
                     return false;
                 }
             }
@@ -3463,18 +3580,47 @@ impl<'a> Types<'a> {
         }
         true
     }
-    /// The canonical `(name, type)` row of a structural record layout.
+    /// The canonical `(name, type)` row of a structural record layout, without
+    /// checker metadata. Use [`Self::structural_row_fields`] wherever erased
+    /// borrow labels must survive.
     pub fn structural_row(&self, ty: Type) -> Option<Vec<(String, Type)>> {
-        let id = ty.layout().filter(|id| self.enums[*id].structural)?;
-        let variant = &self.enums[id].variants[0];
         Some(
-            variant
-                .names
-                .iter()
-                .cloned()
-                .zip(variant.fields.iter().copied())
+            self.structural_row_fields(ty)?
+                .into_iter()
+                .map(|field| (field.name, field.ty))
                 .collect(),
         )
+    }
+    /// The canonical complete row of a structural record layout, including the
+    /// outer borrow label erased from each field's runtime type.
+    pub fn structural_row_fields(&self, ty: Type) -> Option<Vec<RowField>> {
+        let id = ty.layout().filter(|id| self.enums[*id].structural)?;
+        Some(self.row_fields(id))
+    }
+    /// The complete instantiated field row of any record layout (nominal or
+    /// structural). A row variable projects its residual from this view so
+    /// declared field labels travel with the fields.
+    pub fn record_row_fields(&self, ty: Type) -> Option<Vec<RowField>> {
+        let id = ty.layout().filter(|id| self.enums[*id].record)?;
+        Some(self.row_fields(id))
+    }
+    fn row_fields(&self, id: usize) -> Vec<RowField> {
+        let layout = &self.enums[id];
+        let variant = &layout.variants[0];
+        variant
+            .names
+            .iter()
+            .cloned()
+            .zip(variant.fields.iter().copied())
+            .enumerate()
+            .map(|(index, (name, ty))| {
+                RowField::new(
+                    name,
+                    ty,
+                    layout.field_lifetimes.get(index).cloned().flatten(),
+                )
+            })
+            .collect()
     }
     /// Whether two types have the same runtime word layout despite differing
     /// only in erased record lifetime labels.
@@ -5293,6 +5439,9 @@ fn collect_borrow_lifetimes(types: &Types<'_>, ty: Type, out: &mut BTreeSet<Stri
             Type::Enum(id) | Type::Variants(id, _) => {
                 let layout = &types.enums[id];
                 out.extend(layout.lifetimes.iter().cloned());
+                if layout.structural {
+                    out.extend(layout.field_lifetimes.iter().flatten().cloned());
+                }
                 for argument in &layout.arguments {
                     go(types, *argument, out, seen);
                 }
@@ -5402,6 +5551,57 @@ pub(crate) fn contains_task_exit_borrow(types: &Types<'_>, ty: Type) -> bool {
                 .copied()
                 .chain(std::iter::once(types.function_types[id].result))
                 .any(|part| go(types, part, seen)),
+            _ => false,
+        }
+    }
+    go(types, ty, &mut BTreeSet::new())
+}
+
+/// Whether any reachable borrowed leaf sits inside an anonymous structural
+/// row. Borrowed structural results remain an explicit boundary: unlike a
+/// nominal record they declare no field lifetimes that could be related to a
+/// caller's outlives bounds, even when a row specialization happens to carry a
+/// concrete label. Retained borrowed fields stay exact and readable through a
+/// row parameter, but a borrowed structural value may not be returned.
+pub(crate) fn contains_borrowed_structural(types: &Types<'_>, ty: Type) -> bool {
+    fn go(types: &Types<'_>, ty: Type, seen: &mut BTreeSet<Type>) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        match ty {
+            Type::Enum(id) | Type::Variants(id, _) => {
+                let layout = &types.enums[id];
+                if layout.structural {
+                    return layout.borrowed;
+                }
+                if layout.record || layout.name == "TaskExit" {
+                    return layout
+                        .variants
+                        .iter()
+                        .flat_map(|variant| variant.fields.iter())
+                        .any(|field| go(types, *field, seen));
+                }
+                layout
+                    .arguments
+                    .iter()
+                    .chain(
+                        layout
+                            .variants
+                            .iter()
+                            .flat_map(|variant| variant.fields.iter()),
+                    )
+                    .any(|field| go(types, *field, seen))
+            }
+            Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p)
+            | Type::Task(p) => go(types, types.pointees[p], seen),
+            Type::Union(id) => types.unions[id]
+                .members
+                .iter()
+                .any(|member| go(types, *member, seen)),
             _ => false,
         }
     }

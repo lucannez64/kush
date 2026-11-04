@@ -1515,6 +1515,8 @@ pub(crate) enum Pattern {
 }
 #[derive(Clone)]
 struct Signature {
+    /// Call-only types scope declared labels before caller rows are expanded.
+    call_contract: Option<CallLifetimeContract>,
     binding: BindingId,
     name: String,
     /// Runtime parameter types, in order. Erased parameters are absent.
@@ -1549,7 +1551,25 @@ struct Signature {
     /// instance's specialization. `Self::NAME` resolves here.
     associated_consts: BTreeMap<String, ConstValue>,
 }
+#[derive(Clone)]
+struct CallLifetimeContract {
+    parameters: Vec<Type>,
+    result: Type,
+    binders: BTreeSet<String>,
+    names: BTreeMap<String, String>,
+    bounds: BTreeSet<(String, String)>,
+}
 impl Signature {
+    fn scope_call_lifetimes(&mut self) -> (BTreeSet<String>, BTreeMap<String, String>) {
+        let Some(contract) = self.call_contract.take() else {
+            return (BTreeSet::new(), BTreeMap::new());
+        };
+        self.parameters = contract.parameters;
+        self.result = contract.result;
+        self.lifetime_bounds = contract.bounds;
+        (contract.binders, contract.names)
+    }
+
     /// Whether logical runtime parameter `index` is physically erased by a
     /// grade-zero contract.
     fn parameter_erased(&self, index: usize) -> bool {
@@ -7382,15 +7402,16 @@ fn match_type_pattern(
             // Structural impl headers match an anonymous structural row.
             // Nominal records are deliberately not matched here: they keep
             // their own identity, so a structural impl cannot silently overlap
-            // a nominal impl. A `..r` tail binds the residual canonical row.
-            let Some(row_fields) = types.structural_row(actual) else {
+            // a nominal impl. A `..r` tail binds the residual canonical row,
+            // complete with each field's erased borrow label.
+            let Some(row_fields) = types.structural_row_fields(actual) else {
                 return Ok(false);
             };
             if row.is_none() && row_fields.len() != fields.len() {
                 return Ok(false);
             }
             for field in fields {
-                let Some((_, actual_ty)) = row_fields.iter().find(|(name, _)| name == &field.name)
+                let Some(actual_field) = row_fields.iter().find(|actual| actual.name == field.name)
                 else {
                     return Ok(false);
                 };
@@ -7398,7 +7419,7 @@ fn match_type_pattern(
                     resolution,
                     types,
                     &field.ty,
-                    *actual_ty,
+                    actual_field.ty,
                     bindings,
                     depth + 1,
                 )? {
@@ -7414,13 +7435,12 @@ fn match_type_pattern(
                     .map(|field| field.name.as_str())
                     .collect::<BTreeSet<_>>();
                 let residual = row_fields
-                    .iter()
-                    .filter(|(name, _)| !declared.contains(name.as_str()))
-                    .cloned()
+                    .into_iter()
+                    .filter(|field| !declared.contains(field.name.as_str()))
                     .collect::<Vec<_>>();
-                let residual = types.structural(residual, row.span)?;
+                let residual = types.structural_fields(residual, row.span)?;
                 if let Some(bound) = bindings.types.get(&binder).copied() {
-                    if types.structural_row(bound) != types.structural_row(residual) {
+                    if types.structural_row_fields(bound) != types.structural_row_fields(residual) {
                         return Ok(false);
                     }
                 } else {
@@ -9779,6 +9799,17 @@ impl<'a> Functions<'a> {
             }
             lifetime_bounds = close_lifetime_bounds(lifetime_bounds);
         }
+        // Structural rows now carry concrete labels through `..r`
+        // specializations, but a borrowed structural result is still an
+        // explicit boundary: the row itself declares no lifetime parameters
+        // that could be related to the caller's outlives bounds. The next
+        // node (LT-STRUCT-RESULT) owns relaxing this gate.
+        if crate::runtime_types::contains_borrowed_structural(types, result) {
+            return Err(Diagnostic::new(
+                f.result.span,
+                "a returned record cannot carry a borrowed field without a declared lifetime; anonymous 'struct { ... }' rows have none, so return a nominal record with declared field lifetimes instead",
+            ));
+        }
         if result.is_view() {
             let Some(lifetime) = &result_lifetime else {
                 return Err(Diagnostic::new(
@@ -10072,8 +10103,49 @@ impl<'a> Functions<'a> {
         let default_trait = declared
             .default_specialization
             .map(|index| self.default_specializations[index].clone());
+        // Rename only labels written in the callee declaration. Substituted
+        // type arguments (including residual rows) already belong to the caller
+        // and must never be captured by a same-spelled callee binder.
+        let call_contract = if f.lifetimes.is_empty() {
+            None
+        } else {
+            let mut scoped = substitution.clone();
+            let mut binders = BTreeSet::new();
+            let mut names = BTreeMap::new();
+            for lifetime in &f.lifetimes {
+                let identity = types.fresh_lifetime(&format!("callee '{}", lifetime.name));
+                scoped
+                    .lifetimes
+                    .insert(lifetime.name.clone(), identity.clone());
+                binders.insert(identity.clone());
+                names.insert(identity, lifetime.name.clone());
+            }
+            let rename = |name: &String| {
+                scoped
+                    .lifetimes
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone())
+            };
+            Some(CallLifetimeContract {
+                parameters: f
+                    .parameters
+                    .iter()
+                    .filter(|p| !p.erased)
+                    .map(|p| types.ty_in(split_grade(&p.ty).0, &scoped))
+                    .collect::<Result<Vec<_>>>()?,
+                result: types.ty_in(&result_ty, &scoped)?,
+                binders,
+                names,
+                bounds: lifetime_bounds
+                    .iter()
+                    .map(|(a, b)| (rename(a), rename(b)))
+                    .collect(),
+            })
+        };
         let index = self.signatures.len();
         self.signatures.push(Signature {
+            call_contract,
             binding,
             origin: origin
                 .filter(|_| specialized)
@@ -14239,6 +14311,7 @@ impl Checker<'_, '_> {
             declared_lifetimes: BTreeSet::new(),
         };
         let signature = Signature {
+            call_contract: None,
             binding: usize::MAX,
             name: function.name.clone(),
             parameters,
@@ -14385,7 +14458,8 @@ impl Checker<'_, '_> {
             impl_arguments,
             Some(span),
         )?;
-        let signature = self.functions.signatures[index].clone();
+        let mut signature = self.functions.signatures[index].clone();
+        let (lifetime_binders, lifetime_names) = signature.scope_call_lifetimes();
         self.require(signature.effects, span)?;
         let mut signature_types = signature.parameters.iter();
         let parameter_types = f
@@ -14477,22 +14551,32 @@ impl Checker<'_, '_> {
             }
         }
         diverges |= values.iter().any(|value| value.ty == Type::Never);
-        let ty = if diverges {
-            Type::Never
+        // One occurrence map serves both argument invariance and the result,
+        // including any fresh identities for unresolved lexical borrows.
+        let lifetime_map = if diverges {
+            BTreeMap::new()
         } else {
-            self.instantiated_call_result_type(
+            self.resolve_call_lifetimes(
                 &lifetime_binders,
                 &signature.parameters,
-                signature.result,
-                signature.result_grade,
-                &signature.lifetime_bounds,
                 &values,
+                &signature.lifetime_bounds,
+                &lifetime_names,
                 span,
             )?
         };
+        let ty = if diverges {
+            Type::Never
+        } else if crate::runtime_types::grade_erases(signature.result_grade) {
+            Type::Unit
+        } else {
+            self.types
+                .relabel_lifetimes(signature.result, &lifetime_map, span)?
+        };
         let mut coerced = Vec::with_capacity(values.len());
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
-            coerced.push(self.coerce_argument(value, *ty, span)?);
+            let ty = self.types.relabel_lifetimes(*ty, &lifetime_map, span)?;
+            coerced.push(self.coerce_argument(value, ty, span)?);
         }
         self.apply_effect_writes(signature.effects);
         let value = Expr {
@@ -15802,6 +15886,34 @@ impl Checker<'_, '_> {
         {
             return Ok(());
         }
+        if let Some(fields) = self.types.structural_row_fields(callee)
+            && let Some(actual_fields) = self.types.record_row_fields(actual)
+        {
+            for field in fields {
+                if let Some(actual) = actual_fields
+                    .iter()
+                    .find(|actual| actual.name == field.name)
+                {
+                    let position = position.compose(crate::variance::SignSet::INVARIANT);
+                    self.record_call_lifetime_occurrence(
+                        field.lifetime.as_deref(),
+                        actual.lifetime.as_deref(),
+                        position,
+                        binders,
+                        occurrences,
+                    );
+                    self.collect_call_lifetime_occurrences(
+                        field.ty,
+                        actual.ty,
+                        position,
+                        binders,
+                        occurrences,
+                        depth + 1,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
         match (callee, actual) {
             (
                 Type::Annotated(callee_pointee, callee_label),
@@ -16012,17 +16124,20 @@ impl Checker<'_, '_> {
     /// with no parameter occurrence keeps a distinct opaque identity so an
     /// unresolved callee label can never masquerade as a caller binder with the
     /// same printed name.
+    #[allow(clippy::too_many_arguments)]
     fn resolve_call_lifetimes(
         &mut self,
         binders: &BTreeSet<String>,
         parameters: &[Type],
         values: &[Expr],
         bounds: &BTreeSet<(String, String)>,
+        binder_names: &BTreeMap<String, String>,
         span: Span,
     ) -> Result<BTreeMap<String, String>> {
         let mut occurrences = self.call_lifetime_occurrences(parameters, values, binders)?;
         let mut map = BTreeMap::new();
         for binder in binders {
+            let binder_name = binder_names.get(binder).unwrap_or(binder);
             let occurrences = occurrences.remove(binder).unwrap_or_default();
             let actuals = occurrences
                 .iter()
@@ -16079,7 +16194,7 @@ impl Checker<'_, '_> {
                 return Err(Diagnostic::new(
                     span,
                     format!(
-                        "this call cannot prove the invariant lifetime '{binder}': one occurrence supplies an inferred/elided identity while another supplies a named lifetime"
+                        "this call cannot prove the invariant lifetime '{binder_name}': one occurrence supplies an inferred/elided identity while another supplies a named lifetime"
                     ),
                 ));
             }
@@ -16098,7 +16213,7 @@ impl Checker<'_, '_> {
                     return Err(Diagnostic::new(
                         span,
                         format!(
-                            "this call instantiates lifetime '{binder}' invariantly from several argument lifetimes ({names}); an invariant occurrence requires one actual lifetime identity"
+                            "this call instantiates lifetime '{binder_name}' invariantly from several argument lifetimes ({names}); an invariant occurrence requires one actual lifetime identity"
                         ),
                     ));
                 }
@@ -16113,7 +16228,7 @@ impl Checker<'_, '_> {
                                 return Err(Diagnostic::new(
                                     span,
                                     format!(
-                                        "this call cannot use lifetime '{}' where '{binder}' is invariant '{}': no established outlives edge proves '{}: '{}",
+                                        "this call cannot use lifetime '{}' where '{binder_name}' is invariant '{}': no established outlives edge proves '{}: '{}",
                                         occurrence.actual, candidate, occurrence.actual, candidate
                                     ),
                                 ));
@@ -16124,7 +16239,7 @@ impl Checker<'_, '_> {
                                 return Err(Diagnostic::new(
                                     span,
                                     format!(
-                                        "this call cannot use lifetime '{}' where '{binder}' is invariant '{}': no established outlives edge proves '{}: '{}",
+                                        "this call cannot use lifetime '{}' where '{binder_name}' is invariant '{}': no established outlives edge proves '{}: '{}",
                                         occurrence.actual, candidate, candidate, occurrence.actual
                                     ),
                                 ));
@@ -16135,7 +16250,7 @@ impl Checker<'_, '_> {
                                 return Err(Diagnostic::new(
                                     span,
                                     format!(
-                                        "this call instantiates lifetime '{binder}' invariantly from both '{}' and '{}'; an invariant occurrence requires one actual lifetime identity",
+                                        "this call instantiates lifetime '{binder_name}' invariantly from both '{}' and '{}'; an invariant occurrence requires one actual lifetime identity",
                                         occurrence.actual, candidate
                                     ),
                                 ));
@@ -16180,7 +16295,7 @@ impl Checker<'_, '_> {
                         return Err(Diagnostic::new(
                             span,
                             format!(
-                                "cannot choose one actual lifetime for callee lifetime '{binder}' from covariant argument occurrences ({names}); no candidate satisfies every required outlives edge"
+                                "cannot choose one actual lifetime for callee lifetime '{binder_name}' from covariant argument occurrences ({names}); no candidate satisfies every required outlives edge"
                             ),
                         ));
                     }
@@ -16202,7 +16317,7 @@ impl Checker<'_, '_> {
                                 return Err(Diagnostic::new(
                                     span,
                                     format!(
-                                        "cannot choose one actual lifetime for callee lifetime '{binder}': the covariant argument lifetimes {names} are incomparable, so no checked common identity exists"
+                                        "cannot choose one actual lifetime for callee lifetime '{binder_name}': the covariant argument lifetimes {names} are incomparable, so no checked common identity exists"
                                     ),
                                 ));
                             }
@@ -16256,7 +16371,14 @@ impl Checker<'_, '_> {
         if crate::runtime_types::grade_erases(result_grade) {
             return Ok(Type::Unit);
         }
-        let map = self.resolve_call_lifetimes(binders, parameters, values, bounds, span)?;
+        let map = self.resolve_call_lifetimes(
+            binders,
+            parameters,
+            values,
+            bounds,
+            &BTreeMap::new(),
+            span,
+        )?;
         self.types.relabel_lifetimes(result, &map, span)
     }
     /// Insert the deterministic runtime conversion needed to use `value` as
@@ -16422,7 +16544,36 @@ impl Checker<'_, '_> {
     /// supported fragment copies fields that already have the target
     /// representation, while width/order changes still require a real
     /// conversion. This is a deliberate limit, not a silent relabeling.
+    fn retained_struct_labels(
+        &mut self,
+        source: Type,
+        expected: Type,
+        rename: Option<&BTreeMap<String, String>>,
+        span: Span,
+    ) -> Result<Type> {
+        let mut fields = self
+            .types
+            .structural_row_fields(expected)
+            .expect("structural target");
+        if let Some(source_fields) = self.types.record_row_fields(source) {
+            for field in &mut fields {
+                let name = rename
+                    .and_then(|map| map.get(&field.name))
+                    .unwrap_or(&field.name);
+                if let Some(source) = source_fields.iter().find(|source| &source.name == name) {
+                    if field.lifetime.is_none() {
+                        field.lifetime = source.lifetime.clone();
+                    }
+                    if self.types.is_structural(field.ty) && source.ty.layout().is_some() {
+                        field.ty = self.retained_struct_labels(source.ty, field.ty, None, span)?;
+                    }
+                }
+            }
+        }
+        self.types.structural_fields(fields, span)
+    }
     fn coerce_struct(&mut self, value: Expr, expected: Type, span: Span) -> Result<Expr> {
+        let expected = self.retained_struct_labels(value.ty, expected, None, span)?;
         let coercion = self.struct_coercion(value.ty, expected, span, 0)?;
         Ok(Expr {
             kind: ExprKind::Coerce {
@@ -16498,6 +16649,7 @@ impl Checker<'_, '_> {
         let target_ty = self.ty(&cleaned)?;
         let value = self.expr(value_ast)?;
         let rename = (!mapping.is_empty()).then_some(&mapping);
+        let target_ty = self.retained_struct_labels(value.ty, target_ty, rename, span)?;
         let coercion = self.struct_coercion_mapped(value.ty, target_ty, rename, span, 0)?;
         Ok(Expr {
             kind: ExprKind::Coerce {
@@ -16604,18 +16756,40 @@ impl Checker<'_, '_> {
                     ),
                 ));
             }
-            if (crate::runtime_types::has_borrow(self.types, *target_ty)
-                || crate::runtime_types::has_mutable_borrow(self.types, *target_ty))
-                && source_ty != *target_ty
+            if crate::runtime_types::has_borrow(self.types, *target_ty)
+                || crate::runtime_types::has_mutable_borrow(self.types, *target_ty)
             {
-                return Err(Diagnostic::new(
-                    span,
-                    format!(
-                        "cannot convert field '{source_name}' from {} to {}: borrowed leaves are invariant under structural conversion",
-                        self.types.name(source_ty),
-                        self.types.name(*target_ty)
-                    ),
-                ));
+                if source_ty != *target_ty {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "cannot convert field '{source_name}' from {} to {}: borrowed leaves are invariant under structural conversion",
+                            self.types.name(source_ty),
+                            self.types.name(*target_ty)
+                        ),
+                    ));
+                }
+                let source_label = self.types.enums[source_layout]
+                    .field_lifetimes
+                    .get(source_index)
+                    .cloned()
+                    .flatten();
+                let target_label = self.types.enums[expected.layout().expect("structural target")]
+                    .field_lifetimes
+                    .get(target_index)
+                    .cloned()
+                    .flatten();
+                if let (Some(source_label), Some(target_label)) = (source_label, target_label)
+                    && !crate::runtime_types::is_opaque_row_label(&source_label)
+                    && source_label != target_label
+                {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "cannot convert field '{source_name}' from a '{source_label}' borrow to an '{target_label}' borrow: borrowed leaves are invariant under structural conversion"
+                        ),
+                    ));
+                }
             }
             let nested = self.nested_field_coercion(source_ty, *target_ty, span, depth + 1)?;
             kept.push((target_index, source_index, nested));
@@ -17005,6 +17179,7 @@ impl Checker<'_, '_> {
             declared_lifetimes: BTreeSet::new(),
         };
         let synthetic = Signature {
+            call_contract: None,
             associated_consts: BTreeMap::new(),
             binding: usize::MAX,
             name: name.to_owned(),
@@ -18479,6 +18654,7 @@ impl Checker<'_, '_> {
                     }
                     diverges = value.ty == Type::Never;
                     let ty = match annotation {
+                        Some(ty) if self.types.is_structural(ty) => value.ty,
                         Some(ty) => ty,
                         // Mutable locals keep the declared enum, not one variant.
                         None if *mutable => self.types.full(value.ty, pattern.span)?,
@@ -22003,6 +22179,7 @@ impl Checker<'_, '_> {
         grades.extend(parameter_grades.iter().copied());
         let name = if once { "once lambda" } else { "lambda" };
         let signature = Signature {
+            call_contract: None,
             binding: usize::MAX,
             name: name.to_owned(),
             parameters,
@@ -25091,6 +25268,9 @@ impl Checker<'_, '_> {
                     // declared row does not mention. It is monomorphized per
                     // concrete residual row, so the binding is a structural
                     // record type whose canonical row is exactly the residual.
+                    // The complete descriptors carry each field's erased borrow
+                    // label, keeping call sites with distinct labels in
+                    // separate specializations.
                     if let Some(row) = row {
                         let Some(binder) = self.resolution.reference(row.span) else {
                             return Err(Diagnostic::new(
@@ -25103,18 +25283,18 @@ impl Checker<'_, '_> {
                                 .iter()
                                 .map(|field| field.name.as_str())
                                 .collect::<BTreeSet<_>>();
-                            let residual = variant
-                                .names
-                                .iter()
-                                .cloned()
-                                .zip(variant.fields.iter().copied())
-                                .filter(|(name, _)| !declared.contains(name.as_str()))
+                            let residual = self
+                                .types
+                                .record_row_fields(Type::Enum(layout))
+                                .expect("a checked record has a canonical row")
+                                .into_iter()
+                                .filter(|field| !declared.contains(field.name.as_str()))
                                 .collect::<Vec<_>>();
-                            let residual = self.types.structural(residual, span)?;
+                            let residual = self.types.structural_fields(residual, span)?;
                             match subst.types.get(&binder).copied() {
                                 Some(bound) => {
-                                    if self.types.structural_row(bound)
-                                        != self.types.structural_row(residual)
+                                    if self.types.structural_row_fields(bound)
+                                        != self.types.structural_row_fields(residual)
                                     {
                                         return Err(Diagnostic::new(
                                             span,
@@ -26487,25 +26667,36 @@ impl Checker<'_, '_> {
             None,
             Some(span),
         )?;
-        let signature = self.functions.signatures[index].clone();
+        let mut signature = self.functions.signatures[index].clone();
+        let (lifetime_binders, lifetime_names) = signature.scope_call_lifetimes();
         self.require(signature.effects, span)?;
         let diverges = values.iter().any(|value| value.ty == Type::Never);
-        let ty = if diverges {
-            Type::Never
+        // One occurrence map serves both argument invariance and the result,
+        // including any fresh identities for unresolved lexical borrows.
+        let lifetime_map = if diverges {
+            BTreeMap::new()
         } else {
-            self.instantiated_call_result_type(
+            self.resolve_call_lifetimes(
                 &lifetime_binders,
                 &signature.parameters,
-                signature.result,
-                signature.result_grade,
-                &signature.lifetime_bounds,
                 &values,
+                &signature.lifetime_bounds,
+                &lifetime_names,
                 span,
             )?
         };
+        let ty = if diverges {
+            Type::Never
+        } else if crate::runtime_types::grade_erases(signature.result_grade) {
+            Type::Unit
+        } else {
+            self.types
+                .relabel_lifetimes(signature.result, &lifetime_map, span)?
+        };
         let mut coerced = Vec::with_capacity(values.len());
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
-            coerced.push(self.coerce_argument(value, *ty, span)?);
+            let ty = self.types.relabel_lifetimes(*ty, &lifetime_map, span)?;
+            coerced.push(self.coerce_argument(value, ty, span)?);
         }
         let values = coerced;
         // Runtime parameter types aligned with the source parameter list. Erased
