@@ -16654,6 +16654,55 @@ impl Checker<'_, '_> {
         }
         self.types.structural_fields(fields, span)
     }
+    /// Whether a nested structural source may acquire the target row's labels
+    /// through an ordinary checked conversion. Direct borrowed fields already
+    /// allow an unlabelled source to take the annotation; nested rows need the
+    /// same per-leaf rule instead of comparing the interned row types for exact
+    /// identity. A named source label still has to match the target exactly, so
+    /// this never relabels one concrete caller lifetime as another.
+    fn structural_labels_acquirable(&self, source: Type, target: Type) -> bool {
+        let (Some(source_fields), Some(target_fields)) = (
+            self.types.structural_row_fields(source),
+            self.types.structural_row_fields(target),
+        ) else {
+            return false;
+        };
+        if source_fields.len() != target_fields.len() {
+            return false;
+        }
+        for target_field in &target_fields {
+            let Some(source_field) = source_fields
+                .iter()
+                .find(|source_field| source_field.name == target_field.name)
+            else {
+                return false;
+            };
+            match (
+                self.types.is_structural(source_field.ty),
+                self.types.is_structural(target_field.ty),
+            ) {
+                (true, true) => {
+                    if !self.structural_labels_acquirable(source_field.ty, target_field.ty) {
+                        return false;
+                    }
+                }
+                (false, false) => {
+                    if source_field.ty != target_field.ty {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+            if let (Some(source_label), Some(target_label)) =
+                (&source_field.lifetime, &target_field.lifetime)
+                && !crate::runtime_types::is_opaque_row_label(source_label)
+                && source_label != target_label
+            {
+                return false;
+            }
+        }
+        true
+    }
     fn coerce_struct(&mut self, value: Expr, expected: Type, span: Span) -> Result<Expr> {
         let expected = self.retained_struct_labels(value.ty, expected, None, span)?;
         let coercion = self.struct_coercion(value.ty, expected, span, 0)?;
@@ -16841,7 +16890,14 @@ impl Checker<'_, '_> {
             if crate::runtime_types::has_borrow(self.types, *target_ty)
                 || crate::runtime_types::has_mutable_borrow(self.types, *target_ty)
             {
-                if source_ty != *target_ty {
+                // Nested rows follow the same per-leaf rule as direct fields:
+                // an unlabelled source leaf may acquire the target annotation
+                // through this checked conversion, while every named source
+                // label must still match exactly.
+                let nested_acquisition = self.types.is_structural(source_ty)
+                    && self.types.is_structural(*target_ty)
+                    && self.structural_labels_acquirable(source_ty, *target_ty);
+                if source_ty != *target_ty && !nested_acquisition {
                     return Err(Diagnostic::new(
                         span,
                         format!(

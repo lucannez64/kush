@@ -245,7 +245,9 @@ Implemented in this fragment:
   leaf for each borrowed field, while a root slice/text/reference result keeps
   the empty path. A whole-record origin contributes to every declared borrowed
   field, and an unmapped result path is a checked diagnostic rather than an
-  empty origin set.
+  empty origin set. Anonymous structural results with borrowed fields use the
+  same per-field map; owned scalar fields are not summary paths, and a projected
+  field (`wrap(a).view`) keeps only that field's origin.
 - An unsupported result channel is stored in the solved summary, not discarded.
   Indirect calls, dynamic dispatch, loop/performed results, and tasks keep an
   `unknown` fact keyed by result path, so an unsupported owned field does not
@@ -301,9 +303,12 @@ Remaining limits, deliberately not claimed as complete:
   with an explicit-contract request (or must route through a direct checked
   function), and an acyclic caller of an explicit boundary cannot read the
   channel as empty provenance.
-- Per-field result summaries cover nominal borrowed records and their nested
-  borrowed fields. Owned reference containers (`Box<&T>`, `Vec<&T>`) keep their
-  existing declared-lifetime inference rather than becoming per-field records.
+- Per-field result summaries cover nominal borrowed records, anonymous
+  structural rows with written borrowed fields, and their nested borrowed
+  fields. A structural result whose borrowed leaves appear only through an
+  unexpanded `..r` row tail stays outside the declaration summary. Owned
+  reference containers (`Box<&T>`, `Vec<&T>`) keep their existing
+  declared-lifetime inference rather than becoming per-field records.
 - `R[f]` propagates explicit callee bounds and the `Vec.push`/`Box.set`
   container-write relation. A container write reached only through a builtin
   method on a non-parameter local, or a requirement that names a field path the
