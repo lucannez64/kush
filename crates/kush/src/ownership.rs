@@ -899,7 +899,9 @@ fn describe_lifetime(name: &str) -> String {
 }
 /// A caller-side lifetime for diagnostics, hiding internal labels.
 fn describe_actual(name: &str) -> String {
-    if name.starts_with('<') || name.starts_with('#') {
+    if name.starts_with("<local ") {
+        "a borrow of a local owner".to_owned()
+    } else if name.starts_with('<') || name.starts_with('#') {
         crate::runtime_types::lifetime_label_text(name)
     } else {
         format!("lifetime '{name}'")
