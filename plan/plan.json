@@ -557,9 +557,9 @@
       "deps": [
         "LT-REC-TESTS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Fixpoint over mutually recursive signatures; principal result documented.",
-      "commit": null,
+      "commit": "92335b1",
       "log": [
         {
           "time": "2026-11-03 16:06:27",
@@ -595,6 +595,11 @@
           "time": "2026-11-04 02:58:36",
           "who": "agent",
           "text": "Methods, per-field borrowed-record summaries and independent R[f] completed. Remaining: indirect/dynamic/builtin/effect/loop/task boundary inference and general container-write R beyond Vec.push/Box.set; independent soundness review open."
+        },
+        {
+          "time": "2026-11-04 03:47:39",
+          "who": "claude",
+          "text": "Recursive lifetime summaries across call-graph SCCs: direct calls and statically resolved methods, per-field record results, independent R[f] requirements. Indirect/dynamic/effect/loop/task channels remain documented explicit-contract boundaries."
         }
       ]
     },
@@ -1794,9 +1799,9 @@
         "LT-REC-FINALIZE",
         "LT-REC-DIAG"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Order independence, all-owner retention, mutable aliases, local escape, cache replay, budgets and native/reference parity; soundness review.",
-      "commit": null,
+      "commit": "92335b1",
       "log": [
         {
           "time": "2026-11-04 02:58:36",
@@ -1807,6 +1812,11 @@
           "time": "2026-11-04 03:15:29",
           "who": "claude",
           "text": "Merged 64acef9; full Boat gate 1257 tests, fmt, strict Clippy. Independent soundness review running."
+        },
+        {
+          "time": "2026-11-04 03:47:39",
+          "who": "claude",
+          "text": "Independent soundness review: no accepted unsound program. Fixed D1 non-convergent relays, D2 generic receiver resolution, D3 per-field identity relays, D4 inherent-method R[f]; narrowed branch-label exemption. Full Boat gate 1261 tests, fmt, strict Clippy."
         }
       ]
     },
