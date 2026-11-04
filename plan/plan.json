@@ -2298,14 +2298,24 @@
       "deps": [
         "LT-FOLLOWUP-DIAG"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "5ea126a",
       "log": [
         {
           "time": "2026-11-04 21:59:45",
           "who": "agent",
           "text": "delegated"
+        },
+        {
+          "time": "2026-11-04 22:16:05",
+          "who": "agent",
+          "text": "d5eb040 merged (fast-forward) + local-owner phrase kept; 1360 local tests; Boat gate pending with LETREC"
+        },
+        {
+          "time": "2026-11-04 22:31:03",
+          "who": "agent",
+          "text": "Boat gate 1364 at 0b99b61"
         }
       ]
     },
@@ -2317,14 +2327,19 @@
       "deps": [
         "LT-FOLLOWUP-PROJ"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "f65ffb3",
       "log": [
         {
           "time": "2026-11-04 21:59:45",
           "who": "agent",
           "text": "delegated"
+        },
+        {
+          "time": "2026-11-04 22:31:03",
+          "who": "agent",
+          "text": "Opus review CLOSE (16 probes); Boat gate 1364 at 0b99b61"
         }
       ]
     }
