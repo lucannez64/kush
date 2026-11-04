@@ -24868,6 +24868,7 @@ impl Checker<'_, '_> {
         // is any concrete alternative.
         let mut variables: Vec<(&ast::Type, BindingId)> = Vec::new();
         let mut fixed = Vec::new();
+        let mut shaped = Vec::new();
         for alternative in alternatives {
             let variable_id = matches!(
                 &alternative.kind,
@@ -24886,12 +24887,26 @@ impl Checker<'_, '_> {
                     variables.push((alternative, id));
                 }
             } else if self.mentions(alternative, type_vars, const_vars, effect_vars, subst) {
-                // A non-bare variable alternative needs real backtracking over
-                // its shape. Leave that to the ordinary inference path.
-                return Ok(false);
+                // A constructor alternative with unbound arguments, such as
+                // `Option<T>`: an indexed-union pattern.
+                shaped.push(alternative);
             } else {
                 fixed.push(alternative);
             }
+        }
+        if !shaped.is_empty() {
+            return self.unify_indexed_union_pattern(
+                pattern,
+                variables,
+                shaped,
+                fixed,
+                actual,
+                type_vars,
+                const_vars,
+                effect_vars,
+                subst,
+                span,
+            );
         }
         if variables.is_empty() || fixed.is_empty() {
             return Ok(false);
@@ -25041,6 +25056,451 @@ impl Checker<'_, '_> {
             }
         }
         Ok(true)
+    }
+    /// Whether a declared constructor alternative of a union pattern has the
+    /// same outer constructor as an actual union member: the same nominal
+    /// definition, `Box`/`Vec`, tuple arity, array, structural row that has
+    /// every declared field, or arrow arity. Only such members can be covered
+    /// by the alternative once its arguments are instantiated.
+    fn union_pattern_head_matches(&self, pattern: &ast::Type, actual: Type) -> bool {
+        match &pattern.kind {
+            ast::TypeKind::Named { arguments, .. } => {
+                let Some(id) = self.resolution.reference(pattern.span) else {
+                    return false;
+                };
+                let binding = &self.resolution.bindings[id];
+                match binding.kind {
+                    BindingKind::Alias => {
+                        let arguments = arguments
+                            .iter()
+                            .filter(|argument| !matches!(argument.kind, ast::TypeKind::Lifetime(_)))
+                            .collect::<Vec<_>>();
+                        let Some((generics, body)) = self.types.alias_definition(id) else {
+                            return false;
+                        };
+                        if generics.len() != arguments.len() {
+                            return false;
+                        }
+                        let map = generics
+                            .iter()
+                            .zip(arguments.iter().copied())
+                            .map(|(generic, argument)| {
+                                (self.resolution.binder(generic.span).unwrap(), argument)
+                            })
+                            .collect::<BTreeMap<_, _>>();
+                        let expanded = substitute_alias_type(self.resolution, body, &map);
+                        self.union_pattern_head_matches(&expanded, actual)
+                    }
+                    BindingKind::Builtin => matches!(
+                        (binding.name.as_str(), actual),
+                        ("Box", Type::Box(_)) | ("Vec", Type::Vec(_))
+                    ),
+                    BindingKind::Data => actual
+                        .layout()
+                        .is_some_and(|layout| self.types.enums[layout].definition == id),
+                    _ => false,
+                }
+            }
+            ast::TypeKind::Tuple(items) => actual.layout().is_some_and(|layout| {
+                let layout = &self.types.enums[layout];
+                layout.tuple && layout.arguments.len() == items.len()
+            }),
+            ast::TypeKind::Array(..) => actual
+                .layout()
+                .is_some_and(|layout| self.types.enums[layout].array.is_some()),
+            ast::TypeKind::Structural { fields, .. } => {
+                self.types.record_row_fields(actual).is_some_and(|row| {
+                    actual
+                        .layout()
+                        .is_some_and(|layout| self.types.enums[layout].structural)
+                        && fields
+                            .iter()
+                            .all(|field| row.iter().any(|actual| actual.name == field.name))
+                })
+            }
+            ast::TypeKind::Function { parameters, .. } => match actual {
+                Type::Fn(id) | Type::Once(id) => {
+                    self.types.function_types[id].parameters.len() == parameters.len()
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    /// Solve an indexed-union pattern: a declared union with at least one
+    /// constructor alternative whose arguments mention unbound variables, such
+    /// as `Option<T> | Option<U>` or `Vec<T> | i64`.
+    ///
+    /// Every actual member not covered by the concrete fixed part is assigned
+    /// to exactly one pattern alternative with the same outer constructor, or
+    /// to a bare variable. Each constructor alternative is then matched against
+    /// its assigned members separately, and they must agree on every argument:
+    /// constructor arguments are invariant, so `Option<i64> | Option<Bool>` is
+    /// never collapsed into a single `Option<i64 | Bool>`. Bare variables must
+    /// receive at least one member, as in the residual and partition rules;
+    /// a constructor alternative may receive none, leaving its variables to
+    /// other parameters. Members prefer constructor alternatives over bare
+    /// variables, so `T | Option<U>` keeps `Option<i64>` with `Option<U>`
+    /// first. The enumeration is bounded and canonical (members in normalized
+    /// order, alternatives in generic declaration order), and assignments with
+    /// the same substitution are one choice. Several surviving choices form one
+    /// decision of the bounded cross-parameter replay in `infer`.
+    ///
+    /// Returns `false` when some member has no alternative with its
+    /// constructor; the ordinary coercion check then reports the mismatch.
+    #[allow(clippy::too_many_arguments)]
+    fn unify_indexed_union_pattern(
+        &mut self,
+        pattern: &ast::Type,
+        mut variables: Vec<(&ast::Type, BindingId)>,
+        mut shaped: Vec<&ast::Type>,
+        fixed: Vec<&ast::Type>,
+        actual: Type,
+        type_vars: &[BindingId],
+        const_vars: &[BindingId],
+        effect_vars: &[BindingId],
+        subst: &mut crate::runtime_types::Subst,
+        span: Span,
+    ) -> Result<bool> {
+        // Canonical slot order: constructor alternatives by the first unbound
+        // variable they mention in declaration order, then bare variables in
+        // declaration order. Pattern operand order never matters.
+        let declared = type_vars
+            .iter()
+            .chain(const_vars)
+            .copied()
+            .collect::<Vec<_>>();
+        let unbound_in = |this: &Self, alternative: &ast::Type| {
+            declared
+                .iter()
+                .copied()
+                .filter(|id| {
+                    !subst.types.contains_key(id)
+                        && !subst.consts.contains_key(id)
+                        && type_references_any_binder(
+                            this.resolution,
+                            alternative,
+                            &BTreeSet::from([*id]),
+                        )
+                })
+                .collect::<Vec<_>>()
+        };
+        let position = |id: &BindingId| {
+            declared
+                .iter()
+                .position(|candidate| candidate == id)
+                .unwrap_or(usize::MAX)
+        };
+        shaped.sort_by_key(|alternative| {
+            unbound_in(self, alternative)
+                .first()
+                .map_or(usize::MAX, position)
+        });
+        variables.sort_by_key(|(_, id)| position(id));
+        let mut decided = BTreeSet::new();
+        for alternative in &shaped {
+            decided.extend(unbound_in(self, alternative));
+        }
+        decided.extend(variables.iter().map(|(_, id)| *id));
+        let slots = shaped
+            .iter()
+            .copied()
+            .chain(variables.iter().map(|(variable, _)| *variable))
+            .collect::<Vec<_>>();
+        let constructors = shaped.len();
+
+        let fixed_ty = if fixed.is_empty() {
+            None
+        } else {
+            let mut types = Vec::with_capacity(fixed.len());
+            for alternative in &fixed {
+                types.push(self.types.ty_in(alternative, subst)?);
+            }
+            Some(self.types.union(types, span)?)
+        };
+        let mut residual = Vec::new();
+        for member in self.types.union_members(actual) {
+            if !fixed_ty.is_some_and(|fixed| self.subtype(member, fixed)) {
+                residual.push(member);
+            }
+        }
+        // Candidate slots of every residual member: constructor alternatives
+        // with its outer constructor first, then every bare variable.
+        let mut candidates = Vec::with_capacity(residual.len());
+        for member in &residual {
+            let mut slots_for = (0..constructors)
+                .filter(|slot| self.union_pattern_head_matches(shaped[*slot], *member))
+                .collect::<Vec<_>>();
+            slots_for.extend(constructors..slots.len());
+            if slots_for.is_empty() {
+                return Ok(false);
+            }
+            candidates.push(slots_for);
+        }
+
+        // Enumerate assignments. Each complete assignment is checked in a
+        // scratch substitution with the replay disabled, so a trial leaves no
+        // decision, effect evidence, or binding marks behind.
+        fn enumerate(
+            index: usize,
+            candidates: &[Vec<usize>],
+            assignment: &mut Vec<usize>,
+            budget: &mut usize,
+            out: &mut Vec<Vec<usize>>,
+        ) -> bool {
+            if *budget == 0 {
+                return false;
+            }
+            *budget -= 1;
+            if index == candidates.len() {
+                out.push(assignment.clone());
+                return true;
+            }
+            for slot in &candidates[index] {
+                assignment.push(*slot);
+                if !enumerate(index + 1, candidates, assignment, budget, out) {
+                    return false;
+                }
+                assignment.pop();
+            }
+            true
+        }
+        const INDEXED_BUDGET: usize = 4096;
+        let mut budget = INDEXED_BUDGET;
+        let mut assignments = Vec::new();
+        let complete = enumerate(
+            0,
+            &candidates,
+            &mut Vec::new(),
+            &mut budget,
+            &mut assignments,
+        );
+        let names = || {
+            decided
+                .iter()
+                .map(|id| self.resolution.bindings[*id].name.clone())
+                .collect::<Vec<_>>()
+                .join("', '")
+        };
+        if !complete {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "cannot infer type parameter(s) '{}' from the indexed union pattern: the bounded assignment search exhausted {INDEXED_BUDGET} steps. Specialize explicitly with '::<...>'",
+                    names()
+                ),
+            ));
+        }
+        let group = |assignment: &[usize]| {
+            let mut members = vec![Vec::new(); slots.len()];
+            for (member, slot) in residual.iter().zip(assignment) {
+                members[*slot].push(*member);
+            }
+            members
+        };
+        let saved_plan_active = self.unify_plan_active;
+        let saved_decisions = self.unify_decisions.len();
+        let saved_effects = self.effect_constraints.len();
+        let saved_rows = self.row_bound.clone();
+        let saved_partitions = self.partition_bound.clone();
+        self.unify_plan_active = false;
+        let mut solutions: Vec<(Vec<Vec<Type>>, crate::runtime_types::Subst)> = Vec::new();
+        let mut first_conflict = None;
+        for assignment in &assignments {
+            let members = group(assignment);
+            if members[constructors..].iter().any(Vec::is_empty) {
+                continue;
+            }
+            let mut trial = subst.clone();
+            let mut accepted = true;
+            for (slot, members) in members.iter().enumerate() {
+                if members.is_empty() {
+                    continue;
+                }
+                let result = if slot < constructors {
+                    self.unify_constructor_members(
+                        slots[slot],
+                        members,
+                        type_vars,
+                        const_vars,
+                        effect_vars,
+                        &mut trial,
+                        span,
+                    )
+                } else {
+                    self.types.union(members.clone(), span).and_then(|bound| {
+                        self.unify(
+                            slots[slot],
+                            bound,
+                            type_vars,
+                            const_vars,
+                            effect_vars,
+                            &mut trial,
+                            span,
+                        )
+                    })
+                };
+                if let Err(error) = result {
+                    first_conflict.get_or_insert(error);
+                    accepted = false;
+                    break;
+                }
+            }
+            if accepted
+                && !solutions.iter().any(|(_, existing)| {
+                    existing.types == trial.types && existing.consts == trial.consts
+                })
+            {
+                solutions.push((members, trial));
+            }
+        }
+        self.unify_plan_active = saved_plan_active;
+        self.unify_decisions.truncate(saved_decisions);
+        self.effect_constraints.truncate(saved_effects);
+        self.row_bound = saved_rows;
+        self.partition_bound = saved_partitions;
+
+        if solutions.is_empty() {
+            fn spell(pattern: &ast::Type, out: &mut Vec<String>) {
+                match &pattern.kind {
+                    ast::TypeKind::Binary {
+                        op: crate::lexer::Kind::Pipe,
+                        left,
+                        right,
+                    } => {
+                        spell(left, out);
+                        spell(right, out);
+                    }
+                    _ => out.push(type_key(pattern)),
+                }
+            }
+            let mut spelled = Vec::new();
+            spell(pattern, &mut spelled);
+            let pattern_name = spelled.join(" | ");
+            let actual_name = self.types.name(actual);
+            let detail = first_conflict.map_or_else(
+                || {
+                    "every bare variable needs at least one alternative not covered by the rest of the pattern".to_string()
+                },
+                |error| error.message,
+            );
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "cannot infer type parameter(s) '{}' from the indexed union pattern {pattern_name}: no assignment of the alternatives of {actual_name} is consistent ({detail}). Constructor arguments are invariant, so alternatives such as Option<i64> | Option<Bool> are never merged into one Option<...>. Specialize explicitly with '::<...>'",
+                    names()
+                ),
+            ));
+        }
+        let several = solutions.len() > 1;
+        let choice = self.union_partition_choice(solutions.len())?;
+        let (members, _) = solutions.swap_remove(choice);
+        // Commit the chosen assignment for real so binding marks and effect
+        // evidence are recorded exactly once.
+        for (slot, members) in members.into_iter().enumerate() {
+            if members.is_empty() {
+                continue;
+            }
+            if slot < constructors {
+                self.unify_constructor_members(
+                    slots[slot],
+                    &members,
+                    type_vars,
+                    const_vars,
+                    effect_vars,
+                    subst,
+                    span,
+                )?;
+            } else {
+                let bound = self.types.union(members, span)?;
+                self.unify(
+                    slots[slot],
+                    bound,
+                    type_vars,
+                    const_vars,
+                    effect_vars,
+                    subst,
+                    span,
+                )?;
+            }
+        }
+        if several {
+            // Parameters that mention a variable of a decision with several
+            // choices must not commit to a tentative expected type, so the
+            // replay can still reconsider it.
+            self.partition_bound.extend(decided);
+        }
+        Ok(true)
+    }
+    /// Match one constructor alternative of an indexed-union pattern against
+    /// each member assigned to it. Every member must induce the same binding
+    /// for each variable the alternative mentions: the arguments are
+    /// invariant, so differing members never widen a variable to a union.
+    #[allow(clippy::too_many_arguments)]
+    fn unify_constructor_members(
+        &mut self,
+        alternative: &ast::Type,
+        members: &[Type],
+        type_vars: &[BindingId],
+        const_vars: &[BindingId],
+        effect_vars: &[BindingId],
+        subst: &mut crate::runtime_types::Subst,
+        span: Span,
+    ) -> Result<()> {
+        let mut merged = subst.clone();
+        for member in members {
+            let mut candidate = subst.clone();
+            self.unify(
+                alternative,
+                *member,
+                type_vars,
+                const_vars,
+                effect_vars,
+                &mut candidate,
+                span,
+            )?;
+            for (id, value) in &candidate.types {
+                match merged.types.get(id) {
+                    Some(previous) if previous != value => {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "the alternatives assigned to {} disagree on type parameter '{}': {} and {}",
+                                type_key(alternative),
+                                self.resolution.bindings[*id].name,
+                                self.types.name(*previous),
+                                self.types.name(*value)
+                            ),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        merged.types.insert(*id, *value);
+                    }
+                }
+            }
+            for (id, value) in &candidate.consts {
+                match merged.consts.get(id) {
+                    Some(previous) if previous != value => {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "the alternatives assigned to {} disagree on natural parameter '{}': {previous} and {value}",
+                                type_key(alternative),
+                                self.resolution.bindings[*id].name,
+                            ),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        merged.consts.insert(*id, *value);
+                    }
+                }
+            }
+            merged.effects.extend(candidate.effects);
+        }
+        *subst = merged;
+        Ok(())
     }
     /// First-order matching of a declared type against an actual type.
     #[allow(clippy::too_many_arguments)]

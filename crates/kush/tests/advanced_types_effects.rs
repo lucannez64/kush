@@ -217,6 +217,147 @@ fn generic_inference_across_union_alternatives_reports_conflicts() {
     );
 }
 
+#[test]
+fn indexed_union_patterns_assign_members_per_constructor() {
+    // Each actual member goes to one constructor alternative; T and U are
+    // solved separately instead of being merged into one Option<...>.
+    let source = r#"
+        enum Option<T> { None, Some(T) }
+        fn get<T>(x: Option<T> | i64, d: T) -> T ! {panic} {
+            match x {
+                i64 @ _ => d,
+                Option<T> @ o => match o { Option.Some(v) => v, Option.None => d },
+            }
+        }
+        fn sz<T, U>(x: Vec<T> | Vec<U> | i64) -> i64 ! {panic} {
+            match x { i64 @ n => n, Vec<T> @ v => Vec.len(&v), Vec<U> @ v => 100 + Vec.len(&v) }
+        }
+        fn make(c: i64) -> Vec<i64> | Vec<Bool> | i64 ! {alloc, panic} {
+            if c == 0 { let v: Vec<i64> = [1, 2]; v }
+            else { if c == 1 { let v: Vec<Bool> = [true]; v } else { 7 } }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let a: Option<i64> | i64 = 4;
+            let b: Option<i64> | i64 = Option.Some(40);
+            get(a, 2) + get(b, 0) + sz(make(0)) + sz(make(1)) + sz(make(2)) - 110
+        }"#;
+    assert_eq!(value(source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+}
+
+#[test]
+fn indexed_union_patterns_cover_every_constructor_shape() {
+    let source = r#"
+        enum Option<T> { None, Some(T) }
+        struct Pair<A, B> { a: A, b: B }
+        fn one<T, U>(x: T | Option<U>, u: U) -> i64 ! {panic} {
+            match x { Option<U> @ _ => 1, T @ _ => 2 }
+        }
+        fn arr<T, U, N: Nat, M: Nat>(x: [T; N] | [U; M]) -> i64 ! {panic} {
+            match x { [T; N] @ _ => 2, [U; M] @ _ => 30 }
+        }
+        fn tup<T>(x: (T, i64) | Bool) -> i64 ! {panic} {
+            match x { Bool @ _ => 0, (T, i64) @ (_, k) => k }
+        }
+        fn single<T>(x: Option<T> | i64) -> i64 ! {panic} { match x { i64 @ n => n, _ => 3 } }
+        fn nest<T>(x: Option<Vec<T>> | i64) -> i64 ! {panic} {
+            match x { i64 @ n => n, Option<Vec<T>> @ _ => 4 }
+        }
+        fn rec<A, B>(x: Pair<A, i64> | Pair<B, Bool>) -> i64 ! {panic} {
+            match x { Pair<A, i64> @ p => p.b, Pair<B, Bool> @ _ => 5 }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let x: Bool | Option<i64> = Option.Some(3);
+            let y: [i64; 2] | [Bool; 3] = [true, false, true];
+            let z: (Bool, i64) | Bool = (true, 6);
+            let s: Option<Bool> = Option.Some(true);
+            let w: Option<Vec<Bool>> | i64 = 0;
+            let q: Pair<Bool, i64> = Pair { a: true, b: 7 };
+            let p: Pair<Bool, i64> | Pair<i64, Bool> = q;
+            one(x, 1) + arr(y) + tup(z) + single(s) + nest(w) + rec(p)
+        }"#;
+    // `T | Option<U>` keeps Option<i64> with the constructor alternative (1),
+    // the [Bool; 3] member binds U and M (30), and a single non-union actual
+    // still picks its constructor alternative (3).
+    assert_eq!(value(source), 47);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 47);
+}
+
+#[test]
+fn indexed_union_assignments_replay_and_ignore_operand_order() {
+    // The first canonical assignment gives T the i64 member, but the second
+    // parameter needs T=Bool, so the bounded replay swaps the assignment.
+    let replayed = r#"
+        enum Option<T> { None, Some(T) }
+        fn pick<T, U>(x: Option<T> | Option<U>, t: T) -> i64 ! {panic} {
+            match x { Option<T> @ _ => 10, Option<U> @ _ => 20 }
+        }
+        fn make(c: Bool) -> Option<i64> | Option<Bool> ! {panic} {
+            if c { let o: Option<i64> = Option.Some(1); o }
+            else { let o: Option<Bool> = Option.Some(true); o }
+        }
+        fn main() -> i64 ! {panic} { pick(make(true), true) + pick(make(false), 5) + 2 }"#;
+    assert_eq!(value(replayed), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(replayed, 42);
+    let ordered = |pattern: &str| {
+        format!(
+            "enum Option<T> {{ None, Some(T) }}
+            fn pick<T, U>(x: {pattern}) -> i64 ! {{panic}} {{
+                match x {{ Option<T> @ _ => 1, Option<U> @ _ => 2 }}
+            }}
+            fn main() -> i64 ! {{panic}} {{
+                let o: Option<Bool> = Option.Some(true);
+                let x: Option<i64> | Option<Bool> = o;
+                pick(x)
+            }}"
+        )
+    };
+    assert_eq!(
+        value(&ordered("Option<T> | Option<U>")),
+        value(&ordered("Option<U> | Option<T>"))
+    );
+}
+
+#[test]
+fn indexed_union_patterns_never_merge_invariant_arguments() {
+    // One constructor alternative cannot cover Vec<i64> and Vec<Bool>: that
+    // would need the unsound Vec<i64 | Bool>.
+    rejects(
+        r#"
+        fn sz<T>(x: Vec<T> | i64) -> i64 ! {panic} { 0 }
+        fn make(c: i64) -> Vec<i64> | Vec<Bool> | i64 ! {alloc, panic} {
+            if c == 0 { let v: Vec<i64> = [1, 2]; v }
+            else { if c == 1 { let v: Vec<Bool> = [true]; v } else { 7 } }
+        }
+        fn main() -> i64 ! {alloc, panic} { sz(make(0)) }"#,
+        "never merged into one Option<...>",
+    );
+    rejects(
+        r#"
+        enum Option<T> { None, Some(T) }
+        struct Pair<A, B> { a: A, b: B }
+        fn rec<A>(x: Pair<A, i64> | Pair<A, Bool>) -> i64 ! {panic} { 0 }
+        fn main() -> i64 ! {panic} {
+            let q: Pair<Bool, i64> = Pair { a: true, b: 7 };
+            let p: Pair<Bool, i64> | Pair<i64, Bool> = q;
+            rec(p)
+        }"#,
+        "no assignment of the alternatives",
+    );
+    // A bare variable still needs its own member: with only Option<i64>, T
+    // takes it and U stays unbound.
+    rejects(
+        r#"
+        enum Option<T> { None, Some(T) }
+        fn pick<T, U>(x: T | Option<U>) -> i64 ! {panic} { 0 }
+        fn main() -> i64 ! {panic} { let o: Option<i64> = Option.None; pick(o) }"#,
+        "cannot infer type parameter 'U'",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // General effect-row constraints
 // ---------------------------------------------------------------------------

@@ -405,16 +405,39 @@ The supported inference fragment is deliberately first-order and bounded:
   chosen arm; explicit annotations/specialization are the escape hatch;
 - type inference does not infer unions from unconstrained literals: an empty
   vector still needs an annotation;
-- **indexed/dependent unions remain an explicit boundary.** Indexed enums,
-  runtime-indexed union alternatives, and dependent type families are not
-  inferred from a union actual in this executable fragment. A union of the same
-  generic constructor with different arguments (for example
-  `Option<i64> | Option<Bool>`) is not collapsed to `Option<i64 | Bool>`:
-  the constructor is invariant, so that would be unsound. Such calls require
-  an explicit `::<...>` specialization.
+- **indexed-union patterns** have per-alternative constructor constraints. A
+  declared union whose alternatives apply a constructor to unbound arguments,
+  such as `Option<T> | Option<U>`, `Vec<T> | i64`, `[T; N] | [U; M]`, or
+  `T | Pair<A, Bool>`, is solved by assigning every actual member that the
+  concrete fixed part does not cover to exactly one alternative. A member can
+  go to an alternative with the same outer constructor (the same nominal
+  definition, `Box`/`Vec`, tuple arity, array, structural row with every
+  declared field, or arrow arity) or to a bare variable. Each constructor
+  alternative is then matched against each of its members separately, and all
+  of them must induce the same arguments. Constructor arguments are invariant,
+  so a union of the same generic constructor with different arguments is never
+  collapsed: `Vec<T> | i64` over `Vec<i64> | Vec<Bool> | i64` is rejected
+  instead of inventing `Vec<i64 | Bool>`, and plain `Option<T>` over
+  `Option<i64> | Option<Bool>` still reports the disagreement. Bare variables
+  must still receive at least one member. A constructor alternative may receive
+  none, which leaves its variables to other parameters. Members try constructor
+  alternatives before bare variables, so `T | Option<U>` over
+  `Bool | Option<i64>` gives `T = Bool, U = i64`. Enumeration is canonical
+  (members in normalized order, alternatives ordered by their first unbound
+  variable in declaration order, so operand order never matters), is bounded
+  at 4096 steps, and treats assignments that give the same substitution as one
+  choice. If several choices survive, they form one decision of the same
+  bounded cross-parameter replay as multi-variable partitions. For example,
+  `pick<T, U>(x: Option<T> | Option<U>, t: T)` takes the assignment that agrees
+  with `t`. A member with no alternative of its constructor is left to the
+  ordinary coercion check, which reports the mismatch;
+- **dependent unions remain an explicit boundary.** Runtime-indexed union
+  alternatives and dependent type families are not inferred from a union
+  actual. Natural arguments of constructor alternatives, such as `[T; N]`, are
+  ordinary first-order constants, not dependent indices.
 
 This is a decidable bounded fragment with a precise boundary, not a complete
-principal algebraic subtyping algorithm. Indexed/dependent unions, row
+principal algebraic subtyping algorithm. Dependent unions, row
 subtraction/aliasing, and unbounded cross-parameter search are outside it.
 
 ## Case analysis and narrowing
@@ -548,8 +571,10 @@ Deliberately unsupported, with explicit diagnostics:
   row as described above. Multi-variable union patterns use a bounded canonical
   partition search, and a bounded cross-parameter replay can reconsider an
   earlier partition. Row variables add recursive residual-row unification.
-  The single-variable residual rule is principal; multi-variable partitions are
-  deterministic but not principal, and indexed/dependent unions, row
+  Indexed-union patterns such as `Option<T> | Option<U>` assign each member to
+  one constructor alternative without merging invariant arguments.
+  The single-variable residual rule is principal; multi-variable partitions and
+  indexed assignments are deterministic but not principal, and dependent unions, row
   subtraction/aliasing, and unbounded search remain explicit-specialization
   boundaries. Array length variables are a separate compile-time fragment
   described in [dependent-indices.md](dependent-indices.md).
