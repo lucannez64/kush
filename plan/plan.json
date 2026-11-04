@@ -1802,6 +1802,11 @@
           "time": "2026-11-04 02:58:36",
           "who": "agent",
           "text": "Method/record/R adversarial tests and eval+native agreement added; indirect/dynamic boundaries remain. Independent soundness review not run."
+        },
+        {
+          "time": "2026-11-04 03:15:29",
+          "who": "claude",
+          "text": "Merged 64acef9; full Boat gate 1257 tests, fmt, strict Clippy. Independent soundness review running."
         }
       ]
     },
