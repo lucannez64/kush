@@ -632,7 +632,7 @@
       "deps": [
         "LT-VAR-TESTS"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "",
       "commit": null,
       "log": [
@@ -675,6 +675,11 @@
           "time": "2026-11-03 22:58:21",
           "who": "agent",
           "text": "Full c69b41b Boat gate passed: 1242 tests, formatting, strict Clippy. Call-wide correction integrated; final targeted review required before LT-VARIANCE closure and row implementation."
+        },
+        {
+          "time": "2026-11-04 02:31:41",
+          "who": "claude",
+          "text": "Final targeted soundness review delegated (DeepSeek V4.1 Flash) on 1dfbee1"
         }
       ]
     },
@@ -1692,10 +1697,16 @@
       "deps": [
         "LT-REC-IR"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Seed from checked provenance and propagate all actual argument alternatives; never assume inferred requirements to prove themselves.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-04 02:31:41",
+          "who": "claude",
+          "text": "Implementing record-field result summaries and static method participation (delegate)"
+        }
+      ]
     },
     {
       "id": "LT-REC-FIXPOINT",
