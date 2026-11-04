@@ -1096,10 +1096,26 @@
       "deps": [
         "STRUCT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Keep the residual partition as a deferred constraint instead of committing one choice.",
-      "commit": null,
-      "log": []
+      "commit": "cfd284f",
+      "log": [
+        {
+          "time": "2026-11-04 23:11:21",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-04 23:22:43",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-04 23:22:43",
+          "who": "agent",
+          "text": "done cfd284f"
+        }
+      ]
     },
     {
       "id": "I-PRINC-DEFER",
@@ -1110,10 +1126,21 @@
       "deps": [
         "I-PRINC-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "cfd284f",
+      "log": [
+        {
+          "time": "2026-11-04 23:22:43",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-04 23:22:43",
+          "who": "agent",
+          "text": "done cfd284f"
+        }
+      ]
     },
     {
       "id": "I-PRINC-DOC",
@@ -1124,10 +1151,26 @@
       "deps": [
         "I-PRINC-DEFER"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "cfd284f",
+      "log": [
+        {
+          "time": "2026-11-04 23:22:43",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-04 23:22:43",
+          "who": "agent",
+          "text": "done cfd284f"
+        },
+        {
+          "time": "2026-11-04 23:22:43",
+          "who": "agent",
+          "text": "Principal unique-or-reject inference landed (cfd284f), user chose option 1; decidability/principality boundary in docs/subtyping.md; local 1369-test gate (Boat at capacity)"
+        }
+      ]
     },
     {
       "id": "I-REVIEW",
