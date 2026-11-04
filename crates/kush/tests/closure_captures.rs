@@ -262,3 +262,190 @@ fn proof_facts_survive_a_reader_closure_call() {
         "",
     );
 }
+
+// Each writer must discard the old erased inequality, including paths that
+// synthesize calls rather than going through ordinary indirect-call checking.
+fn rejects_stale_fact(body: &str) {
+    rejects(
+        &format!(
+            r"fn below(i: i64, n: i64, erased p: {{ i < n }}) -> i64 ! {{}} {{ i }}
+        fn main() -> i64 ! {{alloc, panic, suspend}} {{
+            let mut i = 0; let n = 10;
+            if i < n {{ {body} below(i, n, _) }} else {{ 0 }}
+        }}"
+        ),
+        "cannot prove",
+    );
+}
+
+#[test]
+fn nested_lambda_locals_cannot_delete_or_replace_outer_write_summaries() {
+    for unrelated in [
+        "let a = 0; let b = 0; let c = 0;",
+        "let a = 0; let b = 0; let c = fn() -> Unit ! {} {};",
+    ] {
+        rejects_stale_fact(&format!(
+            r"let w = fn() -> Unit ! {{panic}} {{ i = 20; }};
+            let unrelated = fn() -> Unit ! {{alloc, panic}} {{ {unrelated} }};
+            w();"
+        ));
+    }
+}
+
+#[test]
+fn nested_writer_summaries_propagate_to_outer_captures() {
+    rejects_stale_fact(
+        r"let outer = fn() -> Unit ! {alloc, panic} {
+        let inner = fn() -> Unit ! {panic} { i = 20; }; inner();
+        let unrelated = fn() -> Unit ! {} { let a = 0; let b = 0; let c = 0; };
+    }; outer();",
+    );
+}
+
+#[test]
+fn closure_writes_invalidate_while_loop_and_continue_headers() {
+    for loop_body in [
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; w(); j = j + 1; }",
+        "loop { if j >= 2 { break; } result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; w(); j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = 20; }; w(); j = j + 1; continue; }",
+        "while j < 2 { result = below(i, n, _); Task.scope(fn() -> Unit ! {panic} { i = 20; }); j = j + 1; }",
+        "while j < 2 { result = below(i, n, _); let w = fn() -> Unit ! {panic} { i = i + 1; }; w(); i = i - 1; j = j + 1; }",
+    ] {
+        rejects_stale_fact(&format!("let mut j = 0; let mut result = 0; {loop_body}"));
+    }
+}
+
+#[test]
+fn scope_callback_writes_invalidate_the_caller_and_enclosing_lambda() {
+    rejects_stale_fact("Task.scope(fn() -> Unit ! {panic} { i = 20; });");
+    rejects_stale_fact(
+        r"let outer = fn() -> Unit ! {alloc, panic, suspend} {
+        Task.scope(fn() -> Unit ! {panic} { i = 20; });
+    }; outer();",
+    );
+}
+
+#[test]
+fn lexical_handler_writes_invalidate_after_tail_and_non_tail_performs() {
+    for body in ["perform Op(0)", "perform Op(0); 0"] {
+        rejects_stale_fact(&format!(
+            r"handle Op: i64 -> i64 with fn(
+            x: i64, resume: linear once fn(i64) -> i64 ! {{}}
+        ) -> i64 ! {{panic}} {{ i = 20; resume(x) }} {{ {body} }};"
+        ));
+    }
+}
+
+#[test]
+fn mixed_captures_keep_readers_shared_and_writers_exclusive() {
+    agrees(
+        r"fn main() -> i64 ! {alloc, panic} {
+        let mut i = 41; let mut j = 0;
+        let f = fn() -> i64 ! {panic} { j = j + 1; i };
+        let observed = i;
+        f() + observed
+    }",
+        82,
+        "",
+    );
+    agrees(
+        r"fn main() -> i64 ! {alloc, panic} {
+        let mut i = 41; let mut j = 0;
+        let f = fn(x: i64) -> i64 ! {panic} { j = j + 1; i + x };
+        let reader = fn() -> i64 ! {panic} { i };
+        f(reader())
+    }",
+        82,
+        "",
+    );
+    rejects(
+        r"fn main() -> i64 ! {alloc, panic} {
+        let mut i = 41; let mut j = 0;
+        let f = fn() -> i64 ! {panic} { j = j + 1; i };
+        let observed = j; f() + observed
+    }",
+        "exclusive",
+    );
+}
+
+#[test]
+fn scope_and_handler_writes_agree_between_backends() {
+    agrees(
+        r"fn main() -> i64 ! {alloc, panic, suspend} {
+        let mut i = 0;
+        Task.scope(fn() -> Unit ! {panic} { i = 20; }); i
+    }",
+        20,
+        "",
+    );
+    agrees(
+        r"fn main() -> i64 ! {alloc, panic} {
+        let mut i = 0;
+        handle Op: i64 -> i64 with fn(x: i64,
+            resume: linear once fn(i64) -> i64 ! {}
+        ) -> i64 ! {panic} { i = 20; resume(x) } { perform Op(0) };
+        i
+    }",
+        20,
+        "",
+    );
+}
+
+#[test]
+fn declared_operation_calls_apply_dynamically_visible_handler_writes() {
+    for invocation in [
+        "invoke()",
+        "(fn() -> i64 ! {Op, panic} { invoke() })()",
+        "Task.scope(fn() -> i64 ! {Op, panic} { invoke() })",
+    ] {
+        rejects(
+            &format!(
+                r"
+            effect Op: i64 -> i64;
+            fn invoke() -> i64 ! {{Op, panic}} {{ perform Op(0) }}
+            fn below(i: i64, n: i64, erased p: {{ i < n }}) -> i64 ! {{}} {{ i }}
+            fn main() -> i64 ! {{alloc, panic, suspend}} {{
+                let mut i = 0; let n = 10;
+                if i < n {{
+                    handle Op: i64 -> i64 with fn(x: i64,
+                        resume: linear once fn(i64) -> i64 ! {{}}
+                    ) -> i64 ! {{}} {{ i = 20; resume(x) }} {{
+                        {invocation}; below(i, n, _)
+                    }}
+                }} else {{ 0 }}
+            }}"
+            ),
+            "cannot prove",
+        );
+    }
+}
+
+#[test]
+fn nested_lambda_and_loop_writes_agree_between_backends() {
+    agrees(
+        r"fn main() -> i64 ! {alloc, panic} {
+        let mut i = 0;
+        let outer = fn() -> Unit ! {alloc, panic} {
+            let inner = fn() -> Unit ! {panic} { i = 20; };
+            let unrelated = fn() -> Unit ! {} { let a = 0; let b = 0; let c = 0; };
+            inner();
+        };
+        outer(); i
+    }",
+        20,
+        "",
+    );
+    agrees(
+        r"fn main() -> i64 ! {alloc, panic} {
+        let mut i = 0; let mut j = 0; let mut result = 0;
+        while j < 2 {
+            result = i;
+            let w = fn() -> Unit ! {panic} { i = 20; }; w();
+            j = j + 1;
+        }
+        result
+    }",
+        20,
+        "",
+    );
+}

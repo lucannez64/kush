@@ -253,7 +253,11 @@ it in outliving data, passing it to another function, or sending it to a task.
 Both backends implement the pointer representation, so reference evaluation and
 native execution agree. Calling a closure that writes the capture invalidates
 erased proof facts about its old value; a call to a read-only closure leaves
-the established version intact. See
+the established version intact. Write summaries also apply to immediate
+`Task.scope` callbacks and effect handlers, including resumed continuations.
+Loop headers discard facts for locations that a closure in the loop may write,
+even before the first checked iteration. Each captured location has its own
+loan mutability: writing one capture leaves read-only captures shared. See
 [runtime scalar indices](runtime-indices.md#4-freezing-mutation-and-joins).
 
 A closure that captures a linear `@[1]`/`#[linear]` obligation (or a copyable

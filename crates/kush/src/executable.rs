@@ -13705,6 +13705,7 @@ impl Checker<'_, '_> {
             let value = self.expr_expected(argument, Some(*ty))?;
             values.push(self.coerce_argument(value, *ty, span)?);
         }
+        self.apply_effect_writes(signature.effects);
         if receiver_mode == ReceiverMode::Mutable {
             // The receiver was rewritten to a local/parameter place when it is
             // one. Move the object into the dispatcher, which returns the
@@ -14493,6 +14494,7 @@ impl Checker<'_, '_> {
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
             coerced.push(self.coerce_argument(value, *ty, span)?);
         }
+        self.apply_effect_writes(signature.effects);
         let value = Expr {
             kind: ExprKind::Call(Target::Function(index), coerced),
             ty,
@@ -19612,7 +19614,7 @@ impl Checker<'_, '_> {
                     );
                 }
                 ast::ExprKind::While { condition, body } => {
-                    c.bump_assigned(body);
+                    c.bump_assigned(body, Some(condition));
                     let condition = c.expr(condition)?;
                     c.expect(condition.ty, Type::Bool, condition.span)?;
                     let mark = c.facts.mark();
@@ -19632,7 +19634,7 @@ impl Checker<'_, '_> {
                     (ExprKind::While(Box::new(condition), body), Type::Unit)
                 }
                 ast::ExprKind::Loop(body) => {
-                    c.bump_assigned(body);
+                    c.bump_assigned(body, None);
                     let scalar_baseline = c.scalar_values.clone();
                     let scalar_live = c.kernel_locals.len();
                     c.loops.push(Loop { value: Some(Type::Never), is_while: false, expected });
@@ -21881,6 +21883,7 @@ impl Checker<'_, '_> {
         let saved_loops = std::mem::take(&mut self.loops);
         let saved_facts = std::mem::take(&mut self.facts);
         let saved_written = std::mem::take(&mut self.written_slots);
+        let saved_closure_writes = std::mem::take(&mut self.closure_writes);
         let capture_ids = captures
             .iter()
             .map(|slot| {
@@ -21982,6 +21985,7 @@ impl Checker<'_, '_> {
         self.loops = saved_loops;
         self.facts = saved_facts;
         self.written_slots = saved_written;
+        self.closure_writes = saved_closure_writes;
         let (body, obligation, written) = checked?;
         let capture_writes = (0..captures.len())
             .map(|index| written.contains(&index))
@@ -22105,6 +22109,30 @@ impl Checker<'_, '_> {
                 _ => return None,
             }
         }
+    }
+    /// Apply every callable execution path's may-write summary to the caller.
+    fn apply_closure_writes(&mut self, targets: impl IntoIterator<Item = usize>) {
+        for slot in targets {
+            self.invalidate_scalar_proofs(slot);
+            self.written_slots.insert(slot);
+        }
+    }
+    /// Calls with a declared operation can invoke its dynamically installed
+    /// handler even when there is no lexical perform in this function.
+    fn apply_effect_writes(&mut self, effects: u16) {
+        let slots = self
+            .handlers
+            .iter()
+            .filter(|handler| self.operation_effect(&handler.operation) & effects != 0)
+            .map(|handler| handler.slot)
+            .collect::<Vec<_>>();
+        for slot in slots {
+            self.apply_handler_writes(slot);
+        }
+    }
+    fn apply_handler_writes(&mut self, slot: usize) {
+        let targets = self.closure_writes.get(&slot).cloned().unwrap_or_default();
+        self.apply_closure_writes(targets);
     }
     /// Forget proof facts and symbolic versions about a scalar location that a
     /// writing closure may have changed. The location itself remains live; only
@@ -22648,10 +22676,8 @@ impl Checker<'_, '_> {
         // invalidate old-value facts only now: proofs established before the
         // call cannot be reused after it, while argument checking still sees
         // the pre-call value. Reading closures have no write targets.
-        for slot in write_targets {
-            self.invalidate_scalar_proofs(slot);
-            self.written_slots.insert(slot);
-        }
+        self.apply_closure_writes(write_targets);
+        self.apply_effect_writes(signature.effects);
         let value = Expr {
             kind: ExprKind::CallIndirect {
                 callee: Box::new(callee),
@@ -26071,7 +26097,7 @@ impl Checker<'_, '_> {
                         ),
                     ));
                 }
-                let (body, result, _, result_grade) =
+                let (body, result, effects, result_grade) =
                     self.task_callable(&arguments[0], true, false, "Task.scope", span)?;
                 if crate::runtime_types::is_reference_container(self.types, result) {
                     return Err(Diagnostic::new(
@@ -26091,6 +26117,8 @@ impl Checker<'_, '_> {
                         "a task result supports exactly @[1] (owning transfer or copyable must-use) or no grade",
                     ));
                 }
+                self.apply_closure_writes(self.closure_write_targets(&body).unwrap_or_default());
+                self.apply_effect_writes(effects);
                 let obligation =
                     self.linear_type(result) || result_grade.is_some_and(Grade::is_one);
                 let failure = self.types.result(result, span).ok();
@@ -26543,6 +26571,7 @@ impl Checker<'_, '_> {
                 )?;
             }
         }
+        self.apply_effect_writes(signature.effects);
         let value = Expr {
             kind: ExprKind::Call(
                 if self.functions.foreign_functions.contains_key(&index) {
@@ -28052,6 +28081,9 @@ impl Checker<'_, '_> {
         let handler_type = handler_value.ty;
         let slot = self.fresh_local(span, handler_type)?;
         self.locals[slot].linear = signature.linear;
+        if let Some(targets) = self.closure_write_targets(&handler_value) {
+            self.closure_writes.insert(slot, targets);
+        }
         let handler_parameter = signature.parameters[0];
         let handler_result = signature.result;
         self.handlers.push(HandlerScope {
@@ -28351,6 +28383,8 @@ impl Checker<'_, '_> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        // The handler can write before invoking the resumed suffix.
+        self.apply_handler_writes(slot);
         let resume = self.resumption_continuation(
             captures,
             (result_id, result_ty, mutable),
@@ -28487,6 +28521,8 @@ impl Checker<'_, '_> {
         let saved_effects = self.effects;
         let saved_loops = std::mem::take(&mut self.loops);
         let saved_facts = std::mem::take(&mut self.facts);
+        let saved_written = std::mem::take(&mut self.written_slots);
+        let saved_closure_writes = std::mem::take(&mut self.closure_writes);
         let saved_handlers = std::mem::take(&mut self.handlers);
         let saved_scope_depth = self.scope_depth;
         let kernel_mark = self.kernel_locals.len();
@@ -28548,6 +28584,8 @@ impl Checker<'_, '_> {
         self.effects = saved_effects;
         self.loops = saved_loops;
         self.facts = saved_facts;
+        self.written_slots = saved_written;
+        self.closure_writes = saved_closure_writes;
         let body = checked?;
         if !captures.is_empty() {
             // Building an environment is a real allocation.
@@ -28607,6 +28645,7 @@ impl Checker<'_, '_> {
             self.require(effects | operation_effect, span)?;
             let payload = self.expr_expected(value, Some(parameter))?;
             let payload = self.coerce_argument(payload, handler_parameter, span)?;
+            self.apply_handler_writes(slot);
             let resume = self.resume_value(result, multishot, span)?;
             let call = Expr {
                 kind: ExprKind::CallIndirect {
@@ -29717,8 +29756,8 @@ impl Checker<'_, '_> {
     }
     /// Facts about locals assigned anywhere in a loop body do not survive
     /// into it: the next iteration may observe the new value.
-    fn bump_assigned(&mut self, body: &ast::Block) {
-        type Out<'e> = Vec<(Span, &'e ast::Expr)>;
+    fn bump_assigned(&mut self, body: &ast::Block, condition: Option<&ast::Expr>) {
+        type Out<'e> = Vec<(Span, Option<&'e ast::Expr>)>;
         fn block<'e>(b: &'e ast::Block, out: &mut Out<'e>) {
             for s in &b.statements {
                 match s {
@@ -29738,7 +29777,7 @@ impl Checker<'_, '_> {
                     left,
                     right,
                 } => {
-                    out.push((left.span, right));
+                    out.push((left.span, Some(right)));
                     expr(right, out);
                 }
                 K::Binary { left, right, .. }
@@ -29758,15 +29797,26 @@ impl Checker<'_, '_> {
                         expr(end, out);
                     }
                 }
-                K::Unary { operand, .. } | K::Try(operand) | K::Field { value: operand, .. } => {
-                    expr(operand, out)
-                }
+                K::Unary { operand, .. }
+                | K::Try(operand)
+                | K::Cast { value: operand, .. }
+                | K::Field { value: operand, .. } => expr(operand, out),
                 K::Return(Some(v)) | K::Break(Some(v)) => expr(v, out),
                 K::Tuple(vs) | K::Array(vs) => vs.iter().for_each(|v| expr(v, out)),
                 K::Call { callee, arguments } => {
                     expr(callee, out);
                     arguments.iter().for_each(|v| expr(v, out));
                 }
+                K::Lambda(lambda) => {
+                    let mut writes = Vec::new();
+                    block(&lambda.body, &mut writes);
+                    out.extend(writes.into_iter().map(|(span, _)| (span, None)));
+                }
+                K::Handle { handler, body, .. } => {
+                    expr(handler, out);
+                    block(body, out);
+                }
+                K::Perform { value, .. } => expr(value, out),
                 K::Specialize { callee, .. } => expr(callee, out),
                 K::Block(b) | K::Loop(b) => block(b, out),
                 K::While { condition, body } => {
@@ -29793,24 +29843,37 @@ impl Checker<'_, '_> {
                         expr(&arm.body, out);
                     }
                 }
-                K::Record { fields, .. } => fields.iter().for_each(|(_, v)| expr(v, out)),
-                _ => {}
+                K::Record { fields, .. } | K::StructuralLiteral(fields) => {
+                    fields.iter().for_each(|(_, v)| expr(v, out))
+                }
+                K::Name(_)
+                | K::Integer(_)
+                | K::Float(_)
+                | K::String(_)
+                | K::Char(_)
+                | K::Bool(_)
+                | K::Continue
+                | K::Return(None)
+                | K::Break(None) => {}
             }
         }
         let mut assignments = Vec::new();
         block(body, &mut assignments);
+        if let Some(condition) = condition {
+            expr(condition, &mut assignments);
+        }
         // Per slot: +1 if every update is `x = x + c` (c >= 0), -1 if every
         // update is `x = x - c` (c >= 0), 0 otherwise.
         let mut direction: BTreeMap<usize, i8> = BTreeMap::new();
         for (span, value) in &assignments {
             let Ok(slot) = self.slot(*span) else { continue };
             let step =
-                match &value.kind {
-                    ast::ExprKind::Binary {
+                match value.map(|value| &value.kind) {
+                    Some(ast::ExprKind::Binary {
                         op: op @ (Kind::Plus | Kind::Minus),
                         left,
                         right,
-                    } if matches!(&left.kind, ast::ExprKind::Name(_))
+                    }) if matches!(&left.kind, ast::ExprKind::Name(_))
                         && self.slot(left.span) == Ok(slot)
                         && matches!(&right.kind, ast::ExprKind::Integer(_)) =>
                     {
@@ -29827,9 +29890,36 @@ impl Checker<'_, '_> {
                 })
                 .or_insert(step);
         }
+        // Existing closures referenced by this body may be invoked on any
+        // iteration. Include their summaries even through nested callables.
+        let mut references = BTreeSet::new();
+        collect_lambda_refs(self.resolution, body, &mut references);
+        if let Some(condition) = condition {
+            collect_expr_refs(self.resolution, condition, &mut references);
+        }
+        for id in references {
+            if let Some(targets) = self
+                .slots
+                .get(&id)
+                .and_then(|slot| self.closure_writes.get(slot))
+            {
+                for target in targets {
+                    direction.insert(*target, 0);
+                }
+            }
+        }
+        // An operation in the loop may call an enclosing handler without
+        // referring to its synthesized local binding in the source tree.
+        for handler in &self.handlers {
+            if let Some(targets) = self.closure_writes.get(&handler.slot) {
+                for target in targets {
+                    direction.insert(*target, 0);
+                }
+            }
+        }
         for (slot, step) in direction {
             if step == 0 {
-                self.facts.bump(slot);
+                self.invalidate_scalar_proofs(slot);
             } else {
                 self.facts.bump_monotone(slot, step > 0);
             }

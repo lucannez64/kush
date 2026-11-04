@@ -166,7 +166,9 @@ or calling it releases only the environment allocation. Escaping through a
 return, record, box, union, helper call, adapter, or spawned task is rejected
 before either backend sees the value. A writing call also invalidates erased
 proof facts about the captured location's old value, while a read-only call
-preserves them.
+preserves them. Mutability is tracked per captured location, including during
+call argument evaluation; a closure that writes `j` and only reads `i` holds
+an exclusive loan on `j` and a shared loan on `i`.
 
 Borrow lifetimes include the remainder of argument evaluation and the call itself:
 

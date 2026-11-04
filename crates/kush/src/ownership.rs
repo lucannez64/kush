@@ -1012,7 +1012,8 @@ struct LoopState {
 #[derive(Clone, Default)]
 struct BorrowedCapture {
     origins: BTreeSet<usize>,
-    mutable: bool,
+    /// Only these origins are exclusive; the remaining captures stay shared.
+    exclusive_origins: BTreeSet<usize>,
     splits: SplitLabels,
     /// A slice result borrowed from one capture, resolved to the capture's
     /// outer provenance when the closure value is constructed.
@@ -2911,7 +2912,13 @@ impl Checker<'_> {
             // currently being initialized. Neither is an active capability.
             self.available[*view]
                 && self.derives_from(*view, source)
-                && (!mutable_only || self.view_mut[*view])
+                && (!mutable_only
+                    || self
+                        .borrowed_closures
+                        .get(view)
+                        .map_or(self.view_mut[*view], |capture| {
+                            capture.exclusive_origins.contains(&source)
+                        }))
         })
     }
     fn temporary_loan_at(&self, source: usize) -> bool {
@@ -3329,7 +3336,15 @@ impl Checker<'_> {
                 // storage, and the record itself stays suspended for moves.
                 continue;
             }
-            if mutable || self.view_mut[*view] {
+            let exclusive_overlap =
+                self.borrowed_closures
+                    .get(view)
+                    .map_or(self.view_mut[*view], |capture| {
+                        !self
+                            .origins_roots(&capture.exclusive_origins)
+                            .is_disjoint(&roots)
+                    });
+            if mutable || exclusive_overlap {
                 let what = if mutable {
                     "cannot create an exclusive '&mut [T]' view while another view of the same owner is live; split siblings require one checked Slice.split_at_mut pair, and independent disjoint ranges are not inferred"
                 } else {
@@ -4044,7 +4059,7 @@ impl Checker<'_> {
             // capability live until its last call or enclosing-scope end.
             self.acquire_view(
                 slot,
-                capture.mutable,
+                !capture.exclusive_origins.is_empty(),
                 capture.origins.clone(),
                 capture.splits.clone(),
                 None,
@@ -5550,20 +5565,32 @@ impl Checker<'_> {
                     .cloned()
                     .or(local_capture);
                 if let Some(info) = &capture_info {
-                    let roots = self.origins_roots(&info.origins);
-                    self.temporary_regions.push(RetainedView {
-                        origins: info.origins.clone(),
-                        roots,
-                        mutable: info.mutable,
-                        splits: info.splits.clone(),
-                        field: None,
-                    });
-                    self.loans.extend(info.origins.iter().copied());
-                    if info.mutable {
-                        self.temporary_exclusive
-                            .extend(info.origins.iter().copied());
-                    } else {
-                        self.temporary_shared.extend(info.origins.iter().copied());
+                    for mutable in [false, true] {
+                        let origins = if mutable {
+                            info.exclusive_origins.clone()
+                        } else {
+                            info.origins
+                                .difference(&info.exclusive_origins)
+                                .copied()
+                                .collect()
+                        };
+                        if origins.is_empty() {
+                            continue;
+                        }
+                        let roots = self.origins_roots(&origins);
+                        self.temporary_regions.push(RetainedView {
+                            origins: origins.clone(),
+                            roots,
+                            mutable,
+                            splits: info.splits.clone(),
+                            field: None,
+                        });
+                        self.loans.extend(origins.iter().copied());
+                        if mutable {
+                            self.temporary_exclusive.extend(origins);
+                        } else {
+                            self.temporary_shared.extend(origins);
+                        }
                     }
                 }
                 for argument in arguments.iter_mut() {
@@ -5875,7 +5902,7 @@ impl Checker<'_> {
                     }
                     let mut origins = BTreeSet::new();
                     let mut splits: Option<SplitLabels> = None;
-                    let mut mutable = false;
+                    let mut exclusive_origins = BTreeSet::new();
                     for (index, capture) in &scalars {
                         let slot = match &capture.kind {
                             ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
@@ -5898,7 +5925,9 @@ impl Checker<'_> {
                             expr_ptr,
                             capture.span,
                         )?;
-                        mutable |= capture_mut;
+                        if capture_mut {
+                            exclusive_origins.extend(capture_origins.iter().copied());
+                        }
                         origins.extend(capture_origins);
                         splits.get_or_insert_with(SplitLabels::default);
                     }
@@ -5915,7 +5944,9 @@ impl Checker<'_> {
                             expr_ptr,
                             capture.span,
                         )?;
-                        mutable |= capture_mut;
+                        if capture_mut {
+                            exclusive_origins.extend(capture_origins.iter().copied());
+                        }
                         origins.extend(capture_origins);
                         splits = Some(match splits {
                             Some(mut current) => {
@@ -5933,7 +5964,9 @@ impl Checker<'_> {
                     for capture in &records {
                         let provenance = self.record_provenance(capture);
                         for loan in provenance.leaves.values() {
-                            mutable |= loan.mutable;
+                            if loan.mutable {
+                                exclusive_origins.extend(loan.origins.iter().copied());
+                            }
                             origins.extend(loan.origins.iter().copied());
                             splits = Some(match splits {
                                 Some(current) => intersect_splits(&current, &loan.splits),
@@ -5943,7 +5976,7 @@ impl Checker<'_> {
                     }
                     let mut info = BorrowedCapture {
                         origins,
-                        mutable,
+                        exclusive_origins,
                         splits: splits.unwrap_or_default(),
                         result_slice: None,
                         result_record: None,
