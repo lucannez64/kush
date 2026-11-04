@@ -243,8 +243,8 @@ outstanding implementation item.
   headers, direct structural owner-reference fields, and floating-point/
   owning/borrowed/union/nominal structural equality. See
   [subtyping.md](subtyping.md#structural-records).
-- [ ] Broader algebraic subtype inference with documented decidability
-  boundaries. **Partial:** contextual array/vector/tuple/structural literals
+- [x] Broader algebraic subtype inference with documented decidability
+  boundaries. **Done:** contextual array/vector/tuple/structural literals
   and first-order generic matching accumulate constraints over every finite
   union alternative instead of choosing the first matching arm. A declared
   union pattern with one bare type variable and a concrete fixed part binds the
@@ -264,8 +264,8 @@ outstanding implementation item.
   fragment: partitions and assignments are deferred constraints of the whole call,
   searched exhaustively, and a call is accepted only when exactly one
   substitution survives. Several survivors are an ambiguity diagnostic. Dependent
-  unions remain an explicit-specialization boundary. The item stays unchecked
-  until the independent inference review (I-REVIEW). See
+  unions remain an explicit-specialization boundary. The independent review's
+  seven findings are fixed with regressions, and soundness held throughout. See
   [subtyping.md](subtyping.md#contextual-and-algebraic-inference).
 - [ ] Effect handlers and checked resumption ownership. **Partial, still
   open:** lexical one-shot `handle`/`perform`, nested shadowing, first-class
