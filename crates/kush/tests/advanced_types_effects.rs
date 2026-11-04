@@ -238,6 +238,130 @@ fn call_site_constraints_decide_a_deferred_partition() {
 }
 
 #[test]
+fn principal_inference_review_regressions() {
+    let three = r#"
+        fn three(c: i64) -> Bool | Unit | i64 ! {panic} {
+            if c == 0 { true } else { if c == 1 { () } else { 41 } }
+        }"#;
+    // A wider-closed expected result row does not fix `..r` during the
+    // exhaustive search either (this used to panic).
+    let rows = format!(
+        "{three}
+        fn keep<T, U, r>(x: T | U | i64, t: T, v: struct {{ x: i64, ..r }}) -> struct {{ x: i64, ..r }} ! {{panic}} {{ v }}
+        fn main() -> i64 ! {{panic}} {{
+            let w = struct {{ x: 5, y: true }};
+            let n: struct {{ x: i64 }} = keep(three(0), true, w);
+            let m: struct {{ x: i64 }} = keep(three(0), (), w);
+            n.x + m.x
+        }}"
+    );
+    assert_eq!(value(&rows), 10);
+    // A partition nested inside a constructor alternative is part of the
+    // call-wide search: it is solved when unique...
+    let nested = format!(
+        "{three}
+        struct Pair<A, B> {{ a: A, b: B }}
+        fn f<T, U>(x: Pair<T | U | i64, T> | i64) -> i64 ! {{panic}} {{
+            match x {{ i64 @ n => n, Pair<T | U | i64, T> @ p => match p.a {{ T @ _ => 1, U @ _ => 2, i64 @ _ => 3 }} }}
+        }}
+        fn main() -> i64 ! {{panic}} {{
+            let p: Pair<Bool | Unit | i64, Unit> = Pair {{ a: three(0), b: () }};
+            let x: Pair<Bool | Unit | i64, Unit> | i64 = p;
+            f(x)
+        }}"
+    );
+    assert_eq!(value(&nested), 2);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(&nested, 2);
+    // ...and reported in either generic order when it is not.
+    for generics in ["T, U, V", "U, T, V"] {
+        rejects(
+            &format!(
+                "{three}
+                enum Option<T> {{ None, Some(T) }}
+                struct Pair<A, B> {{ a: A, b: B }}
+                fn f<{generics}>(x: Option<Pair<T | U | i64, T>> | Option<V>) -> i64 ! {{panic}} {{ 0 }}
+                fn mk(c: Bool) -> Option<Pair<Bool | Unit | i64, Bool>> | Option<Pair<Bool | Unit | i64, Unit>> ! {{panic}} {{
+                    if c {{ let p: Pair<Bool | Unit | i64, Bool> = Pair {{ a: three(0), b: true }}; let o: Option<Pair<Bool | Unit | i64, Bool>> = Option.Some(p); o }}
+                    else {{ let p: Pair<Bool | Unit | i64, Unit> = Pair {{ a: three(0), b: () }}; let o: Option<Pair<Bool | Unit | i64, Unit>> = Option.Some(p); o }}
+                }}
+                fn main() -> i64 ! {{panic}} {{ f(mk(true)) }}"
+            ),
+            "is ambiguous",
+        );
+    }
+    // Uniqueness is judged by the call's subtype checks, not lenient
+    // matching: Option is invariant, so only T = Bool is a solution.
+    let invariant = r#"
+        enum Option<T> { None, Some(T) }
+        struct S { a: i64 }
+        fn pick<T, U>(x: T | U | i64, t: Option<T>) -> i64 ! {panic} { match x { i64 @ n => n, _ => 5 } }
+        fn main() -> i64 ! {panic} {
+            let x: Bool | Unit | S | i64 = true;
+            let t: Option<Bool> = Option.Some(true);
+            pick(x, t)
+        }"#;
+    assert_eq!(value(invariant), 5);
+    // Effect rows belong to the chosen assignment, whatever the generic order.
+    for generics in [
+        "T, U, e: Effects, f: Effects",
+        "U, T, e: Effects, f: Effects",
+    ] {
+        let effects = format!(
+            "fn a(x: i64) -> i64 ! {{panic}} {{ x }}
+            fn b(x: Bool) -> i64 ! {{alloc}} {{ 2 }}
+            fn mk(c: Bool) -> (fn(i64) -> i64 ! {{panic}}) | (fn(Bool) -> i64 ! {{alloc}}) ! {{}} {{
+                if c {{ a }} else {{ b }}
+            }}
+            fn h<{generics}>(x: (fn(T) -> i64 ! {{e}}) | (fn(U) -> i64 ! {{f}}), t: T) -> i64 ! {{e, panic}} {{
+                match x {{ (fn(T) -> i64 ! {{e}}) @ g => 10, (fn(U) -> i64 ! {{f}}) @ g => 20 }}
+            }}
+            fn main() -> i64 ! {{panic, alloc}} {{ h(mk(true), true) }}"
+        );
+        assert_eq!(value(&effects), 20, "{generics}");
+    }
+    // Assignments that differ only in effect rows are still two solutions.
+    rejects(
+        r#"
+        fn a() -> i64 ! {panic} { 1 }
+        fn b() -> i64 ! {alloc} { 2 }
+        fn mk(c: Bool) -> (fn() -> i64 ! {panic}) | (fn() -> i64 ! {alloc}) ! {} {
+            if c { a } else { b }
+        }
+        fn h<e: Effects, f: Effects>(x: (fn() -> i64 ! {e}) | (fn() -> i64 ! {f})) -> i64 ! {e, panic} { 5 }
+        fn main() -> i64 ! {panic} { h(mk(true)) }"#,
+        "is ambiguous",
+    );
+    // A member with the right constructor that is no instance of the
+    // constructor alternative goes to the bare variable, and a bare variable
+    // bound by a constructor alternative may stay without members.
+    let bare = r#"
+        enum Option<T> { None, Some(T) }
+        struct Pair<A, B> { a: A, b: B }
+        fn f<T, A>(x: T | Pair<A, Bool>, a: A) -> i64 ! {panic} {
+            match x { Pair<A, Bool> @ _ => 1, _ => 2 }
+        }
+        fn g<T>(x: T | Option<T>) -> i64 ! {panic} { match x { Option<T> @ _ => 10, _ => 20 } }
+        fn h<T>(x: Box<T> | T) -> i64 ! {panic} { match x { Box<T> @ _ => 100, _ => 200 } }
+        fn main() -> i64 ! {alloc, panic} {
+            let q: Pair<Bool, i64> = Pair { a: true, b: 7 };
+            let x: Pair<Bool, i64> | i64 = q;
+            let o: Option<i64> = Option.Some(3);
+            let b: Box<i64> = Box.new(3);
+            f(x, true) + g(o) + h(b)
+        }"#;
+    assert_eq!(value(bare), 112);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(bare, 112);
+    rejects(
+        r#"
+        fn f<T>(x: (T, T) | i64) -> i64 ! {panic} { 0 }
+        fn main() -> i64 ! {panic} { let p: (i64, Bool) | i64 = (1, true); f(p) }"#,
+        "(i64, Bool) fits no alternative",
+    );
+}
+
+#[test]
 fn structural_literals_accumulate_contextual_union_candidates() {
     let source = r#"
         fn main() -> i64 ! {panic} {
@@ -414,7 +538,7 @@ fn indexed_union_patterns_never_merge_invariant_arguments() {
         enum Option<T> { None, Some(T) }
         fn pick<T, U>(x: T | Option<U>) -> i64 ! {panic} { 0 }
         fn main() -> i64 ! {panic} { let o: Option<i64> = Option.None; pick(o) }"#,
-        "every bare variable needs at least one alternative",
+        "bare type parameter 'T' gets no alternative",
     );
     // Symmetric constructor alternatives with nothing else to decide them.
     rejects(

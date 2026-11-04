@@ -399,7 +399,13 @@ The supported inference fragment is deliberately first-order and bounded:
 - **principal result: unique or rejected.** Inference never guesses. It
   accepts a call only when exactly one type/natural substitution satisfies
   the whole constraint group, and that substitution is then the principal
-  solution of the call. Several surviving substitutions are an ambiguity
+  solution of the call. Each surviving plan is checked against the subtype
+  relations the call will actually require (every argument against its
+  instantiated parameter, the instantiated result against the expected type).
+  First-order matching ignores variance, so this keeps
+  `t: Option<T>` from admitting `T = Bool | Unit` for an `Option<Bool>`. Plans
+  whose effect-row evidence differs are different solutions, and the chosen
+  plan's effect evidence is the one solved. Several surviving substitutions are an ambiguity
   diagnostic that lists the candidates (`[T = Bool, U = Unit] or [T = Unit,
   U = Bool]`) and asks for `::<...>`. Choice plans that give the same
   substitution count once. The single-variable residual rule (`T | i64`) is
@@ -424,14 +430,18 @@ The supported inference fragment is deliberately first-order and bounded:
   collapsed: `Vec<T> | i64` over `Vec<i64> | Vec<Bool> | i64` is rejected
   instead of inventing `Vec<i64 | Bool>`, and plain `Option<T>` over
   `Option<i64> | Option<Bool>` still reports the disagreement. Bare variables
-  must still receive at least one member. A constructor alternative may receive
+  must still receive at least one member, unless a constructor alternative
+  already binds them (`T | Option<T>` over `Option<i64>`). A constructor alternative may receive
   none, which leaves its variables to other parameters. As with the fixed
   part, the most specific alternative covers: a member that fits a
   constructor alternative never goes to a bare variable. So `T | Option<U>`
   over `Bool | Option<i64>` has the single solution `T = Bool, U = i64`, and
   over `Option<i64>` alone it is rejected because `T` gets nothing. A member is
   assigned to a constructor alternative only when it is an instance of it:
-  `Pair<B, Bool>` cannot take `Pair<Bool, i64>`. Enumeration is canonical
+  `Pair<B, Bool>` cannot take `Pair<Bool, i64>`, so in `T | Pair<A, Bool>` that
+  member goes to `T`. A partition nested inside a constructor alternative,
+  such as `Option<Pair<T | U | i64, T>>`, is a decision of the same call-wide
+  search. Enumeration is canonical
   (members in normalized order, alternatives ordered by their first unbound
   variable in declaration order, so operand order never matters), is bounded
   at 4096 steps, and treats assignments that give the same substitution as one
@@ -477,7 +487,25 @@ merged. Native and reference agree.
 
 Outside the fragment, with explicit diagnostics: dependent unions, row
 subtraction/aliasing, searches beyond the budget, and unions inferred from
-unconstrained literals.
+unconstrained literals. The search interns the union types of the plans it
+commits. A unique solution over a very wide union, or a program already close
+to the 256-union layout budget, can therefore stop with "union layout budget
+exhausted". That is a resource limit, never treated as evidence against a
+choice. Speculative trials do not intern unions for bare variables.
+
+The independent review (I-REVIEW) found seven issues, all fixed with
+regressions in `principal_inference_review_regressions`:
+- a panic when a partition met a `..r` result hint;
+- a nested partition hidden by speculative trials, which made the result
+  depend on generic order;
+- uniqueness judged by lenient matching instead of the call's subtype checks;
+- effect evidence of a different plan being solved;
+- non-instance members not routed to bare variables;
+- layout-budget errors treated as rejected choices;
+- misleading diagnostics.
+The replay's plan advance also kept earlier implicit zero choices only when
+the plan was long enough, which skipped plans for calls with several
+decisions. It now pads them.
 
 ## Case analysis and narrowing
 

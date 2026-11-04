@@ -5061,6 +5061,86 @@ fn split_reference_projection(expr: Expr) -> Option<(Expr, usize)> {
     let (root, inner) = split_reference_projection(base)?;
     Some((root, inner + offset))
 }
+/// Outcome of a speculative unification; see `Checker::unify_trial`.
+struct UnifyTrial<R> {
+    result: Result<R>,
+    /// A nested partition or indexed assignment took the first of several
+    /// choices, so a failure does not rule the trial out.
+    nested_choice: bool,
+    effects: Vec<(crate::runtime_types::EffectRowTerm, u16)>,
+}
+/// Identity of a verified indexed-union assignment: its substitution, effect
+/// evidence, and the members of bare variables a trial left unbound.
+type IndexedSolutionKey = (
+    crate::runtime_types::Subst,
+    Vec<(crate::runtime_types::EffectRowTerm, u16)>,
+    Vec<Vec<Type>>,
+);
+/// One surviving plan of the cross-parameter search.
+struct ReplaySolution {
+    subst: crate::runtime_types::Subst,
+    /// The effect-row evidence this plan produced.
+    effects: Vec<EffectConstraint>,
+    /// Whether the plan passes the call's subtype checks, not only matching.
+    valid: bool,
+}
+/// Whether two inference solutions bind every type and natural variable the
+/// same way.
+fn same_solution(
+    left: &crate::runtime_types::Subst,
+    right: &crate::runtime_types::Subst,
+    type_vars: &[BindingId],
+    const_vars: &[BindingId],
+) -> bool {
+    type_vars
+        .iter()
+        .all(|var| left.types.get(var) == right.types.get(var))
+        && const_vars
+            .iter()
+            .all(|var| left.consts.get(var) == right.consts.get(var))
+}
+/// Layout budget exhaustion is a resource limit, never evidence against one
+/// inference choice.
+fn is_layout_budget_error(error: &Diagnostic) -> bool {
+    error.message.contains("layout budget exhausted")
+}
+/// Spell a declared type for diagnostics, writing unions with `|`.
+fn union_pattern_spelling(ty: &ast::Type) -> String {
+    match &ty.kind {
+        ast::TypeKind::Binary {
+            op: crate::lexer::Kind::Pipe,
+            left,
+            right,
+        } => format!(
+            "{} | {}",
+            union_pattern_spelling(left),
+            union_pattern_spelling(right)
+        ),
+        ast::TypeKind::Named { path, arguments } if !arguments.is_empty() => format!(
+            "{}<{}>",
+            path.join("."),
+            arguments
+                .iter()
+                .map(union_pattern_spelling)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ast::TypeKind::Tuple(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(union_pattern_spelling)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ast::TypeKind::Array(inner, length) => format!(
+            "[{}; {}]",
+            union_pattern_spelling(inner),
+            union_pattern_spelling(length)
+        ),
+        _ => type_key(ty),
+    }
+}
 /// A span-insensitive canonical spelling of a declared type. Used only to
 /// compare trait method contracts with their impls; it deliberately treats
 /// `Self` as one stable placeholder because both sides must spell it the same
@@ -25234,28 +25314,74 @@ impl Checker<'_, '_> {
                 residual.push(member);
             }
         }
+        let names = |this: &Self| {
+            decided
+                .iter()
+                .map(|id| this.resolution.bindings[*id].name.clone())
+                .collect::<Vec<_>>()
+                .join("', '")
+        };
         // Candidate slots of every residual member. Like the fixed part, the
-        // most specific alternative covers: a member with a constructor
-        // alternative of its outer constructor goes to one of those, never
-        // to a bare variable. Only members no constructor alternative can
-        // take are partitioned among the bare variables.
+        // most specific alternative covers: a member that is an instance of a
+        // constructor alternative goes to one of those, never to a bare
+        // variable. Only members no constructor alternative can take are
+        // partitioned among the bare variables.
         let mut candidates = Vec::with_capacity(residual.len());
         for member in &residual {
-            let mut slots_for = (0..constructors)
-                .filter(|slot| self.union_pattern_head_matches(shaped[*slot], *member))
-                .collect::<Vec<_>>();
+            let mut slots_for = Vec::new();
+            let mut member_conflict: Option<Diagnostic> = None;
+            for (slot, alternative) in shaped.iter().copied().enumerate() {
+                if !self.union_pattern_head_matches(alternative, *member) {
+                    continue;
+                }
+                let base = subst.clone();
+                let trial = self.unify_trial(|this| {
+                    let mut scratch = base;
+                    this.unify_constructor_members(
+                        alternative,
+                        &[*member],
+                        type_vars,
+                        const_vars,
+                        effect_vars,
+                        &mut scratch,
+                        span,
+                    )
+                    .map(|()| scratch)
+                })?;
+                // A nested choice that failed on its first option may still
+                // fit; the replay decides it.
+                match trial.result {
+                    Ok(_) => slots_for.push(slot),
+                    Err(_) if trial.nested_choice => slots_for.push(slot),
+                    Err(error) => {
+                        member_conflict.get_or_insert(error);
+                    }
+                }
+            }
             if slots_for.is_empty() {
                 slots_for.extend(constructors..slots.len());
             }
             if slots_for.is_empty() {
+                // A member with the right constructor that is still no
+                // instance of any alternative is a real conflict; one with no
+                // matching constructor is left to the coercion check.
+                if let Some(error) = member_conflict {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "cannot infer type parameter(s) '{}' from the indexed union pattern {}: {} fits no alternative ({}). Specialize explicitly with '::<...>'",
+                            names(self),
+                            union_pattern_spelling(pattern),
+                            self.types.name(*member),
+                            error.message
+                        ),
+                    ));
+                }
                 return Ok(false);
             }
             candidates.push(slots_for);
         }
 
-        // Enumerate assignments. Each complete assignment is checked in a
-        // scratch substitution with the replay disabled, so a trial leaves no
-        // decision, effect evidence, or binding marks behind.
         fn enumerate(
             index: usize,
             candidates: &[Vec<usize>],
@@ -25290,19 +25416,12 @@ impl Checker<'_, '_> {
             &mut budget,
             &mut assignments,
         );
-        let names = || {
-            decided
-                .iter()
-                .map(|id| self.resolution.bindings[*id].name.clone())
-                .collect::<Vec<_>>()
-                .join("', '")
-        };
         if !complete {
             return Err(Diagnostic::new(
                 span,
                 format!(
                     "cannot infer type parameter(s) '{}' from the indexed union pattern: the bounded assignment search exhausted {INDEXED_BUDGET} steps. Specialize explicitly with '::<...>'",
-                    names()
+                    names(self)
                 ),
             ));
         }
@@ -25313,137 +25432,103 @@ impl Checker<'_, '_> {
             }
             members
         };
-        let saved_plan_active = self.unify_plan_active;
-        let saved_decisions = self.unify_decisions.len();
-        let saved_effects = self.effect_constraints.len();
-        let saved_rows = self.row_bound.clone();
-        let saved_partitions = self.partition_bound.clone();
-        self.unify_plan_active = false;
-        let mut solutions: Vec<(Vec<Vec<Type>>, crate::runtime_types::Subst)> = Vec::new();
-        let mut first_conflict = None;
+        // Check every assignment in a scratch substitution with the replay
+        // disabled, so a trial leaves no decision, effect evidence, or binding
+        // marks behind. Assignments whose trial took the first of several
+        // nested choices are kept unverified: the call-wide replay explores
+        // their other nested choices when it commits them.
+        let bare = variables.iter().map(|(_, id)| *id).collect::<Vec<_>>();
+        let mut choices: Vec<Vec<Vec<Type>>> = Vec::new();
+        let mut verified: Vec<IndexedSolutionKey> = Vec::new();
+        let mut first_conflict: Option<Diagnostic> = None;
         for assignment in &assignments {
             let members = group(assignment);
-            if members[constructors..].iter().any(Vec::is_empty) {
-                continue;
-            }
-            let mut trial = subst.clone();
-            let mut accepted = true;
-            for (slot, members) in members.iter().enumerate() {
-                if members.is_empty() {
-                    continue;
+            let base = subst.clone();
+            let trial = self.unify_trial(|this| {
+                let mut scratch = base;
+                this.commit_indexed_assignment(
+                    true,
+                    &slots,
+                    constructors,
+                    &members,
+                    &bare,
+                    type_vars,
+                    const_vars,
+                    effect_vars,
+                    &mut scratch,
+                    span,
+                )?;
+                Ok(scratch)
+            })?;
+            match trial.result {
+                Ok(scratch) if !trial.nested_choice => {
+                    // Members of bare variables the trial left unbound are
+                    // part of the solution's identity.
+                    let open = members[constructors..]
+                        .iter()
+                        .zip(&bare)
+                        .map(|(members, variable)| {
+                            if scratch.types.contains_key(variable) {
+                                Vec::new()
+                            } else {
+                                members.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let key = (scratch, trial.effects, open);
+                    if !verified.iter().any(|existing| {
+                        same_solution(&existing.0, &key.0, type_vars, const_vars)
+                            && existing.1 == key.1
+                            && existing.2 == key.2
+                    }) {
+                        verified.push(key);
+                        choices.push(members);
+                    }
                 }
-                let result = if slot < constructors {
-                    self.unify_constructor_members(
-                        slots[slot],
-                        members,
-                        type_vars,
-                        const_vars,
-                        effect_vars,
-                        &mut trial,
-                        span,
-                    )
-                } else {
-                    self.types.union(members.clone(), span).and_then(|bound| {
-                        self.unify(
-                            slots[slot],
-                            bound,
-                            type_vars,
-                            const_vars,
-                            effect_vars,
-                            &mut trial,
-                            span,
-                        )
-                    })
-                };
-                if let Err(error) = result {
+                Ok(_) => choices.push(members),
+                Err(_) if trial.nested_choice => choices.push(members),
+                Err(error) => {
                     first_conflict.get_or_insert(error);
-                    accepted = false;
-                    break;
                 }
-            }
-            if accepted
-                && !solutions.iter().any(|(_, existing)| {
-                    existing.types == trial.types && existing.consts == trial.consts
-                })
-            {
-                solutions.push((members, trial));
             }
         }
-        self.unify_plan_active = saved_plan_active;
-        self.unify_decisions.truncate(saved_decisions);
-        self.effect_constraints.truncate(saved_effects);
-        self.row_bound = saved_rows;
-        self.partition_bound = saved_partitions;
 
-        if solutions.is_empty() {
-            fn spell(pattern: &ast::Type, out: &mut Vec<String>) {
-                match &pattern.kind {
-                    ast::TypeKind::Binary {
-                        op: crate::lexer::Kind::Pipe,
-                        left,
-                        right,
-                    } => {
-                        spell(left, out);
-                        spell(right, out);
-                    }
-                    _ => out.push(type_key(pattern)),
-                }
-            }
-            let mut spelled = Vec::new();
-            spell(pattern, &mut spelled);
-            let pattern_name = spelled.join(" | ");
+        if choices.is_empty() {
+            let pattern_name = union_pattern_spelling(pattern);
             let actual_name = self.types.name(actual);
-            let detail = first_conflict.map_or_else(
-                || {
-                    "every bare variable needs at least one alternative that no other pattern alternative covers".to_string()
-                },
-                |error| {
-                    format!(
-                        "{}. Constructor arguments are invariant, so alternatives such as Option<i64> | Option<Bool> are never merged into one Option<...>",
-                        error.message
-                    )
-                },
-            );
+            let detail = match first_conflict {
+                Some(error) if error.message.contains("disagree on") => format!(
+                    "{}. Constructor arguments are invariant, so alternatives such as Option<i64> | Option<Bool> are never merged into one Option<...>",
+                    error.message
+                ),
+                Some(error) => error.message,
+                None => "no assignment exists".to_string(),
+            };
             return Err(Diagnostic::new(
                 span,
                 format!(
                     "cannot infer type parameter(s) '{}' from the indexed union pattern {pattern_name}: no assignment of the alternatives of {actual_name} is consistent ({detail}). Specialize explicitly with '::<...>'",
-                    names()
+                    names(self)
                 ),
             ));
         }
-        let several = solutions.len() > 1;
-        let choice = self.union_partition_choice(solutions.len())?;
-        let (members, _) = solutions.swap_remove(choice);
-        // Commit the chosen assignment for real so binding marks and effect
-        // evidence are recorded exactly once.
-        for (slot, members) in members.into_iter().enumerate() {
-            if members.is_empty() {
-                continue;
-            }
-            if slot < constructors {
-                self.unify_constructor_members(
-                    slots[slot],
-                    &members,
-                    type_vars,
-                    const_vars,
-                    effect_vars,
-                    subst,
-                    span,
-                )?;
-            } else {
-                let bound = self.types.union(members, span)?;
-                self.unify(
-                    slots[slot],
-                    bound,
-                    type_vars,
-                    const_vars,
-                    effect_vars,
-                    subst,
-                    span,
-                )?;
-            }
-        }
+        let several = choices.len() > 1;
+        let choice = self.union_partition_choice(choices.len())?;
+        let members = choices.swap_remove(choice);
+        // Commit the chosen assignment for real so binding marks, effect
+        // evidence, and nested decisions are recorded exactly once.
+        self.commit_indexed_assignment(
+            false,
+            &slots,
+            constructors,
+            &members,
+            &bare,
+            type_vars,
+            const_vars,
+            effect_vars,
+            subst,
+            span,
+        )?;
         if several {
             // Parameters that mention a variable of a decision with several
             // choices must not commit to a tentative expected type, so the
@@ -25451,6 +25536,110 @@ impl Checker<'_, '_> {
             self.partition_bound.extend(decided);
         }
         Ok(true)
+    }
+    /// Run a speculative unification with the choice replay disabled and
+    /// restore every piece of inference state afterwards. Reports whether a
+    /// nested partition took the first of several choices, and the effect
+    /// evidence the trial produced. Layout budget exhaustion is not a
+    /// rejected choice: it is returned as an error, because treating it as
+    /// one could make a later choice look unique.
+    fn unify_trial<R>(
+        &mut self,
+        run: impl FnOnce(&mut Self) -> Result<R>,
+    ) -> Result<UnifyTrial<R>> {
+        let saved_plan_active = std::mem::replace(&mut self.unify_plan_active, false);
+        let saved_open = std::mem::replace(&mut self.unify_open_choice, false);
+        let saved_decisions = self.unify_decisions.len();
+        let saved_effects = self.effect_constraints.len();
+        let saved_rows = self.row_bound.clone();
+        let saved_partitions = self.partition_bound.clone();
+        let result = run(self);
+        let nested_choice = self.unify_open_choice;
+        let effects = self.effect_constraints[saved_effects..]
+            .iter()
+            .map(|constraint| (constraint.row.clone(), constraint.actual))
+            .collect();
+        self.unify_plan_active = saved_plan_active;
+        self.unify_open_choice = saved_open;
+        self.unify_decisions.truncate(saved_decisions);
+        self.effect_constraints.truncate(saved_effects);
+        self.row_bound = saved_rows;
+        self.partition_bound = saved_partitions;
+        if let Err(error) = &result
+            && is_layout_budget_error(error)
+        {
+            return Err(error.clone());
+        }
+        Ok(UnifyTrial {
+            result,
+            nested_choice,
+            effects,
+        })
+    }
+    /// Apply one indexed-union assignment: every constructor alternative to
+    /// its members, every nonempty bare variable to the union of its members.
+    /// A bare variable with no member is accepted only when a constructor
+    /// alternative bound it (`T | Option<T>` over `Option<i64>`). A `trial`
+    /// leaves still-unbound bare variables unbound instead of creating their
+    /// union type: speculative assignments must not use up the union layout
+    /// budget, and the caller tells such trials apart by their members.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_indexed_assignment(
+        &mut self,
+        trial: bool,
+        slots: &[&ast::Type],
+        constructors: usize,
+        members: &[Vec<Type>],
+        bare: &[BindingId],
+        type_vars: &[BindingId],
+        const_vars: &[BindingId],
+        effect_vars: &[BindingId],
+        subst: &mut crate::runtime_types::Subst,
+        span: Span,
+    ) -> Result<()> {
+        for (slot, members) in members.iter().enumerate().take(constructors) {
+            if members.is_empty() {
+                continue;
+            }
+            self.unify_constructor_members(
+                slots[slot],
+                members,
+                type_vars,
+                const_vars,
+                effect_vars,
+                subst,
+                span,
+            )?;
+        }
+        for (index, members) in members.iter().enumerate().skip(constructors) {
+            let variable = bare[index - constructors];
+            if members.is_empty() {
+                if subst.types.contains_key(&variable) {
+                    continue;
+                }
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "bare type parameter '{}' gets no alternative: every member fits a constructor alternative or the fixed part",
+                        self.resolution.bindings[variable].name
+                    ),
+                ));
+            }
+            if trial && !subst.types.contains_key(&variable) {
+                continue;
+            }
+            let bound = self.types.union(members.clone(), span)?;
+            self.unify(
+                slots[index],
+                bound,
+                type_vars,
+                const_vars,
+                effect_vars,
+                subst,
+                span,
+            )?;
+        }
+        Ok(())
     }
     /// Match one constructor alternative of an indexed-union pattern against
     /// each member assigned to it. Every member must induce the same binding
@@ -25486,7 +25675,7 @@ impl Checker<'_, '_> {
                             span,
                             format!(
                                 "the alternatives assigned to {} disagree on type parameter '{}': {} and {}",
-                                type_key(alternative),
+                                union_pattern_spelling(alternative),
                                 self.resolution.bindings[*id].name,
                                 self.types.name(*previous),
                                 self.types.name(*value)
@@ -25506,7 +25695,7 @@ impl Checker<'_, '_> {
                             span,
                             format!(
                                 "the alternatives assigned to {} disagree on natural parameter '{}': {previous} and {value}",
-                                type_key(alternative),
+                                union_pattern_spelling(alternative),
                                 self.resolution.bindings[*id].name,
                             ),
                         ));
@@ -25531,7 +25720,7 @@ impl Checker<'_, '_> {
                         format!(
                             "{} is not an instance of {}",
                             self.types.name(*member),
-                            type_key(alternative)
+                            union_pattern_spelling(alternative)
                         ),
                     ));
                 }
@@ -26398,20 +26587,24 @@ impl Checker<'_, '_> {
     /// ambiguous. At most [`UNIFY_BACKTRACK_BUDGET`] complete replays are
     /// attempted; exhausting the budget is an explicit diagnostic because
     /// uniqueness is then unknown.
+    #[allow(clippy::too_many_arguments)]
     fn replay_unification(
         &mut self,
         constraints: &[(&ast::Type, Type)],
+        result_hint: bool,
         base: Option<&crate::runtime_types::Subst>,
         type_vars: &[BindingId],
         const_vars: &[BindingId],
         effect_vars: &[BindingId],
         span: Span,
-    ) -> Result<Vec<crate::runtime_types::Subst>> {
+    ) -> Result<Vec<ReplaySolution>> {
         let mut plan: Vec<usize> = Vec::new();
         let mut attempts = 0usize;
-        let mut solutions: Vec<crate::runtime_types::Subst> = Vec::new();
+        let mut solutions: Vec<ReplaySolution> = Vec::new();
+        let saved_rows = std::mem::take(&mut self.row_bound);
         loop {
             if attempts >= UNIFY_BACKTRACK_BUDGET {
+                self.row_bound = saved_rows;
                 return Err(Diagnostic::new(
                     span,
                     format!(
@@ -26426,7 +26619,8 @@ impl Checker<'_, '_> {
             let effect_mark = self.effect_constraints.len();
             let mut candidate = base.cloned().unwrap_or_default();
             let mut failure = None;
-            for (pattern, actual) in constraints {
+            let mut hint_rows = Vec::new();
+            for (index, (pattern, actual)) in constraints.iter().enumerate() {
                 if let Err(error) = self.unify(
                     pattern,
                     *actual,
@@ -26439,22 +26633,63 @@ impl Checker<'_, '_> {
                     failure = Some(error);
                     break;
                 }
+                // As in the first pass, a wider-closed expected result row
+                // must not fix a row variable before the arguments do.
+                if index == 0 && result_hint {
+                    for binder in std::mem::take(&mut self.row_bound) {
+                        if let Some(bound) = candidate.types.remove(&binder) {
+                            hint_rows.push((binder, bound));
+                        }
+                    }
+                }
+            }
+            for (binder, bound) in hint_rows {
+                candidate.types.entry(binder).or_insert(bound);
             }
             self.unify_plan_active = false;
-            // Constraints are re-accumulated from the first pass; replay must
-            // not duplicate effect-row evidence.
-            self.effect_constraints.truncate(effect_mark);
-            if failure.is_none()
-                && !solutions.iter().any(|existing| {
-                    type_vars
-                        .iter()
-                        .all(|var| existing.types.get(var) == candidate.types.get(var))
-                        && const_vars
-                            .iter()
-                            .all(|var| existing.consts.get(var) == candidate.consts.get(var))
-                })
+            self.row_bound.clear();
+            // Each plan's effect-row evidence is kept with its solution and
+            // never accumulated across plans.
+            let effects = self.effect_constraints.split_off(effect_mark);
+            if let Some(error) = &failure
+                && is_layout_budget_error(error)
             {
-                solutions.push(candidate);
+                self.row_bound = saved_rows;
+                return Err(error.clone());
+            }
+            if failure.is_none() {
+                let key = effects
+                    .iter()
+                    .map(|constraint| (constraint.row.clone(), constraint.actual))
+                    .collect::<Vec<_>>();
+                let duplicate = solutions.iter().any(|existing| {
+                    same_solution(&existing.subst, &candidate, type_vars, const_vars)
+                        && existing
+                            .effects
+                            .iter()
+                            .map(|constraint| (constraint.row.clone(), constraint.actual))
+                            .eq(key.iter().cloned())
+                });
+                if !duplicate {
+                    let valid = self.solution_satisfies(
+                        constraints,
+                        result_hint,
+                        &candidate,
+                        type_vars,
+                        const_vars,
+                        effect_vars,
+                    )?;
+                    solutions.push(ReplaySolution {
+                        subst: candidate,
+                        effects,
+                        valid,
+                    });
+                    // Two valid solutions already decide ambiguity.
+                    if solutions.iter().filter(|solution| solution.valid).count() > 1 {
+                        self.row_bound = saved_rows;
+                        return Ok(solutions);
+                    }
+                }
             }
             // Advance the most recent decision that still has an untried
             // choice, dropping every later decision from the plan.
@@ -26465,16 +26700,54 @@ impl Checker<'_, '_> {
                 let cardinality = self.unify_decisions[index];
                 let current = plan.get(index).copied().unwrap_or(0);
                 if current + 1 < cardinality {
-                    plan.truncate(index);
+                    // Earlier decisions keep their current choice, including
+                    // the implicit zero of a plan shorter than this index.
+                    plan.resize(index, 0);
                     plan.push(current + 1);
                     advanced = true;
                     break;
                 }
             }
             if !advanced {
+                self.row_bound = saved_rows;
                 return Ok(solutions);
             }
         }
+    }
+    /// Whether a replayed substitution passes the subtype checks the call
+    /// will make: every argument against its instantiated parameter type,
+    /// and the instantiated result against the expected type. First-order
+    /// matching ignores variance, so this is what separates a real solution
+    /// from one that only matched leniently.
+    #[allow(clippy::too_many_arguments)]
+    fn solution_satisfies(
+        &mut self,
+        constraints: &[(&ast::Type, Type)],
+        result_hint: bool,
+        candidate: &crate::runtime_types::Subst,
+        type_vars: &[BindingId],
+        const_vars: &[BindingId],
+        effect_vars: &[BindingId],
+    ) -> Result<bool> {
+        for (index, (pattern, actual)) in constraints.iter().enumerate() {
+            if self.mentions(pattern, type_vars, const_vars, effect_vars, candidate) {
+                continue;
+            }
+            let declared = match self.types.ty_in(pattern, candidate) {
+                Ok(declared) => declared,
+                Err(error) if is_layout_budget_error(&error) => return Err(error),
+                Err(_) => continue,
+            };
+            let holds = if index == 0 && result_hint {
+                self.subtype(declared, *actual)
+            } else {
+                self.subtype(*actual, declared)
+            };
+            if !holds {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
     /// Check values against declared types, inferring type and const variables
     /// left to right. Returns type, grade, and const arguments plus the checked
@@ -26724,12 +26997,24 @@ impl Checker<'_, '_> {
             replay_base.self_type = self_type;
             let solutions = self.replay_unification(
                 &constraints,
+                result.is_some() && explicit.is_none(),
                 Some(&replay_base),
                 &type_vars,
                 &const_vars,
                 &effect_vars,
                 span,
             )?;
+            // Plans that pass the call's subtype checks are the solutions;
+            // only when none does are the leniently matched ones reported.
+            let complete = solutions.iter().filter(|solution| solution.valid).count() < 2;
+            let mut solutions = if solutions.iter().any(|solution| solution.valid) {
+                solutions
+                    .into_iter()
+                    .filter(|solution| solution.valid)
+                    .collect::<Vec<_>>()
+            } else {
+                solutions
+            };
             if solutions.len() > 1 {
                 let spell = |this: &Self, solution: &crate::runtime_types::Subst| {
                     type_vars
@@ -26751,13 +27036,25 @@ impl Checker<'_, '_> {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
-                let shown = solutions
+                let mut spelled = solutions
                     .iter()
                     .take(3)
-                    .map(|solution| format!("[{}]", spell(self, solution)))
+                    .map(|solution| spell(self, &solution.subst))
+                    .collect::<Vec<_>>();
+                if spelled.windows(2).any(|pair| pair[0] == pair[1]) {
+                    for (index, text) in spelled.iter_mut().enumerate() {
+                        if !text.is_empty() {
+                            text.push_str(", ");
+                        }
+                        text.push_str(&format!("effect-row assignment #{}", index + 1));
+                    }
+                }
+                let shown = spelled
+                    .iter()
+                    .map(|text| format!("[{text}]"))
                     .collect::<Vec<_>>()
                     .join(" or ");
-                let more = if solutions.len() > 3 {
+                let more = if complete && solutions.len() > 3 {
                     format!(" (and {} more)", solutions.len() - 3)
                 } else {
                     String::new()
@@ -26769,11 +27066,23 @@ impl Checker<'_, '_> {
                     ),
                 ));
             }
-            match solutions.into_iter().next() {
-                Some(replayed) => subst = replayed,
+            match solutions.pop() {
+                Some(replayed) => {
+                    subst = replayed.subst;
+                    // The chosen plan's effect evidence replaces the first
+                    // pass's, which may belong to another choice.
+                    self.effect_constraints.truncate(constraint_mark);
+                    self.effect_constraints.extend(replayed.effects);
+                }
                 None => {
-                    let error = unify_error
-                        .expect("a successful first pass is one surviving solution of the search");
+                    let Some(error) = unify_error else {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "type inference for {what} found no solution when it searched every union partition, although the first pass matched. Specialize the type arguments explicitly with '::<...>'"
+                            ),
+                        ));
+                    };
                     if self.partition_bound.is_empty() {
                         return Err(error);
                     }
