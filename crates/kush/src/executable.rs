@@ -14462,22 +14462,31 @@ impl Checker<'_, '_> {
             }
         }
         diverges |= values.iter().any(|value| value.ty == Type::Never);
-        let ty = if diverges {
-            Type::Never
+        // One occurrence map serves both argument invariance and the result,
+        // including any fresh identities for unresolved lexical borrows.
+        let lifetime_map = if diverges {
+            BTreeMap::new()
         } else {
-            self.instantiated_call_result_type(
+            self.resolve_call_lifetimes(
                 &lifetime_binders,
                 &signature.parameters,
-                signature.result,
-                signature.result_grade,
-                &signature.lifetime_bounds,
                 &values,
+                &signature.lifetime_bounds,
                 span,
             )?
         };
+        let ty = if diverges {
+            Type::Never
+        } else if crate::runtime_types::grade_erases(signature.result_grade) {
+            Type::Unit
+        } else {
+            self.types
+                .relabel_lifetimes(signature.result, &lifetime_map, span)?
+        };
         let mut coerced = Vec::with_capacity(values.len());
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
-            coerced.push(self.coerce_argument(value, *ty, span)?);
+            let ty = self.types.relabel_lifetimes(*ty, &lifetime_map, span)?;
+            coerced.push(self.coerce_argument(value, ty, span)?);
         }
         let value = Expr {
             kind: ExprKind::Call(Target::Function(index), coerced),
@@ -15786,6 +15795,34 @@ impl Checker<'_, '_> {
         {
             return Ok(());
         }
+        if let Some(fields) = self.types.structural_row_fields(callee)
+            && let Some(actual_fields) = self.types.record_row_fields(actual)
+        {
+            for field in fields {
+                if let Some(actual) = actual_fields
+                    .iter()
+                    .find(|actual| actual.name == field.name)
+                {
+                    let position = position.compose(crate::variance::SignSet::INVARIANT);
+                    self.record_call_lifetime_occurrence(
+                        field.lifetime.as_deref(),
+                        actual.lifetime.as_deref(),
+                        position,
+                        binders,
+                        occurrences,
+                    );
+                    self.collect_call_lifetime_occurrences(
+                        field.ty,
+                        actual.ty,
+                        position,
+                        binders,
+                        occurrences,
+                        depth + 1,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
         match (callee, actual) {
             (
                 Type::Annotated(callee_pointee, callee_label),
@@ -16406,7 +16443,36 @@ impl Checker<'_, '_> {
     /// supported fragment copies fields that already have the target
     /// representation, while width/order changes still require a real
     /// conversion. This is a deliberate limit, not a silent relabeling.
+    fn retained_struct_labels(
+        &mut self,
+        source: Type,
+        expected: Type,
+        rename: Option<&BTreeMap<String, String>>,
+        span: Span,
+    ) -> Result<Type> {
+        let mut fields = self
+            .types
+            .structural_row_fields(expected)
+            .expect("structural target");
+        if let Some(source_fields) = self.types.record_row_fields(source) {
+            for field in &mut fields {
+                let name = rename
+                    .and_then(|map| map.get(&field.name))
+                    .unwrap_or(&field.name);
+                if let Some(source) = source_fields.iter().find(|source| &source.name == name) {
+                    if field.lifetime.is_none() {
+                        field.lifetime = source.lifetime.clone();
+                    }
+                    if self.types.is_structural(field.ty) && source.ty.layout().is_some() {
+                        field.ty = self.retained_struct_labels(source.ty, field.ty, None, span)?;
+                    }
+                }
+            }
+        }
+        self.types.structural_fields(fields, span)
+    }
     fn coerce_struct(&mut self, value: Expr, expected: Type, span: Span) -> Result<Expr> {
+        let expected = self.retained_struct_labels(value.ty, expected, None, span)?;
         let coercion = self.struct_coercion(value.ty, expected, span, 0)?;
         Ok(Expr {
             kind: ExprKind::Coerce {
@@ -16482,6 +16548,7 @@ impl Checker<'_, '_> {
         let target_ty = self.ty(&cleaned)?;
         let value = self.expr(value_ast)?;
         let rename = (!mapping.is_empty()).then_some(&mapping);
+        let target_ty = self.retained_struct_labels(value.ty, target_ty, rename, span)?;
         let coercion = self.struct_coercion_mapped(value.ty, target_ty, rename, span, 0)?;
         Ok(Expr {
             kind: ExprKind::Coerce {
@@ -18486,6 +18553,7 @@ impl Checker<'_, '_> {
                     }
                     diverges = value.ty == Type::Never;
                     let ty = match annotation {
+                        Some(ty) if self.types.is_structural(ty) => value.ty,
                         Some(ty) => ty,
                         // Mutable locals keep the declared enum, not one variant.
                         None if *mutable => self.types.full(value.ty, pattern.span)?,
@@ -26383,22 +26451,31 @@ impl Checker<'_, '_> {
         let signature = self.functions.signatures[index].clone();
         self.require(signature.effects, span)?;
         let diverges = values.iter().any(|value| value.ty == Type::Never);
-        let ty = if diverges {
-            Type::Never
+        // One occurrence map serves both argument invariance and the result,
+        // including any fresh identities for unresolved lexical borrows.
+        let lifetime_map = if diverges {
+            BTreeMap::new()
         } else {
-            self.instantiated_call_result_type(
+            self.resolve_call_lifetimes(
                 &lifetime_binders,
                 &signature.parameters,
-                signature.result,
-                signature.result_grade,
-                &signature.lifetime_bounds,
                 &values,
+                &signature.lifetime_bounds,
                 span,
             )?
         };
+        let ty = if diverges {
+            Type::Never
+        } else if crate::runtime_types::grade_erases(signature.result_grade) {
+            Type::Unit
+        } else {
+            self.types
+                .relabel_lifetimes(signature.result, &lifetime_map, span)?
+        };
         let mut coerced = Vec::with_capacity(values.len());
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
-            coerced.push(self.coerce_argument(value, *ty, span)?);
+            let ty = self.types.relabel_lifetimes(*ty, &lifetime_map, span)?;
+            coerced.push(self.coerce_argument(value, ty, span)?);
         }
         let values = coerced;
         // Runtime parameter types aligned with the source parameter list. Erased

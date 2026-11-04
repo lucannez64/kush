@@ -1366,7 +1366,21 @@ impl<'a> Types<'a> {
         span: Span,
     ) -> Result<Type> {
         match ty {
-            Type::Enum(id) if self.enums[id].structural => Ok(ty),
+            Type::Enum(id) if self.enums[id].structural => {
+                let mut fields = self.structural_row_fields(ty).expect("structural row");
+                for field in &mut fields {
+                    field.ty = self.freshen_borrows_with(field.ty, binders, map, span)?;
+                    if field
+                        .lifetime
+                        .as_ref()
+                        .is_some_and(|label| binders.contains(label))
+                    {
+                        // The argument supplies this occurrence's identity.
+                        field.lifetime = None;
+                    }
+                }
+                self.structural_fields(fields, span)
+            }
             Type::Enum(id) if self.enums[id].record && self.enums[id].borrowed => {
                 let definition = self.enums[id].definition;
                 let consts = self.enums[id].consts.clone();
@@ -1537,6 +1551,16 @@ impl<'a> Types<'a> {
             return Ok(ty);
         }
         match ty {
+            Type::Enum(id) if self.enums[id].structural => {
+                let mut fields = self.structural_row_fields(ty).expect("structural row");
+                for field in &mut fields {
+                    field.ty = self.relabel_lifetimes(field.ty, map, span)?;
+                    if let Some(label) = &field.lifetime {
+                        field.lifetime = Some(map.get(label).unwrap_or(label).clone());
+                    }
+                }
+                self.structural_fields(fields, span)
+            }
             Type::Enum(id) => {
                 let definition = self.enums[id].definition;
                 let consts = self.enums[id].consts.clone();
@@ -5415,6 +5439,9 @@ fn collect_borrow_lifetimes(types: &Types<'_>, ty: Type, out: &mut BTreeSet<Stri
             Type::Enum(id) | Type::Variants(id, _) => {
                 let layout = &types.enums[id];
                 out.extend(layout.lifetimes.iter().cloned());
+                if layout.structural {
+                    out.extend(layout.field_lifetimes.iter().flatten().cloned());
+                }
                 for argument in &layout.arguments {
                     go(types, *argument, out, seen);
                 }

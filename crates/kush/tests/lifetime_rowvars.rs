@@ -284,3 +284,55 @@ fn borrowed_structural_results_remain_rejected() {
         "cannot carry a borrowed field without a declared lifetime",
     );
 }
+
+#[test]
+fn structural_call_instantiates_callee_lifetime() {
+    agrees(
+        r#"fn read<'a>(v: struct { view: &'a [i64] }) -> i64 ! {panic} { Slice.get(v.view, 0) }
+        fn caller<'b>(x: &'b [i64]) -> i64 ! {panic} {
+            let row: struct { view: &'b [i64] } = struct { view: x };
+            read(row)
+        }
+        fn main() -> i64 ! {panic} { let x: [i64; 1] = [42]; caller(&x[..]) }"#,
+        42,
+        "",
+    );
+}
+
+#[test]
+fn structural_calls_have_separate_lifetime_instantiations() {
+    agrees(
+        r#"fn read<'a>(v: struct { view: &'a [i64] }) -> i64 ! {panic} { Slice.get(v.view, 0) }
+        fn caller<'b, 'c>(x: &'b [i64], y: &'c [i64]) -> i64 ! {panic} {
+            let first: struct { view: &'b [i64] } = struct { view: x };
+            let second: struct { view: &'c [i64] } = struct { view: y };
+            read(first) + read(second)
+        }
+        fn main() -> i64 ! {panic} {
+            let x: [i64; 1] = [20]; let y: [i64; 1] = [22]; caller(&x[..], &y[..])
+        }"#,
+        42,
+        "",
+    );
+    rejects(
+        r#"fn pair<'a>(x: struct { view: &'a [i64] }, y: struct { view: &'a [i64] }) -> Unit ! {panic} {}
+        fn caller<'b, 'c>(x: struct { view: &'b [i64] }, y: struct { view: &'c [i64] }) -> Unit ! {panic} {
+            pair(x, y)
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+}
+
+#[test]
+fn unlabelled_annotation_preserves_retained_borrow_label() {
+    rejects(
+        r#"fn keep<'long: 'short, 'short>(v: struct { view: &'short [i64] }) -> Unit ! {panic} {
+            let unlabeled: struct { view: &[i64] } = v;
+            let longer: struct { view: &'long [i64] } = unlabeled;
+            drop(longer);
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariant",
+    );
+}

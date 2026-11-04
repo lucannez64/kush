@@ -129,6 +129,12 @@ LT-STRUCT-RESULT work is not started.
   the resolved substitution. Residual fields are sorted by their canonical
   target names and coercions map them by source field name, not by retained
   source indices.
+- Call occurrences instantiate declared callee lifetimes from structural field
+  labels before argument coercion. Repeated invariant occurrences must agree;
+  separate calls resolve independent maps, while caller labels remain rigid.
+- Unlabelled structural annotations and casts retain known source field labels,
+  including nested retained rows, so an intermediate annotation cannot erase an
+  invariant obligation. Local bindings keep that refined checked row.
 - Structural conversion keeps retained borrowed leaves invariant: a concrete
   source label must equal the target label. An unlabelled literal or an
   opaque/fresh inferred label may acquire the target annotation only through
@@ -141,7 +147,8 @@ LT-STRUCT-RESULT work is not started.
 Coverage is in `crates/kush/tests/lifetime_rowvars.rs`: direct annotation
 labels, residual borrowed reads, distinct call-site labels, matching repeated
 rows, impl-row methods, owner mutation/drop while a residual loan is live,
-reordered nonzero source indices, label invariance, and continued structural
+reordered nonzero source indices, label invariance through unlabelled intermediates, alpha-renamed call binders,
+repeated-binder conflicts, and continued structural
 result rejection. Positive cases are checked by the reference evaluator and the
 native backend with balanced allocation statistics.
 
