@@ -493,6 +493,10 @@ fn container_carries_borrow(
 #[derive(Clone, Debug, Default)]
 struct RecordProvenance {
     leaves: BTreeMap<Vec<usize>, Loan>,
+    /// Every actual lifetime contributed to a leaf before a branch join hid an
+    /// incomparable label. Diagnostics use this to name the failing source
+    /// instead of falling back to "a temporary or local owner".
+    alternatives: BTreeMap<Vec<usize>, BTreeSet<String>>,
 }
 impl RecordProvenance {
     fn merge(parts: impl IntoIterator<Item = RecordProvenance>) -> Self {
@@ -509,6 +513,20 @@ impl RecordProvenance {
                     .entry(path.clone())
                     .or_default()
                     .push(loan.lifetime.clone());
+                if let Some(lifetime) = &loan.lifetime {
+                    merged
+                        .alternatives
+                        .entry(path.clone())
+                        .or_default()
+                        .insert(lifetime.clone());
+                }
+                if let Some(alternatives) = part.alternatives.get(path) {
+                    merged
+                        .alternatives
+                        .entry(path.clone())
+                        .or_default()
+                        .extend(alternatives.iter().cloned());
+                }
             }
         }
         for (path, entry) in &mut merged.leaves {
@@ -891,6 +909,18 @@ fn describe_actual(name: &str) -> String {
         "a borrow with no named lifetime".to_owned()
     } else {
         format!("lifetime '{name}'")
+    }
+}
+/// Name one actual lifetime inside a type-level message. A named caller label
+/// keeps its surface spelling; a canonical `#k` label is rendered like an arrow
+/// lifetime, and an internal inference identity stays explicit.
+fn display_actual_lifetime(name: &str) -> String {
+    if name.starts_with('#') {
+        describe_lifetime(name)
+    } else if name.starts_with('<') {
+        name.to_owned()
+    } else {
+        format!("'{name}")
     }
 }
 fn is_internal_lifetime(name: &str) -> bool {
@@ -1916,6 +1946,23 @@ impl Checker<'_> {
                 (None, None) => continue,
             };
             merged.leaves.insert(path, loan);
+        }
+        let alternative_paths = existing
+            .alternatives
+            .keys()
+            .chain(provenance.alternatives.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for path in alternative_paths {
+            let mut alternatives = existing
+                .alternatives
+                .get(&path)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(more) = provenance.alternatives.get(&path) {
+                alternatives.extend(more.iter().cloned());
+            }
+            merged.alternatives.insert(path, alternatives);
         }
         self.record_sources[slot] = Some(merged);
         let mut origins = if replace {
@@ -3659,13 +3706,35 @@ impl Checker<'_> {
                 ));
             };
             if !self.lifetime_carried_at(loan.lifetime.as_deref(), lifetime, leaf.variance) {
+                let failing = provenance
+                    .alternatives
+                    .get(&leaf.path)
+                    .map(|alternatives| {
+                        alternatives
+                            .iter()
+                            .filter(|alternative| {
+                                !self.lifetime_carried_at(
+                                    Some(alternative),
+                                    lifetime,
+                                    leaf.variance,
+                                )
+                            })
+                            .map(|alternative| display_actual_lifetime(alternative))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let actual = if failing.is_empty() {
+                    loan.lifetime
+                        .as_deref()
+                        .map(display_actual_lifetime)
+                        .unwrap_or_else(|| "a temporary or local owner".to_owned())
+                } else {
+                    failing.join(" or ")
+                };
                 return Err(Diagnostic::new(
                     span,
                     format!(
-                        "returned borrowed record field has lifetime {}, which does not satisfy the declared result lifetime '{lifetime}' at its {} occurrence",
-                        loan.lifetime
-                            .as_deref()
-                            .unwrap_or("a temporary or local owner"),
+                        "returned borrowed record field has lifetime {actual}, which does not satisfy the declared result lifetime '{lifetime}' at its {} occurrence",
                         describe_variance(leaf.variance)
                     ),
                 ));
@@ -6585,12 +6654,19 @@ fn coerce_provenance(coercion: &Coercion, provenance: RecordProvenance) -> Recor
     let mut out = RecordProvenance::default();
     if let Some(root) = provenance.leaves.get(&Vec::new()) {
         out.leaves.insert(Vec::new(), root.clone());
+        if let Some(alternatives) = provenance.alternatives.get(&Vec::new()) {
+            out.alternatives.insert(Vec::new(), alternatives.clone());
+        }
     }
     for (target, source, nested) in kept {
         let mut field = RecordProvenance::default();
         for (path, loan) in &provenance.leaves {
             if path.first() == Some(source) {
-                field.leaves.insert(path[1..].to_vec(), loan.clone());
+                let relative = path[1..].to_vec();
+                field.leaves.insert(relative.clone(), loan.clone());
+                if let Some(alternatives) = provenance.alternatives.get(path) {
+                    field.alternatives.insert(relative, alternatives.clone());
+                }
             }
         }
         if let Some(nested) = nested {
@@ -6600,6 +6676,11 @@ fn coerce_provenance(coercion: &Coercion, provenance: RecordProvenance) -> Recor
             let mut full = vec![*target];
             full.extend(path);
             out.leaves.insert(full, loan);
+        }
+        for (path, alternatives) in field.alternatives {
+            let mut full = vec![*target];
+            full.extend(path);
+            out.alternatives.insert(full, alternatives);
         }
     }
     out

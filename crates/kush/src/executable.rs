@@ -25365,13 +25365,33 @@ impl Checker<'_, '_> {
                                 .iter()
                                 .map(|field| field.name.as_str())
                                 .collect::<BTreeSet<_>>();
-                            let residual = self
+                            let mut residual = Vec::new();
+                            for (index, mut field) in self
                                 .types
                                 .record_row_fields(Type::Enum(layout))
                                 .expect("a checked record has a canonical row")
                                 .into_iter()
-                                .filter(|field| !declared.contains(field.name.as_str()))
-                                .collect::<Vec<_>>();
+                                .enumerate()
+                            {
+                                if declared.contains(field.name.as_str()) {
+                                    continue;
+                                }
+                                // An unannotated literal carries no declared
+                                // identity for a borrowed residual field. Give
+                                // it a stable local label for this inspected
+                                // row shape so a `..r` specialization can carry
+                                // it into a result; ownership still checks the
+                                // actual origins, so the label is never origin
+                                // evidence. The layout identity keeps repeated
+                                // unlabelled rows matching each other without
+                                // mixing an explicit caller label.
+                                if field.lifetime.is_none() && field.ty.is_view() {
+                                    field.lifetime = Some(format!(
+                                        "<unlabelled structural row {layout} field {index}>"
+                                    ));
+                                }
+                                residual.push(field);
+                            }
                             let residual = self.types.structural_fields(residual, span)?;
                             match subst.types.get(&binder).copied() {
                                 Some(bound) => {

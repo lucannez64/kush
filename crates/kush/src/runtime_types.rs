@@ -137,6 +137,39 @@ impl RowField {
 pub(crate) fn is_opaque_row_label(label: &str) -> bool {
     label.is_empty() || label == "_" || label.starts_with('<')
 }
+/// Render an erased lifetime label for a type diagnostic. Canonical callable
+/// labels `#k` print as the arrow's `'a`, `'b`, ...; an internal inference
+/// identity prints as a compact anonymous label such as `'_1` so two distinct
+/// inferred rows never print as the same type.
+fn lifetime_label_text(name: &str) -> String {
+    if let Some(index) = name.strip_prefix('#').and_then(|n| n.parse::<usize>().ok()) {
+        let letter = (b'a' + (index % 26) as u8) as char;
+        if index < 26 {
+            return format!("'{letter}");
+        }
+        return format!("'{letter}{}", index / 26);
+    }
+    if name.starts_with('<') {
+        let mut suffix = String::new();
+        let mut separator = false;
+        for character in name.chars() {
+            if character.is_ascii_digit() {
+                suffix.push(character);
+                separator = false;
+            } else if !separator && !suffix.is_empty() {
+                suffix.push('_');
+                separator = true;
+            }
+        }
+        let suffix = suffix.trim_end_matches('_');
+        return if suffix.is_empty() {
+            "'_".to_owned()
+        } else {
+            format!("'_{suffix}")
+        };
+    }
+    format!("'{name}")
+}
 /// One empty variant is represented by an invalid one-word payload value.
 /// The populated variant retains the payload's ordinary representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1884,13 +1917,36 @@ impl<'a> Types<'a> {
             name
         }
     }
+    /// Render a structural row with every erased outer borrow label. Rows that
+    /// differ only in a field lifetime are distinct checker types, so a
+    /// mismatch must not print both sides as the same label-free shape.
+    fn structural_name(&self, id: usize) -> String {
+        let layout = &self.enums[id];
+        let variant = &layout.variants[0];
+        let fields = variant
+            .names
+            .iter()
+            .zip(&variant.fields)
+            .enumerate()
+            .map(|(index, (name, ty))| {
+                let mut text = self.name(*ty);
+                if let Some(label) = layout.field_lifetimes.get(index).and_then(Option::as_ref)
+                    && text.starts_with('&')
+                {
+                    text = format!("&{} {}", lifetime_label_text(label), &text[1..]);
+                }
+                format!("{name}: {text}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("struct {{ {fields} }}")
+    }
     fn layout_name(&self, id: usize) -> String {
         let layout = &self.enums[id];
-        if layout.tuple
-            || layout.array.is_some()
-            || layout.dynamic_array.is_some()
-            || layout.structural
-        {
+        if layout.structural {
+            return self.structural_name(id);
+        }
+        if layout.tuple || layout.array.is_some() || layout.dynamic_array.is_some() {
             return layout.name.clone();
         }
         if layout.arguments.is_empty() && layout.consts.is_empty() && layout.lifetimes.is_empty() {

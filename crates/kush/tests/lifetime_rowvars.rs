@@ -53,6 +53,114 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
 }
 
 #[test]
+fn mismatch_diagnostics_render_structural_field_lifetimes() {
+    // Arrow contracts over the same erased field shape are distinct when the
+    // field labels differ, so the mismatch must print the labels rather than
+    // two identical-looking rows.
+    rejects(
+        r#"fn second<'a, 'b>(a: &'a [i64], b: &'b [i64])
+            -> struct { view: &'b [i64] } ! {panic} {
+            struct { view: b }
+        }
+        fn install(f: fn<'a, 'b>(&'a [i64], &'b [i64])
+            -> struct { view: &'a [i64] } ! {panic}) -> Unit ! {panic} {
+            drop(f);
+        }
+        fn main() -> Unit ! {panic} {
+            let a: [i64; 1] = [1];
+            let b: [i64; 1] = [2];
+            install(second);
+            drop(a);
+            drop(b);
+        }"#,
+        "expected fn<'a, 'b>(&'a [i64], &'b [i64]) -> struct { view: &'a [i64] } ! {panic}, found fn<'a, 'b>(&'a [i64], &'b [i64]) -> struct { view: &'b [i64] } ! {panic}",
+    );
+    // The repeated-row diagnostic names both residuals with their labels.
+    rejects(
+        r#"fn pick<r>(a: struct { n: i64, ..r }, b: struct { n: i64, ..r })
+            -> i64 ! {panic} { drop(a); drop(b); 0 }
+        fn run<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> i64 ! {panic} {
+            let first: struct { n: i64, view: &'a [i64] } = struct { n: 1, view: x };
+            let second: struct { n: i64, view: &'b [i64] } = struct { n: 2, view: y };
+            pick(first, second)
+        }
+        fn main() -> Unit ! {} {}"#,
+        "bound to struct { view: &'a [i64] } by another argument, but this argument's residual row is struct { view: &'b [i64] }",
+    );
+    // Inferred call-site labels are distinct internal identities; they must
+    // not collapse to the same anonymous spelling either.
+    let error = check(
+        r#"struct A<'a> { n: i64, view: &'a [i64] }
+        struct B<'b> { n: i64, view: &'b [i64] }
+        fn pick<r>(a: struct { n: i64, ..r }, b: struct { n: i64, ..r })
+            -> i64 ! {panic} { drop(a); drop(b); 0 }
+        fn run<'a, 'b>(x: &'a [i64], y: &'b [i64]) -> i64 ! {panic} {
+            pick(A { n: 1, view: x }, B { n: 2, view: y })
+        }
+        fn main() -> Unit ! {} {}"#,
+    )
+    .unwrap_err();
+    let message = error.message;
+    let bound = message
+        .split("was bound to ")
+        .nth(1)
+        .and_then(|rest| rest.split(" by another argument").next())
+        .expect("row-variable message names the bound row");
+    let residual = message
+        .split("residual row is ")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("row-variable message names the residual row");
+    assert_ne!(bound, residual, "{message}");
+    assert!(bound.contains("&'_"), "{message}");
+    assert!(residual.contains("&'_"), "{message}");
+}
+
+#[test]
+fn an_unlabelled_structural_literal_specializes_a_borrowed_residual_row() {
+    // The literal's borrowed field has no declared identity, but specializing
+    // `..r` gives it a local label. The identity helper accepts it exactly like
+    // the nominal-record argument, and both backends agree.
+    agrees(
+        r#"fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {panic} { v }
+        fn main() -> i64 ! {panic} {
+            let values: [i64; 1] = [1];
+            let out = keep(struct { n: 1, view: &values[..] });
+            Slice.get(out.view, 0) + 41
+        }"#,
+        42,
+        "",
+    );
+    // Repeated unlabelled rows of the same shape keep matching each other.
+    agrees(
+        r#"fn pair<r>(a: struct { x: i64, ..r }, b: struct { x: i64, ..r }) -> i64 ! {panic} {
+            a.x + b.x
+        }
+        fn main() -> i64 ! {panic} {
+            let left: [i64; 1] = [1];
+            let right: [i64; 1] = [2];
+            pair(
+                struct { x: 20, view: &left[..] },
+                struct { x: 22, view: &right[..] },
+            )
+        }"#,
+        42,
+        "",
+    );
+    // The label is never origin evidence: a literal borrowing a frame local
+    // still cannot be returned as the caller's declared lifetime.
+    rejects(
+        r#"fn keep<r>(v: struct { n: i64, ..r }) -> struct { n: i64, ..r } ! {panic} { v }
+        fn bad<'a>(v: &'a [i64]) -> struct { n: i64, view: &'a [i64] } ! {panic} {
+            let values: [i64; 1] = [1];
+            keep(struct { n: 1, view: &values[..] })
+        }
+        fn main() -> Unit ! {} {}"#,
+        "outlive the lexical scope",
+    );
+}
+
+#[test]
 fn direct_structural_annotations_keep_their_borrow_labels() {
     // Before labels were part of the canonical row, the parameter's `view`
     // leaf had no lifetime and the explicit result could not be tied to it.
