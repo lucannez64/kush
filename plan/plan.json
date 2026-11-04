@@ -1671,6 +1671,11 @@
           "time": "2026-11-03 17:40:41",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-04 02:27:11",
+          "who": "agent",
+          "text": "Verified close-out contract: no backend or arrow cache consumes the provisional summaries; stable leaf identity, budgets as errors, discovery/freeze present (grep + design-map done)"
         }
       ]
     },
@@ -1787,7 +1792,7 @@
         "LT-VAR-TABLE",
         "LT-VAR-CONTEXT"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Single pair/path witness for callable and type checks; retain owners and declared mutable destination labels; lifetime-only, no erased fallback.",
       "commit": null,
       "log": [
@@ -1795,6 +1800,16 @@
           "time": "2026-11-04 00:34:09",
           "who": "agent",
           "text": "Checked branch labels before instantiating a call argument (40547d6): the reviewer's laundering case now rejects with its labels intact; Boat gate 1243 tests."
+        },
+        {
+          "time": "2026-11-04 01:03:01",
+          "who": "agent",
+          "text": "Branch-argument label check landed (40547d6); boundary tests extended; independent soundness review running"
+        },
+        {
+          "time": "2026-11-04 02:27:11",
+          "who": "agent",
+          "text": "Independent soundness review complete. Expanded branch label checking across enum wrappers, unions, and every pointee carrier (17d8956); 1244-test Boat gate. F3 (binder-name reuse) and F4 (half-opaque bound skip) are declined at LOW: fixing breaks committed legit programs, ownership provenance pass owns that path; recorded as designed behavior."
         }
       ]
     },
@@ -1806,10 +1821,21 @@
       "deps": [
         "LT-VAR-CHECK"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Algebra, aliasing attacks, callable occurrence environments, source-copy loans, anonymous intersections, parity and independent soundness review.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-04 01:03:01",
+          "who": "agent",
+          "text": "Algebra/alias/copy/parity boundaries added; independent soundness review running"
+        },
+        {
+          "time": "2026-11-04 02:27:11",
+          "who": "agent",
+          "text": "Boundary suite now covers branch-argument laundering (invariant and covariant), alias attacks, copy-loan release, wrapper sweeps; review verdict: no remaining end-to-end hole in the reviewed scope"
+        }
+      ]
     },
     {
       "id": "RES-HANDLER-ELIDE",
