@@ -1506,6 +1506,8 @@ pub(crate) enum Pattern {
 }
 #[derive(Clone)]
 struct Signature {
+    /// Call-only types scope declared labels before caller rows are expanded.
+    call_contract: Option<CallLifetimeContract>,
     binding: BindingId,
     name: String,
     /// Runtime parameter types, in order. Erased parameters are absent.
@@ -1540,7 +1542,25 @@ struct Signature {
     /// instance's specialization. `Self::NAME` resolves here.
     associated_consts: BTreeMap<String, ConstValue>,
 }
+#[derive(Clone)]
+struct CallLifetimeContract {
+    parameters: Vec<Type>,
+    result: Type,
+    binders: BTreeSet<String>,
+    names: BTreeMap<String, String>,
+    bounds: BTreeSet<(String, String)>,
+}
 impl Signature {
+    fn scope_call_lifetimes(&mut self) -> (BTreeSet<String>, BTreeMap<String, String>) {
+        let Some(contract) = self.call_contract.take() else {
+            return (BTreeSet::new(), BTreeMap::new());
+        };
+        self.parameters = contract.parameters;
+        self.result = contract.result;
+        self.lifetime_bounds = contract.bounds;
+        (contract.binders, contract.names)
+    }
+
     /// Whether logical runtime parameter `index` is physically erased by a
     /// grade-zero contract.
     fn parameter_erased(&self, index: usize) -> bool {
@@ -10070,8 +10090,49 @@ impl<'a> Functions<'a> {
         let default_trait = declared
             .default_specialization
             .map(|index| self.default_specializations[index].clone());
+        // Rename only labels written in the callee declaration. Substituted
+        // type arguments (including residual rows) already belong to the caller
+        // and must never be captured by a same-spelled callee binder.
+        let call_contract = if f.lifetimes.is_empty() {
+            None
+        } else {
+            let mut scoped = substitution.clone();
+            let mut binders = BTreeSet::new();
+            let mut names = BTreeMap::new();
+            for lifetime in &f.lifetimes {
+                let identity = types.fresh_lifetime(&format!("callee '{}", lifetime.name));
+                scoped
+                    .lifetimes
+                    .insert(lifetime.name.clone(), identity.clone());
+                binders.insert(identity.clone());
+                names.insert(identity, lifetime.name.clone());
+            }
+            let rename = |name: &String| {
+                scoped
+                    .lifetimes
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone())
+            };
+            Some(CallLifetimeContract {
+                parameters: f
+                    .parameters
+                    .iter()
+                    .filter(|p| !p.erased)
+                    .map(|p| types.ty_in(split_grade(&p.ty).0, &scoped))
+                    .collect::<Result<Vec<_>>>()?,
+                result: types.ty_in(&result_ty, &scoped)?,
+                binders,
+                names,
+                bounds: lifetime_bounds
+                    .iter()
+                    .map(|(a, b)| (rename(a), rename(b)))
+                    .collect(),
+            })
+        };
         let index = self.signatures.len();
         self.signatures.push(Signature {
+            call_contract,
             binding,
             origin: origin
                 .filter(|_| specialized)
@@ -14224,6 +14285,7 @@ impl Checker<'_, '_> {
             declared_lifetimes: BTreeSet::new(),
         };
         let signature = Signature {
+            call_contract: None,
             binding: usize::MAX,
             name: function.name.clone(),
             parameters,
@@ -14370,7 +14432,8 @@ impl Checker<'_, '_> {
             impl_arguments,
             Some(span),
         )?;
-        let signature = self.functions.signatures[index].clone();
+        let mut signature = self.functions.signatures[index].clone();
+        let (lifetime_binders, lifetime_names) = signature.scope_call_lifetimes();
         self.require(signature.effects, span)?;
         let mut signature_types = signature.parameters.iter();
         let parameter_types = f
@@ -14472,6 +14535,7 @@ impl Checker<'_, '_> {
                 &signature.parameters,
                 &values,
                 &signature.lifetime_bounds,
+                &lifetime_names,
                 span,
             )?
         };
@@ -16033,17 +16097,20 @@ impl Checker<'_, '_> {
     /// with no parameter occurrence keeps a distinct opaque identity so an
     /// unresolved callee label can never masquerade as a caller binder with the
     /// same printed name.
+    #[allow(clippy::too_many_arguments)]
     fn resolve_call_lifetimes(
         &mut self,
         binders: &BTreeSet<String>,
         parameters: &[Type],
         values: &[Expr],
         bounds: &BTreeSet<(String, String)>,
+        binder_names: &BTreeMap<String, String>,
         span: Span,
     ) -> Result<BTreeMap<String, String>> {
         let mut occurrences = self.call_lifetime_occurrences(parameters, values, binders)?;
         let mut map = BTreeMap::new();
         for binder in binders {
+            let binder_name = binder_names.get(binder).unwrap_or(binder);
             let occurrences = occurrences.remove(binder).unwrap_or_default();
             let actuals = occurrences
                 .iter()
@@ -16100,7 +16167,7 @@ impl Checker<'_, '_> {
                 return Err(Diagnostic::new(
                     span,
                     format!(
-                        "this call cannot prove the invariant lifetime '{binder}': one occurrence supplies an inferred/elided identity while another supplies a named lifetime"
+                        "this call cannot prove the invariant lifetime '{binder_name}': one occurrence supplies an inferred/elided identity while another supplies a named lifetime"
                     ),
                 ));
             }
@@ -16119,7 +16186,7 @@ impl Checker<'_, '_> {
                     return Err(Diagnostic::new(
                         span,
                         format!(
-                            "this call instantiates lifetime '{binder}' invariantly from several argument lifetimes ({names}); an invariant occurrence requires one actual lifetime identity"
+                            "this call instantiates lifetime '{binder_name}' invariantly from several argument lifetimes ({names}); an invariant occurrence requires one actual lifetime identity"
                         ),
                     ));
                 }
@@ -16134,7 +16201,7 @@ impl Checker<'_, '_> {
                                 return Err(Diagnostic::new(
                                     span,
                                     format!(
-                                        "this call cannot use lifetime '{}' where '{binder}' is invariant '{}': no established outlives edge proves '{}: '{}",
+                                        "this call cannot use lifetime '{}' where '{binder_name}' is invariant '{}': no established outlives edge proves '{}: '{}",
                                         occurrence.actual, candidate, occurrence.actual, candidate
                                     ),
                                 ));
@@ -16145,7 +16212,7 @@ impl Checker<'_, '_> {
                                 return Err(Diagnostic::new(
                                     span,
                                     format!(
-                                        "this call cannot use lifetime '{}' where '{binder}' is invariant '{}': no established outlives edge proves '{}: '{}",
+                                        "this call cannot use lifetime '{}' where '{binder_name}' is invariant '{}': no established outlives edge proves '{}: '{}",
                                         occurrence.actual, candidate, candidate, occurrence.actual
                                     ),
                                 ));
@@ -16156,7 +16223,7 @@ impl Checker<'_, '_> {
                                 return Err(Diagnostic::new(
                                     span,
                                     format!(
-                                        "this call instantiates lifetime '{binder}' invariantly from both '{}' and '{}'; an invariant occurrence requires one actual lifetime identity",
+                                        "this call instantiates lifetime '{binder_name}' invariantly from both '{}' and '{}'; an invariant occurrence requires one actual lifetime identity",
                                         occurrence.actual, candidate
                                     ),
                                 ));
@@ -16201,7 +16268,7 @@ impl Checker<'_, '_> {
                         return Err(Diagnostic::new(
                             span,
                             format!(
-                                "cannot choose one actual lifetime for callee lifetime '{binder}' from covariant argument occurrences ({names}); no candidate satisfies every required outlives edge"
+                                "cannot choose one actual lifetime for callee lifetime '{binder_name}' from covariant argument occurrences ({names}); no candidate satisfies every required outlives edge"
                             ),
                         ));
                     }
@@ -16223,7 +16290,7 @@ impl Checker<'_, '_> {
                                 return Err(Diagnostic::new(
                                     span,
                                     format!(
-                                        "cannot choose one actual lifetime for callee lifetime '{binder}': the covariant argument lifetimes {names} are incomparable, so no checked common identity exists"
+                                        "cannot choose one actual lifetime for callee lifetime '{binder_name}': the covariant argument lifetimes {names} are incomparable, so no checked common identity exists"
                                     ),
                                 ));
                             }
@@ -16277,7 +16344,14 @@ impl Checker<'_, '_> {
         if crate::runtime_types::grade_erases(result_grade) {
             return Ok(Type::Unit);
         }
-        let map = self.resolve_call_lifetimes(binders, parameters, values, bounds, span)?;
+        let map = self.resolve_call_lifetimes(
+            binders,
+            parameters,
+            values,
+            bounds,
+            &BTreeMap::new(),
+            span,
+        )?;
         self.types.relabel_lifetimes(result, &map, span)
     }
     /// Insert the deterministic runtime conversion needed to use `value` as
@@ -17076,6 +17150,7 @@ impl Checker<'_, '_> {
             declared_lifetimes: BTreeSet::new(),
         };
         let synthetic = Signature {
+            call_contract: None,
             associated_consts: BTreeMap::new(),
             binding: usize::MAX,
             name: name.to_owned(),
@@ -22045,6 +22120,7 @@ impl Checker<'_, '_> {
         grades.extend(parameter_grades.iter().copied());
         let name = if once { "once lambda" } else { "lambda" };
         let signature = Signature {
+            call_contract: None,
             binding: usize::MAX,
             name: name.to_owned(),
             parameters,
@@ -26448,7 +26524,8 @@ impl Checker<'_, '_> {
             None,
             Some(span),
         )?;
-        let signature = self.functions.signatures[index].clone();
+        let mut signature = self.functions.signatures[index].clone();
+        let (lifetime_binders, lifetime_names) = signature.scope_call_lifetimes();
         self.require(signature.effects, span)?;
         let diverges = values.iter().any(|value| value.ty == Type::Never);
         // One occurrence map serves both argument invariance and the result,
@@ -26461,6 +26538,7 @@ impl Checker<'_, '_> {
                 &signature.parameters,
                 &values,
                 &signature.lifetime_bounds,
+                &lifetime_names,
                 span,
             )?
         };

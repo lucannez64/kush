@@ -336,3 +336,36 @@ fn unlabelled_annotation_preserves_retained_borrow_label() {
         "invariant",
     );
 }
+
+#[test]
+fn residual_caller_lifetime_does_not_capture_same_named_callee_binder() {
+    agrees(
+        r#"fn inspect<'a,r>(v: struct { x: &'a [i64], ..r }) -> i64 ! {panic} {
+            Slice.get(v.x, 0) + Slice.get(v.y, 0)
+        }
+        fn caller<'a,'b>(v: struct { x: &'b [i64], y: &'a [i64] }) -> i64 ! {panic} {
+            inspect(v)
+        }
+        fn main() -> i64 ! {panic} {
+            let x: [i64; 1] = [20];
+            let y: [i64; 1] = [22];
+            caller(struct { x: &x[..], y: &y[..] })
+        }"#,
+        42,
+        "",
+    );
+}
+
+#[test]
+fn same_named_callee_binder_still_requires_one_invariant_identity() {
+    rejects(
+        r#"fn inspect<'a,r>(v: struct { x: &'a [i64], z: &'a [i64], ..r }) -> i64 ! {panic} {
+            Slice.get(v.x, 0) + Slice.get(v.y, 0) + Slice.get(v.z, 0)
+        }
+        fn caller<'a,'b>(v: struct { x: &'b [i64], y: &'a [i64], z: &'a [i64] }) -> i64 ! {panic} {
+            inspect(v)
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariantly from several argument lifetimes",
+    );
+}
