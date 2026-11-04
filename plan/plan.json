@@ -2245,9 +2245,9 @@
       "deps": [
         "LIFE"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "LT-REVIEW low findings 2-4: render structural field lifetime labels in type-mismatch messages; name the real parameter source for recursive argument swaps; accept or clearly diagnose unlabelled structural literals passed to ..r helpers.",
-      "commit": null,
+      "commit": "3eac080",
       "log": [
         {
           "time": "2026-11-04 21:19:12",
@@ -2258,6 +2258,11 @@
           "time": "2026-11-04 21:40:21",
           "who": "agent",
           "text": "3eac080 merged; Opus review CLOSE (13 probes); nit: internal '<unlabelled structural row\u2026>' label can appear in messages; gate pending with PROJ"
+        },
+        {
+          "time": "2026-11-04 21:56:33",
+          "who": "agent",
+          "text": "Opus review CLOSE; merged; Boat gate 1358 at 5f59397"
         }
       ]
     },
@@ -2269,14 +2274,19 @@
       "deps": [
         "LIFE"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "LT-REVIEW finding 5: wrap(a).view through a helper returning a structural record; nested structural row arguments rejected by conversion invariance (LT-STRUCT-RESULT review).",
-      "commit": null,
+      "commit": "2bf5e6f",
       "log": [
         {
           "time": "2026-11-04 21:19:12",
           "who": "agent",
           "text": "delegated"
+        },
+        {
+          "time": "2026-11-04 21:56:33",
+          "who": "agent",
+          "text": "Opus review CLOSE (21 probes); merged; Boat gate 1358 at 5f59397. Remaining: let-bound helper results on recursive edges not inferred"
         }
       ]
     }
