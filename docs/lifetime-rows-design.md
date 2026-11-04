@@ -155,9 +155,11 @@ implements the borrowed structural result gate (2026-11-04).
 - A field annotation is an obligation, never origin evidence. For lifetime
   obligations, a structural field's erased outer borrow is covariant like any
   other shared/exclusive view (a longer source satisfies a shorter declared
-  result label), while retained borrowed fields stay exact under an actual
-  structural conversion because `structural_subtype` still requires identical
-  concrete labels. Nested nominal invariance is still composed through the
+  result label), while retained **named** borrowed labels stay exact under an
+  actual structural conversion. An unlabelled or opaque source leaf may acquire
+  the target annotation only through the ordinary checked coercion, which keeps
+  the value's actual origins; this rule now applies through nested structural
+  rows as well. Nested nominal invariance is still composed through the
   declaration variance table.
 - Supported elision: an unlabelled borrowed field in a structural result is
   resolved from the function's single distinct input borrow lifetime, mirroring
@@ -165,23 +167,37 @@ implements the borrowed structural result gate (2026-11-04).
   identity. Zero or several distinct input lifetimes is an explicit rejection.
   An arrow type has no body, so its structural fields must name an arrow-bound
   lifetime.
+- An elided multi-input root result may follow a projected field of a helper's
+  structural result. The recursive summary stores one leaf per result field, so
+  `wrap(a).view` contributes only the projected field's origin and leaves an
+  unrelated argument's owner free to be mutated or dropped. Direct static calls
+  and statically resolved methods compose; indirect calls, dynamic dispatch,
+  effects, loops and tasks keep explicit contracts. A recursive edge unions
+  every possible source that can reach the result through that edge.
+- Call-site instantiation of callee lifetime binders descends through nested
+  structural fields. A nested structural argument's unlabelled inner leaves may
+  acquire the callee's labels through the checked conversion, and the ownership
+  pass still validates every actual origin. Two named inner labels bound to one
+  callee lifetime remain an invariant-identity error.
 
 Coverage is in `crates/kush/tests/lifetime_rowvars.rs` and
 `crates/kush/tests/lifetime_struct_results.rs`: direct annotation labels,
 residual borrowed reads, distinct call-site labels, matching repeated rows,
 impl-row identity results, owner mutation/drop while a residual loan is live,
 reordered nonzero source indices, label invariance through unlabelled
-intermediates, alpha-renamed call binders, repeated-binder conflicts, and the
-full result matrix below. Positive cases are checked by the reference evaluator
-and the native backend (default and release codegen) with balanced allocation
-statistics.
+intermediates, alpha-renamed call binders, repeated-binder conflicts, projected
+structural helper results (including recursive per-field summaries), nested row
+arguments with distinct caller labels, and the full result matrix below.
+Positive cases are checked by the reference evaluator and the native backend
+(default and release codegen) with balanced allocation statistics.
 
 Deliberate limits left for later nodes:
 
-- Structural **literals** remain unlabelled: an unannotated literal does not
-  copy its expected type's label, because its field provenance has no declared
-  identity. An explicit structural annotation may supply the label through the
-  checked conversion.
+- Structural **literals** remain unlabelled in their own checked type: an
+  unannotated literal does not copy its expected type's label, because its
+  field provenance has no declared identity. An explicit structural annotation
+  or a callee row conversion may supply the label through the checked
+  conversion, which retains the field's actual origins.
 - An elided borrowed field in a structural **parameter** has no signature
   identity. A `..r` result field elided the same way is therefore an explicit
   rejection rather than an invented equality; annotate the parameter field.

@@ -473,6 +473,13 @@ impl<'a, 'r> Solver<'a, 'r> {
             return true;
         }
         let result = crate::grades::split(&f.result).0;
+        // An anonymous structural result keeps one summary leaf per borrowed
+        // field path, exactly like a nominal borrowed record. Without this the
+        // call would look like a scalar boundary and a caller projecting a
+        // borrowed field (`wrap(a).view`) would lose the origin.
+        if matches!(result.kind, ast::TypeKind::Structural { .. }) {
+            return Self::written_type_has_borrow(result);
+        }
         // Only a nominal record gets per-field result leaves here. An owned
         // reference container (`Box<&T>`, `Vec<&T>`) and an enum payload keep
         // their existing declared-lifetime inference; treating them as records
@@ -508,6 +515,62 @@ impl<'a, 'r> Solver<'a, 'r> {
                 | "Option"
                 | "Result"
         )
+    }
+    /// Whether a written type can carry borrowed storage, including through an
+    /// anonymous structural row. Used to admit structural results into the
+    /// per-field summary domain; it never treats an owner reference as a view.
+    fn written_type_has_borrow(ty: &ast::Type) -> bool {
+        match &ty.kind {
+            ast::TypeKind::Borrow { .. } => true,
+            ast::TypeKind::Structural { fields, row, .. } => {
+                fields
+                    .iter()
+                    .any(|field| Self::written_type_has_borrow(&field.ty))
+                    || row.as_deref().is_some_and(Self::written_type_has_borrow)
+            }
+            ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => {
+                arguments.iter().any(Self::written_type_has_borrow)
+            }
+            ast::TypeKind::Slice(inner)
+            | ast::TypeKind::Array(inner, _)
+            | ast::TypeKind::Dyn(inner)
+            | ast::TypeKind::Graded { inner, .. } => Self::written_type_has_borrow(inner),
+            ast::TypeKind::Function {
+                parameters, result, ..
+            } => {
+                parameters
+                    .iter()
+                    .any(|parameter| Self::written_type_has_borrow(&parameter.ty))
+                    || Self::written_type_has_borrow(result)
+            }
+            ast::TypeKind::Binary { left, right, .. } => {
+                Self::written_type_has_borrow(left) || Self::written_type_has_borrow(right)
+            }
+            ast::TypeKind::Lifetime(_)
+            | ast::TypeKind::SelfType
+            | ast::TypeKind::Integer(_)
+            | ast::TypeKind::Bool(_)
+            | ast::TypeKind::Predicate(_) => false,
+        }
+    }
+    /// Whether `path` reaches a borrowed field of the written structural
+    /// result. A whole-value key (the empty path) stays because it can flow
+    /// into every declared borrowed field; an owned scalar field leaf is not a
+    /// provenance channel and must not become a summary path.
+    fn result_path_has_borrow(ty: &ast::Type, path: &[String]) -> bool {
+        let Some((first, rest)) = path.split_first() else {
+            return Self::written_type_has_borrow(ty);
+        };
+        let ast::TypeKind::Structural { fields, .. } = &ty.kind else {
+            // A path through a nominal/container shape is kept conservatively;
+            // the result mapping checks its declared lifetime instead of
+            // silently discarding an origin.
+            return true;
+        };
+        fields
+            .iter()
+            .find(|field| field.name == *first)
+            .is_some_and(|field| Self::result_path_has_borrow(&field.ty, rest))
     }
     /// Whether the written result is a borrowed slice/text view/reference. Only
     /// these root result slots use the elided-root inference path.
@@ -1685,7 +1748,16 @@ impl<'a, 'r> Solver<'a, 'r> {
                 };
                 let mut locals = BTreeMap::new();
                 self.analyze_locals(&declared, &mut locals)?;
-                let flow = self.block_flow(body, &locals)?;
+                let mut flow = self.block_flow(body, &locals)?;
+                let result = crate::grades::split(&declared.ast.result).0;
+                if matches!(result.kind, ast::TypeKind::Structural { .. }) {
+                    // Record/structural literals extend a whole-value origin to
+                    // every field, including owned scalars. Only borrowed field
+                    // paths are real summary leaves.
+                    flow.leaves.retain(|path, _| {
+                        path.is_empty() || Self::result_path_has_borrow(result, path)
+                    });
+                }
                 let mut requirements = BTreeSet::new();
                 self.collect_requirements(body, &locals, &mut requirements)?;
                 let borrow_capable = Self::result_can_borrow(declared.ast);

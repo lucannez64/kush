@@ -150,8 +150,12 @@ different field lifetime of a multi-lifetime record remains an explicit error,
 and a result lifetime longer than the returned source is rejected. A body that
 delegates to a helper follows the helper's declared result source, so an elided
 multi-input result remains inferable through helper chains that return the
-slice directly. Projecting a field from a helper's structural result
-(`wrap(a).view`) is not followed and needs an explicit result lifetime.
+slice directly or through a projected field of the helper's structural result.
+`wrap(a).view` follows only the projected field's own source; another input's
+owner is not retained, so that owner may be mutated or dropped while the result
+is live. Recursive declarations use the same per-field summaries. A recursive
+edge unions every possible source that can reach the result through that edge,
+so passing an unrelated parameter along the edge does not by itself retain it.
 
 At a call site the caller must establish the callee's relation; the checker
 never trusts an annotation. Every callee lifetime mentioned by an argument is
@@ -159,8 +163,11 @@ instantiated to the actual caller label (or a stable anonymous identity for
 local storage), and for every declared pair `'a: 'b`, including transitive
 pairs, every actual for `'a` must outlive every actual for `'b` under the
 caller's own declared bounds. Two borrows of the same storage satisfy the
-relation reflexively. A caller lifetime outlives storage owned by the
-caller's own frame (non-parameter locals that hold no borrow), so
+relation reflexively. The same instantiation descends through nested structural
+fields: an inner callee binder adopts the caller's actual label, while two named
+inner labels that bind one callee lifetime must still be identical. A caller
+lifetime outlives storage owned by the caller's own frame (non-parameter locals
+that hold no borrow), so
 `pair(outer, &local[..])` is accepted; the reverse is not, because a local owner
 cannot outlive a caller parameter. Two distinct local owners cannot establish a
 non-reflexive relation, and a view merged from several sources is not treated

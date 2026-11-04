@@ -147,6 +147,92 @@ fn main() -> i64 ! {panic} {
 }
 
 #[test]
+fn recursive_projection_through_a_structural_helper_field() {
+    // The base return projects `view` from a structural helper result. The
+    // per-field summary carries the helper's `'a` leaf through the projection;
+    // the recursive edge only ever selects `a` as well.
+    agrees(
+        r#"
+fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+    struct { view: v }
+}
+fn find<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    if n == 0 { wrap(a).view } else { find(a, b, n - 1) }
+}
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [40, 2];
+    let mut b: Vec<i64> = [3, 4];
+    let out = find(&a[..], &b[..], 1);
+    Vec.clear(&mut b);
+    Slice.get(out, 0) + 2
+}
+"#,
+        42,
+        "",
+    );
+}
+
+#[test]
+fn recursive_structural_helper_summary_keeps_its_projected_origin() {
+    agrees(
+        r#"
+fn wrap<'a>(v: &'a [i64], n: i64) -> struct { view: &'a [i64] } ! {panic} {
+    if n == 0 { struct { view: v } } else { wrap(v, n - 1) }
+}
+fn project<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
+    wrap(a, 1).view
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [40, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(project(&a[..], &b[..]), 0) + 2
+}
+"#,
+        42,
+        "",
+    );
+}
+
+#[test]
+fn recursive_projected_result_keeps_its_owner_loaned() {
+    rejects(
+        r#"
+fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+    struct { view: v }
+}
+fn find<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+    if n == 0 { wrap(a).view } else { find(a, b, n - 1) }
+}
+fn main() -> i64 ! {alloc, panic} {
+    let mut a: Vec<i64> = [40, 2];
+    let b: Vec<i64> = [3, 4];
+    let out = find(&a[..], &b[..], 1);
+    Vec.clear(&mut a);
+    Slice.get(out, 0)
+}
+"#,
+        "exclusive",
+    );
+}
+
+#[test]
+fn a_local_projection_on_a_recursive_path_stays_rejected() {
+    rejects(
+        r#"
+fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+    struct { view: v }
+}
+fn bad<'a>(a: &'a [i64], n: i64) -> &[i64] ! {panic} {
+    let local: [i64; 2] = [1, 2];
+    if n == 0 { wrap(&local[..]).view } else { bad(a, n - 1) }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "outlive the lexical scope",
+    );
+}
+
+#[test]
 fn recursive_record_field_parameters_keep_field_paths() {
     agrees(
         r#"

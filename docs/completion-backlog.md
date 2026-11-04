@@ -74,9 +74,11 @@ and remaining limits.
   trait and generic-impl methods keep exact contracts; outer-only reference
   provenance and canonical indirect-arrow bounds; an elided structural result
   field needs exactly one distinct input borrow lifetime; helper chains are
-  followed for direct slice results only, not through a helper's structural
-  result field; retained borrowed structural fields stay exact under
-  conversion; unlabelled structural literals passed to a `..r` helper need an
+  followed through a projected field of a structural result, including
+  recursive per-field summaries, but only for direct static calls and methods;
+  call-site binders descend through nested structural fields, where unlabelled
+  literal leaves may acquire the callee label while retained named labels stay
+  exact; unlabelled structural literals passed to a `..r` helper need an
   explicit annotation.
 - [x] Capturing lambdas returning borrowed slices with represented provenance.
   The capture index and field path travel in the callable contract and the

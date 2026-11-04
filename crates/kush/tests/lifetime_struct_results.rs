@@ -243,6 +243,153 @@ fn helper_results_compose_through_structural_results() {
 }
 
 #[test]
+fn helper_structural_result_projection_follows_the_projected_source() {
+    // `wrap(a).view` keeps only `'a` as a possible source. `'b`'s owner is
+    // therefore free to be mutated while the projected result is still live.
+    agrees(
+        r#"fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+            struct { view: v }
+        }
+        fn project<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
+            wrap(a).view
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let a: Vec<i64> = [40, 2];
+            let mut b: Vec<i64> = [3, 4];
+            let out = project(&a[..], &b[..]);
+            Vec.clear(&mut b);
+            Slice.get(out, 0) + 2
+        }"#,
+        42,
+        "",
+    );
+}
+
+#[test]
+fn a_projected_helper_source_keeps_its_own_owner_loaned() {
+    rejects(
+        r#"fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+            struct { view: v }
+        }
+        fn project<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
+            wrap(a).view
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut a: Vec<i64> = [40, 2];
+            let b: Vec<i64> = [3, 4];
+            let out = project(&a[..], &b[..]);
+            Vec.clear(&mut a);
+            Slice.get(out, 0)
+        }"#,
+        "exclusive",
+    );
+    rejects(
+        r#"fn wrap<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+            struct { view: v }
+        }
+        fn project<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
+            wrap(a).view
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let a: Vec<i64> = [40, 2];
+            let b: Vec<i64> = [3, 4];
+            let out = project(&a[..], &b[..]);
+            drop(a);
+            Slice.get(out, 0)
+        }"#,
+        "cannot move or drop",
+    );
+}
+
+#[test]
+fn nested_structural_row_arguments_instantiate_the_callee_label() {
+    // The callee's `'a` is instantiated from the caller's `'b` even though the
+    // borrowed view is one nested row below the parameter's direct fields.
+    agrees(
+        r#"fn inner<'a>(v: struct { w: struct { view: &'a [i64] } })
+            -> struct { view: &'a [i64] } ! {panic} { v.w }
+        fn relay<'b>(v: &'b [i64]) -> struct { view: &'b [i64] } ! {panic} {
+            inner(struct { w: struct { view: v } })
+        }
+        fn main() -> i64 ! {panic} {
+            let values: [i64; 2] = [40, 2];
+            let out = relay(&values[..]);
+            Slice.get(out.view, 0) + 2
+        }"#,
+        42,
+        "",
+    );
+}
+
+#[test]
+fn a_nested_row_argument_result_keeps_the_caller_owner_loaned() {
+    rejects(
+        r#"fn inner<'a>(v: struct { w: struct { view: &'a [i64] } })
+            -> struct { view: &'a [i64] } ! {panic} { v.w }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut data: Vec<i64> = [1, 2];
+            let out = inner(struct { w: struct { view: &data[..] } });
+            Vec.clear(&mut data);
+            Slice.get(out.view, 0)
+        }"#,
+        "exclusive",
+    );
+    rejects(
+        r#"fn inner<'a>(v: struct { w: struct { view: &'a [i64] } })
+            -> struct { view: &'a [i64] } ! {panic} { v.w }
+        fn main() -> i64 ! {alloc, panic} {
+            let data: Vec<i64> = [1, 2];
+            let out = inner(struct { w: struct { view: &data[..] } });
+            drop(data);
+            Slice.get(out.view, 0)
+        }"#,
+        "cannot move or drop",
+    );
+}
+
+#[test]
+fn a_local_backed_nested_row_argument_cannot_escape() {
+    rejects(
+        r#"fn inner<'a>(v: struct { w: struct { view: &'a [i64] } })
+            -> struct { view: &'a [i64] } ! {panic} { v.w }
+        fn bad<'a>(v: &'a [i64]) -> struct { view: &'a [i64] } ! {panic} {
+            let local: [i64; 1] = [1];
+            inner(struct { w: struct { view: &local[..] } })
+        }
+        fn main() -> Unit ! {} {}"#,
+        "outlive the lexical scope",
+    );
+}
+
+#[test]
+fn nested_structural_row_labels_stay_exact_at_call_sites() {
+    rejects(
+        r#"fn pair<'a>(
+            x: struct { w: struct { view: &'a [i64] } },
+            y: struct { w: struct { view: &'a [i64] } },
+        ) -> Unit ! {panic} {}
+        fn caller<'b, 'c>(x: &'b [i64], y: &'c [i64]) -> Unit ! {panic} {
+            let first: struct { w: struct { view: &'b [i64] } } =
+                struct { w: struct { view: x } };
+            let second: struct { w: struct { view: &'c [i64] } } =
+                struct { w: struct { view: y } };
+            pair(first, second)
+        }
+        fn main() -> Unit ! {} {}"#,
+        "invariantly from several argument lifetimes",
+    );
+    rejects(
+        r#"fn inner<'a>(v: struct { w: struct { view: &'a [i64] } })
+            -> struct { view: &'a [i64] } ! {panic} { v.w }
+        fn bad<'b, 'c>(v: &'b [i64]) -> struct { view: &'c [i64] } ! {panic} {
+            inner(struct { w: struct { view: v } })
+        }
+        fn main() -> Unit ! {} {}"#,
+        "does not appear on any parameter that outlives it",
+    );
+}
+
+#[test]
 fn exclusive_structural_result_comes_from_an_exclusive_input() {
     agrees(
         r#"fn keep<'a>(v: &'a mut [i64]) -> struct { view: &'a mut [i64] } ! {panic} {
