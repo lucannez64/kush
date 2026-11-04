@@ -841,3 +841,31 @@ fn laundering_coverage_through_union_typed_arms() {
     )
     .unwrap();
 }
+
+#[test]
+fn lifetimes_inside_record_type_arguments_are_invariant() {
+    // A label that occurs only inside a type argument cannot be extended
+    // (`Outer<W<'short>>` -> `Outer<W<'long>>`) or used to bypass an
+    // invariant slot.
+    rejects(
+        r#"struct W<'a> { view: &'a [i64] }
+        struct Outer<T> { inner: T }
+        fn launder<'long: 'short, 'short>(o: Outer<W<'short>>, mark: &'long i64) -> i64 ! {panic} {
+            let x: Outer<W<'long>> = o;
+            let _ = mark;
+            Slice.get(x.inner.view, 0)
+        }
+        fn main() -> Unit ! {} {}"#,
+        "lifetime mismatch",
+    );
+    rejects(
+        r#"struct Inv<'a> { cell: Box<&'a mut Box<&'a i64>> }
+        struct Wrap<T> { inner: T }
+        fn launder<'long: 'short, 'short>(w: Wrap<Inv<'short>>, mark: &'long i64) -> Unit ! {panic} {
+            let x: Wrap<Inv<'long>> = w;
+            let _ = mark; let _ = x;
+        }
+        fn main() -> Unit ! {} {}"#,
+        "lifetime mismatch",
+    );
+}

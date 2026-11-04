@@ -1042,6 +1042,32 @@ impl WitnessCheck<'_, '_> {
                             fields,
                         )?;
                     }
+                    // A lifetime may occur only inside a type argument
+                    // (`Outer<W<'a>>`). Type parameters have no inferred
+                    // lifetime variance, so a borrowing argument is compared
+                    // invariantly, like an unknown named argument in the table.
+                    let arguments = self.types.enums[a]
+                        .arguments
+                        .iter()
+                        .copied()
+                        .zip(self.types.enums[b].arguments.iter().copied())
+                        .collect::<Vec<_>>();
+                    for (source_argument, target_argument) in arguments {
+                        if crate::runtime_types::has_borrow(self.types, source_argument)
+                            || crate::runtime_types::has_borrow(self.types, target_argument)
+                        {
+                            self.types(
+                                source_argument,
+                                target_argument,
+                                None,
+                                None,
+                                position.compose(SignSet::INVARIANT),
+                                path,
+                                fields,
+                                depth + 1,
+                            )?;
+                        }
+                    }
                     Ok(())
                 } else if self.types.enums[a].record && self.types.enums[b].structural {
                     self.structural_into(a, b, path, fields, depth)
