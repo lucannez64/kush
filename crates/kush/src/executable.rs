@@ -17472,10 +17472,7 @@ impl Checker<'_, '_> {
                 span,
                 obligation: proposition.text.clone(),
                 goal,
-                steps: proof.steps,
-                multipliers: proof.multipliers,
-                denominator: proof.denominator,
-                negation: proof.negation,
+                proof,
                 hypotheses,
             });
         }
