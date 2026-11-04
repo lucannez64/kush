@@ -149,7 +149,9 @@ bounds. The inference is limited to direct parameter lifetimes: selecting a
 different field lifetime of a multi-lifetime record remains an explicit error,
 and a result lifetime longer than the returned source is rejected. A body that
 delegates to a helper follows the helper's declared result source, so an elided
-multi-input result remains inferable through helper chains.
+multi-input result remains inferable through helper chains that return the
+slice directly. Projecting a field from a helper's structural result
+(`wrap(a).view`) is not followed and needs an explicit result lifetime.
 
 At a call site the caller must establish the callee's relation; the checker
 never trusts an annotation. Every callee lifetime mentioned by an argument is

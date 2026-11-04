@@ -771,10 +771,21 @@
         "LT-STRUCT-RESULT",
         "LT-DIAG"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "HEAD",
+      "log": [
+        {
+          "time": "2026-11-04 21:00:34",
+          "who": "agent",
+          "text": "Opus 5.5 low subagent"
+        },
+        {
+          "time": "2026-11-04 21:04:40",
+          "who": "agent",
+          "text": "Opus review: no unsound program in 45 interaction probes; docs corrected; low follow-ups as LT-FOLLOWUP-DIAG/PROJ"
+        }
+      ]
     },
     {
       "id": "LIFE",
@@ -785,9 +796,9 @@
       "deps": [
         "LT-REVIEW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "HEAD",
       "log": [
         {
           "time": "2026-11-03 17:40:41",
@@ -798,6 +809,11 @@
           "time": "2026-11-04 02:58:36",
           "who": "agent",
           "text": "Recursive summary fragment extended to methods, records and R[f]. Broader indirect-boundary inference and soundness review remain."
+        },
+        {
+          "time": "2026-11-04 21:04:40",
+          "who": "agent",
+          "text": "Closed after LT-REVIEW"
         }
       ]
     },
@@ -2220,6 +2236,32 @@
           "text": "Metadata, residual-row specialization, result provenance and hostile validation contract completed; no result rejection removed."
         }
       ]
+    },
+    {
+      "id": "LT-FOLLOWUP-DIAG",
+      "title": "Lifetime diagnostics: field labels in type mismatches, recursive-swap source, ..r literal message",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "LIFE"
+      ],
+      "status": "todo",
+      "desc": "LT-REVIEW low findings 2-4: render structural field lifetime labels in type-mismatch messages; name the real parameter source for recursive argument swaps; accept or clearly diagnose unlabelled structural literals passed to ..r helpers.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LT-FOLLOWUP-PROJ",
+      "title": "Follow structural result field projections in elided result inference",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "LIFE"
+      ],
+      "status": "todo",
+      "desc": "LT-REVIEW finding 5: wrap(a).view through a helper returning a structural record; nested structural row arguments rejected by conversion invariance (LT-STRUCT-RESULT review).",
+      "commit": null,
+      "log": []
     }
   ]
 }

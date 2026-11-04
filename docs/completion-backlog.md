@@ -44,7 +44,7 @@ and remaining limits.
   dynamic indices of one base conflict), and a child task returning a borrowed
   `TaskExit`. See
   [borrowing-extensions.md](borrowing-extensions.md).
-- [ ] Broader sound lifetime inference. **Partial:** function/arrow/lambda
+- [x] Broader sound lifetime inference. Function/arrow/lambda
   results can be inferred from a single record-field source or a per-field body
   origin. A multi-lifetime record supports per-field selection, including
   nested field paths. Several returned sources now form an anonymous
@@ -61,8 +61,23 @@ and remaining limits.
   A returned `&Field` may also name a field of a `&Record` parameter; the finite
   `reference_reaches_type` reachability rule accepts it when the parameter
   lifetime outlives the result, and the ownership pass still proves the exact
-  origin. Principal unification for recursive lifetime constraints, variance,
-  and row variables remains explicitly absent.
+  origin. Recursive functions and methods get declaration-level summaries
+  solved as a bounded SCC fixed point, including per-field record results and
+  inferred caller requirements (R[f]) for inherent methods
+  ([recursive-lifetime-design.md](recursive-lifetime-design.md)). Lifetime
+  variance is checked by a witness over records, callables and type arguments
+  ([lifetime-variance.md](lifetime-variance.md)). Structural rows carry field
+  lifetime labels through `..r`, and borrowed structural results are accepted
+  when every leaf's actual origin is caller-owned and long enough
+  ([lifetime-rows-design.md](lifetime-rows-design.md)). Accepted limits:
+  indirect calls, `dyn`, effects, loops and tasks keep explicit contracts;
+  trait and generic-impl methods keep exact contracts; outer-only reference
+  provenance and canonical indirect-arrow bounds; an elided structural result
+  field needs exactly one distinct input borrow lifetime; helper chains are
+  followed for direct slice results only, not through a helper's structural
+  result field; retained borrowed structural fields stay exact under
+  conversion; unlabelled structural literals passed to a `..r` helper need an
+  explicit annotation.
 - [x] Capturing lambdas returning borrowed slices with represented provenance.
   The capture index and field path travel in the callable contract and the
   result is resolved against the capture's outer provenance.
@@ -1435,3 +1450,15 @@ the updated `lifetime_rowvars.rs`, `lifetime_variance.rs` and
 strict Clippy; positive cases agree between the reference evaluator and the
 native backend in default and release codegen with balanced allocation
 statistics.
+
+## LIFE closed (LT-REVIEW)
+
+The final lifetimes review at `6ad8643` probed interactions between recursive
+inference, variance, row-variable labels and borrowed structural results (45
+programs) and found no unsound program. The "LIFE remains open" notes in the
+earlier checkpoints above are superseded: LT-RECURSIVE, LT-VARIANCE,
+LT-ROWVARS and LT-STRUCT-RESULT have landed, and the remaining limits are the
+accepted boundaries listed in the checked LIFE item. Diagnostic follow-ups
+(field lifetime labels in type-mismatch messages, the source named for
+recursive argument swaps, unlabelled literals passed to `..r` helpers) are
+tracked in `plan/plan.json`.
