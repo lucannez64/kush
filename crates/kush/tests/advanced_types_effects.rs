@@ -1345,19 +1345,31 @@ fn proof_parameters_survive_unrelated_versioned_binders() {
 }
 
 #[test]
-fn mutable_scalar_capture_is_a_frozen_independent_snapshot() {
-    // The closure copies the runtime scalar when it is constructed. Its proof
-    // is about that independent snapshot, not a later value of the mutable
-    // binding, so the write after capture is sound.
+fn mutable_scalar_capture_is_a_live_view_with_a_checked_loan() {
+    // The closure captures the caller's scalar location, not a copy. The
+    // location stays loaned until the closure's last call, so a write before
+    // that call is rejected; after the call the binding is free again.
     let source = r#"
+        fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut n = 5;
+            let f = fn() -> i64 ! {alloc, panic} { keep(n, refl::<i64>(n)) };
+            let value = f();
+            n = 6;
+            value + n
+        }"#;
+    assert_eq!(value(source), 11);
+    rejects(
+        r#"
         fn keep(n: i64, erased same: Eq<i64, n, n>) -> i64 ! {} { n }
         fn main() -> i64 ! {alloc, panic} {
             let mut n = 5;
             let f = fn() -> i64 ! {alloc, panic} { keep(n, refl::<i64>(n)) };
             n = 6;
             f() + n
-        }"#;
-    assert_eq!(value(source), 11);
+        }"#,
+        "while a closure capturing it is live",
+    );
 }
 
 // ---------------------------------------------------------------------------

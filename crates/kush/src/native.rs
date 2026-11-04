@@ -3490,6 +3490,24 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
                 let mut capture_offset = 8i32;
                 for i in 0..captures {
                     let width = g.variables[i].len();
+                    if f.capture_refs.get(i).copied().unwrap_or(false) {
+                        // The environment stores the caller's stack address.
+                        // Reads and writes of this capture go through it.
+                        let pointer = g.builder.ins().load(
+                            I64,
+                            ir::MemFlagsData::new(),
+                            environment,
+                            capture_offset,
+                        );
+                        g.locations[i] = Some(pointer);
+                        let zero = g.constant(0);
+                        for variable in &g.variables[i] {
+                            g.builder.def_var(*variable, zero);
+                        }
+                        capture_offset += 8;
+                        g.activate_local(i);
+                        continue;
+                    }
                     let values = g.load_words(environment, capture_offset, width);
                     capture_offset += (width * 8) as i32;
                     g.assign(i, &values);
@@ -5345,8 +5363,27 @@ impl Generator<'_, '_> {
                     self.builder
                         .ins()
                         .store(ir::MemFlagsData::new(), drop, environment, 0);
+                    let capture_refs = self.program.functions[*function].capture_refs.clone();
                     let mut offset = 8;
-                    for capture in captures {
+                    for (index, capture) in captures.iter().enumerate() {
+                        if capture_refs.get(index).copied().unwrap_or(false) {
+                            let slot = match &capture.kind {
+                                ExprKind::Local(slot)
+                                | ExprKind::Peek(slot)
+                                | ExprKind::Move(slot) => *slot,
+                                _ => unreachable!("checked by-reference scalar capture"),
+                            };
+                            let pointer = self.local_address(slot);
+                            self.builder.ins().store(
+                                ir::MemFlagsData::new(),
+                                pointer,
+                                environment,
+                                offset as i32,
+                            );
+                            self.consume(capture);
+                            offset += 8;
+                            continue;
+                        }
                         let values = lower!(self.expr(capture));
                         self.consume(capture);
                         let width = self.program.width(capture.ty);

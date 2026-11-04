@@ -292,7 +292,10 @@ outstanding implementation item.
   version; assignment appends a fresh versioned binder or records an assigned
   canonical literal; an old literal proof is rejected against the new value; a
   by-value scalar alias keeps the copied binder across later mutation; a
-  closure capture is an independent frozen snapshot. Branch joins keep an
+  mutable scalar closure capture is now a checked live view, not a snapshot.
+  The closure environment stores the caller's location and the ownership pass
+  keeps it loaned until the closure's last call, so escapes and outliving data
+  are rejected. Branch joins keep an
   index only when every reaching branch agrees, and loop joins invalidate a
   changed scalar to a fresh binder. Erased proof-valued locals can alias
   checked logical terms and be re-passed to erased parameters. The separate
@@ -300,10 +303,9 @@ outstanding implementation item.
   (`c * x`, `x + y`, lengths) and is discharged by exact Fourier–Motzkin
   elimination with an independently verified Farkas-style refutation
   certificate; nonlinear terms, cutting planes, and the documented row/term
-  budgets remain explicit "not established" boundaries. Still absent: mutable
-  captures as a live view. A closure capture is a sound copy/snapshot; live
-  sharing needs a checked closure borrow lifetime so the environment cannot
-  outlive the captured location, which is not implemented. See
+  budgets remain explicit "not established" boundaries. Still absent: proof
+  facts about a captured location are not yet invalidated when a writing
+  closure is called. See
   [runtime-indices.md](runtime-indices.md#4-freezing-mutation-and-joins) and
   [runtime-indices.md](runtime-indices.md#4a-arithmetic-proof-search).
 - [ ] Runtime-sized inline arrays with checked lifetime/storage layout.

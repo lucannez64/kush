@@ -154,6 +154,16 @@ borrowed capture cannot be moved to another local, returned, stored, passed to a
 helper, or captured by a task; see [lifetimes.md](lifetimes.md) and
 [functions.md](functions.md).
 
+A mutable scalar capture is also a scoped borrow rather than an owning move.
+The closure environment stores a non-owning pointer to the caller's binding, so
+the captured location cannot be read, assigned, moved, or dropped while the
+closure is live. The loan is tracked by the same backward last-use analysis as
+slice views and ends at the closure's checked last call or lexical scope end.
+The pointer is stack storage, never a heap owner; dropping an uncalled closure
+or calling it releases only the environment allocation. Escaping through a
+return, record, box, union, helper call, adapter, or spawned task is rejected
+before either backend sees the value.
+
 Borrow lifetimes include the remainder of argument evaluation and the call itself:
 
 ```rust

@@ -281,6 +281,11 @@ pub(crate) struct Function {
     /// Number of leading locals captured from a closure environment. `None`
     /// for ordinary functions, noncapturing lambdas, and pure adapters.
     pub closure: Option<usize>,
+    /// One flag per capture position: the environment stores a pointer to the
+    /// captured caller location instead of a copy. Only call-scoped scalar
+    /// captures use this representation; the ownership pass guarantees the
+    /// closure cannot outlive the location.
+    pub capture_refs: Vec<bool>,
     pub locals: Vec<Local>,
     pub result: Type,
     pub body: Block,
@@ -4795,6 +4800,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             name: sig.name.clone(),
             parameters: sig.parameters.len(),
             closure: None,
+            capture_refs: vec![],
             locals,
             result: sig.result,
             body,
@@ -10105,6 +10111,7 @@ impl<'a> Functions<'a> {
                 name: name.clone(),
                 parameters: parameters.len(),
                 closure: None,
+                capture_refs: vec![],
                 locals,
                 result,
                 body: Block {
@@ -14199,6 +14206,7 @@ impl Checker<'_, '_> {
             ),
             parameters: parameters.len(),
             closure: None,
+            capture_refs: vec![],
             locals,
             result: function_result,
             body,
@@ -16962,6 +16970,7 @@ impl Checker<'_, '_> {
             closure: (captures != 0)
                 .then_some(captures)
                 .or(env_parameter.then_some(0)),
+            capture_refs: vec![false; captures],
             locals,
             result: signature.result,
             body,
@@ -21249,6 +21258,17 @@ impl Checker<'_, '_> {
     ) -> Result<Expr> {
         let captures = self.lambda_captures(lambda);
         let once = !captures.is_empty();
+        // A mutable scalar capture is a live view: the environment stores the
+        // address of the caller's binding, not a copy. Immutable scalars keep
+        // their existing by-value snapshot contract, and affine/borrowed
+        // captures keep their existing owning/capability representation.
+        let capture_refs = captures
+            .iter()
+            .map(|slot| {
+                let local = self.locals[*slot];
+                local.mutable && !local.linear && local.grade.is_none() && is_live_scalar(local.ty)
+            })
+            .collect::<Vec<_>>();
         if once && matches!(expected, Some(Type::Fn(_))) {
             return Err(Diagnostic::new(
                 span,
@@ -21266,14 +21286,21 @@ impl Checker<'_, '_> {
             )
             .with_note(self.locals[*slot].span, "text view declared here"));
         }
-        let borrowed_capture = captures.iter().any(|slot| {
-            self.locals[*slot].ty.is_slice()
-                || self.carrier_type(self.locals[*slot].ty)
-                || crate::runtime_types::is_reference_container(self.types, self.locals[*slot].ty)
-        });
-        for slot in &captures {
+        let borrowed_capture = capture_refs.iter().any(|by_ref| *by_ref)
+            || captures.iter().any(|slot| {
+                self.locals[*slot].ty.is_slice()
+                    || self.carrier_type(self.locals[*slot].ty)
+                    || crate::runtime_types::is_reference_container(
+                        self.types,
+                        self.locals[*slot].ty,
+                    )
+            });
+        for (capture_index, slot) in captures.iter().enumerate() {
             let local = self.locals[*slot];
             let ty = local.ty;
+            if capture_refs[capture_index] {
+                self.locals[*slot].pinned = true;
+            }
             if crate::runtime_types::contains_task_exit_borrow(self.types, ty) {
                 return Err(Diagnostic::new(
                     span,
@@ -21813,11 +21840,10 @@ impl Checker<'_, '_> {
                 resource: None,
             })
             .collect::<Vec<_>>();
-        // Check the lambda body in a fresh function context.
-        let capture_mutable = captures
-            .iter()
-            .map(|slot| self.locals[*slot].mutable)
-            .collect::<Vec<_>>();
+        // Check the lambda body in a fresh function context. A by-reference
+        // scalar capture is writable inside the body; whether it actually is
+        // written decides the shared/exclusive loan and proof invalidation.
+        let capture_body_mutable = capture_refs.clone();
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_slots = std::mem::take(&mut self.slots);
         let saved_result = self.result;
@@ -21850,12 +21876,16 @@ impl Checker<'_, '_> {
         let checked = (|| {
             self.scope_depth = if scope_root { saved_scope_depth + 1 } else { 0 };
             self.parameter_lifetimes = child_parameter_lifetimes.clone();
-            for (ty, (grade, linear)) in capture_types.iter().zip(&capture_obligations) {
+            for ((ty, (grade, linear)), mutable) in capture_types
+                .iter()
+                .zip(&capture_obligations)
+                .zip(capture_body_mutable.iter())
+            {
                 self.locals.push(Local {
                     ty: *ty,
-                    mutable: false,
+                    mutable: *mutable,
                     linear: *linear,
-                    pinned: false,
+                    pinned: *mutable,
                     grade: *grade,
                     span,
                 });
@@ -21868,17 +21898,12 @@ impl Checker<'_, '_> {
                 }
             }
             self.slots = capture_binders;
-            // Captured immutable scalars are frozen in the closure environment
-            // at construction, so they are sound symbolic indices for proof
-            // terms in the body. Mutable captures stay rejected conservatively.
-            for ((id, ty), mutable) in capture_ids
-                .iter()
-                .zip(capture_types.iter())
-                .zip(capture_mutable.iter())
-            {
-                if let Some(id) = id
-                    && !*mutable
-                {
+            // Captured scalars are symbolic indices in the body. A by-value
+            // snapshot is frozen at construction; a by-reference mutable
+            // capture is a versioned local whose assignment appends a fresh
+            // binder exactly like any other mutable scalar.
+            for (id, ty) in capture_ids.iter().zip(capture_types.iter()) {
+                if let Some(id) = id {
                     self.admit_scalar_index(*id, *ty, Span::default())?;
                 }
             }
@@ -21968,6 +21993,7 @@ impl Checker<'_, '_> {
             name: name.to_owned(),
             parameters: captures.len() + lambda.parameters.len(),
             closure: once.then_some(captures.len()),
+            capture_refs: capture_refs.clone(),
             locals,
             result,
             body,
@@ -30586,6 +30612,15 @@ fn block_contains_lexical_perform(block: &ast::Block, operation: &str) -> bool {
         .tail
         .as_deref()
         .is_some_and(|tail| contains_lexical_perform(tail, operation))
+}
+
+/// A one-word scalar value that can be captured by reference without owning
+/// or borrowing storage. Mutable bindings of these types become live views.
+pub(crate) fn is_live_scalar(ty: Type) -> bool {
+    matches!(
+        ty,
+        Type::I64 | Type::Int(_) | Type::Float(_) | Type::Char | Type::Bool | Type::Unit
+    )
 }
 
 /// Collect runtime binding references in a lambda body so captures can be

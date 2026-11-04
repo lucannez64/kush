@@ -169,12 +169,13 @@ Implemented consequences:
   variables are shifted as later binders are appended). A proof-valued local
   may alias another such local, may shadow, and has no runtime slot, so it
   cannot be returned, stored, or read as a runtime value.
-- A closure capture of a scalar is a **copy made when the closure is
-  constructed**. That copy is an independent immutable snapshot: it may index
-  proofs in the lambda body even if the outer binding is later assigned. The
-  lambda observes the captured value, never the final mutable value. This is the
-  sound snapshot contract; a *live* mutable capture would need a closure borrow
-  lifetime and is not implemented (see the deliberate limits below).
+- An **immutable** scalar closure capture is a copy made when the closure is
+  constructed. A **mutable** scalar capture is a live view: the environment
+  stores the caller's location, and the ownership pass keeps it loaned until
+  the closure's checked last call. The outer binding cannot be assigned or read
+  through an exclusive capture while the closure is live, so the lambda and the
+  caller never disagree about the current value. The lambda admits the capture
+  as a versioned symbolic index exactly like any other mutable scalar local.
 - Block scopes truncate symbolic binders, so a proof cannot mention a local
   after its scope. Local shadowing resolves to the innermost binder.
 - A proof parameter cannot be stored in a runtime value, returned as a runtime
@@ -191,8 +192,8 @@ expression over a mutable local is unchanged. It never accepts a proof about an
 older value after an assignment that is not known to agree on every path. The
 implementation is tested by `crates/kush/tests/advanced_types_effects.rs` with
 current-value proofs, old-literal rejection, unrelated versioned binders,
-branch/loop join agreement and disagreement, proof-valued locals, and a frozen
-closure snapshot.
+branch/loop join agreement and disagreement, proof-valued locals, and scoped
+live mutable captures.
 
 ## 4a. Arithmetic proof search
 
@@ -320,10 +321,10 @@ fn consume(erased p: Eq<i64, 0, 0>); consume(n)
   implicit argument, tactic, or user-supplied axiom. The *separate* arithmetic
   `{ ... }` fragment has the bounded linear proof search described in 4a, but it
   never fabricates kernel evidence and never applies to a symbolic `Eq`/`prop`.
-- A closure capture of a mutable scalar is still a snapshot, not a live view.
-  Supporting a live view requires a checked closure borrow lifetime so the
-  environment cannot outlive the captured location; until that exists, the
-  snapshot contract above is the only accepted mutation interaction.
+- A mutable scalar capture is a live view, but a call to a closure that writes
+  it does not yet invalidate proof facts about the caller's older value. Keep
+  the proof inside the closure body or re-establish the needed arithmetic fact
+  after the call; automatic fact invalidation is the next proofs milestone.
 
 These are implementation budget and fragment limits, not claims that the full
 [v0.1 dependent design](spec-v0.1.md) is complete.

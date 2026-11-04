@@ -1314,10 +1314,16 @@
       "deps": [
         "LT-SOLVER"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Non-escaping closures capture by reference; environment cannot outlive the location.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-04 15:15:53",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "P-LIVE-CAPTURE",

@@ -238,6 +238,19 @@ moved to another binding, returned, stored in data or a box, passed to another
 function, adapted to a union or other function type, or captured by a task. See
 [borrowing and lifetimes](lifetimes.md#scoped-borrowed-closure-captures).
 
+A mutable scalar local (`i64`, another fixed-width integer, `f32`/`f64`,
+`Char`, `Bool`, or `Unit`) is captured **by reference**. The environment stores
+the address of the caller's binding rather than a copy; a write in the lambda
+updates that binding, and a later call observes the current value. These
+captures are call-scoped like borrowed views: the closure may only be built as
+a direct `let` initializer or called immediately, and the location stays
+loaned until the closure's checked last call or lexical scope end. While the
+closure is live the caller cannot read, assign, move, or drop the captured
+location. The same restrictions reject returning the closure, storing it in
+outliving data, passing it to another function, or sending it to a task. Both
+backends implement the pointer representation, so reference evaluation and
+native execution agree.
+
 A closure that captures a linear `@[1]`/`#[linear]` obligation (or a copyable
 value graded `@[1]`) is a `linear once fn(...)` value. Linearity is
 propagated, not erased:
