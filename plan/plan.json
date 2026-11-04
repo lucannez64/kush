@@ -709,9 +709,9 @@
         "STRUCT",
         "LT-ROWS-DESIGN"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Borrowed residual fields carry labels through `..r`.",
-      "commit": null,
+      "commit": "98b5b6f",
       "log": [
         {
           "time": "2026-11-04 15:08:45",
@@ -727,6 +727,11 @@
           "time": "2026-11-04 17:06:48",
           "who": "agent",
           "text": "Codex review NOT YET (2x P2: rigid call-site binders, unlabelled-intermediate relabel); no escape reproduced; fix delegated"
+        },
+        {
+          "time": "2026-11-04 19:43:29",
+          "who": "agent",
+          "text": "Codex reviews + fixes (593e7bf binder instantiation/label retention, 4d5d061 binder scope); Boat gate 1311 passed"
         }
       ]
     },
