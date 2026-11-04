@@ -2253,6 +2253,11 @@
           "time": "2026-11-04 21:19:12",
           "who": "agent",
           "text": "delegated"
+        },
+        {
+          "time": "2026-11-04 21:40:21",
+          "who": "agent",
+          "text": "3eac080 merged; Opus review CLOSE (13 probes); nit: internal '<unlabelled structural row\u2026>' label can appear in messages; gate pending with PROJ"
         }
       ]
     },

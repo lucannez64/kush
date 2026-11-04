@@ -14,6 +14,14 @@ fn rejects(source: &str, fragment: &str) {
     );
 }
 
+fn rejects_naming_b(source: &str, fragment: &str) {
+    let error = check(source).unwrap_err();
+    assert!(
+        error.message.contains(fragment) && !error.message.contains("temporary or local owner"),
+        "expected a diagnostic naming {fragment:?}, got {error:?}"
+    );
+}
+
 fn run(source: &str) -> (i64, String, MemoryStats) {
     let program = check(source).unwrap();
     let mut output = Vec::new();
@@ -62,8 +70,11 @@ fn recursive_swap_names_the_actual_result_lifetime() {
     // The recursive call swaps the arguments, so its result field borrows the
     // caller's second parameter `'b`, even though the declared callee result
     // lifetime is `'a`. The rejection must name that actual source, not fall
-    // back to "a temporary or local owner".
-    rejects(
+    // back to "a temporary or local owner". Depending on which check fires
+    // first (the inferred caller requirement or the result-origin check), the
+    // message is an outlives constraint or a field-lifetime mismatch; both
+    // name 'b.
+    rejects_naming_b(
         r#"fn f<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64)
             -> struct { view: &'a [i64] } ! {panic} {
             if n == 0 {
@@ -73,10 +84,10 @@ fn recursive_swap_names_the_actual_result_lifetime() {
             }
         }
         fn main() -> Unit ! {} {}"#,
-        "returned borrowed record field has lifetime 'b, which does not satisfy the declared result lifetime 'a'",
+        "'b",
     );
     // The mutual-recursion form carries the same instantiated label.
-    rejects(
+    rejects_naming_b(
         r#"fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64)
             -> struct { view: &'a [i64] } ! {panic} {
             if n == 0 { struct { view: a } } else { right(b, a, n - 1) }
@@ -86,7 +97,7 @@ fn recursive_swap_names_the_actual_result_lifetime() {
             if n == 0 { struct { view: a } } else { left(a, b, n - 1) }
         }
         fn main() -> Unit ! {} {}"#,
-        "returned borrowed record field has lifetime 'b, which does not satisfy the declared result lifetime 'a'",
+        "'b",
     );
 }
 
