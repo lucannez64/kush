@@ -14,27 +14,33 @@
 //! SCCs computed here are call-graph components over function declarations.
 //!
 //! Scope limits:
-//! - Direct and lexically resolved static calls only. Indirect, dynamic, and
-//!   method calls are unsupported boundaries: a summary that needs one keeps
-//!   that `unknown` channel and is rejected unless the function has an
-//!   explicit result lifetime. A caller of an explicit-result boundary still
-//!   sees the preserved `unknown` instead of an empty origin set.
-//! - One root result slot (a borrowed slice, text view, or reference) is
-//!   summarized. Borrowed-record field results keep their existing declared
-//!   field lifetimes; this pass does not infer per-field result binders.
+//! - Direct and statically resolved method calls participate. Indirect calls,
+//!   dynamic dispatch, effect operations, loops, and tasks are unsupported
+//!   boundaries: a summary that needs one keeps that `unknown` channel and is
+//!   rejected unless the function has an explicit result lifetime. A caller of
+//!   an explicit-result boundary still sees the preserved `unknown` instead of
+//!   an empty origin set.
+//! - Root result slots (a borrowed slice, text view, or reference) and
+//!   per-field borrowed-record result paths are summarized. A missing field
+//!   path is a checked error, never an empty origin set.
 //! - An unseeded cycle is rejected unless every result path is syntactically
 //!   returned from an explicit-result boundary. Merely containing an unrelated
 //!   explicit-result call is not evidence for the returned value.
-//! - This pass computes result-derived may-origins, not an independent
-//!   required-precondition set `R[f]`. Bounds are exported only from the
-//!   origins a result can actually return; independent caller requirements
-//!   still need an explicit contract, and are never invented here.
+//! - An independent required-precondition summary `R[f]` unions explicit
+//!   callee bounds and container-write requirements through the same call
+//!   substitution. Callers missing a newly inferred requirement are rejected;
+//!   an explicit trait/arrow/override contract is never strengthened.
 //! - Aggregate budgets are checked errors, never partial successes:
 //!   `MAX_ANALYSIS_STEPS` = 250_000 steps, `MAX_ORIGIN_FACTS` = 16_384 facts,
 //!   `MAX_LOCAL_PASSES` = 64 local fixed-point passes.
 
-use super::{Declared, Resolution, borrow_lifetime, type_lifetimes};
-use crate::{Diagnostic, Span, ast, lexer::Kind, resolve::BindingId};
+use super::{Declared, Resolution, Type, borrow_lifetime, type_lifetimes};
+use crate::runtime_types::Types;
+use crate::{
+    Diagnostic, Span, ast,
+    lexer::Kind,
+    resolve::{BindingId, BindingKind},
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A stable borrow leaf: one runtime parameter plus the source field path that
@@ -47,15 +53,32 @@ pub(super) struct Origin {
     pub path: Vec<String>,
 }
 
-/// The result-origin summary of one declaration. `origins` is the union over
-/// every normal return path; no alternative is dropped because a scalar
-/// condition could prune it. `unknown` preserves an unsupported result channel
-/// discovered in the body so a caller cannot read it as an empty (unrestricted)
-/// provenance.
+/// One inferred caller precondition: the borrow leaf `long` must outlive the
+/// borrow leaf `short`. Both endpoints are input leaves, so this set never
+/// mentions a value the caller cannot control.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Requirement {
+    pub long: Origin,
+    pub short: Origin,
+}
+
+/// The result-origin summary of one declaration. `leaves` is keyed by the
+/// normal result field path (empty for a root slice/text/reference result) and
+/// each origin set is the union over every normal return path; no alternative
+/// is dropped because a scalar condition could prune it. `requirements` is the
+/// independent `R[f]` precondition set. `unknown` preserves an unsupported
+/// result channel discovered in the body so a caller cannot read it as an empty
+/// (unrestricted) provenance.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct FunctionSummary {
-    pub origins: BTreeSet<Origin>,
-    unknown: Option<Unsupported>,
+    pub leaves: BTreeMap<Vec<String>, BTreeSet<Origin>>,
+    pub requirements: BTreeSet<Requirement>,
+    /// Whether this declaration participates in, or is reachable from, a
+    /// recursive call-graph SCC. Only such declarations may publish newly
+    /// inferred record-result bounds or caller preconditions; an acyclic
+    /// declaration keeps its existing rigid contract.
+    pub inferred_contract: bool,
+    unknown: BTreeMap<Vec<String>, Unsupported>,
 }
 
 /// Solved declaration summaries, sorted by binding for deterministic replay.
@@ -82,9 +105,12 @@ struct Flow {
     /// a record value uses the paths of its fields.
     leaves: BTreeMap<Vec<String>, BTreeSet<Origin>>,
     /// A value in result position came from a channel this pass cannot follow.
-    /// Carrying it to a result forces an explicit result contract instead of
-    /// silently guessing an empty (unrestricted) provenance.
-    unknown: Option<Unsupported>,
+    /// Keys use the same relative field paths as `leaves`, so an unsupported
+    /// owned field (for example a box construction) does not contaminate a
+    /// borrowed field of the same record. Carrying it to a result forces an
+    /// explicit result contract instead of silently guessing an empty
+    /// (unrestricted) provenance.
+    unknown: BTreeMap<Vec<String>, Unsupported>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,16 +137,19 @@ impl Flow {
         }
         Self {
             leaves,
-            unknown: None,
+            unknown: BTreeMap::new(),
         }
     }
     fn unknown(span: Span, what: impl Into<String>) -> Self {
         Self {
             leaves: BTreeMap::new(),
-            unknown: Some(Unsupported {
-                span,
-                what: what.into(),
-            }),
+            unknown: BTreeMap::from([(
+                Vec::new(),
+                Unsupported {
+                    span,
+                    what: what.into(),
+                },
+            )]),
         }
     }
     /// Construct a record/struct literal: each field value keeps its parameter
@@ -133,10 +162,13 @@ impl Flow {
             key.extend(path.iter().cloned());
             leaves.insert(key, origins.clone());
         }
-        Self {
-            leaves,
-            unknown: self.unknown.clone(),
+        let mut unknown = BTreeMap::new();
+        for (path, fact) in &self.unknown {
+            let mut key = fields.to_vec();
+            key.extend(path.iter().cloned());
+            unknown.insert(key, fact.clone());
         }
+        Self { leaves, unknown }
     }
     /// Project one record field. Relative field keys select the matching
     /// subvalue; a whole-value root origin gains the field on its parameter leaf
@@ -166,21 +198,38 @@ impl Flow {
                     }));
             }
         }
-        Self {
-            leaves,
-            unknown: self.unknown.clone(),
+        let mut unknown = BTreeMap::new();
+        for (path, fact) in &self.unknown {
+            if path.is_empty() {
+                unknown.insert(Vec::new(), fact.clone());
+            } else if path.first().is_some_and(|first| first == field) {
+                unknown.insert(path[1..].to_vec(), fact.clone());
+            }
         }
+        Self { leaves, unknown }
     }
     fn merge(&mut self, other: Flow) {
         for (path, origins) in other.leaves {
             self.leaves.entry(path).or_default().extend(origins);
         }
-        if let Some(unknown) = other.unknown {
-            self.unknown = Some(match self.unknown.take() {
-                Some(current) if current.precedes(&unknown) => current,
-                Some(_) | None => unknown,
-            });
+        for (path, fact) in other.unknown {
+            match self.unknown.get(&path) {
+                Some(current) if current.precedes(&fact) => {}
+                _ => {
+                    self.unknown.insert(path, fact);
+                }
+            }
         }
+    }
+    fn has_unknown(&self) -> bool {
+        !self.unknown.is_empty()
+    }
+    /// Whether an unsupported fact can affect this result field path. A root
+    /// fact affects every path; a fact on an unrelated field does not.
+    fn unknown_conflicts(&self, path: &[String]) -> bool {
+        self.unknown.keys().any(|key| {
+            key.is_empty() || path.is_empty() || key.starts_with(path) || path.starts_with(key)
+        })
     }
     /// All origins carried by this flow, regardless of field path. Used when a
     /// callee origin has no field path or when returning a whole value.
@@ -207,7 +256,7 @@ impl Flow {
     ) -> Result<(), SelectFailure> {
         if path.is_empty() {
             out.extend(self.all_origins());
-            return if self.unknown.is_none() {
+            return if self.unknown.is_empty() {
                 Ok(())
             } else {
                 Err(SelectFailure::Missing)
@@ -253,7 +302,7 @@ impl Flow {
                 matched = true;
             }
         }
-        if self.unknown.is_some() || !matched {
+        if self.unknown_conflicts(path) || !matched {
             Err(SelectFailure::Missing)
         } else {
             Ok(())
@@ -269,26 +318,95 @@ enum SelectFailure {
     Budget,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CallArguments<'e> {
+    Direct(&'e [ast::Expr]),
+    Method {
+        receiver: &'e ast::Expr,
+        arguments: &'e [ast::Expr],
+    },
+}
+
+impl<'e> CallArguments<'e> {
+    /// The AST expression at a source parameter position. A direct call keeps
+    /// erased proof holes in place, so the position is the list index. A method
+    /// call has its receiver at position zero and shifts explicit arguments by
+    /// one.
+    fn source(self, position: usize) -> Option<&'e ast::Expr> {
+        match self {
+            Self::Direct(arguments) => arguments.get(position),
+            Self::Method {
+                receiver,
+                arguments,
+            } => {
+                if position == 0 {
+                    Some(receiver)
+                } else {
+                    arguments.get(position - 1)
+                }
+            }
+        }
+    }
+}
+
 struct Solver<'a, 'r> {
     resolution: &'r Resolution,
     declared: &'r BTreeMap<BindingId, Declared<'a>>,
+    types: &'r Types<'a>,
     summaries: BTreeMap<BindingId, FunctionSummary>,
     edges: BTreeMap<BindingId, BTreeSet<BindingId>>,
     /// Source offsets of each direct call edge, for diagnostics. `Span` has no
     /// total order, so the stored pair is `(start, end)`.
     edge_sites: BTreeMap<(BindingId, BindingId), BTreeSet<(usize, usize)>>,
+    /// Declared methods by method name. Receiver-type dispatch selects one when
+    /// the receiver's syntactic type is known; a unique name is otherwise a
+    /// static resolution rather than an `unknown` boundary.
+    methods_by_name: BTreeMap<String, BTreeSet<BindingId>>,
+    /// Concrete receiver type name of each declared method.
+    method_receivers: BTreeMap<BindingId, String>,
+    /// Syntactic receiver/local type names for the body currently analyzed.
+    type_names: BTreeMap<BindingId, String>,
+    /// Runtime parameter index of each non-erased parameter binding.
+    parameter_bindings: BTreeMap<BindingId, usize>,
+    self_type_name: Option<String>,
     steps: usize,
     facts: usize,
 }
 
 impl<'a, 'r> Solver<'a, 'r> {
-    fn new(resolution: &'r Resolution, declared: &'r BTreeMap<BindingId, Declared<'a>>) -> Self {
+    fn new(
+        resolution: &'r Resolution,
+        declared: &'r BTreeMap<BindingId, Declared<'a>>,
+        types: &'r Types<'a>,
+    ) -> Self {
+        let mut methods_by_name: BTreeMap<String, BTreeSet<BindingId>> = BTreeMap::new();
+        let mut method_receivers = BTreeMap::new();
+        for (binding, entry) in declared {
+            let Some(self_ty) = entry.self_ty else {
+                continue;
+            };
+            let Type::Enum(id) = self_ty else {
+                continue;
+            };
+            let receiver = types.enums[id].name.clone();
+            method_receivers.insert(*binding, receiver.clone());
+            methods_by_name
+                .entry(entry.ast.name.clone())
+                .or_default()
+                .insert(*binding);
+        }
         Self {
             resolution,
             declared,
+            types,
             summaries: BTreeMap::new(),
             edges: BTreeMap::new(),
             edge_sites: BTreeMap::new(),
+            methods_by_name,
+            method_receivers,
+            type_names: BTreeMap::new(),
+            parameter_bindings: BTreeMap::new(),
+            self_type_name: None,
             steps: 0,
             facts: 0,
         }
@@ -320,13 +438,12 @@ impl<'a, 'r> Solver<'a, 'r> {
             .enumerate()
             .collect()
     }
-    /// The source argument for one runtime parameter index. Calls keep erased
-    /// proof positions in the AST argument list, so a runtime index must skip
-    /// those positions instead of indexing the AST list directly. A missing
-    /// position is an unsupported call shape, not argument zero.
-    fn runtime_argument<'e>(
+    /// The source arguments of one call, used with source parameter positions.
+    /// A direct call keeps erased proof holes in its AST argument list; a
+    /// method call instead has an implicit receiver at source position zero.
+    fn source_argument<'e>(
         declared: &Declared<'a>,
-        arguments: &'e [ast::Expr],
+        call: CallArguments<'e>,
         runtime_index: usize,
     ) -> Option<&'e ast::Expr> {
         let mut runtime = 0usize;
@@ -335,25 +452,70 @@ impl<'a, 'r> Solver<'a, 'r> {
                 continue;
             }
             if runtime == runtime_index {
-                return arguments.get(position);
+                return call.source(position);
             }
             runtime = runtime.saturating_add(1);
         }
         None
     }
+    /// Whether the written result can carry a borrowed value: a root borrowed
+    /// slice/text/reference, a borrowed record, or a container with borrowed
+    /// elements. The written shape matters because an elided `&[T]` mentions no
+    /// named lifetime.
+    fn result_can_borrow(f: &ast::Function) -> bool {
+        if Self::has_borrowed_result(f) {
+            return true;
+        }
+        let result = crate::grades::split(&f.result).0;
+        // Only a nominal record gets per-field result leaves here. An owned
+        // reference container (`Box<&T>`, `Vec<&T>`) and an enum payload keep
+        // their existing declared-lifetime inference; treating them as records
+        // would turn every container constructor into an unsupported field.
+        let ast::TypeKind::Named { path, arguments } = &result.kind else {
+            return false;
+        };
+        if path
+            .last()
+            .is_some_and(|name| Self::is_reference_container_name(name))
+        {
+            return false;
+        }
+        let mut mentioned = BTreeSet::new();
+        for argument in arguments {
+            type_lifetimes(argument, &mut mentioned);
+        }
+        !mentioned.is_empty()
+    }
+    fn is_reference_container_name(name: &str) -> bool {
+        matches!(
+            name,
+            "Box"
+                | "Vec"
+                | "Bytes"
+                | "String"
+                | "Task"
+                | "TaskExit"
+                | "Arena"
+                | "ArenaBox"
+                | "AllocBox"
+                | "AllocVec"
+                | "Option"
+                | "Result"
+        )
+    }
     /// Whether the written result is a borrowed slice/text view/reference. Only
-    /// these root result slots are summarized here.
+    /// these root result slots use the elided-root inference path.
     fn has_borrowed_result(f: &ast::Function) -> bool {
         matches!(
             &crate::grades::split(&f.result).0.kind,
             ast::TypeKind::Borrow { .. }
         )
     }
-    /// Number of independent direct input borrow lifetimes. Record-field
-    /// lifetimes are validated by the ordinary inference: their declared names
-    /// may include phantom parameters, so counting names here would reject a
-    /// single real leaf as if it were ambiguous. A direct elided borrow counts
-    /// once; declared names are deduplicated.
+    /// Number of independent input borrow lifetimes, including named lifetimes
+    /// nested in a record or container parameter. Record-field lifetimes are
+    /// deduplicated by name; a direct elided borrow counts once. This count is
+    /// used only to distinguish a genuinely ambiguous unseeded cycle from the
+    /// existing single-input parametric elision.
     fn input_lifetime_count(f: &ast::Function) -> usize {
         let mut names = BTreeSet::new();
         let mut elided = 0usize;
@@ -366,9 +528,245 @@ impl<'a, 'r> Solver<'a, 'r> {
                     }
                     None => elided += 1,
                 }
+                continue;
             }
+            type_lifetimes(ty, &mut names);
         }
         names.len() + elided
+    }
+    /// Syntactic type name of a written type after stripping references,
+    /// grades, and type arguments. `Self` uses the enclosing impl target.
+    fn ast_type_name(&self, ty: &ast::Type) -> Option<String> {
+        match &ty.kind {
+            ast::TypeKind::Borrow { inner, .. } | ast::TypeKind::Graded { inner, .. } => {
+                self.ast_type_name(inner)
+            }
+            ast::TypeKind::Named { path, .. } => path.last().cloned(),
+            ast::TypeKind::SelfType => self.self_type_name.clone(),
+            _ => None,
+        }
+    }
+    fn self_name_of(&self, declared: &Declared<'a>) -> Option<String> {
+        let Type::Enum(id) = declared.self_ty? else {
+            return None;
+        };
+        Some(self.types.enums[id].name.clone())
+    }
+    /// Rebuild the simple receiver/local type environment for one body. This is
+    /// deliberately a syntactic over-approximation: it never invents a method
+    /// target, and an unresolved receiver keeps the explicit-contract boundary.
+    fn prepare_type_names(&mut self, declared: &Declared<'a>) {
+        self.self_type_name = self.self_name_of(declared);
+        self.type_names.clear();
+        self.parameter_bindings.clear();
+        for (index, parameter) in Self::runtime_parameters(declared.ast) {
+            if let Some(binder) = self.resolution.binder(parameter.span) {
+                self.parameter_bindings.insert(binder, index);
+            }
+        }
+        for parameter in declared.ast.parameters.iter().filter(|p| !p.erased) {
+            if let (Some(binder), Some(name)) = (
+                self.resolution.binder(parameter.span),
+                self.ast_type_name(&parameter.ty),
+            ) {
+                self.type_names.insert(binder, name);
+            }
+        }
+        if let Some(body) = &declared.ast.body {
+            self.collect_type_names(body);
+        }
+    }
+    fn collect_type_names(&mut self, block: &ast::Block) {
+        for statement in &block.statements {
+            match statement {
+                ast::Statement::Let { pattern, value, .. } => {
+                    let name = self.expr_type_name(value);
+                    if let (Some(name), ast::PatternKind::Name(_)) = (name, &pattern.kind)
+                        && let Some(binder) = self.resolution.binder(pattern.span)
+                    {
+                        self.type_names.entry(binder).or_insert(name);
+                    }
+                    self.collect_expr_type_names(value);
+                }
+                ast::Statement::Expr(value) => self.collect_expr_type_names(value),
+            }
+        }
+        if let Some(tail) = &block.tail {
+            self.collect_expr_type_names(tail);
+        }
+    }
+    fn collect_expr_type_names(&mut self, expr: &ast::Expr) {
+        use ast::ExprKind as K;
+        match &expr.kind {
+            K::Block(block) => self.collect_type_names(block),
+            K::If {
+                then, otherwise, ..
+            } => {
+                self.collect_type_names(then);
+                if let Some(otherwise) = otherwise {
+                    self.collect_expr_type_names(otherwise);
+                }
+            }
+            K::Match { arms, .. } => {
+                for arm in arms {
+                    self.collect_expr_type_names(&arm.body);
+                }
+            }
+            K::While { body, .. } | K::Loop(body) => self.collect_type_names(body),
+            K::Handle { body, .. } => self.collect_type_names(body),
+            K::Field { value, .. }
+            | K::Slice { value, .. }
+            | K::Index { value, .. }
+            | K::Unary { operand: value, .. }
+            | K::Try(value)
+            | K::Cast { value, .. }
+            | K::Return(Some(value))
+            | K::Break(Some(value))
+            | K::Specialize { callee: value, .. } => self.collect_expr_type_names(value),
+            K::Binary { left, right, .. } => {
+                self.collect_expr_type_names(left);
+                self.collect_expr_type_names(right);
+            }
+            K::Call { callee, arguments } => {
+                self.collect_expr_type_names(callee);
+                for argument in arguments {
+                    self.collect_expr_type_names(argument);
+                }
+            }
+            K::Tuple(values) | K::Array(values) => {
+                for value in values {
+                    self.collect_expr_type_names(value);
+                }
+            }
+            K::Record { fields, .. } | K::StructuralLiteral(fields) => {
+                for (_, value) in fields {
+                    self.collect_expr_type_names(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn expr_type_name(&self, expr: &ast::Expr) -> Option<String> {
+        use ast::ExprKind as K;
+        match &expr.kind {
+            K::Name(_) => self
+                .resolution
+                .reference(expr.span)
+                .and_then(|binder| self.type_names.get(&binder).cloned()),
+            K::Unary { operand, .. } => self.expr_type_name(operand),
+            K::Record { ty, .. } => self.expr_type_name(ty),
+            K::Call { callee, .. } => {
+                let (binding, _) = self.call_target(callee)?;
+                self.declared
+                    .get(&binding)
+                    .and_then(|declared| self.ast_type_name(&declared.ast.result))
+            }
+            K::Block(block) => block
+                .tail
+                .as_deref()
+                .and_then(|tail| self.expr_type_name(tail)),
+            _ => None,
+        }
+    }
+    /// Resolve a statically dispatched method call. The receiver type name is
+    /// matched against the concrete impl target; a method name with exactly one
+    /// declaration is also a static resolution. Dynamic dispatch and builtin
+    /// methods stay `None` (an explicit-contract boundary).
+    fn method_target<'e>(&self, callee: &'e ast::Expr) -> Option<(BindingId, &'e ast::Expr)> {
+        let ast::ExprKind::Field { value, name } = &callee.kind else {
+            return None;
+        };
+        if Self::is_builtin_method_name(name) {
+            return None;
+        }
+        let receiver = match &value.kind {
+            ast::ExprKind::Field {
+                value: receiver, ..
+            } if self
+                .resolution
+                .reference(value.span)
+                .is_some_and(|id| self.resolution.bindings[id].kind == BindingKind::Trait) =>
+            {
+                receiver.as_ref()
+            }
+            _ => value.as_ref(),
+        };
+        let candidates = self.methods_by_name.get(name)?;
+        if let Some(receiver_name) = self.expr_type_name(receiver) {
+            let matching = candidates
+                .iter()
+                .copied()
+                .filter(|binding| self.method_receivers.get(binding) == Some(&receiver_name))
+                .collect::<Vec<_>>();
+            if let [binding] = matching.as_slice() {
+                return Some((*binding, receiver));
+            }
+        }
+        if let [binding] = candidates.iter().copied().collect::<Vec<_>>().as_slice() {
+            return Some((*binding, receiver));
+        }
+        None
+    }
+    fn call_target<'e>(&self, callee: &'e ast::Expr) -> Option<(BindingId, Option<&'e ast::Expr>)> {
+        match &callee.kind {
+            ast::ExprKind::Name(_) => self.callee_binding(callee).map(|binding| (binding, None)),
+            ast::ExprKind::Specialize { callee, .. } => {
+                self.callee_binding(callee).map(|binding| (binding, None))
+            }
+            ast::ExprKind::Field { .. } => self
+                .method_target(callee)
+                .map(|(binding, receiver)| (binding, Some(receiver))),
+            _ => None,
+        }
+    }
+    fn is_builtin_method_name(name: &str) -> bool {
+        matches!(
+            name,
+            "len"
+                | "capacity"
+                | "get"
+                | "at"
+                | "try_get"
+                | "push"
+                | "push_reserved"
+                | "clear"
+                | "reserve"
+                | "try_reserve"
+                | "copy"
+                | "set"
+                | "as_bytes"
+                | "as_str"
+                | "bytes"
+                | "substr"
+                | "to_string"
+                | "byte_at"
+                | "scalar_at"
+                | "scalar_len"
+                | "from_utf8"
+                | "take"
+                | "read"
+                | "code"
+                | "convert"
+                | "try_convert"
+                | "truncate"
+                | "wrapping_add"
+                | "wrapping_sub"
+                | "wrapping_mul"
+                | "saturating_add"
+                | "saturating_sub"
+                | "saturating_mul"
+                | "checked_add"
+                | "checked_sub"
+                | "checked_mul"
+                | "abs"
+                | "sqrt"
+                | "is_nan"
+                | "is_infinite"
+                | "is_finite"
+                | "to_f64"
+                | "try_to_f32"
+                | "try_to_int"
+        )
     }
     /// Whether any runtime input type can carry a borrow at all, including a
     /// borrowed record field. A no-input elided borrowed result is already
@@ -405,6 +803,15 @@ impl<'a, 'r> Solver<'a, 'r> {
             let Some(binding) = self.resolution.binder(parameter.span) else {
                 continue;
             };
+            let ty = crate::grades::split(&parameter.ty).0;
+            let mut mentioned = BTreeSet::new();
+            type_lifetimes(ty, &mut mentioned);
+            // A scalar parameter or a record with no borrow leaf cannot own a
+            // borrow origin. Seeding it would fabricate a field leaf for a
+            // scalar field written into a record literal.
+            if mentioned.is_empty() && !matches!(ty.kind, ast::TypeKind::Borrow { .. }) {
+                continue;
+            }
             let mut origins = BTreeSet::new();
             origins.insert(Origin {
                 parameter: index,
@@ -508,25 +915,31 @@ impl<'a, 'r> Solver<'a, 'r> {
         locals: &BTreeMap<BindingId, Flow>,
         span: Span,
     ) -> Result<Flow, Diagnostic> {
-        let Some(binding) = self.callee_binding(callee) else {
+        let Some((binding, receiver)) = self.call_target(callee) else {
             return Ok(Flow::unknown(
                 span,
-                "an indirect, dynamic, method, or unresolved call in result position requires an explicit checked contract",
+                "an indirect, dynamic, or unresolved call in result position requires an explicit checked contract",
             ));
         };
-        let Some(declared) = self.declared.get(&binding) else {
+        let Some(declared) = self.declared.get(&binding).copied() else {
             return Ok(Flow::unknown(
                 span,
                 "a call to a non-function or erased definition in result position requires an explicit checked contract",
             ));
         };
+        let call = match receiver {
+            Some(receiver) => CallArguments::Method {
+                receiver,
+                arguments,
+            },
+            None => CallArguments::Direct(arguments),
+        };
         let Some(summary) = self.summaries.get(&binding).cloned() else {
-            // A declaration with a borrowed result is summarized (possibly
+            // A declaration with a borrow-capable result is summarized (possibly
             // empty before the first iteration). Anything else can only be a
-            // non-borrowed scalar result; a record that carries borrows is an
-            // unsupported boundary for this root-slot fragment. The written
-            // shape matters here: an elided `&[T]` mentions no named lifetime,
-            // but it is still a borrowed shape and must never look scalar.
+            // scalar/free record result. The written shape matters here: an
+            // elided `&[T]` mentions no named lifetime, but it is still a
+            // borrowed shape and must never look scalar.
             let mut mentioned = BTreeSet::new();
             type_lifetimes(crate::grades::split(&declared.ast.result).0, &mut mentioned);
             return Ok(
@@ -535,62 +948,96 @@ impl<'a, 'r> Solver<'a, 'r> {
                 } else {
                     Flow::unknown(
                         span,
-                        "a call returning a borrowed result without a summary is not part of the root-slot recursive fragment; annotate the result lifetime",
+                        "a call returning a borrowed result without a summary is not part of the recursive fragment; annotate the result lifetime",
                     )
                 },
             );
         };
         let callee_name = declared.ast.name.clone();
-        let mut out = BTreeSet::new();
-        let mut unknown = None;
-        for origin in &summary.origins {
-            let Some(argument) = Self::runtime_argument(declared, arguments, origin.parameter)
-            else {
-                unknown = Some(Unsupported {
-                    span,
-                    what: format!(
-                        "a summary origin names runtime parameter {} but the call has no corresponding source argument",
-                        origin.parameter
-                    ),
-                });
-                continue;
-            };
-            let flow = self.expr_flow(argument, locals)?;
-            if flow.unknown.is_some() {
-                unknown = Some(Unsupported {
-                    span: argument.span,
-                    what: "a borrowed call argument comes from an unsupported boundary; annotate the result lifetime"
-                        .to_owned(),
-                });
-                continue;
+        let mut leaves: BTreeMap<Vec<String>, BTreeSet<Origin>> = BTreeMap::new();
+        let mut unknown: BTreeMap<Vec<String>, Unsupported> = BTreeMap::new();
+        let mut note_unknown = |path: Vec<String>, fact: Unsupported| match unknown.get(&path) {
+            Some(current) if current.precedes(&fact) => {}
+            _ => {
+                unknown.insert(path, fact);
             }
-            let mut selected = BTreeSet::new();
-            match flow.select(&origin.path, &mut selected, &mut self.steps) {
-                Ok(()) => {}
-                Err(SelectFailure::Missing) => {
-                    unknown = Some(Unsupported {
-                        span: argument.span,
-                        what: format!(
-                            "a borrowed call argument does not expose the callee result's field path '{}'; annotate the result lifetime or route the value through a direct checked function",
-                            origin.path.join(".")
-                        ),
-                    });
+        };
+        for (result_path, origins) in &summary.leaves {
+            for origin in origins {
+                let Some(argument) = Self::source_argument(&declared, call, origin.parameter)
+                else {
+                    note_unknown(
+                        result_path.clone(),
+                        Unsupported {
+                            span,
+                            what: format!(
+                                "a summary origin names runtime parameter {} but the call has no corresponding source argument",
+                                origin.parameter
+                            ),
+                        },
+                    );
+                    continue;
+                };
+                let flow = self.expr_flow(argument, locals)?;
+                if flow.has_unknown() {
+                    note_unknown(
+                        result_path.clone(),
+                        Unsupported {
+                            span: argument.span,
+                            what: "a borrowed call argument comes from an unsupported boundary; annotate the result lifetime"
+                                .to_owned(),
+                        },
+                    );
                     continue;
                 }
-                Err(SelectFailure::Budget) => {
-                    return Err(Diagnostic::new(
-                        span,
-                        "recursive lifetime inference exceeded its finite work budget while substituting a call summary",
-                    ));
+                let mut selected = BTreeSet::new();
+                match flow.select(&origin.path, &mut selected, &mut self.steps) {
+                    Ok(()) => {}
+                    Err(SelectFailure::Missing) => {
+                        note_unknown(
+                            result_path.clone(),
+                            Unsupported {
+                                span: argument.span,
+                                what: format!(
+                                    "a borrowed call argument does not expose the callee result's field path '{}'; annotate the result lifetime or route the value through a direct checked function",
+                                    origin.path.join(".")
+                                ),
+                            },
+                        );
+                        continue;
+                    }
+                    Err(SelectFailure::Budget) => {
+                        return Err(Diagnostic::new(
+                            span,
+                            "recursive lifetime inference exceeded its finite work budget while substituting a call summary",
+                        ));
+                    }
                 }
-            }
-            for selected in selected {
-                if out.insert(selected) {
-                    self.charge_fact(span)?;
+                for selected in selected {
+                    if leaves
+                        .entry(result_path.clone())
+                        .or_default()
+                        .insert(selected)
+                    {
+                        self.charge_fact(span)?;
+                    }
                 }
             }
         }
-        if let Some(summary_unknown) = &summary.unknown {
+        for (path, summary_unknown) in &summary.unknown {
+            // Only a fact that can affect a summarized result leaf matters. An
+            // unsupported owned field of a record does not contaminate the
+            // borrowed leaves, and cannot be read as provenance either.
+            let relevant = summary.leaves.is_empty()
+                || summary.leaves.keys().any(|leaf| {
+                    path.is_empty()
+                        || leaf.is_empty()
+                        || leaf.starts_with(path)
+                        || path.starts_with(leaf)
+                });
+            if !relevant {
+                continue;
+            }
             let candidate = Unsupported {
                 span,
                 what: format!(
@@ -598,14 +1045,9 @@ impl<'a, 'r> Solver<'a, 'r> {
                     summary_unknown.what
                 ),
             };
-            unknown = Some(match unknown.take() {
-                Some(current) if current.precedes(&candidate) => current,
-                Some(_) | None => candidate,
-            });
+            note_unknown(path.clone(), candidate);
         }
-        let mut flow = Flow::root(out);
-        flow.unknown = unknown;
-        Ok(flow)
+        Ok(Flow { leaves, unknown })
     }
     fn block_flow(
         &mut self,
@@ -629,14 +1071,15 @@ impl<'a, 'r> Solver<'a, 'r> {
     /// would publish a summary that silently dropped a local origin.
     fn analyze_locals(
         &mut self,
-        f: &ast::Function,
+        declared: &Declared<'a>,
         locals: &mut BTreeMap<BindingId, Flow>,
     ) -> Result<(), Diagnostic> {
-        self.seed_locals(f, locals)?;
-        let Some(body) = &f.body else {
+        self.prepare_type_names(declared);
+        self.seed_locals(declared.ast, locals)?;
+        let Some(body) = &declared.ast.body else {
             return Ok(());
         };
-        let span = f.result.span;
+        let span = declared.ast.result.span;
         run_local_fixed_point(MAX_LOCAL_PASSES, span, || {
             let before = locals.clone();
             self.walk_block(body, locals)?;
@@ -748,9 +1191,11 @@ impl<'a, 'r> Solver<'a, 'r> {
             P::Name(_) => {
                 if let Some(binding) = self.resolution.binder(pattern.span) {
                     locals.entry(binding).or_default().merge(flow.clone());
-                    if let Some(unknown) = &flow.unknown {
-                        locals.get_mut(&binding).unwrap().unknown = Some(unknown.clone());
-                    }
+                    locals
+                        .get_mut(&binding)
+                        .unwrap()
+                        .unknown
+                        .extend(flow.unknown.clone());
                 }
             }
             P::Record { fields, .. } | P::Structural { fields, .. } => {
@@ -775,7 +1220,7 @@ impl<'a, 'r> Solver<'a, 'r> {
     }
     fn collect_edges(&mut self, binding: BindingId, block: &ast::Block) -> Result<(), Diagnostic> {
         let mut found = BTreeSet::new();
-        collect_direct_calls(self.resolution, self.declared, block, &mut found);
+        self.collect_calls_in_block(block, &mut found);
         for (callee, start, end) in found {
             self.edges.entry(binding).or_default().insert(callee);
             self.edge_sites
@@ -785,17 +1230,395 @@ impl<'a, 'r> Solver<'a, 'r> {
         }
         Ok(())
     }
+    fn collect_calls_in_block(
+        &self,
+        block: &ast::Block,
+        out: &mut BTreeSet<(BindingId, usize, usize)>,
+    ) {
+        for statement in &block.statements {
+            match statement {
+                ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
+                    self.collect_calls_in_expr(value, out)
+                }
+            }
+        }
+        if let Some(tail) = &block.tail {
+            self.collect_calls_in_expr(tail, out);
+        }
+    }
+    fn collect_calls_in_expr(
+        &self,
+        expr: &ast::Expr,
+        out: &mut BTreeSet<(BindingId, usize, usize)>,
+    ) {
+        use ast::ExprKind as K;
+        match &expr.kind {
+            K::Call { callee, arguments } => {
+                if let Some((binding, _)) = self.call_target(callee)
+                    && self
+                        .declared
+                        .get(&binding)
+                        .is_some_and(|d| d.ast.body.is_some())
+                {
+                    out.insert((binding, callee.span.start, callee.span.end));
+                }
+                self.collect_calls_in_expr(callee, out);
+                for argument in arguments {
+                    self.collect_calls_in_expr(argument, out);
+                }
+            }
+            K::Block(block) => self.collect_calls_in_block(block, out),
+            K::If {
+                then, otherwise, ..
+            } => {
+                self.collect_calls_in_block(then, out);
+                if let Some(otherwise) = otherwise {
+                    self.collect_calls_in_expr(otherwise, out);
+                }
+            }
+            K::Match { arms, .. } => {
+                for arm in arms {
+                    self.collect_calls_in_expr(&arm.body, out);
+                }
+            }
+            K::While { condition, body } => {
+                self.collect_calls_in_expr(condition, out);
+                self.collect_calls_in_block(body, out);
+            }
+            K::Loop(body) => self.collect_calls_in_block(body, out),
+            K::Handle { handler, body, .. } => {
+                self.collect_calls_in_expr(handler, out);
+                self.collect_calls_in_block(body, out);
+            }
+            K::Field { value, .. }
+            | K::Slice { value, .. }
+            | K::Index { value, .. }
+            | K::Unary { operand: value, .. }
+            | K::Try(value)
+            | K::Cast { value, .. }
+            | K::Return(Some(value))
+            | K::Break(Some(value))
+            | K::Perform { value, .. } => self.collect_calls_in_expr(value, out),
+            K::Binary { left, right, .. } => {
+                self.collect_calls_in_expr(left, out);
+                self.collect_calls_in_expr(right, out);
+            }
+            K::Record { fields, .. } | K::StructuralLiteral(fields) => {
+                for (_, value) in fields {
+                    self.collect_calls_in_expr(value, out);
+                }
+            }
+            K::Tuple(values) | K::Array(values) => {
+                for value in values {
+                    self.collect_calls_in_expr(value, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    /// Collect the independent required-precondition set `R[f]` from every
+    /// call and container write in a body. Explicit callee bounds and an
+    /// already inferred callee `R[g]` both substitute through the same actual
+    /// argument leaves. A field path that cannot be mapped is a checked error,
+    /// never silently dropped.
+    fn collect_requirements(
+        &mut self,
+        block: &ast::Block,
+        locals: &BTreeMap<BindingId, Flow>,
+        out: &mut BTreeSet<Requirement>,
+    ) -> Result<(), Diagnostic> {
+        for statement in &block.statements {
+            match statement {
+                ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
+                    self.requirements_in_expr(value, locals, out)?
+                }
+            }
+        }
+        if let Some(tail) = &block.tail {
+            self.requirements_in_expr(tail, locals, out)?;
+        }
+        Ok(())
+    }
+    fn requirements_in_expr(
+        &mut self,
+        expr: &ast::Expr,
+        locals: &BTreeMap<BindingId, Flow>,
+        out: &mut BTreeSet<Requirement>,
+    ) -> Result<(), Diagnostic> {
+        self.charge(expr.span)?;
+        use ast::ExprKind as K;
+        match &expr.kind {
+            K::Call { callee, arguments } => {
+                self.requirements_in_call(callee, arguments, locals, out)?;
+                self.requirements_in_expr(callee, locals, out)?;
+                for argument in arguments {
+                    self.requirements_in_expr(argument, locals, out)?;
+                }
+            }
+            K::Block(block) => self.collect_requirements(block, locals, out)?,
+            K::If {
+                then, otherwise, ..
+            } => {
+                self.collect_requirements(then, locals, out)?;
+                if let Some(otherwise) = otherwise {
+                    self.requirements_in_expr(otherwise, locals, out)?;
+                }
+            }
+            K::Match { arms, .. } => {
+                for arm in arms {
+                    self.requirements_in_expr(&arm.body, locals, out)?;
+                }
+            }
+            K::While { condition, body } => {
+                self.requirements_in_expr(condition, locals, out)?;
+                self.collect_requirements(body, locals, out)?;
+            }
+            K::Loop(body) => self.collect_requirements(body, locals, out)?,
+            K::Handle { body, .. } => self.collect_requirements(body, locals, out)?,
+            K::Field { value, .. }
+            | K::Slice { value, .. }
+            | K::Index { value, .. }
+            | K::Unary { operand: value, .. }
+            | K::Try(value)
+            | K::Cast { value, .. }
+            | K::Return(Some(value))
+            | K::Break(Some(value))
+            | K::Perform { value, .. }
+            | K::Specialize { callee: value, .. } => {
+                self.requirements_in_expr(value, locals, out)?
+            }
+            K::Binary { left, right, .. } => {
+                self.requirements_in_expr(left, locals, out)?;
+                self.requirements_in_expr(right, locals, out)?;
+            }
+            K::Record { fields, .. } | K::StructuralLiteral(fields) => {
+                for (_, value) in fields {
+                    self.requirements_in_expr(value, locals, out)?;
+                }
+            }
+            K::Tuple(values) | K::Array(values) => {
+                for value in values {
+                    self.requirements_in_expr(value, locals, out)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    fn requirements_in_call(
+        &mut self,
+        callee: &ast::Expr,
+        arguments: &[ast::Expr],
+        locals: &BTreeMap<BindingId, Flow>,
+        out: &mut BTreeSet<Requirement>,
+    ) -> Result<(), Diagnostic> {
+        if let Some((binding, receiver)) = self.call_target(callee) {
+            let Some(declared) = self.declared.get(&binding).copied() else {
+                return Ok(());
+            };
+            let call = match receiver {
+                Some(receiver) => CallArguments::Method {
+                    receiver,
+                    arguments,
+                },
+                None => CallArguments::Direct(arguments),
+            };
+            let mut requirements = self
+                .summaries
+                .get(&binding)
+                .map(|summary| summary.requirements.clone())
+                .unwrap_or_default();
+            // The callee's own explicit bounds are preconditions too. They are
+            // never invented by this pass; they are read from the declaration
+            // exactly as ownership will validate them.
+            for (long, short) in Self::declared_bounds(declared.ast) {
+                for long in Self::lifetime_origins(declared.ast, &long) {
+                    for short in Self::lifetime_origins(declared.ast, &short) {
+                        requirements.insert(Requirement {
+                            long: long.clone(),
+                            short,
+                        });
+                    }
+                }
+            }
+            for requirement in requirements {
+                let longs = self.requirement_actuals(&declared, call, &requirement.long, locals)?;
+                let shorts =
+                    self.requirement_actuals(&declared, call, &requirement.short, locals)?;
+                for long in longs {
+                    for short in &shorts {
+                        if &long == short {
+                            continue;
+                        }
+                        if out.insert(Requirement {
+                            long: long.clone(),
+                            short: short.clone(),
+                        }) {
+                            self.charge_fact(callee.span)?;
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+        self.container_write_requirement(callee, arguments, locals, out)
+    }
+    /// A direct `Vec.push`/`Box.set` writes the value borrow into the container's
+    /// declared element lifetime. That relation is not a returned origin, so it
+    /// belongs to `R[f]` and must be satisfied by every caller.
+    fn container_write_requirement(
+        &mut self,
+        callee: &ast::Expr,
+        arguments: &[ast::Expr],
+        locals: &BTreeMap<BindingId, Flow>,
+        out: &mut BTreeSet<Requirement>,
+    ) -> Result<(), Diagnostic> {
+        let ast::ExprKind::Field { value, name } = &callee.kind else {
+            return Ok(());
+        };
+        if !matches!(name.as_str(), "push" | "set") {
+            return Ok(());
+        }
+        // `Vec.push(values, value)` names the container in the first argument;
+        // `values.push(value)` names it in the receiver. The resolved builtin
+        // name distinguishes the two spellings.
+        let builtin = self.resolution.reference(callee.span).and_then(|id| {
+            let binding = &self.resolution.bindings[id];
+            (binding.kind == BindingKind::Builtin).then_some(binding.name.as_str())
+        });
+        let (container, written) = match builtin {
+            Some("Vec.push") | Some("Box.set") => {
+                let [container, written] = arguments else {
+                    return Ok(());
+                };
+                (container, written)
+            }
+            Some(_) => return Ok(()),
+            None => {
+                let [written] = arguments else {
+                    return Ok(());
+                };
+                (value.as_ref(), written)
+            }
+        };
+        let Some(container) = self.root_parameter_origin(container) else {
+            return Ok(());
+        };
+        let flow = self.expr_flow(written, locals)?;
+        if flow.has_unknown() {
+            return Ok(());
+        }
+        for origin in flow.all_origins() {
+            if origin != container
+                && out.insert(Requirement {
+                    long: origin,
+                    short: container.clone(),
+                })
+            {
+                self.charge_fact(callee.span)?;
+            }
+        }
+        Ok(())
+    }
+    fn root_parameter_origin(&self, expr: &ast::Expr) -> Option<Origin> {
+        let binding = self.resolution.reference(expr.span)?;
+        let parameter = *self.parameter_bindings.get(&binding)?;
+        Some(Origin {
+            parameter,
+            path: Vec::new(),
+        })
+    }
+    fn declared_bounds(f: &ast::Function) -> BTreeSet<(String, String)> {
+        let mut bounds = BTreeSet::new();
+        for lifetime in &f.lifetimes {
+            for bound in &lifetime.bounds {
+                if bound.name != lifetime.name {
+                    bounds.insert((lifetime.name.clone(), bound.name.clone()));
+                }
+            }
+        }
+        bounds
+    }
+    /// The input leaves whose written type mentions `lifetime`. A direct borrow
+    /// names its own runtime parameter; a nested lifetime inside a container or
+    /// record uses that parameter's root leaf. Result-only lifetimes produce no
+    /// precondition.
+    fn lifetime_origins(f: &ast::Function, lifetime: &str) -> BTreeSet<Origin> {
+        let mut origins = BTreeSet::new();
+        for (index, parameter) in Self::runtime_parameters(f) {
+            let ty = crate::grades::split(&parameter.ty).0;
+            if let ast::TypeKind::Borrow {
+                lifetime: Some(name),
+                ..
+            } = &ty.kind
+                && name == lifetime
+            {
+                origins.insert(Origin {
+                    parameter: index,
+                    path: Vec::new(),
+                });
+                continue;
+            }
+            let mut names = BTreeSet::new();
+            type_lifetimes(ty, &mut names);
+            if names.contains(lifetime) {
+                origins.insert(Origin {
+                    parameter: index,
+                    path: Vec::new(),
+                });
+            }
+        }
+        origins
+    }
+    fn requirement_actuals(
+        &mut self,
+        declared: &Declared<'a>,
+        call: CallArguments<'_>,
+        origin: &Origin,
+        locals: &BTreeMap<BindingId, Flow>,
+    ) -> Result<BTreeSet<Origin>, Diagnostic> {
+        let Some(argument) = Self::source_argument(declared, call, origin.parameter) else {
+            return Err(Diagnostic::new(
+                declared.span,
+                format!(
+                    "a required precondition names runtime parameter {} but the call has no corresponding source argument",
+                    origin.parameter
+                ),
+            ));
+        };
+        let flow = self.expr_flow(argument, locals)?;
+        if flow.has_unknown() {
+            return Ok(BTreeSet::new());
+        }
+        let mut actuals = BTreeSet::new();
+        match flow.select(&origin.path, &mut actuals, &mut self.steps) {
+            Ok(()) => Ok(actuals),
+            Err(SelectFailure::Missing) => Err(Diagnostic::new(
+                argument.span,
+                format!(
+                    "this call argument does not expose the required precondition's field path '{}'; annotate the contract explicitly",
+                    origin.path.join(".")
+                ),
+            )),
+            Err(SelectFailure::Budget) => Err(Diagnostic::new(
+                argument.span,
+                "recursive lifetime inference exceeded its finite work budget while substituting a required precondition",
+            )),
+        }
+    }
     fn solve(&mut self) -> Result<(), Diagnostic> {
-        // Seed one summary slot per declaration with a borrowed result. The
-        // least fixed point starts empty: a cycle with no base return stays
-        // empty and is rejected below instead of bootstrapping "any input".
+        // Seed one summary slot per function body. The least fixed point starts
+        // empty: a cycle with no base return stays empty and is rejected below
+        // instead of bootstrapping "any input". Requirements are seeded from an
+        // empty set as well and grow by union with the same call substitution.
         for (binding, declared) in self.declared {
-            if declared.ast.body.is_some() && Self::has_borrowed_result(declared.ast) {
+            if declared.ast.body.is_some() {
                 self.summaries.insert(*binding, FunctionSummary::default());
             }
         }
         for (binding, declared) in self.declared {
             if let Some(body) = &declared.ast.body {
+                self.prepare_type_names(declared);
                 self.collect_edges(*binding, body)?;
             }
         }
@@ -817,15 +1640,43 @@ impl<'a, 'r> Solver<'a, 'r> {
                     continue;
                 };
                 let mut locals = BTreeMap::new();
-                self.analyze_locals(declared.ast, &mut locals)?;
+                self.analyze_locals(&declared, &mut locals)?;
                 let flow = self.block_flow(body, &locals)?;
-                let origins = flow.all_origins();
-                let summary = FunctionSummary {
-                    origins,
-                    unknown: flow.unknown.clone(),
+                let mut requirements = BTreeSet::new();
+                self.collect_requirements(body, &locals, &mut requirements)?;
+                let borrow_capable = Self::result_can_borrow(declared.ast);
+                let mut summary = FunctionSummary {
+                    leaves: if borrow_capable {
+                        flow.leaves.clone()
+                    } else {
+                        BTreeMap::new()
+                    },
+                    requirements,
+                    inferred_contract: false,
+                    unknown: if borrow_capable {
+                        flow.unknown.clone()
+                    } else {
+                        BTreeMap::new()
+                    },
                 };
+                // Join with the previous iteration so a later callee fact can
+                // only add origins/requirements. The finite lattice guarantees
+                // termination; this also makes the result independent of which
+                // caller happened to be visited first.
                 let previous = self.summaries[binding].clone();
-                if summary != previous {
+                for (path, origins) in previous.leaves {
+                    summary.leaves.entry(path).or_default().extend(origins);
+                }
+                summary.requirements.extend(previous.requirements);
+                for (path, fact) in previous.unknown {
+                    match summary.unknown.get(&path) {
+                        Some(current) if current.precedes(&fact) => {}
+                        _ => {
+                            summary.unknown.insert(path, fact);
+                        }
+                    }
+                }
+                if summary != self.summaries[binding] {
                     self.summaries.insert(*binding, summary);
                     changed = true;
                 }
@@ -834,11 +1685,44 @@ impl<'a, 'r> Solver<'a, 'r> {
                 break;
             }
         }
+        self.mark_inferred_contracts();
         self.diagnose()
     }
-    /// Whether a direct call target has an explicit borrowed result contract.
+    /// Mark the declarations whose contracts may be inferred: every member of
+    /// a recursive call-graph SCC and every callee reachable from one. An
+    /// acyclic declaration that no recursive path uses keeps its existing
+    /// declared (rigid) contract.
+    fn mark_inferred_contracts(&mut self) {
+        let mut roots = BTreeSet::new();
+        for group in self.sccs() {
+            let cyclic = group.len() > 1
+                || self
+                    .edges
+                    .get(&group[0])
+                    .is_some_and(|edges| edges.contains(&group[0]));
+            if cyclic {
+                roots.extend(group);
+            }
+        }
+        let mut reachable = BTreeSet::new();
+        let mut stack = roots.into_iter().collect::<Vec<_>>();
+        while let Some(node) = stack.pop() {
+            if !reachable.insert(node) {
+                continue;
+            }
+            if let Some(next) = self.edges.get(&node) {
+                stack.extend(next.iter().copied());
+            }
+        }
+        for (binding, summary) in &mut self.summaries {
+            summary.inferred_contract = reachable.contains(binding);
+        }
+    }
+    /// Whether a direct/method call target has an explicit borrowed result
+    /// contract. A record result with declared lifetimes is not an explicit
+    /// root-result boundary: its per-field leaves are inferred.
     fn explicit_result_call(&self, callee: &ast::Expr) -> bool {
-        self.callee_binding(callee).is_some_and(|binding| {
+        self.call_target(callee).is_some_and(|(binding, _)| {
             self.declared.get(&binding).is_some_and(|declared| {
                 Self::has_borrowed_result(declared.ast)
                     && borrow_lifetime(crate::grades::split(&declared.ast.result).0).is_some()
@@ -906,31 +1790,49 @@ impl<'a, 'r> Solver<'a, 'r> {
             // participate in a cycle.
             for binding in group {
                 let declared = self.declared[binding];
-                if !Self::has_borrowed_result(declared.ast)
-                    || borrow_lifetime(crate::grades::split(&declared.ast.result).0).is_some()
+                if !Self::result_can_borrow(declared.ast) {
+                    continue;
+                }
+                if Self::has_borrowed_result(declared.ast)
+                    && borrow_lifetime(crate::grades::split(&declared.ast.result).0).is_some()
                 {
-                    // An explicit result contract is parametric forwarding; it
-                    // is validated by the ownership pass, not inferred here.
+                    // An explicit root result contract is parametric forwarding;
+                    // it is validated by the ownership pass, not inferred here.
                     continue;
                 }
                 let Some(body) = &declared.ast.body else {
                     continue;
                 };
                 let mut locals = BTreeMap::new();
-                self.analyze_locals(declared.ast, &mut locals)?;
+                self.analyze_locals(&declared, &mut locals)?;
                 let flow = self.block_flow(body, &locals)?;
-                if let Some(unknown) = &flow.unknown {
+                if let Some((_, unknown)) = flow.unknown.iter().find(|(path, _)| {
+                    self.summaries[binding].leaves.is_empty()
+                        || self.summaries[binding].leaves.keys().any(|leaf| {
+                            path.is_empty()
+                                || leaf.is_empty()
+                                || leaf.starts_with(path)
+                                || path.starts_with(leaf)
+                        })
+                }) {
                     // A no-input elided result already has a more precise
                     // "cannot be returned" rejection in the ordinary pass. For
-                    // an acyclic declaration a single input lifetime already
+                    // an acyclic root result a single input lifetime already
                     // fixes the result provenance, so the existing pass keeps
                     // its more specific mutability/escape diagnostic. Multiple
                     // independent inputs are where an empty summary would
-                    // silently choose no owner.
+                    // silently choose no owner. A borrowed record result has
+                    // per-field leaves, so any unsupported channel must be
+                    // reported instead of becoming an empty field set.
                     let report = if cyclic {
                         Self::input_has_borrow_shape(declared.ast)
-                    } else {
+                    } else if Self::has_borrowed_result(declared.ast) {
                         Self::input_lifetime_count(declared.ast) > 1
+                    } else {
+                        // An acyclic record result keeps its existing rigid
+                        // field validation. A non-returning call such as
+                        // `panic()` is not evidence of an empty borrowed field.
+                        false
                     };
                     if report {
                         errors.push((
@@ -944,7 +1846,10 @@ impl<'a, 'r> Solver<'a, 'r> {
                         ));
                     }
                 } else if cyclic
-                    && flow.all_origins().is_empty()
+                    && self.summaries[binding]
+                        .leaves
+                        .values()
+                        .all(BTreeSet::is_empty)
                     && Self::input_lifetime_count(declared.ast) > 1
                     && !self.block_result_evidence(body)
                 {
@@ -1185,105 +2090,6 @@ fn expr_returns<'e>(expr: &'e ast::Expr, out: &mut Vec<&'e ast::Expr>) {
         K::Lambda(_) | K::Specialize { .. } => {}
     }
 }
-/// Direct static call edges from one function body to declared functions.
-fn collect_direct_calls<'a>(
-    resolution: &Resolution,
-    declared: &BTreeMap<BindingId, Declared<'a>>,
-    block: &ast::Block,
-    out: &mut BTreeSet<(BindingId, usize, usize)>,
-) {
-    fn visit_expr<'a>(
-        resolution: &Resolution,
-        declared: &BTreeMap<BindingId, Declared<'a>>,
-        expr: &ast::Expr,
-        out: &mut BTreeSet<(BindingId, usize, usize)>,
-    ) {
-        use ast::ExprKind as K;
-        match &expr.kind {
-            K::Call { callee, arguments } => {
-                let target = match &callee.kind {
-                    K::Name(_) => resolution.reference(callee.span),
-                    K::Specialize { callee, .. } => resolution.reference(callee.span),
-                    _ => None,
-                };
-                if let Some(binding) = target
-                    && declared.get(&binding).is_some_and(|d| d.ast.body.is_some())
-                {
-                    out.insert((binding, callee.span.start, callee.span.end));
-                }
-                for argument in arguments {
-                    visit_expr(resolution, declared, argument, out);
-                }
-            }
-            K::Block(block) => visit_block(resolution, declared, block, out),
-            K::If {
-                then, otherwise, ..
-            } => {
-                visit_block(resolution, declared, then, out);
-                if let Some(otherwise) = otherwise {
-                    visit_expr(resolution, declared, otherwise, out);
-                }
-            }
-            K::Match { arms, .. } => {
-                for arm in arms {
-                    visit_expr(resolution, declared, &arm.body, out);
-                }
-            }
-            K::While { condition, body } => {
-                visit_expr(resolution, declared, condition, out);
-                visit_block(resolution, declared, body, out);
-            }
-            K::Loop(body) => visit_block(resolution, declared, body, out),
-            K::Handle { handler, body, .. } => {
-                visit_expr(resolution, declared, handler, out);
-                visit_block(resolution, declared, body, out);
-            }
-            K::Field { value, .. }
-            | K::Slice { value, .. }
-            | K::Index { value, .. }
-            | K::Unary { operand: value, .. }
-            | K::Try(value)
-            | K::Cast { value, .. }
-            | K::Return(Some(value))
-            | K::Break(Some(value))
-            | K::Perform { value, .. } => visit_expr(resolution, declared, value, out),
-            K::Binary { left, right, .. } => {
-                visit_expr(resolution, declared, left, out);
-                visit_expr(resolution, declared, right, out);
-            }
-            K::Record { fields, .. } | K::StructuralLiteral(fields) => {
-                for (_, value) in fields {
-                    visit_expr(resolution, declared, value, out);
-                }
-            }
-            K::Tuple(values) | K::Array(values) => {
-                for value in values {
-                    visit_expr(resolution, declared, value, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    fn visit_block<'a>(
-        resolution: &Resolution,
-        declared: &BTreeMap<BindingId, Declared<'a>>,
-        block: &ast::Block,
-        out: &mut BTreeSet<(BindingId, usize, usize)>,
-    ) {
-        for statement in &block.statements {
-            match statement {
-                ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
-                    visit_expr(resolution, declared, value, out)
-                }
-            }
-        }
-        if let Some(tail) = &block.tail {
-            visit_expr(resolution, declared, tail, out);
-        }
-    }
-    visit_block(resolution, declared, block, out);
-}
-
 /// Compute the frozen recursive summaries for every declaration with a
 /// borrowed root result. The returned table is complete before any body is
 /// checked, so ownership and callable interning never observe a provisional
@@ -1291,8 +2097,9 @@ fn collect_direct_calls<'a>(
 pub(super) fn solve<'a>(
     resolution: &Resolution,
     declared: &BTreeMap<BindingId, Declared<'a>>,
+    types: &Types<'a>,
 ) -> Result<Summaries, Diagnostic> {
-    let mut solver = Solver::new(resolution, declared);
+    let mut solver = Solver::new(resolution, declared, types);
     solver.solve()?;
     Ok(Summaries {
         functions: solver.summaries,
@@ -1337,7 +2144,7 @@ mod tests {
         leaves.insert(vec!["right".to_owned()], BTreeSet::from([origin(0, &[])]));
         let flow = Flow {
             leaves,
-            unknown: None,
+            unknown: BTreeMap::new(),
         };
         let mut selected = BTreeSet::new();
         let mut work = 0usize;
@@ -1354,7 +2161,7 @@ mod tests {
         leaves.insert(Vec::new(), BTreeSet::from([origin(0, &[])]));
         let flow = Flow {
             leaves,
-            unknown: None,
+            unknown: BTreeMap::new(),
         };
         let mut selected = BTreeSet::new();
         let mut work = MAX_ANALYSIS_STEPS;

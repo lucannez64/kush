@@ -342,6 +342,9 @@ fn main() -> Unit ! {} {}
 
 #[test]
 fn an_unsupported_recursive_boundary_asks_for_an_explicit_contract() {
+    // A direct record-returning call is summarized per field. The same call
+    // through an unconstrained function value is an indirect boundary and must
+    // not be read as an empty field set.
     rejects(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
@@ -349,11 +352,12 @@ fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
     Pair { left: a, right: b }
 }
 fn f<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
-    if n == 0 { make(a, b).left } else { f(a, b, n - 1) }
+    let g: fn<'a, 'b>(&'a [i64], &'b [i64]) -> Pair<'a, 'b> ! {panic} = make;
+    if n == 0 { g(a, b).left } else { f(a, b, n - 1) }
 }
 fn main() -> Unit ! {} {}
 "#,
-        "not part of the root-slot recursive fragment",
+        "cannot use this result origin",
     );
 }
 
@@ -469,7 +473,10 @@ fn main() -> Unit ! {} {}
 
 #[test]
 fn an_acyclic_borrowed_record_channel_cannot_become_empty_provenance() {
-    rejects(
+    // A direct record call is now summarized per field, so its projection is
+    // usable. An indirect call through an unconstrained arrow still cannot be
+    // read as empty provenance.
+    check(
         r#"
 struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
 fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
@@ -477,6 +484,23 @@ fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
 }
 fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {panic} {
     make(a, b).left
+}
+fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
+    unsupported(a, b)
+}
+fn main() -> Unit ! {} {}
+"#,
+    )
+    .unwrap();
+    rejects(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn make<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+    Pair { left: a, right: b }
+}
+fn unsupported<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &'a [i64] ! {panic} {
+    let g: fn<'a, 'b>(&'a [i64], &'b [i64]) -> Pair<'a, 'b> ! {panic} = make;
+    g(a, b).left
 }
 fn forward<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> &[i64] ! {panic} {
     unsupported(a, b)
@@ -520,5 +544,322 @@ fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
 fn main() -> Unit ! {} {}
 "#,
         "no independently justified result origin",
+    );
+}
+
+#[test]
+fn statically_resolved_recursive_method_calls_compose_origins() {
+    // The receiver is an implicit source argument at position zero; the
+    // recursive branch permutes the two slice parameters. Both owners stay in
+    // the summary and the evaluator selects the permuted winner.
+    agrees(
+        r#"
+struct Provider { tag: i64 }
+impl Provider {
+    fn pick<'a, 'b>(self: Provider, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+        if n == 0 { a } else { self.pick(b, a, n - 1) }
+    }
+}
+fn main() -> i64 ! {panic} {
+    let provider = Provider { tag: 0 };
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(provider.pick(&a[..], &b[..], 1), 0)
+}
+"#,
+        3,
+        "",
+    );
+}
+
+#[test]
+fn a_recursive_method_with_erased_proof_positions_keeps_source_arguments() {
+    // The receiver occupies source position zero, so the erased hole after the
+    // first runtime argument must still map the selected parameter to `b`, not
+    // to the erased position or the receiver.
+    agrees(
+        r#"
+struct Provider { tag: i64 }
+impl Provider {
+    fn pick<'a, 'b>(
+        self: Provider,
+        a: &'a [i64],
+        erased proof: { 0 == 0 },
+        b: &'b [i64],
+        n: i64,
+    ) -> &'b [i64] ! {panic} {
+        if n == 0 { b } else { self.pick(a, _, b, n - 1) }
+    }
+}
+fn main() -> i64 ! {panic} {
+    let provider = Provider { tag: 0 };
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(provider.pick(&a[..], _, &b[..], 1), 1)
+}
+"#,
+        4,
+        "",
+    );
+}
+
+#[test]
+fn a_static_trait_method_cycle_participates_and_keeps_its_contract() {
+    agrees(
+        r#"
+struct Provider { tag: i64 }
+trait Pick {
+    fn pick<'a, 'b>(self: Self, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic};
+}
+impl Pick for Provider {
+    fn pick<'a, 'b>(self: Self, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+        if n == 0 { b } else { self.pick(a, b, n - 1) }
+    }
+}
+fn main() -> i64 ! {panic} {
+    let provider = Provider { tag: 0 };
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    Slice.get(provider.pick(&a[..], &b[..], 1), 0)
+}
+"#,
+        3,
+        "",
+    );
+}
+
+#[test]
+fn a_recursive_method_cycle_without_a_base_origin_is_rejected() {
+    rejects(
+        r#"
+struct Provider { tag: i64 }
+impl Provider {
+    fn chase<'a, 'b>(self: Provider, a: &'a [i64], b: &'b [i64], n: i64) -> &[i64] ! {panic} {
+        self.chase(a, b, n)
+    }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "no independently justified result origin",
+    );
+}
+
+#[test]
+fn borrowed_record_results_keep_a_per_field_summary() {
+    // A recursive relay returns a record with two independently borrowed
+    // fields. Both field origins survive the call graph, and both owners stay
+    // loaned through the record's last use.
+    agrees(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn build<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+    Pair { left: a, right: b }
+}
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
+    if n == 0 { build(a, b) } else { relay(a, b, n - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let a: [i64; 2] = [1, 2];
+    let b: [i64; 2] = [3, 4];
+    let pair = relay(&a[..], &b[..], 2);
+    Slice.get(pair.left, 1) + Slice.get(pair.right, 0)
+}
+"#,
+        5,
+        "",
+    );
+}
+
+#[test]
+fn a_recursive_record_result_keeps_every_owner_loaned() {
+    // Reading only `left` must not release the owner of `right`.
+    rejects(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn build<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> Pair<'a, 'b> ! {panic} {
+    Pair { left: a, right: b }
+}
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> Pair<'a, 'b> ! {panic} {
+    if n == 0 { build(a, b) } else { relay(a, b, n - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let mut a: [i64; 2] = [1, 2];
+    let mut b: [i64; 2] = [3, 4];
+    let pair = relay(&a[..], &b[..], 1);
+    a = [5, 6];
+    b = [7, 8];
+    Slice.get(pair.left, 0)
+}
+"#,
+        "cannot replace an owner",
+    );
+}
+
+#[test]
+fn permuted_record_inputs_keep_all_owners_under_one_lifetime() {
+    // Both parameters share one declared lifetime, so permuting them retains
+    // both origins without inventing an equality. Replacing either owner while
+    // the record is live must remain rejected.
+    rejects(
+        r#"
+struct One<'a> { value: &'a [i64] }
+fn left<'a>(a: &'a [i64], b: &'a [i64], n: i64) -> One<'a> ! {panic} {
+    if n == 0 { One { value: a } } else { right(b, a, n - 1) }
+}
+fn right<'a>(a: &'a [i64], b: &'a [i64], n: i64) -> One<'a> ! {panic} {
+    if n == 0 { One { value: a } } else { left(b, a, n - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let mut a: [i64; 2] = [1, 2];
+    let mut b: [i64; 2] = [3, 4];
+    let one = left(&a[..], &b[..], 1);
+    b = [5, 6];
+    Slice.get(one.value, 0)
+}
+"#,
+        "cannot replace an owner",
+    );
+}
+
+#[test]
+fn a_local_record_field_on_a_recursive_path_stays_rejected() {
+    rejects(
+        r#"
+struct Holder<'a> { value: &'a [i64] }
+fn chase<'a>(a: &'a [i64], n: i64) -> Holder<'a> ! {panic} {
+    let local: [i64; 2] = [9, 9];
+    if n == 0 { Holder { value: a } } else { chase(&local[..], n - 1) }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "outlive the lexical scope",
+    );
+}
+
+#[test]
+fn a_no_seed_record_cycle_cannot_manufacture_field_origins() {
+    rejects(
+        r#"
+struct Pair<'a, 'b> { left: &'a [i64], right: &'b [i64] }
+fn left<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> Pair<'a, 'b> ! {panic} {
+    right(a, b, stop)
+}
+fn right<'a, 'b>(a: &'a [i64], b: &'b [i64], stop: Bool) -> Pair<'a, 'b> ! {panic} {
+    left(a, b, stop)
+}
+fn main() -> Unit ! {} {}
+"#,
+        "no independently justified result origin",
+    );
+}
+
+#[test]
+fn a_recursive_container_write_exports_a_caller_precondition() {
+    // `fill` writes `p` into `values` through `Vec.push`, so its body needs
+    // `'b: 'a`. The requirement is independent of any returned origin and is
+    // exported as R[fill]; the body itself is accepted. The accepted program
+    // evaluates identically in the reference evaluator and native backend.
+    agrees(
+        r#"
+struct Point { x: i64, y: i64 }
+fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+    if n > 0 { fill(values, p, n - 1) } else { Vec.push(values, p) }
+}
+fn caller<'a, 'b: 'a>(values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc, panic} {
+    fill(values, p, 1)
+}
+fn main() -> i64 ! {alloc, panic} {
+    let p = Point { x: 7, y: 0 };
+    let values: Vec<&Point> = [&p];
+    let values = caller(values, &p);
+    Vec.get(&values, 0).x + Vec.get(&values, 1).x
+}
+"#,
+        14,
+        "",
+    );
+    // A caller that cannot prove the newly inferred requirement is rejected,
+    // even though its declaration appears before the recursive callee.
+    rejects(
+        r#"
+struct Point { x: i64, y: i64 }
+fn caller<'a, 'b>(values: Vec<&'a Point>, p: &'b Point) -> Vec<&'a Point> ! {alloc, panic} {
+    fill(values, p, 1)
+}
+fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+    if n > 0 { fill(values, p, n - 1) } else { Vec.push(values, p) }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "cannot establish the callee's outlives constraint 'b: 'a",
+    );
+}
+
+#[test]
+fn an_explicit_callee_bound_propagates_as_a_recursive_precondition() {
+    // `relay` never returns a borrow, but it calls `left`, whose explicit
+    // `'b: 'a` contract becomes relay's independent requirement.
+    check(
+        r#"
+fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { a } else { b }
+}
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {panic} {
+    if n == 0 { 0 } else { let _ = left(a, b, n - 1); relay(a, b, n - 1) }
+}
+fn caller<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+    relay(a, b, 1)
+}
+fn main() -> Unit ! {} {}
+"#,
+    )
+    .unwrap();
+    rejects(
+        r#"
+fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { a } else { b }
+}
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {panic} {
+    if n == 0 { 0 } else { let _ = left(a, b, n - 1); relay(a, b, n - 1) }
+}
+fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+    relay(a, b, 1)
+}
+fn main() -> Unit ! {} {}
+"#,
+        "cannot establish the callee's outlives constraint 'b: 'a",
+    );
+    // The same program with declarations permuted gives the same requirement.
+    rejects(
+        r#"
+fn caller<'a, 'b>(a: &'a [i64], b: &'b [i64]) -> i64 ! {panic} {
+    relay(a, b, 1)
+}
+fn relay<'a, 'b>(a: &'a [i64], b: &'b [i64], n: i64) -> i64 ! {panic} {
+    if n == 0 { 0 } else { let _ = left(a, b, n - 1); relay(a, b, n - 1) }
+}
+fn left<'a, 'b: 'a>(a: &'a [i64], b: &'b [i64], n: i64) -> &'a [i64] ! {panic} {
+    if n == 0 { a } else { b }
+}
+fn main() -> Unit ! {} {}
+"#,
+        "cannot establish the callee's outlives constraint 'b: 'a",
+    );
+}
+
+#[test]
+fn a_frozen_arrow_cannot_erase_a_recursive_container_requirement() {
+    rejects(
+        r#"
+struct Point { x: i64, y: i64 }
+fn fill<'a, 'b>(values: Vec<&'a Point>, p: &'b Point, n: i64) -> Vec<&'a Point> ! {alloc, panic} {
+    if n > 0 { fill(values, p, n - 1) } else { Vec.push(values, p) }
+}
+fn main() -> Unit ! {alloc, panic} {
+    let f: fn<'a, 'b>(Vec<&'a Point>, &'b Point, i64) -> Vec<&'a Point> ! {alloc, panic} = fill;
+    let _ = f;
+}
+"#,
+        "type mismatch",
     );
 }

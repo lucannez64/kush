@@ -1,8 +1,9 @@
 # Design: recursive lifetime summaries
 
-Status: design only for LT-RECURSIVE-DESIGN. No new programs are accepted by
-this document. LT-RECURSIVE remains an implementation task. Source baseline:
-`edb9e6e` (finite graph/SCC solver and diagnostics integrated).
+Status: the direct-call, static-method, borrowed-record and required-precondition
+fragments are implemented in `crates/kush/src/executable/recursive_lifetimes.rs`.
+Indirect/dynamic boundaries remain explicit-contract limits. Source baseline:
+`3a58acc` with the method, record-result and `R[f]` extensions in this branch.
 
 ## Problem and current boundaries
 
@@ -223,8 +224,13 @@ Implemented in this fragment:
   parameter list, so an erased proof position never shifts the selected
   argument. The same explicit source-position mapping is used by the syntactic
   helper-result seed.
-- Direct static calls compose through helpers, self recursion, and mutual
-  recursion. Local `let` aliases, record destructuring, field projections,
+- Direct static calls and statically resolved method calls compose through
+  helpers, self recursion, and mutual recursion. A method receiver is the
+  implicit source argument at position zero; erased proof positions after it are
+  skipped by source position, never by runtime index into the AST argument list.
+  Receiver-type dispatch uses the syntactically known local/parameter type (or a
+  unique method name), so dynamic dispatch and builtin methods remain
+  boundaries. Local `let` aliases, record destructuring, field projections,
   record literals, blocks, branches, and matches carry origins; assignments are
   folded to a local fixed point. Input permutations on recursive calls keep
   every actual alternative.
@@ -234,13 +240,20 @@ Implemented in this fragment:
   errors instead of partial summaries: 250,000 analysis steps, 16,384 origin
   facts, and exactly 64 local fixed-point passes. Exhausting a pass budget asks
   for an explicit result lifetime and never returns the last partial walk.
+- A result summary is now a map from result field path to origin set. A
+  borrowed-record result such as `Pair<'a, 'b>` therefore keeps an independent
+  leaf for each borrowed field, while a root slice/text/reference result keeps
+  the empty path. A whole-record origin contributes to every declared borrowed
+  field, and an unmapped result path is a checked diagnostic rather than an
+  empty origin set.
 - An unsupported result channel is stored in the solved summary, not discarded.
-  Indirect, dynamic, method, loop, perform, and borrowed-record channels keep an
-  `unknown` fact: an elided multi-input declaration is rejected, and a caller of
-  an explicit-result boundary still sees the preserved `unknown` rather than an
-  empty origin set. A single-input or no-input acyclic declaration keeps its
-  existing more specific diagnostic because its result lifetime is already
-  determined by the ordinary rule.
+  Indirect calls, dynamic dispatch, loop/performed results, and tasks keep an
+  `unknown` fact keyed by result path, so an unsupported owned field does not
+  contaminate a borrowed sibling. An elided multi-input declaration is rejected,
+  and a caller of an explicit-result boundary still sees the preserved `unknown`
+  rather than an empty origin set. A single-input or no-input acyclic
+  declaration keeps its existing more specific diagnostic because its result
+  lifetime is already determined by the ordinary rule.
 - Elided borrowed result shapes are recognized by their written borrow shape,
   not by whether a named lifetime is printed (`&[T]` mentions no lifetime but is
   still borrowed). The public helper-result seed and the summary mapping agree
@@ -259,11 +272,19 @@ Implemented in this fragment:
   validated by ownership, including no-base cycles. Inference never invents
   `Never`, lifetime equality, or a fresh label per iteration.
 - Result-derived bounds are exported on the recursive declaration and checked at
-  every caller. This is not an independent required-precondition summary `R[f]`:
-  requirements not implied by a possible returned origin remain outside this
-  fragment and need an explicit contract. A frozen function value carries the
-  same result-derived bounds, so an unconstrained arrow cannot silently
-  strengthen or erase them.
+  every caller. An independent required-precondition summary `R[f]` is also
+  computed by the same least fixed point: explicit callee outlives bounds are
+  substituted through actual argument leaves, and an argument written into
+  another argument's `Vec`/`Box` container contributes the element-lifetime
+  requirement. Callers missing a newly inferred requirement are rejected even
+  when checked before the callee. A frozen function value carries both the
+  result-derived and `R[f]` bounds, so an unconstrained arrow cannot silently
+  erase them.
+- Newly inferred record-result bounds and `R[f]` requirements are published only
+  for a declaration that is in, or reachable from, a recursive call-graph SCC.
+  An acyclic declaration that no recursive path uses keeps its existing rigid
+  contract, and explicit declared outlives bounds, trait/impl methods and arrows
+  are never strengthened by this pass.
 - Every solved origin must map to a declared input lifetime. A missing field
   path is rejected with a checked diagnostic that asks for an explicit result
   lifetime; it is never silently omitted from the summary.
@@ -273,26 +294,35 @@ Implemented in this fragment:
 
 Remaining limits, deliberately not claimed as complete:
 
-- The summarized result slot is a borrowed slice, text view, or reference.
-  Borrowed-record field result binders still require their existing declared
-  field lifetimes; per-field recursive result summaries are not inferred.
-- Direct and lexically resolved static calls participate. Indirect calls,
-  dynamic dispatch, method calls, effect-operation results, and loop results are
-  unsupported boundaries. Their `unknown` fact is preserved in the solved
-  summary; an elided multi-input result is rejected with an explicit-contract
-  request (or must route through a direct checked function), and an acyclic
-  caller of an explicit boundary cannot read the channel as empty provenance.
-- Requirements are derived from possible result origins only. A separate
-  finite required-precondition summary `R[f]` for constraints not implied by a
-  returned origin is not implemented; such cases require an explicit contract
-  rather than an inferred one. No claim of full `R[f]` completeness is made.
+- Direct static calls and statically resolved methods participate. Indirect
+  calls, dynamic dispatch, builtin method results, effect-operation results,
+  loop results, and tasks remain unsupported boundaries. Their `unknown` fact is
+  preserved in the solved summary; an elided multi-input result is rejected
+  with an explicit-contract request (or must route through a direct checked
+  function), and an acyclic caller of an explicit boundary cannot read the
+  channel as empty provenance.
+- Per-field result summaries cover nominal borrowed records and their nested
+  borrowed fields. Owned reference containers (`Box<&T>`, `Vec<&T>`) keep their
+  existing declared-lifetime inference rather than becoming per-field records.
+- `R[f]` propagates explicit callee bounds and the `Vec.push`/`Box.set`
+  container-write relation. A container write reached only through a builtin
+  method on a non-parameter local, or a requirement that names a field path the
+  caller does not expose, stays at the existing explicit-contract/ownership
+  diagnostic. Requirement publication is limited to recursive/reachable
+  declarations as described above; an acyclic helper keeps its rigid contract.
+- Method dispatch in the summary uses syntactic receiver type names, not full
+  type inference. An ambiguous receiver type that does not resolve to exactly
+  one concrete impl method remains an `unknown` boundary.
 - Summaries are solved per declaration. Lifetime labels do not vary with type
   substitution in the supported fragment, so concrete instances map the same
   stable parameter-leaf IDs onto their own frozen labels. Instance-specific
   discovery of new borrowed field shapes is outside this fragment.
 - Polymorphic recursion past the existing instance limit keeps its explicit
   rejection. Variance and subtype interaction is a separate track; this module
-  does not change `runtime_types` subtype or variance rules.
+  does not change `runtime_types` subtype or variance rules. A branch join of
+  two record-result arms may carry compiler-internal call result labels; those
+  are opaque to the invariant-label identity check and are validated by
+  ownership provenance instead.
 
 Gate used for this stage:
 
@@ -301,12 +331,15 @@ mbx test -p kush --test recursive_lifetimes -j2
 mbx test -p kush --test lifetimes --test borrowed_records \
   --test borrowing_references --test borrowing_extensions --test task_borrows -j2
 mbx test -p kush --test borrowed_methods --test slices --test subtyping \
-  --test review_regressions --test advanced_types_effects -j2
+  --test lifetime_variance --test traits --test review_regressions \
+  --test advanced_types_effects -j2
 ```
 
-`LT-RECURSIVE` and `LIFE` remain open: the closed-world direct-scalar fragment
-above is implemented and tested, but the record-result and indirect-boundary
-extensions are not.
+`LT-RECURSIVE` remains open for the indirect/dynamic boundary extensions and a
+fully general `R[f]` beyond the container-write/explicit-bound fragment. The
+direct-call, static-method, borrowed-record and required-precondition chain above
+is implemented and tested; `LIFE` keeps only the broader inference items that
+are outside this module.
 
 - Stable anonymous IDs, signature/cache replay, deep SCCs, exhaustion diagnostics
   and deterministic witnesses. No provisional metadata survives finalization.
