@@ -4813,6 +4813,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             unify_plan: Vec::new(),
             unify_decisions: Vec::new(),
             unify_plan_active: false,
+            unify_open_choice: false,
             partition_bound: BTreeSet::new(),
             row_bound: BTreeSet::new(),
             continuation_depth: 0,
@@ -11003,6 +11004,10 @@ struct Checker<'a, 't> {
     unify_plan: Vec<usize>,
     unify_decisions: Vec<usize>,
     unify_plan_active: bool,
+    /// Set when the ordinary inference pass took the first of several choices
+    /// at a partition or indexed-union decision. Such a call is then searched
+    /// exhaustively and accepted only when one substitution survives.
+    unify_open_choice: bool,
     /// Type variables bound by a multi-variable union partition during the
     /// current `infer` call. Parameters that mention one of them are checked
     /// without a tentative expected type so the replay can reconsider the
@@ -24813,6 +24818,9 @@ impl Checker<'_, '_> {
     /// recorded so the driver can enumerate choices deterministically.
     fn union_partition_choice(&mut self, cardinality: usize) -> Result<usize> {
         if !self.unify_plan_active {
+            if cardinality > 1 {
+                self.unify_open_choice = true;
+            }
             return Ok(0);
         }
         let index = self.unify_decisions.len();
@@ -25139,12 +25147,14 @@ impl Checker<'_, '_> {
     /// never collapsed into a single `Option<i64 | Bool>`. Bare variables must
     /// receive at least one member, as in the residual and partition rules;
     /// a constructor alternative may receive none, leaving its variables to
-    /// other parameters. Members prefer constructor alternatives over bare
-    /// variables, so `T | Option<U>` keeps `Option<i64>` with `Option<U>`
-    /// first. The enumeration is bounded and canonical (members in normalized
-    /// order, alternatives in generic declaration order), and assignments with
-    /// the same substitution are one choice. Several surviving choices form one
-    /// decision of the bounded cross-parameter replay in `infer`.
+    /// other parameters. A member that fits a constructor alternative never
+    /// goes to a bare variable (the most specific alternative covers, as with
+    /// the fixed part), so `T | Option<U>` over `Bool | Option<i64>` has the
+    /// single solution `T = Bool, U = i64`. The enumeration is bounded and
+    /// canonical (members in normalized order, alternatives in generic
+    /// declaration order), and assignments with the same substitution are one
+    /// choice. Several surviving choices form one decision of the cross-
+    /// parameter search in `infer`, which accepts only a unique solution.
     ///
     /// Returns `false` when some member has no alternative with its
     /// constructor; the ordinary coercion check then reports the mismatch.
@@ -25224,14 +25234,19 @@ impl Checker<'_, '_> {
                 residual.push(member);
             }
         }
-        // Candidate slots of every residual member: constructor alternatives
-        // with its outer constructor first, then every bare variable.
+        // Candidate slots of every residual member. Like the fixed part, the
+        // most specific alternative covers: a member with a constructor
+        // alternative of its outer constructor goes to one of those, never
+        // to a bare variable. Only members no constructor alternative can
+        // take are partitioned among the bare variables.
         let mut candidates = Vec::with_capacity(residual.len());
         for member in &residual {
             let mut slots_for = (0..constructors)
                 .filter(|slot| self.union_pattern_head_matches(shaped[*slot], *member))
                 .collect::<Vec<_>>();
-            slots_for.extend(constructors..slots.len());
+            if slots_for.is_empty() {
+                slots_for.extend(constructors..slots.len());
+            }
             if slots_for.is_empty() {
                 return Ok(false);
             }
@@ -25380,14 +25395,19 @@ impl Checker<'_, '_> {
             let actual_name = self.types.name(actual);
             let detail = first_conflict.map_or_else(
                 || {
-                    "every bare variable needs at least one alternative not covered by the rest of the pattern".to_string()
+                    "every bare variable needs at least one alternative that no other pattern alternative covers".to_string()
                 },
-                |error| error.message,
+                |error| {
+                    format!(
+                        "{}. Constructor arguments are invariant, so alternatives such as Option<i64> | Option<Bool> are never merged into one Option<...>",
+                        error.message
+                    )
+                },
             );
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "cannot infer type parameter(s) '{}' from the indexed union pattern {pattern_name}: no assignment of the alternatives of {actual_name} is consistent ({detail}). Constructor arguments are invariant, so alternatives such as Option<i64> | Option<Bool> are never merged into one Option<...>. Specialize explicitly with '::<...>'",
+                    "cannot infer type parameter(s) '{}' from the indexed union pattern {pattern_name}: no assignment of the alternatives of {actual_name} is consistent ({detail}). Specialize explicitly with '::<...>'",
                     names()
                 ),
             ));
@@ -25498,6 +25518,24 @@ impl Checker<'_, '_> {
                 }
             }
             merged.effects.extend(candidate.effects);
+        }
+        // Matching ignores concrete argument mismatches, so check that every
+        // member really is an instance of the solved alternative: `Pair<B,
+        // Bool>` must not take `Pair<Bool, i64>`.
+        if !self.mentions(alternative, type_vars, const_vars, effect_vars, &merged) {
+            let solved = self.types.ty_in(alternative, &merged)?;
+            for member in members {
+                if !self.subtype(*member, solved) {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "{} is not an instance of {}",
+                            self.types.name(*member),
+                            type_key(alternative)
+                        ),
+                    ));
+                }
+            }
         }
         *subst = merged;
         Ok(())
@@ -26349,13 +26387,17 @@ impl Checker<'_, '_> {
             )),
         }
     }
-    /// Replay the accumulated type constraints with deterministic
-    /// cross-parameter backtracking. Every multi-variable union partition is a
-    /// decision point; the driver enumerates choice plans in lexicographic
-    /// order and reruns the *whole* constraint list from `base`, so an earlier
-    /// partition can change when a later parameter rejects it. At most
-    /// [`UNIFY_BACKTRACK_BUDGET`] complete replays are attempted; a plan that
-    /// is locally impossible backtracks without spending a full replay.
+    /// Replay the accumulated type constraints over every deterministic
+    /// choice plan. Every multi-variable union partition and indexed-union
+    /// assignment with several local choices is a decision point; the driver
+    /// enumerates plans in lexicographic order and reruns the *whole*
+    /// constraint list from `base`, so an earlier choice can change when a
+    /// later parameter rejects it. Every surviving plan is collected and
+    /// plans that give the same type/natural substitution are one solution,
+    /// so the caller can accept exactly one solution and report several as
+    /// ambiguous. At most [`UNIFY_BACKTRACK_BUDGET`] complete replays are
+    /// attempted; exhausting the budget is an explicit diagnostic because
+    /// uniqueness is then unknown.
     fn replay_unification(
         &mut self,
         constraints: &[(&ast::Type, Type)],
@@ -26364,15 +26406,16 @@ impl Checker<'_, '_> {
         const_vars: &[BindingId],
         effect_vars: &[BindingId],
         span: Span,
-    ) -> Result<Option<crate::runtime_types::Subst>> {
+    ) -> Result<Vec<crate::runtime_types::Subst>> {
         let mut plan: Vec<usize> = Vec::new();
         let mut attempts = 0usize;
+        let mut solutions: Vec<crate::runtime_types::Subst> = Vec::new();
         loop {
             if attempts >= UNIFY_BACKTRACK_BUDGET {
                 return Err(Diagnostic::new(
                     span,
                     format!(
-                        "cross-parameter type inference exhausted its {UNIFY_BACKTRACK_BUDGET}-replay budget while searching union partitions. Specialize the ambiguous parameters explicitly with '::<...>'"
+                        "cross-parameter type inference exhausted its {UNIFY_BACKTRACK_BUDGET}-replay budget while searching union partitions, so it cannot tell whether the solution is unique. Specialize the ambiguous parameters explicitly with '::<...>'"
                     ),
                 ));
             }
@@ -26401,8 +26444,17 @@ impl Checker<'_, '_> {
             // Constraints are re-accumulated from the first pass; replay must
             // not duplicate effect-row evidence.
             self.effect_constraints.truncate(effect_mark);
-            if failure.is_none() {
-                return Ok(Some(candidate));
+            if failure.is_none()
+                && !solutions.iter().any(|existing| {
+                    type_vars
+                        .iter()
+                        .all(|var| existing.types.get(var) == candidate.types.get(var))
+                        && const_vars
+                            .iter()
+                            .all(|var| existing.consts.get(var) == candidate.consts.get(var))
+                })
+            {
+                solutions.push(candidate);
             }
             // Advance the most recent decision that still has an untried
             // choice, dropping every later decision from the plan.
@@ -26420,7 +26472,7 @@ impl Checker<'_, '_> {
                 }
             }
             if !advanced {
-                return Ok(None);
+                return Ok(solutions);
             }
         }
     }
@@ -26443,7 +26495,12 @@ impl Checker<'_, '_> {
         what: &str,
         span: Span,
     ) -> Result<Inferred> {
-        self.infer_inner(
+        // A nested call inside an argument runs its own inference; keep the
+        // enclosing call's tentative-binding marks intact across it.
+        let partitions = std::mem::take(&mut self.partition_bound);
+        let rows = std::mem::take(&mut self.row_bound);
+        let open = std::mem::replace(&mut self.unify_open_choice, false);
+        let inferred = self.infer_inner(
             generics,
             explicit,
             pairs,
@@ -26453,7 +26510,11 @@ impl Checker<'_, '_> {
             base,
             what,
             span,
-        )
+        );
+        self.partition_bound = partitions;
+        self.row_bound = rows;
+        self.unify_open_choice = open;
+        inferred
     }
     #[allow(clippy::too_many_arguments)]
     fn infer_inner(
@@ -26506,6 +26567,7 @@ impl Checker<'_, '_> {
         let mut hint_rows: Vec<(BindingId, Type)> = Vec::new();
         self.partition_bound.clear();
         self.row_bound.clear();
+        self.unify_open_choice = false;
         let mut grade_arguments = Vec::new();
         if let Some(list) = explicit {
             if list.len() != generics.len() {
@@ -26648,20 +26710,70 @@ impl Checker<'_, '_> {
         for (binder, bound) in hint_rows {
             subst.types.entry(binder).or_insert(bound);
         }
-        if let Some(error) = unify_error {
-            if explicit.is_some() {
-                return Err(error);
-            }
-            match self.replay_unification(
+        if explicit.is_some()
+            && let Some(error) = unify_error.take()
+        {
+            return Err(error);
+        }
+        if unify_error.is_some() || self.unify_open_choice {
+            // A failed first pass, or a first pass that took one of several
+            // choices: search every deterministic choice plan. Inference is
+            // principal for this fragment: it accepts only when exactly one
+            // substitution satisfies the whole constraint group.
+            let mut replay_base = base.cloned().unwrap_or_default();
+            replay_base.self_type = self_type;
+            let solutions = self.replay_unification(
                 &constraints,
-                base,
+                Some(&replay_base),
                 &type_vars,
                 &const_vars,
                 &effect_vars,
                 span,
-            )? {
+            )?;
+            if solutions.len() > 1 {
+                let spell = |this: &Self, solution: &crate::runtime_types::Subst| {
+                    type_vars
+                        .iter()
+                        .filter_map(|var| {
+                            solution.types.get(var).map(|ty| {
+                                format!(
+                                    "{} = {}",
+                                    this.resolution.bindings[*var].name,
+                                    this.types.name(*ty)
+                                )
+                            })
+                        })
+                        .chain(const_vars.iter().filter_map(|var| {
+                            solution.consts.get(var).map(|value| {
+                                format!("{} = {value}", this.resolution.bindings[*var].name)
+                            })
+                        }))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let shown = solutions
+                    .iter()
+                    .take(3)
+                    .map(|solution| format!("[{}]", spell(self, solution)))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                let more = if solutions.len() > 3 {
+                    format!(" (and {} more)", solutions.len() - 3)
+                } else {
+                    String::new()
+                };
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "type inference for {what} is ambiguous: the union alternatives can be split as {shown}{more}, and no argument or expected type decides between them. Specialize the type arguments explicitly with '::<...>'"
+                    ),
+                ));
+            }
+            match solutions.into_iter().next() {
                 Some(replayed) => subst = replayed,
                 None => {
+                    let error = unify_error
+                        .expect("a successful first pass is one surviving solution of the search");
                     if self.partition_bound.is_empty() {
                         return Err(error);
                     }

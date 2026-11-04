@@ -255,15 +255,17 @@ outstanding implementation item.
   rejects an earlier partition; the replay is deterministic, lexicographic,
   and capped at 4096 complete attempts, with budget exhaustion explicit. Named
   row variables provide recursive residual-row unification for structural
-  records. The principal result and its exact boundary are documented:
-  single-variable residuals are principal, multi-variable partitions are
-  deterministic but not principal. Indexed-union patterns
+  records. The principal result and its exact boundary are documented.
+  Indexed-union patterns
   (`Option<T> | Option<U>`, `Vec<T> | i64`, `[T; N] | [U; M]`) assign each
   actual member to one constructor alternative, and their choices go through the same
   bounded replay. Invariant arguments are never merged: `Option<i64> | Option<Bool>`
-  never becomes `Option<i64 | Bool>`. Dependent unions remain an
-  explicit-specialization boundary. A principal form for multi-variable
-  partitions is still missing, so this item stays unchecked. See
+  never becomes `Option<i64 | Bool>`. Inference is now principal for this
+  fragment: partitions and assignments are deferred constraints of the whole call,
+  searched exhaustively, and a call is accepted only when exactly one
+  substitution survives. Several survivors are an ambiguity diagnostic. Dependent
+  unions remain an explicit-specialization boundary. The item stays unchecked
+  until the independent inference review (I-REVIEW). See
   [subtyping.md](subtyping.md#contextual-and-algebraic-inference).
 - [ ] Effect handlers and checked resumption ownership. **Partial, still
   open:** lexical one-shot `handle`/`perform`, nested shadowing, first-class

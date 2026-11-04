@@ -377,12 +377,15 @@ The supported inference fragment is deliberately first-order and bounded:
   or previously solved fixed part stay with the fixed part and are never
   redistributed. The search order is canonical: residual alternatives keep
   their normalized order and are assigned to variables in declaration order.
-  Ordinary inference takes the first canonical partition;
-- **cross-parameter backtracking** is bounded and deterministic. If a later
-  parameter rejects the partition committed for an earlier one, `infer`
-  replays the entire accumulated constraint list from the base substitution,
-  enumerating partition choices in lexicographic order. The replay budget is
-  4096 complete attempts; exhausting it is an explicit diagnostic. Parameters
+  The order only makes the search reproducible. It never selects a result:
+  see the principal-result rule below;
+- **cross-parameter search** is bounded and exhaustive. A partition is a
+  deferred constraint of the whole call, not a commitment of one parameter.
+  When the first pass fails, or when it had to take one of several choices,
+  `infer` replays the entire accumulated constraint list (every argument and
+  the expected result type) from the base substitution for every choice plan
+  in lexicographic order. The replay budget is 4096 complete attempts.
+  Exhausting it is an explicit diagnostic, because uniqueness is then unknown. Parameters
   that mention a tentatively partitioned or row-bound variable are checked
   without committing to the tentative expected type, so the replay can
   reconsider instead of failing during contextual checking. The search changes
@@ -393,14 +396,16 @@ The supported inference fragment is deliberately first-order and bounded:
   nested structural fields. This is recursive row unification for the
   monomorphized fragment, not row subtraction or row aliasing: a row variable
   must receive the same residual row from every parameter;
-- **principal result for the decidable fragment.** The single-variable residual
-  rule (`T | i64` over a finite normalized union) is principal: the residual is
-  the unique set of actual alternatives not covered by the fixed part. A
-  multi-variable partition is not principal in general; ordinary inference and
-  replay choose the first canonical partition that satisfies every parameter.
-  When exactly one partition survives, that result is determined by the
-  constraints, and a completely unconstrained or symmetric case is reported as
-  ambiguous or as an unbound parameter instead of being guessed;
+- **principal result: unique or rejected.** Inference never guesses. It
+  accepts a call only when exactly one type/natural substitution satisfies
+  the whole constraint group, and that substitution is then the principal
+  solution of the call. Several surviving substitutions are an ambiguity
+  diagnostic that lists the candidates (`[T = Bool, U = Unit] or [T = Unit,
+  U = Bool]`) and asks for `::<...>`. Choice plans that give the same
+  substitution count once. The single-variable residual rule (`T | i64`) is
+  always unique. A multi-variable partition is unique only when other
+  arguments or the expected result type decide it, as in
+  `pick<T, U>(x: T | U | i64, t: T)` or `let r: Option<Unit> = tag(x)`;
 - conflicting or incomparable evidence is always an error, never a silently
   chosen arm; explicit annotations/specialization are the escape hatch;
 - type inference does not infer unions from unconstrained literals: an empty
@@ -420,25 +425,59 @@ The supported inference fragment is deliberately first-order and bounded:
   instead of inventing `Vec<i64 | Bool>`, and plain `Option<T>` over
   `Option<i64> | Option<Bool>` still reports the disagreement. Bare variables
   must still receive at least one member. A constructor alternative may receive
-  none, which leaves its variables to other parameters. Members try constructor
-  alternatives before bare variables, so `T | Option<U>` over
-  `Bool | Option<i64>` gives `T = Bool, U = i64`. Enumeration is canonical
+  none, which leaves its variables to other parameters. As with the fixed
+  part, the most specific alternative covers: a member that fits a
+  constructor alternative never goes to a bare variable. So `T | Option<U>`
+  over `Bool | Option<i64>` has the single solution `T = Bool, U = i64`, and
+  over `Option<i64>` alone it is rejected because `T` gets nothing. A member is
+  assigned to a constructor alternative only when it is an instance of it:
+  `Pair<B, Bool>` cannot take `Pair<Bool, i64>`. Enumeration is canonical
   (members in normalized order, alternatives ordered by their first unbound
   variable in declaration order, so operand order never matters), is bounded
   at 4096 steps, and treats assignments that give the same substitution as one
-  choice. If several choices survive, they form one decision of the same
-  bounded cross-parameter replay as multi-variable partitions. For example,
-  `pick<T, U>(x: Option<T> | Option<U>, t: T)` takes the assignment that agrees
-  with `t`. A member with no alternative of its constructor is left to the
+  choice. Several choices form one decision of the same cross-parameter
+  search as multi-variable partitions, so the unique-or-rejected rule applies.
+  `pick<T, U>(x: Option<T> | Option<U>, t: T)` takes the one assignment that
+  agrees with `t`, while `pick<T, U>(x: Option<T> | Option<U>)` over
+  `Option<i64> | Option<Bool>` is ambiguous. A member with no alternative of its constructor is left to the
   ordinary coercion check, which reports the mismatch;
 - **dependent unions remain an explicit boundary.** Runtime-indexed union
   alternatives and dependent type families are not inferred from a union
   actual. Natural arguments of constructor alternatives, such as `[T; N]`, are
   ordinary first-order constants, not dependent indices.
 
-This is a decidable bounded fragment with a precise boundary, not a complete
-principal algebraic subtyping algorithm. Dependent unions, row
-subtraction/aliasing, and unbounded cross-parameter search are outside it.
+### Decidability and principality boundary
+
+Union inference is decidable because every search is finite: actual unions
+are normalized (at most 16 alternatives per position), patterns are finite
+syntax, each partition or indexed assignment is enumerated under a 4096-step
+budget, and the whole call is replayed at most 4096 times. Every outcome is
+explicit: a unique solution, an ambiguity listing the candidates, a conflict,
+or a budget diagnostic. Within the budget the search is complete for the
+fragment: if exactly one substitution satisfies every constraint, it is found
+and accepted.
+
+Principality here means the call has a unique solution. Ground substitutions
+of a partition (`T = Bool, U = Unit` against `T = Unit, U = Bool`) are
+incomparable, and a callee that narrows with `T @ ...` can tell them apart, so
+no most-general solution exists to pick. The checker rejects such calls as
+ambiguous instead of choosing by declaration or operand order. This follows the
+"never guess" rule of constraint-based inference such as GHC's OutsideIn(X),
+not defaulting. Algebraic subtyping (MLsub) stays principal because it never
+splits a union between variables. Kush accepts the split only when the call
+determines it. The specificity rules (the fixed part, then constructor
+alternatives, then bare variables) are fixed coverage rules, not tie-breaks:
+they hold whatever the other constraints say.
+
+Checked by `advanced_types_effects.rs`: unique partitions decided by an
+argument, an expected result type, or a callable argument; symmetric
+partitions and indexed assignments rejected in both operand orders; explicit
+specialization as the escape hatch; and invariant constructor arguments never
+merged. Native and reference agree.
+
+Outside the fragment, with explicit diagnostics: dependent unions, row
+subtraction/aliasing, searches beyond the budget, and unions inferred from
+unconstrained literals.
 
 ## Case analysis and narrowing
 
@@ -573,8 +612,8 @@ Deliberately unsupported, with explicit diagnostics:
   earlier partition. Row variables add recursive residual-row unification.
   Indexed-union patterns such as `Option<T> | Option<U>` assign each member to
   one constructor alternative without merging invariant arguments.
-  The single-variable residual rule is principal; multi-variable partitions and
-  indexed assignments are deterministic but not principal, and dependent unions, row
+  A call is accepted only when its whole constraint group has a unique
+  solution; several survivors are an explicit ambiguity. Dependent unions, row
   subtraction/aliasing, and unbounded search remain explicit-specialization
   boundaries. Array length variables are a separate compile-time fragment
   described in [dependent-indices.md](dependent-indices.md).

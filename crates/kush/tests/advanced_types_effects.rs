@@ -134,21 +134,35 @@ fn union_patterns_infer_the_residual_type_variable() {
 }
 
 #[test]
-fn union_patterns_partition_multiple_variables_deterministically() {
+fn union_patterns_partition_multiple_variables_principally() {
     // `T | U | i64` over `Bool | Unit | i64` leaves the residual `Bool | Unit`.
-    // The bounded partition search hands residual alternatives to unbound
-    // variables in declaration order, so T=Bool and U=Unit.
-    let source = r#"
-        fn pick<T, U>(x: T | U | i64) -> i64 ! {panic} {
-            match x { i64 @ n => n, _ => 42 }
-        }
+    // Both T=Bool,U=Unit and T=Unit,U=Bool fit, and the body can tell them
+    // apart, so inference reports the ambiguity instead of choosing one.
+    let three = r#"
         fn three(c: i64) -> Bool | Unit | i64 ! {panic} {
             if c == 0 { true } else { if c == 1 { () } else { 41 } }
-        }
-        fn main() -> i64 ! {panic} { pick(three(0)) }"#;
-    assert_eq!(value(source), 42);
+        }"#;
+    rejects(
+        &format!(
+            "{three}
+            fn pick<T, U>(x: T | U | i64) -> i64 ! {{panic}} {{
+                match x {{ i64 @ n => n, T @ _ => 1, U @ _ => 2 }}
+            }}
+            fn main() -> i64 ! {{panic}} {{ pick(three(0)) }}"
+        ),
+        "type inference for 'pick' is ambiguous: the union alternatives can be split as [T = Bool, U = Unit] or [T = Unit, U = Bool]",
+    );
+    // An explicit specialization is the escape hatch.
+    let source = format!(
+        "{three}
+        fn pick<T, U>(x: T | U | i64) -> i64 ! {{panic}} {{
+            match x {{ i64 @ n => n, T @ _ => 1, U @ _ => 42 }}
+        }}
+        fn main() -> i64 ! {{panic}} {{ pick::<Unit, Bool>(three(0)) }}"
+    );
+    assert_eq!(value(&source), 42);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    agrees(source, 42);
+    agrees(&source, 42);
     // Cross-parameter backtracking: the first canonical partition is
     // T=Bool, U=Unit, but the second parameter requires T=Unit. The bounded
     // replay reruns the whole constraint group and selects T=Unit, U=Bool.
@@ -178,6 +192,48 @@ fn union_patterns_partition_multiple_variables_deterministically() {
         fn pick<T, U>(x: T | U | i64) -> i64 ! {panic} { 0 }
         fn main() -> i64 ! {panic} { pick(true) }"#,
         "no partition binds every variable",
+    );
+}
+
+#[test]
+fn call_site_constraints_decide_a_deferred_partition() {
+    // The partition is not committed by the union argument alone: the
+    // expected result type and a callable argument each leave one solution.
+    let source = r#"
+        enum Option<T> { None, Some(T) }
+        fn three(c: i64) -> Bool | Unit | i64 ! {panic} {
+            if c == 0 { true } else { if c == 1 { () } else { 41 } }
+        }
+        fn tag<T, U>(x: T | U | i64) -> Option<T> ! {panic} {
+            match x { T @ t => Option.Some(t), _ => Option.None }
+        }
+        fn wrap<T, U>(x: T | U | i64, f: fn(T) -> i64 ! {}) -> i64 ! {panic} {
+            match x { T @ t => f(t), _ => 7 }
+        }
+        fn score(b: Bool) -> i64 ! {} { if b { 40 } else { 1 } }
+        fn main() -> i64 ! {panic} {
+            let r: Option<Unit> = tag(three(1));
+            let k = match r { Option.Some(_) => 2, Option.None => 0 };
+            k + wrap(three(0), score)
+        }"#;
+    assert_eq!(value(source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // Without the expected type the same call is ambiguous.
+    rejects(
+        r#"
+        enum Option<T> { None, Some(T) }
+        fn three(c: i64) -> Bool | Unit | i64 ! {panic} {
+            if c == 0 { true } else { if c == 1 { () } else { 41 } }
+        }
+        fn tag<T, U>(x: T | U | i64) -> Option<T> ! {panic} {
+            match x { T @ t => Option.Some(t), _ => Option.None }
+        }
+        fn main() -> i64 ! {panic} {
+            let r = tag(three(1));
+            match r { Option.Some(_) => 2, Option.None => 0 }
+        }"#,
+        "is ambiguous",
     );
 }
 
@@ -229,7 +285,7 @@ fn indexed_union_patterns_assign_members_per_constructor() {
                 Option<T> @ o => match o { Option.Some(v) => v, Option.None => d },
             }
         }
-        fn sz<T, U>(x: Vec<T> | Vec<U> | i64) -> i64 ! {panic} {
+        fn sz<T, U>(x: Vec<T> | Vec<U> | i64, t: T) -> i64 ! {panic} {
             match x { i64 @ n => n, Vec<T> @ v => Vec.len(&v), Vec<U> @ v => 100 + Vec.len(&v) }
         }
         fn make(c: i64) -> Vec<i64> | Vec<Bool> | i64 ! {alloc, panic} {
@@ -239,7 +295,7 @@ fn indexed_union_patterns_assign_members_per_constructor() {
         fn main() -> i64 ! {alloc, panic} {
             let a: Option<i64> | i64 = 4;
             let b: Option<i64> | i64 = Option.Some(40);
-            get(a, 2) + get(b, 0) + sz(make(0)) + sz(make(1)) + sz(make(2)) - 110
+            get(a, 2) + get(b, 0) + sz(make(0), 0) + sz(make(1), 0) + sz(make(2), 0) - 110
         }"#;
     assert_eq!(value(source), 42);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -254,7 +310,7 @@ fn indexed_union_patterns_cover_every_constructor_shape() {
         fn one<T, U>(x: T | Option<U>, u: U) -> i64 ! {panic} {
             match x { Option<U> @ _ => 1, T @ _ => 2 }
         }
-        fn arr<T, U, N: Nat, M: Nat>(x: [T; N] | [U; M]) -> i64 ! {panic} {
+        fn arr<T, U, N: Nat, M: Nat>(x: [T; N] | [U; M], t: T) -> i64 ! {panic} {
             match x { [T; N] @ _ => 2, [U; M] @ _ => 30 }
         }
         fn tup<T>(x: (T, i64) | Bool) -> i64 ! {panic} {
@@ -275,10 +331,11 @@ fn indexed_union_patterns_cover_every_constructor_shape() {
             let w: Option<Vec<Bool>> | i64 = 0;
             let q: Pair<Bool, i64> = Pair { a: true, b: 7 };
             let p: Pair<Bool, i64> | Pair<i64, Bool> = q;
-            one(x, 1) + arr(y) + tup(z) + single(s) + nest(w) + rec(p)
+            one(x, 1) + arr(y, 0) + tup(z) + single(s) + nest(w) + rec(p)
         }"#;
     // `T | Option<U>` keeps Option<i64> with the constructor alternative (1),
-    // the [Bool; 3] member binds U and M (30), and a single non-union actual
+    // `t` fixes T = i64 so the [Bool; 3] member binds U and M (30), and a
+    // single non-union actual
     // still picks its constructor alternative (3).
     assert_eq!(value(source), 47);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -286,7 +343,7 @@ fn indexed_union_patterns_cover_every_constructor_shape() {
 }
 
 #[test]
-fn indexed_union_assignments_replay_and_ignore_operand_order() {
+fn indexed_union_assignments_are_unique_or_ambiguous() {
     // The first canonical assignment gives T the i64 member, but the second
     // parameter needs T=Bool, so the bounded replay swaps the assignment.
     let replayed = r#"
@@ -302,23 +359,26 @@ fn indexed_union_assignments_replay_and_ignore_operand_order() {
     assert_eq!(value(replayed), 42);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(replayed, 42);
-    let ordered = |pattern: &str| {
+    // Without the deciding parameter, both assignments fit in either operand
+    // order, so the call is ambiguous rather than ordered by declaration.
+    let ordered = |pattern: &str, decider: &str, call: &str| {
         format!(
             "enum Option<T> {{ None, Some(T) }}
-            fn pick<T, U>(x: {pattern}) -> i64 ! {{panic}} {{
+            fn pick<T, U>(x: {pattern}{decider}) -> i64 ! {{panic}} {{
                 match x {{ Option<T> @ _ => 1, Option<U> @ _ => 2 }}
             }}
             fn main() -> i64 ! {{panic}} {{
                 let o: Option<Bool> = Option.Some(true);
                 let x: Option<i64> | Option<Bool> = o;
-                pick(x)
+                {call}
             }}"
         )
     };
-    assert_eq!(
-        value(&ordered("Option<T> | Option<U>")),
-        value(&ordered("Option<U> | Option<T>"))
-    );
+    for pattern in ["Option<T> | Option<U>", "Option<U> | Option<T>"] {
+        assert_eq!(value(&ordered(pattern, ", u: U", "pick(x, true)")), 2);
+        assert_eq!(value(&ordered(pattern, "", "pick::<Bool, i64>(x)")), 1);
+        rejects(&ordered(pattern, "", "pick(x)"), "is ambiguous");
+    }
 }
 
 #[test]
@@ -347,14 +407,25 @@ fn indexed_union_patterns_never_merge_invariant_arguments() {
         }"#,
         "no assignment of the alternatives",
     );
-    // A bare variable still needs its own member: with only Option<i64>, T
-    // takes it and U stays unbound.
+    // A member that fits a constructor alternative never goes to a bare
+    // variable, so with only Option<i64> the bare T has nothing to bind.
     rejects(
         r#"
         enum Option<T> { None, Some(T) }
         fn pick<T, U>(x: T | Option<U>) -> i64 ! {panic} { 0 }
         fn main() -> i64 ! {panic} { let o: Option<i64> = Option.None; pick(o) }"#,
-        "cannot infer type parameter 'U'",
+        "every bare variable needs at least one alternative",
+    );
+    // Symmetric constructor alternatives with nothing else to decide them.
+    rejects(
+        r#"
+        fn sz<T, U>(x: Vec<T> | Vec<U> | i64) -> i64 ! {panic} { 0 }
+        fn make(c: i64) -> Vec<i64> | Vec<Bool> | i64 ! {alloc, panic} {
+            if c == 0 { let v: Vec<i64> = [1, 2]; v }
+            else { if c == 1 { let v: Vec<Bool> = [true]; v } else { 7 } }
+        }
+        fn main() -> i64 ! {alloc, panic} { sz(make(0)) }"#,
+        "type inference for 'sz' is ambiguous",
     );
 }
 
