@@ -1330,9 +1330,9 @@
       "deps": [
         "LT-SOLVER"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Non-escaping closures capture by reference; environment cannot outlive the location.",
-      "commit": null,
+      "commit": "b124e42",
       "log": [
         {
           "time": "2026-11-04 15:11:23",
@@ -1343,6 +1343,11 @@
           "time": "2026-11-04 16:13:54",
           "who": "agent",
           "text": "54775f6 (t3/0f1d2b80); P-LIVE-CAPTURE d14e7db, P-INVALIDATE b71fc62; 1274 local tests; review running"
+        },
+        {
+          "time": "2026-11-04 19:12:38",
+          "who": "agent",
+          "text": "Codex review + follow-up fixes (c53a50e, 44a033a); Boat gate 1297 passed"
         }
       ]
     },
@@ -1355,10 +1360,16 @@
       "deps": [
         "P-CLOSURE-LT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "b124e42",
+      "log": [
+        {
+          "time": "2026-11-04 19:12:39",
+          "who": "agent",
+          "text": "Codex review + follow-up fixes (c53a50e, 44a033a); Boat gate 1297 passed"
+        }
+      ]
     },
     {
       "id": "P-INVALIDATE",
@@ -1369,14 +1380,19 @@
       "deps": [
         "P-LIVE-CAPTURE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "b124e42",
       "log": [
         {
           "time": "2026-11-04 17:04:23",
           "who": "agent",
           "text": "Codex review NOT YET: nested lambda metadata reset, loop backedge, Task.scope, effect handlers, mixed-capture loans; fix delegated"
+        },
+        {
+          "time": "2026-11-04 19:12:39",
+          "who": "agent",
+          "text": "Codex review + follow-up fixes (c53a50e, 44a033a); Boat gate 1297 passed"
         }
       ]
     },
