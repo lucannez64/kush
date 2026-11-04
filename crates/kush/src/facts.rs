@@ -683,8 +683,8 @@ fn eliminate(mut rows: Vec<Row>) -> Option<Vec<Row>> {
                 // up: au*x + ru <= bu, au > 0
                 // low: al*x + rl <= bl, al < 0
                 // (-al)*up + au*low eliminates x with both weights positive.
-                let weight_low = up_coefficient.abs();
-                let weight_up = low_coefficient.abs();
+                let weight_low = up_coefficient.checked_abs()?;
+                let weight_up = low_coefficient.checked_abs()?;
                 let combined = up.combine(low, weight_up, weight_low, &variable)?;
                 next.push(combined);
             }
@@ -792,11 +792,11 @@ impl Ratio {
     fn is_negative(&self) -> bool {
         self.num < 0
     }
-    fn abs(self) -> Self {
-        Ratio {
-            num: self.num.abs(),
+    fn checked_abs(self) -> Option<Self> {
+        Some(Ratio {
+            num: self.num.checked_abs()?,
             den: self.den,
-        }
+        })
     }
     fn checked_add(self, other: Self) -> Option<Self> {
         let num = self
@@ -821,7 +821,7 @@ impl Ratio {
         } else {
             (num, den)
         };
-        let divisor = gcd(num.abs(), den);
+        let divisor = gcd(num, den);
         let divisor = if divisor == 0 { 1 } else { divisor };
         Some(Ratio {
             num: num / divisor,

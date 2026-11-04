@@ -178,3 +178,15 @@ fn exceeding_the_integer_term_budget_leaves_the_obligation_unproved() {
     );
     rejects(&source, "cannot prove");
 }
+
+#[test]
+fn extreme_coefficients_fail_closed_instead_of_panicking() {
+    let source = r#"
+fn take(x: i64, erased p: { x >= 0 }) -> i64 ! {} { x }
+fn forward(x: i64, erased p: {
+    (-170141183460469231731687303715884105727 - 1) * x <= 0
+}) -> i64 ! {} { take(x, _) }
+fn main() -> i64 ! {panic} { 0 }
+"#;
+    assert!(check(source).is_err());
+}
