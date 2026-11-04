@@ -1,9 +1,10 @@
 # Design: recursive lifetime summaries
 
-Status: the direct-call, static-method, borrowed-record and required-precondition
-fragments are implemented in `crates/kush/src/executable/recursive_lifetimes.rs`.
-Indirect/dynamic boundaries remain explicit-contract limits. Source baseline:
-`3a58acc` with the method, record-result and `R[f]` extensions in this branch.
+Status: the direct-call, static-method, borrowed-record, let-bound helper/recursive
+result and required-precondition fragments are implemented in
+`crates/kush/src/executable/recursive_lifetimes.rs`. Indirect/dynamic boundaries
+remain explicit-contract limits. Source baseline: `3a58acc` with the method,
+record-result, structural-projection and `R[f]` extensions in this branch.
 
 ## Problem and current boundaries
 
@@ -230,10 +231,16 @@ Implemented in this fragment:
   skipped by source position, never by runtime index into the AST argument list.
   Receiver-type dispatch uses the syntactically known local/parameter type (or a
   unique method name), so dynamic dispatch and builtin methods remain
-  boundaries. Local `let` aliases, record destructuring, field projections,
-  record literals, blocks, branches, and matches carry origins; assignments are
-  folded to a local fixed point. Input permutations on recursive calls keep
-  every actual alternative.
+  boundaries. Local `let` aliases, let-bound helper and recursive call results
+  (including structural results and their field projections), record
+  destructuring, field projections, record literals, blocks, branches, and
+  matches carry origins; assignments are folded to a local fixed point. A
+  binding introduced inside a branch or block keeps its own resolver binding,
+  and shadowing therefore cannot merge two values. Reassignment of a mutable
+  binding unions every possible value rather than selecting one path. An
+  unsupported initializer stays `unknown` instead of becoming empty
+  provenance. Input permutations on recursive calls keep every actual
+  alternative.
 - Call-graph condensation is separate from the outlives solver. Iteration and
   diagnostics are sorted by declaration name plus binding for deterministic
   results under declaration permutation. The aggregate budgets are checked
@@ -248,6 +255,17 @@ Implemented in this fragment:
   empty origin set. Anonymous structural results with borrowed fields use the
   same per-field map; owned scalar fields are not summary paths, and a projected
   field (`wrap(a).view`) keeps only that field's origin.
+- A helper or recursive call result first bound with `let` keeps that same
+  per-field map. `let r = wrap(b); r.view` therefore carries `b`'s origin, not
+  the local record binding, and `let s = project(r.view, a, n - 1)` is
+  instantiated with that origin. The fixed point over local bindings and
+  assignments runs under the existing 64-pass budget. Shadowing uses distinct
+  resolver bindings; a mutable reassignment unions every possible value; an
+  unsupported initializer keeps the `unknown` channel. The ownership pass
+  remains authoritative for local escape, moves, and mutable-capability checks:
+  a local record remains an ancestor loan for ordinary uses, while return
+  validation follows a borrowed field's external origins. Projecting an owned
+  field from that record still treats the binding as storage and is rejected.
 - An unsupported result channel is stored in the solved summary, not discarded.
   Indirect calls, dynamic dispatch, loop/performed results, and tasks keep an
   `unknown` fact keyed by result path, so an unsupported owned field does not
@@ -296,6 +314,12 @@ Implemented in this fragment:
 
 Remaining limits, deliberately not claimed as complete:
 
+- A let-bound value whose initialization is an unsupported result channel
+  stays `unknown`; being bound does not make an indirect helper result
+  inferable. Shadowing and mutable reassignment are path-insensitive unions,
+  not flow-sensitive kills: a value that was overwritten may still contribute
+  a conservative owner, so the result can be rejected where a precise flow
+  would accept it.
 - Direct static calls and statically resolved methods participate. Indirect
   calls, dynamic dispatch, builtin method results, effect-operation results,
   loop results, and tasks remain unsupported boundaries. Their `unknown` fact is
