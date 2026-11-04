@@ -1182,10 +1182,26 @@
         "I-IDX-TESTS",
         "I-PRINC-DOC"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "0efd210",
+      "log": [
+        {
+          "time": "2026-11-04 23:25:26",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 00:03:00",
+          "who": "agent",
+          "text": "Independent review found 2 HIGH, 3 MEDIUM, 2 LOW (panic with ..r hints, hidden nested partition, lenient uniqueness, effect evidence, budget errors as choices, routing, diagnostics) plus a latent plan-advance bug; all fixed in 0efd210 with regressions; soundness held throughout. Boat gate 1370 tests"
+        },
+        {
+          "time": "2026-11-05 00:03:01",
+          "who": "agent",
+          "text": "done 0efd210"
+        }
+      ]
     },
     {
       "id": "INF",
