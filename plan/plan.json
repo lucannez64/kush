@@ -986,10 +986,26 @@
       "deps": [
         "STRUCT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Same constructor, differing arguments; invariant args never collapse.",
-      "commit": null,
-      "log": []
+      "commit": "29de4d0",
+      "log": [
+        {
+          "time": "2026-11-04 22:38:39",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-04 22:51:08",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-04 22:51:08",
+          "who": "agent",
+          "text": "done 29de4d0"
+        }
+      ]
     },
     {
       "id": "I-IDX-CONSTRAINTS",
@@ -1000,10 +1016,21 @@
       "deps": [
         "I-IDX-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "29de4d0",
+      "log": [
+        {
+          "time": "2026-11-04 22:51:08",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-04 22:51:08",
+          "who": "agent",
+          "text": "done 29de4d0"
+        }
+      ]
     },
     {
       "id": "I-IDX-SOLVE",
@@ -1014,10 +1041,21 @@
       "deps": [
         "I-IDX-CONSTRAINTS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "29de4d0",
+      "log": [
+        {
+          "time": "2026-11-04 22:51:08",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-04 22:51:08",
+          "who": "agent",
+          "text": "done 29de4d0"
+        }
+      ]
     },
     {
       "id": "I-IDX-TESTS",
@@ -1028,10 +1066,26 @@
       "deps": [
         "I-IDX-SOLVE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "29de4d0",
+      "log": [
+        {
+          "time": "2026-11-04 22:51:09",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-04 22:51:09",
+          "who": "agent",
+          "text": "done 29de4d0"
+        },
+        {
+          "time": "2026-11-04 22:51:09",
+          "who": "agent",
+          "text": "Indexed-union inference landed (29de4d0): per-constructor assignment, invariant args never merged, replay decisions, native parity tests; local 1368-test gate because Boat was at capacity"
+        }
+      ]
     },
     {
       "id": "I-PRINC-DESIGN",
