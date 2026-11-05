@@ -223,7 +223,9 @@ array in the native runtime and a vector in the reference evaluator.
 
 ## Limits
 
-This is a usable handler fragment, not a general algebraic-effect runtime:
+This is a usable handler fragment, not a general algebraic-effect runtime. The planned
+replacement of the single-perform continuation by resumable state machines is
+designed in [effect state machines](effect-state-machines.md):
 
 - lexical non-tail resumption is limited to one top-level statement perform per
   handle; general expression contexts, multiple prompts, and nested
