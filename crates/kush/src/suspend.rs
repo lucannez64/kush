@@ -52,6 +52,7 @@ enum Step {
 }
 
 pub(crate) fn lower(program: &mut Executable) -> Result<()> {
+    check_task_tokens(program)?;
     let mut context = Context {
         performs: performs(program),
         entries: BTreeMap::new(),
@@ -446,6 +447,10 @@ fn block_children<'a>(
         }
         ExprKind::HandlerPush { handler, body, .. } => {
             on_expr(handler);
+            on_block(body);
+        }
+        ExprKind::HandlerRedirect { depth, body } => {
+            on_expr(depth);
             on_block(body);
         }
         ExprKind::Suspendable(suspendable) => on_block(&suspendable.body),
@@ -1256,6 +1261,9 @@ struct Spec {
     finish: Option<usize>,
     /// Resumable entry index and continuation token type per awaited callee.
     entries: BTreeMap<usize, (usize, Type)>,
+    /// The handle is for a declared operation: resumed continuations hide
+    /// frames the handler pushes (see `ExprKind::HandlerRedirect`).
+    redirect: bool,
     /// The handler, when it is a known noncapturing function that only calls
     /// its resumption directly: multishot points with captured values call a
     /// specialization of it.
@@ -1475,6 +1483,10 @@ fn build(
                 .expect("known point")
     };
     let cleanup = resources_in(&body, &host.local_resources);
+    // A one-shot continuation of a declared-operation handle records the
+    // handler-stack depth at its point and resumes under a redirect, so
+    // frames the handler pushes around `resume` stay invisible to it.
+    let redirects = |point: usize| spec.redirect && matches!(tokens[&point], Type::Once(_));
     // Replace every point by an exit whose value is the handler call (or the
     // awaited entry call) with the point's resumption token.
     let mut inputs = BTreeMap::new();
@@ -1528,6 +1540,12 @@ fn build(
                             span,
                             resource: None,
                         })
+                        .chain(redirects(*point).then_some(Expr {
+                            kind: ExprKind::HandlerDepth,
+                            ty: Type::I64,
+                            span,
+                            resource: None,
+                        }))
                         .collect(),
                 },
                 ty: token_ty,
@@ -1573,8 +1591,10 @@ fn build(
         let slots = &captures[point];
         let (input_resource, input_ty) = inputs[point];
         let input_slot = locals.len();
+        let redirect = redirects(*point);
+        let depth_slot = input_slot + 1;
         let mut zipper = Zipper {
-            next_local: input_slot + 1,
+            next_local: input_slot + 1 + usize::from(redirect),
             flags: Vec::new(),
             span: spec.span,
         };
@@ -1596,6 +1616,16 @@ fn build(
             grade: None,
             span: spec.span,
         });
+        if redirect {
+            cont_locals.push(Local {
+                ty: Type::I64,
+                mutable: false,
+                linear: false,
+                pinned: false,
+                grade: None,
+                span: spec.span,
+            });
+        }
         cont_locals.extend(zipper.flags);
         let mut cont_resources = host.resources.clone();
         let mut cont_local_resources = host.local_resources.clone();
@@ -1607,29 +1637,56 @@ fn build(
         }
         cont_local_resources.resize(cont_locals.len(), None);
         let mut parameter_slots = slots.clone();
+        if redirect {
+            parameter_slots.push(depth_slot);
+        }
+        let environment = parameter_slots.len();
         parameter_slots.push(input_slot);
         let parameters = parameter_slots.len();
+        let region = Expr {
+            kind: ExprKind::Region {
+                body: rest,
+                finish: finish(spec.span),
+            },
+            ty: spec.result,
+            span: spec.span,
+            resource: None,
+        };
+        let body = if redirect {
+            Expr {
+                kind: ExprKind::HandlerRedirect {
+                    depth: Box::new(Expr {
+                        kind: ExprKind::Local(depth_slot),
+                        ty: Type::I64,
+                        span: spec.span,
+                        resource: None,
+                    }),
+                    body: Block {
+                        statements: vec![],
+                        tail: Some(Box::new(region)),
+                        ty: spec.result,
+                    },
+                },
+                ty: spec.result,
+                span: spec.span,
+                resource: None,
+            }
+        } else {
+            region
+        };
         continuations.push(Function {
             name: format!("{}::resume#{point}", host.name),
             parameters,
             // Once tokens carry an environment word even without captures;
             // a capture-free multishot token is a plain code pointer.
-            closure: matches!(tokens[point], Type::Once(_)).then_some(slots.len()),
-            capture_refs: vec![false; slots.len()],
-            capture_writes: vec![false; slots.len()],
+            closure: matches!(tokens[point], Type::Once(_)).then_some(environment),
+            capture_refs: vec![false; environment],
+            capture_writes: vec![false; environment],
             locals: cont_locals,
             result: spec.result,
             body: Block {
                 statements: vec![],
-                tail: Some(Box::new(Expr {
-                    kind: ExprKind::Region {
-                        body: rest,
-                        finish: finish(spec.span),
-                    },
-                    ty: spec.result,
-                    span: spec.span,
-                    resource: None,
-                })),
+                tail: Some(Box::new(body)),
                 ty: spec.result,
             },
             span: spec.span,
@@ -1757,6 +1814,41 @@ fn lower_one(
                 .flatten(),
         )
     };
+    // A known handler that installs no dynamic handler and only calls its
+    // token directly cannot hide frames from the resumed code, so its
+    // continuations need no redirect (and stay capture-free when possible).
+    let handler_is_transparent = {
+        let handler = find_in_block(&program.functions[index].body, target)
+            .and_then(|suspendable| suspendable.handler_function);
+        handler.is_some_and(|handler| {
+            !context.lowering.contains(&handler) && {
+                let function = &program.functions[handler];
+                let pushes = {
+                    fn pushes(expr: &Expr) -> bool {
+                        if matches!(
+                            expr.kind,
+                            ExprKind::HandlerPush { .. } | ExprKind::HandlerRedirect { .. }
+                        ) {
+                            return true;
+                        }
+                        let mut found = false;
+                        expr.for_each_child(&mut |child| found |= pushes(child));
+                        found
+                    }
+                    function
+                        .body
+                        .statements
+                        .iter()
+                        .any(|statement| match statement {
+                            Statement::Let(_, value) | Statement::Expr(value) => pushes(value),
+                            Statement::Declare(_) => false,
+                        })
+                        || function.body.tail.as_deref().is_some_and(pushes)
+                };
+                !pushes && multishot_handler(program, handler).is_some()
+            }
+        })
+    };
     // A multishot handler is specialized from its lowered body.
     let multishot_handler = match multishot {
         Some(handler) if !context.lowering.contains(&handler) => {
@@ -1831,6 +1923,7 @@ fn lower_one(
             awaited_allocates,
             finish: None,
             entries: entries.clone(),
+            redirect: operation.is_some() && !handler_is_transparent,
             multishot_handler: multishot_handler.clone(),
             span,
         };
@@ -2428,6 +2521,7 @@ fn resumable_entry(
         awaited_allocates,
         finish: Some(k),
         entries,
+        redirect: true,
         multishot_handler: None,
         span: source.span,
     };
@@ -2643,4 +2737,118 @@ fn call_specialization(call: &mut Expr, function: usize, environment: Vec<Expr>)
         }
         _ => unreachable!("a multishot point wraps the handler call"),
     }
+}
+
+/// A resumption token moved into a spawned task would run the rest of the
+/// handled body in another task, which does not see the handle's dynamic
+/// frames. Reject spawning a closure that captures a value of a resumption
+/// token type of some suspendable body (directly, or through a local bound
+/// to such a closure).
+fn check_task_tokens(program: &Executable) -> Result<()> {
+    fn tokens_in(expr: &Expr, out: &mut BTreeSet<Type>) {
+        if let ExprKind::Suspendable(suspendable) = &expr.kind {
+            out.insert(suspendable.token);
+        }
+        expr.for_each_child(&mut |child| tokens_in(child, out));
+    }
+    let mut tokens = BTreeSet::new();
+    for function in &program.functions {
+        let wrapper = Expr {
+            kind: ExprKind::Block(function.body.clone()),
+            ty: function.body.ty,
+            span: function.span,
+            resource: None,
+        };
+        tokens_in(&wrapper, &mut tokens);
+    }
+    if tokens.is_empty() {
+        return Ok(());
+    }
+    let captures_token = |expr: &Expr, holders: &Slots| {
+        let mut expr = expr;
+        while let ExprKind::Coerce { value, .. } = &expr.kind {
+            expr = value;
+        }
+        match &expr.kind {
+            ExprKind::FnValue { captures, .. } => captures.iter().any(|capture| {
+                tokens.contains(&capture.ty)
+                    || matches!(capture.kind, ExprKind::Local(s) | ExprKind::Move(s) if holders.contains(&s))
+            }),
+            ExprKind::Local(slot) | ExprKind::Move(slot) => holders.contains(slot),
+            _ => false,
+        }
+    };
+    for function in &program.functions {
+        // Locals holding a closure that captures a token, to a fixed point.
+        let mut holders = Slots::new();
+        loop {
+            let before = holders.len();
+            fn bindings<'a>(block: &'a Block, out: &mut Vec<(usize, &'a Expr)>) {
+                for statement in &block.statements {
+                    if let Statement::Let(slot, value) = statement {
+                        out.push((*slot, value));
+                    }
+                    if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                        collect(value, out);
+                    }
+                }
+                if let Some(tail) = &block.tail {
+                    collect(tail, out);
+                }
+            }
+            fn collect<'a>(expr: &'a Expr, out: &mut Vec<(usize, &'a Expr)>) {
+                if let ExprKind::Assign(slot, value) = &expr.kind {
+                    out.push((*slot, value));
+                }
+                let mut blocks = Vec::new();
+                let mut children = Vec::new();
+                block_children(expr, &mut |block| blocks.push(block), &mut |child| {
+                    children.push(child)
+                });
+                for block in blocks {
+                    bindings(block, out);
+                }
+                for child in children {
+                    collect(child, out);
+                }
+            }
+            let mut pairs = Vec::new();
+            bindings(&function.body, &mut pairs);
+            for (slot, value) in pairs {
+                if captures_token(value, &holders) {
+                    holders.insert(slot);
+                }
+            }
+            if holders.len() == before {
+                break;
+            }
+        }
+        fn spawns<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+            if let ExprKind::TaskSpawn { body, .. } = &expr.kind {
+                out.push(expr);
+                let _ = body;
+            }
+            expr.for_each_child(&mut |child| spawns(child, out));
+        }
+        let mut found = Vec::new();
+        let wrapper = Expr {
+            kind: ExprKind::Block(function.body.clone()),
+            ty: function.body.ty,
+            span: function.span,
+            resource: None,
+        };
+        spawns(&wrapper, &mut found);
+        for spawn in found {
+            let ExprKind::TaskSpawn { body, .. } = &spawn.kind else {
+                continue;
+            };
+            if captures_token(body, &holders) {
+                return Err(Diagnostic::new(
+                    spawn.span,
+                    "a resumption token cannot be moved into a spawned task: the rest of the handled body would run in another task, without the handle's dynamic handlers; resume it in the handler's own task",
+                ));
+            }
+        }
+    }
+    Ok(())
 }

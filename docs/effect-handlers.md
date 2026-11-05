@@ -175,7 +175,8 @@ copy of the live values (see the multishot lowering below).
 There are three resumption lowerings:
 
 - **Tail-resumptive handler.** A handler written as a lambda at the `handle`
-  whose only use of the token is `resume(e)` in tail position computes
+  whose only use of the token is `resume(e)` in tail position, with no early
+  `return` or `?`, computes
   `h(p, k) = k(e)`. Every perform passes the noncapturing identity token and
   the body continues in place: no allocation, constant stack, and `return`,
   `?`, `break` and `continue` behave as in any other code. A perform that is
@@ -228,6 +229,8 @@ Rules for suspendable bodies, checked after ownership:
 - the token must not outlive the handler: an operation result type, a handler
   payload type, or a handler-written capture that can hold a function value
   is rejected for non-tail resumption;
+- a resumption token cannot be captured by a spawned task, which would run
+  the rest of the body without the handle's dynamic handlers;
 - a `break`/`continue` inside a `while` condition is rejected when the loop
   has to be rebuilt around a perform (the condition performs, or the body
   performs).

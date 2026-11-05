@@ -366,6 +366,7 @@ impl Executable {
                         function,
                         environment: None,
                     }),
+                    redirect: None,
                     consume: false,
                 })
                 .collect(),
@@ -1160,6 +1161,8 @@ impl TaskComm {
 struct HandlerFrame {
     operation: usize,
     handler: Option<Value>,
+    /// A redirect frame: lookups continue below this depth instead.
+    redirect: Option<usize>,
     /// A `once` handler owns its environment and can be consumed only once.
     /// A copyable `fn` handler serves any number of performs.
     consume: bool,
@@ -5133,6 +5136,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         self.dynamic_handlers.push(HandlerFrame {
             operation,
             handler: Some(handler_value),
+            redirect: None,
             consume,
         });
         let flow = self.block(body, frame);
@@ -5155,11 +5159,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         resume: &Expr,
         frame: &mut Frame,
     ) -> Result<Flow> {
-        let Some(index) = self
-            .dynamic_handlers
-            .iter()
-            .rposition(|frame| frame.operation == operation && frame.handler.is_some())
-        else {
+        let mut index = self.dynamic_handlers.len();
+        let found = loop {
+            if index == 0 {
+                break None;
+            }
+            index -= 1;
+            let candidate = &self.dynamic_handlers[index];
+            if let Some(target) = candidate.redirect {
+                index = target;
+                continue;
+            }
+            if candidate.operation == operation && candidate.handler.is_some() {
+                break Some(index);
+            }
+        };
+        let Some(index) = found else {
             return Err(Diagnostic::new(
                 expr.span,
                 "no dynamically active handler for this operation",
@@ -6480,6 +6495,30 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         true,
                     ));
                 }
+            }
+            ExprKind::HandlerDepth => Value::Scalar(self.dynamic_handlers.len() as i64),
+            ExprKind::HandlerRedirect { depth, body } => {
+                let target = value!(self.expr(depth, frame)).scalar() as usize;
+                let before = self.dynamic_handlers.len();
+                if before > target {
+                    self.dynamic_handlers.push(HandlerFrame {
+                        operation: usize::MAX,
+                        handler: None,
+                        redirect: Some(target),
+                        consume: true,
+                    });
+                }
+                let flow = self.block(body, frame);
+                while self.dynamic_handlers.len() > before {
+                    if let Some(HandlerFrame {
+                        handler: Some(value),
+                        ..
+                    }) = self.dynamic_handlers.pop()
+                    {
+                        self.drop_value(value)?;
+                    }
+                }
+                return flow;
             }
             ExprKind::Suspendable(_) | ExprKind::Suspend { .. } => {
                 return Err(Diagnostic::new(

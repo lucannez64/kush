@@ -487,7 +487,9 @@ is inherent (section 7).
    Kush has no unwinding that could abandon it and drop its live values.
 7. A non-tail perform inside the body of a nested non-tail handler or a
    nested declared-operation handler is rejected (multi-prompt capture).
-8. Added after the independent review: a point whose own call borrows a value
+8. Added after the independent reviews: a handler with an early `return`
+   or `?` is not tail-resumptive; a resumption token cannot be captured by a
+   spawned task; a point whose own call borrows a value
    its continuation captures is rejected; locals holding by-reference
    closures count as borrows; continuation code may not write a local the
    handler captures by reference, nor (through a closure) one read after the
@@ -526,9 +528,16 @@ continuation `k`.
   handler or the awaited entry: `fn call() { perform D(x) }` resumes with no
   allocation.
 - **The handler is found dynamically.** A perform in a resumable entry is
-  the ordinary handler-stack lookup with the real token. The innermost frame
-  for `D` is the non-tail handle's, because entries are only called from its
-  body and from other entries, never under a nested handler for `D`.
+  the ordinary handler-stack lookup with the real token. Entries are only
+  called from the handle's body and from other entries, never under a nested
+  handler, so at a suspension the handle's frame is the innermost one for
+  `D`. The handler itself may install handlers around its call of `resume`;
+  to keep deep semantics, a continuation of a declared-operation handle
+  records the stack depth at its point and resumes under a
+  `HandlerRedirect`, which pushes a redirect frame (only when frames were
+  pushed above that depth) that makes lookups skip back to it. A handler
+  known not to install handlers, and that only calls its token directly,
+  needs no redirect.
 - **Unresumable paths are rejected.** In code resumed by a non-tail handler
   for `D`, a call that may perform `D` through a function value, a trait
   object, `Task.scope`, or a vector callback is rejected, as is one inside a

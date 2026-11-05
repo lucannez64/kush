@@ -1223,6 +1223,17 @@ pub(crate) enum ExprKind {
         finish: bool,
         cleanup: Vec<usize>,
     },
+    /// Lowered form only: the current depth of the dynamic handler stack.
+    HandlerDepth,
+    /// Lowered form only: run `body` with dynamic handler lookups that skip
+    /// the frames above `depth` that were pushed before entering it. A
+    /// resumed continuation of a declared-operation handle uses it so that
+    /// frames its handler pushed around `resume` stay invisible (deep
+    /// semantics). A redirect frame is pushed only when such frames exist.
+    HandlerRedirect {
+        depth: Box<Expr>,
+        body: Block,
+    },
     /// Lowered form only: `?` inside a resumable function entry. The `Err`
     /// path leaves the innermost `Region` through its finish (the caller's
     /// continuation) instead of returning, dropping `cleanup` first.
@@ -1391,6 +1402,7 @@ impl Expr {
             | ExprKind::Peek(_)
             | ExprKind::ArenaNew
             | ExprKind::TaskYield
+            | ExprKind::HandlerDepth
             | ExprKind::TaskCheckCancel
             | ExprKind::DynArrayNew { .. }
             | ExprKind::Break(None, _)
@@ -1551,6 +1563,10 @@ impl Expr {
                 }
             }
             ExprKind::RegionExit { value, .. } | ExprKind::TryExit { value, .. } => f(value),
+            ExprKind::HandlerRedirect { depth, body } => {
+                f(depth);
+                block(body, f);
+            }
             ExprKind::If(condition, yes, no) => {
                 f(condition);
                 block(yes, f);
@@ -1609,6 +1625,7 @@ impl Expr {
             | ExprKind::Peek(_)
             | ExprKind::ArenaNew
             | ExprKind::TaskYield
+            | ExprKind::HandlerDepth
             | ExprKind::TaskCheckCancel
             | ExprKind::DynArrayNew { .. }
             | ExprKind::Break(None, _)
@@ -1769,6 +1786,10 @@ impl Expr {
                 }
             }
             ExprKind::RegionExit { value, .. } | ExprKind::TryExit { value, .. } => f(value),
+            ExprKind::HandlerRedirect { depth, body } => {
+                f(depth);
+                block(body, f);
+            }
             ExprKind::If(condition, yes, no) => {
                 f(condition);
                 block(yes, f);
@@ -2637,6 +2658,8 @@ fn fusion_expr_safe(
         | ExprKind::Suspend { .. }
         | ExprKind::Region { .. }
         | ExprKind::RegionExit { .. }
+        | ExprKind::HandlerDepth
+        | ExprKind::HandlerRedirect { .. }
         | ExprKind::TryExit { .. } => false,
         ExprKind::FnValue { function, captures } => {
             captures
@@ -2885,6 +2908,11 @@ fn fuse_expr(
         }
         ExprKind::RegionExit { value, .. } | ExprKind::TryExit { value, .. } => {
             fuse_expr(value, types, signatures, safety, fusions)
+        }
+        ExprKind::HandlerDepth => {}
+        ExprKind::HandlerRedirect { depth, body } => {
+            fuse_expr(depth, types, signatures, safety, fusions);
+            fuse_block(body, types, signatures, safety, fusions);
         }
         ExprKind::AllocBoxNew { allocator, value }
         | ExprKind::AllocBoxTryNew {
@@ -23785,9 +23813,16 @@ impl Checker<'_, '_> {
                 continue;
             }
             match ty {
-                Type::Fn(_) | Type::Once(_) | Type::DynObj(_) | Type::Task(_) => return true,
+                Type::Fn(_)
+                | Type::Once(_)
+                | Type::DynObj(_)
+                | Type::Task(_)
+                | Type::AllocatorContext => return true,
                 Type::Box(p)
                 | Type::Vec(p)
+                | Type::ArenaBox(p)
+                | Type::AllocBox(p)
+                | Type::AllocVec(p)
                 | Type::Ref(p)
                 | Type::RefMut(p)
                 | Type::Slice(p)
@@ -33624,10 +33659,12 @@ fn tail_resumptive_handler(resolution: &Resolution, handler: &ast::Expr) -> bool
     else {
         return false;
     };
+    // An early `return` or `?` in the handler would skip the resumption,
+    // which the identity token cannot express; count it as a mention.
     let mentions = |expr: &ast::Expr| {
         let mut refs = BTreeSet::new();
         collect_expr_refs(resolution, expr, &mut refs);
-        refs.contains(&token)
+        refs.contains(&token) || exits_early(expr)
     };
     fn statement_value(statement: &ast::Statement) -> &ast::Expr {
         match statement {
@@ -33686,6 +33723,58 @@ fn tail_resumptive_handler(resolution: &Resolution, handler: &ast::Expr) -> bool
                 .is_some_and(|value| tail(resolution, token, mentions, value))
     }
     block_tail(resolution, token, &mentions, &lambda.body)
+}
+/// Whether an expression contains `return` or `?` outside nested lambdas.
+fn exits_early(expr: &ast::Expr) -> bool {
+    fn block(block: &ast::Block) -> bool {
+        block.statements.iter().any(|statement| match statement {
+            ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => exits_early(value),
+        }) || block.tail.as_deref().is_some_and(exits_early)
+    }
+    use ast::ExprKind as E;
+    match &expr.kind {
+        E::Return(_) | E::Try(_) => true,
+        E::Lambda(_) => false,
+        E::Name(_)
+        | E::Integer(_)
+        | E::Float(_)
+        | E::String(_)
+        | E::Char(_)
+        | E::Bool(_)
+        | E::Continue => false,
+        E::Tuple(values) | E::Array(values) => values.iter().any(exits_early),
+        E::StructuralLiteral(fields) | E::Record { fields, .. } => {
+            fields.iter().any(|(_, value)| exits_early(value))
+                || matches!(&expr.kind, E::Record { ty, .. } if exits_early(ty))
+        }
+        E::Block(inner) | E::Loop(inner) => block(inner),
+        E::Unary { operand, .. } | E::Cast { value: operand, .. } => exits_early(operand),
+        E::Binary { left, right, .. } => exits_early(left) || exits_early(right),
+        E::Call { callee, arguments } => exits_early(callee) || arguments.iter().any(exits_early),
+        E::Handle { handler, body, .. } => exits_early(handler) || block(body),
+        E::Perform { value, .. } => exits_early(value),
+        E::Specialize { callee, .. } => exits_early(callee),
+        E::Field { value, .. } => exits_early(value),
+        E::Index { value, index } => exits_early(value) || exits_early(index),
+        E::Slice { value, start, end } => {
+            exits_early(value)
+                || start.as_deref().is_some_and(exits_early)
+                || end.as_deref().is_some_and(exits_early)
+        }
+        E::If {
+            condition,
+            then,
+            otherwise,
+        } => exits_early(condition) || block(then) || otherwise.as_deref().is_some_and(exits_early),
+        E::Match { value, arms } => {
+            exits_early(value)
+                || arms.iter().any(|arm| {
+                    arm.guard.as_ref().is_some_and(exits_early) || exits_early(&arm.body)
+                })
+        }
+        E::While { condition, body } => exits_early(condition) || block(body),
+        E::Break(value) => value.as_deref().is_some_and(exits_early),
+    }
 }
 /// Whether a handled body performs `operation` lexically anywhere other than
 /// as the body's whole tail expression (which keeps the identity token).

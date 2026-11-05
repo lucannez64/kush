@@ -1195,3 +1195,118 @@ fn review_borrows_that_end_inside_the_payload_are_accepted() {
     );
     agrees(&source, 34, "");
 }
+
+#[test]
+fn review_tokens_cannot_escape_through_containers_or_tasks() {
+    rejects(
+        r#"
+        enum G { Done(i64), More(i64, ArenaBox<fn(G) -> G ! {}>) }
+        fn make() -> G ! {io, alloc, panic} {
+            handle Yield: i64 -> G with fn(
+                x: i64,
+                resume: fn(G) -> G ! {},
+            ) -> G ! {alloc, panic} {
+                let a = Arena.new();
+                G.More(x, Arena.alloc(&a, resume))
+            } {
+                let r = perform Yield(1);
+                print_i64(555);
+                G.Done(1)
+            }
+        }
+        fn main() -> i64 ! {io, alloc, panic} { match make() { G.Done(n) => n, G.More(x, b) => x } }"#,
+        "could return its resumption token",
+    );
+    rejects(
+        r#"
+        use std.task.TaskExit;
+        effect D: i64 -> i64;
+        fn d() -> i64 ! {D, panic} { perform D(1) }
+        fn main() -> i64 ! {io, alloc, panic, suspend} {
+            let base = 40;
+            handle D: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x | base) } {
+                handle Ask: i64 -> i64 with fn(
+                    x: i64,
+                    resume: linear once fn(i64) -> i64 ! {},
+                ) -> i64 ! {alloc, panic, suspend} {
+                    Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+                        let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic, suspend} { resume(x) });
+                        match Task.join(t) { TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 }
+                    })
+                } {
+                    let a = perform Ask(1);
+                    a + d()
+                }
+            }
+        }"#,
+        "cannot be moved into a spawned task",
+    );
+}
+
+#[test]
+fn review_handlers_that_return_early_are_not_tail_resumptive() {
+    // The handler stops the body without resuming when x > 5.
+    let source = r#"
+        fn main() -> i64 ! {alloc, panic} {
+            handle Ask: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { if x > 5 { return 7; } resume(x) } {
+                let a = perform Ask(9);
+                a + 100
+            }
+        }"#;
+    agrees(source, 7, "");
+}
+
+#[test]
+fn review_resumed_code_does_not_see_frames_the_handler_pushed() {
+    // The outer handler re-handles D around resume. Deep semantics: the
+    // resumed continuation (including called functions) is handled by the
+    // outer handler again, exactly as when the performs are written
+    // lexically.
+    let called = r#"
+        effect D: i64 -> i64;
+        fn d(n: i64) -> i64 ! {D, panic} { let a = perform D(n); a ^ 1 }
+        fn main() -> i64 ! {alloc, panic} {
+            handle D: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} {
+                handle D: i64 -> i64 with fn(
+                    y: i64,
+                    r2: linear once fn(i64) -> i64 ! {},
+                ) -> i64 ! {} { let z = r2(y ^ 4); z ^ 16 } {
+                    resume(x ^ 8)
+                }
+            } {
+                let a = d(32);
+                let b = d(64);
+                a ^ b ^ 0
+            }
+        }"#;
+    let lexical = r#"
+        effect D: i64 -> i64;
+        fn main() -> i64 ! {alloc, panic} {
+            handle D: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} {
+                handle D: i64 -> i64 with fn(
+                    y: i64,
+                    r2: linear once fn(i64) -> i64 ! {},
+                ) -> i64 ! {} { let z = r2(y ^ 4); z ^ 16 } {
+                    resume(x ^ 8)
+                }
+            } {
+                let a = perform D(32) ^ 1;
+                let b = perform D(64) ^ 1;
+                a ^ b ^ 0
+            }
+        }"#;
+    agrees(lexical, 96, "");
+    agrees(called, 96, "");
+}

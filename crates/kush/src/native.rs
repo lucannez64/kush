@@ -2104,10 +2104,33 @@ void kush_handler_pop(void) {
         kush_handler_drop_frame(&handlers->frames[handlers->depth]);
     }
 }
+/* A resumed continuation of a declared-operation handle hides the frames its
+   handler pushed around `resume`: a redirect frame (operation -1) sends the
+   lookup below `code`, the depth recorded at the suspension. It is pushed
+   only when such frames exist, owns nothing, and is a task-inheritance
+   barrier. Returns the depth to restore after the continuation. */
+int64_t kush_handler_redirect(int64_t target) {
+    kush_handler_context *handlers = kush_handlers();
+    int64_t before = handlers->depth;
+    if (before > target) {
+        if (handlers->depth >= KUSH_HANDLER_MAX) kush_panic();
+        handlers->frames[handlers->depth].operation = -1;
+        handlers->frames[handlers->depth].code = target;
+        handlers->frames[handlers->depth].environment = 0;
+        handlers->frames[handlers->depth].once = 1;
+        handlers->frames[handlers->depth].consumed = 1;
+        handlers->depth += 1;
+    }
+    return before;
+}
 int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
     kush_handler_context *handlers = kush_handlers();
     for (int64_t index = handlers->depth - 1; index >= 0; --index) {
         kush_handler_frame *frame = &handlers->frames[index];
+        if (frame->operation == -1) {
+            index = frame->code;
+            continue;
+        }
         if (frame->operation != operation || frame->consumed) continue;
         out[0] = frame->code;
         out[1] = frame->environment;
@@ -2729,7 +2752,10 @@ impl Drop for Scratch {
 /// separately compiled callback bodies perform their own analysis.
 fn block_installs_handler(block: &ex::Block) -> bool {
     fn expression(expr: &Expr) -> bool {
-        if matches!(expr.kind, ExprKind::HandlerPush { .. }) {
+        if matches!(
+            expr.kind,
+            ExprKind::HandlerPush { .. } | ExprKind::HandlerRedirect { .. }
+        ) {
             return true;
         }
         let mut found = false;
@@ -3262,6 +3288,16 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
     let handler_lookup = module
         .declare_function("kush_handler_lookup", Linkage::Import, &handler_lookup_sig)
         .map_err(error)?;
+    let mut handler_redirect_sig = module.make_signature();
+    handler_redirect_sig.params.push(AbiParam::new(I64));
+    handler_redirect_sig.returns.push(AbiParam::new(I64));
+    let handler_redirect = module
+        .declare_function(
+            "kush_handler_redirect",
+            Linkage::Import,
+            &handler_redirect_sig,
+        )
+        .map_err(error)?;
     let mut literal_data = BTreeMap::new();
     let mut literals = Vec::new();
     for f in &program.functions {
@@ -3453,6 +3489,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
             handler_push,
             handler_pop,
             handler_lookup,
+            handler_redirect,
             handler_base: None,
             task_wrappers: &task_wrappers,
             task_pointer_drops: &task_pointer_drops,
@@ -4607,6 +4644,7 @@ struct Generator<'a, 'b> {
     handler_push: FuncId,
     handler_pop: FuncId,
     handler_lookup: FuncId,
+    handler_redirect: FuncId,
     /// Entry handler-stack depth for this function; every return restores it so
     /// an early `return` cannot leave a dynamic handler frame visible.
     handler_base: Option<Variable>,
@@ -5673,6 +5711,14 @@ impl Generator<'_, '_> {
                 self.jump(finish_block, &error);
                 self.builder.switch_to_block(success);
                 return Some(values[1..1 + self.program.width(input.ok)].to_vec());
+            }
+            ExprKind::HandlerDepth => self.runtime_call(self.handler_depth, &[]),
+            ExprKind::HandlerRedirect { depth, body } => {
+                let target = lower!(self.scalar(depth));
+                let before = self.runtime_call(self.handler_redirect, &[target]);
+                let values = self.block(body)?;
+                self.runtime_void(self.handler_restore, &[before]);
+                return Some(values);
             }
             ExprKind::Suspendable(_) | ExprKind::Suspend { .. } => {
                 unreachable!("suspendable bodies are lowered before code generation")
