@@ -289,3 +289,22 @@ fn repeating_paths_cannot_introduce_new_outer_linear_obligations() {
         42,
     );
 }
+
+#[test]
+fn a_record_field_may_hold_functions_of_the_record_itself() {
+    // Naming the field type while the record is still being declared used to
+    // index its (still empty) field list and panic in the compiler.
+    let source = r#"
+        struct S { f: [fn(S) -> S ! {}; 1], n: i64 }
+        fn bump(s: S) -> S ! {} { S { f: s.f, n: s.n ^ 1 } }
+        fn main() -> i64 ! {panic} {
+            let s = S { f: [bump], n: 41 };
+            let [g] = s.f;
+            let t = g(s);
+            t.n
+        }"#;
+    let program = check(source).unwrap();
+    let (value, stats) = program.evaluate_with_stats(&mut Vec::new()).unwrap();
+    assert_eq!(value, 40);
+    assert_eq!(stats.allocations, stats.deallocations);
+}

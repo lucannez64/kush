@@ -6079,8 +6079,12 @@ pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Result<Vec<BorrowLea
                     if types.enums[id].record || types.enums[id].name == "TaskExit" =>
                 {
                     if types.enums[id].record {
-                        for (index, field) in types.enums[id].variants[0].fields.iter().enumerate()
-                        {
+                        // A record still being declared (for example named
+                        // inside its own field types) has no fields yet.
+                        let Some(variant) = types.enums[id].variants.first() else {
+                            return Ok(());
+                        };
+                        for (index, field) in variant.fields.iter().enumerate() {
                             path.push(index);
                             let field_hint = types.enums[id].field_lifetimes[index].clone();
                             let position = field_position(types, id, index, *field, position);
