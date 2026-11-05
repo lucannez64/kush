@@ -547,11 +547,8 @@ checked table.
 `dyn Trait<Nat>` and `dyn Trait<Grade>` are supported because their arguments
 are part of the checked specialization identity. Effect-row trait parameters
 are not part of the language at all (they are rejected on trait declarations),
-so `dyn Trait<Effect>` cannot be spelled. Multi-trait objects written
-`dyn A + B` are an explicit rejection: a closed-world object already exposes
-every trait whose concrete member set coincides (qualify a shared method name as
-`receiver.Trait.method(...)`), while an open dynamic object represents exactly
-one trait specialization.
+so `dyn Trait<Effect>` cannot be spelled. Multi-trait objects `dyn A + B` are
+described below.
 
 Three receiver modes dispatch dynamically in both representations:
 
@@ -696,17 +693,44 @@ coincide. If more than one represented trait declares the called method name,
 the call is ambiguous; qualify it as `object.Trait.method(...)`. A method that
 belongs to only one represented trait needs no qualification. This closed-world
 sharing is sound because every member of the union implements every represented
-trait, but adding an impl rebuilds the member set. A dynamic object represents
-exactly one trait specialization. The surface syntax `dyn A + B` is therefore an
-explicit rejection; closed-world sharing is reached through one trait's `dyn`
-type and explicit qualification.
+trait, but adding an impl rebuilds the member set.
+
+A multi-trait object `dyn A + B` lists several distinct trait specializations
+(each with its own trait arguments and optional `Out = T` bindings). Its
+members implement every listed trait:
+
+```kush
+let mut a: dyn Show + Count = Text { name: "a", count: 1 };
+a.bump();                     // only Count declares bump
+print_i64(a.Show.tag());      // both declare tag: qualify it
+let count: dyn Count = a;     // upcast to a subset of the traits
+```
+
+The list is canonical, so `dyn A + B` and `dyn B + A` are one type, and a
+repeated trait is rejected. Every trait named in a multi-trait object uses the
+dynamic representation (two words: member identifier and owned payload), so
+coercion needs `alloc`. Each registered member has one method table per listed
+trait; registration checks that the member implements every trait. A method
+name declared by one listed trait dispatches through it; a name declared by
+several must be qualified as `object.Trait.method(...)`. All receiver modes,
+generic methods, temporaries, projected fields, nominal fields, `Box`, and
+`Vec` work as for a one-trait object, and linearity follows the members.
+
+An owned multi-trait object coerces to an object over any non-empty subset of
+its traits. The checker records the upcast and registers every member of the
+source (including members coerced later) in the target, and the runtime maps
+the member identifier through the two checked tables; the payload pointer is
+kept, so nothing is allocated, copied, or released. A reference cannot be
+upcast (`&(dyn A + B)` to `&dyn A` is a type mismatch) because it points at
+the source object's identifier; call the method through the original
+reference. Lifetime bounds such as `dyn A + 'a` are rejected.
 
 References that escape their owner's scope remain outside this subset.
 
 ### Design: explicit associated bindings and multi-trait objects
 
-This section records the design of two extensions before they are built; the
-sections above describe them once implemented.
+This section records the design of two extensions; both are implemented as
+described here and in the sections above.
 
 **Explicit associated bindings.** `dyn Trait<Out = T>` names the *same* object
 type as `dyn Trait`: the object specialization is still identified by the
@@ -911,9 +935,8 @@ The following remain intentionally outside the implemented subset:
 - effect parameters on impl headers, lifetime-parameterized impl headers, and
   effect-row trait parameters (the latter are rejected by the trait grammar, so
   `dyn Trait<Effect>` cannot be named);
-- multi-trait object syntax `dyn A + B`; closed-world objects already share
-  members across coincident traits via `object.Trait.method(...)`, and an open
-  dynamic object represents one trait specialization;
+- upcasting a reference to a multi-trait object, downcasts, and lifetime
+  bounds on objects (`dyn A + 'a`);
 - `DynArray` elements and fields erased by structural width subtyping may not
   contain a dynamic object, since object linearity is only known after every
   member is registered;

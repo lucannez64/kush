@@ -1164,17 +1164,16 @@ impl Parser {
                 return Ok(Node::new(TypeKind::SelfType, self.since(path_start)));
             }
             if path == ["dyn"] {
-                let bound = self.dyn_bound()?;
-                if self.at(&Kind::Plus) {
-                    return Err(Diagnostic::new(
-                        self.current().span,
-                        "multi-trait trait objects such as 'dyn A + B' are not supported; a closed-world dyn object already exposes every trait whose concrete member set coincides (qualify a shared method name as 'receiver.Trait.method(...)'), while an open dynamic object represents exactly one trait specialization",
-                    ));
+                let mut bounds = vec![self.dyn_bound()?];
+                while self.eat(&Kind::Plus) {
+                    if matches!(self.current().kind, Kind::Lifetime(_)) {
+                        return Err(self.error(
+                            "trait objects do not take lifetime bounds; object values own their payload",
+                        ));
+                    }
+                    bounds.push(self.dyn_bound()?);
                 }
-                return Ok(Node::new(
-                    TypeKind::Dyn(vec![bound]),
-                    self.since(path_start),
-                ));
+                return Ok(Node::new(TypeKind::Dyn(bounds), self.since(path_start)));
             }
             if path == ["impl"] {
                 return Err(self.error(

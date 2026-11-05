@@ -259,9 +259,12 @@ pub(crate) struct UnionType {
 /// changes only the dispatch tables, never the value layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DynObjectType {
-    pub trait_id: BindingId,
-    pub arguments: TraitArguments,
-    /// Checker spelling such as `dyn Show` or `dyn Convert<i64>`.
+    /// The listed trait specializations, canonically sorted: one for
+    /// `dyn Show`, several for a multi-trait object `dyn Show + Count`. A
+    /// member's method table keys each method by its position here.
+    pub components: Vec<(BindingId, TraitArguments)>,
+    /// Checker spelling such as `dyn Show`, `dyn Convert<i64>`, or
+    /// `dyn Count + Show`.
     pub name: String,
 }
 
@@ -542,7 +545,7 @@ pub(crate) struct Types<'a> {
     /// Dynamically dispatched trait-object specializations, indexed by
     /// `Type::DynObj`. Interning is by `(trait, trait arguments)`.
     pub objects: Vec<DynObjectType>,
-    object_cache: BTreeMap<(BindingId, TraitArguments), usize>,
+    object_cache: BTreeMap<Vec<(BindingId, TraitArguments)>, usize>,
     /// Traits whose objects cannot use the inline closed-world union because
     /// they have generic/blanket impls or appear in a nominal field. This is
     /// decided before layouts are built so a field can hold a fixed-size fat
@@ -1364,6 +1367,91 @@ impl<'a> Types<'a> {
     }
     /// Forget variant refinements, including inside a heterogeneous union.
     /// Stored and reassignable values keep the declared enum alternatives.
+    /// Resolve one `dyn` bound to its object specialization `(trait, trait
+    /// arguments)`, checking object safety and applying its associated-type
+    /// bindings to the specialization's projections.
+    fn lower_dyn_bound(
+        &mut self,
+        bound: &ast::DynBound,
+        substitution: &Subst,
+        depth: usize,
+    ) -> Result<(BindingId, TraitArguments)> {
+        let trait_path = &bound.trait_ref;
+        let ast::TypeKind::Named { arguments, .. } = &trait_path.kind else {
+            return Err(Diagnostic::new(
+                trait_path.span,
+                "a trait object must name one declared trait",
+            ));
+        };
+        let trait_id = self
+            .resolution
+            .reference(trait_path.span)
+            .ok_or_else(|| Diagnostic::new(trait_path.span, "trait object path did not resolve"))?;
+        if self.resolution.bindings[trait_id].kind != BindingKind::Trait {
+            return Err(Diagnostic::new(
+                trait_path.span,
+                format!(
+                    "'{}' is not a declared trait; 'dyn' names a trait object",
+                    self.resolution.bindings[trait_id].name
+                ),
+            ));
+        }
+        for argument in arguments {
+            if matches!(argument.kind, ast::TypeKind::Lifetime(_)) {
+                return Err(Diagnostic::new(
+                    argument.span,
+                    "trait objects do not take lifetime arguments in this subset; object values own their payload and cannot store borrows",
+                ));
+            }
+        }
+        let generics = self
+            .trait_generics
+            .get(&trait_id)
+            .cloned()
+            .unwrap_or_default();
+        // Trait parameters are classified by category, so `dyn Trait<3>`
+        // supplies a natural and `dyn Trait<1>` a grade rather than being
+        // lowered as an ordinary machine type.
+        let arguments = crate::executable::evaluate_trait_arguments(
+            self,
+            self.resolution,
+            self.logical,
+            &generics,
+            arguments,
+            substitution,
+            &self.resolution.bindings[trait_id].name,
+            trait_path.span,
+        )?;
+        let key = (trait_id, arguments);
+        if let Some(reason) = self.dyn_errors.get(&trait_id) {
+            return Err(Diagnostic::new(
+                trait_path.span,
+                format!(
+                    "trait '{}' is not object-safe: {reason}",
+                    self.resolution.bindings[trait_id].name
+                ),
+            ));
+        }
+        for (name, value) in &bound.bindings {
+            if !self
+                .trait_associated_types
+                .get(&trait_id)
+                .is_some_and(|names| names.contains(name))
+            {
+                return Err(Diagnostic::new(
+                    value.span,
+                    format!(
+                        "trait '{}' declares no associated type '{name}' to bind",
+                        self.resolution.bindings[trait_id].name
+                    ),
+                ));
+            }
+            let lowered = self.lower(value, substitution, depth + 1)?;
+            let lowered = self.full(lowered, value.span)?;
+            self.bind_object_projection(&key, name, lowered, value.span)?;
+        }
+        Ok(key)
+    }
     /// Fix or check one projected associated type of an object
     /// specialization from an explicit `dyn Trait<Name = T>` binding.
     pub(crate) fn bind_object_projection(
@@ -2840,124 +2928,86 @@ impl<'a> Types<'a> {
             return self.tuple(elements, ty.span);
         }
         if let ast::TypeKind::Dyn(bounds) = &ty.kind {
-            let [bound] = bounds.as_slice() else {
-                return Err(Diagnostic::new(
-                    ty.span,
-                    "multi-trait trait objects are not supported yet",
-                ));
-            };
-            let trait_path = &bound.trait_ref;
-            let ast::TypeKind::Named { arguments, .. } = &trait_path.kind else {
-                return Err(Diagnostic::new(
-                    trait_path.span,
-                    "a trait object must name one declared trait",
-                ));
-            };
-            let trait_id = self.resolution.reference(trait_path.span).ok_or_else(|| {
-                Diagnostic::new(trait_path.span, "trait object path did not resolve")
-            })?;
-            if self.resolution.bindings[trait_id].kind != BindingKind::Trait {
-                return Err(Diagnostic::new(
-                    trait_path.span,
-                    format!(
-                        "'{}' is not a declared trait; 'dyn' names a trait object",
-                        self.resolution.bindings[trait_id].name
-                    ),
-                ));
-            }
-            for argument in arguments {
-                if matches!(argument.kind, ast::TypeKind::Lifetime(_)) {
+            let mut components = Vec::with_capacity(bounds.len());
+            for bound in bounds {
+                let component = self.lower_dyn_bound(bound, substitution, depth)?;
+                if components.contains(&component) {
                     return Err(Diagnostic::new(
-                        argument.span,
-                        "trait objects do not take lifetime arguments in this subset; object values own their payload and cannot store borrows",
-                    ));
-                }
-            }
-            let generics = self
-                .trait_generics
-                .get(&trait_id)
-                .cloned()
-                .unwrap_or_default();
-            // Trait parameters are classified by category, so `dyn Trait<3>`
-            // supplies a natural and `dyn Trait<1>` a grade rather than being
-            // lowered as an ordinary machine type.
-            let arguments = crate::executable::evaluate_trait_arguments(
-                self,
-                self.resolution,
-                self.logical,
-                &generics,
-                arguments,
-                substitution,
-                &self.resolution.bindings[trait_id].name,
-                ty.span,
-            )?;
-            let key = (trait_id, arguments);
-            if let Some(reason) = self.dyn_errors.get(&trait_id) {
-                return Err(Diagnostic::new(
-                    ty.span,
-                    format!(
-                        "trait '{}' is not object-safe: {reason}",
-                        self.resolution.bindings[trait_id].name
-                    ),
-                ));
-            }
-            for (name, value) in &bound.bindings {
-                if !self
-                    .trait_associated_types
-                    .get(&trait_id)
-                    .is_some_and(|names| names.contains(name))
-                {
-                    return Err(Diagnostic::new(
-                        value.span,
+                        bound.trait_ref.span,
                         format!(
-                            "trait '{}' declares no associated type '{name}' to bind",
-                            self.resolution.bindings[trait_id].name
+                            "trait '{}' is listed twice in this trait object",
+                            self.resolution.bindings[component.0].name
                         ),
                     ));
                 }
-                let lowered = self.lower(value, substitution, depth + 1)?;
-                let lowered = self.full(lowered, value.span)?;
-                self.bind_object_projection(&key, name, lowered, value.span)?;
+                components.push(component);
             }
-            if self.dynamic_traits.contains(&trait_id) {
-                if let Some(id) = self.object_cache.get(&key) {
-                    return Ok(Type::DynObj(*id));
-                }
-                if self.objects.len() >= 256 {
-                    return Err(Diagnostic::new(
+            components.sort();
+            if let [(trait_id, arguments)] = components.as_slice()
+                && !self.dynamic_traits.contains(trait_id)
+            {
+                let key = (*trait_id, arguments.clone());
+                return self.dyn_objects.get(&key).copied().ok_or_else(|| {
+                    Diagnostic::new(
                         ty.span,
-                        "trait-object budget exhausted (256)",
-                    ));
-                }
-                let mut name = self.resolution.bindings[trait_id].name.clone();
-                if !generics.is_empty() {
-                    name.push('<');
-                    name.push_str(&crate::executable::trait_specialization_name(
-                        self.resolution,
-                        self,
-                        &generics,
-                        &key.1,
-                    ));
-                    name.push('>');
-                }
-                let id = self.objects.len();
-                self.objects.push(DynObjectType {
-                    trait_id,
-                    arguments: key.1.clone(),
-                    name: format!("dyn {name}"),
+                        format!(
+                            "no finite closed-world object type exists for trait '{}'; it needs at least one concrete impl and no generic or blanket impls",
+                            self.resolution.bindings[*trait_id].name
+                        ),
+                    )
                 });
-                self.object_cache.insert(key, id);
-                return Ok(Type::DynObj(id));
             }
-            return self.dyn_objects.get(&key).copied().ok_or_else(|| {
-                Diagnostic::new(
+            if let Some(id) = components
+                .iter()
+                .find(|(trait_id, _)| !self.dynamic_traits.contains(trait_id))
+            {
+                return Err(Diagnostic::new(
                     ty.span,
                     format!(
-                        "no finite closed-world object type exists for trait '{}'; it needs at least one concrete impl and no generic or blanket impls",
-                        self.resolution.bindings[trait_id].name
+                        "internal error: trait '{}' in a multi-trait object has no dynamic representation",
+                        self.resolution.bindings[id.0].name
                     ),
-                )
+                ));
+            }
+            if let Some(id) = self.object_cache.get(&components) {
+                return Ok(Type::DynObj(*id));
+            }
+            if self.objects.len() >= 256 {
+                return Err(Diagnostic::new(
+                    ty.span,
+                    "trait-object budget exhausted (256)",
+                ));
+            }
+            let name = components
+                .iter()
+                .map(|(trait_id, arguments)| {
+                    let generics = self
+                        .trait_generics
+                        .get(trait_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut name = self.resolution.bindings[*trait_id].name.clone();
+                    if !generics.is_empty() {
+                        name.push('<');
+                        name.push_str(&crate::executable::trait_specialization_name(
+                            self.resolution,
+                            self,
+                            &generics,
+                            arguments,
+                        ));
+                        name.push('>');
+                    }
+                    name
+                })
+                .collect::<Vec<_>>()
+                .join(" + ");
+            let id = self.objects.len();
+            self.objects.push(DynObjectType {
+                components: components.clone(),
+                name: format!("dyn {name}"),
             });
+            self.object_cache.insert(components, id);
+            return Ok(Type::DynObj(id));
         }
         if let ast::TypeKind::Named { path, arguments } = &ty.kind {
             if path.len() == 2 {

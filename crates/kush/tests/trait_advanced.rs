@@ -2183,20 +2183,21 @@ fn projected_shared_receivers_keep_their_owner_borrowed_through_arguments() {
 }
 
 #[test]
-fn multi_trait_trait_objects_are_an_explicit_language_rejection() {
-    rejects(
+fn multi_trait_trait_objects_dispatch_both_traits() {
+    agrees(
         r#"
         struct Point { x: i64 }
         trait A { fn a(self: Self) -> i64 ! {panic}; }
         trait B { fn b(self: Self) -> i64 ! {panic}; }
         impl A for Point { fn a(self: Self) -> i64 ! {panic} { self.x } }
         impl B for Point { fn b(self: Self) -> i64 ! {panic} { self.x + 1 } }
-        fn main() -> i64 ! {io, panic} {
+        fn main() -> i64 ! {io, alloc, panic} {
             let object: dyn A + B = Point { x: 5 };
             print_i64(object.a());
             0
         }"#,
-        "multi-trait trait objects",
+        0,
+        "5\n",
     );
 }
 

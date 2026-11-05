@@ -101,6 +101,9 @@ pub struct Resolution {
     /// Built-ins occupy bits 0..4; declared effects take the following bits in
     /// declaration order.
     pub effect_bits: BTreeMap<String, u16>,
+    /// Traits named in a multi-trait object type `dyn A + B` anywhere in the
+    /// program. They always use the dynamic object representation.
+    pub multi_object_traits: BTreeSet<BindingId>,
     references_by_span: BTreeMap<(usize, usize), BindingId>,
     binders_by_span: BTreeMap<(usize, usize), BindingId>,
 }
@@ -1234,6 +1237,13 @@ impl Resolver {
                 TypeKind::Dyn(bounds) => {
                     for inner in crate::ast::dyn_types(bounds) {
                         r.ty(inner)?;
+                    }
+                    if bounds.len() > 1 {
+                        for bound in bounds {
+                            if let Some(id) = r.result.reference(bound.trait_ref.span) {
+                                r.result.multi_object_traits.insert(id);
+                            }
+                        }
                     }
                 }
                 TypeKind::Tuple(types) => {

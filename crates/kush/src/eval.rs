@@ -3201,6 +3201,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     value: Arc::new(Mutex::new(value)),
                 })
             }
+            Coercion::DynUpcast { from, to } => self.dyn_upcast(*from, *to, value, span),
             Coercion::Callable {
                 function, capture, ..
             } => {
@@ -4969,6 +4970,37 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     /// Resolve the registered member vtable and call the selected checked
     /// method. The receiver value is already adapted to the impl's receiver
     /// mode (owned payload, payload-cell reference, or mutable cell reference).
+    /// Map an owned object's member identifier from `from`'s member table to
+    /// `to`'s. The payload cell moves unchanged: nothing is allocated, copied,
+    /// or released.
+    fn dyn_upcast(&self, from: usize, to: usize, value: Value, span: Span) -> Result<Value> {
+        let Value::DynObject { member, value } = value else {
+            return Err(Diagnostic::new(
+                span,
+                "internal error: a trait-object upcast expected an owned object",
+            ));
+        };
+        let member_type = self
+            .program
+            .dyn_members
+            .get(from)
+            .and_then(|members| members.get(member))
+            .map(|entry| entry.member);
+        let target = member_type.and_then(|member_type| {
+            self.program
+                .dyn_members
+                .get(to)?
+                .iter()
+                .position(|entry| entry.member == member_type)
+        });
+        let Some(member) = target else {
+            return Err(Diagnostic::new(
+                span,
+                "internal error: an upcast member is not registered in the target object",
+            ));
+        };
+        Ok(Value::DynObject { member, value })
+    }
     fn call_dyn_member(
         &mut self,
         spec: &DynCallSpec,
@@ -6141,6 +6173,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             member: *member,
                             value: Arc::new(Mutex::new(inner)),
                         }
+                    }
+                    Coercion::DynUpcast { from, to } => {
+                        self.dyn_upcast(*from, *to, inner, expr.span)?
                     }
                     Coercion::Callable {
                         function, capture, ..

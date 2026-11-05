@@ -5044,6 +5044,37 @@ impl Generator<'_, '_> {
     /// selected for that member. Owned dispatch loads the payload and releases
     /// its allocation before the call; borrowed dispatch passes the payload
     /// pointer directly so an owning/linear member is never copied.
+    /// Map an owned object's member identifier from `from`'s member table to
+    /// `to`'s through a compare-and-select chain. The payload pointer word is
+    /// kept, so nothing is allocated, copied, or released.
+    fn dyn_upcast(&mut self, from: usize, to: usize, values: &[Value]) -> Words {
+        let source = self
+            .program
+            .dyn_members
+            .get(from)
+            .cloned()
+            .unwrap_or_default();
+        let target = self
+            .program
+            .dyn_members
+            .get(to)
+            .cloned()
+            .unwrap_or_default();
+        let mut mapped = self.constant(0);
+        for (index, entry) in source.iter().enumerate() {
+            let position = target
+                .iter()
+                .position(|candidate| candidate.member == entry.member)
+                .expect("the checker registers every upcast member in the target object");
+            let hit = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, values[0], index as i64);
+            let value = self.constant(position as i64);
+            mapped = self.builder.ins().select(hit, value, mapped);
+        }
+        vec![mapped, values[1]]
+    }
     fn dyn_call(&mut self, spec_index: usize, values: Words) -> Words {
         let spec = self.program.dyn_calls[spec_index].clone();
         let members = self
@@ -6753,6 +6784,9 @@ impl Generator<'_, '_> {
                         let pointer = self.allocate_dyn_payload(*member_type, &values);
                         return Some(vec![self.constant(*member as i64), pointer]);
                     }
+                    Coercion::DynUpcast { from, to } => {
+                        return Some(self.dyn_upcast(*from, *to, &values));
+                    }
                 }
             }
             ExprKind::DynArrayNew { element, capacity } => {
@@ -8441,6 +8475,7 @@ impl Generator<'_, '_> {
                 let pointer = self.allocate_dyn_payload(*member_type, values);
                 vec![self.constant(*member as i64), pointer]
             }
+            Coercion::DynUpcast { from, to } => self.dyn_upcast(*from, *to, values),
             Coercion::Callable {
                 function,
                 capture,
