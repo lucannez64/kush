@@ -3054,10 +3054,21 @@
       "deps": [
         "A-RT-GENERIC"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Rebind length binders inside Vec/Box/tuple/record arguments of a signature, not only a whole parameter/result or one reference.",
-      "commit": null,
-      "log": [],
+      "commit": "2273cec",
+      "log": [
+        {
+          "time": "2026-11-05 14:49:41",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 14:53:48",
+          "who": "agent",
+          "text": "done 2273cec"
+        }
+      ],
       "area": "dynarray"
     },
     {
