@@ -914,3 +914,35 @@ fn main() -> i64 ! {alloc} {
         "inside a fn or dyn type (possibly through a type alias)",
     );
 }
+
+#[test]
+fn recursive_calls_forward_their_own_binders() {
+    // Review regression (round 5): forwarding `n` (or swapping `n` and `m`)
+    // in a self-call maps a binder to itself, which is sound and accepted.
+    agrees(
+        r#"
+fn f(n: i64, a: [i64; n <= 4], d: i64) -> i64 ! {panic} {
+    if d == 0 { DynArray.len(&a) } else { f(n, a, d - 1) }
+}
+fn main() -> i64 ! {panic} {
+    let k: i64 = 3;
+    let a: [i64; k <= 4] = Array.fill(k, 5);
+    f(k, a, 2)
+}"#,
+        3,
+    );
+    agrees(
+        r#"
+        fn f(n: i64, m: i64, a: [i64; n <= 4], b: [i64; m <= 4], d: i64) -> i64 ! {panic} {
+            if d == 0 { DynArray.len(&a) * 10 + DynArray.len(&b) } else { f(m, n, b, a, d - 1) }
+        }
+        fn main() -> i64 ! {panic} {
+            let k: i64 = 4;
+            let j: i64 = 1;
+            let a: [i64; k <= 4] = Array.fill(k, 5);
+            let b: [i64; j <= 4] = Array.fill(j, 6);
+            f(k, j, a, b, 1)
+        }"#,
+        14,
+    );
+}

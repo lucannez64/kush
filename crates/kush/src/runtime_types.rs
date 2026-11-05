@@ -924,16 +924,6 @@ impl<'a> Types<'a> {
         span: Span,
     ) -> Result<Type> {
         let rebound = self.rebind_lengths_inner(ty, map, span)?;
-        // No callee binder may survive into the caller's type.
-        if runtime_length_binders(self, rebound)
-            .iter()
-            .any(|binder| map.contains_key(binder))
-        {
-            return Err(Diagnostic::new(
-                span,
-                "this call's signature mentions a runtime-length array in a position its length binder cannot be substituted in",
-            ));
-        }
         if rebound != ty && !self.rebinding_isomorphic(ty, rebound, map, &mut BTreeSet::new()) {
             return Err(Diagnostic::new(
                 span,
