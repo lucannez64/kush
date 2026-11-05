@@ -894,8 +894,32 @@ fn check_outer_writes(
     block: &Block,
     outer_live: &dyn Fn(usize) -> bool,
     locals: &[Local],
+    capture_writes: &BTreeMap<usize, Vec<bool>>,
 ) -> Result<()> {
-    fn walk(expr: &Expr, outer_live: &dyn Fn(usize) -> bool, locals: &[Local]) -> Result<()> {
+    fn walk(
+        expr: &Expr,
+        outer_live: &dyn Fn(usize) -> bool,
+        locals: &[Local],
+        capture_writes: &BTreeMap<usize, Vec<bool>>,
+    ) -> Result<()> {
+        // A closure that writes a captured local through a reference writes
+        // the continuation's copy too.
+        if let ExprKind::FnValue { function, captures } = &expr.kind
+            && let Some(writes) = capture_writes.get(function)
+        {
+            for (capture, writes) in captures.iter().zip(writes) {
+                if *writes
+                    && let Some(slot) = place_root(capture)
+                    && outer_live(slot)
+                {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "a resumed continuation cannot write a local of the enclosing function that is used after the 'handle': the continuation runs on its own copy of the value",
+                    )
+                    .with_note(locals[slot].span, "local declared here"));
+                }
+            }
+        }
         let written = match &expr.kind {
             ExprKind::Assign(slot, _)
             | ExprKind::InitOwner { slot, .. }
@@ -920,20 +944,141 @@ fn check_outer_writes(
         let mut result = Ok(());
         expr.for_each_child(&mut |child| {
             if result.is_ok() {
-                result = walk(child, outer_live, locals);
+                result = walk(child, outer_live, locals, capture_writes);
             }
         });
         result
     }
     for statement in &block.statements {
         if let Statement::Let(_, value) | Statement::Expr(value) = statement {
-            walk(value, outer_live, locals)?;
+            walk(value, outer_live, locals, capture_writes)?;
         }
     }
     if let Some(tail) = &block.tail {
-        walk(tail, outer_live, locals)?;
+        walk(tail, outer_live, locals, capture_writes)?;
     }
     Ok(())
+}
+
+/// Locals that hold a closure capturing locals by reference (directly or
+/// through moves between locals): the closure's type does not show the
+/// borrow, but holding it across a suspension is holding a borrow.
+fn by_reference_closures(program: &Executable, body: &Block) -> Slots {
+    fn holds(program: &Executable, out: &Slots, value: &Expr) -> bool {
+        let mut value = value;
+        while let ExprKind::Coerce { value: inner, .. } = &value.kind {
+            value = inner;
+        }
+        match &value.kind {
+            ExprKind::FnValue { function, .. } => {
+                program.functions[*function].capture_refs.iter().any(|r| *r)
+            }
+            ExprKind::Local(source) | ExprKind::Move(source) => out.contains(source),
+            _ => false,
+        }
+    }
+    fn in_block(block: &Block, program: &Executable, out: &mut Slots, changed: &mut bool) {
+        for statement in &block.statements {
+            match statement {
+                Statement::Let(slot, value) => {
+                    if holds(program, out, value) && out.insert(*slot) {
+                        *changed = true;
+                    }
+                    in_expr(value, program, out, changed);
+                }
+                Statement::Expr(value) => in_expr(value, program, out, changed),
+                Statement::Declare(_) => {}
+            }
+        }
+        if let Some(tail) = &block.tail {
+            in_expr(tail, program, out, changed);
+        }
+    }
+    fn in_expr(expr: &Expr, program: &Executable, out: &mut Slots, changed: &mut bool) {
+        if let ExprKind::Assign(slot, value) = &expr.kind
+            && holds(program, out, value)
+            && out.insert(*slot)
+        {
+            *changed = true;
+        }
+        let mut blocks = Vec::new();
+        let mut children = Vec::new();
+        block_children(expr, &mut |block| blocks.push(block), &mut |child| {
+            children.push(child)
+        });
+        for block in blocks {
+            in_block(block, program, out, changed);
+        }
+        for child in children {
+            in_expr(child, program, out, changed);
+        }
+    }
+    let mut out = Slots::new();
+    loop {
+        let mut changed = false;
+        in_block(body, program, &mut out, &mut changed);
+        if !changed {
+            break out;
+        }
+    }
+}
+
+/// Closures that write captured locals: function index to per-capture flags.
+fn writing_closures(program: &Executable) -> BTreeMap<usize, Vec<bool>> {
+    program
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, function)| function.capture_writes.iter().any(|w| *w))
+        .map(|(index, function)| (index, function.capture_writes.clone()))
+        .collect()
+}
+
+/// Locals a suspension point's own call borrows: directly (`&v`, `&mut v`,
+/// a place reference), plus whether it passes an opaque borrowed value (a
+/// view local or a by-reference closure) whose source is unknown.
+fn point_borrows(call: &Expr, host: &Host) -> (Slots, bool) {
+    fn operand(expr: &Expr, host: &Host, direct: &mut Slots, opaque: &mut bool) {
+        match &expr.kind {
+            ExprKind::Borrow(slot) | ExprKind::BorrowInit { slot, .. } => {
+                direct.insert(*slot);
+            }
+            ExprKind::BorrowPlace(place) | ExprKind::BorrowField(place) => {
+                if let Some(slot) = place_root(place) {
+                    direct.insert(slot);
+                } else {
+                    *opaque = true;
+                }
+            }
+            ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot)
+                if host.borrowed.get(*slot).copied().unwrap_or(true)
+                    || host.by_reference.contains(slot) =>
+            {
+                *opaque = true;
+            }
+            _ => {}
+        }
+        if expr.ty.is_view() || expr.ty.is_ref() || expr.ty.is_text() {
+            *opaque |= !matches!(
+                expr.kind,
+                ExprKind::Borrow(_) | ExprKind::BorrowInit { .. } | ExprKind::BorrowPlace(_)
+            );
+        }
+        expr.for_each_child(&mut |child| operand(child, host, direct, opaque));
+    }
+    let mut direct = Slots::new();
+    let mut opaque = false;
+    let operands: Vec<&Expr> = match &call.kind {
+        ExprKind::Coerce { value, .. } => return point_borrows(value, host),
+        ExprKind::Call(_, arguments) => arguments.iter().collect(),
+        ExprKind::CallIndirect { arguments, .. } => arguments.iter().take(1).collect(),
+        ExprKind::DynamicPerform { payload, .. } => vec![payload],
+        _ => vec![],
+    };
+    for argument in operands {
+        operand(argument, host, &mut direct, &mut opaque);
+    }
+    (direct, opaque)
 }
 
 /// Replace the `Erased` token argument of a suspension's handler call.
@@ -971,6 +1116,10 @@ struct Host {
     copyable: Vec<bool>,
     /// Locals the owning function reads after the body.
     after: Slots,
+    /// Locals holding a closure that captures by reference.
+    by_reference: Slots,
+    /// Closures that write captured locals, by function index.
+    capture_writes: BTreeMap<usize, Vec<bool>>,
 }
 
 /// What the machine builder needs about one suspendable body.
@@ -999,6 +1148,8 @@ struct Spec {
 }
 
 struct Built {
+    /// The body had suspension points (otherwise it is returned unchanged).
+    points: bool,
     body: Block,
     continuations: Vec<Function>,
     allocates: bool,
@@ -1017,6 +1168,7 @@ fn build(
     let paths = point_paths(&body)?;
     if paths.is_empty() {
         return Ok(Built {
+            points: false,
             body,
             continuations: Vec::new(),
             allocates: false,
@@ -1049,11 +1201,38 @@ fn build(
     for (point, path) in &paths {
         point_spans.insert(*point, at_path_mut(&mut body, path).span);
     }
+    // The point's own call may borrow a local that its continuation also
+    // captures: the callee (or handler) would then use the original while
+    // the continuation works on its moved copy.
+    for (point, path) in &paths {
+        let site = at_path_mut(&mut body, path);
+        let ExprKind::Suspend { call, .. } = &site.kind else {
+            unreachable!("paths lead to suspension points")
+        };
+        let (direct, opaque) = point_borrows(call, host);
+        let relevant = captures[point]
+            .iter()
+            .copied()
+            .filter(|slot| Some(*slot) != spec.finish && !matches!(locals[*slot].ty, Type::Fn(_)))
+            .collect::<Vec<_>>();
+        let conflict = relevant
+            .iter()
+            .find(|slot| direct.contains(slot))
+            .or_else(|| relevant.first().filter(|_| opaque));
+        if let Some(slot) = conflict {
+            return Err(Diagnostic::new(
+                point_spans[point],
+                "this call can suspend while it borrows a value that is still used after it; the resumed code would work on a moved copy. Finish using the borrowed value before the call, or pass an owned value",
+            )
+            .with_note(locals[*slot].span, "value used after the call declared here"));
+        }
+    }
     for (point, slots) in &captures {
         let at = point_spans[point];
         for slot in slots {
             let local = &locals[*slot];
-            if host.borrowed.get(*slot).copied().unwrap_or(true) {
+            if host.borrowed.get(*slot).copied().unwrap_or(true) || host.by_reference.contains(slot)
+            {
                 return Err(Diagnostic::new(
                     at,
                     "a borrowed value (slice view, text view, reference, borrowed record, or task handle) cannot stay live across a non-tail 'perform'; end the borrow before the perform or pass an owned value",
@@ -1289,7 +1468,7 @@ fn build(
         };
         let rest = zipper.block(&body, &paths[point], input);
         check_escapes(&rest)?;
-        check_outer_writes(&rest, &outer_live, locals)?;
+        check_outer_writes(&rest, &outer_live, locals, &host.capture_writes)?;
         let mut cont_locals = locals.clone();
         cont_locals.push(Local {
             ty: input_ty,
@@ -1399,6 +1578,7 @@ fn build(
         continuations.push(function);
     }
     Ok(Built {
+        points: true,
         body,
         continuations,
         allocates,
@@ -1502,6 +1682,8 @@ fn lower_one(
         borrowed: function.local_borrowed.clone(),
         copyable: function.local_copyable.clone(),
         after,
+        by_reference: by_reference_closures(program, &function.body),
+        capture_writes: writing_closures(program),
     };
     let mut body = std::mem::replace(&mut program.functions[index].body, empty_block());
     let first_function = program.functions.len();
@@ -1532,6 +1714,9 @@ fn lower_one(
         };
         let built = build(&host, &spec, body, first_function, &owns)?;
         continuations = built.continuations;
+        if !built.points {
+            return Ok(ExprKind::Block(built.body));
+        }
         Ok(ExprKind::Region {
             body: built.body,
             finish: None,
@@ -2106,6 +2291,8 @@ fn resumable_entry(
         borrowed,
         copyable,
         after: Slots::new(),
+        by_reference: by_reference_closures(program, &body),
+        capture_writes: writing_closures(program),
     };
     let spec = Spec {
         result,

@@ -942,3 +942,129 @@ fn tail_and_non_tail_loops_agree_in_both_backends() {
     agrees(&tail, s, "");
     agrees(&non_tail, s, "");
 }
+
+// ---------------------------------------------------------------------------
+// Independent review regressions (E-REVIEW)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn review_a_resumable_call_cannot_borrow_a_value_its_continuation_captures() {
+    // The callee would write the original vector while the continuation
+    // holds a moved copy (native use after free before the fix).
+    rejects(
+        &declared(
+            "fn grow(v: &mut Vec<i64>) -> i64 ! {Op, alloc, panic} {
+                 Vec.push(v, 9); Vec.push(v, 10);
+                 perform Op(1)
+             }",
+            "alloc, panic",
+            "let mut v: Vec<i64> = [1];
+             let a = grow(&mut v);
+             Vec.len(&v) * 100 + a",
+        ),
+        "can suspend while it borrows a value that is still used after it",
+    );
+    rejects(
+        &declared(
+            "fn bump(p: &mut i64) -> i64 ! {Op, panic} { *p = 5; perform Op(1) }",
+            "alloc, panic",
+            "let mut n = 1; let a = bump(&mut n); n * 100 + a",
+        ),
+        "can suspend while it borrows a value that is still used after it",
+    );
+    // Borrowing a value that is dead after the call is fine.
+    let dead = declared(
+        "fn bump(p: &mut i64) -> i64 ! {Op, panic} { *p = 5; perform Op(1) }",
+        "alloc, panic",
+        "let mut n = 1; let a = bump(&mut n); a * 3",
+    );
+    agrees(&dead, 4096, "");
+    // Under a tail-resumptive handler nothing suspends, so the borrow is
+    // ordinary.
+    let tail = r#"
+        effect Op: i64 -> i64;
+        fn grow(v: &mut Vec<i64>) -> i64 ! {Op, alloc, panic} {
+            Vec.push(v, 9); Vec.push(v, 10);
+            perform Op(1)
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x ^ 2) } {
+                let mut v: Vec<i64> = [1];
+                let a = grow(&mut v);
+                Vec.len(&v) * 100 + a
+            }
+        }"#;
+    agrees(tail, 303, "");
+}
+
+#[test]
+fn review_closures_capturing_by_reference_cannot_cross_or_write_through_a_perform() {
+    rejects(
+        &with_handler(
+            "",
+            "let mut m = 1;
+             let f = fn() -> Unit ! {panic} { m = m + 100; };
+             let a = perform Ask(1);
+             f();
+             a + m",
+        ),
+        "cannot stay live across a non-tail 'perform'",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let mut n = 1;
+            let r = handle Ask: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { let r = resume(x); r + 1 } {
+                let a = perform Ask(1);
+                let f = fn() -> Unit ! {panic} { n = n + 100; };
+                f();
+                a
+            };
+            r * 1000 + n
+        }"#,
+        "cannot write a local of the enclosing function",
+    );
+}
+
+#[test]
+fn review_task_scopes_that_may_perform_are_rejected_without_other_points() {
+    rejects(
+        &declared(
+            "fn call() -> i64 ! {Op, panic} { perform Op(20) }",
+            "alloc, panic, suspend",
+            "let mut out = 0;
+             Task.scope(fn() -> Unit ! {Op, alloc, panic, suspend} { out = call(); });
+             out * 3",
+        ),
+        "cannot be resumed",
+    );
+}
+
+#[test]
+fn review_performs_on_the_left_of_short_circuits_and_in_borrowed_temporaries() {
+    let left = with_handler(
+        "",
+        "let i = 1; if perform Ask(i) < 40 && i < 10 { 1 } else { 2 }",
+    );
+    agrees(&left, 2, "");
+    let looped = with_handler(
+        "",
+        "let mut i = 0;
+         while perform Ask(i) < 40 && i < 10 { i = i + 1; }
+         i",
+    );
+    // Five performs (0, 10, 20, 30, 40), each adding one on the way out.
+    agrees(&looped, 9, "");
+    let temporary = declared(
+        "fn mk(n: i64) -> Vec<i64> ! {Op, alloc, panic} { let a = perform Op(n); [a, a] }",
+        "alloc, panic",
+        "let n = Vec.len(&mk(2)); n * 3",
+    );
+    agrees(&temporary, 4102, "");
+}

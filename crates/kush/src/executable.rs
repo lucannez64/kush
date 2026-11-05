@@ -30898,7 +30898,35 @@ impl Checker<'_, '_> {
             self.mark_awaits_in_block(&mut block, operation, bit, &site.name, site.multishot)?;
         }
         if self.handlers.last().is_none_or(|scope| scope.points == 0) {
-            return Ok(block);
+            if site.operation.is_none() {
+                return Ok(block);
+            }
+            // No suspension point, but the lowering still rejects ways the
+            // body could perform the operation that cannot be resumed (task
+            // scopes, trait objects, callbacks), which would otherwise run
+            // with the identity token under this non-tail handler.
+            let ty = block.ty;
+            let token = self.resume_type(result_ty, site.multishot);
+            return Ok(Block {
+                statements: vec![],
+                tail: Some(Box::new(Expr {
+                    kind: ExprKind::Suspendable(Box::new(Suspendable {
+                        handler_function: site.handler_function,
+                        operation: site.operation,
+                        result: ty,
+                        token,
+                        multishot: site.multishot,
+                        handler_writes: site.handler_writes,
+                        effects: site.effects,
+                        body: block,
+                        span,
+                    })),
+                    ty,
+                    span,
+                    resource: None,
+                })),
+                ty,
+            });
         }
         if !site.lexical {
             if self.linear_type(result_ty) {

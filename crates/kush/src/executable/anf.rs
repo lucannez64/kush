@@ -206,9 +206,9 @@ impl<T: Temporaries> Anf<'_, T> {
     fn anf_operands(&mut self, expr: &mut Expr, out: &mut Vec<Statement>) -> Result<()> {
         let span = expr.span;
         let operands: Vec<&mut Expr> = match &mut expr.kind {
-            ExprKind::Binary(op, left, right) if !matches!(op, Kind::AmpAmp | Kind::PipePipe) => {
-                vec![left, right]
-            }
+            // A short-circuit whose right operand suspends was turned into an
+            // `if` above; here only the left operand (always evaluated) can.
+            ExprKind::Binary(_, left, right) => vec![left, right],
             ExprKind::StructEq { left, right, .. } => vec![left, right],
             ExprKind::Unary(_, value)
             | ExprKind::Coerce { value, .. }
@@ -218,7 +218,9 @@ impl<T: Temporaries> Anf<'_, T> {
             | ExprKind::Assign(_, value)
             | ExprKind::Break(Some(value), _)
             | ExprKind::Drop(value)
-            | ExprKind::BoxNew(value) => vec![value],
+            | ExprKind::BoxNew(value)
+            | ExprKind::InitOwner { value, .. }
+            | ExprKind::BorrowInit { value, .. } => vec![value],
             ExprKind::Call(_, arguments)
             | ExprKind::Construct {
                 fields: arguments, ..
