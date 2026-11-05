@@ -3105,6 +3105,62 @@
       "desc": "Relax rule 2 of docs/effect-state-machines.md: views of storage owned outside the handled body may live across a perform with the handle's extent as region; token classed as a scoped borrowed-capture closure.",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "FIX-ANF-BORROW-ORDER",
+      "title": "ANF keeps a borrow before a later operand that writes the borrowed local",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "g(&x, { x = 100; perform Ask(0) }) was accepted under a non-tail handler (borrow taken after the write) but rejected under a tail one.",
+      "commit": "ed69498",
+      "log": [
+        {
+          "time": "2026-11-05 14:07:58",
+          "who": "agent",
+          "text": "done ed69498"
+        }
+      ]
+    },
+    {
+      "id": "FIX-FN-ARRAY-FIELD",
+      "title": "Compiler panic on a record field holding an array of self-referential function values",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "struct S { f: [fn(S) -> S ! {}; 1], n: i64 } panics at runtime_types.rs (index out of bounds).",
+      "commit": "fd0c46e",
+      "log": [
+        {
+          "time": "2026-11-05 14:07:58",
+          "who": "agent",
+          "text": "done fd0c46e"
+        }
+      ]
+    },
+    {
+      "id": "FIX-EVAL-TASK-STACK",
+      "title": "Evaluator stack overflow with nested Task.scope/Task.spawn",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "kush eval aborts (Rust stack overflow) at about five nested calls that each run Task.scope + Task.spawn; native is correct.",
+      "commit": "ea8f99b",
+      "log": [
+        {
+          "time": "2026-11-05 14:07:58",
+          "who": "agent",
+          "text": "done ea8f99b"
+        },
+        {
+          "time": "2026-11-05 14:07:59",
+          "who": "agent",
+          "text": "Boat gate on ea8f99b: fmt, clippy, 1476 tests pass."
+        }
+      ]
     }
   ]
 }
