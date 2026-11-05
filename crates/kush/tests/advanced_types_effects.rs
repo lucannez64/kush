@@ -3726,11 +3726,7 @@ fn runtime_length_array_binders_and_positions_are_checked() {
         "fn f(n: i64, b: Bool) -> [i64; b <= 4] ! {} { 0 } fn main() -> i64 ! {} { 0 }",
         "must be an earlier i64 parameter of the same function",
     );
-    rejects(
-        "fn f(n: i64, a: Vec<[i64; n <= 4]>) -> i64 ! {} { 0 } fn main() -> i64 ! {} { 0 }",
-        "must be a whole parameter or result type",
-    );
-    // Generic and method signatures are covered by
+    // Generic, method, and nested signatures are covered by
     // `tests/runtime_length_extensions.rs`.
     rejects(
         "struct S { a: [i64; n <= 4] } fn main() -> i64 ! {} { 0 }",

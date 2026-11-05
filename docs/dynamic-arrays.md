@@ -260,9 +260,13 @@ Semantics:
   `!=`, and `match` patterns work as for `DynArray`; a `..rest` binding is a
   plain `DynArray<T, C>`. `DynArray.push` and `DynArray.pop` are rejected
   because they would change the length.
-- **Signatures and calls.** A parameter or result type may be a runtime-length
-  array, or a direct `&`/`&mut` reference to one, whose binder is an earlier
-  `i64` parameter of the same function. At each call the actual argument for
+- **Signatures and calls.** A parameter or result type may mention a
+  runtime-length array anywhere the call site can rewrite it: as the whole
+  type, behind `&`/`&mut`, or inside `Vec`, `Box`, tuples, fixed and inline
+  arrays, generic records and enums, structural rows, and unions (for
+  example `v: &Vec<[i64; n <= 4]>` or `-> Pair<[i64; n <= 4]>`). Each binder
+  must be an earlier `i64` parameter of the same function (any `i64`
+  parameter for the result). At each call the actual argument for
   that parameter must be the name of an immutable `i64` binding; the callee's
   binder is replaced by the caller's, so `fn f(n: i64, a: [i64; n <= 8])`
   called as `f(k, b)` requires `b: [i64; k <= 8]`, and the result of
@@ -332,8 +336,7 @@ word. A runtime array length without a capacity, such as `[i64; n]`, remains
 an explicit diagnostic that suggests `[T; n <= C]`; use `Vec<T>` for an owned
 container of unbounded length. Runtime-length arrays cannot appear in foreign
 signatures, `fn` types, lambda signatures, or methods of a trait used as a
-`dyn` object, and a signature may only use them as a whole parameter/result or
-behind one reference. There is no element-wise owning move beyond
+`dyn` object, or inside a `dyn` type in any signature. There is no element-wise owning move beyond
 push/pop of copyable values, and no `&mut` (exclusive) borrowed pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow
 for arbitrary lengths.
 

@@ -907,36 +907,92 @@ impl<'a> Types<'a> {
     pub fn dynamic_array(&mut self, element: Type, capacity: usize, span: Span) -> Result<Type> {
         self.inline_array(element, capacity, None, span)
     }
-    /// Replace runtime-length binders at a call boundary. Signatures only
-    /// admit `[T; n <= C]` directly or behind one reference, so these are the
-    /// only positions rewritten.
+    /// Replace runtime-length binders at a call boundary, anywhere inside a
+    /// signature type: whole arrays, references, containers, tuples, fixed
+    /// and inline arrays, records, structural rows, and unions. Only erased
+    /// type identity changes; every rebuilt layout has the same words.
     pub fn rebind_lengths(
         &mut self,
         ty: Type,
         map: &BTreeMap<BindingId, BindingId>,
         span: Span,
     ) -> Result<Type> {
-        if map.is_empty() {
+        if map.is_empty()
+            || runtime_length_binders(self, ty).is_disjoint(&map.keys().copied().collect())
+        {
             return Ok(ty);
         }
+        let pointer = |types: &mut Self, p: usize| -> Result<usize> {
+            let inner = types.rebind_lengths(types.pointees[p], map, span)?;
+            Ok(types.pointer(inner))
+        };
         match ty {
-            Type::Enum(id) if self.enums[id].runtime_length.is_some() => {
-                let binder = self.enums[id].runtime_length.expect("runtime length");
-                let (element, capacity) = self.enums[id]
-                    .dynamic_array
-                    .expect("runtime arrays use the DynArray layout");
-                let binder = map.get(&binder).copied().unwrap_or(binder);
-                self.runtime_array(element, capacity, binder, span)
+            Type::Enum(id) if self.enums[id].dynamic_array.is_some() => {
+                let binder = self.enums[id]
+                    .runtime_length
+                    .map(|binder| map.get(&binder).copied().unwrap_or(binder));
+                let (element, capacity) = self.enums[id].dynamic_array.expect("inline array");
+                let element = self.rebind_lengths(element, map, span)?;
+                self.inline_array(element, capacity, binder, span)
             }
-            Type::Ref(p) => {
-                let inner = self.rebind_lengths(self.pointees[p], map, span)?;
-                Ok(Type::Ref(self.pointer(inner)))
+            Type::Enum(id) if self.enums[id].array.is_some() => {
+                let (element, length) = self.enums[id].array.expect("fixed array");
+                let element = self.rebind_lengths(element, map, span)?;
+                self.array(element, length, span)
             }
-            Type::RefMut(p) => {
-                let inner = self.rebind_lengths(self.pointees[p], map, span)?;
-                Ok(Type::RefMut(self.pointer(inner)))
+            Type::Enum(id) if self.enums[id].tuple => {
+                let mut items = Vec::new();
+                for item in self.enums[id].arguments.clone() {
+                    items.push(self.rebind_lengths(item, map, span)?);
+                }
+                self.tuple(items, span)
             }
-            _ => Ok(ty),
+            Type::Enum(id) if self.enums[id].structural => {
+                let mut fields = self.structural_row_fields(ty).expect("structural row");
+                for field in &mut fields {
+                    field.ty = self.rebind_lengths(field.ty, map, span)?;
+                }
+                self.structural_fields(fields, span)
+            }
+            Type::Enum(id) => {
+                let definition = self.enums[id].definition;
+                let consts = self.enums[id].consts.clone();
+                let lifetimes = self.enums[id].lifetimes.clone();
+                let mut arguments = Vec::new();
+                for argument in self.enums[id].arguments.clone() {
+                    arguments.push(self.rebind_lengths(argument, map, span)?);
+                }
+                self.instantiate(definition, arguments, consts, lifetimes, span)
+                    .map(Type::Enum)
+            }
+            Type::Variants(id, mask) => match self.rebind_lengths(Type::Enum(id), map, span)? {
+                Type::Enum(new_id) => Ok(refine(&self.enums, new_id, mask)),
+                other => Ok(other),
+            },
+            Type::Union(id) => {
+                let mut members = Vec::new();
+                for member in self.unions[id].members.clone() {
+                    members.push(self.rebind_lengths(member, map, span)?);
+                }
+                self.union(members, span)
+            }
+            Type::Ref(p) => Ok(Type::Ref(pointer(self, p)?)),
+            Type::RefMut(p) => Ok(Type::RefMut(pointer(self, p)?)),
+            Type::Slice(p) => Ok(Type::Slice(pointer(self, p)?)),
+            Type::SliceMut(p) => Ok(Type::SliceMut(pointer(self, p)?)),
+            Type::Box(p) => Ok(Type::Box(pointer(self, p)?)),
+            Type::Vec(p) => Ok(Type::Vec(pointer(self, p)?)),
+            Type::ArenaBox(p) => Ok(Type::ArenaBox(pointer(self, p)?)),
+            Type::AllocBox(p) => Ok(Type::AllocBox(pointer(self, p)?)),
+            Type::AllocVec(p) => Ok(Type::AllocVec(pointer(self, p)?)),
+            Type::Task(p) => Ok(Type::Task(pointer(self, p)?)),
+            Type::Annotated(p, label) => Ok(Type::Annotated(pointer(self, p)?, label)),
+            // Callable and object types cannot carry a signature binder: the
+            // signature validator rejects them, so nothing is left to rebind.
+            _ => Err(Diagnostic::new(
+                span,
+                "internal error: a runtime-length binder in a callable or object type cannot be substituted",
+            )),
         }
     }
     /// Intern a runtime-length array `[T; n <= C]`: the `DynArray<T, C>`

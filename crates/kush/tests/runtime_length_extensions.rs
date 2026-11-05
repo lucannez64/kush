@@ -277,3 +277,134 @@ fn recursive_calls_cannot_capture_their_own_length_binder() {
         5,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Binders nested inside signature types
+// ---------------------------------------------------------------------------
+
+#[test]
+fn signatures_rebind_lengths_inside_containers_tuples_records_and_unions() {
+    let stats = agrees(
+        r#"
+        enum Maybe<T> { Some(T), None }
+        struct Pair<T> { a: T, b: i64 }
+        fn rows(n: i64, count: i64) -> Vec<[i64; n <= 4]> ! {panic, alloc} {
+            let mut v: Vec<[i64; n <= 4]> = Vec.new();
+            let mut i = 0;
+            while i < count { v = Vec.push(v, Array.fill(n, i)); i = i + 1; }
+            v
+        }
+        fn summed(n: i64, v: &Vec<[i64; n <= 4]>) -> i64 ! {panic} {
+            let mut acc = 0;
+            let mut i = 0;
+            while i < Vec.len(v) {
+                let row: [i64; n <= 4] = Vec.get(v, i);
+                let mut j = 0;
+                while j < n { acc = acc + row[j]; j = j + 1; }
+                i = i + 1;
+            }
+            acc
+        }
+        fn split(n: i64, p: ([i64; n <= 4], Box<[i64; n <= 4]>)) -> Pair<[i64; n <= 4]> ! {alloc} {
+            let (x, y) = p;
+            Pair { a: Box.take(y), b: DynArray.len(&x) }
+        }
+        fn opt(n: i64, o: Maybe<[i64; n <= 4]>) -> i64 ! {panic} {
+            match o { Maybe.Some(a) => DynArray.len(&a), Maybe.None => 0 }
+        }
+        fn either(n: i64, u: [i64; n <= 4] | Bool) -> i64 ! {} {
+            match u { [i64; n <= 4] @ a => DynArray.len(&a), Bool @ b => 100 }
+        }
+        fn mk(n: i64) -> struct { xs: [i64; n <= 4], tag: i64 } ! {panic} {
+            struct { xs: Array.fill(n, 4), tag: 1 }
+        }
+        fn main() -> i64 ! {panic, alloc} {
+            let k: i64 = 3;
+            let v: Vec<[i64; k <= 4]> = rows(k, 3);
+            let t = summed(k, &v);                         // 0*3 + 1*3 + 2*3 = 9
+            let a: [i64; k <= 4] = Array.fill(k, 1);
+            let b: [i64; k <= 4] = Array.fill(k, 2);
+            let p: Pair<[i64; k <= 4]> = split(k, (a, Box.new(b)));
+            let c: [i64; k <= 4] = p.a;
+            let r = mk(k);
+            let d: [i64; k <= 4] = r.xs;
+            t + p.b + opt(k, Maybe.Some(c)) + either(k, d) + either(k, true)
+        }"#,
+        118,
+    );
+    assert!(stats.allocations >= 2);
+    // A generic element inside a nested position.
+    agrees(
+        r#"
+        fn heads<T>(n: i64, v: &Vec<[T; n <= 4]>, erased ok: { 0 < n && n <= 4 }) -> T ! {panic} {
+            let row: [T; n <= 4] = Vec.get(v, 0);
+            row[0]
+        }
+        fn main() -> i64 ! {panic, alloc} {
+            let k: i64 = 2;
+            let mut v: Vec<[i64; k <= 4]> = Vec.new();
+            v = Vec.push(v, [7, 8]);
+            heads(k, &v, _)
+        }"#,
+        7,
+    );
+    // Owning elements inside a nested array drop exactly once.
+    let stats = agrees(
+        r#"
+        fn wrap(n: i64, a: [Box<i64>; n <= 4]) -> Vec<[Box<i64>; n <= 4]> ! {alloc, panic} {
+            let v: Vec<[Box<i64>; n <= 4]> = Vec.new();
+            Vec.push(v, a)
+        }
+        fn main() -> i64 ! {panic, alloc} {
+            let k: i64 = 2;
+            let a: [Box<i64>; k <= 4] = [Box.new(1), Box.new(2)];
+            let v: Vec<[Box<i64>; k <= 4]> = wrap(k, a);
+            Vec.len(&v)
+        }"#,
+        1,
+    );
+    assert!(stats.allocations >= 3);
+}
+
+#[test]
+fn nested_signature_binders_reject_mismatches_and_unsubstitutable_positions() {
+    rejects(
+        r#"
+        fn s(n: i64, v: &Vec<[i64; n <= 4]>) -> i64 ! {} { 0 }
+        fn main() -> i64 ! {alloc, panic} {
+            let k: i64 = 2; let j: i64 = 2;
+            let v: Vec<[i64; j <= 4]> = Vec.new();
+            s(k, &v)
+        }"#,
+        "expected &Vec<[i64; k <= 4]>, found &Vec<[i64; j <= 4]>",
+    );
+    rejects(
+        r#"
+        fn s(n: i64) -> Vec<[i64; n <= 4]> ! {alloc} { Vec.new() }
+        fn main() -> i64 ! {alloc} {
+            let k: i64 = 2; let j: i64 = 2;
+            let v: Vec<[i64; j <= 4]> = s(k);
+            0
+        }"#,
+        "expected Vec<[i64; j <= 4]>, found Vec<[i64; k <= 4]>",
+    );
+    rejects(
+        "fn s(n: i64, f: fn([i64; n <= 4]) -> i64 ! {}) -> i64 ! {} { 0 } fn main() -> i64 ! {} { 0 }",
+        "a fn/once fn type cannot mention a runtime-length array",
+    );
+    rejects(
+        r#"
+        trait Tr<T> { fn m(self: Self) -> i64 ! {}; }
+        fn s(n: i64, f: dyn Tr<[i64; n <= 4]>) -> i64 ! {} { 0 }
+        fn main() -> i64 ! {} { 0 }"#,
+        "a trait object type cannot mention a runtime-length array",
+    );
+    rejects(
+        "fn s(v: Vec<[i64; n <= 4]>, n: i64) -> i64 ! {} { 0 } fn main() -> i64 ! {} { 0 }",
+        "must be the name of an immutable i64 parameter or local",
+    );
+    rejects(
+        "fn s(m: i64, v: Vec<[i64; m <= 4]>) -> (i64, [i64; q <= 4]) ! {} { 0 } fn main() -> i64 ! {} { 0 }",
+        "must be the name of an immutable i64 parameter or local",
+    );
+}

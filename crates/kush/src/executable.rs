@@ -11138,12 +11138,12 @@ fn validate_erased_parameters(
 /// catches unbound, type/grade, and runtime-dependent lengths even when the
 /// generic function is never instantiated; concrete lengths are still checked
 /// during specialization.
-/// Runtime-length arrays in a signature. A parameter or result may be
-/// `[T; n <= C]` or a direct reference to one, where `n` is an earlier `i64`
-/// parameter (any `i64` parameter for the result; never a method receiver).
-/// Calls substitute the caller's binder, so the shape is restricted to
-/// positions the call site rewrites. Generic functions, methods, and trait
-/// items may use them; foreign signatures and `fn` types may not.
+/// Runtime-length arrays in a signature. A parameter or result type may
+/// mention `[T; n <= C]` anywhere the call site rewrites binders (references,
+/// containers, tuples, arrays, records, rows, unions), where `n` is an
+/// earlier `i64` parameter (any `i64` parameter for the result; never a
+/// method receiver). Foreign signatures, `fn` types, and trait object types
+/// may not mention them: nothing substitutes the caller's binder there.
 fn validate_runtime_length_signature(
     resolution: &Resolution,
     f: &ast::Function,
@@ -11156,7 +11156,6 @@ fn validate_runtime_length_signature(
         resolution: &Resolution,
         ty: &ast::Type,
         allowed: &BTreeSet<BindingId>,
-        direct: bool,
         restricted: Option<&'static str>,
     ) -> Result<()> {
         match &ty.kind {
@@ -11168,12 +11167,6 @@ fn validate_runtime_length_signature(
                             format!("{reason} cannot mention a runtime-length array [T; n <= C]"),
                         ));
                     }
-                    if !direct {
-                        return Err(Diagnostic::new(
-                            ty.span,
-                            "in a signature, a runtime-length array must be a whole parameter or result type, or a direct reference to one",
-                        ));
-                    }
                     let id = runtime_length_binder(resolution, binder)?;
                     if !allowed.contains(&id) {
                         return Err(Diagnostic::new(
@@ -11181,49 +11174,46 @@ fn validate_runtime_length_signature(
                             "the length of a runtime-length array in a signature must be an earlier i64 parameter of the same function",
                         ));
                     }
-                    walk(resolution, capacity, allowed, false, restricted)?;
+                    walk(resolution, capacity, allowed, restricted)?;
                 }
-                walk(resolution, element, allowed, false, restricted)
+                walk(resolution, element, allowed, restricted)
             }
-            ast::TypeKind::Borrow { inner, .. } => {
-                walk(resolution, inner, allowed, direct, restricted)
-            }
-            ast::TypeKind::Graded { inner, .. } => {
-                walk(resolution, inner, allowed, direct, restricted)
-            }
+            ast::TypeKind::Borrow { inner, .. } => walk(resolution, inner, allowed, restricted),
+            ast::TypeKind::Graded { inner, .. } => walk(resolution, inner, allowed, restricted),
             ast::TypeKind::Named { arguments, .. } => {
                 for argument in arguments {
-                    walk(resolution, argument, allowed, false, restricted)?;
+                    walk(resolution, argument, allowed, restricted)?;
                 }
                 Ok(())
             }
             ast::TypeKind::Tuple(items) => {
                 for item in items {
-                    walk(resolution, item, allowed, false, restricted)?;
+                    walk(resolution, item, allowed, restricted)?;
                 }
                 Ok(())
             }
-            ast::TypeKind::Slice(inner) | ast::TypeKind::Dyn(inner) => {
-                walk(resolution, inner, allowed, false, restricted)
+            ast::TypeKind::Slice(inner) => walk(resolution, inner, allowed, restricted),
+            ast::TypeKind::Dyn(inner) => {
+                walk(resolution, inner, allowed, Some("a trait object type"))
             }
             ast::TypeKind::Structural { fields, .. } => {
                 for field in fields {
-                    walk(resolution, &field.ty, allowed, false, restricted)?;
+                    walk(resolution, &field.ty, allowed, restricted)?;
                 }
                 Ok(())
             }
             ast::TypeKind::Binary { left, right, .. } => {
-                walk(resolution, left, allowed, false, restricted)?;
-                walk(resolution, right, allowed, false, restricted)
+                walk(resolution, left, allowed, restricted)?;
+                walk(resolution, right, allowed, restricted)
             }
             ast::TypeKind::Function {
                 parameters, result, ..
             } => {
                 let reason = Some("a fn/once fn type");
                 for parameter in parameters {
-                    walk(resolution, &parameter.ty, allowed, false, reason)?;
+                    walk(resolution, &parameter.ty, allowed, reason)?;
                 }
-                walk(resolution, result, allowed, false, reason)
+                walk(resolution, result, allowed, reason)
             }
             _ => Ok(()),
         }
@@ -11250,7 +11240,7 @@ fn validate_runtime_length_signature(
         if parameter.erased {
             continue;
         }
-        walk(resolution, &parameter.ty, &earlier, true, restricted)?;
+        walk(resolution, &parameter.ty, &earlier, restricted)?;
         if is_i64(&parameter.ty)
             && (!method || index > 0)
             && let Some(id) = resolution.binder(parameter.span)
@@ -11258,7 +11248,7 @@ fn validate_runtime_length_signature(
             earlier.insert(id);
         }
     }
-    walk(resolution, &f.result, &all, true, restricted)
+    walk(resolution, &f.result, &all, restricted)
 }
 
 fn validate_length_templates(resolution: &Resolution, f: &ast::Function) -> Result<()> {
