@@ -181,7 +181,38 @@ handle Ask: i64 -> i64 as ask with fn(x: i64, resume: linear once fn(i64) -> i64
   (section 3.4); EFF-CAP-RESUME-CALLS adds them for noncapturing one-shot
   handlers (below). As before, a capturing (`once`) handler serves one
   perform, by name or by capability.
-- Not yet: capabilities captured by lambdas.
+- Capabilities captured by lambdas: EFF-CAP-LAMBDA below.
+
+### As built (EFF-CAP-LAMBDA)
+
+A lambda may capture a capability bound by a `handle` in the same function
+whose handler runs in place (noncapturing, one-shot, tail-resumptive). A
+`cap` parameter does not qualify, since its caller may bind it to a handler
+with code after `resume` (found by the review; the closure would then
+perform it with the identity token). Tests:
+`a_lambda_*` in `crates/kush/tests/effect_capabilities.rs`.
+
+- The closure's environment holds the handler's code pointer; inside the
+  lambda body the captured slot is a capability again (second-class:
+  `perform op(..)` or passed to a `cap` parameter only). Closure functions
+  record which capture positions hold capabilities.
+- The ownership pass treats such a closure exactly like a borrowed-capture
+  closure (section 3.2): a shared scoped loan of the capability local. It
+  must be called immediately or bound directly to a local, and it cannot be
+  moved, returned, stored, captured, or passed to another function (the
+  existing scoped-closure diagnostic now names capabilities).
+- The suspension lowering counts a local holding such a closure as a borrow,
+  so it cannot stay live across a non-tail perform.
+- A capability of a handler with code after `resume`, a capturing handler or
+  a multishot handler cannot be captured ("a lambda can only capture a
+  capability whose handler runs in place"): performing it inside the
+  closure would need the closure itself to be resumable.
+- Review fixes (EFF-CAP-RESUME-CALLS): a non-tail capability passed to two
+  parameters of one call is rejected; calls nested in the operands of
+  another suspension point are await points too; a lambda does not inherit
+  the enclosing handle's resumable capabilities.
+- Behaviour change: such lambdas were rejected ("a lambda cannot capture a
+  second-class capability"); they are now accepted.
 
 ### As built (EFF-CAP-RESUME-CALLS, scoped with the user)
 

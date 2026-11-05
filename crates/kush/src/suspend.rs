@@ -1266,6 +1266,9 @@ fn by_reference_closures(program: &Executable, body: &Block) -> Slots {
             // captures a value that holds one (a view, a reference, ...).
             ExprKind::FnValue { function, captures } => {
                 program.functions[*function].capture_refs.iter().any(|r| *r)
+                    // A captured capability borrows its handle activation.
+                    || (program.functions[*function].closure.is_some()
+                        && !program.functions[*function].capability_parameters.is_empty())
                     || captures
                         .iter()
                         .any(|capture| carries_in(capture.ty, &layouts, &program.pointees, 0))
@@ -3485,6 +3488,17 @@ fn mark_capability_points(
     let await_parameter = match &expr.kind {
         _ if performs_through(expr, slot) => None,
         ExprKind::Call(crate::executable::Target::Function(callee), arguments) => {
+            if arguments
+                .iter()
+                .filter(|argument| passes_slot(argument, slot))
+                .count()
+                > 1
+            {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    "a capability that may be bound to a handler with code after 'resume' cannot be passed to two parameters of one call",
+                ));
+            }
             match arguments
                 .iter()
                 .position(|argument| passes_slot(argument, slot))

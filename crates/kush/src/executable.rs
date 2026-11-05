@@ -5414,6 +5414,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             capability_slots: BTreeSet::new(),
             capability_passable: BTreeSet::new(),
             capability_resumable: BTreeSet::new(),
+            capability_parameter_slots: BTreeSet::new(),
             capability_argument: false,
             resolution,
             types: &mut types,
@@ -5484,6 +5485,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     if matches!(split_grade(&p.ty).0.kind, ast::TypeKind::Capability { .. }) {
                         checker.capability_slots.insert(slot);
                         checker.capability_passable.insert(slot);
+                        checker.capability_parameter_slots.insert(slot);
                     }
                     checker.locals[slot].grade = *grade;
                     checker.locals[slot].linear =
@@ -12106,6 +12108,9 @@ struct Checker<'a, 't> {
     /// may be passed to `cap` parameters, and such calls become await
     /// points of the handled body (EFF-CAP-RESUME-CALLS).
     capability_resumable: BTreeSet<usize>,
+    /// `cap` parameters of this function: they may be bound to a handler
+    /// with code after `resume`, so a lambda cannot capture them.
+    capability_parameter_slots: BTreeSet<usize>,
     /// Set while checking an argument passed to a `cap` parameter.
     capability_argument: bool,
     /// Erased proof parameters in scope: binder -> proposition.
@@ -23425,15 +23430,22 @@ impl Checker<'_, '_> {
         scope_root: bool,
     ) -> Result<Expr> {
         let captures = self.lambda_captures(lambda);
-        if captures
-            .iter()
-            .any(|slot| self.capability_slots.contains(slot))
-        {
+        // EFF-CAP-LAMBDA: a lambda may capture a capability whose handler
+        // runs in place. The closure is then a scoped borrow of it, checked
+        // like a borrowed-capture closure (ownership and suspension rules).
+        if captures.iter().any(|slot| {
+            self.capability_slots.contains(slot)
+                && (!self.capability_passable.contains(slot)
+                    || self.capability_parameter_slots.contains(slot))
+        }) {
             return Err(Diagnostic::new(
                 span,
-                "a lambda cannot capture a second-class capability; pass it to a function with a 'cap' parameter instead",
+                "a lambda can only capture a capability bound by a 'handle' in this function whose handler runs in place (noncapturing, one-shot, tail-resumptive); a 'cap' parameter may be bound to a handler with code after 'resume'. Perform it directly or pass it to a function with a 'cap' parameter",
             ));
         }
+        let capability_captures = (0..captures.len())
+            .filter(|index| self.capability_slots.contains(&captures[*index]))
+            .collect::<Vec<_>>();
         let once = !captures.is_empty();
         let inference = self.prepare_lambda_inference(lambda, span, expected)?;
         // A mutable scalar capture is a live view: the environment stores the
@@ -24027,6 +24039,8 @@ impl Checker<'_, '_> {
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_capabilities = std::mem::take(&mut self.capability_slots);
         let saved_passable = std::mem::take(&mut self.capability_passable);
+        let saved_resumable = std::mem::take(&mut self.capability_resumable);
+        let saved_cap_parameters = std::mem::take(&mut self.capability_parameter_slots);
         let saved_slots = std::mem::take(&mut self.slots);
         let saved_result = self.result;
         let saved_parameter_lifetimes = std::mem::take(&mut self.parameter_lifetimes);
@@ -24081,6 +24095,11 @@ impl Checker<'_, '_> {
                 }
             }
             self.slots = capture_binders;
+            // A captured capability stays second-class inside the body.
+            for index in &capability_captures {
+                self.capability_slots.insert(*index);
+                self.capability_passable.insert(*index);
+            }
             // Captured scalars are symbolic indices in the body. A by-value
             // snapshot is frozen at construction; a by-reference mutable
             // capture is a versioned local whose assignment appends a fresh
@@ -24134,6 +24153,8 @@ impl Checker<'_, '_> {
         self.locals = saved_locals;
         self.capability_slots = saved_capabilities;
         self.capability_passable = saved_passable;
+        self.capability_resumable = saved_resumable;
+        self.capability_parameter_slots = saved_cap_parameters;
         self.slots = saved_slots;
         self.result = saved_result;
         self.parameter_lifetimes = saved_parameter_lifetimes;
@@ -24230,7 +24251,7 @@ impl Checker<'_, '_> {
             parameter_slots: None,
             local_borrowed,
             local_copyable,
-            capability_parameters: vec![],
+            capability_parameters: capability_captures.clone(),
         };
         let index = self.functions.add_synthetic(signature, function)?;
         let ty = if once {
@@ -32463,6 +32484,23 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
+    fn mark_capability_awaits_in_call(
+        &mut self,
+        expr: &mut Expr,
+        slot: usize,
+        nested: bool,
+    ) -> Result<()> {
+        let ExprKind::Suspend { call, .. } = &mut expr.kind else {
+            unreachable!("called for suspension points")
+        };
+        let mut result = Ok(());
+        call.for_each_child_mut(&mut |child| {
+            if result.is_ok() {
+                result = self.mark_capability_awaits(child, slot, nested);
+            }
+        });
+        result
+    }
     fn mark_capability_awaits(&mut self, expr: &mut Expr, slot: usize, nested: bool) -> Result<()> {
         fn passes(argument: &Expr, slot: usize) -> bool {
             match &argument.kind {
@@ -32492,9 +32530,13 @@ impl Checker<'_, '_> {
                         "a call that may perform the handled operation and also receives its capability is not supported under a handler with code after 'resume'",
                     ));
                 }
-                return Ok(());
+                return self.mark_capability_awaits_in_call(expr, slot, nested);
             }
-            ExprKind::Suspend { .. } => return Ok(()),
+            // A point's own call is the handler or awaited call; calls in its
+            // operands may still pass the capability.
+            ExprKind::Suspend { .. } => {
+                return self.mark_capability_awaits_in_call(expr, slot, nested);
+            }
             _ => nested,
         };
         let mut result = Ok(());
@@ -32510,6 +32552,17 @@ impl Checker<'_, '_> {
         let Some(index) = arguments.iter().position(|argument| passes(argument, slot)) else {
             return Ok(());
         };
+        if arguments
+            .iter()
+            .filter(|argument| passes(argument, slot))
+            .count()
+            > 1
+        {
+            return Err(Diagnostic::new(
+                expr.span,
+                "a capability of a handler with code after 'resume' cannot be passed to two parameters of one call",
+            ));
+        }
         let callee = *callee;
         if nested {
             return Err(Diagnostic::new(

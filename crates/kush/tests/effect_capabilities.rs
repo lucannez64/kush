@@ -190,11 +190,7 @@ fn capability_rows_are_subeffects() {
 fn capabilities_are_second_class() {
     for (helpers, body, fragment) in [
         ("", "let c = ask; 0", "second-class"),
-        (
-            "",
-            "let f = fn() -> i64 ! {panic} { perform ask(1) }; f()",
-            "second-class",
-        ),
+        // Lambda captures: `a_lambda_capturing_a_capability_is_scoped`.
         (
             "fn leak(op: cap Ask ! {panic}) -> cap Ask ! {panic} ! {panic} { op }",
             "0",
@@ -596,5 +592,195 @@ fn capability_resumption_across_calls_is_checked() {
              fn main() -> i64 ! {{}} {{ 0 }}"
         ),
         "must produce the operation result type",
+    );
+}
+
+/// EFF-CAP-LAMBDA: a lambda may capture a capability whose handler runs in
+/// place. The closure is a scoped borrow of the capability (the
+/// borrowed-capture closure rules): bound directly to a local or called
+/// immediately, never moved, returned, stored or passed on, and never live
+/// across a non-tail perform.
+const IN_PLACE: &str = "handle Ask: i64 -> i64 as ask with fn(
+    x: i64,
+    k: linear once fn(i64) -> i64 ! {},
+) -> i64 ! {panic} { k(x + 100) }";
+
+fn in_place(helpers: &str, body: &str) -> String {
+    format!(
+        "effect Ask: i64 -> i64;
+         {helpers}
+         fn main() -> i64 ! {{alloc, panic}} {{ {IN_PLACE} {{ {body} }} }}"
+    )
+}
+
+#[test]
+fn a_lambda_performs_through_a_captured_capability() {
+    agrees(
+        &in_place(
+            "fn step(op: cap Ask ! {panic}, x: i64) -> i64 ! {panic} { perform op(x) * 2 + 1 }",
+            "let g = fn(y: i64) -> i64 ! {alloc, panic} {
+                 let h = fn(z: i64) -> i64 ! {panic} { step(ask, z) };
+                 h(y) + perform ask(0)
+             };
+             g(1)",
+        ),
+        303,
+        "",
+    );
+    // With owned values in the closure environment and around it.
+    agrees(
+        &in_place(
+            "",
+            "let b = Box.new(5);
+             let owned = Box.new(7);
+             let f = fn() -> i64 ! {alloc, panic} { perform ask(Box.take(owned)) };
+             f() + Box.take(b)",
+        ),
+        112,
+        "",
+    );
+}
+
+#[test]
+fn a_lambda_capturing_a_capability_is_scoped() {
+    let scoped = "is scoped";
+    rejects(
+        &in_place("", "let f = fn() -> i64 ! {panic} { perform ask(1) }; f")
+            .replace(
+                "fn main() -> i64 ! {alloc, panic} {",
+                "fn main() -> i64 ! {alloc, panic} { let g = ",
+            )
+            .replace("; f } }", "; f }; g() }"),
+        scoped,
+    );
+    rejects(
+        &in_place(
+            "fn call(f: once fn() -> i64 ! {panic}) -> i64 ! {panic} { f() }",
+            "let f = fn() -> i64 ! {panic} { perform ask(1) }; call(f)",
+        ),
+        scoped,
+    );
+    rejects(
+        &in_place(
+            "",
+            "let v: Vec<once fn() -> i64 ! {panic}> = Vec.new();
+             let w = Vec.push(v, fn() -> i64 ! {panic} { perform ask(1) }); 0",
+        ),
+        "must be called immediately or bound directly to a local",
+    );
+    rejects(
+        "effect Ask: i64 -> i64;
+         fn leak(op: cap Ask ! {panic}) -> once fn() -> i64 ! {panic} ! {alloc, panic} {
+             fn() -> i64 ! {panic} { perform op(1) }
+         }
+         fn main() -> i64 ! {} { 0 }",
+        "a 'cap' parameter may be bound to a handler with code after 'resume'",
+    );
+    // Still second-class inside the lambda.
+    rejects(
+        &in_place("", "let f = fn() -> i64 ! {panic} { let c = ask; 0 }; f()"),
+        "second-class capability",
+    );
+    // Not live across a non-tail perform of another handler.
+    rejects(
+        &in_place(
+            "",
+            "handle G: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {panic} { let r = k(x); r + 1 } {
+                 let f = fn() -> i64 ! {panic} { perform ask(1) };
+                 let a = perform G(1);
+                 f() + a
+             }",
+        ),
+        "cannot stay live across a non-tail 'perform'",
+    );
+    // Only capabilities whose handler runs in place can be captured.
+    rejects(
+        "effect Ask: i64 -> i64;
+         fn main() -> i64 ! {alloc, panic} {
+             handle Ask: i64 -> i64 as ask with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {panic} { let r = k(x); r + 1 } {
+                 let f = fn() -> i64 ! {panic} { perform ask(1) }; f()
+             }
+         }",
+        "whose handler runs in place",
+    );
+}
+
+/// Review findings for EFF-CAP-RESUME-CALLS / EFF-CAP-LAMBDA: each case
+/// previously ran a handler with code after `resume` in place (the shallow
+/// answer) or let an unpassable capability through.
+#[test]
+fn review_regressions_for_capability_resumption() {
+    const NON_TAIL: &str = "handle Ask: i64 -> i64 as ask with fn(
+        x: i64,
+        k: linear once fn(i64) -> i64 ! {},
+    ) -> i64 ! {panic} { let r = k(x * 10); r ^ 1 }";
+    const STEP: &str =
+        "fn step(op: cap Ask ! {panic}, x: i64) -> i64 ! {panic} { perform op(x) + 1 }";
+    // A lambda cannot capture a `cap` parameter: it may be non-tail.
+    rejects(
+        &format!(
+            "effect Ask: i64 -> i64;
+             fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{alloc, panic}} {{
+                 let f = fn(y: i64) -> i64 ! {{panic}} {{ perform op(y) }};
+                 f(x) + 1
+             }}
+             fn main() -> i64 ! {{alloc, panic}} {{ {NON_TAIL} {{ step(ask, 1) }} }}"
+        ),
+        "a 'cap' parameter may be bound to a handler with code after 'resume'",
+    );
+    // The same non-tail capability passed to two parameters of one call.
+    rejects(
+        &format!(
+            "effect Ask: i64 -> i64;
+             fn two(a: cap Ask ! {{panic}}, b: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform b(x) + 1 }}
+             fn main() -> i64 ! {{panic}} {{ {NON_TAIL} {{ two(ask, ask, 1) }} }}"
+        ),
+        "cannot be passed to two parameters of one call",
+    );
+    rejects(
+        &format!(
+            "effect Ask: i64 -> i64;
+             fn two(a: cap Ask ! {{panic}}, b: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform b(x) + 1 }}
+             fn fwd(op: cap Ask ! {{panic}}) -> i64 ! {{panic}} {{ two(op, op, 1) }}
+             fn main() -> i64 ! {{panic}} {{ {NON_TAIL} {{ fwd(ask) }} }}"
+        ),
+        "cannot be passed to two parameters of one call",
+    );
+    // A call nested in the operand of another suspension point is an await
+    // point too: same answer as the hoisted form.
+    for body in [
+        "perform ask(step(ask, 1))",
+        "let a = step(ask, 1); perform ask(a)",
+    ] {
+        agrees(
+            &format!(
+                "effect Ask: i64 -> i64;
+                 {STEP}
+                 fn main() -> i64 ! {{alloc, panic}} {{ {NON_TAIL} {{ {body} }} }}"
+            ),
+            110,
+            "",
+        );
+    }
+    // A lambda inside a non-tail handle body does not inherit the outer
+    // handle's resumable capabilities.
+    rejects(
+        "effect Ask: i64 -> i64;
+         effect Log: i64 -> i64;
+         fn step(op: cap Ask ! {Log, panic}, x: i64) -> i64 ! {Log, panic} { perform op(x) }
+         fn main() -> i64 ! {alloc, panic} {
+             handle Ask: i64 -> i64 as outer with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {panic} { let r = k(x); r ^ 1 } {
+                 let f = fn() -> i64 ! {alloc, panic} {
+                     handle Log: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { k(x) } {
+                         handle Ask: i64 -> i64 as c with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {Log, panic} { k(perform Log(x)) } {
+                             step(c, 1)
+                         }
+                     }
+                 };
+                 let a = perform outer(1);
+                 a + f()
+             }
+         }",
+        "can only be performed in its own 'handle' body",
     );
 }

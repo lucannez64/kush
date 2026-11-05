@@ -2210,6 +2210,7 @@ impl<'a> Checker<'a> {
                 // break path must agree.
                 if let Some(breaks) = frame.breaks {
                     self.counts = entry.counts.clone();
+                    self.hinted = entry.hinted.clone();
                     self.active = entry.active.clone();
                     for (slot, count) in &entry.counts {
                         if breaks.get(slot).copied().unwrap_or(Grade::ZERO) != *count {
@@ -2224,6 +2225,7 @@ impl<'a> Checker<'a> {
                 } else {
                     self.counts = entry.counts;
                     self.active = entry.active;
+                    self.hinted = entry.hinted;
                 }
             }
             ExprKind::Loop(body) => {
@@ -2236,6 +2238,7 @@ impl<'a> Checker<'a> {
                     self.counts = breaks;
                 } else {
                     self.counts = entry.counts;
+                    self.hinted = entry.hinted;
                     if !body_alive || expr.ty == Type::Never {
                         return Ok(false);
                     }

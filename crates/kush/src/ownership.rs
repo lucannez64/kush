@@ -253,6 +253,17 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
         .iter()
         .map(|function| function.capture_writes.clone())
         .collect::<Vec<_>>();
+    let capability_captures = program
+        .functions
+        .iter()
+        .map(|function| {
+            if function.closure.is_some() {
+                function.capability_parameters.clone()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect::<Vec<_>>();
     let foreign_functions = program.foreign_functions.clone();
     for (function_index, function) in program.functions.iter_mut().enumerate() {
         // A foreign declaration has a checked inert body but no source
@@ -276,6 +287,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             functions: &program.function_types,
             capture_refs: &capture_refs,
             capture_writes: &capture_writes,
+            capability_captures: &capability_captures,
             result_grades: &result_grades,
             calls: &calls,
             dyn_call_lifetimes: &dyn_call_lifetimes,
@@ -1171,6 +1183,9 @@ struct Checker<'a> {
     /// Capture write metadata: a writing by-reference capture is an exclusive
     /// loan; a read-only one is shared.
     capture_writes: &'a [Vec<bool>],
+    /// Capture positions of each closure that hold a capability
+    /// (EFF-CAP-LAMBDA): the closure is a shared scoped borrow of it.
+    capability_captures: &'a [Vec<usize>],
     /// Static result contract of each checked function, by instance index:
     /// `(grade, owning)`. `owning` distinguishes an owning `@[1]` transfer
     /// (which is a move) from a copyable must-use `@[1]` contract (which the
@@ -5336,7 +5351,7 @@ impl Checker<'_> {
                 {
                     return Err(Diagnostic::new(
                         expr.span,
-                        "a closure with borrowed slice captures is scoped: call it directly at this binding's scope, or pass no borrowed captures. It cannot be moved, returned, stored, captured, or passed to another function",
+                        "a closure with borrowed captures (slices, by-reference scalars or capabilities) is scoped: call it directly at this binding's scope, or pass no borrowed captures. It cannot be moved, returned, stored, captured, or passed to another function",
                     )
                     .with_note(self.locals[slot].span, "borrowing closure bound here"));
                 }
@@ -6621,12 +6636,18 @@ impl Checker<'_> {
                     .get(*function)
                     .cloned()
                     .unwrap_or_default();
+                let capabilities = self
+                    .capability_captures
+                    .get(*function)
+                    .cloned()
+                    .unwrap_or_default();
                 let scalars = captures
                     .iter()
                     .enumerate()
                     .filter(|(index, capture)| {
-                        capture_ref.get(*index).copied().unwrap_or(false)
-                            && crate::executable::is_live_scalar(capture.ty)
+                        (capture_ref.get(*index).copied().unwrap_or(false)
+                            && crate::executable::is_live_scalar(capture.ty))
+                            || capabilities.contains(index)
                     })
                     .collect::<Vec<_>>();
                 let borrowed = captures
