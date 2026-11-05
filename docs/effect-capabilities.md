@@ -155,6 +155,22 @@ These are statements to test, not a theorem: bitset union being associative
 does not show that the *operational* behaviour of handled programs respects
 the indices.
 
+**Tested (EFF-ROW-LAWS).** `crates/kush/src/row_laws_tests.rs` checks the
+checker's own row operations: term evaluation equals set semantics and is
+bitwise (the lemma the per-bit solver relies on); union is an idempotent
+commutative monoid and subeffecting a congruence over all 2^16 rows (second
+and third rows from a stratified sample); subtraction is antitone on the
+right; discharge `(body - {Op}) ∪ h` keeps `h` and is monotone; and the
+per-bit solver (`solve_row_bits`, extracted from the checker unchanged)
+agrees with an independent whole-row search on solvability, minimal solution
+and ambiguity, for one variable over all 2^16 rows and for two variables over
+a five-bit sub-universe, including exclusion and inclusion bounds.
+`crates/kush/tests/effect_row_laws.rs` checks the language rules over every
+subset of the four builtin effects: call monotonicity, sequential
+composition, arrow subeffecting, `handle` discharge (only `Op`; the handler
+row is kept), per-specialization subtraction `{e - io}`, bounded binders, a
+shared row variable receiving the union, and the ambiguity of `{a | b}`.
+
 ## 5. Decisions
 
 1. **Add capabilities as an opt-in, second-class, lexical path**; keep

@@ -25,6 +25,8 @@ pub mod parser;
 pub mod program;
 pub mod project;
 pub mod resolve;
+#[cfg(test)]
+mod row_laws_tests;
 mod runtime_types;
 pub mod source;
 mod suspend;

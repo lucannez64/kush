@@ -27959,67 +27959,20 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
-        let positions = unbound
+        let rows = constraints
             .iter()
-            .enumerate()
-            .map(|(position, variable)| (*variable, position))
-            .collect::<BTreeMap<_, _>>();
-        // Solve each of the four concrete effects independently. A row term is
-        // built only from bitwise union/subtraction, so the bit at position `b`
-        // of every constraint depends solely on the same bit of each variable.
-        let mut chosen: BTreeMap<BindingId, u16> =
-            unbound.iter().map(|variable| (*variable, 0u16)).collect();
-        for bit_index in 0..16u16 {
-            let bit = 1u16 << bit_index;
-            let limit = 1u32 << unbound.len();
-            let mut valid_masks = Vec::new();
-            let mut and_all: Option<u32> = None;
-            for mask in 0..limit {
-                let mut in_domain = true;
-                for (position, variable) in unbound.iter().enumerate() {
-                    let allowed_bits = allowed.get(variable).copied().unwrap_or(self.all_effects());
-                    let required_bits = required.get(variable).copied().unwrap_or(0);
-                    if mask & (1 << position) != 0 {
-                        if allowed_bits & bit == 0 {
-                            in_domain = false;
-                            break;
-                        }
-                    } else if required_bits & bit != 0 {
-                        in_domain = false;
-                        break;
-                    }
-                }
-                if !in_domain {
-                    continue;
-                }
-                let mut covers = true;
-                for constraint in &constraints {
-                    if constraint.actual & bit == 0 {
-                        continue;
-                    }
-                    let covered = constraint.row.evaluate_with(&mut |variable| {
-                        if let Some(bits) = subst.effects.get(&variable) {
-                            return Some(*bits);
-                        }
-                        let position = positions.get(&variable)?;
-                        Some(if mask & (1 << *position) != 0 { bit } else { 0 })
-                    });
-                    let Some(covered) = covered else {
-                        covers = false;
-                        break;
-                    };
-                    if covered & bit == 0 {
-                        covers = false;
-                        break;
-                    }
-                }
-                if !covers {
-                    continue;
-                }
-                valid_masks.push(mask);
-                and_all = Some(and_all.map_or(mask, |known| known & mask));
-            }
-            if valid_masks.is_empty() {
+            .map(|constraint| (&constraint.row, constraint.actual))
+            .collect::<Vec<_>>();
+        let chosen = match crate::runtime_types::solve_row_bits(
+            &unbound,
+            &allowed,
+            &required,
+            &subst.effects,
+            &rows,
+            self.all_effects(),
+        ) {
+            crate::runtime_types::RowSolve::Solved(chosen) => chosen,
+            crate::runtime_types::RowSolve::Unsatisfiable => {
                 let Some(first) = constraints.first() else {
                     return Err(Diagnostic::new(
                         span,
@@ -28100,30 +28053,7 @@ impl Checker<'_, '_> {
                     ),
                 ));
             }
-            // The bitwise AND of every valid assignment is the unique
-            // componentwise-minimal solution exactly when it is itself valid.
-            // If it is not, at least two incomparable minimal rows exist.
-            let and_all = and_all.expect("at least one valid assignment");
-            let minimal_valid = constraints.iter().all(|constraint| {
-                if constraint.actual & bit == 0 {
-                    return true;
-                }
-                constraint
-                    .row
-                    .evaluate_with(&mut |variable| {
-                        if let Some(bits) = subst.effects.get(&variable) {
-                            return Some(*bits);
-                        }
-                        let position = positions.get(&variable)?;
-                        Some(if and_all & (1 << *position) != 0 {
-                            bit
-                        } else {
-                            0
-                        })
-                    })
-                    .is_some_and(|covered| covered & bit != 0)
-            });
-            if !minimal_valid {
+            crate::runtime_types::RowSolve::Ambiguous => {
                 let names = unbound
                     .iter()
                     .map(|variable| format!("'{}'", self.resolution.bindings[*variable].name))
@@ -28136,12 +28066,7 @@ impl Checker<'_, '_> {
                     ),
                 ));
             }
-            for (position, variable) in unbound.iter().enumerate() {
-                if and_all & (1 << position) != 0 {
-                    *chosen.get_mut(variable).unwrap() |= bit;
-                }
-            }
-        }
+        };
         for (variable, bits) in chosen {
             subst.effects.insert(variable, bits);
         }

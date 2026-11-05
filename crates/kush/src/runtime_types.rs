@@ -5165,7 +5165,7 @@ impl<'a> Types<'a> {
     }
 }
 /// A declared effect row as a small Boolean expression over concrete effect
-/// bits and `<e: Effects>` variables. The effect universe has only four bits, so
+/// bits and `<e: Effects>` variables. The effect universe has sixteen bits, so
 /// union and subtraction are finite and decidable; the checker never has to
 /// solve an infinite row equation. Subtraction binds looser than `|` in the
 /// surface grammar, so `(a | b) - c` is written with explicit parentheses.
@@ -5240,6 +5240,93 @@ impl EffectRowTerm {
         }
     }
 }
+/// Outcome of [`solve_row_bits`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RowSolve {
+    /// The unique componentwise-minimal assignment of every unbound variable.
+    Solved(BTreeMap<BindingId, u16>),
+    /// Some effect bit has no assignment satisfying the domains and rows.
+    Unsatisfiable,
+    /// Some effect bit has several incomparable minimal assignments.
+    Ambiguous,
+}
+
+/// Solve row inclusion constraints `row covers actual` for the `unbound`
+/// variables, one effect bit at a time. Every row operation is bitwise, so
+/// bit `b` of a constraint depends only on bit `b` of each variable. For one
+/// bit, the AND of every valid assignment is the unique componentwise-minimal
+/// assignment exactly when it is itself valid. `allowed`/`required` are each
+/// variable's domain (exclusion and inclusion bounds); `fixed` holds already
+/// specialized variables; `universe` is the domain of a variable with no
+/// entry in `allowed`. Bits are visited in order, so the first failing bit
+/// decides the outcome.
+pub(crate) fn solve_row_bits(
+    unbound: &[BindingId],
+    allowed: &BTreeMap<BindingId, u16>,
+    required: &BTreeMap<BindingId, u16>,
+    fixed: &BTreeMap<BindingId, u16>,
+    constraints: &[(&EffectRowTerm, u16)],
+    universe: u16,
+) -> RowSolve {
+    let positions = unbound
+        .iter()
+        .enumerate()
+        .map(|(position, variable)| (*variable, position))
+        .collect::<BTreeMap<_, _>>();
+    let covers_bit = |row: &EffectRowTerm, mask: u32, bit: u16| {
+        row.evaluate_with(&mut |variable| {
+            if let Some(bits) = fixed.get(&variable) {
+                return Some(*bits);
+            }
+            let position = positions.get(&variable)?;
+            Some(if mask & (1 << *position) != 0 { bit } else { 0 })
+        })
+        .is_some_and(|covered| covered & bit != 0)
+    };
+    let mut chosen: BTreeMap<BindingId, u16> =
+        unbound.iter().map(|variable| (*variable, 0u16)).collect();
+    for bit_index in 0..16u16 {
+        let bit = 1u16 << bit_index;
+        let limit = 1u32 << unbound.len();
+        let mut and_all: Option<u32> = None;
+        for mask in 0..limit {
+            let in_domain = unbound.iter().enumerate().all(|(position, variable)| {
+                let allowed_bits = allowed.get(variable).copied().unwrap_or(universe);
+                let required_bits = required.get(variable).copied().unwrap_or(0);
+                if mask & (1 << position) != 0 {
+                    allowed_bits & bit != 0
+                } else {
+                    required_bits & bit == 0
+                }
+            });
+            if !in_domain {
+                continue;
+            }
+            let covers = constraints
+                .iter()
+                .all(|(row, actual)| actual & bit == 0 || covers_bit(row, mask, bit));
+            if covers {
+                and_all = Some(and_all.map_or(mask, |known| known & mask));
+            }
+        }
+        let Some(and_all) = and_all else {
+            return RowSolve::Unsatisfiable;
+        };
+        let minimal_valid = constraints
+            .iter()
+            .all(|(row, actual)| actual & bit == 0 || covers_bit(row, and_all, bit));
+        if !minimal_valid {
+            return RowSolve::Ambiguous;
+        }
+        for (position, variable) in unbound.iter().enumerate() {
+            if and_all & (1 << position) != 0 {
+                *chosen.get_mut(variable).unwrap() |= bit;
+            }
+        }
+    }
+    RowSolve::Solved(chosen)
+}
+
 /// Convert a declared effect row to the executable effect bitset. Function
 /// value types and direct declarations share this single rule. `subst` maps
 /// `<e: Effects>` binders to concrete rows; a row is a union/subtraction
