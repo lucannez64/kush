@@ -30,6 +30,46 @@ pub(crate) fn contains_suspend(expr: &Expr) -> bool {
     }
 }
 
+/// The local a place-like operand reads or borrows in place, when deferring
+/// it past a suspension point is an option: a borrow, a place read, or a
+/// whole, unchecked view of a local.
+fn deferrable_place(expr: &Expr) -> Option<usize> {
+    match &expr.kind {
+        ExprKind::Peek(slot) | ExprKind::Borrow(slot) => Some(*slot),
+        ExprKind::Slice {
+            base,
+            start: None,
+            end: None,
+            check: false,
+            ..
+        } => match base.kind {
+            ExprKind::Borrow(slot) | ExprKind::Peek(slot) | ExprKind::Local(slot) => Some(slot),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `expr` reads, writes, borrows, or rebinds the local `slot`.
+fn mentions_slot(expr: &Expr, slot: usize) -> bool {
+    let direct = match &expr.kind {
+        ExprKind::Local(s)
+        | ExprKind::Move(s)
+        | ExprKind::Peek(s)
+        | ExprKind::Borrow(s)
+        | ExprKind::Assign(s, _)
+        | ExprKind::InitOwner { slot: s, .. }
+        | ExprKind::BorrowInit { slot: s, .. } => *s == slot,
+        _ => false,
+    };
+    if direct {
+        return true;
+    }
+    let mut found = false;
+    expr.for_each_child(&mut |child| found |= mentions_slot(child, slot));
+    found
+}
+
 /// Whether `expr` contains a `break` or `continue` that targets a loop
 /// enclosing it (not one of its own loops). A `while` condition may do this,
 /// and moving such a condition inside a new loop would retarget the jump.
@@ -265,33 +305,29 @@ impl<T: Temporaries> Anf<'_, T> {
         else {
             return Ok(());
         };
+        // A borrow or place read of a local may be taken after the
+        // suspension instead of hoisted into a temporary: nothing can change
+        // the local in between (handler writes and borrows across points are
+        // rejected), unless a later operand of this same expression touches
+        // it, in which case the original order is kept by hoisting.
+        let deferred = (0..operands.len())
+            .map(|index| {
+                if matches!(
+                    operands[index].kind,
+                    ExprKind::Constant(_) | ExprKind::Erased(_)
+                ) {
+                    return true;
+                }
+                deferrable_place(operands[index]).is_some_and(|slot| {
+                    !operands[index + 1..]
+                        .iter()
+                        .any(|later| mentions_slot(later, slot))
+                })
+            })
+            .collect::<Vec<_>>();
         for (index, operand) in operands.into_iter().enumerate() {
             if index < last {
-                // A borrow or place read of a local is taken after the
-                // suspension instead; nothing can change the local in between
-                // (handler writes and borrows across points are rejected).
-                let local_view = matches!(
-                    &operand.kind,
-                    ExprKind::Slice {
-                        base,
-                        start: None,
-                        end: None,
-                        check: false,
-                        ..
-                    } if matches!(
-                        base.kind,
-                        ExprKind::Borrow(_) | ExprKind::Peek(_) | ExprKind::Local(_)
-                    )
-                );
-                if local_view
-                    || matches!(
-                        operand.kind,
-                        ExprKind::Constant(_)
-                            | ExprKind::Erased(_)
-                            | ExprKind::Peek(_)
-                            | ExprKind::Borrow(_)
-                    )
-                {
+                if deferred[index] {
                     continue;
                 }
                 self.anf_value(operand, out)?;

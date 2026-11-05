@@ -1616,3 +1616,27 @@ fn review_resumable_entries_whose_body_never_completes_build_natively() {
         }"#;
     agrees(search, 8 ^ 4096, "");
 }
+
+#[test]
+fn review_operand_borrows_keep_their_order_before_a_later_write() {
+    // `&x` is evaluated before the block that writes `x`; normalizing the
+    // perform must not move the borrow after the write. The program is
+    // rejected the same way under tail-resumptive and non-tail handlers.
+    let body = "let mut x = 1;
+                g(&x, { x = 100; perform Ask(0) })";
+    let helper = "fn g(r: &i64, v: i64) -> i64 ! {panic} { *r + v }";
+    let tail = format!(
+        "{helper} fn main() -> i64 ! {{alloc, panic}} {{ handle Ask: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{panic}} {{ resume(x + 8) }} {{ {body} }} }}"
+    );
+    let non_tail = format!("{helper} {}", with_handler("", body));
+    let tail_error = check(&tail).unwrap_err().message;
+    let non_tail_error = check(&non_tail).unwrap_err().message;
+    assert!(tail_error.contains("borrows it"), "{tail_error}");
+    assert_eq!(tail_error, non_tail_error);
+    // Without the write, the borrow is simply taken after the perform.
+    let fine = format!(
+        "{helper} {}",
+        with_handler("", "let x = 1; g(&x, perform Ask(0))")
+    );
+    agrees(&fine, 2, "");
+}
