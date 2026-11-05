@@ -159,6 +159,31 @@ physical observation".
 | Tasks and cancellation | a completed payload with an obligation is delivered as `Completed`, never dropped | implemented (linear-task-results.md) |
 | Borrowed views | observation of the view, not the owner; views over owning elements do not exist | implemented (grades.md) |
 
+## Evidence (GRADE-OBLIG-TESTS, GRADE-ARROW-AXES)
+
+`crates/kush/tests/grade_obligations.rs` has one test per obligation of
+sections 2-5: Γ weakening (only `0`/`many`) and contraction, Δ weakening
+(affine drop versus `@[1]`, `#[linear]` and `linear once` obligations) and no
+contraction, exchange, borrows, paths (alternatives, early return, loop
+heads), scaling at `r = 0, 1, n, many` and the owner side condition, E1-E6,
+and the one-shot, multishot, erased-slot and task boundaries. Every positive
+program runs in the evaluator and natively with balanced allocations; every
+hostile program is pinned to the diagnostic of its obligation.
+
+The arrow audit (same file) found the two axes already independent in
+`function_subtype`: the closure-mode check (`linear` source needs a `linear`
+target) runs before and regardless of the parameter-grade check, and the
+erased-position adapter is only reached after both pass. Hostile programs
+try to widen `linear once fn(i64 @[0])` to `once`/`fn` directly, through a
+grade change to `@[1]`, through a two-step coercion, through a join with an
+affine closure, and through a generic identity; all are rejected, and the
+legitimate adapters (erased parameter to a `linear once` target, affine
+erased closure to `once`) keep exactly-once calls and balanced cleanup. No
+code change was needed. One documented consequence of section 3: an
+unannotated target parameter is demand 1 and the callee may copy it, so
+`apply(twice, a)` with `a: i64 @[1]` is accepted exactly as `dup(a)` with
+`fn dup(x: i64)` is; an exact target (`fn(i64 @[1])`) rejects `@[2]`.
+
 ## 6. Decisions
 
 1. **Two zones, never merged.** Copyable `@[1]` (Γ, must-observe) and owning
