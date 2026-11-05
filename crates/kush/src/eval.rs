@@ -6456,6 +6456,31 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
                 return Ok(Flow::Exit(exited, *finish));
             }
+            ExprKind::TryExit {
+                value,
+                input,
+                output,
+                cleanup,
+            } => {
+                let Value::Enum { tag, mut fields } = value!(self.expr(value, frame)) else {
+                    unreachable!()
+                };
+                self.consume(value, frame);
+                if tag == input.ok_tag {
+                    fields.remove(0)
+                } else {
+                    for id in cleanup {
+                        self.drop_resource(Some(*id), frame)?;
+                    }
+                    return Ok(Flow::Exit(
+                        Value::Enum {
+                            tag: output.err_tag,
+                            fields,
+                        },
+                        true,
+                    ));
+                }
+            }
             ExprKind::Suspendable(_) | ExprKind::Suspend { .. } => {
                 return Err(Diagnostic::new(
                     expr.span,

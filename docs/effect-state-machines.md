@@ -487,3 +487,48 @@ is inherent (section 7).
    Kush has no unwinding that could abandon it and drop its live values.
 7. A non-tail perform inside the body of a nested non-tail handler or a
    nested declared-operation handler is rejected (multi-prompt capture).
+
+### 14.1 Resumption across calls (E-CALLEE-COLOR, E-DYN-RESUME)
+
+Implemented as continuation-passing resumable entries rather than frame
+chains stepped by a driver (section 9). The difference is only in how the
+chain is represented: a callee's frame is still a closure environment, and
+the chain is the callee's continuation environment capturing the caller's
+continuation `k`.
+
+- **Coloring.** A non-tail handler for a declared operation `D` makes its
+  body suspendable even without a lexical perform. The checker marks every
+  direct call in the body whose callee's effect row contains `D` as an await
+  point (outside nested handlers for `D`). After ownership, the lowering
+  computes from the checked IR which functions may perform `D` (dynamic
+  performs not under their own handler, plus calls to such functions), a
+  least fixed point over the call graph.
+- **Resumable entry.** `g` gets, on first use, a second function
+  `g::resumable` taking one more parameter: the caller's continuation
+  `k: linear once fn(T_g) -> R`. Its body is `g`'s body as a region whose
+  finish is `k`: a normal completion, a `return e`, and the error path of `?`
+  all call `k` with the value after leaving the region. Dynamic performs of
+  `D` and calls of functions that may perform `D` are its suspension points;
+  the latter call those functions' resumable entries with the point's
+  continuation as their `k`. The entry returns the handled body's final
+  answer `R`. The direct entry is unchanged and still used everywhere else,
+  in particular under tail-resumptive handlers.
+- **Tail points pass `k` through.** A point in tail position whose only live
+  value is `k`, and whose token type is `k`'s type, hands `k` itself to the
+  handler or the awaited entry: `fn call() { perform D(x) }` resumes with no
+  allocation.
+- **The handler is found dynamically.** A perform in a resumable entry is
+  the ordinary handler-stack lookup with the real token. The innermost frame
+  for `D` is the non-tail handle's, because entries are only called from its
+  body and from other entries, never under a nested handler for `D`.
+- **Unresumable paths are rejected.** In code resumed by a non-tail handler
+  for `D`, a call that may perform `D` through a function value, a trait
+  object, `Task.scope`, or a vector callback is rejected, as is one inside a
+  nested handler for another operation. A spawned child task still sees
+  copyable frames as before and resumes them with the identity token: a
+  continuation cannot cross a task boundary.
+- **Behaviour change.** Before this node a perform in a called function always
+  resumed with the identity token. Under a handler with code after `resume`,
+  such programs now give the deep-handler result, the same one a lexical
+  perform gives; a body that calls such functions must then produce the
+  operation result type. Handlers that are tail-resumptive are unaffected.

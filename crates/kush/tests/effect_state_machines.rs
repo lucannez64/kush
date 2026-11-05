@@ -524,3 +524,218 @@ fn linear_values_and_declared_operations_cross_non_tail_performs() {
     // 16 + 17 + 18 = 51; three activations each flip the low bit: 50.
     agrees(declared, 50, "");
 }
+
+// ---------------------------------------------------------------------------
+// Resumption across calls (E-CALLEE-COLOR, E-DYN-RESUME)
+// ---------------------------------------------------------------------------
+
+/// A non-tail handler for a declared operation (declared handlers are pure,
+/// hence bitwise arithmetic): a perform yields `x ^ 1`, and every handler
+/// activation flips bit 12 of the final result after the rest of the body
+/// returns. `{helpers}` holds the called functions.
+fn declared(helpers: &str, row: &str, body: &str) -> String {
+    format!(
+        "effect Op: i64 -> i64;
+         {helpers}
+         fn main() -> i64 ! {{{row}}} {{
+             handle Op: i64 -> i64 with fn(
+                 x: i64,
+                 resume: linear once fn(i64) -> i64 ! {{}},
+             ) -> i64 ! {{}} {{ let r = resume(x ^ 1); r ^ 4096 }} {{ {body} }}
+         }}"
+    )
+}
+
+#[test]
+fn a_called_function_perform_resumes_the_rest_of_the_body() {
+    // resume(21) returns from call() with 21, the body triples it, and the
+    // handler flips bit 12 of the body's result: (21 * 3) ^ 4096. With the
+    // old identity resumption the flip would have happened before the
+    // multiplication: (21 ^ 4096) * 3 = 12351.
+    let source = declared(
+        "fn call() -> i64 ! {Op, panic} { perform Op(20) }",
+        "panic",
+        "call() * 3",
+    );
+    let (result, stats, _) = evaluate(&source);
+    assert_eq!(result, 4159);
+    assert_eq!(stats.allocations, 0);
+    agrees(&source, 4159, "");
+    // Two levels of calls: (21 + 1) * 3, flipped once. `call` has work left
+    // after `deep` returns, so its continuation is an environment.
+    let deep = declared(
+        "fn deep() -> i64 ! {Op, panic} { perform Op(20) }
+         fn call() -> i64 ! {Op, panic} { deep() + 1 }",
+        "alloc, panic",
+        "call() * 3",
+    );
+    agrees(&deep, 4162, "");
+    // A called function that performs twice captures its live values; the
+    // handled body continues afterwards. a = 5, b = 4, (504 * 3) flipped
+    // twice.
+    let work = declared(
+        "fn twice(n: i64) -> i64 ! {Op, panic} {
+             let a = perform Op(n);
+             let b = perform Op(a);
+             a * 100 + b
+         }",
+        "alloc, panic",
+        "let v = twice(4); v * 3",
+    );
+    agrees(&work, 1512, "");
+}
+
+#[test]
+fn called_functions_resume_inside_loops_with_owned_values() {
+    let source = declared(
+        "fn sum(n: i64) -> i64 ! {Op, alloc, panic} {
+             let mut i = 0;
+             let mut s = 0;
+             let keep = Box.new(7);
+             while i < n {
+                 let b = Box.new(i);
+                 s = s + perform Op(Box.take(b));
+                 i = i + 1;
+             }
+             s + Box.take(keep)
+         }",
+        "alloc, panic",
+        "let a = sum(3); let b = sum(1); a + b",
+    );
+    // sum(3) = 1 + 0 + 3 + 7 = 11, sum(1) = 1 + 7 = 8; four flips cancel.
+    let (result, stats, _) = evaluate(&source);
+    assert_eq!(result, 19);
+    assert_eq!(stats.allocations, stats.deallocations);
+    agrees(&source, 19, "");
+}
+
+#[test]
+fn return_and_try_in_a_called_function_continue_the_caller() {
+    let early = declared(
+        "fn pick(n: i64) -> i64 ! {Op, panic} {
+             let a = perform Op(n);
+             if a > 5 { return a * 10; }
+             a
+         }",
+        "alloc, panic",
+        "pick(1) + pick(9)",
+    );
+    // pick(1) = 0, pick(9) = 80; two flips cancel.
+    agrees(&early, 80, "");
+    let tried = r#"
+        enum Result<T, E> { Ok(T), Err(E) }
+        effect Op: i64 -> i64;
+        fn check(n: i64) -> Result<i64, i64> ! {Op, panic} {
+            let a = perform Op(n);
+            if a > 5 { Result.Err(a) } else { Result.Ok(a) }
+        }
+        fn both(n: i64) -> Result<i64, i64> ! {Op, alloc, panic} {
+            let a = check(n)?;
+            let b = check(a)?;
+            Result.Ok(a + b)
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { let r = resume(x ^ 1); r ^ 4096 } {
+                let first = match both(1) { Result.Ok(v) => v, Result.Err(e) => 0 - e };
+                let second = match both(7) { Result.Ok(v) => v, Result.Err(e) => 0 - e };
+                first * 100 + second
+            }
+        }"#;
+    // both(1): a = 0, b = 1, Ok(1). both(7): check(7) yields 6 -> Err(6).
+    // 100 - 6 = 94, flipped by an odd number (three) of activations.
+    agrees(tried, 4190, "");
+}
+
+#[test]
+fn recursive_called_functions_resume_at_every_level() {
+    let source = declared(
+        "fn countdown(n: i64) -> i64 ! {Op, alloc, panic} {
+             if n == 0 { return 0; }
+             let a = perform Op(n);
+             a + countdown(n - 1)
+         }",
+        "alloc, panic",
+        "countdown(3)",
+    );
+    // 2 + 3 + 0 = 5, flipped three times.
+    agrees(&source, 4101, "");
+}
+
+#[test]
+fn tail_resumptive_handlers_keep_the_direct_entry() {
+    // The same called function under a tail-resumptive handler runs through
+    // its ordinary entry and allocates nothing.
+    let source = r#"
+        effect Op: i64 -> i64;
+        fn sum(n: i64) -> i64 ! {Op, panic} {
+            let mut i = 0;
+            let mut s = 0;
+            while i < n { s = s + perform Op(i); i = i + 1; }
+            s
+        }
+        fn main() -> i64 ! {panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x ^ 1) } {
+                sum(4) + 1
+            }
+        }"#;
+    // 1 + 0 + 3 + 2 + 1.
+    let (result, stats, _) = evaluate(source);
+    assert_eq!(result, 7);
+    assert_eq!(stats.allocations, 0);
+    agrees(source, 7, "");
+}
+
+#[test]
+fn unresumable_calls_are_rejected() {
+    rejects(
+        &declared(
+            "fn call() -> i64 ! {Op, panic} { perform Op(20) }
+             fn apply(f: fn() -> i64 ! {Op, panic}) -> i64 ! {Op, panic} { f() }",
+            "panic",
+            "apply(call) + 1",
+        ),
+        "cannot be resumed",
+    );
+    rejects(
+        &declared(
+            "fn call() -> i64 ! {Op, panic} { perform Op(20) }",
+            "panic",
+            "let f: fn() -> i64 ! {Op, panic} = call; f() + 1",
+        ),
+        "calling a function value that may perform 'Op'",
+    );
+    // A borrow held across a perform inside a called function.
+    rejects(
+        &declared(
+            "fn view(v: Vec<i64>) -> i64 ! {Op, alloc, panic} {
+                 let s = &v[0..1];
+                 let a = perform Op(1);
+                 a + Slice.len(s)
+             }",
+            "alloc, panic",
+            "view([1, 2])",
+        ),
+        "cannot stay live across a non-tail 'perform'",
+    );
+    // Under real resumption the handler returns the body's result, so a
+    // body that calls such functions must have the operation result type.
+    rejects(
+        r#"
+        effect Op: i64 -> i64;
+        fn call() -> i64 ! {Op, panic} { perform Op(20) }
+        fn main() -> i64 ! {panic} {
+            let positive = handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { let r = resume(x ^ 1); r ^ 4096 } { call() > 0 };
+            if positive { 1 } else { 0 }
+        }"#,
+        "must produce the operation result type",
+    );
+}

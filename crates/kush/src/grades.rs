@@ -1531,7 +1531,7 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
-            ExprKind::Region { .. } | ExprKind::RegionExit { .. } => {
+            ExprKind::Region { .. } | ExprKind::RegionExit { .. } | ExprKind::TryExit { .. } => {
                 unreachable!("grades run before suspendable bodies are lowered")
             }
             ExprKind::DynamicPerform {

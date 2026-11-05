@@ -13,7 +13,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-mod anf;
+pub(crate) mod anf;
 mod recursive_lifetimes;
 
 type Result<T> = std::result::Result<T, Diagnostic>;
@@ -282,6 +282,8 @@ pub struct Executable {
     /// Whether any checked body contains a structured-task operation. Task
     /// programs use the cooperative reference scheduler and buffered host I/O.
     pub(crate) uses_tasks: bool,
+    /// Effect-row bit of each declared operation, by operation id.
+    pub(crate) effect_bits: Vec<u16>,
     /// Own grade tables for every copyable identity above. Keep this last so
     /// tables remain available while all other program metadata is dropped.
     pub(crate) _grade_algebras: Vec<std::sync::Arc<crate::grades::Algebra>>,
@@ -339,6 +341,12 @@ pub(crate) struct Function {
     /// synthesized by `crate::suspend` keep the enclosing function's slot
     /// numbering and receive their captures at those slots.
     pub parameter_slots: Option<Vec<usize>>,
+    /// Per local: its type holds a borrow (view, text, reference, borrowed
+    /// record, or task handle). Empty when not computed; the suspension
+    /// lowering then treats every local as borrowed.
+    pub local_borrowed: Vec<bool>,
+    /// Per local: the value is copyable (neither owning nor linear).
+    pub local_copyable: Vec<bool>,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Local {
@@ -1190,9 +1198,14 @@ pub(crate) enum ExprKind {
     /// `call` is the handler call `CallIndirect(handler, [payload,
     /// Erased(token)])`, so ownership and grades check a suspension exactly
     /// like a call of the handler; the lowering supplies the real token.
+    ///
+    /// `callee` is set for an await point: `call` is a direct call of a
+    /// function that may perform the handled declared operation, and the
+    /// lowering calls that function's resumable entry instead.
     Suspend {
         point: usize,
         call: Box<Expr>,
+        callee: Option<usize>,
     },
     /// Lowered form only: a block that `RegionExit` can leave from any depth.
     /// A normal completion yields the body value, applied to `finish` when
@@ -1208,6 +1221,15 @@ pub(crate) enum ExprKind {
     RegionExit {
         value: Box<Expr>,
         finish: bool,
+        cleanup: Vec<usize>,
+    },
+    /// Lowered form only: `?` inside a resumable function entry. The `Err`
+    /// path leaves the innermost `Region` through its finish (the caller's
+    /// continuation) instead of returning, dropping `cleanup` first.
+    TryExit {
+        value: Box<Expr>,
+        input: ResultShape,
+        output: ResultShape,
         cleanup: Vec<usize>,
     },
     /// Append one element, consuming and returning the same inline storage.
@@ -1307,6 +1329,9 @@ pub(crate) enum ExprKind {
 /// The checked description of a suspendable handled body.
 #[derive(Debug, Clone)]
 pub(crate) struct Suspendable {
+    /// The declared operation id when the handled operation is declared;
+    /// calls of functions that may perform it are await points.
+    pub operation: Option<usize>,
     /// Operation result type, which is also the body result type.
     pub result: Type,
     /// The resumption token type handed to the handler.
@@ -1316,12 +1341,6 @@ pub(crate) struct Suspendable {
     pub handler_writes: Vec<usize>,
     /// Effect row available at the handle site.
     pub effects: u16,
-    /// Per local slot of the enclosing function (as of the handle): the
-    /// value holds a borrow (view, text, reference, borrowed record, or task
-    /// handle) and cannot live across a suspension.
-    pub borrowed: Vec<bool>,
-    /// Per local slot: the value is copyable (neither owning nor linear).
-    pub copyable: Vec<bool>,
     pub body: Block,
     pub span: Span,
 }
@@ -1525,7 +1544,7 @@ impl Expr {
                     f(finish);
                 }
             }
-            ExprKind::RegionExit { value, .. } => f(value),
+            ExprKind::RegionExit { value, .. } | ExprKind::TryExit { value, .. } => f(value),
             ExprKind::If(condition, yes, no) => {
                 f(condition);
                 block(yes, f);
@@ -1743,7 +1762,7 @@ impl Expr {
                     f(finish);
                 }
             }
-            ExprKind::RegionExit { value, .. } => f(value),
+            ExprKind::RegionExit { value, .. } | ExprKind::TryExit { value, .. } => f(value),
             ExprKind::If(condition, yes, no) => {
                 f(condition);
                 block(yes, f);
@@ -2611,7 +2630,8 @@ fn fusion_expr_safe(
         ExprKind::Suspendable(_)
         | ExprKind::Suspend { .. }
         | ExprKind::Region { .. }
-        | ExprKind::RegionExit { .. } => false,
+        | ExprKind::RegionExit { .. }
+        | ExprKind::TryExit { .. } => false,
         ExprKind::FnValue { function, captures } => {
             captures
                 .iter()
@@ -2857,7 +2877,9 @@ fn fuse_expr(
                 fuse_expr(finish, types, signatures, safety, fusions);
             }
         }
-        ExprKind::RegionExit { value, .. } => fuse_expr(value, types, signatures, safety, fusions),
+        ExprKind::RegionExit { value, .. } | ExprKind::TryExit { value, .. } => {
+            fuse_expr(value, types, signatures, safety, fusions)
+        }
         ExprKind::AllocBoxNew { allocator, value }
         | ExprKind::AllocBoxTryNew {
             allocator, value, ..
@@ -4864,6 +4886,10 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             },
         );
     }
+    let mut effect_bits = vec![0; effect_operations.len()];
+    for (name, operation) in &effect_operations {
+        effect_bits[operation.id] = resolution.effect_bits.get(name).copied().unwrap_or(0);
+    }
     let effect_operations = &effect_operations;
     let mut monomorphic = Vec::new();
     for declaration in &module.items {
@@ -5267,6 +5293,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 ),
             ));
         }
+        let (local_borrowed, local_copyable) = checker.local_classes(&checker.locals);
         let locals = checker.locals;
         functions.bodies[index] = Some(Function {
             name: sig.name.clone(),
@@ -5292,6 +5319,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 .collect(),
             index_relations: checker.index_relations.clone(),
             parameter_slots: None,
+            local_borrowed,
+            local_copyable,
         });
     }
     // Re-check every proof certificate without the search that produced it.
@@ -5321,6 +5350,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,
         uses_tasks: functions.uses_tasks,
+        effect_bits,
         certificates: functions.certificates,
         allocator_contexts: functions.allocator_contexts,
         functions: functions.bodies.into_iter().map(Option::unwrap).collect(),
@@ -10764,6 +10794,8 @@ impl<'a> Functions<'a> {
                     .collect(),
                 index_relations: BTreeSet::new(),
                 parameter_slots: None,
+                local_borrowed: vec![],
+                local_copyable: vec![],
             }));
         } else {
             self.bodies.push(None);
@@ -11489,6 +11521,10 @@ enum ScalarValue {
 /// callable's one-shot/linear contract.
 /// What `checked_effect_body` needs to build a `Suspendable` node.
 struct SuspendableSite {
+    name: String,
+    /// The body performs the operation lexically outside its tail.
+    lexical: bool,
+    operation: Option<usize>,
     multishot: bool,
     handler_writes: Vec<usize>,
     effects: u16,
@@ -15112,6 +15148,8 @@ impl Checker<'_, '_> {
             declared_lifetimes: BTreeSet::new(),
             index_relations: BTreeSet::new(),
             parameter_slots: None,
+            local_borrowed: vec![],
+            local_copyable: vec![],
         };
         let signature = Signature {
             call_contract: None,
@@ -18550,6 +18588,8 @@ impl Checker<'_, '_> {
             declared_lifetimes: BTreeSet::new(),
             index_relations: BTreeSet::new(),
             parameter_slots: None,
+            local_borrowed: vec![],
+            local_copyable: vec![],
         };
         let synthetic = Signature {
             call_contract: None,
@@ -23637,6 +23677,7 @@ impl Checker<'_, '_> {
             default_trait: None,
             associated_consts: BTreeMap::new(),
         };
+        let (local_borrowed, local_copyable) = self.local_classes(&locals);
         let function = Function {
             name: name.to_owned(),
             parameters: captures.len() + lambda.parameters.len(),
@@ -23661,6 +23702,8 @@ impl Checker<'_, '_> {
             declared_lifetimes: BTreeSet::new(),
             index_relations: self.index_relations.clone(),
             parameter_slots: None,
+            local_borrowed,
+            local_copyable,
         };
         let index = self.functions.add_synthetic(signature, function)?;
         let ty = if once {
@@ -30663,8 +30706,11 @@ impl Checker<'_, '_> {
         // the token, in tail position) observes no continuation: `h(p, k)` is
         // `k(e)`, so every perform may use the identity token and continue in
         // place. Otherwise any perform outside the body's tail suspends.
-        let region = !tail_resumptive_handler(self.resolution, handler)
-            && body_has_non_tail_perform(body, operation);
+        // A declared operation can also be performed by called functions;
+        // under a non-tail handler those calls become await points.
+        let lexical = body_has_non_tail_perform(body, operation);
+        let region =
+            !tail_resumptive_handler(self.resolution, handler) && (lexical || declared.is_some());
         let handler_writes = self.closure_writes.get(&slot).cloned().unwrap_or_default();
         self.handlers.push(HandlerScope {
             operation: operation.to_owned(),
@@ -30692,6 +30738,9 @@ impl Checker<'_, '_> {
             expected,
             span,
             region.then_some(SuspendableSite {
+                name: operation.to_owned(),
+                lexical,
+                operation: declared.map(|declared| declared.id),
                 multishot,
                 handler_writes,
                 effects: saved_effects,
@@ -30823,42 +30872,54 @@ impl Checker<'_, '_> {
         let Some(site) = site else {
             return self.block(body, expected);
         };
-        if self.linear_type(result_ty) {
+        if site.lexical && self.linear_type(result_ty) {
             return Err(Diagnostic::new(
                 span,
                 "non-tail resumption of a linear operation result is not supported; return an owning value through the resumption or use a tail-resuming handler",
             ));
         }
-        let mut block = self.block(body, Some(result_ty))?;
-        self.expect(block.ty, result_ty, span)?;
+        let mut block = if site.lexical {
+            let block = self.block(body, Some(result_ty))?;
+            self.expect(block.ty, result_ty, span)?;
+            block
+        } else {
+            self.block(body, expected)?
+        };
+        if let Some(operation) = site.operation {
+            let bit = self.operation_effect(&site.name);
+            self.mark_awaits_in_block(&mut block, operation, bit, &site.name, false)?;
+        }
+        if self.handlers.last().is_none_or(|scope| scope.points == 0) {
+            return Ok(block);
+        }
+        if !site.lexical {
+            if self.linear_type(result_ty) {
+                return Err(Diagnostic::new(
+                    span,
+                    "non-tail resumption of a linear operation result is not supported; return an owning value through the resumption or use a tail-resuming handler",
+                ));
+            }
+            self.expect(block.ty, result_ty, span).map_err(|_| {
+                Diagnostic::new(
+                    span,
+                    format!(
+                        "this handled body calls functions that perform '{}', so under a handler with code after 'resume' it must produce the operation result type {}, which the handler's resumption returns",
+                        site.name,
+                        self.types.name(result_ty)
+                    ),
+                )
+            })?;
+        }
         self.anf_block(&mut block)?;
         let token = self.resume_type(result_ty, site.multishot);
-        let borrowed = self
-            .locals
-            .iter()
-            .map(|local| {
-                let ty = local.ty;
-                ty.is_view()
-                    || ty.is_ref()
-                    || ty.is_text()
-                    || crate::runtime_types::has_borrow(self.types, ty)
-                    || crate::runtime_types::contains_task(self.types, ty)
-            })
-            .collect();
-        let copyable = self
-            .locals
-            .iter()
-            .map(|local| !local.linear && !self.owned_type(local.ty) && !self.linear_type(local.ty))
-            .collect();
         let suspendable = Expr {
             kind: ExprKind::Suspendable(Box::new(Suspendable {
+                operation: site.operation,
                 result: result_ty,
                 token,
                 multishot: site.multishot,
                 handler_writes: site.handler_writes,
                 effects: site.effects,
-                borrowed,
-                copyable,
                 body: block,
                 span,
             })),
@@ -30876,6 +30937,128 @@ impl Checker<'_, '_> {
             tail: Some(Box::new(value)),
             ty,
         })
+    }
+    /// Classify locals for the suspension lowering: whether each holds a
+    /// borrow, and whether each is copyable.
+    fn local_classes(&self, locals: &[Local]) -> (Vec<bool>, Vec<bool>) {
+        let borrowed = locals
+            .iter()
+            .map(|local| {
+                let ty = local.ty;
+                ty.is_view()
+                    || ty.is_ref()
+                    || ty.is_text()
+                    || crate::runtime_types::has_borrow(self.types, ty)
+                    || crate::runtime_types::contains_task(self.types, ty)
+            })
+            .collect();
+        let copyable = locals
+            .iter()
+            .map(|local| !local.linear && !self.owned_type(local.ty) && !self.linear_type(local.ty))
+            .collect();
+        (borrowed, copyable)
+    }
+    /// Turn every direct call in a suspendable body that may perform the
+    /// handled declared operation into an await point. Calls under a nested
+    /// handler for the same operation belong to that handler.
+    fn mark_awaits_in_block(
+        &mut self,
+        block: &mut Block,
+        operation: usize,
+        bit: u16,
+        name: &str,
+        nested: bool,
+    ) -> Result<()> {
+        for statement in &mut block.statements {
+            if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                self.mark_awaits(value, operation, bit, name, nested)?;
+            }
+        }
+        if let Some(tail) = block.tail.as_deref_mut() {
+            self.mark_awaits(tail, operation, bit, name, nested)?;
+        }
+        Ok(())
+    }
+    fn mark_awaits(
+        &mut self,
+        expr: &mut Expr,
+        operation: usize,
+        bit: u16,
+        name: &str,
+        nested: bool,
+    ) -> Result<()> {
+        let nested = match &expr.kind {
+            ExprKind::HandlerPush {
+                operation: inner, ..
+            } if *inner == operation => return Ok(()),
+            ExprKind::HandlerPush { .. } | ExprKind::Suspendable(_) => true,
+            _ => nested,
+        };
+        let mut result = Ok(());
+        expr.for_each_child_mut(&mut |child| {
+            if result.is_ok() {
+                result = self.mark_awaits(child, operation, bit, name, nested);
+            }
+        });
+        result?;
+        let callee = match &expr.kind {
+            ExprKind::Call(Target::Function(function), _) => {
+                (self.functions.signatures[*function].effects & bit != 0).then_some(*function)
+            }
+            ExprKind::Call(Target::ObjectFunction { function, .. }, _)
+                if self.functions.signatures[*function].effects & bit != 0 =>
+            {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    format!(
+                        "a borrowed trait-object call that may perform '{name}' cannot be resumed by a handler with code after 'resume'; call a named function"
+                    ),
+                ));
+            }
+            ExprKind::CallIndirect { callee, .. }
+                if Self::function_parts(callee.ty)
+                    .is_some_and(|(id, _)| self.types.function_types[id].effects & bit != 0) =>
+            {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    format!(
+                        "calling a function value that may perform '{name}' is not supported in the body of a handler with code after 'resume': the call cannot be resumed. Call a named function instead"
+                    ),
+                ));
+            }
+            _ => None,
+        };
+        let Some(callee) = callee else {
+            return Ok(());
+        };
+        if nested {
+            return Err(Diagnostic::new(
+                expr.span,
+                format!(
+                    "a call that may perform '{name}' inside a nested handler for another operation cannot be resumed by the outer handler; move the call out of the nested 'handle'"
+                ),
+            ));
+        }
+        let scope = self.handlers.last_mut().expect("a handle scope is active");
+        scope.points += 1;
+        let point = scope.points;
+        let span = expr.span;
+        let ty = expr.ty;
+        let call = std::mem::replace(
+            expr,
+            Expr {
+                kind: ExprKind::Constant(0),
+                ty,
+                span,
+                resource: None,
+            },
+        );
+        expr.kind = ExprKind::Suspend {
+            point,
+            call: Box::new(call),
+            callee: Some(callee),
+        };
+        Ok(())
     }
     /// Check a direct `perform` against the innermost lexical handler.
     fn perform_effect(
@@ -30951,6 +31134,7 @@ impl Checker<'_, '_> {
                     kind: ExprKind::Suspend {
                         point,
                         call: Box::new(call),
+                        callee: None,
                     },
                     ty: result,
                     span,

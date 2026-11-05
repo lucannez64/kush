@@ -6910,7 +6910,7 @@ impl Checker<'_> {
             }
             ExprKind::Suspendable(suspendable) => self.block(&mut suspendable.body)?,
             ExprKind::Suspend { call, .. } => self.expr(call)?,
-            ExprKind::Region { .. } | ExprKind::RegionExit { .. } => {
+            ExprKind::Region { .. } | ExprKind::RegionExit { .. } | ExprKind::TryExit { .. } => {
                 unreachable!("ownership runs before suspendable bodies are lowered")
             }
             ExprKind::DynamicPerform {
@@ -7937,7 +7937,7 @@ fn expr_live(
             };
             live = block_live(body, &after, views, heads, exits, out);
         }
-        ExprKind::RegionExit { value, .. } => {
+        ExprKind::RegionExit { value, .. } | ExprKind::TryExit { value, .. } => {
             live = expr_live(value, live_after, views, heads, exits, out);
         }
         ExprKind::DynamicPerform {

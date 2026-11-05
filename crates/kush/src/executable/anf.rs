@@ -18,7 +18,7 @@ use super::*;
 
 /// Whether `expr` contains a suspension point of the region being normalized.
 /// Nested suspendable bodies own their points and were normalized already.
-pub(super) fn contains_suspend(expr: &Expr) -> bool {
+pub(crate) fn contains_suspend(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Suspend { .. } => true,
         ExprKind::Suspendable(_) => false,
@@ -53,10 +53,50 @@ fn unsupported(span: Span) -> Diagnostic {
     )
 }
 
+/// Fresh temporaries for the normalizer. Before ownership they are plain
+/// locals; after ownership (resumable function entries) owned temporaries
+/// also need a drop resource.
+pub(crate) trait Temporaries {
+    /// Bind `value` to a fresh immutable local, pushing the binding to `out`,
+    /// and return the expression that reads the local.
+    fn bind(&mut self, value: Expr, out: &mut Vec<Statement>) -> Result<Expr>;
+    /// A fresh immutable `Bool` local.
+    fn flag(&mut self, span: Span) -> Result<usize>;
+}
+
+impl Temporaries for Checker<'_, '_> {
+    fn bind(&mut self, value: Expr, out: &mut Vec<Statement>) -> Result<Expr> {
+        let slot = self.fresh_local(value.span, value.ty)?;
+        let read = Expr {
+            kind: ExprKind::Local(slot),
+            ty: value.ty,
+            span: value.span,
+            resource: None,
+        };
+        out.push(Statement::Let(slot, value));
+        Ok(read)
+    }
+    fn flag(&mut self, span: Span) -> Result<usize> {
+        self.fresh_local(span, Type::Bool)
+    }
+}
+
 impl Checker<'_, '_> {
+    /// Normalize a suspendable body before ownership.
+    pub(super) fn anf_block(&mut self, block: &mut Block) -> Result<()> {
+        Anf { temps: self }.block(block)
+    }
+}
+
+/// The normalizer over some source of temporaries.
+pub(crate) struct Anf<'t, T: Temporaries> {
+    pub(crate) temps: &'t mut T,
+}
+
+impl<T: Temporaries> Anf<'_, T> {
     /// Normalize every statement of `block` so suspension points are whole
     /// statement values or sit inside control constructs.
-    pub(super) fn anf_block(&mut self, block: &mut Block) -> Result<()> {
+    pub(crate) fn block(&mut self, block: &mut Block) -> Result<()> {
         if !block_contains_suspend(block) {
             return Ok(());
         }
@@ -91,11 +131,11 @@ impl Checker<'_, '_> {
         self.short_circuit_to_if(expr);
         match &mut expr.kind {
             ExprKind::Suspend { call, .. } => self.anf_operands(call, out),
-            ExprKind::Block(block) | ExprKind::Loop(block) => self.anf_block(block),
+            ExprKind::Block(block) | ExprKind::Loop(block) => self.block(block),
             ExprKind::If(condition, yes, no) => {
                 self.anf_value(condition, out)?;
-                self.anf_block(yes)?;
-                self.anf_block(no)
+                self.block(yes)?;
+                self.block(no)
             }
             ExprKind::Match(scrutinee, arms) => {
                 self.anf_value(scrutinee, out)?;
@@ -120,7 +160,7 @@ impl Checker<'_, '_> {
                                 ty,
                             },
                         };
-                        self.anf_block(&mut block)?;
+                        self.block(&mut block)?;
                         arm.body = Expr {
                             kind: ExprKind::Block(block),
                             ty,
@@ -135,7 +175,7 @@ impl Checker<'_, '_> {
                 self.while_to_loop(expr)?;
                 self.anf_statement_value(expr, out)
             }
-            ExprKind::While(_, body) => self.anf_block(body),
+            ExprKind::While(_, body) => self.block(body),
             _ => self.anf_operands(expr, out),
         }
     }
@@ -188,7 +228,18 @@ impl Checker<'_, '_> {
                 operands.extend(arguments.iter_mut());
                 operands
             }
-            _ => return Err(unsupported(span)),
+            ExprKind::DynamicPerform {
+                payload, resume, ..
+            } => vec![payload, resume],
+            _ => {
+                let mut nested = false;
+                expr.for_each_child(&mut |child| nested |= contains_suspend(child));
+                return if nested {
+                    Err(unsupported(span))
+                } else {
+                    Ok(())
+                };
+            }
         };
         let Some(last) = operands
             .iter()
@@ -216,18 +267,8 @@ impl Checker<'_, '_> {
     /// Replace `expr` by a fresh immutable local initialized just before.
     fn hoist(&mut self, expr: &mut Expr, out: &mut Vec<Statement>) -> Result<()> {
         let span = expr.span;
-        let ty = expr.ty;
-        let slot = self.fresh_local(span, ty)?;
-        let value = std::mem::replace(
-            expr,
-            Expr {
-                kind: ExprKind::Local(slot),
-                ty,
-                span,
-                resource: None,
-            },
-        );
-        out.push(Statement::Let(slot, value));
+        let value = std::mem::replace(expr, placeholder(span));
+        *expr = self.temps.bind(value, out)?;
         Ok(())
     }
 
@@ -280,7 +321,7 @@ impl Checker<'_, '_> {
         else {
             unreachable!("caller matched a while loop")
         };
-        let test = self.fresh_local(span, Type::Bool)?;
+        let test = self.temps.flag(span)?;
         let local = Expr {
             kind: ExprKind::Local(test),
             ty: Type::Bool,

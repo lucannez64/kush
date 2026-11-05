@@ -5640,6 +5640,40 @@ impl Generator<'_, '_> {
                 }
                 return None;
             }
+            ExprKind::TryExit {
+                value,
+                input,
+                output,
+                cleanup,
+            } => {
+                let values = lower!(self.expr(value));
+                self.consume(value);
+                let condition =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, values[0], input.ok_tag as i64);
+                let success = self.builder.create_block();
+                let failure = self.builder.create_block();
+                self.builder
+                    .ins()
+                    .brif(condition, success, &[], failure, &[]);
+                self.builder.switch_to_block(failure);
+                let (_, finish_block, depth) = *self.regions.last().unwrap();
+                let finish_block = finish_block.expect("a resumable entry region has a finish");
+                let width = self.builder.block_params(finish_block).len();
+                let mut error = vec![self.constant(output.err_tag as i64)];
+                error.extend_from_slice(&values[1..1 + self.program.width(input.error)]);
+                while error.len() < width {
+                    error.push(self.constant(0));
+                }
+                for id in cleanup {
+                    self.cleanup(Some(*id));
+                }
+                self.restore_handler_depth(depth);
+                self.jump(finish_block, &error);
+                self.builder.switch_to_block(success);
+                return Some(values[1..1 + self.program.width(input.ok)].to_vec());
+            }
             ExprKind::Suspendable(_) | ExprKind::Suspend { .. } => {
                 unreachable!("suspendable bodies are lowered before code generation")
             }
