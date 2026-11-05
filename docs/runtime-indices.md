@@ -333,7 +333,9 @@ fn consume(erased p: Eq<i64, 0, 0>); consume(n)
   arbitrary control flow.
 - Runtime scalar values size inline arrays only through a static capacity:
   `[T; n <= C]` binds the length to an immutable `i64` index `n`, and plain
-  `[T; n]` still requires a compile-time `Nat` length. See
+  `[T; n]` still requires a compile-time `Nat` length. Such arrays may appear
+  in free, generic, method, and trait signatures (nested in any substitutable
+  position); each call replaces the callee's binder with the caller's. See
   [runtime-sized inline arrays](dynamic-arrays.md#runtime-length-arrays-t-n--c).
 - Kernel evidence always comes from a checked logical term; there is no
   implicit argument, tactic, or user-supplied axiom. The *separate* arithmetic

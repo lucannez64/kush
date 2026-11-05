@@ -376,15 +376,29 @@ stack allocation with a hidden layout descriptor, and not a general dependent
 array. The capacity is always a compile-time `Nat`; the length is a runtime
 word. A runtime array length without a capacity, such as `[i64; n]`, remains
 an explicit diagnostic that suggests `[T; n <= C]`; use `Vec<T>` for an owned
-container of unbounded length. Runtime-length arrays cannot appear in foreign
-signatures, `fn` types, lambda signatures, or methods of a trait used as a
-`dyn` object, or inside a `dyn` or `fn` type in any signature (also when a
-type alias expands to one; such a call is rejected). There is no element-wise owning move beyond
-push/pop of copyable values, and an exclusive (`&mut`) borrowed pattern
-cannot bind owning, linear, or view elements. `Vec<T>` remains the growable owning container and `&[T]` the borrow
-for arbitrary lengths.
+container of unbounded length. `Vec<T>` remains the growable owning container
+and `&[T]` the borrow for arbitrary lengths. Further limits:
+
+- Runtime-length arrays cannot appear in foreign signatures, `fn` types,
+  lambda signatures, methods of a trait used as a `dyn` object, or inside a
+  `dyn` or `fn` type in any signature (a call through a type alias that
+  expands to one is rejected).
+- A trait and its impl must spell a length binder with the same parameter
+  name.
+- A call is rejected when the caller's binders would change the layout of a
+  union in the callee's signature; this can reject a call with distinct
+  binders when union members would swap positions.
+- A recursive instance cannot take a type argument that names the function's
+  own length binder.
+- There is no element-wise owning move beyond push/pop of copyable values.
+- An exclusive (`&mut`) borrowed pattern cannot bind owning, linear, or view
+  elements, and its bindings suspend the whole array (or the record the array
+  is a field of), even for disjoint fields of that record. A `&mut [T]`
+  result cannot be returned from a `&mut DynArray` parameter.
 
 The implementation is checked by `crates/kush/tests/advanced_types_effects.rs`
+and, for generic/method/trait and nested signatures and exclusive patterns,
+`crates/kush/tests/runtime_length_extensions.rs`,
 with positive push/get/literal/view/pattern/equality execution,
 native/reference agreement, owning-prefix cleanup, capacity overflow,
 out-of-bounds reads and writes, runtime view bounds, mutable-view aliasing
@@ -415,3 +429,26 @@ All are fixed, and each has a regression test (`review_*` in
    a mismatch, a literal argument for a runtime-length parameter gets the
    length-proof message, `[..rest]` alone is exhaustive, and `a[i]` works
    through `&mut [T; n <= C]`.
+
+A second independent review covered the extensions (generic, method, trait,
+and nested signatures, and exclusive patterns) over five rounds plus a
+focused re-check, with local builds. It found seven soundness bugs, each
+fixed with a regression test in `crates/kush/tests/runtime_length_extensions.rs`:
+
+1. A recursive call whose type argument named the function's own length
+   binder (`go::<[i64; n <= 4]>` inside `go`) gave a value of the outer
+   length the inner activation's type. Such instances are rejected; the check
+   also covers inherited trait defaults, whose per-impl copy has its own
+   binding, and binders inside `dyn` trait arguments.
+2. Rebinding a signature type at a call could change its layout: union
+   members merged (`f(k, k, ...)` on `[i64; n <= 4] | [i64; m <= 4]`),
+   swapped positions, absorbed a width subtype, or merged inside a generic
+   record or enum. The rebuilt type must now be isomorphic to the callee's.
+3. A type alias expanding to `dyn Tr<[i64; n <= 4]>` hid the binder from
+   call-site substitution, so the callee's binder leaked into the caller's
+   type. Binder walks now see `dyn` arguments, and such calls are rejected.
+
+Smaller results: recursive calls forwarding their own binder were briefly
+falsely rejected by an intermediate fix and are accepted again, and a guard
+that writes through an exclusive binding does not change what later arms
+test (documented).
