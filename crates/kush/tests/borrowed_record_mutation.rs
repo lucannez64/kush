@@ -336,3 +336,265 @@ fn exclusive_record_references_exclude_aliases() {
         "",
     );
 }
+
+// Independent review (R-REVIEW) regressions.
+#[test]
+fn review_partial_writes_keep_the_other_leaves_loaned() {
+    // Writing one field of an owner keeps the other fields' loans.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+struct Holder<'a> { point: &'a Point, note: i64 }
+struct Outer<'a> { h: Holder<'a>, other: &'a [i64] }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut c: Vec<i64> = [5, 6, 7, 8];
+    let mut o = Outer { h: Holder { point: &a, note: 0 }, other: &c[..] };
+    {
+        let r = &mut o.h;
+        *r = Holder { point: &a, note: 1 };
+    }
+    c = [1];
+    let mut junk: Vec<i64> = [41, 42, 43, 44];
+    Slice.get(o.other, 3)
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+struct Holder<'a> { point: &'a Point, note: i64 }
+struct Pair<'a> { l: Holder<'a>, r: Holder<'a> }
+fn main() -> i64 ! {panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut b = Point { x: 77, y: 0 };
+    let mut p = Pair { l: Holder { point: &a, note: 0 }, r: Holder { point: &b, note: 0 } };
+    {
+        let w = &mut p.l;
+        *w = Holder { point: &a, note: 1 };
+    }
+    b = Point { x: 3, y: 3 };
+    p.r.point.x
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    // Writing one container element keeps the other elements' loans.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+struct Holder<'a> { point: &'a Point, note: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut b = Point { x: 77, y: 0 };
+    let c = Point { x: 8, y: 0 };
+    let mut v = [Holder { point: &c, note: 0 }, Holder { point: &b, note: 0 }];
+    {
+        let r = &mut v[0];
+        *r = Holder { point: &a, note: 1 };
+    }
+    b = Point { x: 3, y: 3 };
+    Vec.get(&v, 1).point.x
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    // A write through an unbound place reference is tracked.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+struct Outer<'a> { h: Win<'a>, other: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a: [i64; 4] = [1, 2, 3, 4];
+    let mut o = Outer { h: Win { view: &a[..], note: 0 }, other: 0 };
+    {
+        let b: Vec<i64> = [70, 71, 72, 73];
+        *(&mut o.h) = Win { view: &b[..], note: 1 };
+    }
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    Slice.get(o.h.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "an outer container was updated with a reference to this block-local value",
+    );
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a: [i64; 4] = [1, 2, 3, 4];
+    let mut v = [Win { view: &a[..], note: 0 }];
+    {
+        let b: Vec<i64> = [70, 71, 72, 73];
+        *(&mut v[0]) = Win { view: &b[..], note: 1 };
+    }
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    Slice.get(Vec.get(&v, 0).view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "an outer container was updated with a reference to this block-local value",
+    );
+    // A leaf copied from another record argument flows into the caller's record.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn steal<'a>(h: &mut Win<'a>, g: &Win<'a>) -> Unit ! {} {
+    *h = Win { view: g.view, note: 1 };
+}
+fn main() -> i64 ! {alloc, panic} {
+    let a: [i64; 4] = [1, 2, 3, 4];
+    let mut h1 = Win { view: &a[..], note: 0 };
+    let mut b: Vec<i64> = [70, 71, 72, 73];
+    {
+        let h2 = Win { view: &b[..], note: 0 };
+        steal(&mut h1, &h2);
+    }
+    b = [5];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    Slice.get(h1.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+struct Holder<'a> { point: &'a Point, note: i64 }
+fn steal<'a>(h: &mut Holder<'a>, g: &Holder<'a>) -> Unit ! {} {
+    *h = Holder { point: g.point, note: 1 };
+}
+fn main() -> i64 ! {panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut h1 = Holder { point: &a, note: 0 };
+    let mut b = Point { x: 77, y: 0 };
+    {
+        let h2 = Holder { point: &b, note: 0 };
+        steal(&mut h1, &h2);
+    }
+    b = Point { x: 123, y: 0 };
+    h1.point.x
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+struct Holder<'a> { point: &'a Point, note: i64 }
+fn steal<'a>(h: &mut Holder<'a>, g: &mut Holder<'a>) -> Unit ! {} {
+    *h = Holder { point: g.point, note: 1 };
+}
+fn main() -> i64 ! {panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut h1 = Holder { point: &a, note: 0 };
+    {
+        let b = Point { x: 77, y: 0 };
+        let mut h2 = Holder { point: &b, note: 0 };
+        steal(&mut h1, &mut h2);
+    }
+    let z = Point { x: 123, y: 0 };
+    h1.point.x
+}"#,
+        "an outer container was updated with a reference to this block-local value",
+    );
+    // A field read through the reference after the write keeps the new
+    // source loaned.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+struct Holder<'a> { point: &'a Point, note: i64 }
+fn main() -> i64 ! {panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut b = Point { x: 30, y: 40 };
+    let mut h = Holder { point: &a, note: 1 };
+    let r = &mut h;
+    *r = Holder { point: &b, note: 2 };
+    let p = r.point;
+    b = Point { x: 0, y: 0 };
+    p.x
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    // Field, element, and argument writes that stay within their storage.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+struct Holder<'a> { point: &'a Point, note: i64 }
+struct Outer<'a> { h: Holder<'a>, other: &'a Point }
+fn set_inner<'a>(o: &mut Outer<'a>, p: &'a Point) -> Unit ! {} {
+    *(&mut o.h) = Holder { point: p, note: 9 };
+}
+fn steal<'a>(h: &mut Holder<'a>, g: &Holder<'a>) -> Unit ! {} { *h = Holder { point: g.point, note: 1 }; }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let b = Point { x: 30, y: 40 };
+    let mut o = Outer { h: Holder { point: &a, note: 0 }, other: &a };
+    set_inner(&mut o, &b);
+    let g = Holder { point: &b, note: 0 };
+    let mut h = Holder { point: &a, note: 0 };
+    steal(&mut h, &g);
+    o.h.point.x + o.h.note + h.point.x
+}"#,
+        69,
+        "",
+    );
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+struct Holder<'a> { point: &'a Point, note: i64 }
+struct Outer<'a> { h: Holder<'a>, other: &'a Point }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let b = Point { x: 30, y: 40 };
+    let mut o = Outer { h: Holder { point: &a, note: 0 }, other: &a };
+    {
+        let r = &mut o.h;
+        *r = Holder { point: &b, note: 1 };
+    }
+    o.h.point.x + o.h.note + o.other.x
+}"#,
+        32,
+        "",
+    );
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+struct Holder<'a> { point: &'a Point, note: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let b = Point { x: 30, y: 40 };
+    let mut v = [Holder { point: &a, note: 1 }, Holder { point: &a, note: 2 }];
+    {
+        let r = &mut v[1];
+        *r = Holder { point: &b, note: 3 };
+    }
+    let w = 0;
+    *(&mut v[w]) = Holder { point: &b, note: 5 };
+    Vec.get(&v, 1).point.x + Vec.get(&v, 0).note * 1000
+}"#,
+        5030,
+        "",
+    );
+}
+
+#[test]
+fn review_container_arguments_are_write_sources() {
+    // A callee may copy an element from a shared container argument into a
+    // written container; the caller keeps the copied element's owner loaned.
+    rejects(
+        r#"
+        struct Point { x: i64, y: i64 }
+        fn copy_first<'a>(dst: &mut Vec<&'a Point>, src: &Vec<&'a Point>) -> Unit ! {alloc, panic} {
+            Vec.push(dst, Vec.get(src, 0));
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let a = Point { x: 1, y: 2 };
+            let mut dst: Vec<&Point> = [&a];
+            {
+                let b = Point { x: 77, y: 0 };
+                let src: Vec<&Point> = [&b];
+                copy_first(&mut dst, &src);
+            }
+            Vec.get(&dst, 1).x
+        }"#,
+        "an outer container was updated with a reference to this block-local value",
+    );
+    // A reference produced by a `break` value is rejected with a real
+    // diagnostic, not an internal error.
+    rejects(
+        r#"fn main() -> i64 ! {panic} {
+    let mut xs: [i64; 4] = [1, 2, 3, 4];
+    let mut i = 0;
+    let p = loop {
+        i = 1;
+        break &mut xs[i];
+    };
+    let q = &mut xs[2];
+    *p = 10;
+    *q = 20;
+    *p
+}"#,
+        "cannot bind this reference: the storage it borrows cannot be tracked",
+    );
+}

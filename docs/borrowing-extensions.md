@@ -315,7 +315,8 @@ fn pairs(s: &mut [i64]) -> Unit ! {panic} {
   earlier loop iteration conflicts with every runtime index of the same base.
 - The index expression is an ordinary read. Reading an exclusively borrowed
   owner or view inside the index (`&mut xs[xs[0]]` while `&mut xs[0]` is live)
-  is rejected.
+  is rejected, and so is reading an exclusive view inside the index of its own
+  element place (`&mut s[Slice.get(s, 0)]`); compute the index first.
 
 A live record or container that holds a reference or slice leaf keeps that
 leaf's owner borrowed against new borrows. A stored `&mut` element excludes
@@ -359,13 +360,18 @@ reset(&mut h, &b);    // h now borrows b: b cannot be replaced while h lives
   keeps the lifetime its current leaves carry, which is how a block-local
   owner is kept out of an outer record.
 - **Leaf provenance.** The value is evaluated first; then the owner's leaves
-  are replaced in one step. A reference with exactly one possible owner
-  replaces that owner's leaves, while a branch-selected reference (`if c {
-  &mut h1 } else { &mut h2 }`) merges the new leaves into every candidate. A
-  call through a `&mut Holder<'a>` parameter conservatively merges every
-  argument that can flow into `'a` into the caller's record, exactly like a
-  `&mut` container parameter. Values read before the write keep their own
-  loans.
+  are updated in one step, under the written place's field path. Only a write
+  to a whole owner through its one possible reference replaces leaves. A write
+  to a field (`*(&mut o.h) = ...`, `let r = &mut o.h`), to a container element
+  (`&mut v[i]`), or through a branch-selected reference (`if c { &mut h1 } else
+  { &mut h2 }`) merges the new leaves, so the other fields, elements, and
+  candidates keep their loans. A write whose field path cannot be identified
+  (a place rooted at a stored reference local, or a container field of a
+  record) is rejected. A call through a `&mut Holder<'a>` parameter
+  conservatively merges every argument leaf that can flow into `'a` into the
+  caller's record, including leaves of other borrowed-record or container
+  arguments (`&Holder<'a>`, `&mut Holder<'a>`, `&Vec<&'a T>`) that the callee
+  could copy. Values read before the write keep their own loans.
 - **Exclusivity.** `&mut h` needs `let mut h` and excludes every other borrow
   of `h` while it lives. An exclusive leaf (`&'a mut [T]`) is never replaced by
   a shared borrow, and a written exclusive source stays exclusively borrowed.

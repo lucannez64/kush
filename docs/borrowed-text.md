@@ -178,8 +178,10 @@ so reborrow it with `&mut v[..]` to keep using it.
 **Positions.** A `&mut str` lives in a lexical binding and may be passed to or
 returned from a named function (`fn rest<'a>(t: &'a mut str) -> &'a mut str`).
 It cannot be stored in a record field, a container, a tuple, an array, a union,
-a closure capture, a task, or a function arrow, and a view of a local String
-cannot be returned.
+a closure capture, a task, or a function arrow. A view of a local String
+cannot be returned, and, as for `&str`, a view derived from a `&mut String`
+parameter has no caller-named lifetime and cannot be returned either; take a
+`&mut str` parameter instead.
 
 ### Conservative boundaries
 

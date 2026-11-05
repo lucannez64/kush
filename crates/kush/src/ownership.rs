@@ -101,16 +101,16 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                     // well, so a call that mutates the caller's container can
                     // relate every written reference to the declared element
                     // lifetime.
-                    // An exclusive reference to a record with borrowed
-                    // fields exposes its leaves the same way: the callee may
-                    // replace the whole record.
+                    // A reference to a record with borrowed fields exposes
+                    // its leaves the same way: through `&mut` the callee may
+                    // replace the whole record, and through `&` it may copy a
+                    // leaf into another written destination.
                     if let Some(container) =
                         referent_of(&program.pointees, local.ty).filter(|container| {
                             container_carries_borrow(&program.enums, &program.pointees, *container)
-                                || (matches!(local.ty, Type::RefMut(_))
-                                    && container
-                                        .layout()
-                                        .is_some_and(|id| program.enums[id].borrowed))
+                                || container
+                                    .layout()
+                                    .is_some_and(|id| program.enums[id].borrowed)
                         })
                     {
                         for leaf in leaves_of(
@@ -2799,7 +2799,7 @@ impl Checker<'_> {
         args: &[Expr],
         span: Span,
     ) -> Result<()> {
-        for (leaves, argument) in parameters.iter().zip(args.iter()) {
+        for (destination, (leaves, argument)) in parameters.iter().zip(args.iter()).enumerate() {
             if !leaves
                 .iter()
                 .any(|leaf| leaf.path.is_empty() && leaf.mutable)
@@ -2825,9 +2825,14 @@ impl Checker<'_> {
                     .get(&relative)
                     .and_then(|loan| loan.lifetime.clone());
                 let mut element = existing.leaves.get(&relative).cloned().unwrap_or_default();
-                for (other_leaves, other) in parameters.iter().zip(args.iter()) {
+                for (index, (other_leaves, other)) in parameters.iter().zip(args.iter()).enumerate()
+                {
                     for leaf in other_leaves {
-                        if leaf.path.first() == Some(&CONTAINER_LEAF) {
+                        // Another argument's element or record leaves are
+                        // sources too: the callee may copy a leaf out of a
+                        // borrowed record or container it was given. The
+                        // destination's own leaves are already in `existing`.
+                        if index == destination && leaf.path.first() == Some(&CONTAINER_LEAF) {
                             continue;
                         }
                         let Some(other_declared) = &leaf.lifetime else {
@@ -2876,9 +2881,11 @@ impl Checker<'_> {
     /// this function is a rigid destination (lifetimes are invariant under
     /// `&mut`), otherwise the destination keeps the lifetime its current
     /// leaves already carry. The owner behind the reference then holds the
-    /// new leaves; a reference with one possible owner replaces that owner's
-    /// leaves, otherwise they are merged. The old leaves stay checked until
-    /// the write, which happens after the value is evaluated.
+    /// new leaves under the written place's field path. Only a write to a
+    /// whole owner through its one possible reference replaces leaves; a
+    /// write to a field, a container element, or one of several possible
+    /// owners merges them. The old leaves stay checked until the write, which
+    /// happens after the value is evaluated.
     fn write_borrowed_record(
         &mut self,
         reference: &Expr,
@@ -2893,59 +2900,175 @@ impl Checker<'_> {
             self.variance,
             referent,
         )?;
-        let existing = self.container_provenance(reference);
         let incoming = self.borrowed_element_provenance(value);
-        for leaf in &expected {
-            let Some(loan) = incoming.leaves.get(&leaf.path) else {
-                return Err(Diagnostic::new(
-                    span,
-                    "the borrowed record written through this reference is missing provenance for a declared borrowed field",
-                ));
-            };
-            if leaf.mutable && !loan.mutable {
-                return Err(Diagnostic::new(
-                    span,
-                    "an exclusive borrowed field cannot be replaced by a shared borrow; shared storage cannot be upgraded",
-                ));
-            }
-            let Some(declared) =
-                self.write_destination_label(leaf.lifetime.as_ref(), &leaf.path, &existing)
-            else {
-                continue;
-            };
-            let written = loan.lifetime.clone().or_else(|| {
-                (!loan.origins.is_empty()).then(|| self.anonymous_lifetime(&loan.origins))
-            });
-            if !written
-                .as_deref()
-                .is_some_and(|written| self.actual_outlives(written, &declared))
-            {
-                return Err(Diagnostic::new(
-                    span,
-                    format!(
-                        "the record written through this '&mut' reference has a field with {}, which does not outlive the record's lifetime {}; lifetimes are invariant under '&mut', so the written source must live at least as long",
-                        written
-                            .as_deref()
-                            .map(describe_actual)
-                            .unwrap_or_else(|| "a temporary or local owner".to_owned()),
-                        describe_lifetime(&declared)
-                    ),
-                ));
+        let targets = self.record_write_targets(reference, span)?;
+        // A parameter reference has no local owner: its declared labels are
+        // the destination and the caller merges the written leaves.
+        let mut destinations = targets
+            .iter()
+            .map(|(owner, prefix, _)| {
+                let mut existing = RecordProvenance::default();
+                if let Some(provenance) = &self.record_sources[*owner] {
+                    for (path, loan) in &provenance.leaves {
+                        if let Some(rest) = path.strip_prefix(prefix.as_slice()) {
+                            existing.leaves.insert(rest.to_vec(), loan.clone());
+                        }
+                    }
+                }
+                existing
+            })
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            destinations.push(self.container_provenance(reference));
+        }
+        for existing in &destinations {
+            for leaf in &expected {
+                let Some(loan) = incoming.leaves.get(&leaf.path) else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "the borrowed record written through this reference is missing provenance for a declared borrowed field",
+                    ));
+                };
+                if leaf.mutable && !loan.mutable {
+                    return Err(Diagnostic::new(
+                        span,
+                        "an exclusive borrowed field cannot be replaced by a shared borrow; shared storage cannot be upgraded",
+                    ));
+                }
+                let Some(declared) =
+                    self.write_destination_label(leaf.lifetime.as_ref(), &leaf.path, existing)
+                else {
+                    continue;
+                };
+                let written = loan.lifetime.clone().or_else(|| {
+                    (!loan.origins.is_empty()).then(|| self.anonymous_lifetime(&loan.origins))
+                });
+                if !written
+                    .as_deref()
+                    .is_some_and(|written| self.actual_outlives(written, &declared))
+                {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "the record written through this '&mut' reference has a field with {}, which does not outlive the record's lifetime {}; lifetimes are invariant under '&mut', so the written source must live at least as long",
+                            written
+                                .as_deref()
+                                .map(describe_actual)
+                                .unwrap_or_else(|| "a temporary or local owner".to_owned()),
+                            describe_lifetime(&declared)
+                        ),
+                    ));
+                }
             }
         }
+        let replace = targets.len() == 1 && targets[0].2;
+        for (owner, prefix, _) in &targets {
+            let mut placed = RecordProvenance::default();
+            for (path, loan) in &incoming.leaves {
+                let mut full = prefix.clone();
+                full.extend(path.iter().copied());
+                placed.leaves.insert(full, loan.clone());
+            }
+            self.merge_container_provenance_slot(*owner, placed, replace);
+        }
+        // A stored reference also carries the leaves it now points at, so a
+        // field read through it keeps the written sources loaned.
         let base = through_coerce(reference);
-        let owners = match &base.kind {
-            ExprKind::Borrow(_) => 1,
-            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => self
-                .view_loan(base)
-                .origins
-                .into_iter()
-                .filter(|owner| *owner != *slot && self.is_carrier_type(self.locals[*owner].ty))
-                .count(),
-            _ => 0,
-        };
-        self.merge_container_provenance(reference, incoming, owners == 1);
+        if let ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) = &base.kind
+            && !targets.is_empty()
+        {
+            self.merge_container_provenance_slot(*slot, incoming, replace);
+        }
         Ok(())
+    }
+    /// The local owners a borrowed-record write through `reference` reaches:
+    /// `(owner, field path of the written record inside it, whole owner)`.
+    /// An empty list means the reference is a parameter. A place whose field
+    /// path cannot be identified is rejected rather than guessed.
+    fn record_write_targets(
+        &self,
+        reference: &Expr,
+        span: Span,
+    ) -> Result<Vec<(usize, Vec<usize>, bool)>> {
+        let unknown = || {
+            Diagnostic::new(
+                span,
+                "cannot track which part of its owner this '&mut' reference replaces; write through '&mut' of the whole record, or of a record field of a local",
+            )
+        };
+        // A place rooted at a reference parameter writes caller storage: the
+        // declared labels check it and the caller merges the leaves. A place
+        // rooted at a stored reference local is not tracked field by field.
+        let parameter_reference =
+            |slot: usize| slot < self.parameter_count && self.locals[slot].ty.is_ref();
+        let place_target =
+            |root: usize, path: Vec<usize>| -> Result<Vec<(usize, Vec<usize>, bool)>> {
+                if parameter_reference(root) {
+                    return Ok(Vec::new());
+                }
+                if self.locals[root].ty.is_ref() {
+                    return Err(unknown());
+                }
+                let index = |step: &usize| step & (INDEX_PATH_MARK | RUNTIME_INDEX_MARK) != 0;
+                if !path.iter().any(index) {
+                    let whole = path.is_empty();
+                    return Ok(vec![(root, path, whole)]);
+                }
+                // One element of a container of borrowed records: container
+                // leaves are element-relative and shared by every element.
+                if path.len() == 1
+                    && container_carries_borrow(self.enums, self.pointees, self.locals[root].ty)
+                {
+                    return Ok(vec![(root, Vec::new(), false)]);
+                }
+                Err(unknown())
+            };
+        let base = through_coerce(reference);
+        match &base.kind {
+            ExprKind::Borrow(slot) | ExprKind::BorrowInit { slot, .. } => {
+                Ok(vec![(*slot, Vec::new(), true)])
+            }
+            ExprKind::BorrowPlace(place) => {
+                let (root, path) = self.place_ident(place).ok_or_else(unknown)?;
+                place_target(root, path)
+            }
+            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
+                if let Some(field) = &self.view_fields[*slot] {
+                    return place_target(field.root, field.path.clone());
+                }
+                let owners = self
+                    .view_loan(base)
+                    .origins
+                    .into_iter()
+                    .filter(|owner| *owner != *slot)
+                    .collect::<Vec<_>>();
+                if owners.iter().all(|owner| parameter_reference(*owner)) {
+                    return Ok(Vec::new());
+                }
+                let carriers = owners
+                    .iter()
+                    .copied()
+                    .filter(|owner| self.is_carrier_type(self.locals[*owner].ty))
+                    .collect::<Vec<_>>();
+                let referent = self.referent(base.ty);
+                let same = |owner: usize| {
+                    let definition = |ty: Type| ty.layout().map(|id| self.enums[id].definition);
+                    referent.is_some_and(|referent| {
+                        definition(self.locals[owner].ty).is_some()
+                            && definition(self.locals[owner].ty) == definition(referent)
+                    })
+                };
+                if carriers.is_empty() || !carriers.iter().all(|owner| same(*owner)) {
+                    return Err(unknown());
+                }
+                let whole = carriers.len() == 1;
+                Ok(carriers
+                    .into_iter()
+                    .map(|owner| (owner, Vec::new(), whole))
+                    .collect())
+            }
+            _ => Err(unknown()),
+        }
     }
     fn argument_leaf_loan(&self, argument: &Expr, path: &[usize]) -> Option<Loan> {
         if let Some(rest) = path.strip_prefix(&[CONTAINER_LEAF]) {
@@ -4420,7 +4543,7 @@ impl Checker<'_> {
             if origins.is_empty() {
                 return Err(Diagnostic::new(
                     expr.span,
-                    "internal error: stored reference has no capability provenance",
+                    "cannot bind this reference: the storage it borrows cannot be tracked through this expression (for example a 'break' value); create the reference where it is used",
                 ));
             }
             let lifetime = loan

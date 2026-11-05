@@ -367,3 +367,21 @@ fn mutable_text_views_cannot_outlive_or_escape_their_owner() {
         "use after move",
     );
 }
+
+#[test]
+fn review_a_view_of_a_mutable_string_parameter_is_not_returned() {
+    // As for `&str`, a view derived from a `&mut String` parameter has no
+    // caller-named lifetime; a `&mut str` parameter can be narrowed instead.
+    rejects(
+        r#"
+        fn f<'a>(s: &'a mut String) -> &'a mut str ! {} { s.as_mut_str() }
+        fn main() -> i64 ! {} { 0 }"#,
+        "",
+    );
+    check(
+        r#"
+        fn f<'a>(s: &'a mut str) -> &'a mut str ! {panic} { &mut s[0..1] }
+        fn main() -> i64 ! {} { 0 }"#,
+    )
+    .unwrap();
+}

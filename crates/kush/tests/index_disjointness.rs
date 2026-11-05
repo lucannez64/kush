@@ -366,3 +366,32 @@ fn proofs_never_cross_a_loop_iteration_through_stored_loans() {
         OVERLAP,
     );
 }
+
+#[test]
+fn review_an_exclusive_view_is_not_read_inside_its_own_element_index() {
+    // Reading the view inside the index of its own element place is
+    // rejected (documented); computing the index first is accepted.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 4] = [1, 2, 3, 4];
+            let s: &mut [i64] = &mut xs[..];
+            let p = &mut s[Slice.get(s, 0)];
+            *p
+        }"#,
+        "cannot use a slice view while a child view derived from it is live",
+    );
+    agrees(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 4] = [1, 2, 3, 4];
+            let s: &mut [i64] = &mut xs[..];
+            let i = Slice.get(s, 0);
+            let p = &mut s[i];
+            *p = *p * 10;
+            *p
+        }"#,
+        20,
+        "",
+    );
+}
