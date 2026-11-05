@@ -1,7 +1,16 @@
-# Zed compiles this extension to wasm32-wasip2. Cranelift cannot target wasm,
-# so override a user-wide `codegen-backend = "cranelift"` for this crate only.
-[profile.dev]
-codegen-backend = "llvm"
-
-[profile.release]
-codegen-backend = "llvm"
+# Zed compiles this extension for wasm32-wasip2. Cranelift cannot target wasm,
+# so if a user-wide Cargo config ever sets `codegen-backend = "cranelift"`
+# again, override it for this crate only with:
+#
+#   [profile.dev]
+#   codegen-backend = "llvm"
+#
+#   [profile.release]
+#   codegen-backend = "llvm"
+#
+# `codegen-backend` in a profile is still unstable, so that override also needs
+# `cargo-features = ["codegen-backend"]` on the first line of Cargo.toml and a
+# nightly toolchain to build. Without the opt-in Zed's extension build fails
+# with "feature `codegen-backend` is required". This machine no longer enables
+# Cranelift by default (~/.cargo/config.toml.bak), so the override is left out
+# and the extension builds with plain Cargo.
