@@ -3029,10 +3029,21 @@
       "deps": [
         "DA"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Substitute the caller's length binder in generic inference and method dispatch so generic fns, impl methods, and trait items may use [T; n <= C].",
-      "commit": null,
-      "log": [],
+      "commit": "5c8d6b6",
+      "log": [
+        {
+          "time": "2026-11-05 14:44:58",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 14:49:24",
+          "who": "agent",
+          "text": "done 5c8d6b6"
+        }
+      ],
       "area": "dynarray"
     },
     {
@@ -3161,6 +3172,26 @@
           "text": "Boat gate on ea8f99b: fmt, clippy, 1476 tests pass."
         }
       ]
+    },
+    {
+      "id": "FIX-RT-RECURSIVE-BINDER",
+      "title": "Reject recursive instances that capture their own length binder",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "DA"
+      ],
+      "status": "done",
+      "desc": "A type argument naming a length binder of the function being instantiated (go::<[i64; n <= 4]> inside go) gave an old-length value the new activation's length type. Found while doing A-RT-GENERIC.",
+      "commit": "5c8d6b6",
+      "log": [
+        {
+          "time": "2026-11-05 14:49:23",
+          "who": "agent",
+          "text": "done 5c8d6b6"
+        }
+      ],
+      "area": "dynarray"
     }
   ]
 }
