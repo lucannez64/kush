@@ -1892,10 +1892,26 @@
       "deps": [
         "A-REVIEW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "37f38e5",
+      "log": [
+        {
+          "time": "2026-11-05 02:31:44",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 02:31:57",
+          "who": "agent",
+          "text": "done 37f38e5"
+        },
+        {
+          "time": "2026-11-05 02:31:57",
+          "who": "agent",
+          "text": "All dependencies done; Boat gate 1397 tests/fmt/clippy passed on 017f51e; backlog ticked in 37f38e5."
+        }
+      ]
     },
     {
       "id": "DONE",
