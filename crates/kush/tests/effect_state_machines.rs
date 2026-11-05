@@ -1589,3 +1589,30 @@ fn review_handlers_cannot_store_tokens_through_captured_mutable_views() {
     assert_ne!(bound, lambda);
     rejects(&bound, "captures mutable access to storage");
 }
+
+#[test]
+fn review_resumable_entries_whose_body_never_completes_build_natively() {
+    let returned = r#"
+        effect Ask: i64 -> i64;
+        fn two(x: i64) -> i64 ! {Ask, panic} { return x; }
+        fn main() -> i64 ! {alloc, panic} {
+            handle Ask: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { let r = resume(x ^ 5); r } {
+                two(3) + 1
+            }
+        }"#;
+    agrees(returned, 4, "");
+    // An early-exit search loop: find(2) performs 2 (3), 3 (2), 4 (5),
+    // 5 (4), 6 (7 > 5, returned); four flips cancel and the fifth wins.
+    let search = r#"
+        effect Op: i64 -> i64;
+        fn find(start: i64) -> i64 ! {Op, panic} {
+            let mut n = start;
+            loop { let a = perform Op(n); if a > 5 { return a; } n = n + 1; }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            handle Op: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { let r = resume(x ^ 1); r ^ 4096 } {
+                find(2) + 1
+            }
+        }"#;
+    agrees(search, 8 ^ 4096, "");
+}

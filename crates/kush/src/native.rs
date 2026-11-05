@@ -5607,15 +5607,24 @@ impl Generator<'_, '_> {
             }
             ExprKind::Region { body, finish, .. } => {
                 let exit = self.join(expr.ty);
+                // The finish block receives the finish callable's argument:
+                // the body value on completion, or a returned value from a
+                // `RegionExit`/`TryExit`, even when the body itself never
+                // completes (type Never).
                 let finish_block = match finish {
-                    Some(_) if body.ty != Type::Never => {
+                    Some(finish) => {
+                        let input = match finish.ty {
+                            Type::Fn(id) | Type::Once(id) => {
+                                self.program.function_types[id].parameters[0]
+                            }
+                            _ => unreachable!("checked region finish callable"),
+                        };
                         let block = self.builder.create_block();
-                        for _ in 0..self.program.width(body.ty) {
+                        for _ in 0..self.program.width(input) {
                             self.builder.append_block_param(block, I64);
                         }
                         Some(block)
                     }
-                    Some(_) => Some(self.builder.create_block()),
                     None => None,
                 };
                 let depth = self.capture_handler_depth();
