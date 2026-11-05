@@ -289,26 +289,20 @@ fn capturing_capability_handlers_run_in_their_own_body() {
 }
 
 #[test]
-fn only_in_place_capabilities_cross_calls() {
+fn capturing_and_multishot_capabilities_stay_in_their_body() {
+    // EFF-CAP-RESUME-CALLS lets non-tail one-shot noncapturing handlers
+    // cross calls (tests in `capability_resumption_across_calls` below).
     let step = "fn step(op: cap Ask ! {}, x: i64) -> i64 ! {} { perform op(x) }";
-    for handler in [
-        // non-tail
-        "fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { let r = resume(x); r ^ 1 }",
-        // multishot
-        "fn(x: i64, resume: fn(i64) -> i64 ! {}) -> i64 ! {} { resume(x) }",
-    ] {
-        rejects(
-            &format!(
-                "effect Ask: i64 -> i64;
-                 {step}
-                 fn main() -> i64 ! {{panic}} {{
-                     handle Ask: i64 -> i64 as ask with {handler} {{ step(ask, 1) }}
-                 }}"
-            ),
-            "EFF-CAP-RESUME-CALLS",
-        );
-    }
-    // A capturing in-place handler cannot cross calls either.
+    rejects(
+        &format!(
+            "effect Ask: i64 -> i64;
+             {step}
+             fn main() -> i64 ! {{panic}} {{
+                 handle Ask: i64 -> i64 as ask with fn(x: i64, resume: fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{ resume(x) }} {{ step(ask, 1) }}
+             }}"
+        ),
+        "capturing or multishot",
+    );
     rejects(
         &format!(
             "effect Ask: i64 -> i64;
@@ -321,7 +315,7 @@ fn only_in_place_capabilities_cross_calls() {
                  ) -> i64 ! {{}} {{ resume(x | k) }} {{ step(ask, 1) }}
              }}"
         ),
-        "EFF-CAP-RESUME-CALLS",
+        "capturing or multishot",
     );
 }
 
@@ -453,7 +447,7 @@ fn a_capability_whose_handler_performs_declared_operations_stays_local() {
                  ) -> i64 ! {Log, panic} { resume(perform Log(x)) } { f(ask) }
              }
          }",
-        "EFF-CAP-RESUME-CALLS",
+        "performs declared operations",
     );
     // Builtin effects travel with a passed capability.
     agrees(
@@ -467,5 +461,140 @@ fn a_capability_whose_handler_performs_declared_operations_stays_local() {
          }",
         2,
         "2\n",
+    );
+}
+
+/// EFF-CAP-RESUME-CALLS: a non-tail, one-shot, noncapturing handler's
+/// capability may be passed to `cap` parameters. A function that performs
+/// through such a parameter (directly or by passing it on) gets a resumable
+/// entry keyed by the parameter index, and calls that pass the capability
+/// become await points of the handled body.
+#[test]
+fn capability_resumption_across_calls() {
+    const NON_TAIL: &str = "handle Ask: i64 -> i64 as ask with fn(
+        x: i64,
+        k: linear once fn(i64) -> i64 ! {},
+    ) -> i64 ! {panic} { let r = k(x * 10); r ^ 1 }";
+    // Two calls deep, with an owned value live across the first perform.
+    agrees(
+        &format!(
+            "effect Ask: i64 -> i64;
+             fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform op(x) + 1 }}
+             fn twice(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{alloc, panic}} {{
+                 let b = Box.new(x);
+                 let y = step(op, Box.take(b));
+                 let c = Box.new(y);
+                 step(op, Box.take(c))
+             }}
+             fn main() -> i64 ! {{alloc, panic}} {{ {NON_TAIL} {{ twice(ask, 1) }} }}"
+        ),
+        111,
+        "",
+    );
+    const PLUS_ONE: &str = "handle Ask: i64 -> i64 as ask with fn(
+        x: i64,
+        k: linear once fn(i64) -> i64 ! {},
+    ) -> i64 ! {panic} { let r = k(x + 1); r }";
+    // Points in a callee loop, recursion, and a callee that only forwards.
+    agrees(
+        &format!(
+            "effect Ask: i64 -> i64;
+             fn sum(op: cap Ask ! {{panic}}, n: i64) -> i64 ! {{alloc, panic}} {{
+                 let mut acc = 0;
+                 let mut i = 0;
+                 while i < n {{ let t = Box.new(i); acc = acc + perform op(Box.take(t)); i = i + 1; }}
+                 acc
+             }}
+             fn rec(op: cap Ask ! {{panic}}, n: i64) -> i64 ! {{alloc, panic}} {{
+                 if n == 0 {{ 0 }} else {{
+                     let keep = Box.new(n);
+                     perform op(n) + rec(op, n - 1) + Box.take(keep) - n
+                 }}
+             }}
+             fn ignore(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ x * 2 }}
+             fn forward(op: cap Ask ! {{panic}}, n: i64) -> i64 ! {{alloc, panic}} {{ sum(op, n) }}
+             fn main() -> i64 ! {{alloc, panic}} {{
+                 {PLUS_ONE} {{
+                     let held = Box.new(100);
+                     let a = forward(ask, 3);
+                     let b = rec(ask, 3);
+                     a + b + ignore(ask, 5) + perform ask(1) + Box.take(held)
+                 }}
+             }}"
+        ),
+        6 + 9 + 10 + 2 + 100,
+        "",
+    );
+    // A capability-only handler with effects runs its code after `resume`.
+    agrees(
+        "effect Ask: i64 -> i64;
+         fn f(op: cap Ask ! {io, panic}) -> i64 ! {io, panic} { perform op(2) + perform op(3) }
+         fn main() -> i64 ! {io, alloc, panic} {
+             handle Ask: i64 -> i64 as ask with fn(
+                 x: i64,
+                 k: linear once fn(i64) -> i64 ! {},
+             ) -> i64 ! {io, panic} { print_i64(x); let r = k(x); print_i64(r); r + 100 } { f(ask) }
+         }",
+        205,
+        "2\n3\n5\n105\n",
+    );
+    // A declared, dynamically visible non-tail handler: the capability and
+    // by-name performs in callees reach the same activation.
+    agrees(
+        "effect Ask: i64 -> i64;
+         fn by_cap(op: cap Ask ! {}, x: i64) -> i64 ! {} { perform op(x) }
+         fn by_name(x: i64) -> i64 ! {Ask, panic} { perform Ask(x) }
+         fn main() -> i64 ! {alloc, panic} {
+             handle Ask: i64 -> i64 as ask with fn(
+                 x: i64,
+                 k: linear once fn(i64) -> i64 ! {},
+             ) -> i64 ! {} { let r = k(x ^ 4); r ^ 1 } { by_cap(ask, 1) ^ by_name(2) }
+         }",
+        ((1 ^ 4) ^ (2 ^ 4)) ^ 1 ^ 1,
+        "",
+    );
+}
+
+#[test]
+fn capability_resumption_across_calls_is_checked() {
+    const NON_TAIL: &str = "handle Ask: i64 -> i64 as ask with fn(
+        x: i64,
+        k: linear once fn(i64) -> i64 ! {},
+    ) -> i64 ! {panic} { let r = k(x); r ^ 1 }";
+    // A call given the capability inside a nested dynamic handle.
+    rejects(
+        &format!(
+            "effect Ask: i64 -> i64;
+             effect Log: i64 -> i64;
+             fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform op(x) }}
+             fn main() -> i64 ! {{panic}} {{
+                 {NON_TAIL} {{
+                     handle Log: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{ k(x) }} {{ step(ask, 1) }}
+                 }}
+             }}"
+        ),
+        "inside a nested handler",
+    );
+    // A callee performing through the capability inside its own handle.
+    rejects(
+        &format!(
+            "effect Ask: i64 -> i64;
+             effect Log: i64 -> i64;
+             fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{
+                 handle Log: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{ k(x) }} {{ perform op(x) }}
+             }}
+             fn main() -> i64 ! {{panic}} {{ {NON_TAIL} {{ step(ask, 1) }} }}"
+        ),
+        "nested handler or handled body",
+    );
+    // The handled body must produce the operation result.
+    rejects(
+        &format!(
+            "effect Ask: i64 -> i64;
+             fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform op(x) }}
+             fn f() -> Bool ! {{panic}} {{ {NON_TAIL} {{ step(ask, 1) == 1 }} }}
+             fn main() -> i64 ! {{}} {{ 0 }}"
+        ),
+        "must produce the operation result type",
     );
 }

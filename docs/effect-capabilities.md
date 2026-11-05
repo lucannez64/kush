@@ -176,13 +176,54 @@ handle Ask: i64 -> i64 as ask with fn(x: i64, resume: linear once fn(i64) -> i64
   capability in its own `handle` body uses the lexical machinery of that
   activation (state machines for non-tail, copied continuations for
   multishot), chosen by activation rather than by name, and agrees with the
-  by-name perform in both backends (tested). Only noncapturing, one-shot,
-  tail-resumptive capabilities may be passed to `cap` parameters; passing any
-  other is rejected, because a callee would need a resumable entry keyed by
-  the capability parameter (section 3.4). That cross-call part is
-  EFF-CAP-RESUME-CALLS. As before, a capturing (`once`) handler serves one
+  by-name perform in both backends (tested). Passing non-tail capabilities to `cap`
+  parameters needs resumable entries keyed by the capability parameter
+  (section 3.4); EFF-CAP-RESUME-CALLS adds them for noncapturing one-shot
+  handlers (below). As before, a capturing (`once`) handler serves one
   perform, by name or by capability.
-- Not yet: cross-call non-tail capabilities, capabilities captured by lambdas.
+- Not yet: capabilities captured by lambdas.
+
+### As built (EFF-CAP-RESUME-CALLS, scoped with the user)
+
+Scoped on 2026-11-06 to **non-tail, one-shot, noncapturing** handlers;
+capturing (`once`) handlers across calls (EFF-CAP-RESUME-CAPTURING) and
+multishot handlers across calls (EFF-CAP-RESUME-MULTISHOT, which needs new
+`cap` syntax for a copyable token) stay rejected with "this capability's
+handler is capturing or multishot ...". Tests:
+`crates/kush/tests/effect_capabilities.rs`
+(`capability_resumption_across_calls*`).
+
+- The capability is still the handler's function pointer, so no
+  representation changes. Compiled functions record their `cap` parameter
+  slots (`Function::capability_parameters`).
+- **Handle side.** A handler bound `as op` whose body passes `op` to a call
+  makes the body suspendable when the handler is not tail-resumptive (also
+  for capability-only handlers, which have no dynamic frame). After
+  checking, each direct call that passes `op` to a `cap` parameter `i`
+  becomes an await point `Suspend { callee, capability: Some(i) }`; inside a
+  nested dynamic handle it is rejected.
+- **Coloring.** `suspend::capability_performs` is the least fixed point of
+  the `cap` parameters each function performs through, directly or by
+  passing them to a parameter its callee performs through. Before a body is
+  lowered, await points whose callee never performs through that parameter
+  become ordinary calls again.
+- **Entries.** Resumable entries are keyed by `EntryKey::Operation(op)` or
+  `EntryKey::Capability(i)`. In an entry for `Capability(i)`, a perform
+  through parameter `i` is a suspension point that calls the handler (the
+  parameter's value) with the real continuation token, and a call passing
+  `i` on to a parameter its callee performs through is an await point of
+  that callee's entry. Performs through the capability inside a nested
+  handle of the callee are rejected. Everything else (regions, finish `k`,
+  tail points passing `k` through, redirects, cleanup) is the E-CALLEE-COLOR
+  machinery.
+- **Behaviour change.** Passing a non-tail capability to a function was
+  rejected before; it is now accepted and gives the deep-handler result,
+  the same as performing through it in the handle's own body.
+- **Use-after-free review focus.** A continuation frame never holds the
+  capability beyond the activation: the capability is a code pointer with
+  no environment, and every continuation runs nested inside the handler
+  call made from the activation's own region (E-CPS-BORROW argument).
+
 
 ### EFF-CAP-RESUME-CALLS design note
 

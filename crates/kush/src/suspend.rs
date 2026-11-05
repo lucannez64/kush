@@ -56,6 +56,7 @@ pub(crate) fn lower(program: &mut Executable) -> Result<()> {
     check_task_tokens(program)?;
     let mut context = Context {
         performs: performs(program),
+        capability_performs: capability_performs(program),
         entries: BTreeMap::new(),
         lowering: BTreeSet::new(),
     };
@@ -140,14 +141,145 @@ fn retarget_aborts(expr: &mut Expr, labels: &mut Vec<usize>) -> Result<()> {
     Ok(())
 }
 
+/// What a resumable entry is resumable for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EntryKey {
+    /// Performs of a declared operation found on the dynamic stack.
+    Operation(usize),
+    /// Performs through the `cap` parameter with this index.
+    Capability(usize),
+}
+
+/// Whether `expr` passes parameter slot `slot` as is (a capability).
+fn passes_slot(expr: &Expr, slot: usize) -> bool {
+    match &expr.kind {
+        ExprKind::Local(local) | ExprKind::Move(local) | ExprKind::Peek(local) => *local == slot,
+        ExprKind::Coerce { value, .. } => passes_slot(value, slot),
+        _ => false,
+    }
+}
+
+/// Whether `expr` is a perform through the capability in `slot`: an
+/// indirect call of that local with the payload and a token.
+fn performs_through(expr: &Expr, slot: usize) -> bool {
+    matches!(
+        &expr.kind,
+        ExprKind::CallIndirect { callee, arguments }
+            if arguments.len() == 2 && passes_slot(callee, slot)
+    )
+}
+
+/// Capability parameters each function may perform through: directly, or by
+/// passing them to a `cap` parameter that its callee performs through. A
+/// least fixed point over the call graph.
+fn capability_performs(program: &Executable) -> Vec<BTreeSet<usize>> {
+    let mut result = vec![BTreeSet::new(); program.functions.len()];
+    loop {
+        let mut changed = false;
+        for (index, function) in program.functions.iter().enumerate() {
+            let mut found = result[index].clone();
+            for &slot in &function.capability_parameters {
+                if found.contains(&slot) {
+                    continue;
+                }
+                let mut uses = false;
+                fn walk(expr: &Expr, slot: usize, result: &[BTreeSet<usize>], uses: &mut bool) {
+                    if performs_through(expr, slot) {
+                        *uses = true;
+                    }
+                    if let ExprKind::Call(crate::executable::Target::Function(callee), arguments) =
+                        &expr.kind
+                    {
+                        for (index, argument) in arguments.iter().enumerate() {
+                            if passes_slot(argument, slot) && result[*callee].contains(&index) {
+                                *uses = true;
+                            }
+                        }
+                    }
+                    expr.for_each_child(&mut |child| walk(child, slot, result, uses));
+                }
+                for statement in &function.body.statements {
+                    if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                        walk(value, slot, &result, &mut uses);
+                    }
+                }
+                if let Some(tail) = &function.body.tail {
+                    walk(tail, slot, &result, &mut uses);
+                }
+                if uses {
+                    found.insert(slot);
+                }
+            }
+            if found != result[index] {
+                result[index] = found;
+                changed = true;
+            }
+        }
+        if !changed {
+            break result;
+        }
+    }
+}
+
+/// Replace capability await points of `target` whose callee never performs
+/// through that parameter by their plain call.
+fn unmark_capability_awaits(
+    program: &mut Executable,
+    context: &Context,
+    index: usize,
+    target: *const Suspendable,
+) {
+    fn walk(expr: &mut Expr, performs: &[BTreeSet<usize>]) {
+        if let ExprKind::Suspend {
+            callee: Some(callee),
+            capability: Some(parameter),
+            ..
+        } = &expr.kind
+            && !performs
+                .get(*callee)
+                .is_some_and(|set| set.contains(parameter))
+        {
+            let ExprKind::Suspend { call, .. } =
+                std::mem::replace(&mut expr.kind, ExprKind::Constant(0))
+            else {
+                unreachable!()
+            };
+            *expr = *call;
+            return;
+        }
+        if matches!(expr.kind, ExprKind::Suspendable(_)) {
+            return;
+        }
+        expr.for_each_child_mut(&mut |child| walk(child, performs));
+    }
+    let performs = &context.capability_performs;
+    let mut lower = |mut suspendable: Box<Suspendable>| -> Result<ExprKind> {
+        for statement in &mut suspendable.body.statements {
+            if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                walk(value, performs);
+            }
+        }
+        if let Some(tail) = suspendable.body.tail.as_deref_mut() {
+            walk(tail, performs);
+        }
+        Ok(ExprKind::Suspendable(suspendable))
+    };
+    let mut lower: Option<&mut dyn FnMut(Box<Suspendable>) -> Result<ExprKind>> = Some(&mut lower);
+    let _ = replace_target_in_block(&mut program.functions[index].body, target, &mut lower);
+}
+
 /// State shared by every lowering step of one program.
 struct Context {
     /// Declared operations each original function may perform dynamically
     /// (not handled inside it), by operation id.
     performs: Vec<BTreeSet<usize>>,
-    /// Resumable entry of (function, operation): its index and whether it or
-    /// anything it awaits allocates a resumption environment.
-    entries: BTreeMap<(usize, usize), (usize, bool)>,
+    /// Capability parameters each function may perform through, directly
+    /// or by passing them on (EFF-CAP-RESUME-CALLS).
+    capability_performs: Vec<BTreeSet<usize>>,
+    /// Resumable entry of (function, operation or capability parameter): its
+    /// index and whether it or anything it awaits allocates a resumption
+    /// environment.
+    entries: BTreeMap<(usize, EntryKey), (usize, bool)>,
     /// Functions whose suspendable bodies are being lowered.
     lowering: BTreeSet<usize>,
 }
@@ -1576,7 +1708,7 @@ struct Spec {
     /// it.
     finish: Option<usize>,
     /// Resumable entry index and continuation token type per awaited callee.
-    entries: BTreeMap<usize, (usize, Type)>,
+    entries: BTreeMap<(usize, Option<usize>), (usize, Type)>,
     /// The handle is for a declared operation: resumed continuations hide
     /// frames the handler pushes (see `ExprKind::HandlerRedirect`).
     redirect: bool,
@@ -1803,11 +1935,17 @@ fn build(
     let mut tokens = BTreeMap::new();
     for (point, path) in &paths {
         let site = at_path_mut(&mut body, path);
-        let ExprKind::Suspend { call, callee, .. } = &site.kind else {
+        let ExprKind::Suspend {
+            call,
+            callee,
+            capability,
+            ..
+        } = &site.kind
+        else {
             unreachable!("paths lead to suspension points")
         };
         let token = match callee {
-            Some(callee) => spec.entries[callee].1,
+            Some(callee) => spec.entries[&(*callee, *capability)].1,
             None => token_type(call, spec.token),
         };
         tokens.insert(*point, token);
@@ -1852,7 +1990,10 @@ fn build(
         let span = site.span;
         inputs.insert(*point, (site.resource, site.ty));
         let ExprKind::Suspend {
-            mut call, callee, ..
+            mut call,
+            callee,
+            capability,
+            ..
         } = std::mem::replace(&mut site.kind, ExprKind::Constant(0))
         else {
             unreachable!("paths lead to suspension points")
@@ -1915,7 +2056,8 @@ fn build(
                 let ExprKind::Call(target, arguments) = &mut call.kind else {
                     unreachable!("an await point wraps a direct call")
                 };
-                *target = crate::executable::Target::Function(spec.entries[&callee].0);
+                *target =
+                    crate::executable::Target::Function(spec.entries[&(callee, capability)].0);
                 arguments.push(token);
                 call.ty = spec.result;
             }
@@ -2059,6 +2201,7 @@ fn build(
             parameter_slots: Some(parameter_slots),
             local_borrowed: vec![],
             local_copyable: vec![],
+            capability_parameters: vec![],
         });
     }
     // Handler specializations: `resume(y)` calls the point's continuation
@@ -2127,14 +2270,15 @@ fn empty_block() -> Block {
 
 /// Await points in a suspendable body: callees whose resumable entries it
 /// needs.
-fn awaited_callees(block: &Block, out: &mut BTreeSet<usize>) {
-    fn walk(expr: &Expr, out: &mut BTreeSet<usize>) {
+fn awaited_callees(block: &Block, out: &mut BTreeSet<(usize, Option<usize>)>) {
+    fn walk(expr: &Expr, out: &mut BTreeSet<(usize, Option<usize>)>) {
         if let ExprKind::Suspend {
             callee: Some(callee),
+            capability,
             ..
         } = &expr.kind
         {
-            out.insert(*callee);
+            out.insert((*callee, *capability));
         }
         if !matches!(expr.kind, ExprKind::Suspendable(_)) {
             expr.for_each_child(&mut |child| walk(child, out));
@@ -2156,6 +2300,9 @@ fn lower_one(
     index: usize,
     target: *const Suspendable,
 ) -> Result<()> {
+    // A capability await whose callee never performs through that
+    // parameter is an ordinary call.
+    unmark_capability_awaits(program, context, index, target);
     let (operation, result, awaited, multishot) = {
         let suspendable = find_in_block(&program.functions[index].body, target)
             .expect("target suspendable exists");
@@ -2223,12 +2370,17 @@ fn lower_one(
     // append functions, but never moves this function's body.
     let mut entries = BTreeMap::new();
     let mut awaited_allocates = false;
-    for callee in awaited {
-        let operation = operation.expect("await points only exist for declared operations");
-        let (entry, allocates) = resumable_entry(program, context, callee, operation, result)?;
+    for (callee, capability) in awaited {
+        let key = match capability {
+            Some(parameter) => EntryKey::Capability(parameter),
+            None => EntryKey::Operation(
+                operation.expect("await points only exist for declared operations"),
+            ),
+        };
+        let (entry, allocates) = resumable_entry(program, context, callee, key, result)?;
         let input = program.functions[callee].result;
         let token = Type::Once(function_type(program, input, result));
-        entries.insert(callee, (entry, token));
+        entries.insert((callee, capability), (entry, token));
         awaited_allocates |= allocates;
     }
     if let Some(operation) = operation {
@@ -2945,7 +3097,7 @@ fn mark_entry_points(
     operation: usize,
     performs: &[BTreeSet<usize>],
     points: &mut usize,
-    awaited: &mut BTreeSet<usize>,
+    awaited: &mut BTreeSet<(usize, Option<usize>)>,
     nested: bool,
 ) -> Result<()> {
     let nested = match &expr.kind {
@@ -3001,12 +3153,13 @@ fn mark_entry_points(
     // point so the continuation input inherits it.
     expr.resource = call.resource.take();
     if let Some(callee) = callee {
-        awaited.insert(callee);
+        awaited.insert((callee, None));
     }
     expr.kind = ExprKind::Suspend {
         point: *points,
         call: Box::new(call),
         callee,
+        capability: None,
     };
     Ok(())
 }
@@ -3084,10 +3237,10 @@ fn resumable_entry(
     program: &mut Executable,
     context: &mut Context,
     function: usize,
-    operation: usize,
+    key: EntryKey,
     result: Type,
 ) -> Result<(usize, bool)> {
-    if let Some(entry) = context.entries.get(&(function, operation)) {
+    if let Some(entry) = context.entries.get(&(function, key)) {
         return Ok(*entry);
     }
     {
@@ -3118,7 +3271,7 @@ fn resumable_entry(
     let source = program.functions[function].clone();
     program.functions.push(source.clone());
     program.foreign_functions.push(None);
-    context.entries.insert((function, operation), (index, true));
+    context.entries.insert((function, key), (index, true));
     let continuation = Type::Once(function_type(program, source.result, result));
     let mut locals = source.locals.clone();
     let mut resources = source.resources.clone();
@@ -3143,24 +3296,51 @@ fn resumable_entry(
     let mut body = source.body.clone();
     let mut points = 0;
     let mut awaited = BTreeSet::new();
-    for_each_value_mut(&mut body, &mut |value| {
-        mark_entry_points(
-            value,
-            operation,
-            &context.performs,
-            &mut points,
-            &mut awaited,
-            false,
-        )
-    })?;
-    check_unresumable_paths(program, context, &body, operation)?;
+    // The token a perform through the capability hands its handler.
+    let mut capability_token = Type::Unit;
+    match key {
+        EntryKey::Operation(operation) => {
+            for_each_value_mut(&mut body, &mut |value| {
+                mark_entry_points(
+                    value,
+                    operation,
+                    &context.performs,
+                    &mut points,
+                    &mut awaited,
+                    false,
+                )
+            })?;
+            check_unresumable_paths(program, context, &body, operation)?;
+        }
+        EntryKey::Capability(slot) => {
+            let Type::Fn(arrow) = source.locals[slot].ty else {
+                unreachable!("a capability parameter is a handler arrow")
+            };
+            let answer = program.function_types[arrow].result;
+            capability_token = Type::Once(function_type(program, answer, result));
+            for_each_value_mut(&mut body, &mut |value| {
+                mark_capability_points(
+                    value,
+                    slot,
+                    &context.capability_performs,
+                    &mut points,
+                    &mut awaited,
+                    false,
+                )
+            })?;
+        }
+    }
     let mut entries = BTreeMap::new();
     let mut awaited_allocates = false;
-    for callee in awaited {
-        let (entry, allocates) = resumable_entry(program, context, callee, operation, result)?;
+    for (callee, capability) in awaited {
+        let callee_key = match (capability, key) {
+            (Some(parameter), _) => EntryKey::Capability(parameter),
+            (None, key) => key,
+        };
+        let (entry, allocates) = resumable_entry(program, context, callee, callee_key, result)?;
         let input = program.functions[callee].result;
         let token = Type::Once(function_type(program, input, result));
-        entries.insert(callee, (entry, token));
+        entries.insert((callee, capability), (entry, token));
         awaited_allocates |= allocates;
     }
     {
@@ -3200,7 +3380,7 @@ fn resumable_entry(
     };
     let spec = Spec {
         result,
-        token: Type::Unit,
+        token: capability_token,
         multishot: false,
         handler_writes: vec![],
         handler_refs: vec![],
@@ -3266,15 +3446,90 @@ fn resumable_entry(
         parameter_slots: Some(parameter_slots),
         local_borrowed: host.borrowed,
         local_copyable: host.copyable,
+        capability_parameters: source.capability_parameters.clone(),
     };
     for continuation in built.continuations {
         program.functions.push(continuation);
         program.foreign_functions.push(None);
     }
-    context
-        .entries
-        .insert((function, operation), (index, allocates));
+    context.entries.insert((function, key), (index, allocates));
     Ok((index, allocates))
+}
+
+/// Mark the suspension points of a resumable entry for the capability
+/// parameter `slot`: performs through it and calls passing it to a `cap`
+/// parameter its callee performs through, outside nested handlers.
+fn mark_capability_points(
+    expr: &mut Expr,
+    slot: usize,
+    performs: &[BTreeSet<usize>],
+    points: &mut usize,
+    awaited: &mut BTreeSet<(usize, Option<usize>)>,
+    nested: bool,
+) -> Result<()> {
+    let nested = nested
+        || matches!(
+            expr.kind,
+            ExprKind::HandlerPush { .. }
+                | ExprKind::Region { .. }
+                | ExprKind::Suspendable(_)
+                | ExprKind::AbortScope { .. }
+        );
+    let mut result = Ok(());
+    expr.for_each_child_mut(&mut |child| {
+        if result.is_ok() {
+            result = mark_capability_points(child, slot, performs, points, awaited, nested);
+        }
+    });
+    result?;
+    let await_parameter = match &expr.kind {
+        _ if performs_through(expr, slot) => None,
+        ExprKind::Call(crate::executable::Target::Function(callee), arguments) => {
+            match arguments
+                .iter()
+                .position(|argument| passes_slot(argument, slot))
+            {
+                Some(parameter)
+                    if performs
+                        .get(*callee)
+                        .is_some_and(|set| set.contains(&parameter)) =>
+                {
+                    Some((*callee, parameter))
+                }
+                _ => return Ok(()),
+            }
+        }
+        _ => return Ok(()),
+    };
+    if nested {
+        return Err(Diagnostic::new(
+            expr.span,
+            "a perform through a capability inside a nested handler or handled body cannot be resumed by its handler with code after 'resume'; perform it outside the nested 'handle'",
+        ));
+    }
+    *points += 1;
+    let span = expr.span;
+    let ty = expr.ty;
+    let mut call = std::mem::replace(
+        expr,
+        Expr {
+            kind: ExprKind::Constant(0),
+            ty,
+            span,
+            resource: None,
+        },
+    );
+    expr.resource = call.resource.take();
+    if let Some((callee, parameter)) = await_parameter {
+        awaited.insert((callee, Some(parameter)));
+    }
+    expr.kind = ExprKind::Suspend {
+        point: *points,
+        call: Box::new(call),
+        callee: await_parameter.map(|(callee, _)| callee),
+        capability: await_parameter.map(|(_, parameter)| parameter),
+    };
+    Ok(())
 }
 
 /// Whether the point at `path` is in tail position of the body: each step

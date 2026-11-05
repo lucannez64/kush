@@ -349,6 +349,8 @@ pub(crate) struct Function {
     pub local_borrowed: Vec<bool>,
     /// Per local: the value is copyable (neither owning nor linear).
     pub local_copyable: Vec<bool>,
+    /// Parameter slots of type `cap Op` (EFF-CAP-RESUME-CALLS).
+    pub capability_parameters: Vec<usize>,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Local {
@@ -1196,6 +1198,10 @@ pub(crate) enum ExprKind {
         point: usize,
         call: Box<Expr>,
         callee: Option<usize>,
+        /// For an await point that passes a capability: the callee's `cap`
+        /// parameter index, which keys its resumable entry instead of the
+        /// handled operation (EFF-CAP-RESUME-CALLS).
+        capability: Option<usize>,
     },
     /// Lowered form only: a block that `RegionExit` can leave from any depth.
     /// A normal completion yields the body value, applied to `finish` when
@@ -5407,6 +5413,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             abort_labels: 0,
             capability_slots: BTreeSet::new(),
             capability_passable: BTreeSet::new(),
+            capability_resumable: BTreeSet::new(),
             capability_argument: false,
             resolution,
             types: &mut types,
@@ -5553,6 +5560,9 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             ));
         }
         let (local_borrowed, local_copyable) = checker.local_classes(&checker.locals);
+        let capability_parameters = (0..sig.parameters.len())
+            .filter(|slot| checker.capability_slots.contains(slot))
+            .collect();
         let locals = checker.locals;
         functions.bodies[index] = Some(Function {
             name: sig.name.clone(),
@@ -5580,6 +5590,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             parameter_slots: None,
             local_borrowed,
             local_copyable,
+            capability_parameters,
         });
     }
     // Re-check every proof certificate without the search that produced it.
@@ -11182,6 +11193,7 @@ impl<'a> Functions<'a> {
                 parameter_slots: None,
                 local_borrowed: vec![],
                 local_copyable: vec![],
+                capability_parameters: vec![],
             }));
         } else {
             self.bodies.push(None);
@@ -11990,6 +12002,8 @@ struct SuspendableSite {
     handler_writes: Vec<usize>,
     effects: u16,
     token_effects: u16,
+    /// The handler local of a capability whose calls become await points.
+    capability_slot: Option<usize>,
 }
 struct HandlerScope {
     operation: String,
@@ -12088,6 +12102,10 @@ struct Checker<'a, 't> {
     /// noncapturing, one-shot, tail-resumptive handlers. Others can only be
     /// performed in their own handle body (EFF-CAP-RESUME).
     capability_passable: BTreeSet<usize>,
+    /// Capability locals of non-tail, noncapturing, one-shot handlers: they
+    /// may be passed to `cap` parameters, and such calls become await
+    /// points of the handled body (EFF-CAP-RESUME-CALLS).
+    capability_resumable: BTreeSet<usize>,
     /// Set while checking an argument passed to a `cap` parameter.
     capability_argument: bool,
     /// Erased proof parameters in scope: binder -> proposition.
@@ -15463,6 +15481,7 @@ impl Checker<'_, '_> {
             parameter_slots: None,
             local_borrowed: vec![],
             local_copyable: vec![],
+            capability_parameters: vec![],
         };
         let signature = Signature {
             call_contract: None,
@@ -19022,6 +19041,7 @@ impl Checker<'_, '_> {
             parameter_slots: None,
             local_borrowed: vec![],
             local_copyable: vec![],
+            capability_parameters: vec![],
         };
         let synthetic = Signature {
             call_contract: None,
@@ -24210,6 +24230,7 @@ impl Checker<'_, '_> {
             parameter_slots: None,
             local_borrowed,
             local_copyable,
+            capability_parameters: vec![],
         };
         let index = self.functions.add_synthetic(signature, function)?;
         let ty = if once {
@@ -29329,10 +29350,12 @@ impl Checker<'_, '_> {
                         "a 'cap' parameter takes a capability bound by 'handle Op as op' or a 'cap' parameter, passed by name",
                     ));
                 };
-                if !self.capability_passable.contains(&slot) {
+                if !self.capability_passable.contains(&slot)
+                    && !self.capability_resumable.contains(&slot)
+                {
                     return Err(Diagnostic::new(
                         value.span,
-                        "this capability's handler is not a noncapturing, one-shot, tail-resumptive handler, so it can only be performed in its own 'handle' body; passing it to a function needs resumable entries keyed by capability (EFF-CAP-RESUME-CALLS)",
+                        "this capability's handler is capturing or multishot, or it runs in place and performs declared operations, so it can only be performed in its own 'handle' body",
                     ));
                 }
                 self.capability_argument = true;
@@ -31833,12 +31856,35 @@ impl Checker<'_, '_> {
         // handler suspends instead, where performs inside nested handles are
         // rejected.
         let shadows_handler_effects = body_handles_any(body, signature.effects, self.resolution);
+        // The body passes its capability to called functions: under a
+        // non-tail handler those calls resume through resumable entries keyed
+        // by the capability parameter (EFF-CAP-RESUME-CALLS).
+        let capability_awaits = capability.as_ref().is_some_and(|(_, binder)| {
+            let mut refs = BTreeSet::new();
+            collect_lambda_refs(self.resolution, body, &mut refs);
+            self.resolution
+                .binder(*binder)
+                .is_some_and(|id| refs.contains(&id))
+        });
         let region = ((!tail_resumptive_handler(self.resolution, handler)
             || shadows_handler_effects)
-            && (lexical || declared.is_some()))
+            && (lexical || declared.is_some() || capability_awaits))
             || (declared.is_some() && multishot);
         if capability.is_some() && passable && !region {
             self.capability_passable.insert(slot);
+        }
+        // A noncapturing one-shot handler with code after `resume`: calls
+        // given its capability become await points.
+        let capability_resumable = capability.is_some()
+            && region
+            && !multishot
+            && matches!(
+                &handler_value.kind,
+                ExprKind::FnValue { captures, .. } if captures.is_empty()
+            )
+            && matches!(handler_value.ty, Type::Fn(_));
+        if capability_resumable {
+            self.capability_resumable.insert(slot);
         }
         let handler_function = match &handler_value.kind {
             ExprKind::FnValue { function, captures } if captures.is_empty() => Some(*function),
@@ -31901,6 +31947,7 @@ impl Checker<'_, '_> {
                 handler_writes,
                 effects: saved_effects,
                 token_effects: token_effects.unwrap_or(0),
+                capability_slot: capability_resumable.then_some(slot),
             }),
         );
         self.effects = saved_effects;
@@ -32263,6 +32310,9 @@ impl Checker<'_, '_> {
                 ));
             }
         }
+        if let Some(slot) = site.capability_slot {
+            self.mark_capability_awaits_in_block(&mut block, slot)?;
+        }
         if self.handlers.last().is_none_or(|scope| scope.points == 0) {
             if site.operation.is_none() {
                 return Ok(block);
@@ -32398,6 +32448,96 @@ impl Checker<'_, '_> {
             .collect();
         (borrowed, copyable)
     }
+    /// Turn every direct call in a suspendable body that passes the
+    /// capability held in `slot` to a `cap` parameter into an await point
+    /// keyed by that parameter (EFF-CAP-RESUME-CALLS). Calls inside nested
+    /// handlers cannot be resumed by this handle.
+    fn mark_capability_awaits_in_block(&mut self, block: &mut Block, slot: usize) -> Result<()> {
+        for statement in &mut block.statements {
+            if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                self.mark_capability_awaits(value, slot, false)?;
+            }
+        }
+        if let Some(tail) = block.tail.as_deref_mut() {
+            self.mark_capability_awaits(tail, slot, false)?;
+        }
+        Ok(())
+    }
+    fn mark_capability_awaits(&mut self, expr: &mut Expr, slot: usize, nested: bool) -> Result<()> {
+        fn passes(argument: &Expr, slot: usize) -> bool {
+            match &argument.kind {
+                ExprKind::Local(local) | ExprKind::Move(local) | ExprKind::Peek(local) => {
+                    *local == slot
+                }
+                ExprKind::Coerce { value, .. } => passes(value, slot),
+                _ => false,
+            }
+        }
+        let nested = match &expr.kind {
+            ExprKind::HandlerPush { .. }
+            | ExprKind::Suspendable(_)
+            | ExprKind::AbortScope { .. } => true,
+            ExprKind::Suspend {
+                call,
+                callee: Some(_),
+                ..
+            } => {
+                let found = matches!(
+                    &call.kind,
+                    ExprKind::Call(_, arguments) if arguments.iter().any(|argument| passes(argument, slot))
+                );
+                if found {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "a call that may perform the handled operation and also receives its capability is not supported under a handler with code after 'resume'",
+                    ));
+                }
+                return Ok(());
+            }
+            ExprKind::Suspend { .. } => return Ok(()),
+            _ => nested,
+        };
+        let mut result = Ok(());
+        expr.for_each_child_mut(&mut |child| {
+            if result.is_ok() {
+                result = self.mark_capability_awaits(child, slot, nested);
+            }
+        });
+        result?;
+        let ExprKind::Call(Target::Function(callee), arguments) = &expr.kind else {
+            return Ok(());
+        };
+        let Some(index) = arguments.iter().position(|argument| passes(argument, slot)) else {
+            return Ok(());
+        };
+        let callee = *callee;
+        if nested {
+            return Err(Diagnostic::new(
+                expr.span,
+                "a call given a capability inside a nested handler cannot be resumed by its handler with code after 'resume'; move the call out of the nested 'handle'",
+            ));
+        }
+        let scope = self.handlers.last_mut().expect("a handle scope is active");
+        scope.points += 1;
+        let point = scope.points;
+        let (ty, span) = (expr.ty, expr.span);
+        let call = std::mem::replace(
+            expr,
+            Expr {
+                kind: ExprKind::Constant(0),
+                ty,
+                span,
+                resource: None,
+            },
+        );
+        expr.kind = ExprKind::Suspend {
+            point,
+            call: Box::new(call),
+            callee: Some(callee),
+            capability: Some(index),
+        };
+        Ok(())
+    }
     /// Turn every direct call in a suspendable body that may perform the
     /// handled declared operation into an await point. Calls under a nested
     /// handler for the same operation belong to that handler.
@@ -32511,6 +32651,7 @@ impl Checker<'_, '_> {
             point,
             call: Box::new(call),
             callee: Some(callee),
+            capability: None,
         };
         Ok(())
     }
@@ -32666,6 +32807,7 @@ impl Checker<'_, '_> {
                     point,
                     call: Box::new(call),
                     callee: None,
+                    capability: None,
                 },
                 ty: result,
                 span,
