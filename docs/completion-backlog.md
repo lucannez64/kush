@@ -340,25 +340,26 @@ outstanding implementation item.
   while a read-only call preserves them. See
   [runtime-indices.md](runtime-indices.md#4-freezing-mutation-and-joins) and
   [runtime-indices.md](runtime-indices.md#4a-arithmetic-proof-search).
-- [ ] Runtime-sized inline arrays with checked lifetime/storage layout.
-  **Partial:** `DynArray<T, capacity>` has compile-time capacity, runtime
-  length, inline storage, checked push overflow, checked reads, `set`, `pop`,
-  owning-prefix drop, contextual literals, shared `&[T]` views, exclusive
-  `&mut [T]` views over the live prefix with exclusive-loan rules, views
-  through a direct local record's `DynArray` field (including nested fields),
-  elementwise equality for one-word comparable elements, and length-checked
-  patterns with a trailing `..`/`..name` tail binding and mandatory catch-all.
-  Literals are statically bounded by the capacity and use the checked push
-  sequence, so their overflow guards are unreachable and no `panic` effect is
-  added. Views read the runtime length word, use the same slice operations as
-  arrays, reject owner moves/drops/push/set/pop/reads while live, reject
-  aliasing exclusive views, and cannot escape the owner's lexical scope. Still
-  missing: runtime `[T; n]` (the array length in a type annotation remains a
-  compile-time `Nat`; a runtime length is an explicit diagnostic pointing at
-  `Vec<T>`), a pattern suffix after `..`, borrowed-element or recursive
-  element patterns, and views over a `DynArray` inside a reference-based record
-  place or temporary record. Capacity remains a compile-time `Nat`. See
-  [dynamic-arrays.md](dynamic-arrays.md).
+- [x] Runtime-sized inline arrays with checked lifetime/storage layout.
+  **Implemented** in [dynamic-arrays.md](dynamic-arrays.md).
+  `DynArray<T, capacity>` has compile-time capacity, a runtime length, inline
+  storage, checked push/set/pop/reads, owning-prefix drop, contextual
+  literals, elementwise equality, and shared/exclusive live-prefix views.
+  Runtime-length arrays `[T; n <= C]` bind their length to an immutable `i64`
+  runtime index `n` that is part of the type. They are built by
+  `Array.fill(n, v)` (unchecked when `0 <= n <= C` is proved, otherwise
+  checked with `panic`) or by a literal whose length is proved, and read by
+  `a[i]` (proof-based when `0 <= i < n` is proved, otherwise checked).
+  Non-generic free-function calls substitute the caller's binder. Lambdas,
+  `fn` types, function values, and generic/method signatures cannot carry
+  them. Patterns match a prefix, a suffix after `..`, nested element
+  patterns, and, through a shared borrow, owning elements by `&T` reference.
+  Views work through direct local records, record references, and temporary
+  records. Place references into slice-view elements (`&s[i]`, `&mut s[i]`)
+  root at the view's owners. Unbounded `[T; n]` remains a diagnostic that
+  suggests `[T; n <= C]`, because the spec forbids runtime-sized stack
+  allocation. An independent review's two soundness findings and five smaller
+  findings are fixed with regression tests.
 
 ## Memory and optimization
 
