@@ -52,6 +52,7 @@ Rust unsafe code or permission to run an invalid access in native code.
 | borrowed container -> clear/replace payload -> previously extracted live leaf | the extracted leaf still keeps its own loan; do not release it with the container |
 | branch-selected return or recursive summary with possible origins A and B | retain both roots, even if one result lifetime name is printed |
 | borrowed result with an explicitly long annotation but a block-local actual root | reject; the annotation cannot manufacture caller-owned storage |
+| `let w = s.m(&a[..])` with `m<'a>(self: &'a mut Self, v: &'a [T]) -> &'a [T]` -> shared read of `s` -> use `w` | accept (BORROW-EXCL-VIEW-READ, user decision): the shared result retains a *shared* loan on `s` and `a`, so writes, exclusive reborrows, replacement and moves of `s` reject while `w` is live; a shared result can never write, so reading `s` cannot observe a torn value. This is looser than Rust, which keeps `s` exclusively borrowed for `'a` |
 | temporary owner initialized in a skipped operand | no initialization, access, drop or loan is observed |
 | early exit after temporary initialization or handler/task capture | initialized owners clean up once; no returned leaf may outlive storage |
 

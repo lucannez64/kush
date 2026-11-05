@@ -637,3 +637,89 @@ fn exclusive_record_loans_block_later_method_aliases() {
         "exclusive",
     );
 }
+
+/// BORROW-EXCL-VIEW-READ (user decision: keep accepting). A shared view
+/// returned by an exclusive-receiver call keeps the receiver *borrowed*, not
+/// exclusively locked: shared reads of the receiver stay allowed while the
+/// view is live, because nothing can write through a shared view. Writes,
+/// exclusive reborrows, replacement and moves of the receiver stay rejected.
+const EXCL_VIEW: &str = r#"
+struct S { v: i64, arr: DynArray<i64, 2>, name: String }
+struct T { v: i64 }
+trait Swap {
+    fn swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64] ! {panic};
+    fn look(self: &Self) -> i64 ! {panic};
+    fn bump(self: &mut Self) -> i64 ! {panic};
+}
+impl Swap for S {
+    // Returns a view of the receiver's own inline storage.
+    fn swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64] ! {panic} { self.v = self.v + 1; &self.arr[..] }
+    fn look(self: &Self) -> i64 ! {panic} { self.v }
+    fn bump(self: &mut Self) -> i64 ! {panic} { self.v = self.v + 100; self.v }
+}
+impl Swap for T {
+    // Returns the argument view.
+    fn swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64] ! {panic} { self.v = self.v + 2; v }
+    fn look(self: &Self) -> i64 ! {panic} { self.v }
+    fn bump(self: &mut Self) -> i64 ! {panic} { self.v = self.v + 100; self.v }
+}
+"#;
+
+#[test]
+fn shared_reads_are_allowed_while_an_exclusive_call_view_is_live() {
+    let stats = agrees(
+        &format!(
+            r#"{EXCL_VIEW}
+            fn main() -> i64 ! {{io, alloc, panic}} {{
+                let other = [10, 20];
+                let mut s = S {{ v: 5, arr: [3, 4], name: String.from("s") }};
+                let w = s.swapv(&other[..]);
+                print_i64(s.look());
+                print_i64(w[1]);
+                let mut t = T {{ v: 0 }};
+                let u = t.swapv(&other[..]);
+                print_i64(t.look());
+                print_i64(u[0]);
+                let mut pair: (dyn Swap, DynArray<i64, 2>) = (T {{ v: 1 }}, [7, 8]);
+                let p = pair.0.swapv(&pair.1[..]);
+                print_i64(pair.0.look());
+                print_i64(p[0]);
+                print_i64(s.bump());
+                0
+            }}"#
+        ),
+        0,
+        "6\n4\n2\n10\n3\n7\n106\n",
+    );
+    // The `String` and the object payload, each released once.
+    assert_eq!(stats.allocations, 2, "{stats:?}");
+}
+
+#[test]
+fn exclusive_call_views_still_block_writes_and_moves_of_the_receiver() {
+    for (body, fragment) in [
+        (
+            "print_i64(s.bump()); print_i64(w[0]);",
+            "cannot create an exclusive",
+        ),
+        (
+            "s = S { v: 1, arr: [3, 4], name: String.from(\"r\") }; print_i64(w[0]);",
+            "cannot replace an owner",
+        ),
+        ("let moved = s; print_i64(w[0]);", "cannot move an owner"),
+    ] {
+        rejects(
+            &format!(
+                r#"{EXCL_VIEW}
+                fn main() -> i64 ! {{io, alloc, panic}} {{
+                    let other = [10, 20];
+                    let mut s = S {{ v: 5, arr: [3, 4], name: String.from("s") }};
+                    let w = s.swapv(&other[..]);
+                    {body}
+                    0
+                }}"#
+            ),
+            fragment,
+        );
+    }
+}
