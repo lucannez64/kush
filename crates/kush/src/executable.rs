@@ -1885,6 +1885,11 @@ pub(crate) enum Pattern {
         /// `&[T]` view of the middle; other element patterns test copies of
         /// copyable elements.
         borrowed: bool,
+        /// For a `&mut DynArray` scrutinee: the first of one fresh split group
+        /// per exclusive binding (element names then `..rest`, in order). Each
+        /// binding takes the opposite side from every other binding, so the
+        /// `&mut T` and `&mut [T]` bindings are pairwise disjoint loans.
+        exclusive: Option<usize>,
     },
 }
 #[derive(Clone)]
@@ -7513,6 +7518,19 @@ fn prepare_trait_objects<'a>(
                     ));
                     break;
                 }
+                // A dynamic call has no static callee whose length binders the
+                // call site could replace with the caller's.
+                if f.parameters
+                    .iter()
+                    .map(|parameter| &parameter.ty)
+                    .chain(std::iter::once(&f.result))
+                    .any(type_mentions_runtime_length)
+                {
+                    reason = Some(format!(
+                        "method '{name}' mentions a runtime-length array [T; n <= C]; call it through a concrete receiver"
+                    ));
+                    break;
+                }
             }
         }
         if reason.is_none()
@@ -9815,6 +9833,35 @@ impl<'a> Functions<'a> {
         let instantiated_self =
             impl_arguments.map(|index| self.impl_instantiations[index].self_type);
         substitution.self_type = instantiated_self.or(declared.self_ty);
+        // A type argument may not name a runtime-length binder of the function
+        // being instantiated. Only a recursive call can write one, and in the
+        // new activation that binder holds a different value, so a value of
+        // the old length would get the new length's type.
+        // An inherited trait default runs under a synthesized per-impl
+        // binding, but its parameters and locals are owned by the trait
+        // method's own binding; both count as the function's own.
+        let body_owner = f
+            .parameters
+            .iter()
+            .find_map(|parameter| resolution.binder(parameter.span))
+            .and_then(|parameter| resolution.bindings[parameter].owner);
+        for ty in substitution.types.values().chain(&substitution.self_type) {
+            let captured = crate::runtime_types::runtime_length_binders(types, *ty)
+                .into_iter()
+                .find(|binder| {
+                    let owner = resolution.bindings[*binder].owner;
+                    owner == Some(binding) || (owner.is_some() && owner == body_owner)
+                });
+            if let Some(binder) = captured {
+                return Err(Diagnostic::new(
+                    origin.unwrap_or(declared.span),
+                    format!(
+                        "a type argument of '{}' mentions its own length binder '{}'; each call gets a new '{}', so pass the array as an ordinary runtime-length parameter instead",
+                        f.name, resolution.bindings[binder].name, resolution.bindings[binder].name
+                    ),
+                ));
+            }
+        }
         // Projections in an impl's own associated values may depend on a bound
         // of an impl parameter, as in `impl<T: Show> Wrap for W<T> { type Out =
         // T.Out; }`. Install those projections before lowering signatures.
@@ -11164,11 +11211,12 @@ fn validate_erased_parameters(
 /// catches unbound, type/grade, and runtime-dependent lengths even when the
 /// generic function is never instantiated; concrete lengths are still checked
 /// during specialization.
-/// Runtime-length arrays in a signature. A parameter or result may be
-/// `[T; n <= C]` or a direct reference to one, where `n` is an earlier `i64`
-/// parameter (any `i64` parameter for the result). Calls substitute the
-/// caller's binder, so the shape is restricted to positions the call site
-/// rewrites. Generic functions and methods cannot use them.
+/// Runtime-length arrays in a signature. A parameter or result type may
+/// mention `[T; n <= C]` anywhere the call site rewrites binders (references,
+/// containers, tuples, arrays, records, rows, unions), where `n` is an
+/// earlier `i64` parameter (any `i64` parameter for the result; never a
+/// method receiver). Foreign signatures, `fn` types, and trait object types
+/// may not mention them: nothing substitutes the caller's binder there.
 fn validate_runtime_length_signature(
     resolution: &Resolution,
     f: &ast::Function,
@@ -11181,7 +11229,6 @@ fn validate_runtime_length_signature(
         resolution: &Resolution,
         ty: &ast::Type,
         allowed: &BTreeSet<BindingId>,
-        direct: bool,
         restricted: Option<&'static str>,
     ) -> Result<()> {
         match &ty.kind {
@@ -11193,12 +11240,6 @@ fn validate_runtime_length_signature(
                             format!("{reason} cannot mention a runtime-length array [T; n <= C]"),
                         ));
                     }
-                    if !direct {
-                        return Err(Diagnostic::new(
-                            ty.span,
-                            "in a signature, a runtime-length array must be a whole parameter or result type, or a direct reference to one",
-                        ));
-                    }
                     let id = runtime_length_binder(resolution, binder)?;
                     if !allowed.contains(&id) {
                         return Err(Diagnostic::new(
@@ -11206,85 +11247,84 @@ fn validate_runtime_length_signature(
                             "the length of a runtime-length array in a signature must be an earlier i64 parameter of the same function",
                         ));
                     }
-                    walk(resolution, capacity, allowed, false, restricted)?;
+                    walk(resolution, capacity, allowed, restricted)?;
                 }
-                walk(resolution, element, allowed, false, restricted)
+                walk(resolution, element, allowed, restricted)
             }
-            ast::TypeKind::Borrow { inner, .. } => {
-                walk(resolution, inner, allowed, direct, restricted)
-            }
-            ast::TypeKind::Graded { inner, .. } => {
-                walk(resolution, inner, allowed, direct, restricted)
-            }
+            ast::TypeKind::Borrow { inner, .. } => walk(resolution, inner, allowed, restricted),
+            ast::TypeKind::Graded { inner, .. } => walk(resolution, inner, allowed, restricted),
             ast::TypeKind::Named { arguments, .. } => {
                 for argument in arguments {
-                    walk(resolution, argument, allowed, false, restricted)?;
+                    walk(resolution, argument, allowed, restricted)?;
                 }
                 Ok(())
             }
             ast::TypeKind::Tuple(items) => {
                 for item in items {
-                    walk(resolution, item, allowed, false, restricted)?;
+                    walk(resolution, item, allowed, restricted)?;
                 }
                 Ok(())
             }
-            ast::TypeKind::Slice(inner) => walk(resolution, inner, allowed, false, restricted),
+            ast::TypeKind::Slice(inner) => walk(resolution, inner, allowed, restricted),
             ast::TypeKind::Dyn(bounds) => {
                 for inner in ast::dyn_types(bounds) {
-                    walk(resolution, inner, allowed, false, restricted)?;
+                    walk(resolution, inner, allowed, Some("a trait object type"))?;
                 }
                 Ok(())
             }
             ast::TypeKind::Structural { fields, .. } => {
                 for field in fields {
-                    walk(resolution, &field.ty, allowed, false, restricted)?;
+                    walk(resolution, &field.ty, allowed, restricted)?;
                 }
                 Ok(())
             }
             ast::TypeKind::Binary { left, right, .. } => {
-                walk(resolution, left, allowed, false, restricted)?;
-                walk(resolution, right, allowed, false, restricted)
+                walk(resolution, left, allowed, restricted)?;
+                walk(resolution, right, allowed, restricted)
             }
             ast::TypeKind::Function {
                 parameters, result, ..
             } => {
                 let reason = Some("a fn/once fn type");
                 for parameter in parameters {
-                    walk(resolution, &parameter.ty, allowed, false, reason)?;
+                    walk(resolution, &parameter.ty, allowed, reason)?;
                 }
-                walk(resolution, result, allowed, false, reason)
+                walk(resolution, result, allowed, reason)
             }
             _ => Ok(()),
         }
     }
-    let restricted = if method {
-        Some("a method signature")
-    } else if f.foreign.is_some() {
+    let restricted = if f.foreign.is_some() {
         Some("a foreign function signature")
-    } else if !f.generics.is_empty() {
-        Some("a generic function signature")
     } else {
         None
     };
-    let all = f
-        .parameters
+    // A method receiver is never a length binder: the call site substitutes
+    // binders from the explicit argument list only.
+    let binders = if method {
+        &f.parameters[1.min(f.parameters.len())..]
+    } else {
+        &f.parameters[..]
+    };
+    let all = binders
         .iter()
         .filter(|parameter| !parameter.erased && is_i64(&parameter.ty))
         .filter_map(|parameter| resolution.binder(parameter.span))
         .collect::<BTreeSet<_>>();
     let mut earlier = BTreeSet::new();
-    for parameter in &f.parameters {
+    for (index, parameter) in f.parameters.iter().enumerate() {
         if parameter.erased {
             continue;
         }
-        walk(resolution, &parameter.ty, &earlier, true, restricted)?;
+        walk(resolution, &parameter.ty, &earlier, restricted)?;
         if is_i64(&parameter.ty)
+            && (!method || index > 0)
             && let Some(id) = resolution.binder(parameter.span)
         {
             earlier.insert(id);
         }
     }
-    walk(resolution, &f.result, &all, true, restricted)
+    walk(resolution, &f.result, &all, restricted)
 }
 
 fn validate_length_templates(resolution: &Resolution, f: &ast::Function) -> Result<()> {
@@ -11417,6 +11457,42 @@ fn validate_type_template(
         ast::TypeKind::Predicate(_) => Ok(()),
         ast::TypeKind::Lifetime(_) | ast::TypeKind::SelfType => Ok(()),
         ast::TypeKind::Integer(_) | ast::TypeKind::Bool(_) => Ok(()),
+    }
+}
+
+/// Whether a written type mentions a runtime-length array `[T; n <= C]`
+/// anywhere.
+pub(crate) fn type_mentions_runtime_length(ty: &ast::Type) -> bool {
+    match &ty.kind {
+        ast::TypeKind::Array(element, length) => {
+            runtime_length_parts(length).is_some() || type_mentions_runtime_length(element)
+        }
+        ast::TypeKind::Borrow { inner, .. }
+        | ast::TypeKind::Graded { inner, .. }
+        | ast::TypeKind::Slice(inner) => type_mentions_runtime_length(inner),
+        ast::TypeKind::Dyn(bounds) => ast::dyn_types(bounds).any(type_mentions_runtime_length),
+        ast::TypeKind::Named { arguments, .. } => {
+            arguments.iter().any(type_mentions_runtime_length)
+        }
+        ast::TypeKind::Tuple(items) => items.iter().any(type_mentions_runtime_length),
+        ast::TypeKind::Structural { fields, row, .. } => {
+            fields
+                .iter()
+                .any(|field| type_mentions_runtime_length(&field.ty))
+                || row.as_deref().is_some_and(type_mentions_runtime_length)
+        }
+        ast::TypeKind::Binary { left, right, .. } => {
+            type_mentions_runtime_length(left) || type_mentions_runtime_length(right)
+        }
+        ast::TypeKind::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(|parameter| type_mentions_runtime_length(&parameter.ty))
+                || type_mentions_runtime_length(result)
+        }
+        _ => false,
     }
 }
 
@@ -15192,9 +15268,13 @@ impl Checker<'_, '_> {
             .iter()
             .map(|lifetime| lifetime.name.clone())
             .collect::<BTreeSet<_>>();
+        // Runtime-length binders in the method signature are replaced by the
+        // caller's bindings, exactly as for a free-function call.
+        let lengths = self.call_runtime_lengths(f, 1, arguments)?;
         let mut prechecked = None;
         let mut generic_arguments = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         if !f.generics.is_empty() {
+            self.pending_lengths = lengths.clone();
             let pairs = f.parameters[1..]
                 .iter()
                 .zip(arguments)
@@ -15296,6 +15376,7 @@ impl Checker<'_, '_> {
                         .next()
                         .expect("inferred method argument in runtime order"),
                     None => {
+                        let ty = self.types.rebind_lengths(ty, &lengths, evidence.span)?;
                         let wanted = if lifetime_binders.is_empty() {
                             ty
                         } else {
@@ -15346,12 +15427,15 @@ impl Checker<'_, '_> {
         } else if crate::runtime_types::grade_erases(signature.result_grade) {
             Type::Unit
         } else {
-            self.types
-                .relabel_lifetimes(signature.result, &lifetime_map, span)?
+            let result = self
+                .types
+                .relabel_lifetimes(signature.result, &lifetime_map, span)?;
+            self.types.rebind_lengths(result, &lengths, span)?
         };
         let mut coerced = Vec::with_capacity(values.len());
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
             let ty = self.types.relabel_lifetimes(*ty, &lifetime_map, span)?;
+            let ty = self.types.rebind_lengths(ty, &lengths, span)?;
             coerced.push(self.coerce_argument(value, ty, span)?);
         }
         self.apply_effect_writes(signature.effects);
@@ -16609,35 +16693,64 @@ impl Checker<'_, '_> {
     /// elements are matched without moving or copying them; `..rest` binds a
     /// `&[T]` view of the middle. Copyable elements may also use ordinary
     /// by-value sub-patterns, which test copies.
+    ///
+    /// Over an exclusive `&mut` scrutinee, element names bind `&mut T` and
+    /// `..rest` binds `&mut [T]`. Each such binding gets its own split group,
+    /// so the bindings are pairwise disjoint loans of the array. Like
+    /// `&mut s[i]`, this requires non-owning, non-linear, non-view elements.
     fn borrowed_dyn_pattern(
         &mut self,
         parts: &[ast::Pattern],
         element: Type,
         capacity: usize,
+        exclusive: bool,
         span: Span,
         bindings: &mut BTreeMap<String, (usize, Type)>,
     ) -> Result<Pattern> {
         let copyable =
             !(self.owned_type(element) || self.linear_type(element) || element.is_view());
+        if exclusive && (!copyable || element.is_ref()) {
+            return Err(Diagnostic::new(
+                span,
+                "a '&mut DynArray' pattern binds '&mut T' element references, which would alias an owning, linear, or view element; match a shared borrow instead, or move elements out with DynArray.pop",
+            ));
+        }
         let element_pointer = self.types.pointer(element);
-        let reference = Type::Ref(element_pointer);
-        let view = Type::Slice(element_pointer);
+        let (reference, view) = if exclusive {
+            (
+                Type::RefMut(element_pointer),
+                Type::SliceMut(element_pointer),
+            )
+        } else {
+            (Type::Ref(element_pointer), Type::Slice(element_pointer))
+        };
         let mut prefix = Vec::new();
         let mut suffix = Vec::new();
         let mut rest = false;
         let mut rest_binding = None;
+        let mut exclusive_slots = BTreeSet::new();
         let bind = |checker: &mut Self,
                     name: &str,
                     ty: Type,
                     part: &ast::Pattern,
-                    bindings: &mut BTreeMap<String, (usize, Type)>|
+                    bindings: &mut BTreeMap<String, (usize, Type)>,
+                    exclusive_slots: &mut BTreeSet<usize>|
          -> Result<usize> {
             if let Some((slot, previous)) = bindings.get(name) {
+                // Two exclusive references to different elements cannot share
+                // one name.
+                if exclusive && exclusive_slots.contains(slot) {
+                    return Err(Diagnostic::new(
+                        part.span,
+                        format!("'{name}' is bound twice in one '&mut DynArray' pattern"),
+                    ));
+                }
                 checker.expect(ty, *previous, part.span)?;
                 return Ok(*slot);
             }
             let slot = checker.bind(part.span, ty, false)?;
             bindings.insert(name.to_owned(), (slot, ty));
+            exclusive_slots.insert(slot);
             Ok(slot)
         };
         for part in parts {
@@ -16657,7 +16770,14 @@ impl Checker<'_, '_> {
                                 "a borrowed DynArray pattern cannot bind '..name' over owning, linear, or view elements: a '&[T]' view of them has no checked operations; use '..' and bind the elements you need",
                             ));
                         }
-                        rest_binding = Some(bind(self, name, view, part, bindings)?);
+                        rest_binding = Some(bind(
+                            self,
+                            name,
+                            view,
+                            part,
+                            bindings,
+                            &mut exclusive_slots,
+                        )?);
                     }
                     continue;
                 }
@@ -16665,7 +16785,14 @@ impl Checker<'_, '_> {
                 ast::PatternKind::Name(path)
                     if path.len() == 1 && !self.is_constructor_pattern(part) =>
                 {
-                    Pattern::Bind(bind(self, &path[0], reference, part, bindings)?)
+                    Pattern::Bind(bind(
+                        self,
+                        &path[0],
+                        reference,
+                        part,
+                        bindings,
+                        &mut exclusive_slots,
+                    )?)
                 }
                 _ if copyable => self.pattern(part, element, bindings)?,
                 _ => {
@@ -16690,6 +16817,17 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
+        // One split group per exclusive binding; see `Pattern::DynArray`.
+        let exclusive = exclusive.then(|| {
+            let base = self.next_split;
+            self.next_split += prefix
+                .iter()
+                .chain(&suffix)
+                .filter(|pattern| matches!(pattern, Pattern::Bind(_)))
+                .count()
+                + usize::from(rest_binding.is_some());
+            base
+        });
         Ok(Pattern::DynArray {
             element,
             capacity,
@@ -16698,6 +16836,7 @@ impl Checker<'_, '_> {
             rest,
             rest_binding,
             borrowed: true,
+            exclusive,
         })
     }
     /// `let v = &a[..]` over a runtime-length array `[T; n <= C]` records
@@ -16906,6 +17045,7 @@ impl Checker<'_, '_> {
     fn call_runtime_lengths(
         &self,
         f: &ast::Function,
+        skip: usize,
         arguments: &[ast::Expr],
     ) -> Result<BTreeMap<BindingId, BindingId>> {
         fn collect(resolution: &Resolution, ty: &ast::Type, out: &mut BTreeSet<BindingId>) {
@@ -16918,19 +17058,39 @@ impl Checker<'_, '_> {
                     }
                     collect(resolution, element, out);
                 }
-                ast::TypeKind::Borrow { inner, .. } | ast::TypeKind::Graded { inner, .. } => {
-                    collect(resolution, inner, out)
+                ast::TypeKind::Borrow { inner, .. }
+                | ast::TypeKind::Graded { inner, .. }
+                | ast::TypeKind::Slice(inner) => collect(resolution, inner, out),
+                ast::TypeKind::Named { arguments, .. } => {
+                    for argument in arguments {
+                        collect(resolution, argument, out);
+                    }
+                }
+                ast::TypeKind::Tuple(items) => {
+                    for item in items {
+                        collect(resolution, item, out);
+                    }
+                }
+                ast::TypeKind::Structural { fields, .. } => {
+                    for field in fields {
+                        collect(resolution, &field.ty, out);
+                    }
+                }
+                ast::TypeKind::Binary { left, right, .. } => {
+                    collect(resolution, left, out);
+                    collect(resolution, right, out);
                 }
                 _ => {}
             }
         }
+        let parameters = &f.parameters[skip.min(f.parameters.len())..];
         let mut binders = BTreeSet::new();
-        for parameter in f.parameters.iter().filter(|parameter| !parameter.erased) {
+        for parameter in parameters.iter().filter(|parameter| !parameter.erased) {
             collect(self.resolution, &parameter.ty, &mut binders);
         }
         collect(self.resolution, &f.result, &mut binders);
         let mut map = BTreeMap::new();
-        for (parameter, argument) in f.parameters.iter().zip(arguments) {
+        for (parameter, argument) in parameters.iter().zip(arguments) {
             let Some(binder) = self.resolution.binder(parameter.span) else {
                 continue;
             };
@@ -22500,9 +22660,10 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::Match { value, arms } => {
                     let value = c.expr(value)?;
-                    // A shared reference to a DynArray is matched by borrowed
-                    // slice patterns; every other borrow is rejected.
-                    let borrowed_array = matches!(value.ty, Type::Ref(pointer)
+                    // A shared or exclusive reference to a DynArray is matched
+                    // by borrowed slice patterns; every other borrow is
+                    // rejected.
+                    let borrowed_array = matches!(value.ty, Type::Ref(pointer) | Type::RefMut(pointer)
                         if c.types.pointees[pointer]
                             .layout()
                             .is_some_and(|id| c.types.enums[id].dynamic_array.is_some()));
@@ -22525,7 +22686,7 @@ impl Checker<'_, '_> {
                     {
                         return Err(Diagnostic::new(
                             arm.pattern.span,
-                            "a match on a '&DynArray' borrow supports slice patterns such as '[x, .., y]' and '_'",
+                            "a match on a '&DynArray' or '&mut DynArray' borrow supports slice patterns such as '[x, .., y]' and '_'",
                         ));
                     }
                     let mut coverage = Coverage::new(span);
@@ -27595,6 +27756,29 @@ impl Checker<'_, '_> {
                     }
                 }
             }
+            ast::TypeKind::Array(element, length)
+                if let Some((_, capacity)) = runtime_length_parts(length) =>
+            {
+                // `[T; n <= C]` infers `T` and `C` from a runtime-length
+                // actual. The binder itself is checked by the final argument
+                // coercion against the caller's substituted binder.
+                if let Some(layout) = actual.layout()
+                    && self.types.enums[layout].runtime_length.is_some()
+                    && let Some((actual_element, actual_capacity)) =
+                        self.types.enums[layout].dynamic_array
+                {
+                    self.unify(
+                        element,
+                        actual_element,
+                        type_vars,
+                        const_vars,
+                        effect_vars,
+                        subst,
+                        span,
+                    )?;
+                    self.unify_length(capacity, actual_capacity, const_vars, subst, span)?;
+                }
+            }
             ast::TypeKind::Array(element, length) => {
                 if let Some(layout) = actual.layout()
                     && let Some((actual_element, actual_length)) = self.types.enums[layout].array
@@ -29122,7 +29306,7 @@ impl Checker<'_, '_> {
             .iter()
             .map(|lifetime| lifetime.name.clone())
             .collect::<BTreeSet<_>>();
-        let lengths = self.call_runtime_lengths(f, arguments)?;
+        let lengths = self.call_runtime_lengths(f, 0, arguments)?;
         self.pending_lengths = lengths.clone();
         let (type_arguments, grade_arguments, const_arguments, effect_arguments, values) = self
             .infer(
@@ -33141,12 +33325,20 @@ impl Checker<'_, '_> {
                 });
             }
             if let ast::PatternKind::Slice(parts) = &pattern.kind
-                && let Type::Ref(pointer) = ty
+                && let Type::Ref(pointer) | Type::RefMut(pointer) = ty
                 && let Some((element, capacity)) = c.types.pointees[pointer]
                     .layout()
                     .and_then(|id| c.types.enums[id].dynamic_array)
             {
-                return c.borrowed_dyn_pattern(parts, element, capacity, pattern.span, bindings);
+                let exclusive = matches!(ty, Type::RefMut(_));
+                return c.borrowed_dyn_pattern(
+                    parts,
+                    element,
+                    capacity,
+                    exclusive,
+                    pattern.span,
+                    bindings,
+                );
             }
             if let ast::PatternKind::Slice(parts) = &pattern.kind {
                 if let Some((element, capacity)) = ty
@@ -33222,6 +33414,7 @@ impl Checker<'_, '_> {
                         rest,
                         rest_binding,
                         borrowed: false,
+                        exclusive: None,
                     });
                 }
                 let Some((element, length)) = ty.layout().and_then(|id| c.types.enums[id].array)

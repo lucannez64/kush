@@ -319,16 +319,23 @@ outstanding implementation item.
   `Array.fill(n, v)` (unchecked when `0 <= n <= C` is proved, otherwise
   checked with `panic`) or by a literal whose length is proved, and read by
   `a[i]` (proof-based when `0 <= i < n` is proved, otherwise checked).
-  Non-generic free-function calls substitute the caller's binder. Lambdas,
-  `fn` types, function values, and generic/method signatures cannot carry
-  them. Patterns match a prefix, a suffix after `..`, nested element
-  patterns, and, through a shared borrow, owning elements by `&T` reference.
+  Free-function, generic-function, impl-method, and trait-item calls
+  substitute the caller's binder, anywhere inside the signature type (for
+  example `&Vec<[T; n <= C]>`). Lambdas, `fn` and `dyn` types, function
+  values, foreign signatures, and methods of `dyn`-used traits cannot carry
+  them, and a recursive instance may not capture its own binder. Patterns
+  match a prefix, a suffix after `..`, nested element patterns, through a
+  shared borrow owning elements by `&T` reference, and through an exclusive
+  borrow non-owning elements by pairwise-disjoint `&mut T` references.
   Views work through direct local records, record references, and temporary
   records. Place references into slice-view elements (`&s[i]`, `&mut s[i]`)
   root at the view's owners. Unbounded `[T; n]` remains a diagnostic that
   suggests `[T; n <= C]`, because the spec forbids runtime-sized stack
   allocation. An independent review's two soundness findings and five smaller
-  findings are fixed with regression tests.
+  findings are fixed with regression tests, and a second review of the
+  generic/method/nested-signature and exclusive-pattern extensions found seven
+  soundness bugs, all fixed with regression tests in
+  `crates/kush/tests/runtime_length_extensions.rs`.
 
 ## Memory and optimization
 

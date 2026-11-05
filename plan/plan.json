@@ -3180,10 +3180,21 @@
       "deps": [
         "DA"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Substitute the caller's length binder in generic inference and method dispatch so generic fns, impl methods, and trait items may use [T; n <= C].",
-      "commit": null,
-      "log": [],
+      "commit": "5c8d6b6",
+      "log": [
+        {
+          "time": "2026-11-05 14:44:58",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 14:49:24",
+          "who": "agent",
+          "text": "done 5c8d6b6"
+        }
+      ],
       "area": "dynarray"
     },
     {
@@ -3194,10 +3205,21 @@
       "deps": [
         "A-RT-GENERIC"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Rebind length binders inside Vec/Box/tuple/record arguments of a signature, not only a whole parameter/result or one reference.",
-      "commit": null,
-      "log": [],
+      "commit": "2273cec",
+      "log": [
+        {
+          "time": "2026-11-05 14:49:41",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 14:53:48",
+          "who": "agent",
+          "text": "done 2273cec"
+        }
+      ],
       "area": "dynarray"
     },
     {
@@ -3208,10 +3230,31 @@
       "deps": [
         "DA"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "match &mut a binds &mut T per element, with pairwise-disjoint loans like split_at_mut sides.",
-      "commit": null,
-      "log": [],
+      "commit": "c4894d3",
+      "log": [
+        {
+          "time": "2026-11-05 14:53:54",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 15:08:41",
+          "who": "agent",
+          "text": "Implemented (uncommitted): match &mut binds &mut T / &mut [T] with one split group per binding; split_labels now honours view-derived ref locals (split_at_mut element refs to one call). 11 extension tests pass; full local suite running before commit."
+        },
+        {
+          "time": "2026-11-05 15:20:49",
+          "who": "agent",
+          "text": "Local gate: full kush suite 1487 passed (-j2, 2 test threads)"
+        },
+        {
+          "time": "2026-11-05 15:20:50",
+          "who": "agent",
+          "text": "done c4894d3"
+        }
+      ],
       "area": "dynarray"
     },
     {
@@ -3224,10 +3267,51 @@
         "A-RT-NESTED-SIG",
         "A-PAT-MUT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": [],
+      "commit": "82a5db0",
+      "log": [
+        {
+          "time": "2026-11-05 15:20:50",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 15:38:03",
+          "who": "agent",
+          "text": "Round 1 (Opus reviewer, local): 1 soundness bug (recursion guard missed trait defaults) fixed in 0b72170 with regression test; 2 minor false rejections (disjoint record field / ..rest place in a record literal) left as limits."
+        },
+        {
+          "time": "2026-11-05 15:52:24",
+          "who": "agent",
+          "text": "Round 2 (fresh Opus reviewer, local): recursion-guard fix held; 1 soundness bug (rebinding merged union members, from 2273cec) fixed in 92df7a8 with regression tests; guard-write snapshot semantics documented."
+        },
+        {
+          "time": "2026-11-05 16:50:41",
+          "who": "agent",
+          "text": "Round 3 (fresh Opus reviewer, local): 3 layout soundness bugs (union reorder, subtype absorption, unions in generic definitions) fixed in 9231966 by a layout-isomorphism check, regression tests added."
+        },
+        {
+          "time": "2026-11-05 17:05:02",
+          "who": "agent",
+          "text": "Round 4 (fresh Opus reviewer, local): isomorphism check held; 2 soundness bugs (binders inside dyn missed by guard and by rebind via alias) fixed in 0ff06eb. Full local suite 1490 passed."
+        },
+        {
+          "time": "2026-11-05 17:17:46",
+          "who": "agent",
+          "text": "Round 5 (fresh Opus reviewer, local): NO soundness bug found. One false rejection from 0ff06eb (recursive binder forwarding) fixed in 82a5db0 with regression tests."
+        },
+        {
+          "time": "2026-11-05 17:23:01",
+          "who": "agent",
+          "text": "Focused re-check of 82a5db0 (fresh Opus reviewer): no leak, removal confirmed safe. Review closed: rounds 1-4 found 7 soundness bugs (all fixed + regression tests), round 5 and the re-check found none."
+        },
+        {
+          "time": "2026-11-05 17:23:01",
+          "who": "agent",
+          "text": "done 82a5db0"
+        }
+      ],
       "area": "dynarray"
     },
     {
@@ -3238,10 +3322,26 @@
       "deps": [
         "A-EXT-REVIEW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": [],
+      "commit": "0583a35",
+      "log": [
+        {
+          "time": "2026-11-05 17:23:01",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 17:29:37",
+          "who": "agent",
+          "text": "Local gate on 0583a35 (no Boat, -j2, 2 test threads): cargo fmt --check OK, mbx test -p kush 1491 passed 0 failed, mbx clippy -p kush --tests clean."
+        },
+        {
+          "time": "2026-11-05 17:29:37",
+          "who": "agent",
+          "text": "done 0583a35"
+        }
+      ],
       "area": "dynarray"
     },
     {
@@ -3336,6 +3436,26 @@
       "desc": "Reviewer probe: v = pair.0.swapv(&pair.1[..]) with swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64], then pair.0.look() while v is live is accepted; same for concrete records. Not a memory-safety issue (the view aliases the argument), but stricter exclusive-loan rules would reject it. Pre-existing.",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "FIX-RT-RECURSIVE-BINDER",
+      "title": "Reject recursive instances that capture their own length binder",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "DA"
+      ],
+      "status": "done",
+      "desc": "A type argument naming a length binder of the function being instantiated (go::<[i64; n <= 4]> inside go) gave an old-length value the new activation's length type. Found while doing A-RT-GENERIC.",
+      "commit": "5c8d6b6",
+      "log": [
+        {
+          "time": "2026-11-05 14:49:23",
+          "who": "agent",
+          "text": "done 5c8d6b6"
+        }
+      ],
+      "area": "dynarray"
     }
   ]
 }

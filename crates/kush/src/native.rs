@@ -7955,7 +7955,7 @@ impl Generator<'_, '_> {
                 // A borrowed DynArray scrutinee is a pointer: patterns test the
                 // loaded words, and element names bind slot addresses.
                 let borrowed = match input.ty {
-                    Type::Ref(pointer) => {
+                    Type::Ref(pointer) | Type::RefMut(pointer) => {
                         let pointee = self.program.pointees[pointer];
                         let words = self.program.width(pointee);
                         Some((value[0], self.load_words(value[0], 0, words)))

@@ -190,7 +190,41 @@ copies. Over owning, linear, or view elements only names, `_`, and an unnamed
 `..` are accepted. The bindings are shared views rooted at the array's owners:
 the array cannot be moved, replaced, or mutated while one is live, and they
 cannot outlive the array's scope. Only slice patterns and `_` are accepted for
-a borrowed scrutinee; borrows of other types are still not matchable. The runtime length is not a finite variant tag, so a match
+a borrowed scrutinee; borrows of other types are still not matchable.
+
+Matching an exclusive borrow (`match &mut a { ... }` on a `let mut` array or
+field, or a `&mut DynArray<T, C>` / `&mut [T; n <= C]` parameter) binds
+`&mut T` per named element and `&mut [T]` for `..rest`:
+
+```rust
+fn swap(p: &mut i64, q: &mut i64) -> Unit ! {} { let t = *p; *p = *q; *q = t; }
+
+let mut a: DynArray<i64, 4> = [3, 4, 5];
+match &mut a {
+    [x, .., y] => swap(x, y),                 // two disjoint &mut i64
+    _ => {},
+};
+match &mut a {
+    [x, ..rest] => { *x = *x + 1; Slice.set(rest, 0, 9); },
+    _ => {},
+};
+```
+
+The bindings are pairwise-disjoint loans, like the two sides of
+`Slice.split_at_mut`: each binding gets its own split group, so two bindings
+(and references derived from them, such as `&mut rest[0]`) may be used and
+passed to one call together, while every other access to the array (a read,
+a view, `&mut a` again, `DynArray.push`/`set`, a move, or a write through the
+reference the array came from) waits for the last use of every binding. A
+binding may leave the match; it still cannot outlive the array's scope. A
+`&mut` parameter scrutinee is reborrowed, so the parameter is usable again
+after the bindings' last use. As with `&mut s[i]`, elements must be
+non-owning, non-linear, non-view values: an exclusive reference to an owning
+element is rejected. By-value sub-patterns (literals, tuples, records,
+variants) test copies of a snapshot taken when the match starts, so a guard
+that writes through a binding and then fails does not change what later arms
+test; a name may be bound only once, and the same
+slice-pattern-or-`_` arm rule applies. The runtime length is not a finite variant tag, so a match
 over `DynArray` must contain an unguarded catch-all: `_`, a binding, or a
 pattern that is only `..` / `..rest`. The ordinary exhaustiveness check rejects
 anything else.
@@ -260,15 +294,37 @@ Semantics:
   `!=`, and `match` patterns work as for `DynArray`; a `..rest` binding is a
   plain `DynArray<T, C>`. `DynArray.push` and `DynArray.pop` are rejected
   because they would change the length.
-- **Signatures and calls.** A parameter or result type may be a runtime-length
-  array, or a direct `&`/`&mut` reference to one, whose binder is an earlier
-  `i64` parameter of the same function. At each call the actual argument for
+- **Signatures and calls.** A parameter or result type may mention a
+  runtime-length array anywhere the call site can rewrite it: as the whole
+  type, behind `&`/`&mut`, or inside `Vec`, `Box`, tuples, fixed and inline
+  arrays, generic records and enums, structural rows, and unions (for
+  example `v: &Vec<[i64; n <= 4]>` or `-> Pair<[i64; n <= 4]>`). Each binder
+  must be an earlier `i64` parameter of the same function (any `i64`
+  parameter for the result). The callee is compiled once, so the
+  rebuilt signature type must keep its exact layout. A call is rejected when
+  the caller's binders would change a union in it: two members becoming one
+  type (`[i64; n <= 4] | [i64; m <= 4]` called as `f(k, k, ...)`, or
+  `T | [i64; n <= 4]` with `T = [i64; k <= 4]`), one member absorbing another
+  as a width subtype, a union inside a generic record or enum merging, or
+  members swapping positions (union member order follows internal type
+  identities, so this last case can reject a call with distinct binders;
+  avoid unions of runtime-length arrays in signatures when it does). At each call the actual argument for
   that parameter must be the name of an immutable `i64` binding; the callee's
   binder is replaced by the caller's, so `fn f(n: i64, a: [i64; n <= 8])`
   called as `f(k, b)` requires `b: [i64; k <= 8]`, and the result of
   `fn make(n: i64) -> [i64; n <= 8]` called as `make(k)` has type
-  `[i64; k <= 8]`. Generic functions, methods, and trait items cannot mention
-  runtime-length arrays in their signatures.
+  `[i64; k <= 8]`. Generic functions, impl methods, and trait items follow
+  the same rule: generic inference reads the element type and capacity from
+  a runtime-length argument (`fn first<T, C: Nat>(n: i64, a: [T; n <= C])`),
+  and a method call substitutes its explicit arguments' binders (the receiver
+  is never a binder). A trait and its impl must spell the binder with the
+  same parameter name. A trait whose method mentions a runtime-length array
+  is not object-safe: a `dyn` call has no static callee to substitute into.
+  Foreign signatures cannot mention runtime-length arrays.
+- **Recursive instances.** A type argument may not mention a length binder
+  of the function being instantiated, as in `go::<[i64; n <= 4]>(...)` inside
+  `go`. Each activation has its own `n`, so such an instance would give a
+  value built with the outer `n` the inner `n`'s type.
 - **First-class functions.** Lambda signatures and `fn`/`once fn` types cannot
   mention runtime-length arrays, and a function whose signature does cannot be
   used as a value. An indirect call cannot substitute the caller's binder, so
@@ -320,14 +376,29 @@ stack allocation with a hidden layout descriptor, and not a general dependent
 array. The capacity is always a compile-time `Nat`; the length is a runtime
 word. A runtime array length without a capacity, such as `[i64; n]`, remains
 an explicit diagnostic that suggests `[T; n <= C]`; use `Vec<T>` for an owned
-container of unbounded length. Runtime-length arrays cannot appear in generic
-function, method, trait, or foreign signatures, in `fn` types, or in lambda
-signatures, and a signature may only use them as a whole parameter/result or
-behind one reference. There is no element-wise owning move beyond
-push/pop of copyable values, and no `&mut` (exclusive) borrowed pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow
-for arbitrary lengths.
+container of unbounded length. `Vec<T>` remains the growable owning container
+and `&[T]` the borrow for arbitrary lengths. Further limits:
+
+- Runtime-length arrays cannot appear in foreign signatures, `fn` types,
+  lambda signatures, methods of a trait used as a `dyn` object, or inside a
+  `dyn` or `fn` type in any signature (a call through a type alias that
+  expands to one is rejected).
+- A trait and its impl must spell a length binder with the same parameter
+  name.
+- A call is rejected when the caller's binders would change the layout of a
+  union in the callee's signature; this can reject a call with distinct
+  binders when union members would swap positions.
+- A recursive instance cannot take a type argument that names the function's
+  own length binder.
+- There is no element-wise owning move beyond push/pop of copyable values.
+- An exclusive (`&mut`) borrowed pattern cannot bind owning, linear, or view
+  elements, and its bindings suspend the whole array (or the record the array
+  is a field of), even for disjoint fields of that record. A `&mut [T]`
+  result cannot be returned from a `&mut DynArray` parameter.
 
 The implementation is checked by `crates/kush/tests/advanced_types_effects.rs`
+and, for generic/method/trait and nested signatures and exclusive patterns,
+`crates/kush/tests/runtime_length_extensions.rs`,
 with positive push/get/literal/view/pattern/equality execution,
 native/reference agreement, owning-prefix cleanup, capacity overflow,
 out-of-bounds reads and writes, runtime view bounds, mutable-view aliasing
@@ -358,3 +429,26 @@ All are fixed, and each has a regression test (`review_*` in
    a mismatch, a literal argument for a runtime-length parameter gets the
    length-proof message, `[..rest]` alone is exhaustive, and `a[i]` works
    through `&mut [T; n <= C]`.
+
+A second independent review covered the extensions (generic, method, trait,
+and nested signatures, and exclusive patterns) over five rounds plus a
+focused re-check, with local builds. It found seven soundness bugs, each
+fixed with a regression test in `crates/kush/tests/runtime_length_extensions.rs`:
+
+1. A recursive call whose type argument named the function's own length
+   binder (`go::<[i64; n <= 4]>` inside `go`) gave a value of the outer
+   length the inner activation's type. Such instances are rejected; the check
+   also covers inherited trait defaults, whose per-impl copy has its own
+   binding, and binders inside `dyn` trait arguments.
+2. Rebinding a signature type at a call could change its layout: union
+   members merged (`f(k, k, ...)` on `[i64; n <= 4] | [i64; m <= 4]`),
+   swapped positions, absorbed a width subtype, or merged inside a generic
+   record or enum. The rebuilt type must now be isomorphic to the callee's.
+3. A type alias expanding to `dyn Tr<[i64; n <= 4]>` hid the binder from
+   call-site substitution, so the callee's binder leaked into the caller's
+   type. Binder walks now see `dyn` arguments, and such calls are rejected.
+
+Smaller results: recursive calls forwarding their own binder were briefly
+falsely rejected by an intermediate fix and are accepted again, and a guard
+that writes through an exclusive binding does not change what later arms
+test (documented).
