@@ -3,10 +3,20 @@ fn main() {
     for (name, source) in kush_infer_proto_corpus() {
         let report = kush_infer_proto::check(source, 100_000);
         match &report.outcome {
-            Ok((out, fit, eff)) => println!(
-                "{name}: {out}  fit={fit:?} eff={eff} steps={}",
-                report.steps
-            ),
+            Ok((out, fit, eff)) => {
+                let signature = kush_infer_proto::signature(out);
+                println!(
+                    "{name}: {out}  fit={fit:?} eff={eff} steps={}\n    simplified: {}\n    kush: {}{}",
+                    report.steps,
+                    signature.simplified,
+                    signature.kush,
+                    if signature.instance {
+                        " (instance)"
+                    } else {
+                        ""
+                    }
+                )
+            }
             Err(failure) => println!("{name}: FAIL {failure:?} steps={}", report.steps),
         }
     }
@@ -54,6 +64,7 @@ fn kush_infer_proto_corpus() -> Vec<(&'static str, &'static str)> {
         ("self_app", "(lam x (app x x))"),
         ("omega_use", "(let w (lam x (app x x)) (app w w))"),
         ("church_two", "(lam f (lam x (app f (app f x))))"),
+        ("pick", "(lam c (lam x (lam y (if c x y))))"),
         (
             "nested_lets",
             "(let a (lam x x) (let b (lam y (app a (app a y))) (let c (lam z (app b (app b z))) (let d (lam u (app c (app c u))) (app d 1)))))",

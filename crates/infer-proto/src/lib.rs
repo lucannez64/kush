@@ -839,6 +839,240 @@ fn merge_arrows(items: BTreeSet<Out>, positive: bool) -> BTreeSet<Out> {
     rest
 }
 
+// ---------------------------------------------------------------------------
+// Simplification (I-PROTO-SIMPLIFY)
+// ---------------------------------------------------------------------------
+
+/// Polarity-indexed occurrence sets of one coalesced type: for each variable
+/// and polarity, every union (positive) or intersection (negative) it occurs
+/// in, as the set of the other members. A lone occurrence is an empty set.
+type Occurrences = std::collections::BTreeMap<(usize, bool), Vec<BTreeSet<Out>>>;
+
+fn occurrences(out: &Out, positive: bool, table: &mut Occurrences) {
+    let group = |items: &BTreeSet<Out>, table: &mut Occurrences| {
+        for item in items {
+            if let Out::Param(id) = item {
+                let others = items.iter().filter(|o| *o != item).cloned().collect();
+                table.entry((*id, positive)).or_default().push(others);
+            }
+        }
+    };
+    match out {
+        Out::Param(id) => table
+            .entry((*id, positive))
+            .or_default()
+            .push(BTreeSet::new()),
+        Out::Fun(a, b, _) => {
+            occurrences(a, !positive, table);
+            occurrences(b, positive, table);
+        }
+        Out::Union(items) | Out::Inter(items) => {
+            group(items, table);
+            for item in items.iter().filter(|i| !matches!(i, Out::Param(_))) {
+                occurrences(item, positive, table);
+            }
+        }
+        Out::Int | Out::Bool | Out::Rigid(_) | Out::Recursive(_) | Out::Poly => {}
+    }
+}
+
+/// Members that occur with `id` in every one of its occurrences at `positive`.
+fn co_occurring(table: &Occurrences, id: usize, positive: bool) -> Option<BTreeSet<Out>> {
+    let mut sets = table.get(&(id, positive))?.iter();
+    let first = sets.next()?.clone();
+    Some(sets.fold(first, |acc, set| acc.intersection(set).cloned().collect()))
+}
+
+/// Replace every occurrence of a variable, then renormalize.
+fn substitute(out: &Out, from: usize, to: &Option<Out>, positive: bool) -> Option<Out> {
+    let rebuild = |items: &BTreeSet<Out>, union: bool| -> Option<Out> {
+        let mut set = BTreeSet::new();
+        for item in items {
+            match substitute(item, from, to, positive) {
+                Some(Out::Union(inner)) if union => set.extend(inner),
+                Some(Out::Inter(inner)) if !union => set.extend(inner),
+                Some(other) => {
+                    set.insert(other);
+                }
+                None => {}
+            }
+        }
+        let set = merge_arrows(set, union);
+        match set.len() {
+            0 => None,
+            1 => set.into_iter().next(),
+            _ if union => Some(Out::Union(set)),
+            _ => Some(Out::Inter(set)),
+        }
+    };
+    match out {
+        Out::Param(id) if *id == from => to.clone(),
+        Out::Fun(a, b, bits) => Some(Out::Fun(
+            Box::new(substitute(a, from, to, !positive).unwrap_or(Out::Param(from))),
+            Box::new(substitute(b, from, to, positive).unwrap_or(Out::Param(from))),
+            *bits,
+        )),
+        Out::Union(items) => rebuild(items, true),
+        Out::Inter(items) => rebuild(items, false),
+        other => Some(other.clone()),
+    }
+}
+
+/// Simple-sub's simplifications on a coalesced type. Each preserves the type
+/// up to subtyping equivalence:
+///
+/// 1. a variable that occurs in only one polarity and never alone is removed
+///    from its unions (`⊥`) or intersections (`⊤`);
+/// 2. two variables that always co-occur with each other in one polarity are
+///    indistinguishable and are merged;
+/// 3. a variable that co-occurs with the same scalar in both polarities is
+///    that scalar.
+///
+/// Variables are then renumbered in order of first occurrence.
+pub fn simplify(out: &Out) -> Out {
+    let mut out = out.clone();
+    // Each round removes a variable, so this terminates.
+    'rounds: loop {
+        let mut table = Occurrences::new();
+        occurrences(&out, true, &mut table);
+        let variables = table.keys().map(|(id, _)| *id).collect::<BTreeSet<_>>();
+        for id in &variables {
+            let plus = table.get(&(*id, true));
+            let minus = table.get(&(*id, false));
+            // (1) Polar, never alone.
+            let lone = |sets: Option<&Vec<BTreeSet<Out>>>| {
+                sets.is_some_and(|sets| sets.iter().any(BTreeSet::is_empty))
+            };
+            if (plus.is_none() || minus.is_none()) && !lone(plus) && !lone(minus) {
+                if let Some(next) = substitute(&out, *id, &None, true) {
+                    out = next;
+                    continue 'rounds;
+                }
+            }
+            // (3) Sandwiched between the same scalar.
+            if let (Some(p), Some(m)) = (
+                co_occurring(&table, *id, true),
+                co_occurring(&table, *id, false),
+            ) {
+                if let Some(scalar) = p
+                    .intersection(&m)
+                    .find(|o| matches!(o, Out::Int | Out::Bool))
+                {
+                    if let Some(next) = substitute(&out, *id, &Some(scalar.clone()), true) {
+                        out = next;
+                        continue 'rounds;
+                    }
+                }
+            }
+            // (2) Mutual co-occurrence in one polarity.
+            for positive in [true, false] {
+                let Some(mine) = co_occurring(&table, *id, positive) else {
+                    continue;
+                };
+                for other in mine {
+                    let Out::Param(other_id) = other else {
+                        continue;
+                    };
+                    if co_occurring(&table, other_id, positive)
+                        .is_some_and(|theirs| theirs.contains(&Out::Param(*id)))
+                    {
+                        if let Some(next) = substitute(&out, other_id, &Some(Out::Param(*id)), true)
+                        {
+                            out = next;
+                            continue 'rounds;
+                        }
+                    }
+                }
+            }
+        }
+        break;
+    }
+    renumber(&out)
+}
+
+/// Kush has no subtyping between type parameters, so a union or intersection
+/// made only of variables is merged into one variable. Unlike [`simplify`]
+/// this picks an *instance* of the inferred type (less general), so callers
+/// report it; the result is the HM-style signature Kush would write.
+pub fn merge_variable_joins(out: &Out) -> (Out, bool) {
+    fn find(out: &Out) -> Option<(usize, usize)> {
+        match out {
+            Out::Union(items) | Out::Inter(items) => {
+                let params = items
+                    .iter()
+                    .filter_map(|i| {
+                        if let Out::Param(id) = i {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if params.len() >= 2 && params.len() == items.len() {
+                    return Some((params[0], params[1]));
+                }
+                items.iter().find_map(find)
+            }
+            Out::Fun(a, b, _) => find(a).or_else(|| find(b)),
+            _ => None,
+        }
+    }
+    let mut out = out.clone();
+    let mut merged = false;
+    while let Some((keep, gone)) = find(&out) {
+        out = substitute(&out, gone, &Some(Out::Param(keep)), true).expect("nonempty");
+        merged = true;
+    }
+    (renumber(&out), merged)
+}
+
+fn renumber(out: &Out) -> Out {
+    fn order(out: &Out, seen: &mut Vec<usize>) {
+        match out {
+            Out::Param(id) if !seen.contains(id) => seen.push(*id),
+            Out::Fun(a, b, _) => {
+                order(a, seen);
+                order(b, seen);
+            }
+            Out::Union(items) | Out::Inter(items) => items.iter().for_each(|i| order(i, seen)),
+            _ => {}
+        }
+    }
+    fn rename(out: &Out, seen: &[usize]) -> Out {
+        match out {
+            Out::Param(id) => Out::Param(seen.iter().position(|s| s == id).unwrap()),
+            Out::Fun(a, b, bits) => {
+                Out::Fun(Box::new(rename(a, seen)), Box::new(rename(b, seen)), *bits)
+            }
+            Out::Union(items) => Out::Union(items.iter().map(|i| rename(i, seen)).collect()),
+            Out::Inter(items) => Out::Inter(items.iter().map(|i| rename(i, seen)).collect()),
+            other => other.clone(),
+        }
+    }
+    let mut seen = Vec::new();
+    order(out, &mut seen);
+    rename(out, &seen)
+}
+
+/// The prototype's Kush signature for a type: simplified, then variable
+/// joins merged. `instance` is true when the merge was needed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Signature {
+    pub simplified: Out,
+    pub kush: Out,
+    pub instance: bool,
+}
+
+pub fn signature(out: &Out) -> Signature {
+    let simplified = simplify(out);
+    let (kush, instance) = merge_variable_joins(&simplified);
+    Signature {
+        simplified,
+        kush,
+        instance,
+    }
+}
+
 /// How a coalesced type maps onto Kush.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Fit {

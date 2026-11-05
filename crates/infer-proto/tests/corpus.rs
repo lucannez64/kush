@@ -176,3 +176,119 @@ fn budgets_are_deterministic_and_never_accept() {
     // A tiny budget rejects even a trivial program.
     assert_eq!(check("(lam x x)", 5).outcome.unwrap_err(), Failure::Budget);
 }
+
+// ---------------------------------------------------------------------------
+// I-PROTO-SIMPLIFY: co-occurrence simplification and Kush signatures
+// ---------------------------------------------------------------------------
+
+fn signature_of(source: &str) -> kush_infer_proto::Signature {
+    let (out, _, _) = check(source, BUDGET).outcome.unwrap();
+    kush_infer_proto::signature(&out)
+}
+
+#[test]
+fn simplification_preserves_already_simple_types() {
+    for (source, expected) in [
+        ("(lam x x)", "('a0 -> 'a0)"),
+        (
+            "(lam f (lam x (app f x)))",
+            "(('a0 -> 'a1) -> ('a0 -> 'a1))",
+        ),
+        (
+            "(lam f (lam g (lam x (app f (app g x)))))",
+            "(('a0 -> 'a1) -> (('a2 -> 'a0) -> ('a2 -> 'a1)))",
+        ),
+        ("(lam x (app print x))", "(int ->{io} int)"),
+        ("(lam c (if c 1 true))", "(bool -> (int | bool))"),
+    ] {
+        let signature = signature_of(source);
+        assert_eq!(signature.simplified.to_string(), expected, "{source}");
+        assert_eq!(signature.kush, signature.simplified, "{source}");
+        assert!(!signature.instance, "{source}");
+    }
+}
+
+#[test]
+fn co_occurring_variables_merge_and_polar_variables_vanish() {
+    // twice: 'a2 and 'a3 always occur together positively, so they merge;
+    // the remaining intersection of variables is merged only for Kush.
+    let twice = signature_of("(lam f (lam x (app f (app f x))))");
+    assert_eq!(
+        twice.simplified.to_string(),
+        "(('a0 -> ('a0 & 'a1)) -> ('a0 -> 'a1))"
+    );
+    assert_eq!(twice.kush.to_string(), "(('a0 -> 'a0) -> ('a0 -> 'a0))");
+    assert!(twice.instance);
+    // A variable that only bounds a result from one side disappears.
+    let rank2 = signature_of("(lam f (if (app f true) (app f 1) 0))");
+    assert_eq!(
+        rank2.simplified.to_string(),
+        "(((int | bool) -> bool) -> int)"
+    );
+    // Two branches of variables: (x, y) -> x | y is x -> x -> x.
+    let pick = signature_of("(lam c (lam x (lam y (if c x y))))");
+    assert_eq!(
+        pick.simplified.to_string(),
+        "(bool -> ('a0 -> ('a0 -> 'a0)))"
+    );
+    assert!(!pick.instance);
+}
+
+/// Replace every type variable by `int` and print as an annotation.
+fn at_int(out: &kush_infer_proto::Out) -> Option<String> {
+    use kush_infer_proto::Out;
+    Some(match out {
+        Out::Int | Out::Param(_) => "int".into(),
+        Out::Bool => "bool".into(),
+        Out::Fun(a, b, 0) => format!("(-> {} {})", at_int(a)?, at_int(b)?),
+        Out::Fun(a, b, bits) => {
+            let mut names = Vec::new();
+            for (bit, name) in [(kush_infer_proto::IO, "io"), (2, "alloc"), (4, "panic")] {
+                if bits & bit != 0 {
+                    names.push(name);
+                }
+            }
+            format!("(->! {} {} {})", names.join(" "), at_int(a)?, at_int(b)?)
+        }
+        _ => return None,
+    })
+}
+
+#[test]
+fn every_kush_signature_still_types_its_program() {
+    // Simplification and merging must yield a type the term really has:
+    // re-check each corpus program annotated with its Kush signature at int.
+    let mut checked = 0;
+    for source in [
+        "(lam x x)",
+        "(lam f (lam x (app f x)))",
+        "(lam f (lam g (lam x (app f (app g x)))))",
+        "(lam f (lam x (app f (app f x))))",
+        "(lam c (lam x (lam y (if c x y))))",
+        "(lam x (app print x))",
+        "(lam f (lam x (app f (app print x))))",
+    ] {
+        let signature = signature_of(source);
+        let Some(annotation) = at_int(&signature.kush) else {
+            continue;
+        };
+        let annotated = format!("(ann {source} {annotation})");
+        assert!(
+            check(&annotated, BUDGET).outcome.is_ok(),
+            "{annotated}: {:?}",
+            check(&annotated, BUDGET).outcome
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 7);
+    // The re-check is not vacuous: a signature the term does not have is
+    // rejected (twice feeds f's result back into f).
+    assert!(
+        check(
+            "(ann (lam f (lam x (app f (app f x)))) (-> (-> int bool) (-> int bool)))",
+            BUDGET
+        )
+        .outcome
+        .is_err()
+    );
+}

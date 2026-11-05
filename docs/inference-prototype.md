@@ -100,6 +100,32 @@ native stack in the first version: a step budget alone is not enough.
    not subtyping inference problems in this sense and remain with the
    lifetime solver; nothing here replaces it.
 
+## 3a. Simplification (I-PROTO-SIMPLIFY)
+
+`kush_infer_proto::signature` applies Simple-sub's co-occurrence
+simplifications to the coalesced type, each an equivalence up to subtyping:
+a variable occurring in one polarity and never alone is removed; two
+variables that always co-occur in one polarity are merged; a variable
+sandwiched by the same scalar in both polarities becomes that scalar.
+Variables are renumbered by first occurrence. A second, Kush-specific step
+merges any union or intersection made only of variables; that picks an
+*instance* of the type (less general), so it is reported (`instance`).
+
+Corpus re-run (`target/debug/examples/corpus`):
+
+| Program | Coalesced | Simplified | Kush signature |
+| --- | --- | --- | --- |
+| `λf. λx. f (f x)` | `((('a2 \| 'a3) -> ('a3 & 'a4)) -> ('a2 -> 'a4))` | `(('a0 -> ('a0 & 'a1)) -> ('a0 -> 'a1))` | `(('a0 -> 'a0) -> ('a0 -> 'a0))`, instance: `fn twice<T>(f: fn(T) -> T, x: T) -> T` |
+| `λf. if f true then f 1 else 0` | `(((int \| bool) -> (bool & 'a3)) -> int)` | `(((int \| bool) -> bool) -> int)` | same (still a union coercion) |
+| `λc. λx. λy. if c then x else y` (`pick`) | `(bool -> ('a4 -> ('a4 -> 'a4)))` (the solver already shares one variable) | `(bool -> ('a0 -> ('a0 -> 'a0)))` | same, not an instance |
+| id, apply, compose, effects, let-polymorphism | already minimal | unchanged up to renumbering | same |
+
+Every Kush signature is re-checked as an annotation on its program (at
+`int` for each variable) and accepted; a signature the term does not have is
+rejected. Only `twice` needed the instance step in the corpus, which supports
+decision 3: the checker should infer a lambda's types locally and ask for an
+annotation rather than print a type with variable joins.
+
 ## 4. Decisions
 
 1. **Do not integrate a general SuperF/Simple-sub solver** into the checker.
