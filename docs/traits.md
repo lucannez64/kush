@@ -911,7 +911,10 @@ a field must still be consumed. Shared and exclusive borrows of an object
 owner exclude each other exactly as for records: a live `&dyn` blocks a later
 `&mut dyn` or mutable dispatch on the owner. A trait with one concrete impl is
 still represented as a one-alternative object rather than collapsing to the
-member type, so stored `&dyn`/`&mut dyn` dispatch works for it too.
+member type, so stored `&dyn`/`&mut dyn` dispatch works for it too. This
+holds inside tuples and other aggregates as well: `pair.0.method()` dispatches
+on the object, and an object is never implicitly a value of its member type
+(`let t: Text = pair.0;` is a type mismatch, `expected Text, found dyn Show`).
 
 ## Limits
 
@@ -937,10 +940,6 @@ The following remain intentionally outside the implemented subset:
   `dyn Trait<Effect>` cannot be named);
 - upcasting a reference to a multi-trait object, downcasts, and lifetime
   bounds on objects (`dyn A + 'a`);
-- a closed-world object whose trait has exactly one concrete impl is stored as
-  that member type inside a tuple, so `pair.0.method()` there follows the
-  static method rules (a projected borrowed or consuming static call is
-  rejected) instead of object dispatch;
 - `DynArray` elements and fields erased by structural width subtyping may not
   contain a dynamic object, since object linearity is only known after every
   member is registered;

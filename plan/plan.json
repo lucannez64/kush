@@ -3421,10 +3421,21 @@
       "deps": [
         "DYN"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "In a tuple, a closed dyn Trait with one concrete impl is stored as the member type (let t: Text = pair.0 is accepted), so projected dispatch follows static rules. Keeping the object type would reject currently accepted programs; needs a user decision.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 18:05:37",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 18:05:37",
+          "who": "agent",
+          "text": "User chose: keep the object type in tuples (let t: Text = pair.0 becomes rejected; pair.0.method() uses object dispatch)."
+        }
+      ]
     },
     {
       "id": "BORROW-EXCL-VIEW-READ",
@@ -3435,7 +3446,13 @@
       "status": "todo",
       "desc": "Reviewer probe: v = pair.0.swapv(&pair.1[..]) with swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64], then pair.0.look() while v is live is accepted; same for concrete records. Not a memory-safety issue (the view aliases the argument), but stricter exclusive-loan rules would reject it. Pre-existing.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 18:05:37",
+          "who": "agent",
+          "text": "User chose: keep accepting; document and pin with regression tests."
+        }
+      ]
     },
     {
       "id": "FIX-RT-RECURSIVE-BINDER",

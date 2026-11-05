@@ -505,3 +505,73 @@ fn consuming_projected_dispatch_follows_destructuring_rules() {
         );
     }
 }
+
+/// A closed object whose trait has exactly one impl keeps its object type in
+/// a tuple (D-SINGLE-TUPLE): projected shared, mutable and consuming calls
+/// dispatch on the object, and the member type is not recovered implicitly.
+const SINGLE: &str = r#"
+struct Text { tag: i64, name: String }
+trait Show {
+    fn show(self: &Self) -> i64 ! {panic};
+    fn bump(self: &mut Self) -> i64 ! {panic};
+    fn eat(self: Self) -> i64 ! {panic};
+}
+impl Show for Text {
+    fn show(self: &Self) -> i64 ! {panic} { self.tag }
+    fn bump(self: &mut Self) -> i64 ! {panic} { self.tag = self.tag + 1; self.tag }
+    fn eat(self: Self) -> i64 ! {panic} { let Text { tag, name } = self; tag * 10 }
+}
+"#;
+
+#[test]
+fn single_impl_objects_keep_their_object_type_inside_tuples() {
+    let stats = agrees(
+        &format!(
+            r#"{SINGLE}
+            fn main() -> i64 ! {{io, alloc, panic}} {{
+                let mut pair: (dyn Show, i64) = (Text {{ tag: 7, name: String.from("hello") }}, 1);
+                print_i64(pair.0.show());
+                print_i64(pair.0.bump());
+                let mut other: (i64, dyn Show) = (3, Text {{ tag: 1, name: String.from("x") }});
+                print_i64(other.1.bump());
+                let (n, object) = other;
+                print_i64(object.eat() + n);
+                print_i64(pair.1);
+                print_i64(pair.0.eat());
+                0
+            }}"#
+        ),
+        0,
+        "7\n8\n2\n23\n1\n80\n",
+    );
+    // One `String` per object; both are released by the consuming calls.
+    assert_eq!(stats.allocations, 2, "{stats:?}");
+}
+
+#[test]
+fn single_impl_objects_are_not_their_member_type() {
+    // Projected out of a tuple (previously accepted through the collapse).
+    rejects(
+        r#"struct Text { name: i64 }
+        trait Show { fn show(self: &Self) -> i64 ! {panic}; }
+        impl Show for Text { fn show(self: &Self) -> i64 ! {panic} { self.name } }
+        fn main() -> i64 ! {alloc, panic} {
+            let pair: (dyn Show, i64) = (Text { name: 7 }, 1);
+            let t: Text = pair.0;
+            t.show()
+        }"#,
+        "expected Text, found dyn Show",
+    );
+    // A plain local (previously an internal representation error).
+    rejects(
+        &format!(
+            r#"{SINGLE}
+            fn main() -> i64 ! {{alloc, panic}} {{
+                let object: dyn Show = Text {{ tag: 7, name: String.from("a") }};
+                let t: Text = object;
+                t.eat()
+            }}"#
+        ),
+        "expected Text, found dyn Show",
+    );
+}

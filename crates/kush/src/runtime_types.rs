@@ -1695,6 +1695,11 @@ impl<'a> Types<'a> {
                         other => other,
                     })
                     .collect::<Vec<_>>();
+                // A one-member object union is already full; renormalizing it
+                // would collapse the object to its member type.
+                if widened == self.unions[id].members {
+                    return Ok(ty);
+                }
                 self.union(widened, span)
             }
             _ => Ok(ty),
@@ -2231,6 +2236,15 @@ impl<'a> Types<'a> {
                     .map(|(_, v)| format!("{}.{}", self.enums[id].name, v.name))
                     .collect::<Vec<_>>();
                 names.join(" | ")
+            }
+            Type::Union(id) if self.unions[id].members.len() == 1 => {
+                // A one-member union is a closed-world trait object.
+                match self.dyn_objects.iter().find(|(_, object)| **object == ty) {
+                    Some(((trait_id, _), _)) => {
+                        format!("dyn {}", self.resolution.bindings[*trait_id].name)
+                    }
+                    None => format!("dyn object of {}", self.name(self.unions[id].members[0])),
+                }
             }
             Type::Union(id) => self.unions[id]
                 .members
@@ -4001,6 +4015,10 @@ impl<'a> Types<'a> {
                     .iter()
                     .any(|right| self.atom_subtype(*left, *right))
             }),
+            // A one-member union is a closed-world trait object (`union`
+            // never builds one): it keeps its object identity and is not a
+            // value of its member type.
+            (Type::Union(a), _) if self.unions[a].members.len() == 1 => false,
             (Type::Union(a), _) => self.unions[a]
                 .members
                 .iter()

@@ -133,8 +133,9 @@ and remaining limits.
   dispatch, and owned upcasts to any subset of their traits. Remaining
   boundaries: no FFI-compatible vtable or open-world membership, no reference
   upcasts or downcasts, no per-field partial moves, no exact-use `@[1]` object
-  results, and a one-impl closed object inside a tuple collapses to its member
-  type (see [traits.md](traits.md#limits)). Effect-row trait parameters do not
+  results (see [traits.md](traits.md#limits)). A closed object whose trait has
+  one concrete impl keeps its object type everywhere, including tuples
+  (`D-SINGLE-TUPLE`): it is not a value of its member type. Effect-row trait parameters do not
   exist, so `dyn Trait<Effect>` cannot be named. Reviewed independently in
   `D-REVIEW` (about 100 probes, no soundness finding).
 - [x] Specialization with an explicit deterministic coherence contract. Unique
