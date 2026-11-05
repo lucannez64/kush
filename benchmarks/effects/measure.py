@@ -17,6 +17,8 @@ PROGRAMS = [
     "capability-perform-lexical",
     "capability-perform-in-callee",
     "dynamic-perform-in-callee",
+    "checked-call",
+    "may-abort-call",
 ]
 
 def main():

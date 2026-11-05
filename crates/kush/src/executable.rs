@@ -284,6 +284,8 @@ pub struct Executable {
     pub(crate) uses_tasks: bool,
     /// Effect-row bit of each declared operation, by operation id.
     pub(crate) effect_bits: Vec<u16>,
+    /// Whether each declared operation is abortive (`-> Never`).
+    pub(crate) abortive_operations: Vec<bool>,
     /// Own grade tables for every copyable identity above. Keep this last so
     /// tables remain available while all other program metadata is dropped.
     pub(crate) _grade_algebras: Vec<std::sync::Arc<crate::grades::Algebra>>,
@@ -1219,6 +1221,27 @@ pub(crate) enum ExprKind {
         label: usize,
         body: Block,
         handler: Box<Expr>,
+        /// A declared operation: the scope also pushes a dynamic handler frame
+        /// so called functions can abort to it (E-ABORT-PROPAGATE).
+        operation: Option<usize>,
+    },
+    /// `perform F(value)` of a declared abortive operation with no enclosing
+    /// abortive scope in this function: find the innermost dynamic frame for
+    /// `F`, hand it the payload, and leave this function like `return` (every
+    /// live value is dropped). A missing handler aborts the program. Type
+    /// `Never`.
+    AbortPerform {
+        operation: usize,
+        value: Box<Expr>,
+    },
+    /// A call that may abort (E-ABORT-PROPAGATE). After `call` returns, a set
+    /// abort word names a handle activation: if it is one of the enclosing
+    /// scopes in `exits` (label, cleanup filled by ownership), leave to it;
+    /// otherwise, when `propagates`, leave this function like `return`.
+    AbortCall {
+        call: Box<Expr>,
+        exits: Vec<(usize, Vec<usize>)>,
+        propagates: bool,
     },
     /// `perform F(value)` of an abortive operation whose `AbortScope` `label`
     /// encloses it in the same function: evaluate `value`, drop `cleanup`
@@ -1572,7 +1595,9 @@ impl Expr {
             }
             ExprKind::RegionExit { value, .. }
             | ExprKind::TryExit { value, .. }
-            | ExprKind::AbortExit { value, .. } => f(value),
+            | ExprKind::AbortExit { value, .. }
+            | ExprKind::AbortPerform { value, .. }
+            | ExprKind::AbortCall { call: value, .. } => f(value),
             ExprKind::HandlerRedirect { depth, body } => {
                 f(depth);
                 block(body, f);
@@ -1799,7 +1824,9 @@ impl Expr {
             }
             ExprKind::RegionExit { value, .. }
             | ExprKind::TryExit { value, .. }
-            | ExprKind::AbortExit { value, .. } => f(value),
+            | ExprKind::AbortExit { value, .. }
+            | ExprKind::AbortPerform { value, .. }
+            | ExprKind::AbortCall { call: value, .. } => f(value),
             ExprKind::HandlerRedirect { depth, body } => {
                 f(depth);
                 block(body, f);
@@ -2815,7 +2842,9 @@ fn fusion_expr_safe(
         | ExprKind::TryExit { .. }
         // An abort leaves code that a fused stage would have to resume.
         | ExprKind::AbortScope { .. }
-        | ExprKind::AbortExit { .. } => false,
+        | ExprKind::AbortExit { .. }
+        | ExprKind::AbortPerform { .. }
+        | ExprKind::AbortCall { .. } => false,
         ExprKind::FnValue { function, captures } => {
             captures
                 .iter()
@@ -3060,7 +3089,11 @@ fn fuse_expr(
         }
         ExprKind::RegionExit { value, .. }
         | ExprKind::TryExit { value, .. }
-        | ExprKind::AbortExit { value, .. } => fuse_expr(value, types, signatures, safety, fusions),
+        | ExprKind::AbortExit { value, .. }
+        | ExprKind::AbortPerform { value, .. }
+        | ExprKind::AbortCall { call: value, .. } => {
+            fuse_expr(value, types, signatures, safety, fusions)
+        }
         ExprKind::AbortScope { body, handler, .. } => {
             fuse_block(body, types, signatures, safety, fusions);
             fuse_expr(handler, types, signatures, safety, fusions);
@@ -5091,6 +5124,10 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             .capability_operations
             .insert(name.clone(), (parameter, result));
     }
+    let mut abortive_operations = vec![false; effect_operations.len()];
+    for operation in effect_operations.values() {
+        abortive_operations[operation.id] = operation.result == Type::Never;
+    }
     let mut effect_bits = vec![0; effect_operations.len()];
     for (name, operation) in &effect_operations {
         effect_bits[operation.id] = resolution.effect_bits.get(name).copied().unwrap_or(0);
@@ -5569,6 +5606,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         fusions: functions.fusions,
         uses_tasks: functions.uses_tasks,
         effect_bits,
+        abortive_operations,
         certificates: functions.certificates,
         allocator_contexts: functions.allocator_contexts,
         functions: functions.bodies.into_iter().map(Option::unwrap).collect(),
@@ -5598,6 +5636,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         foreign_functions,
         logical_definitions: logical.definitions.clone(),
     };
+    crate::suspend::mark_abort_calls(&mut executable)?;
     crate::ownership::check(&mut executable)?;
     crate::grades::check(&executable)?;
     crate::suspend::lower(&mut executable)?;
@@ -31646,7 +31685,7 @@ impl Checker<'_, '_> {
                 expected,
                 span,
                 capability.is_some(),
-                declared.is_some(),
+                declared.map(|declared| declared.id),
             );
         }
         let handler_value = self.expr(handler)?;
@@ -31897,7 +31936,7 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
         span: Span,
         capability: bool,
-        declared: bool,
+        declared: Option<usize>,
     ) -> Result<Expr> {
         if capability {
             return Err(Diagnostic::new(
@@ -31957,6 +31996,18 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
+        let abortive_bits = self
+            .effect_operations
+            .iter()
+            .filter(|(_, operation)| operation.result == Type::Never)
+            .map(|(name, _)| self.operation_effect(name))
+            .fold(0, |bits, bit| bits | bit);
+        if signature.effects & abortive_bits != 0 {
+            return Err(Diagnostic::new(
+                handler.span,
+                "a handler for an abortive operation cannot itself perform an abortive operation; handle it inside the handler",
+            ));
+        }
         self.require(signature.effects, span)?;
         let handler_type = handler_value.ty;
         let slot = self.fresh_local(span, handler_type)?;
@@ -31973,7 +32024,7 @@ impl Checker<'_, '_> {
             multishot: false,
             region: false,
             points: 0,
-            declared,
+            declared: declared.is_some(),
             abort: Some(label),
         });
         let operation_effect = self.operation_effect(operation);
@@ -32011,6 +32062,7 @@ impl Checker<'_, '_> {
                     span,
                     resource: None,
                 }),
+                operation: declared,
             },
             ty,
             span,
@@ -32626,6 +32678,39 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
+    /// A dynamic abortive perform (E-ABORT-PROPAGATE): it leaves this
+    /// function like `return`, and the innermost dynamic `handle F` receives
+    /// the payload. A missing handler aborts the program, hence `panic`.
+    fn abort_perform(
+        &mut self,
+        operation: &str,
+        declared: EffectOperation,
+        operation_effect: u16,
+        value: &ast::Expr,
+        span: Span,
+    ) -> Result<Expr> {
+        if let Some(inner) = self.handlers.iter().rev().find(|scope| scope.region) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the abortive 'perform {operation}' cannot leave the body of 'handle {}', whose handler has code after 'resume'; perform it outside that handle",
+                    inner.operation
+                ),
+            ));
+        }
+        self.require(PANIC | operation_effect, span)?;
+        let payload = self.expr_expected(value, Some(declared.parameter))?;
+        let payload = self.coerce_argument(payload, declared.parameter, span)?;
+        Ok(Expr {
+            kind: ExprKind::AbortPerform {
+                operation: declared.id,
+                value: Box::new(payload),
+            },
+            ty: Type::Never,
+            span,
+            resource: None,
+        })
+    }
     fn perform_effect(
         &mut self,
         operation: &str,
@@ -32656,12 +32741,7 @@ impl Checker<'_, '_> {
             ));
         };
         if declared.result == Type::Never {
-            return Err(Diagnostic::new(
-                span,
-                format!(
-                    "the abortive 'perform {operation}' must be lexically inside its 'handle' in the same function"
-                ),
-            ));
+            return self.abort_perform(operation, declared, operation_effect, value, span);
         }
         // No handler may be active at run time, which aborts the program, so
         // a dynamically resolved operation can always panic. A declared

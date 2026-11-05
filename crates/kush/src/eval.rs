@@ -98,6 +98,9 @@ impl Executable {
             stats: stats.clone(),
             task: None,
             dynamic_handlers: Vec::new(),
+            abort_scopes: Vec::new(),
+            next_activation: 0,
+            pending_abort: None,
             try_budget: alloc_budget.map(|budget| Arc::new(AtomicUsize::new(budget))),
             host: Arc::new(host.clone()),
         };
@@ -309,6 +312,9 @@ impl Executable {
                     stats,
                     task: None,
                     dynamic_handlers: Vec::new(),
+                    abort_scopes: Vec::new(),
+                    next_activation: 0,
+                    pending_abort: None,
                     try_budget: try_budget.clone(),
                     host: host.clone(),
                 };
@@ -371,8 +377,12 @@ impl Executable {
                     }),
                     redirect: None,
                     consume: false,
+                    abort: None,
                 })
                 .collect(),
+            abort_scopes: Vec::new(),
+            next_activation: 0,
+            pending_abort: None,
             try_budget: try_budget.clone(),
             host: host.clone(),
         };
@@ -975,7 +985,7 @@ enum PlaceFlow {
     Break(Value),
     Continue,
     Exit(Value, bool),
-    Abort(usize, Value),
+    Abort(u64, Value),
 }
 impl From<Flow> for PlaceFlow {
     fn from(flow: Flow) -> Self {
@@ -997,8 +1007,8 @@ enum Flow {
     Continue,
     /// Leave the innermost `Region`; the flag applies the region's finish.
     Exit(Value, bool),
-    /// Leave the innermost `AbortScope` with this label, carrying the payload.
-    Abort(usize, Value),
+    /// Leave the `AbortScope` activation with this id, carrying the payload.
+    Abort(u64, Value),
 }
 struct Frame {
     function: usize,
@@ -1182,6 +1192,8 @@ struct HandlerFrame {
     /// A `once` handler owns its environment and can be consumed only once.
     /// A copyable `fn` handler serves any number of performs.
     consume: bool,
+    /// An abortive `handle` activation (no handler value).
+    abort: Option<u64>,
 }
 struct Evaluator<'a, R: Read, W: Write> {
     program: &'a Executable,
@@ -1196,6 +1208,12 @@ struct Evaluator<'a, R: Read, W: Write> {
     /// unwound on every normal or early exit from the handled body, dropping an
     /// unconsumed owning handler exactly once.
     dynamic_handlers: Vec<HandlerFrame>,
+    /// Abortive scopes active on this task: (label, activation id).
+    abort_scopes: Vec<(usize, u64)>,
+    next_activation: u64,
+    /// An abort that left a function: the activation it addresses and the
+    /// payload, picked up by the caller's `AbortCall`.
+    pending_abort: Option<(u64, Value)>,
     /// Remaining successful fallible allocation attempts for deterministic
     /// failure probes. `None` means unlimited.
     try_budget: Option<Arc<AtomicUsize>>,
@@ -5128,8 +5146,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     v
                 }
             }
-            Flow::Break(_) | Flow::Continue | Flow::Exit(..) | Flow::Abort(..) => {
-                unreachable!("loop, region and abort exits are checked")
+            // An abort leaves the function; the caller's `AbortCall` takes it.
+            Flow::Abort(activation, payload) => {
+                self.pending_abort = Some((activation, payload));
+                Value::Scalar(0)
+            }
+            Flow::Break(_) | Flow::Continue | Flow::Exit(..) => {
+                unreachable!("loop and region exits are checked")
             }
         })
     }
@@ -5196,6 +5219,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             handler: Some(handler_value),
             redirect: None,
             consume,
+            abort: None,
         });
         let flow = self.block(body, frame);
         let popped = self.dynamic_handlers.pop();
@@ -5207,6 +5231,15 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             self.drop_value(value)?;
         }
         flow
+    }
+    /// The activation of the innermost active abortive scope `label`.
+    fn abort_activation(&self, label: usize) -> u64 {
+        self.abort_scopes
+            .iter()
+            .rev()
+            .find(|(target, _)| *target == label)
+            .map(|(_, activation)| *activation)
+            .expect("an abort exit is inside its scope")
     }
     #[inline(never)]
     fn dynamic_perform(
@@ -6526,15 +6559,35 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 label,
                 body,
                 handler,
-            } => match self.block(body, frame)? {
-                Flow::Value(value) => value,
-                Flow::Abort(target, payload) if target == *label => {
-                    let callable = value!(self.expr(handler, frame));
-                    self.consume(handler, frame);
-                    self.call_value(callable, vec![payload])?
+                operation,
+            } => {
+                let activation = self.next_activation;
+                self.next_activation += 1;
+                let depth = self.dynamic_handlers.len();
+                if let Some(operation) = operation {
+                    self.dynamic_handlers.push(HandlerFrame {
+                        operation: *operation,
+                        handler: None,
+                        redirect: None,
+                        consume: false,
+                        abort: Some(activation),
+                    });
                 }
-                other => return Ok(other),
-            },
+                self.abort_scopes.push((*label, activation));
+                let flow = self.block(body, frame);
+                self.abort_scopes.pop();
+                // Frames pushed inside pop themselves on every exit.
+                self.dynamic_handlers.truncate(depth);
+                match flow? {
+                    Flow::Value(value) => value,
+                    Flow::Abort(target, payload) if target == activation => {
+                        let callable = value!(self.expr(handler, frame));
+                        self.consume(handler, frame);
+                        self.call_value(callable, vec![payload])?
+                    }
+                    other => return Ok(other),
+                }
+            }
             ExprKind::AbortExit {
                 label,
                 value,
@@ -6545,7 +6598,59 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 for id in cleanup {
                     self.drop_resource(Some(*id), frame)?;
                 }
-                return Ok(Flow::Abort(*label, payload));
+                return Ok(Flow::Abort(self.abort_activation(*label), payload));
+            }
+            ExprKind::AbortPerform { operation, value } => {
+                let mut index = self.dynamic_handlers.len();
+                let activation = loop {
+                    if index == 0 {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "no dynamically active handler for this operation",
+                        ));
+                    }
+                    index -= 1;
+                    let candidate = &self.dynamic_handlers[index];
+                    if let Some(target) = candidate.redirect {
+                        index = target;
+                        continue;
+                    }
+                    if candidate.operation == *operation {
+                        break candidate
+                            .abort
+                            .expect("an abortive operation has abortive frames");
+                    }
+                };
+                let payload = value!(self.expr(value, frame));
+                self.consume(value, frame);
+                return Ok(Flow::Abort(activation, payload));
+            }
+            ExprKind::AbortCall {
+                call,
+                exits,
+                propagates,
+            } => {
+                let value = value!(self.expr(call, frame));
+                let Some((activation, payload)) = self.pending_abort.take() else {
+                    return Ok(Flow::Value(value));
+                };
+                // The call's result is a placeholder on this path.
+                self.consume(call, frame);
+                for (label, cleanup) in exits {
+                    if self.abort_activation(*label) == activation {
+                        for id in cleanup {
+                            self.drop_resource(Some(*id), frame)?;
+                        }
+                        return Ok(Flow::Abort(activation, payload));
+                    }
+                }
+                if !*propagates {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: an abort reached a call that cannot leave to it",
+                    ));
+                }
+                return Ok(Flow::Abort(activation, payload));
             }
             ExprKind::RegionExit {
                 value,
@@ -6594,6 +6699,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         handler: None,
                         redirect: Some(target),
                         consume: true,
+                        abort: None,
                     });
                 }
                 let flow = self.block(body, frame);

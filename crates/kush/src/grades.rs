@@ -1096,7 +1096,9 @@ impl<'a> Checker<'a> {
                 self.value_moves_linear(owner) || self.value_moves_linear(payload)
             }
             ExprKind::VecMap { vector, .. } => self.value_moves_linear(vector),
-            ExprKind::Coerce { value, .. } => self.value_moves_linear(value),
+            ExprKind::Coerce { value, .. } | ExprKind::AbortCall { call: value, .. } => {
+                self.value_moves_linear(value)
+            }
             ExprKind::TaskSpawn { obligation, .. }
             | ExprKind::TaskScope { obligation, .. }
             | ExprKind::TaskJoin { obligation, .. } => *obligation,
@@ -1161,7 +1163,9 @@ impl<'a> Checker<'a> {
                 self.value_has_grade_one(owner) || self.value_has_grade_one(payload)
             }
             ExprKind::VecMap { vector, .. } => self.value_has_grade_one(vector),
-            ExprKind::Coerce { value, .. } => self.value_has_grade_one(value),
+            ExprKind::Coerce { value, .. } | ExprKind::AbortCall { call: value, .. } => {
+                self.value_has_grade_one(value)
+            }
             ExprKind::TaskSpawn { obligation, .. }
             | ExprKind::TaskScope { obligation, .. }
             | ExprKind::TaskJoin { obligation, .. } => *obligation,
@@ -1660,6 +1664,7 @@ impl<'a> Checker<'a> {
                 label,
                 body,
                 handler,
+                ..
             } => {
                 self.aborts.push((
                     *label,
@@ -1927,6 +1932,43 @@ impl<'a> Checker<'a> {
                 }
                 self.check_exact(&self.active.clone(), expr.span, "this return")?;
                 return Ok(false);
+            }
+            ExprKind::AbortPerform { value, .. } => {
+                if !self.expr(value, multiplier)? {
+                    return Ok(false);
+                }
+                self.check_exact(
+                    &self.active.clone(),
+                    expr.span,
+                    "this abortive perform leaves the function",
+                )?;
+                return Ok(false);
+            }
+            ExprKind::AbortCall {
+                call,
+                exits,
+                propagates,
+            } => {
+                if !self.expr(call, multiplier)? {
+                    return Ok(false);
+                }
+                for (label, _) in exits.iter() {
+                    let index = self
+                        .aborts
+                        .iter()
+                        .rposition(|(target, _)| target == label)
+                        .expect("an abort call is inside its scopes");
+                    let inner = self.active[self.aborts[index].1.active_start..].to_vec();
+                    self.check_exact(&inner, expr.span, "this call may abort to its 'handle'")?;
+                    self.note_abort(index, expr.span)?;
+                }
+                if *propagates {
+                    self.check_exact(
+                        &self.active.clone(),
+                        expr.span,
+                        "this call may abort out of the function",
+                    )?;
+                }
             }
             ExprKind::Assign(slot, value) => {
                 if self.guard && self.is_tracked(*slot) {

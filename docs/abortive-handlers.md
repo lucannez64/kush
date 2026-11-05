@@ -1,7 +1,8 @@
 # Non-resuming (abortive) handlers and unwinding
 
-Status: **design, decided** (E-ABORT-DESIGN); the lexical part is
-implemented (E-ABORT-LEXICAL, section 3.5).
+Status: **design, decided** (E-ABORT-DESIGN); the lexical part and
+propagation across calls are implemented (E-ABORT-LEXICAL, section 3.5;
+E-ABORT-PROPAGATE, section 3.6).
 It answers how a handler that does not resume can discard the computation
 between a `perform` and its `handle` while dropping every live owned value
 exactly once, in the reference evaluator and natively, and keeps this
@@ -154,9 +155,46 @@ Tests: `crates/kush/tests/abortive_handlers.rs`.
 - Restrictions, each rejected with a diagnostic: handlers with a token or a
   linear handler; a payload or handler result that can hold a borrow;
   binding an abortive handle `as` a capability or naming one in `cap F`; a
-  dynamic perform (in a called function or a lambda) — that is
-  E-ABORT-PROPAGATE; a non-tail suspension point inside an abortive body and
-  an abort out of a non-tail handler's body — E-ABORT-INTERACT.
+  non-tail suspension point inside an abortive body and an abort out of a
+  non-tail handler's body — E-ABORT-INTERACT.
+
+### 3.6 As built (E-ABORT-PROPAGATE)
+
+Tests: `crates/kush/tests/abortive_handlers.rs`; measurement:
+[benchmarks/effects](../benchmarks/effects/README.md).
+
+- A `handle` of a declared abortive operation also pushes a dynamic frame.
+  `perform F(x)` with no enclosing abortive scope in its function becomes
+  `AbortPerform`: it needs `F` and `panic` in the row, finds the innermost
+  frame for `F` (a missing one aborts the program), hands it the payload and
+  leaves the function like `return`.
+- Before ownership, `suspend::mark_abort_calls` uses the existing fixpoint of
+  operations each function may perform dynamically (an abortive scope masks
+  its operation) and wraps every direct call, function-value call, trait
+  object or union call that may abort in `AbortCall`, listing the enclosing
+  abortive scopes of this function it may leave to and whether it may also
+  leave the function. Ownership and grades check each exit like an abortive
+  perform to that scope and the propagation like `?`.
+- **Abort word (deviation from 3.3).** Instead of a second return register,
+  the abort word is the runtime global `kush_abort_word`: tasks share one OS
+  thread and an abort neither yields nor crosses a task, so a global is
+  equivalent and leaves every calling convention, adapter and trait-object
+  trampoline unchanged. The word is the address of the addressed
+  activation's payload buffer (a stack slot of the `handle`), which is also
+  its activation id. After an `AbortCall` the caller loads the word: zero
+  continues; otherwise it compares with each listed scope's buffer, and on a
+  match clears the word, drops that scope's cleanup, pops handler frames and
+  runs the handler with the buffered payload; otherwise it drops every live
+  value and returns. The evaluator uses `Flow::Abort(activation, payload)`
+  inside a function and a pending abort between a callee and its caller.
+- Decision 5: a may-abort call that does not abort costs one load, test and
+  branch; measured within noise of the same call without it.
+- Restrictions (diagnostics): an abortive operation cannot leave a
+  `Task.spawn`/`Task.scope` body or a vector callback; an abortive handler
+  cannot itself perform an abortive operation; a call that may abort, or a
+  dynamic abortive perform, cannot run in the body of a non-tail handler,
+  and a function resumed by one cannot abort out of itself
+  (E-ABORT-INTERACT).
 
 ## 4. Decisions
 

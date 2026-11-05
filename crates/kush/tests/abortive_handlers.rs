@@ -6,6 +6,10 @@
 //! body like a labelled early exit with the cleanup of `?`. Every accepted
 //! program runs in the reference evaluator and natively with balanced
 //! allocations.
+//!
+//! E-ABORT-PROPAGATE: a perform in a called function (or a function value,
+//! trait object method or lambda) finds the innermost dynamic `handle F` and
+//! every frame in between leaves through the early-exit cleanup of `return`.
 
 use kush::executable::{MemoryStats, check};
 
@@ -377,22 +381,6 @@ fn handler_and_operation_shapes_are_checked() {
 
 #[test]
 fn lexical_scope_limits_are_reported() {
-    // A perform in a called function or a lambda is not lexically inside.
-    rejects(
-        &format!(
-            "{FAIL} fn parse() -> i64 ! {{Fail, panic}} {{ perform Fail(1) }}
-             fn main() -> i64 ! {{panic}} {{ {} }}",
-            handled("parse()")
-        ),
-        "must be lexically inside its 'handle'",
-    );
-    rejects(
-        &format!(
-            "{FAIL} fn main() -> i64 ! {{alloc, panic}} {{ {} }}",
-            handled("let f = fn(x: i64) -> i64 ! {Fail, panic} { perform Fail(x) }; f(1)")
-        ),
-        "must be lexically inside its 'handle'",
-    );
     // A non-tail perform of another operation inside the abortive body.
     rejects(
         "fn main() -> i64 ! {panic} {
@@ -448,4 +436,312 @@ fn an_abortive_handle_inside_a_non_tail_body_moves_with_its_continuation() {
             "",
         );
     }
+}
+
+const FAIL_CHECK: &str = "effect Fail: i64 -> Never;
+     fn check(x: i64) -> i64 ! {Fail, panic} { if x > 10 { perform Fail(x) } else { x * 2 } }";
+
+#[test]
+fn an_abort_propagates_through_calls_and_drops_each_frame() {
+    for (n, expected) in [(5, 21 + 100), (20, 11 + 100)] {
+        agrees(
+            &format!(
+                "{FAIL_CHECK}
+                 fn sum(n: i64) -> i64 ! {{Fail, alloc, panic}} {{
+                     let b = Box.new(1);
+                     let mut i = 0;
+                     let mut acc = 0;
+                     while i < n {{ let t = Box.new(i); acc = acc + check(Box.take(t)); i = i + 1; }}
+                     acc + Box.take(b)
+                 }}
+                 fn outer(n: i64) -> i64 ! {{Fail, alloc, panic}} {{
+                     let keep = Box.new(2);
+                     let s = sum(n);
+                     s + Box.take(keep) - 2
+                 }}
+                 fn main() -> i64 ! {{alloc, panic}} {{
+                     let survivor = Box.new(100);
+                     let r = handle Fail: i64 -> Never with fn(code: i64) -> i64 ! {{}} {{ code }} {{ outer({n}) }};
+                     r + Box.take(survivor)
+                 }}"
+            ),
+            expected,
+            "",
+        );
+    }
+    // Recursion: every frame owns a box when the innermost one aborts.
+    agrees(
+        "effect Fail: i64 -> Never;
+         fn deep(n: i64) -> i64 ! {Fail, alloc, panic} {
+             let b = Box.new(n);
+             if n == 0 { perform Fail(7) };
+             deep(n - 1) + Box.take(b)
+         }
+         fn main() -> i64 ! {alloc, panic} {
+             handle Fail: i64 -> Never with fn(code: i64) -> i64 ! {} { code } { deep(12) }
+         }",
+        7,
+        "",
+    );
+}
+
+#[test]
+fn aborts_cross_function_values_trait_objects_and_lambdas() {
+    agrees(
+        &format!(
+            "{FAIL_CHECK}
+             fn apply(f: fn(i64) -> i64 ! {{Fail, panic}}, x: i64) -> i64 ! {{Fail, panic}} {{ f(x) + 1 }}
+             fn main() -> i64 ! {{alloc, panic}} {{
+                 let kept = Box.new(5);
+                 let r = handle Fail: i64 -> Never with fn(code: i64) -> i64 ! {{}} {{ code }} {{
+                     let g = fn(x: i64) -> i64 ! {{Fail, panic}} {{ check(x) }};
+                     apply(check, 3) + apply(g, 50)
+                 }};
+                 r + Box.take(kept)
+             }}"
+        ),
+        55,
+        "",
+    );
+    // A capturing lambda whose environment is live when it aborts.
+    agrees(
+        "effect Fail: i64 -> Never;
+         fn main() -> i64 ! {alloc, panic} {
+             handle Fail: i64 -> Never with fn(code: i64) -> i64 ! {} { code } {
+                 let owned = Box.new(9);
+                 let f: once fn(i64) -> i64 ! {Fail, alloc, panic} = fn(x: i64) -> i64 ! {Fail, alloc, panic} {
+                     let v = Box.take(owned);
+                     if x > 0 { perform Fail(v + x) };
+                     v
+                 };
+                 f(1)
+             }
+         }",
+        10,
+        "",
+    );
+    agrees(
+        "effect Fail: i64 -> Never;
+         trait Step { fn step(self: &Self, x: i64) -> i64 ! {Fail, panic}; }
+         struct Limit { max: i64 }
+         impl Step for Limit {
+             fn step(self: &Self, x: i64) -> i64 ! {Fail, panic} { if x > self.max { perform Fail(x) } else { x } }
+         }
+         fn run(s: &dyn Step, x: i64) -> i64 ! {Fail, panic} { s.step(x) + 1000 }
+         fn main() -> i64 ! {alloc, panic} {
+             let object: dyn Step = Limit { max: 3 };
+             handle Fail: i64 -> Never with fn(code: i64) -> i64 ! {} { code } { run(&object, 1) + run(&object, 8) }
+         }",
+        8,
+        "",
+    );
+}
+
+#[test]
+fn the_innermost_dynamic_activation_receives_the_abort() {
+    agrees(
+        "effect Fail: i64 -> Never;
+         effect Bail: i64 -> Never;
+         fn fail(x: i64) -> i64 ! {Fail, panic} { perform Fail(x) }
+         fn bail(x: i64) -> i64 ! {Bail, panic} { perform Bail(x) }
+         fn guarded(x: i64) -> i64 ! {panic} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {panic} { c + 1 } { fail(x) }
+         }
+         fn mixed(x: i64) -> i64 ! {Fail, alloc, panic} {
+             let b = Box.new(x);
+             handle Bail: i64 -> Never with fn(c: i64) -> i64 ! {panic} { c * 2 } {
+                 if Box.take(b) > 5 { fail(x) } else { bail(x) }
+             }
+         }
+         fn main() -> i64 ! {io, alloc, panic} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {panic} { c + 1000 } {
+                 // The callee's own handle catches its abort.
+                 let a = guarded(1);
+                 // An inner Bail scope is left by a Fail abort, popping its frame.
+                 let b = handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {panic} { c + 100 } { mixed(9) };
+                 let c = mixed(2);
+                 print_i64(a + b + c);
+                 // The outer activation receives this one: the whole body is left.
+                 a + b + c + fail(0)
+             }
+         }",
+        1000,
+        "115\n",
+    );
+}
+
+#[test]
+fn owned_payloads_and_results_on_the_abort_path() {
+    agrees(
+        "effect Oops: Box<i64> -> Never;
+         fn make(x: i64) -> Box<i64> ! {Oops, alloc, panic} {
+             if x > 0 { perform Oops(Box.new(x * 10)) };
+             Box.new(x)
+         }
+         // `first` is bound inside the scope when `make(3)` aborts.
+         struct Pair { a: i64, b: Box<i64> }
+         fn pair(x: i64) -> Pair ! {Oops, alloc, panic} { Pair { a: x, b: make(x) } }
+         fn main() -> i64 ! {alloc, panic} {
+             let r = handle Oops: Box<i64> -> Never with fn(b: Box<i64>) -> i64 ! {alloc, panic} { Box.take(b) } {
+                 let first = make(0);
+                 let p = pair(3);
+                 let Pair { a, b } = p;
+                 Box.take(first) + a + Box.take(b)
+             };
+             r
+         }",
+        30,
+        "",
+    );
+}
+
+#[test]
+fn a_missing_handler_aborts_the_program() {
+    let source = "effect Fail: i64 -> Never;
+         fn fail() -> i64 ! {Fail, panic} { perform Fail(1) }
+         fn main() -> i64 ! {Fail, panic} { fail() }";
+    let program = check(source).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("no dynamically active handler"),
+        "{error:?}"
+    );
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("abortive-missing");
+        kush::native::build(&program, &binary).unwrap();
+        let native = std::process::Command::new(&binary).output().unwrap();
+        assert!(!native.status.success(), "{native:?}");
+    }
+    rejects(
+        "effect Fail: i64 -> Never;
+         fn fail() -> i64 ! {Fail, panic} { perform Fail(1) }
+         fn main() -> i64 ! {panic} { fail() }",
+        "requires effects",
+    );
+}
+
+#[test]
+fn obligations_on_the_propagation_path_are_checked() {
+    // A linear value live across a call that may leave the function.
+    rejects(
+        &format!(
+            "{FAIL_CHECK}
+             fn f() -> i64 ! {{Fail, alloc, panic}} {{
+                 let b: Box<i64> @[1] = Box.new(1);
+                 let x = check(1);
+                 Box.take(b) + x
+             }}
+             fn main() -> i64 ! {{panic}} {{ 0 }}"
+        ),
+        "a call that may abort out of the function",
+    );
+    // The same value outside the handle survives the abort.
+    agrees(
+        &format!(
+            "{FAIL_CHECK}
+             fn main() -> i64 ! {{alloc, panic}} {{
+                 let b: Box<i64> @[1] = Box.new(1);
+                 let r = handle Fail: i64 -> Never with fn(code: i64) -> i64 ! {{}} {{ code }} {{ check(50) }};
+                 Box.take(b) + r
+             }}"
+        ),
+        51,
+        "",
+    );
+    rejects(
+        &format!(
+            "{FAIL_CHECK}
+             fn main() -> i64 ! {{alloc, panic}} {{
+                 handle Fail: i64 -> Never with fn(code: i64) -> i64 ! {{}} {{ code }} {{
+                     let b: Box<i64> @[1] = Box.new(1);
+                     check(50) + Box.take(b)
+                 }}
+             }}"
+        ),
+        "a call that may abort to its 'handle'",
+    );
+    rejects(
+        &format!(
+            "{FAIL_CHECK}
+             fn f(x: i64 @[2]) -> i64 ! {{Fail, panic}} {{ let y = x; check(y) + x }}
+             fn main() -> i64 ! {{panic}} {{ 0 }}"
+        ),
+        "may abort out of the function",
+    );
+    rejects(
+        "effect Fail: i64 -> Never;
+         effect Bail: i64 -> Never;
+         fn fail(x: i64) -> i64 ! {Fail, panic} { perform Fail(x) }
+         fn main() -> i64 ! {panic} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {Bail, panic} { c } { fail(1) }
+         }",
+        "cannot itself perform an abortive operation",
+    );
+}
+
+#[test]
+fn aborts_cannot_cross_tasks_callbacks_or_non_tail_handlers() {
+    rejects(
+        "use std.task.TaskExit;
+         effect Fail: i64 -> Never;
+         fn fail(x: i64) -> i64 ! {Fail, panic} { perform Fail(x) }
+         fn main() -> i64 ! {alloc, panic, suspend} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c } {
+                 Task.scope(fn() -> i64 ! {Fail, alloc, panic, suspend} { fail(1) })
+             }
+         }",
+        "cannot leave a task",
+    );
+    rejects(
+        "effect Fail: i64 -> Never;
+         fn fail(x: i64) -> i64 ! {Fail, panic} { if x > 1 { perform Fail(x) } else { x } }
+         fn main() -> i64 ! {alloc, panic} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c } {
+                 let mut values: Vec<i64> = Vec.new();
+                 values = Vec.push(values, 1);
+                 let values = Vec.map_chain_in_place(values, fail, fail);
+                 Vec.get(&values, 0)
+             }
+         }",
+        "vector callback cannot abort",
+    );
+    // A call that may abort inside the body of a non-tail handler.
+    rejects(
+        "effect Fail: i64 -> Never;
+         fn fail(x: i64) -> i64 ! {Fail, panic} { perform Fail(x) }
+         fn main() -> i64 ! {panic} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c } {
+                 handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {panic} { k(x) + 1 } {
+                     let a = perform Ask(1);
+                     fail(a)
+                 }
+             }
+         }",
+        "cannot run in the body of a handler with code after 'resume'",
+    );
+    // A dynamic abortive perform inside such a body.
+    rejects(
+        "effect Fail: i64 -> Never;
+         fn main() -> i64 ! {Fail, panic} {
+             handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {panic} { k(x) + 1 } {
+                 let a = perform Ask(1);
+                 perform Fail(a)
+             }
+         }",
+        "cannot leave the body of 'handle Ask'",
+    );
+    // A function resumed by a non-tail handler cannot abort out of itself.
+    rejects(
+        "effect Ask: i64 -> i64;
+         effect Fail: i64 -> Never;
+         fn both(x: i64) -> i64 ! {Ask, Fail, panic} { let a = perform Ask(x); if a > 5 { perform Fail(a) }; a }
+         fn main() -> i64 ! {panic} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c } {
+                 handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { k(x) ^ 1 } { both(1) }
+             }
+         }",
+        "cannot run in the body of a handler with code after 'resume'",
+    );
 }

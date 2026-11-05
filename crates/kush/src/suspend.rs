@@ -353,12 +353,25 @@ impl Live {
                 label,
                 body,
                 handler,
+                ..
             } => {
                 let aborted = self.expr(handler, after);
                 self.aborts.push((*label, aborted));
                 let live = self.block(body, after);
                 self.aborts.pop();
                 live
+            }
+            ExprKind::AbortPerform { value, .. } => self.expr(value, &Slots::new()),
+            ExprKind::AbortCall { call, exits, .. } => {
+                let mut live = after.clone();
+                for (label, _) in exits {
+                    if let Some((_, exit)) =
+                        self.aborts.iter().rev().find(|(target, _)| target == label)
+                    {
+                        live.extend(exit.iter().copied());
+                    }
+                }
+                self.expr(call, &live)
             }
             ExprKind::AbortExit { label, value, .. } => {
                 let exit = self
@@ -2283,7 +2296,8 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
                     found.extend(operations.difference(masked).copied());
                 };
                 match &expr.kind {
-                    ExprKind::DynamicPerform { operation, .. } => {
+                    ExprKind::DynamicPerform { operation, .. }
+                    | ExprKind::AbortPerform { operation, .. } => {
                         add(&BTreeSet::from([*operation]));
                     }
                     ExprKind::Call(crate::executable::Target::Function(callee), _) => {
@@ -2316,7 +2330,11 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
                     _ => {}
                 }
                 let masked = match &expr.kind {
-                    ExprKind::HandlerPush { operation, .. } => {
+                    ExprKind::HandlerPush { operation, .. }
+                    | ExprKind::AbortScope {
+                        operation: Some(operation),
+                        ..
+                    } => {
                         let mut masked = masked.clone();
                         masked.insert(*operation);
                         std::borrow::Cow::Owned(masked)
@@ -2370,6 +2388,219 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
             break result;
         }
     }
+}
+
+/// E-ABORT-PROPAGATE (docs/abortive-handlers.md 3.3): wrap every call that
+/// may abort with a declared abortive operation in an `AbortCall` naming the
+/// enclosing abortive scopes it can leave to, and whether the abort can also
+/// leave this function. Runs before ownership, which checks and fills the
+/// cleanup of each exit. Rejects aborts across task boundaries, through
+/// vector callbacks, and out of non-tail handler bodies.
+pub(crate) fn mark_abort_calls(program: &mut Executable) -> Result<()> {
+    let abortive: BTreeSet<usize> = program
+        .abortive_operations
+        .iter()
+        .enumerate()
+        .filter(|(_, abortive)| **abortive)
+        .map(|(operation, _)| operation)
+        .collect();
+    if abortive.is_empty() {
+        return Ok(());
+    }
+    let may = performs(program);
+    let row_operations = |effects: u16| -> BTreeSet<usize> {
+        program
+            .effect_bits
+            .iter()
+            .enumerate()
+            .filter(|(operation, bit)| {
+                **bit != 0 && effects & **bit != 0 && abortive.contains(operation)
+            })
+            .map(|(operation, _)| operation)
+            .collect()
+    };
+    let callable_effects = |ty: Type| match ty {
+        Type::Fn(id) | Type::Once(id) => program.function_types[id].effects,
+        _ => 0,
+    };
+    // Abortive operations each call may leave with, computed on the
+    // unmodified program.
+    struct Marker<'a> {
+        program: &'a Executable,
+        may: &'a [BTreeSet<usize>],
+        abortive: &'a BTreeSet<usize>,
+        row_operations: &'a dyn Fn(u16) -> BTreeSet<usize>,
+        callable_effects: &'a dyn Fn(Type) -> u16,
+    }
+    impl Marker<'_> {
+        fn aborts_of(&self, expr: &Expr) -> BTreeSet<usize> {
+            let mut operations = BTreeSet::new();
+            match &expr.kind {
+                ExprKind::Call(crate::executable::Target::Function(callee), _) => {
+                    operations.extend(self.may[*callee].iter().copied());
+                }
+                ExprKind::Call(crate::executable::Target::DynCall { spec }, _) => {
+                    let spec = &self.program.dyn_calls[*spec];
+                    for member in &self.program.dyn_members[spec.object] {
+                        if let Some(function) = member.methods.get(&spec.key) {
+                            operations.extend(self.may[*function].iter().copied());
+                        }
+                    }
+                }
+                ExprKind::Call(crate::executable::Target::UnionBorrowCall { spec }, _) => {
+                    for (_, _, function) in &self.program.union_calls[*spec].members {
+                        operations.extend(self.may[*function].iter().copied());
+                    }
+                }
+                ExprKind::CallIndirect { callee, .. } => {
+                    operations.extend((self.row_operations)((self.callable_effects)(callee.ty)));
+                }
+                _ => {}
+            }
+            operations.retain(|operation| self.abortive.contains(operation));
+            operations
+        }
+        fn walk(
+            &self,
+            expr: &mut Expr,
+            scopes: &mut Vec<(usize, Option<usize>)>,
+            region: bool,
+        ) -> Result<()> {
+            let barrier = match &expr.kind {
+                ExprKind::TaskSpawn { body, .. } | ExprKind::TaskScope { body, .. } => {
+                    (!(self.row_operations)((self.callable_effects)(body.ty)).is_empty())
+                        .then_some("an abortive operation cannot leave a task: handle it inside the task body")
+                }
+                ExprKind::VecMap { callbacks, .. } => callbacks
+                    .iter()
+                    .any(|callback| {
+                        !(self.row_operations)((self.callable_effects)(callback.ty)).is_empty()
+                    })
+                    .then_some("a vector callback cannot abort with an abortive operation; handle it inside the callback"),
+                _ => None,
+            };
+            if let Some(message) = barrier {
+                return Err(Diagnostic::new(expr.span, message));
+            }
+            let mut result = Ok(());
+            match &mut expr.kind {
+                ExprKind::AbortScope {
+                    label,
+                    body,
+                    handler,
+                    operation,
+                } => {
+                    result = self.walk(handler, scopes, region);
+                    scopes.push((*label, *operation));
+                    if result.is_ok() {
+                        result = self.walk_block(body, scopes, region);
+                    }
+                    scopes.pop();
+                }
+                ExprKind::Suspendable(suspendable) => {
+                    result = self.walk_block(&mut suspendable.body, scopes, true);
+                }
+                _ => expr.for_each_child_mut(&mut |child| {
+                    if result.is_ok() {
+                        result = self.walk(child, scopes, region);
+                    }
+                }),
+            }
+            result?;
+            let operations = self.aborts_of(expr);
+            if operations.is_empty() {
+                return Ok(());
+            }
+            if region {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    "a call that may abort cannot run in the body of a handler with code after 'resume'; call it outside that handle",
+                ));
+            }
+            let mut exits = Vec::new();
+            let mut propagates = false;
+            for operation in operations {
+                match scopes
+                    .iter()
+                    .rev()
+                    .find(|(_, scope)| *scope == Some(operation))
+                {
+                    Some((label, _)) => {
+                        if !exits.iter().any(|(target, _)| target == label) {
+                            exits.push((*label, Vec::new()));
+                        }
+                    }
+                    None => propagates = true,
+                }
+            }
+            // Innermost scope first: the native dispatch tests them in order.
+            exits.sort_by_key(|(label, _)| {
+                std::cmp::Reverse(scopes.iter().position(|(scope, _)| scope == label))
+            });
+            let (ty, span) = (expr.ty, expr.span);
+            let call = std::mem::replace(
+                expr,
+                Expr {
+                    kind: ExprKind::Constant(0),
+                    ty,
+                    span,
+                    resource: None,
+                },
+            );
+            expr.kind = ExprKind::AbortCall {
+                call: Box::new(call),
+                exits,
+                propagates,
+            };
+            Ok(())
+        }
+        fn walk_block(
+            &self,
+            block: &mut Block,
+            scopes: &mut Vec<(usize, Option<usize>)>,
+            region: bool,
+        ) -> Result<()> {
+            for statement in &mut block.statements {
+                if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                    self.walk(value, scopes, region)?;
+                }
+            }
+            if let Some(tail) = block.tail.as_deref_mut() {
+                self.walk(tail, scopes, region)?;
+            }
+            Ok(())
+        }
+    }
+    let mut bodies: Vec<Block> = program
+        .functions
+        .iter_mut()
+        .map(|function| {
+            std::mem::replace(
+                &mut function.body,
+                Block {
+                    statements: vec![],
+                    tail: None,
+                    ty: Type::Unit,
+                },
+            )
+        })
+        .collect();
+    let result = {
+        let marker = Marker {
+            program,
+            may: &may,
+            abortive: &abortive,
+            row_operations: &row_operations,
+            callable_effects: &callable_effects,
+        };
+        bodies
+            .iter_mut()
+            .try_for_each(|body| marker.walk_block(body, &mut Vec::new(), false))
+    };
+    for (function, body) in program.functions.iter_mut().zip(bodies) {
+        function.body = body;
+    }
+    result
 }
 
 /// Reject, in code resumed by a non-tail handler for `operation`, every way
@@ -2624,6 +2855,13 @@ fn rewrite_entry_exits(expr: &mut Expr, cleanup: &[usize], nested: bool) -> Resu
     result?;
     let span = expr.span;
     match std::mem::replace(&mut expr.kind, ExprKind::Constant(0)) {
+        ExprKind::AbortPerform { .. }
+        | ExprKind::AbortCall {
+            propagates: true, ..
+        } => Err(Diagnostic::new(
+            span,
+            "a function resumed by a handler with code after 'resume' cannot abort out of itself; handle the abortive operation inside it",
+        )),
         ExprKind::Return(_) | ExprKind::Try { .. } if nested => Err(Diagnostic::new(
             span,
             "'return' or '?' inside a handled body of a function that is resumed by an outer handler is not supported",

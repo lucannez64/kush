@@ -1480,7 +1480,9 @@ impl Checker<'_> {
                 path.push(index_step(*id, constant));
                 Some((root, path))
             }
-            ExprKind::Coerce { value, .. } => self.place_ident(value),
+            ExprKind::Coerce { value, .. } | ExprKind::AbortCall { call: value, .. } => {
+                self.place_ident(value)
+            }
             ExprKind::Local(slot)
             | ExprKind::Peek(slot)
             | ExprKind::Move(slot)
@@ -1725,7 +1727,9 @@ impl Checker<'_> {
                 loan.mutable = matches!(expr.ty, Type::RefMut(_));
                 loan
             }
-            ExprKind::Coerce { value, .. } => self.view_loan(value),
+            ExprKind::Coerce { value, .. } | ExprKind::AbortCall { call: value, .. } => {
+                self.view_loan(value)
+            }
             ExprKind::Block(block) => block
                 .tail
                 .as_ref()
@@ -2246,6 +2250,7 @@ impl Checker<'_> {
             ExprKind::Coerce {
                 value, coercion, ..
             } => coerce_provenance(coercion, self.record_provenance(value)),
+            ExprKind::AbortCall { call, .. } => self.record_provenance(call),
             ExprKind::Block(block) => block
                 .tail
                 .as_ref()
@@ -3787,7 +3792,9 @@ impl Checker<'_> {
             ExprKind::BorrowPlace(place) => {
                 out.extend(self.place_loan(place).origins.iter().copied());
             }
-            ExprKind::Coerce { value, .. } => self.collect_view_origins(value, out),
+            ExprKind::Coerce { value, .. } | ExprKind::AbortCall { call: value, .. } => {
+                self.collect_view_origins(value, out)
+            }
             ExprKind::Block(block) => {
                 if let Some(tail) = &block.tail {
                     self.collect_view_origins(tail, out);
@@ -3845,7 +3852,9 @@ impl Checker<'_> {
             }
             ExprKind::Project(..) if expr.ty.is_slice() => self.view_loan(expr).splits,
             ExprKind::BorrowPlace(place) => self.place_loan(place).splits,
-            ExprKind::Coerce { value, .. } => self.split_labels(value),
+            ExprKind::Coerce { value, .. } | ExprKind::AbortCall { call: value, .. } => {
+                self.split_labels(value)
+            }
             ExprKind::Block(block) => block
                 .tail
                 .as_ref()
@@ -4633,7 +4642,9 @@ impl Checker<'_> {
             ExprKind::TaskSpawn { obligation, .. }
             | ExprKind::TaskScope { obligation, .. }
             | ExprKind::TaskJoin { obligation, .. } => *obligation,
-            ExprKind::Coerce { value, .. } => self.value_moves_linear(value),
+            ExprKind::Coerce { value, .. } | ExprKind::AbortCall { call: value, .. } => {
+                self.value_moves_linear(value)
+            }
             _ => false,
         }
     }
@@ -7178,6 +7189,7 @@ impl Checker<'_> {
                 label,
                 body,
                 handler,
+                ..
             } => {
                 let state = self.loop_state();
                 self.aborts.push((*label, state));
@@ -7196,6 +7208,57 @@ impl Checker<'_> {
                         }
                     }
                     None => self.available = completed.unwrap_or(state.entry),
+                }
+            }
+            ExprKind::AbortPerform { value, .. } => {
+                self.check_pending_linear(0, expr.span)?;
+                self.expr(value)?;
+                self.exit_check(
+                    0..self.available.len(),
+                    expr.span,
+                    "this abortive perform leaves the function",
+                )?;
+            }
+            ExprKind::AbortCall {
+                call,
+                exits,
+                propagates,
+            } => {
+                let mut start = if *propagates { 0 } else { usize::MAX };
+                let mut indices = Vec::new();
+                for (label, _) in exits.iter() {
+                    let index = self
+                        .aborts
+                        .iter()
+                        .rposition(|(target, _)| target == label)
+                        .expect("an abort call is inside its scopes");
+                    start = start.min(self.aborts[index].1.pending_linear_start);
+                    indices.push(index);
+                }
+                self.check_pending_linear(start, expr.span)?;
+                self.expr(call)?;
+                // The wrapper owns the result (registered below), so it is
+                // tracked only once the call did not abort.
+                call.resource = None;
+                for ((_, cleanup), index) in exits.iter_mut().zip(indices) {
+                    let bound = self.aborts[index].1.bound.clone();
+                    self.exit_check(bound, expr.span, "a call that may abort to its 'handle'")?;
+                    *cleanup = self.cleanup_list_for(&self.aborts[index].1);
+                    if let Some(previous) = self.aborts[index].1.breaks.clone() {
+                        let current = self.available.clone();
+                        self.merge(&previous, expr.span)?;
+                        self.aborts[index].1.breaks = Some(self.available.clone());
+                        self.available = current;
+                    } else {
+                        self.aborts[index].1.breaks = Some(self.available.clone());
+                    }
+                }
+                if *propagates {
+                    self.exit_check(
+                        0..self.available.len(),
+                        expr.span,
+                        "a call that may abort out of the function",
+                    )?;
                 }
             }
             ExprKind::AbortExit {
@@ -7942,12 +8005,33 @@ fn expr_live(
             label,
             body,
             handler,
+            ..
         } => {
             // An abort continues with the handler call, then after the scope.
             let aborted = expr_live(handler, live_after, views, heads, exits, out);
             exits.push((Some(*label), aborted));
             live = block_live(body, live_after, views, heads, exits, out);
             exits.pop();
+        }
+        ExprKind::AbortPerform { value, .. } => {
+            live = expr_live(value, &Live::new(), views, heads, exits, out);
+        }
+        ExprKind::AbortCall {
+            call,
+            exits: targets,
+            ..
+        } => {
+            let mut after = live_after.clone();
+            for (label, _) in targets {
+                if let Some((_, live)) = exits
+                    .iter()
+                    .rev()
+                    .find(|(target, _)| *target == Some(*label))
+                {
+                    after.extend(live.iter().copied());
+                }
+            }
+            live = expr_live(call, &after, views, heads, exits, out);
         }
         ExprKind::AbortExit { label, value, .. } => {
             let exit = exits

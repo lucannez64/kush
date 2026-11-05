@@ -2102,6 +2102,10 @@ static void kush_handler_drop_frame(kush_handler_frame *frame) {
         drop((void *)(uintptr_t)environment);
     }
 }
+/* E-ABORT-PROPAGATE: nonzero while an abort travels up the stack; the value
+   is the payload buffer of the addressed abortive handle activation. Tasks
+   share one OS thread and an abort never yields or crosses a task. */
+int64_t kush_abort_word = 0;
 int64_t kush_handler_depth(void) {
     return kush_handlers()->depth;
 }
@@ -2796,7 +2800,12 @@ fn block_installs_handler(block: &ex::Block) -> bool {
     fn expression(expr: &Expr) -> bool {
         if matches!(
             expr.kind,
-            ExprKind::HandlerPush { .. } | ExprKind::HandlerRedirect { .. }
+            ExprKind::HandlerPush { .. }
+                | ExprKind::HandlerRedirect { .. }
+                | ExprKind::AbortScope {
+                    operation: Some(_),
+                    ..
+                }
         ) {
             return true;
         }
@@ -3340,6 +3349,9 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
             &handler_redirect_sig,
         )
         .map_err(error)?;
+    let abort_word = module
+        .declare_data("kush_abort_word", Linkage::Import, true, false)
+        .map_err(error)?;
     let mut literal_data = BTreeMap::new();
     let mut literals = Vec::new();
     for f in &program.functions {
@@ -3517,6 +3529,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
             vec_ops: &vec_ops,
             vec_element,
             literal_data: &literal_data,
+            abort_word,
             closure_drops: &closure_drops,
             task_spawn,
             task_join,
@@ -4651,8 +4664,10 @@ struct Generator<'a, 'b> {
     regions: Vec<(Option<ir::Block>, Option<ir::Block>, Option<Variable>)>,
     /// Enclosing `AbortScope`s: label, the block receiving the payload, and
     /// the handler-stack depth at entry.
-    aborts: Vec<(usize, ir::Block, Option<Variable>)>,
+    aborts: Vec<AbortTarget>,
     literal_data: &'b BTreeMap<usize, DataId>,
+    /// The runtime's `kush_abort_word`.
+    abort_word: DataId,
     allocate: FuncId,
     try_allocate: FuncId,
     grow: FuncId,
@@ -4691,6 +4706,19 @@ struct Generator<'a, 'b> {
     task_pointer_drops: &'b BTreeMap<Type, FuncId>,
     tracked: Vec<Tracked>,
     function_index: usize,
+}
+/// An enclosing `AbortScope` during code generation.
+#[derive(Clone, Copy)]
+struct AbortTarget {
+    label: usize,
+    /// Receives the payload words and runs the handler.
+    aborted: ir::Block,
+    /// Handler-stack depth before the scope pushed anything.
+    depth: Option<Variable>,
+    /// Payload buffer of a declared operation's activation; its address is
+    /// the activation's abort word.
+    buffer: Option<Value>,
+    width: usize,
 }
 macro_rules! lower {
     ($e:expr) => {
@@ -4776,6 +4804,31 @@ impl Generator<'_, '_> {
             self.jump(no, &[]);
             self.builder.switch_to_block(no);
         }
+    }
+    fn abort_target(&self, label: usize) -> AbortTarget {
+        *self
+            .aborts
+            .iter()
+            .rev()
+            .find(|target| target.label == label)
+            .expect("an abort exit is inside its scope")
+    }
+    fn abort_word_address(&mut self) -> Value {
+        let data = self
+            .module
+            .declare_data_in_func(self.abort_word, self.builder.func);
+        self.builder.ins().symbol_value(I64, data)
+    }
+    /// Leave the function on an abort path: the caller ignores the result.
+    fn return_dummy(&mut self) {
+        let function = &self.program.functions[self.function_index];
+        let width = if function.result_grade.is_some_and(Grade::is_zero) {
+            0
+        } else {
+            self.program.width(function.result)
+        };
+        let words = (0..width).map(|_| self.constant(0)).collect::<Vec<_>>();
+        self.return_value(&words);
     }
     fn cleanup_all(&mut self) {
         for id in (0..self.tracked.len()).rev() {
@@ -5740,6 +5793,7 @@ impl Generator<'_, '_> {
                 label,
                 body,
                 handler,
+                operation,
             } => {
                 let exit = self.join(expr.ty);
                 let Some((id, once)) = (match handler.ty {
@@ -5755,10 +5809,32 @@ impl Generator<'_, '_> {
                     self.builder.append_block_param(aborted, I64);
                 }
                 let depth = self.capture_handler_depth();
-                self.aborts.push((*label, aborted, depth));
+                let width = self.program.width(payload);
+                let buffer = operation.map(|operation| {
+                    let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                        ir::StackSlotKind::ExplicitSlot,
+                        (width.max(1) * 8) as u32,
+                        STACK_SLOT_ALIGN_SHIFT,
+                    ));
+                    let buffer = self.builder.ins().stack_addr(I64, slot, 0);
+                    let op = self.constant(operation as i64);
+                    let zero = self.constant(0);
+                    self.runtime_void(self.handler_push, &[op, buffer, zero, zero]);
+                    buffer
+                });
+                self.aborts.push(AbortTarget {
+                    label: *label,
+                    aborted,
+                    depth,
+                    buffer,
+                    width,
+                });
                 let finished = self.block(body);
                 self.aborts.pop();
                 if let (Some(values), Some(exit)) = (finished, exit) {
+                    if buffer.is_some() {
+                        self.runtime_void(self.handler_pop, &[]);
+                    }
                     self.jump(exit, &values);
                 }
                 self.builder.switch_to_block(aborted);
@@ -5804,15 +5880,87 @@ impl Generator<'_, '_> {
                 for id in cleanup {
                     self.cleanup(Some(*id));
                 }
-                let (_, aborted, depth) = *self
-                    .aborts
-                    .iter()
-                    .rev()
-                    .find(|(target, _, _)| target == label)
-                    .expect("an abort exit is inside its scope");
-                self.restore_handler_depth(depth);
-                self.jump(aborted, &values);
+                let target = self.abort_target(*label);
+                self.restore_handler_depth(target.depth);
+                self.jump(target.aborted, &values);
                 return None;
+            }
+            ExprKind::AbortPerform { operation, value } => {
+                let values = lower!(self.expr(value));
+                self.consume(value);
+                let out = self.stack_words(3);
+                let op = self.constant(*operation as i64);
+                let found = self.runtime_call(self.handler_lookup, &[op, out]);
+                let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
+                self.guard(missing);
+                let buffer = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), out, 0);
+                for (index, word) in values.iter().enumerate() {
+                    self.builder.ins().store(
+                        ir::MemFlagsData::new(),
+                        *word,
+                        buffer,
+                        (index * 8) as i32,
+                    );
+                }
+                let word = self.abort_word_address();
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), buffer, word, 0);
+                self.cleanup_all();
+                self.return_dummy();
+                return None;
+            }
+            ExprKind::AbortCall {
+                call,
+                exits,
+                propagates,
+            } => {
+                let values = lower!(self.expr(call));
+                let address = self.abort_word_address();
+                let word = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), address, 0);
+                let dispatch = self.builder.create_block();
+                let normal = self.builder.create_block();
+                self.builder.ins().brif(word, dispatch, &[], normal, &[]);
+                self.builder.switch_to_block(dispatch);
+                // The call's result words are meaningless on this path.
+                self.consume(call);
+                for (label, cleanup) in exits {
+                    let target = self.abort_target(*label);
+                    let Some(buffer) = target.buffer else {
+                        continue;
+                    };
+                    let hit = self.builder.create_block();
+                    let miss = self.builder.create_block();
+                    let same = self.builder.ins().icmp(IntCC::Equal, word, buffer);
+                    self.builder.ins().brif(same, hit, &[], miss, &[]);
+                    self.builder.switch_to_block(hit);
+                    let zero = self.constant(0);
+                    let address = self.abort_word_address();
+                    self.builder
+                        .ins()
+                        .store(ir::MemFlagsData::new(), zero, address, 0);
+                    for id in cleanup {
+                        self.cleanup(Some(*id));
+                    }
+                    self.restore_handler_depth(target.depth);
+                    let payload = self.load_words(buffer, 0, target.width);
+                    self.jump(target.aborted, &payload);
+                    self.builder.switch_to_block(miss);
+                }
+                if *propagates {
+                    self.cleanup_all();
+                    self.return_dummy();
+                } else {
+                    self.builder.ins().trap(ir::TrapCode::user(1).unwrap());
+                }
+                self.builder.switch_to_block(normal);
+                return Some(values);
             }
             ExprKind::RegionExit {
                 value,

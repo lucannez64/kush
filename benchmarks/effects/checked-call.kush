@@ -1,0 +1,2 @@
+fn work(x: i64) -> i64 ! {panic} { if x < 0 { return 0 - x; }; x ^ 5 }
+fn main() -> i64 ! {panic} { let mut s = 0; let mut i = 0; while i < 10000000 { s = (s + work(i)) & 1023; i = i + 1; } s & 255 }
