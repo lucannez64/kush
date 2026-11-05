@@ -1647,10 +1647,21 @@
       "deps": [
         "MEM"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Length bound to a runtime scalar index; storage and drop rules.",
-      "commit": null,
-      "log": []
+      "commit": "b8f5ccf",
+      "log": [
+        {
+          "time": "2026-11-05 00:27:11",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 01:00:15",
+          "who": "agent",
+          "text": "done b8f5ccf"
+        }
+      ]
     },
     {
       "id": "A-RT-TYPE",
@@ -1661,10 +1672,16 @@
       "deps": [
         "A-RT-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "b8f5ccf",
+      "log": [
+        {
+          "time": "2026-11-05 01:00:15",
+          "who": "agent",
+          "text": "done b8f5ccf"
+        }
+      ]
     },
     {
       "id": "A-RT-STORAGE",
@@ -1675,10 +1692,16 @@
       "deps": [
         "A-RT-TYPE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "b8f5ccf",
+      "log": [
+        {
+          "time": "2026-11-05 01:00:15",
+          "who": "agent",
+          "text": "done b8f5ccf"
+        }
+      ]
     },
     {
       "id": "A-RT-VIEWS",
@@ -1689,10 +1712,21 @@
       "deps": [
         "A-RT-STORAGE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "b8f5ccf",
+      "log": [
+        {
+          "time": "2026-11-05 01:00:15",
+          "who": "agent",
+          "text": "done b8f5ccf"
+        },
+        {
+          "time": "2026-11-05 01:00:15",
+          "who": "agent",
+          "text": "Local gate: 1381 kush tests passed, clippy -D warnings clean (mbx -j2). Design chosen by the user: explicit capacity [T; n <= C]."
+        }
+      ]
     },
     {
       "id": "A-PAT-SUFFIX",
