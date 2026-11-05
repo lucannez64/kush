@@ -1065,6 +1065,11 @@
           "time": "2026-11-05 14:50:36",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-05 15:17:40",
+          "who": "agent",
+          "text": "Committed 50abd0e (in-place BorrowPlace dispatch on object fields). Boat gate: 1484 tests pass; clippy collapsible_if fixed in 390e388; re-gate pending."
         }
       ]
     },
@@ -1077,10 +1082,21 @@
       "deps": [
         "D-PROJ-MUT"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Partial move semantics identical to destructuring.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 15:17:40",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 15:17:41",
+          "who": "agent",
+          "text": "Committed 390e388 (consume root aggregate like destructuring; linear siblings and fields behind references rejected). Gate pending."
+        }
+      ]
     },
     {
       "id": "D-ASSOC-EARLY",
@@ -1091,10 +1107,16 @@
       "deps": [
         "TRAITS"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Explicit `dyn Trait<Out = T>` binding, checked against every later member.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 15:17:41",
+          "who": "agent",
+          "text": "Design d6c3db3; dyn Trait<Out = T> binding fixes projection at type lowering; implementing."
+        }
+      ]
     },
     {
       "id": "D-MULTI-SYNTAX",
