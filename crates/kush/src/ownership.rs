@@ -285,6 +285,12 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             parameter_lifetimes: function.parameter_lifetimes.clone(),
             lifetime_bounds: function.lifetime_bounds.clone(),
             declared_lifetimes: function.declared_lifetimes.clone(),
+            parameter_labels: calls[function_index]
+                .parameters
+                .iter()
+                .flatten()
+                .filter_map(|leaf| leaf.lifetime.clone())
+                .collect(),
             parameter_count: function.parameters,
             available: vec![false; function.locals.len()],
             moved_at: vec![None; function.locals.len()],
@@ -1185,6 +1191,11 @@ struct Checker<'a> {
     /// only in an expected instantiation is a call-site placeholder and defers
     /// to the container's actual provenance.
     declared_lifetimes: BTreeSet<String>,
+    /// Every lifetime label on this function's parameter leaves, including
+    /// elided ones. An elided parameter label is a distinct, rigid identity:
+    /// writing a reference into a parameter's container or record must prove
+    /// it outlives that label, exactly like a declared one.
+    parameter_labels: BTreeSet<String>,
     parameter_count: usize,
     locals: Vec<crate::executable::Local>,
     available: Vec<bool>,
@@ -1983,52 +1994,9 @@ impl Checker<'_> {
     /// `push` keeps the union of every possible element source.
     #[must_use]
     fn merge_container_element(&mut self, receiver: &Expr, loan: Loan, replace: bool) -> bool {
-        let base = through_coerce(receiver);
-        if let ExprKind::BorrowPlace(place) = &base.kind {
-            let mut provenance = RecordProvenance::default();
-            provenance.leaves.insert(Vec::new(), loan);
-            return self.merge_into_place_owner(place, provenance);
-        }
-        let slot = match &base.kind {
-            ExprKind::Borrow(slot)
-            | ExprKind::BorrowInit { slot, .. }
-            | ExprKind::InitOwner { slot, .. }
-            | ExprKind::Local(slot)
-            | ExprKind::Peek(slot)
-            | ExprKind::Move(slot) => *slot,
-            _ => return true,
-        };
-        // Writing through a stored `&mut` reference local changes the
-        // container it points to. Record the element loan on that owner too,
-        // so scope-exit checks on the owner see the new source even after
-        // the reference binding itself goes out of scope.
-        if self.locals[slot].ty.is_ref() {
-            let owners = self
-                .view_loan(base)
-                .origins
-                .into_iter()
-                .filter(|owner| *owner != slot && self.is_carrier_type(self.locals[*owner].ty))
-                .collect::<Vec<_>>();
-            for owner in owners {
-                self.merge_container_slot(owner, loan.clone(), replace);
-            }
-        }
-        self.merge_container_slot(slot, loan, replace);
-        true
-    }
-    fn merge_container_slot(&mut self, slot: usize, loan: Loan, replace: bool) {
-        let mut provenance = self.record_sources[slot].clone().unwrap_or_default();
-        let existing = provenance.leaves.remove(&Vec::new());
-        let merged = if replace {
-            loan.clone()
-        } else {
-            self.merge_loans(existing.into_iter().chain([loan.clone()]))
-        };
-        provenance.leaves.insert(Vec::new(), merged);
-        self.record_sources[slot] = Some(stripped_provenance(provenance));
-        let mut origins = self.view_sources[slot].clone().unwrap_or_default();
-        origins.extend(loan.origins.iter().copied());
-        self.view_sources[slot] = Some(origins);
+        let mut provenance = RecordProvenance::default();
+        provenance.leaves.insert(Vec::new(), loan);
+        self.merge_written(receiver, provenance, replace)
     }
     /// The borrow leaf of one reference value stored in a container. A direct
     /// reference expression carries its own loan; a nested borrowed record is
@@ -2068,30 +2036,87 @@ impl Checker<'_> {
         provenance: RecordProvenance,
         replace: bool,
     ) -> bool {
+        self.merge_written(receiver, provenance, replace)
+    }
+    /// Record leaves written through `receiver` (a container or borrowed
+    /// record reached by `&mut`) on every local owner it can denote. A place
+    /// or a stored reference to a field merges under that field's path; a
+    /// stored reference to a whole local merges into owners of the same type,
+    /// replacing only when there is exactly one. Returns false when the owner
+    /// cannot be identified (a block, branch, or call result receiver, or a
+    /// reference whose owners have another type); the caller rejects the
+    /// write.
+    #[must_use]
+    fn merge_written(
+        &mut self,
+        receiver: &Expr,
+        provenance: RecordProvenance,
+        replace: bool,
+    ) -> bool {
         let base = through_coerce(receiver);
-        if let ExprKind::BorrowPlace(place) = &base.kind {
-            return self.merge_into_place_owner(place, provenance);
-        }
         let slot = match &base.kind {
+            ExprKind::BorrowPlace(place) => {
+                return match self.place_ident(place) {
+                    Some((root, path)) => self.merge_into_place_owner(root, path, provenance),
+                    None => false,
+                };
+            }
             ExprKind::Borrow(slot)
-            | ExprKind::Local(slot)
-            | ExprKind::Peek(slot)
-            | ExprKind::Move(slot) => *slot,
-            _ => return true,
+            | ExprKind::BorrowInit { slot, .. }
+            | ExprKind::InitOwner { slot, .. } => {
+                self.merge_container_provenance_slot(*slot, provenance, replace);
+                return true;
+            }
+            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => *slot,
+            _ => return false,
         };
-        if self.locals[slot].ty.is_ref() {
-            let owners = self
+        if !self.locals[slot].ty.is_ref() || slot < self.parameter_count {
+            self.merge_container_provenance_slot(slot, provenance, replace);
+            return true;
+        }
+        let tracked = if let Some(field) = self.view_fields[slot].clone() {
+            self.merge_into_place_owner(field.root, field.path, provenance.clone())
+        } else {
+            let referent = self.referent(self.locals[slot].ty);
+            let origins = self
                 .view_loan(base)
                 .origins
                 .into_iter()
-                .filter(|owner| *owner != slot && self.is_carrier_type(self.locals[*owner].ty))
+                .filter(|owner| *owner != slot)
                 .collect::<Vec<_>>();
-            for owner in owners {
-                self.merge_container_provenance_slot(owner, provenance.clone(), replace);
+            let owners = origins
+                .iter()
+                .copied()
+                .filter(|owner| {
+                    self.is_carrier_type(self.locals[*owner].ty)
+                        && referent.is_some_and(|referent| {
+                            self.same_shape(self.locals[*owner].ty, referent)
+                        })
+                })
+                .collect::<Vec<_>>();
+            let reborrow = origins
+                .iter()
+                .any(|owner| *owner < self.parameter_count && self.locals[*owner].ty.is_ref());
+            let whole = owners.len() == 1;
+            for owner in &owners {
+                self.merge_container_provenance_slot(*owner, provenance.clone(), replace && whole);
             }
+            !owners.is_empty() || reborrow
+        };
+        self.merge_container_provenance_slot(slot, provenance, false);
+        tracked
+    }
+    /// Whether two types are the same container kind, or the same nominal
+    /// record with the same type arguments (lifetimes aside).
+    fn same_shape(&self, left: Type, right: Type) -> bool {
+        match (left.layout(), right.layout()) {
+            (Some(a), Some(b)) => {
+                self.enums[a].definition == self.enums[b].definition
+                    && self.enums[a].arguments == self.enums[b].arguments
+            }
+            (None, None) => std::mem::discriminant(&left) == std::mem::discriminant(&right),
+            _ => false,
         }
-        self.merge_container_provenance_slot(slot, provenance, replace);
-        true
     }
     /// Merge leaves written through a place reference (`&mut o.b`,
     /// `&mut v[i]`, `&mut o.v[i].h`) into the place's root owner. A container
@@ -2101,10 +2126,12 @@ impl Checker<'_> {
     /// parameter writes caller storage, which the caller tracks. Returns
     /// false when the owner cannot be identified (a place rooted at a stored
     /// reference local); the caller must reject the write.
-    fn merge_into_place_owner(&mut self, place: &Expr, provenance: RecordProvenance) -> bool {
-        let Some((root, path)) = self.place_ident(place) else {
-            return false;
-        };
+    fn merge_into_place_owner(
+        &mut self,
+        root: usize,
+        path: Vec<usize>,
+        provenance: RecordProvenance,
+    ) -> bool {
         if self.locals[root].ty.is_ref() {
             return root < self.parameter_count;
         }
@@ -2822,8 +2849,8 @@ impl Checker<'_> {
         provenance: &RecordProvenance,
     ) -> Option<String> {
         if let Some(label) = expected
-            && !is_internal_lifetime(label)
-            && self.declared_lifetimes.contains(label)
+            && ((!is_internal_lifetime(label) && self.declared_lifetimes.contains(label))
+                || self.parameter_labels.contains(label))
         {
             return Some(label.clone());
         }
@@ -3197,6 +3224,33 @@ impl Checker<'_> {
             }
             _ => Err(unknown()),
         }
+    }
+    /// Writing a reference into a container reached through a parameter whose
+    /// element lifetime is elided has no destination label to check against:
+    /// the element and the written source have independent caller lifetimes.
+    /// Reject it and ask for a named lifetime rather than guess.
+    fn check_elided_parameter_destination(
+        &self,
+        receiver: &Expr,
+        expected: &[crate::runtime_types::BorrowLeaf],
+        span: Span,
+    ) -> Result<()> {
+        let elided = expected
+            .iter()
+            .find(|leaf| leaf.path.is_empty())
+            .is_some_and(|leaf| leaf.lifetime.is_none());
+        if elided
+            && self
+                .view_origins(receiver)
+                .iter()
+                .any(|origin| *origin < self.parameter_count)
+        {
+            return Err(Diagnostic::new(
+                span,
+                "cannot write a reference into a parameter's container whose element lifetime is elided; name it and relate the written source to it, as in 'fn f<'a>(v: &mut Vec<&'a T>, x: &'a T)'",
+            ));
+        }
+        Ok(())
     }
     fn argument_leaf_loan(&self, argument: &Expr, path: &[usize]) -> Option<Loan> {
         if let Some(rest) = path.strip_prefix(&[CONTAINER_LEAF]) {
@@ -4869,7 +4923,8 @@ impl Checker<'_> {
         // `&mut record` is exclusive over the record and its exclusive leaves,
         // but only shared over the storage behind its shared leaves: through
         // the reference a shared leaf can be read or replaced, never written.
-        let mut shared_sources = BTreeSet::new();
+        // Every leaf of the referent is lent for the call too, including the
+        // leaves of a record reached through a stored `&mut` reference.
         if matches!(expr.ty, Type::RefMut(_))
             && self
                 .referent(expr.ty)
@@ -4882,20 +4937,23 @@ impl Checker<'_> {
                 .filter(|loan| loan.mutable)
                 .flat_map(|loan| loan.origins.iter().copied())
                 .collect::<BTreeSet<_>>();
-            for loan in provenance.leaves.values().filter(|loan| !loan.mutable) {
-                for origin in &loan.origins {
-                    if origins.contains(origin) && !exclusive.contains(origin) {
-                        shared_sources.insert(*origin);
-                    }
-                }
-            }
-        }
-        if !shared_sources.is_empty() {
+            let shared_sources = provenance
+                .leaves
+                .values()
+                .filter(|loan| !loan.mutable)
+                .flat_map(|loan| loan.origins.iter().copied())
+                .filter(|origin| !exclusive.contains(origin))
+                .collect::<BTreeSet<_>>();
             let exclusive_origins = origins
-                .difference(&shared_sources)
+                .iter()
+                .chain(&exclusive)
                 .copied()
+                .filter(|origin| !shared_sources.contains(origin))
                 .collect::<BTreeSet<_>>();
             self.retain_region(expr, exclusive_origins, splits.clone(), true, field.clone())?;
+            if shared_sources.is_empty() {
+                return Ok(());
+            }
             return self.retain_region(expr, shared_sources, splits, false, None);
         }
         if let Some(slot) = receiver {
@@ -5802,6 +5860,7 @@ impl Checker<'_> {
                         element,
                     )?;
                     let existing = self.container_provenance(reference);
+                    self.check_elided_parameter_destination(reference, &expected, expr.span)?;
                     if let Some(expected_leaf) = expected.iter().find(|leaf| leaf.path.is_empty())
                         && let Some(declared) = self.write_destination_label(
                             expected_leaf.lifetime.as_ref(),
@@ -6149,6 +6208,9 @@ impl Checker<'_> {
                                     self.reference_labels,
                                     self.variance,
                                     element,
+                                )?;
+                                self.check_elided_parameter_destination(
+                                    &args[0], &expected, expr.span,
                                 )?;
                                 if let Some(expected_leaf) =
                                     expected.iter().find(|leaf| leaf.path.is_empty())

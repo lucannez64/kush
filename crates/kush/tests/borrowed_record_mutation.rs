@@ -1035,3 +1035,281 @@ fn main() -> i64 ! {alloc, panic} {
         "",
     );
 }
+
+#[test]
+fn review_third_recheck_container_writes_and_reference_arguments() {
+    // An elided element lifetime of a parameter container is not a write destination.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+fn addv(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc, panic} { Vec.push(v, s); }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut v: Vec<&Point> = [&a];
+    {
+        let p2 = Point { x: 70, y: 71 };
+        addv(&mut v, &p2);
+    }
+    let junk = Point { x: 9, y: 9 };
+    Vec.get(&v, 1).x + junk.x * 0
+}"#,
+        "cannot write a reference into a parameter's container whose element lifetime is elided",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+fn addv(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc, panic} { Vec.push(v, s); }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut v: Vec<&Point> = [&a];
+    let f = addv;
+    {
+        let p2 = Point { x: 70, y: 71 };
+        f(&mut v, &p2);
+    }
+    let junk = Point { x: 9, y: 9 };
+    Vec.get(&v, 1).x + junk.x * 0
+}"#,
+        "cannot write a reference into a parameter's container whose element lifetime is elided",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut v: Vec<&Point> = [&a];
+    let g = fn(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc, panic} { Vec.push(v, s); };
+    {
+        let p2 = Point { x: 70, y: 71 };
+        g(&mut v, &p2);
+    }
+    let junk = Point { x: 9, y: 9 };
+    Vec.get(&v, 1).x + junk.x * 0
+}"#,
+        "cannot write a reference into a parameter's container whose element lifetime is elided",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut v: Vec<&Point> = [&a];
+    let g = fn(v: &mut Vec<&Point>, s: &Point) -> Unit ! {alloc, panic} { Vec.push(v, s); };
+    let mut b = Point { x: 3, y: 4 };
+    g(&mut v, &b);
+    b = Point { x: 50, y: 50 };
+    Vec.get(&v, 1).x
+}"#,
+        "cannot write a reference into a parameter's container whose element lifetime is elided",
+    );
+    // A container write through a block, call result, or branch receiver is rejected.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+struct O<'a> { n: i64, b: Box<Win<'a>> }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut b: Vec<i64> = [70, 71, 72, 73];
+    let mut o = O { n: 0, b: Box.new(Win { view: &a[..], note: 0 }) };
+    Box.set({ &mut o.b }, Win { view: &b[..], note: 1 });
+    b = [1];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    let w2 = Box.read(&o.b);
+    Slice.get(w2.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot track which owner this write through a place reference updates",
+    );
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+struct O<'a> { n: i64, b: Box<Win<'a>> }
+fn pick<'a, 'b>(o: &'b mut O<'a>) -> &'b mut Box<Win<'a>> ! {} { &mut o.b }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut b: Vec<i64> = [70, 71, 72, 73];
+    let mut o = O { n: 0, b: Box.new(Win { view: &a[..], note: 0 }) };
+    Box.set(pick(&mut o), Win { view: &b[..], note: 1 });
+    b = [1];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    let w2 = Box.read(&o.b);
+    Slice.get(w2.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot track which owner this write through a place reference updates",
+    );
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+struct O<'a> { n: i64, v: Vec<Win<'a>> }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut b: Vec<i64> = [70, 71, 72, 73];
+    let mut o = O { n: 0, v: [Win { view: &a[..], note: 0 }] };
+    Vec.push({ &mut o.v }, Win { view: &b[..], note: 1 });
+    b = [1];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    let w2 = Vec.get(&o.v, 1);
+    Slice.get(w2.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot track which owner this write through a place reference updates",
+    );
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+struct O<'a> { n: i64, b: Box<Win<'a>> }
+fn setb<'a>(h: &mut Box<Win<'a>>, v: &'a [i64]) -> Unit ! {alloc, panic} { Box.set(h, Win { view: v, note: 7 }); }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut b: Vec<i64> = [70, 71, 72, 73];
+    let mut o = O { n: 0, b: Box.new(Win { view: &a[..], note: 0 }) };
+    setb({ &mut o.b }, &b[..]);
+    b = [1];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    let w2 = Box.read(&o.b);
+    Slice.get(w2.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot track which owner this write through a place reference updates",
+    );
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut b: Vec<i64> = [70, 71, 72, 73];
+    let mut v = [Win { view: &a[..], note: 0 }];
+    Vec.push(if Vec.len(&a) > 0 { &mut v } else { &mut v }, Win { view: &b[..], note: 1 });
+    b = [1];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    let w2 = Vec.get(&v, 1);
+    Slice.get(w2.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot track which owner this write through a place reference updates",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut v: Vec<&Point> = [&a];
+    {
+        let p2 = Point { x: 70, y: 71 };
+        Vec.push({ &mut v }, &p2);
+    }
+    let junk = Point { x: 9, y: 9 };
+    Vec.get(&v, 1).x + junk.x * 0
+}"#,
+        "cannot track which owner this write through a place reference updates",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+fn id<'b, 'a>(v: &'b mut Vec<&'a Point>) -> &'b mut Vec<&'a Point> ! {} { v }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut v: Vec<&Point> = [&a];
+    {
+        let p2 = Point { x: 70, y: 71 };
+        Vec.push(id(&mut v), &p2);
+    }
+    let junk = Point { x: 9, y: 9 };
+    Vec.get(&v, 1).x + junk.x * 0
+}"#,
+        "cannot track which owner this write through a place reference updates",
+    );
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut b: Vec<i64> = [70, 71, 72, 73];
+    let mut bx = Box.new(Win { view: &a[..], note: 0 });
+    Box.set({ &mut bx }, Win { view: &b[..], note: 1 });
+    b = [1];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    Slice.get(Box.read(&bx).view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot track which owner this write through a place reference updates",
+    );
+    // A stored `&mut` record reference lends its leaves for the call.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn f<'a>(h: &mut Win<'a>, s: &mut [i64]) -> i64 ! {panic} { Slice.set(s, 0, 99); Slice.get(h.view, 0) }
+fn main() -> i64 ! {alloc, panic} {
+    let mut b: Vec<i64> = [1, 2, 3, 4];
+    let mut h = Win { view: &b[..], note: 0 };
+    let r = &mut h;
+    f(r, &mut b[..])
+}"#,
+        "cannot create an exclusive view while a shared view retained by this expression",
+    );
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn f<'a>(h: &mut Win<'a>, s: &mut Vec<i64>) -> i64 ! {alloc, panic} { Vec.push(s, 5); Vec.push(s, 6); Vec.push(s, 7); Vec.push(s, 8); Vec.push(s, 9); let junk: Vec<i64> = [100, 100, 100, 100, 100, 100, 100, 100]; Slice.get(h.view, 0) + Vec.get(&junk, 0) * 0 }
+fn main() -> i64 ! {alloc, panic} {
+    let mut b: Vec<i64> = [1, 2, 3, 4];
+    let mut h = Win { view: &b[..], note: 0 };
+    let r = &mut h;
+    f(r, &mut b)
+}"#,
+        "",
+    );
+    rejects(
+        r#"struct Window<'a> { view: &'a mut [i64], note: i64 }
+fn f<'a>(h: &mut Window<'a>, s: &mut [i64]) -> i64 ! {panic} { Slice.get(s, 0) }
+fn main() -> i64 ! {alloc, panic} {
+    let mut b: Vec<i64> = [1, 2, 3, 4];
+    let mut h = Window { view: &mut b[..], note: 0 };
+    let r = &mut h;
+    f(r, &mut b[..])
+}"#,
+        "",
+    );
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+fn f<'a>(v: &mut Vec<&'a Point>, s: &mut Point) -> i64 ! {panic} { s.x = 99; Vec.get(v, 0).x }
+fn main() -> i64 ! {alloc, panic} {
+    let mut p = Point { x: 1, y: 2 };
+    let mut v: Vec<&Point> = [&p];
+    let r = &mut v;
+    f(r, &mut p)
+}"#,
+        "",
+    );
+    // Box.set through a stored field reference merges under that field.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+struct O<'a> { other: &'a [i64], b: Box<Win<'a>> }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut c: Vec<i64> = [5, 6, 7, 8];
+    let mut o = O { other: &c[..], b: Box.new(Win { view: &a[..], note: 0 }) };
+    let r = &mut o.b;
+    Box.set(r, Win { view: &a[..], note: 1 });
+    c = [1];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    Slice.get(o.other, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+struct O<'a> { other: &'a [i64], b: Box<Win<'a>> }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut c: Vec<i64> = [5, 6, 7, 8];
+    let mut o = O { other: &c[..], b: Box.new(Win { view: &a[..], note: 0 }) };
+    {
+        let r = &mut o.b;
+        Box.set(r, Win { view: &a[..], note: 1 });
+    }
+    c = [1];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    Slice.get(o.other, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    // The named-lifetime form of the elided helper is accepted.
+    agrees(
+        r#"
+        struct Point { x: i64, y: i64 }
+        fn addv<'a>(v: &mut Vec<&'a Point>, s: &'a Point) -> Unit ! {alloc, panic} { Vec.push(v, s); }
+        fn main() -> i64 ! {alloc, panic} {
+            let a = Point { x: 1, y: 2 };
+            let b = Point { x: 70, y: 71 };
+            let mut v: Vec<&Point> = [&a];
+            addv(&mut v, &b);
+            let f = addv;
+            f(&mut v, &a);
+            Vec.get(&v, 1).x + Vec.len(&v)
+        }"#,
+        73,
+        "",
+    );
+}

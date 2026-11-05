@@ -386,6 +386,16 @@ reset(&mut h, &b);    // h now borrows b: b cannot be replaced while h lives
   place (`&mut o.b`, `&mut o.v`) merge into the record under that field's
   path. A `&mut record` argument is exclusive over the record and its
   exclusive leaves but only shared over the storage behind its shared leaves.
+- **Receivers.** A container or record write must name its owner: a direct
+  local, a place (`&mut o.b`), a stored reference whose owner is known, or a
+  reference parameter. A block, branch, or call result used as the `&mut`
+  receiver of `Box.set`/`Vec.push`/`Vec.set` or of a writing callee is
+  rejected. A stored `&mut` reference to a container or record lends its
+  leaves' storage for the call exactly like `&mut owner`.
+- **Elided element lifetimes.** Writing a reference into a parameter's
+  container whose element lifetime is elided (`fn f(v: &mut Vec<&T>, x: &T)`)
+  is rejected: the element and the source have independent caller lifetimes.
+  Name the lifetime (`fn f<'a>(v: &mut Vec<&'a T>, x: &'a T)`).
 - **Calls.** A field or element place passed to a writing callee
   (`set(&mut o.h, ..)`, `set(&mut v[i], ..)`, or a stored `let r = &mut o.h`)
   resolves the same owner and field path as a direct write. A place of a
