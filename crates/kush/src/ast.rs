@@ -366,6 +366,12 @@ pub enum TypeKind {
     /// signature. It is replaced by the concrete impl target before runtime
     /// type lowering.
     SelfType,
+    /// An omitted lambda parameter or result type (`fn(x) { ... }`), or, as
+    /// the only element of a lambda's effect list, an omitted effect row. The
+    /// checker fills it from the expected arrow, a generic call, or the
+    /// binding's first use, and otherwise asks for the annotation. It never
+    /// appears outside a lambda.
+    Infer,
     /// `dyn Trait`, `dyn Trait<Arguments, Out = T>`, or `dyn A + B`: a trait
     /// object. Each bound names one trait with its trait arguments and any
     /// explicit associated-type bindings. The checker chooses the closed-world
@@ -544,7 +550,8 @@ pub struct Arm {
 /// fn(x: i64, y: i64) -> i64 ! {panic} { x + y }
 /// ```
 ///
-/// Parameter and result types are mandatory. A lambda that captures no outer
+/// Parameter, result and effect annotations may be omitted
+/// ([`TypeKind::Infer`]); the checker infers them locally. A lambda that captures no outer
 /// runtime binding is a copyable function pointer (`fn(...)`). A lambda that
 /// captures affine owned storage is an owning once-consuming closure
 /// (`once fn(...)`); its environment is moved into the closure exactly once.

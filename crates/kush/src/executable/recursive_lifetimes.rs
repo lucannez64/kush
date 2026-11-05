@@ -548,6 +548,7 @@ impl<'a, 'r> Solver<'a, 'r> {
             }
             ast::TypeKind::Lifetime(_)
             | ast::TypeKind::SelfType
+            | ast::TypeKind::Infer
             | ast::TypeKind::Integer(_)
             | ast::TypeKind::Bool(_)
             | ast::TypeKind::Predicate(_) => false,

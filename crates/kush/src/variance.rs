@@ -282,6 +282,7 @@ impl Builder<'_> {
             ast::TypeKind::Predicate(_)
             | ast::TypeKind::Dyn(_)
             | ast::TypeKind::SelfType
+            | ast::TypeKind::Infer
             | ast::TypeKind::Integer(_)
             | ast::TypeKind::Bool(_) => {}
         }

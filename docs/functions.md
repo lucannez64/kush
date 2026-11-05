@@ -169,12 +169,59 @@ abstract usage grades likewise require explicit specialization.
 
 ## Lambdas
 
-Lambda parameters and results are mandatory:
+A fully annotated lambda:
 
 ```rust
 let double = fn(x: i64) -> i64 ! {panic} { x * 2 };
 let f: fn(i64) -> i64 ! {panic} = double;
 ```
+
+### Lambda annotation inference
+
+Parameter types, the result type and the effect row of a lambda may be
+omitted (I-LAMBDA-INFER, [inference prototype](inference-prototype.md)
+decisions 3-4). Inference is local and never inserts a coercion:
+
+```rust
+fn apply<T, e: Effects>(f: fn(T) -> T ! {e}, x: T) -> T ! {e} { f(x) }
+
+apply(fn(x) { x * 2 }, 21)            // x: i64 from 21, row {panic} from the body
+let double = fn(x) { x * 2 };         // fixed by the first use below
+apply(double, 21)
+let g: fn(i64) -> i64 ! {panic} = fn(x) { x + 1 };
+let h = fn(x: i64) { x + 1 };         // result i64 and row {panic} from the body
+```
+
+- **Parameters** come from, in order: the expected arrow type (an annotated
+  `let`, a typed parameter, a return position); for a generic call, the other
+  arguments, because an unannotated noncapturing lambda argument is checked
+  after them (evaluation order is unchanged); for `let f = fn(..) {..}`
+  without annotation, the binding's first use: a call `f(a, b)` whose
+  arguments are literals or locals declared before the `let`, an argument
+  position `g(.., f, ..)` whose declared parameter is an arrow (a generic one
+  resolved only through arguments declared as that bare type parameter), or
+  `let h: T = f`. The search for the first use is bounded (10,000 nodes,
+  depth 256); exhausting it asks for the annotation.
+- **Result**: the expected or hinted result; otherwise the body's type. It is
+  never a union (no implicit union coercion), never `Never`, never borrowed or
+  a task handle, and a body using `return` needs the annotation.
+- **Row**: the union of the effects the body requires, the minimal row; a
+  coercion to a wider expected row is ordinary arrow subtyping. A body that
+  handles or performs takes its row from the expected arrow or needs `! {..}`.
+- Inferred parameters are **ungraded** and never borrowed, slice, reference or
+  task types: graded, borrowed and owning-versus-borrowed choices stay with the
+  annotation (an owning type is accepted only when the use site fixes it).
+- Anything else is a diagnostic naming the missing annotation. Annotated
+  lambdas are unchanged, and no previously accepted program changes meaning:
+  all of these forms were parse errors before.
+
+Corpus (`lambda_corpus_tests`): every lambda in `examples/*.kush` (25) with
+all of its annotations removed. 22 are inferred and the program's result and
+output are unchanged; 3 ask for an annotation (two have no use site that
+fixes a parameter, one would need a borrowed `&[i64]` parameter). Limits:
+only noncapturing lambda arguments of generic calls are postponed, first-use
+arguments must be literals or earlier locals, and borrowed, graded or union
+types always need the annotation.
 
 A lambda that captures no outer runtime binding is a copyable `fn(...)` value
 and never allocates.

@@ -158,4 +158,7 @@ Added to `plan/plan.json`:
   I-LAMBDA-INFER can promise readable diagnostics.
 - **I-LAMBDA-INFER** (L): the narrow extension of decision 3 in the checker,
   with the criteria of decision 4, positive/rejection/parity/cleanup tests
-  and a corpus of real Kush lambdas.
+  and a corpus of real Kush lambdas. Implemented without a subtyping solver:
+  expected arrows, generic calls (lambda arguments checked after the others)
+  and a binding's first use supply the types; see functions.md, "Lambda
+  annotation inference", and `crates/kush/tests/lambda_inference.rs`.

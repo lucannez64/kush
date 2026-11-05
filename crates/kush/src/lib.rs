@@ -14,6 +14,8 @@ mod int;
 pub mod interop;
 pub use facts::Certificate;
 pub mod kernel;
+#[cfg(test)]
+mod lambda_corpus_tests;
 pub mod language_server;
 mod layout_cert;
 mod length;

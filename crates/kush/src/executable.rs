@@ -2213,7 +2213,9 @@ pub(crate) fn type_mentions_binding(
             type_mentions_binding(resolution, inner, binder)
                 || type_mentions_binding(resolution, grade, binder)
         }
-        K::Integer(_) | K::Bool(_) | K::Lifetime(_) | K::SelfType | K::Predicate(_) => false,
+        K::Integer(_) | K::Bool(_) | K::Lifetime(_) | K::SelfType | K::Infer | K::Predicate(_) => {
+            false
+        }
     }
 }
 /// The binder named by a bare grade expression, as in `@[G]`. Composite
@@ -2491,6 +2493,36 @@ fn collect_block_returns<'a>(block: &'a ast::Block, out: &mut Vec<&'a ast::Expr>
     if let Some(tail) = &block.tail {
         collect_body_returns(tail, out);
     }
+}
+/// Whether a lambda omits a parameter, result or effect annotation.
+fn lambda_has_holes(lambda: &ast::Lambda) -> bool {
+    matches!(lambda.result.kind, ast::TypeKind::Infer)
+        || matches!(lambda.effects.as_slice(), [only] if matches!(only.kind, ast::TypeKind::Infer))
+        || lambda
+            .parameters
+            .iter()
+            .any(|parameter| matches!(parameter.ty.kind, ast::TypeKind::Infer))
+}
+/// Whether some expression of `block` (not inside a nested lambda) satisfies
+/// `predicate`. Bounded by the AST size.
+fn block_any(block: &ast::Block, predicate: &dyn Fn(&ast::ExprKind) -> bool) -> bool {
+    let mut stack = Vec::new();
+    for statement in &block.statements {
+        match statement {
+            ast::Statement::Let { value, .. } => stack.push(value),
+            ast::Statement::Expr(expr) => stack.push(expr),
+        }
+    }
+    stack.extend(block.tail.as_deref());
+    while let Some(expr) = stack.pop() {
+        if predicate(&expr.kind) {
+            return true;
+        }
+        if !matches!(expr.kind, ast::ExprKind::Lambda(_)) {
+            ast_children(expr, &mut |child| stack.push(child));
+        }
+    }
+    false
 }
 /// Automatic fusion equivalence analysis.
 ///
@@ -5185,6 +5217,9 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             entry = Some(index);
         }
         let mut checker = Checker {
+            lambda_holes: BTreeMap::new(),
+            lambda_hint: None,
+            required_effects: std::cell::Cell::new(0),
             resolution,
             types: &mut types,
             functions: &mut functions,
@@ -5653,6 +5688,7 @@ fn type_key(ty: &ast::Type) -> String {
         ),
         ast::TypeKind::Lifetime(name) => format!("'{name}"),
         ast::TypeKind::SelfType => "Self".to_owned(),
+        ast::TypeKind::Infer => "_".to_owned(),
         ast::TypeKind::Function {
             lifetimes,
             parameters,
@@ -5787,6 +5823,7 @@ impl ContractNames {
                     arguments: arguments.iter().map(|argument| self.ty(argument)).collect(),
                 }
             }
+            ast::TypeKind::Infer => ast::TypeKind::Infer,
             ast::TypeKind::SelfType => {
                 if let Some(self_ty) = &self.self_ty {
                     return self_ty.clone();
@@ -6304,6 +6341,7 @@ fn type_self_associations(ty: &ast::Type, out: &mut BTreeSet<String>) {
         | ast::TypeKind::Bool(_)
         | ast::TypeKind::Lifetime(_)
         | ast::TypeKind::SelfType
+        | ast::TypeKind::Infer
         | ast::TypeKind::Predicate(_) => {}
     }
 }
@@ -6393,6 +6431,7 @@ fn validate_associated_type_defaults(associated: &[ast::Associated]) -> Result<(
 fn type_mentions_self(ty: &ast::Type) -> bool {
     match &ty.kind {
         ast::TypeKind::SelfType => true,
+        ast::TypeKind::Infer => false,
         ast::TypeKind::Named { path, arguments } => {
             path.first().is_some_and(|name| name == "Self")
                 || arguments.iter().any(type_mentions_self)
@@ -7846,7 +7885,8 @@ fn validate_impl_pattern(
         | ast::TypeKind::Binary { .. }
         | ast::TypeKind::Lifetime(_)
         | ast::TypeKind::Predicate(_)
-        | ast::TypeKind::SelfType => Err(Diagnostic::new(
+        | ast::TypeKind::SelfType
+        | ast::TypeKind::Infer => Err(Diagnostic::new(
             pattern.span,
             format!(
                 "an impl {what} must be an owned nominal type pattern built from the impl's type parameters; borrows, slices, arrows, unions, grades, lifetimes, predicates, and 'Self' are not supported (searched {})",
@@ -11455,7 +11495,7 @@ fn validate_type_template(
             validate_type_template(resolution, right, consts, in_length, false)
         }
         ast::TypeKind::Predicate(_) => Ok(()),
-        ast::TypeKind::Lifetime(_) | ast::TypeKind::SelfType => Ok(()),
+        ast::TypeKind::Lifetime(_) | ast::TypeKind::SelfType | ast::TypeKind::Infer => Ok(()),
         ast::TypeKind::Integer(_) | ast::TypeKind::Bool(_) => Ok(()),
     }
 }
@@ -11600,6 +11640,7 @@ fn type_references_binding(resolution: &Resolution, ty: &ast::Type, id: BindingI
         | ast::TypeKind::Bool(_)
         | ast::TypeKind::Lifetime(_)
         | ast::TypeKind::SelfType
+        | ast::TypeKind::Infer
         | ast::TypeKind::Predicate(_) => false,
     }
 }
@@ -11668,6 +11709,28 @@ struct Loop {
 /// `fixed | e1 | e2 ...` must cover the actual callable row. Constraints are
 /// accumulated across every higher-order argument before a finite solver picks
 /// a unique minimal specialization.
+/// How an unannotated lambda's row is decided.
+#[derive(Clone, Copy, Debug)]
+enum LambdaRow {
+    Declared,
+    /// From the expected arrow (bodies that handle or perform).
+    Fixed(u16),
+    /// The union of the effects the body requires.
+    FromBody,
+}
+#[derive(Clone, Copy, Debug)]
+struct LambdaInference {
+    result_from_body: bool,
+    row: LambdaRow,
+}
+/// Types a call or a binding's first use supplies for an unannotated
+/// lambda's parameters and result (I-LAMBDA-INFER).
+#[derive(Clone, Debug, Default)]
+struct LambdaHint {
+    parameters: Vec<Option<Type>>,
+    result: Option<Type>,
+}
+
 #[derive(Debug, Clone)]
 struct EffectConstraint {
     row: crate::runtime_types::EffectRowTerm,
@@ -11788,6 +11851,15 @@ struct Checker<'a, 't> {
     closure_writes: BTreeMap<usize, Vec<usize>>,
     /// Types captured by the closure value a local holds, when known.
     closure_captures: BTreeMap<usize, Vec<Type>>,
+    /// Types filled into omitted lambda annotations (`fn(x) { ... }`), keyed
+    /// by the hole's span (I-LAMBDA-INFER).
+    lambda_holes: BTreeMap<(usize, usize), Type>,
+    /// Parameter/result types a generic call or a binding's first use
+    /// supplies for the next unannotated lambda.
+    lambda_hint: Option<LambdaHint>,
+    /// Union of every effect `require`d in the current lambda body; an
+    /// omitted lambda row is inferred as exactly these bits.
+    required_effects: std::cell::Cell<u16>,
     /// Erased proof parameters in scope: binder -> proposition.
     proofs: BTreeMap<BindingId, crate::facts::Proposition>,
     /// Checked logical definitions and their kernel names.
@@ -16562,6 +16634,8 @@ impl Checker<'_, '_> {
             .unwrap_or(0)
     }
     fn require(&self, effects: u16, span: Span) -> Result<()> {
+        self.required_effects
+            .set(self.required_effects.get() | effects);
         let missing = effects & !self.effects;
         if missing == 0 {
             return Ok(());
@@ -16588,6 +16662,18 @@ impl Checker<'_, '_> {
         ))
     }
     fn ty(&mut self, ty: &ast::Type) -> Result<Type> {
+        if matches!(ty.kind, ast::TypeKind::Infer) {
+            return self
+                .lambda_holes
+                .get(&(ty.span.start, ty.span.end))
+                .copied()
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        ty.span,
+                        "cannot infer this lambda type: no expected function type, generic call, or first use fixes it; add the annotation",
+                    )
+                });
+        }
         let subst = crate::runtime_types::Subst {
             types: self.substitution.clone(),
             consts: self.consts.clone(),
@@ -20166,7 +20252,20 @@ impl Checker<'_, '_> {
                             .insert(id, (term, self.kernel_locals.len()));
                         continue;
                     }
-                    let value = self.expr_expected(value, annotation)?;
+                    // `let f = fn(x) { ... }`: the binding's first use fixes
+                    // the omitted lambda types (I-LAMBDA-INFER).
+                    if annotation.is_none()
+                        && let ast::ExprKind::Lambda(lambda) = &value.kind
+                        && lambda_has_holes(lambda)
+                        && matches!(&pattern.kind, ast::PatternKind::Name(path) if path.len() == 1)
+                        && let Some(id) = self.resolution.binder(pattern.span)
+                    {
+                        self.lambda_hint =
+                            self.first_use_hint(id, lambda, &statements[index + 1..], tail)?;
+                    }
+                    let value = self.expr_expected(value, annotation);
+                    self.lambda_hint = None;
+                    let value = value?;
                     self.drain_hoisted(hoist_base, &mut checked);
                     if value.ty.is_ref() && *mutable {
                         return Err(Diagnostic::new(
@@ -23053,6 +23152,7 @@ impl Checker<'_, '_> {
     ) -> Result<Expr> {
         let captures = self.lambda_captures(lambda);
         let once = !captures.is_empty();
+        let inference = self.prepare_lambda_inference(lambda, span, expected)?;
         // A mutable scalar capture is a live view: the environment stores the
         // address of the caller's binding, not a copy. Immutable scalars keep
         // their existing by-value snapshot contract, and affine/borrowed
@@ -23189,7 +23289,13 @@ impl Checker<'_, '_> {
         }
         let (result_inner, result_grade) =
             result_contract(self.resolution, self.types, &self.grades, &lambda.result)?;
-        let result = self.ty(&result_inner)?;
+        // An inferred result is fixed by the body below; until then it is an
+        // inert placeholder that no pre-body check depends on.
+        let mut result = if inference.result_from_body {
+            Type::Unit
+        } else {
+            self.ty(&result_inner)?
+        };
         self.reject_lambda_runtime_length(result, lambda.result.span)?;
         validate_result_contract(
             result_grade,
@@ -23209,11 +23315,15 @@ impl Checker<'_, '_> {
                 "a function value cannot return a task handle; a child handle must not escape its scope",
             ));
         }
-        let effects = crate::runtime_types::effect_bits_with(
-            self.resolution,
-            &lambda.effects,
-            &self.effect_arguments,
-        )?;
+        let mut effects = match inference.row {
+            LambdaRow::Declared => crate::runtime_types::effect_bits_with(
+                self.resolution,
+                &lambda.effects,
+                &self.effect_arguments,
+            )?,
+            LambdaRow::Fixed(bits) => bits,
+            LambdaRow::FromBody => self.all_effects(),
+        };
         let lambda_lifetimes = parameters
             .iter()
             .enumerate()
@@ -23602,16 +23712,6 @@ impl Checker<'_, '_> {
         if capture_result_used {
             borrows.capture_result = Some(capture_result);
         }
-        let function_type = self.types.function_type_with(
-            parameters.clone(),
-            result,
-            effects,
-            parameter_grades.clone(),
-            result_grade,
-            once,
-            linear,
-            borrows,
-        );
         let capture_types = captures
             .iter()
             .map(|slot| self.locals[*slot].ty)
@@ -23670,6 +23770,7 @@ impl Checker<'_, '_> {
         let saved_handlers = std::mem::take(&mut self.handlers);
         let mut child_parameter_lifetimes = capture_lifetimes.clone();
         child_parameter_lifetimes.extend(lambda_lifetimes.clone());
+        let saved_required = self.required_effects.replace(0);
         let checked = (|| {
             self.scope_depth = if scope_root { saved_scope_depth + 1 } else { 0 };
             self.parameter_lifetimes = child_parameter_lifetimes.clone();
@@ -23718,8 +23819,13 @@ impl Checker<'_, '_> {
             self.effects = effects;
             self.loops.clear();
             self.facts = crate::facts::Facts::default();
-            let body = self.block(&lambda.body, Some(result))?;
-            self.expect(body.ty, result, span)?;
+            let body = if inference.result_from_body {
+                self.block(&lambda.body, None)?
+            } else {
+                let body = self.block(&lambda.body, Some(result))?;
+                self.expect(body.ty, result, span)?;
+                body
+            };
             if body.ty != Type::Never
                 && let Some(tail) = &body.tail
                 && self.observes_copyable_result(tail)
@@ -23752,7 +23858,24 @@ impl Checker<'_, '_> {
         self.written_slots = saved_written;
         self.closure_writes = saved_closure_writes;
         self.closure_captures = saved_closure_captures;
+        let body_required = self.required_effects.replace(saved_required);
         let (body, obligation, written) = checked?;
+        if inference.result_from_body {
+            result = self.inferred_lambda_result(body.ty, span)?;
+        }
+        if matches!(inference.row, LambdaRow::FromBody) {
+            effects = body_required & self.all_effects();
+        }
+        let function_type = self.types.function_type_with(
+            parameters.clone(),
+            result,
+            effects,
+            parameter_grades.clone(),
+            result_grade,
+            once,
+            linear,
+            borrows,
+        );
         let capture_writes = (0..captures.len())
             .map(|index| written.contains(&index))
             .collect::<Vec<_>>();
@@ -23848,6 +23971,384 @@ impl Checker<'_, '_> {
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
+        }
+    }
+    /// Fill the omitted annotations of `lambda` (I-LAMBDA-INFER) from the
+    /// expected arrow or the pending hint, and decide how its result and row
+    /// are inferred. Inferred types are Direct Kush types: no borrowed
+    /// parameter, no union or borrowed result, no grade.
+    fn prepare_lambda_inference(
+        &mut self,
+        lambda: &ast::Lambda,
+        span: Span,
+        expected: Option<Type>,
+    ) -> Result<LambdaInference> {
+        let hint = self.lambda_hint.take().unwrap_or_default();
+        let row_hole = matches!(lambda.effects.as_slice(), [only] if matches!(only.kind, ast::TypeKind::Infer));
+        let result_hole = matches!(lambda.result.kind, ast::TypeKind::Infer);
+        let parameter_hole = lambda
+            .parameters
+            .iter()
+            .any(|parameter| matches!(parameter.ty.kind, ast::TypeKind::Infer));
+        if !row_hole && !result_hole && !parameter_hole {
+            return Ok(LambdaInference {
+                result_from_body: false,
+                row: LambdaRow::Declared,
+            });
+        }
+        let arrow = match expected {
+            Some(Type::Fn(id) | Type::Once(id)) => Some(self.types.function_types[id].clone()),
+            _ => None,
+        }
+        .filter(|arrow| arrow.parameters.len() == lambda.parameters.len());
+        for (index, parameter) in lambda.parameters.iter().enumerate() {
+            if !matches!(parameter.ty.kind, ast::TypeKind::Infer) {
+                continue;
+            }
+            let Some(ty) = hint
+                .parameters
+                .get(index)
+                .copied()
+                .flatten()
+                .or_else(|| arrow.as_ref().map(|arrow| arrow.parameters[index]))
+            else {
+                return Err(Diagnostic::new(
+                    parameter.span,
+                    format!(
+                        "cannot infer the type of lambda parameter '{}': no expected function type, generic call, or first use fixes it; annotate it as '{}: T'",
+                        parameter.name, parameter.name
+                    ),
+                ));
+            };
+            if ty == Type::Never
+                || ty.is_view()
+                || ty.is_slice()
+                || ty.is_ref()
+                || crate::runtime_types::has_borrow(self.types, ty)
+                || crate::runtime_types::contains_task(self.types, ty)
+            {
+                return Err(Diagnostic::new(
+                    parameter.span,
+                    format!(
+                        "lambda parameter '{}' would be inferred as {}; borrowed, task and uninhabited parameter types are not inferred, annotate it",
+                        parameter.name,
+                        self.types.name(ty)
+                    ),
+                ));
+            }
+            self.lambda_holes
+                .insert((parameter.ty.span.start, parameter.ty.span.end), ty);
+        }
+        let mut result_from_body = false;
+        if result_hole {
+            match hint
+                .result
+                .or_else(|| arrow.as_ref().map(|arrow| arrow.result))
+            {
+                Some(ty) => {
+                    self.lambda_holes
+                        .insert((lambda.result.span.start, lambda.result.span.end), ty);
+                }
+                None => {
+                    if block_any(&lambda.body, &|kind| {
+                        matches!(kind, ast::ExprKind::Return(_))
+                    }) {
+                        return Err(Diagnostic::new(
+                            span,
+                            "cannot infer the result type of a lambda that uses 'return'; annotate it as '-> T'",
+                        ));
+                    }
+                    result_from_body = true;
+                }
+            }
+        }
+        let row = if !row_hole {
+            LambdaRow::Declared
+        } else if block_any(&lambda.body, &|kind| {
+            matches!(
+                kind,
+                ast::ExprKind::Handle { .. } | ast::ExprKind::Perform { .. }
+            )
+        }) {
+            // Handled bodies capture the row in their suspension sites, so the
+            // row must be known before the body is checked.
+            match &arrow {
+                Some(arrow) => LambdaRow::Fixed(arrow.effects),
+                None => {
+                    return Err(Diagnostic::new(
+                        span,
+                        "cannot infer the effect row of a lambda that handles or performs an operation; annotate it as '! { ... }'",
+                    ));
+                }
+            }
+        } else {
+            LambdaRow::FromBody
+        };
+        Ok(LambdaInference {
+            result_from_body,
+            row,
+        })
+    }
+    /// The parameter and result types the first use of binding `id` (in
+    /// the statements and tail after its `let`) gives an unannotated lambda:
+    /// a direct call `f(a, b)` with arguments typed without context, a
+    /// function argument `g(.., f, ..)` whose parameter is an arrow, or an
+    /// annotated `let h: T = f`. Only literals and locals already declared
+    /// at the `let` are typed, so the hint never depends on code checked
+    /// later. The search is bounded; exhausting it asks for the annotation.
+    fn first_use_hint(
+        &mut self,
+        id: BindingId,
+        lambda: &ast::Lambda,
+        statements: &[ast::Statement],
+        tail: Option<&ast::Expr>,
+    ) -> Result<Option<LambdaHint>> {
+        enum Use<'e> {
+            Called(&'e [ast::Expr]),
+            Argument(&'e ast::Expr, &'e [ast::Expr], usize),
+            Annotated(&'e ast::Type),
+            Other,
+        }
+        struct Search<'r> {
+            resolution: &'r Resolution,
+            id: BindingId,
+            budget: usize,
+        }
+        impl Search<'_> {
+            fn is(&self, expr: &ast::Expr) -> bool {
+                matches!(expr.kind, ast::ExprKind::Name(_))
+                    && self.resolution.reference(expr.span) == Some(self.id)
+            }
+            fn expr<'e>(&mut self, expr: &'e ast::Expr, depth: usize) -> Option<Option<Use<'e>>> {
+                self.budget = self.budget.checked_sub(1)?;
+                if depth > 256 {
+                    return None;
+                }
+                if self.is(expr) {
+                    return Some(Some(Use::Other));
+                }
+                if let ast::ExprKind::Call { callee, arguments } = &expr.kind {
+                    if self.is(callee) {
+                        return Some(Some(Use::Called(arguments)));
+                    }
+                    if let found @ Some(_) = self.expr(callee, depth + 1)? {
+                        return Some(found);
+                    }
+                    for (index, argument) in arguments.iter().enumerate() {
+                        if self.is(argument) {
+                            return Some(Some(Use::Argument(callee, arguments, index)));
+                        }
+                        if let found @ Some(_) = self.expr(argument, depth + 1)? {
+                            return Some(found);
+                        }
+                    }
+                    return Some(None);
+                }
+                let mut children = Vec::new();
+                ast_children(expr, &mut |child| children.push(child));
+                for child in children {
+                    if let found @ Some(_) = self.expr(child, depth + 1)? {
+                        return Some(found);
+                    }
+                }
+                Some(None)
+            }
+        }
+        let mut search = Search {
+            resolution: self.resolution,
+            id,
+            budget: 10_000,
+        };
+        let mut found = None;
+        let exhausted = Diagnostic::new(
+            lambda.body.span,
+            "lambda type inference exhausted its search budget looking for the binding's first use; annotate the lambda",
+        );
+        for statement in statements {
+            let (value, annotation) = match statement {
+                ast::Statement::Let { value, ty, .. } => (value, ty.as_ref()),
+                ast::Statement::Expr(value) => (value, None),
+            };
+            if let Some(annotation) = annotation
+                && search.is(value)
+            {
+                found = Some(Use::Annotated(annotation));
+                break;
+            }
+            match search.expr(value, 0) {
+                None => return Err(exhausted),
+                Some(Some(use_site)) => {
+                    found = Some(use_site);
+                    break;
+                }
+                Some(None) => {}
+            }
+        }
+        if found.is_none()
+            && let Some(tail) = tail
+        {
+            found = search.expr(tail, 0).ok_or(exhausted)?;
+        }
+        let arity = lambda.parameters.len();
+        Ok(match found {
+            Some(Use::Called(arguments)) if arguments.len() == arity => Some(LambdaHint {
+                parameters: arguments
+                    .iter()
+                    .map(|argument| self.context_free_type(argument))
+                    .collect(),
+                result: None,
+            }),
+            Some(Use::Annotated(annotation)) => {
+                let (inner, _) = split_grade(annotation);
+                let ty = self.ty(inner)?;
+                self.arrow_hint(ty, arity)
+            }
+            Some(Use::Argument(callee, arguments, index)) => {
+                self.argument_hint(callee, arguments, index, arity)?
+            }
+            _ => None,
+        })
+    }
+    fn arrow_hint(&self, ty: Type, arity: usize) -> Option<LambdaHint> {
+        let (Type::Fn(id) | Type::Once(id)) = ty else {
+            return None;
+        };
+        let arrow = &self.types.function_types[id];
+        (arrow.parameters.len() == arity).then(|| LambdaHint {
+            parameters: arrow.parameters.iter().copied().map(Some).collect(),
+            result: Some(arrow.result),
+        })
+    }
+    /// A type for an argument that needs no context: a literal or a local
+    /// already declared.
+    fn context_free_type(&self, expr: &ast::Expr) -> Option<Type> {
+        match &expr.kind {
+            ast::ExprKind::Integer(_) => Some(Type::I64),
+            ast::ExprKind::Float(_) => Some(Type::Float(crate::float::FloatKind::F64)),
+            ast::ExprKind::Bool(_) => Some(Type::Bool),
+            ast::ExprKind::Char(_) => Some(Type::Char),
+            ast::ExprKind::Name(_) => {
+                let binding = self.resolution.reference(expr.span)?;
+                let slot = *self.slots.get(&binding)?;
+                Some(self.locals[slot].ty)
+            }
+            _ => None,
+        }
+    }
+    /// The arrow a direct function call expects at argument `index`. A
+    /// generic parameter type is resolved only through other arguments
+    /// whose declared type is that bare type parameter.
+    fn argument_hint(
+        &mut self,
+        callee: &ast::Expr,
+        arguments: &[ast::Expr],
+        index: usize,
+        arity: usize,
+    ) -> Result<Option<LambdaHint>> {
+        let Some(function) = self.resolution.reference(callee.span) else {
+            return Ok(None);
+        };
+        let Some(declared) = self.functions.declared.get(&function) else {
+            return Ok(None);
+        };
+        if declared.self_ty.is_some() || declared.ast.parameters.len() != arguments.len() {
+            return Ok(None);
+        }
+        let ast = declared.ast;
+        let type_vars = ast
+            .generics
+            .iter()
+            .filter(|generic| {
+                !is_grade_generic(self.resolution, generic)
+                    && !is_const_generic(self.resolution, generic)
+                    && !crate::runtime_types::is_effect_generic(self.resolution, generic)
+            })
+            .filter_map(|generic| self.resolution.binder(generic.span))
+            .collect::<Vec<_>>();
+        if ast.generics.len() != type_vars.len()
+            && ast.generics.iter().any(|generic| {
+                is_grade_generic(self.resolution, generic)
+                    || is_const_generic(self.resolution, generic)
+            })
+        {
+            return Ok(None);
+        }
+        let mut subst = crate::runtime_types::Subst::default();
+        for (position, (parameter, argument)) in ast.parameters.iter().zip(arguments).enumerate() {
+            if position == index {
+                continue;
+            }
+            let (declared, _) = split_grade(&parameter.ty);
+            if let ast::TypeKind::Named {
+                path,
+                arguments: none,
+            } = &declared.kind
+                && path.len() == 1
+                && none.is_empty()
+                && let Some(binder) = self.resolution.reference(declared.span)
+                && type_vars.contains(&binder)
+                && let Some(ty) = self.context_free_type(argument)
+            {
+                subst.types.entry(binder).or_insert(ty);
+            }
+        }
+        let (target, _) = split_grade(&ast.parameters[index].ty);
+        let ast::TypeKind::Function {
+            parameters, result, ..
+        } = &target.kind
+        else {
+            return Ok(None);
+        };
+        if parameters.len() != arity {
+            return Ok(None);
+        }
+        let unresolved = |checker: &Self, ty: &ast::Type| {
+            type_vars.iter().any(|var| {
+                !subst.types.contains_key(var)
+                    && type_mentions_binding(checker.resolution, ty, *var)
+            })
+        };
+        let mut hint = LambdaHint::default();
+        for parameter in parameters {
+            let (parameter, _) = split_grade(&parameter.ty);
+            hint.parameters.push(if unresolved(self, parameter) {
+                None
+            } else {
+                self.types.ty_in(parameter, &subst).ok()
+            });
+        }
+        let (result, _) = split_grade(result);
+        if !unresolved(self, result) {
+            hint.result = self.types.ty_in(result, &subst).ok();
+        }
+        Ok(Some(hint))
+    }
+    /// Validate a lambda result type inferred from its body.
+    fn inferred_lambda_result(&self, ty: Type, span: Span) -> Result<Type> {
+        let reason = if ty == Type::Never {
+            Some("its body never returns")
+        } else if matches!(ty, Type::Union(_)) {
+            Some("it would be a union, and Kush does not insert union coercions implicitly")
+        } else if ty.is_view()
+            || ty.is_slice()
+            || ty.is_ref()
+            || crate::runtime_types::has_borrow(self.types, ty)
+        {
+            Some("a borrowed result needs an explicit lifetime contract")
+        } else if crate::runtime_types::contains_task(self.types, ty) {
+            Some("a function value cannot return a task handle")
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => Err(Diagnostic::new(
+                span,
+                format!(
+                    "cannot infer this lambda's result type {}: {reason}; annotate it as '-> T'",
+                    self.types.name(ty)
+                ),
+            )),
+            None => Ok(ty),
         }
     }
     /// Outer scalar slots a call to this callable may write. A direct lambda
@@ -28466,8 +28967,28 @@ impl Checker<'_, '_> {
             .map(|(declared, _)| split_grade(declared).1.cloned())
             .collect::<Vec<_>>();
         let mut values = Vec::new();
+        // Unannotated noncapturing lambdas whose parameter type still mentions
+        // an unsolved generic are checked after the other arguments, with
+        // the parameter and result types those arguments fix
+        // (I-LAMBDA-INFER). Evaluation order is unchanged: only the checking
+        // order differs, and such a lambda captures nothing.
+        let mut postponed: Vec<(usize, &ast::Type, &ast::Expr)> = Vec::new();
         for (declared, value) in pairs.iter() {
             let (declared, _) = split_grade(declared);
+            if let ast::ExprKind::Lambda(lambda) = &value.kind
+                && lambda_has_holes(lambda)
+                && self.lambda_captures(lambda).is_empty()
+                && self.mentions(declared, &type_vars, &const_vars, &effect_vars, &subst)
+            {
+                postponed.push((values.len(), declared, value));
+                values.push(Expr {
+                    kind: ExprKind::Constant(0),
+                    ty: Type::Unit,
+                    span: value.span,
+                    resource: None,
+                });
+                continue;
+            }
             // A runtime-length array parameter takes the ordinary contextual
             // path below, so a literal argument gets the length-proof rule.
             if let (ast::TypeKind::Array(element, length), ast::ExprKind::Array(items)) =
@@ -28526,6 +29047,51 @@ impl Checker<'_, '_> {
                 unify_error.get_or_insert(error);
             }
             values.push(value);
+        }
+        for (index, declared, value) in postponed {
+            let ast::ExprKind::Lambda(lambda) = &value.kind else {
+                unreachable!("only lambdas are postponed")
+            };
+            let mut hint = LambdaHint::default();
+            if let ast::TypeKind::Function {
+                parameters, result, ..
+            } = &declared.kind
+                && parameters.len() == lambda.parameters.len()
+            {
+                for parameter in parameters {
+                    let (parameter, _) = split_grade(&parameter.ty);
+                    hint.parameters.push(
+                        if self.mentions(parameter, &type_vars, &const_vars, &effect_vars, &subst) {
+                            None
+                        } else {
+                            Some(self.types.ty_in(parameter, &subst)?)
+                        },
+                    );
+                }
+                let (result, _) = split_grade(result);
+                if !self.mentions(result, &type_vars, &const_vars, &effect_vars, &subst) {
+                    hint.result = Some(self.types.ty_in(result, &subst)?);
+                }
+            }
+            self.lambda_hint = Some(hint);
+            let checked = self.expr_expected(value, None);
+            self.lambda_hint = None;
+            let checked = checked?;
+            constraints.push((declared, checked.ty));
+            let before = subst.clone();
+            if let Err(error) = self.unify(
+                declared,
+                checked.ty,
+                &type_vars,
+                &const_vars,
+                &effect_vars,
+                &mut subst,
+                span,
+            ) {
+                subst = before;
+                unify_error.get_or_insert(error);
+            }
+            values[index] = checked;
         }
         for (binder, bound) in hint_rows {
             subst.types.entry(binder).or_insert(bound);
@@ -30929,6 +31495,8 @@ impl Checker<'_, '_> {
         let operation_effect = self.operation_effect(operation);
         let saved_effects = self.effects;
         self.effects |= operation_effect;
+        // The discharged operation never reaches an inferred lambda row.
+        let saved_required = self.required_effects.replace(0);
         let checked = self.checked_effect_body(
             body,
             result_ty,
@@ -30949,6 +31517,8 @@ impl Checker<'_, '_> {
             }),
         );
         self.effects = saved_effects;
+        self.required_effects
+            .set(saved_required | (self.required_effects.get() & !operation_effect));
         self.handlers.pop();
         let inner = checked?;
         let ty = inner.ty;
@@ -33666,6 +34236,7 @@ pub(crate) fn substitute_alias_type(
         },
         K::Predicate(expr) => K::Predicate(expr.clone()),
         K::SelfType => K::SelfType,
+        K::Infer => K::Infer,
     };
     ast::Type::new(kind, ty.span)
 }
@@ -33849,7 +34420,7 @@ fn tail_resumptive_handler(resolution: &Resolution, handler: &ast::Expr) -> bool
 /// Visit the direct child expressions of an AST expression; blocks are
 /// expanded into their statement values and tail. Lambda bodies are
 /// children too; callers that must not enter them check for lambdas first.
-fn ast_children<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::Expr)) {
+pub(crate) fn ast_children<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::Expr)) {
     fn block<'a>(block: &'a ast::Block, f: &mut dyn FnMut(&'a ast::Expr)) {
         for statement in &block.statements {
             match statement {

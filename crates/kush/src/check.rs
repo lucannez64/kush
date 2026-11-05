@@ -404,7 +404,11 @@ fn alias_refs_in_type(resolution: &Resolution, ty: &Type, out: &mut BTreeSet<Bin
             alias_refs_in_type(resolution, right, out);
         }
         TypeKind::Predicate(expr) => alias_refs_in_expr(resolution, expr, out),
-        TypeKind::Integer(_) | TypeKind::Bool(_) | TypeKind::Lifetime(_) | TypeKind::SelfType => {}
+        TypeKind::Integer(_)
+        | TypeKind::Bool(_)
+        | TypeKind::Lifetime(_)
+        | TypeKind::SelfType
+        | TypeKind::Infer => {}
     }
 }
 

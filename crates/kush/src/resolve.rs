@@ -1233,7 +1233,7 @@ impl Resolver {
                 TypeKind::Lifetime(_) => {}
                 // `Self` is not a binding. It is substituted by the concrete
                 // impl target before runtime type lowering.
-                TypeKind::SelfType => {}
+                TypeKind::SelfType | TypeKind::Infer => {}
                 TypeKind::Dyn(bounds) => {
                     for inner in crate::ast::dyn_types(bounds) {
                         r.ty(inner)?;

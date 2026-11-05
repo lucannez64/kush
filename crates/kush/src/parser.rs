@@ -1863,8 +1863,12 @@ impl Parser {
         let parameters = self.separated(Kind::RParen, |p| {
             let start = p.current().span;
             let name = p.ident()?;
-            p.expect(&Kind::Colon, "':' after lambda parameter name")?;
-            let ty = p.ty()?;
+            // An omitted parameter type is a hole the checker infers.
+            let ty = if p.eat(&Kind::Colon) {
+                p.ty()?
+            } else {
+                Node::new(TypeKind::Infer, p.since(start))
+            };
             Ok(Parameter {
                 erased: false,
                 name,
@@ -1872,9 +1876,20 @@ impl Parser {
                 span: p.since(start),
             })
         })?;
-        self.expect(&Kind::Arrow, "'->' and an explicit lambda result type")?;
-        let result = self.ty()?;
-        let effects = self.effects()?;
+        let hole = self.current().span;
+        let result = if self.eat(&Kind::Arrow) {
+            self.ty()?
+        } else {
+            Node::new(TypeKind::Infer, Span::new(hole.start, hole.start))
+        };
+        let effects = if self.at(&Kind::Bang) {
+            self.effects()?
+        } else {
+            vec![Node::new(
+                TypeKind::Infer,
+                Span::new(hole.start, hole.start),
+            )]
+        };
         let body = self.block()?;
         Ok(Lambda {
             parameters,

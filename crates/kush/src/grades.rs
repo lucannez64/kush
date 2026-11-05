@@ -350,7 +350,7 @@ fn grade_occurrences(resolution: &Resolution, ty: &ast::Type, binder: BindingId)
             grade_occurrences(resolution, inner, binder)
                 + grade_occurrences(resolution, grade, binder)
         }
-        K::Integer(_) | K::Bool(_) | K::Lifetime(_) | K::SelfType | K::Predicate(_) => 0,
+        K::Integer(_) | K::Bool(_) | K::Lifetime(_) | K::SelfType | K::Infer | K::Predicate(_) => 0,
     }
 }
 
