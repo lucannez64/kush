@@ -135,6 +135,28 @@ before instantiation (layouts are per instantiation already).
 - Parity: evaluator and native (default and release) agree, allocations
   balanced.
 
+### Alignment contract (UNBOX-ALIGN-CONTRACT, asserted)
+
+Every `Box`, `&T` and `&mut T` the native backend produces is nonzero and a
+multiple of 8. Measured per path in
+`native::allocator_runtime_tests::every_allocation_path_returns_nonzero_pointer_aligned_storage`:
+
+| Path | Alignment |
+| --- | --- |
+| pooled and system `kush_alloc`/`kush_try_alloc`, growth (`kush_grow`, `kush_try_grow`) | 16 |
+| headerless buffers, `Bytes`, `Vec` (element slots are 8-byte words) | 16 (elements 8) |
+| arena payloads (fresh chunk or bump, fallible or not) | 8 (an 8-byte region pointer precedes each payload) |
+| user allocator blocks (`AllocBox`/`AllocVec` data is a `Bytes` payload) | 8 or more |
+| references to locals (every Cranelift stack slot uses `STACK_SLOT_ALIGN_SHIFT = 3`) | 8 |
+
+The contract is named on both sides (`KUSH_POINTER_ALIGN` in the C runtime
+with static asserts, `POINTER_ALIGN`/`STACK_SLOT_ALIGN_SHIFT` in `native.rs`),
+and a test rejects any stack slot created without the named shift. The
+reference evaluator has no addresses, so the contract is native-only;
+foreign resources and bridge layouts stay `⊤`. An alignment niche may
+therefore use `1..7` for `Box`/references, but none is enabled: that
+extension still needs its own node and measurement.
+
 ## 7. Decisions
 
 1. Unboxing is driven by **checked certificates** over a per-word value-set

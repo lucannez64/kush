@@ -31,6 +31,15 @@ use std::{
 };
 
 mod runtime_cache;
+/// Every native stack slot is word aligned (`1 << 3` bytes). References to
+/// locals point into these slots, so with the runtime's allocation contract
+/// (`KUSH_POINTER_ALIGN` in the C runtime) every `Box`, `&T` and `&mut T` is a
+/// nonzero multiple of 8. Pointer niches (unboxing-certificates.md section 6)
+/// rely on this; change it only together with the certificate value sets.
+pub(crate) const STACK_SLOT_ALIGN_SHIFT: u8 = 3;
+/// The pointer alignment every native allocation path and stack reference
+/// guarantees, in bytes.
+pub(crate) const POINTER_ALIGN: u64 = 1 << STACK_SLOT_ALIGN_SHIFT;
 
 type Result<T> = std::result::Result<T, Diagnostic>;
 fn error(message: impl std::fmt::Display) -> Diagnostic {
@@ -268,6 +277,13 @@ static void kush_note_deallocation(void) {
    exactly the live capacity. All retained storage is drained back to the
    system on a normal exit. */
 #define KUSH_ALLOC_ALIGN ((uint64_t)16)
+/* Pointer contract: every pointer handed to generated code as a Box payload,
+   buffer, arena payload, allocator block or reference is nonzero and a
+   multiple of KUSH_POINTER_ALIGN. Layout value sets (unboxing-certificates.md
+   section 3) may rely on it; the Rust side mirrors it as POINTER_ALIGN. */
+#define KUSH_POINTER_ALIGN ((uint64_t)8)
+_Static_assert(KUSH_ALLOC_ALIGN % KUSH_POINTER_ALIGN == 0,
+               "allocator alignment must be a multiple of the pointer alignment");
 #define KUSH_POOL_MAX ((uint64_t)1024)
 #define KUSH_POOL_CLASSES ((size_t)(KUSH_POOL_MAX / KUSH_ALLOC_ALIGN))
 #define KUSH_POOL_RETAIN_CAP ((uint64_t)1024 * 1024)
@@ -634,6 +650,8 @@ struct KushArenaChunk {
 };
 _Static_assert(sizeof(KushArenaChunk) % KUSH_ALLOC_ALIGN == 0,
                "arena chunk data must preserve alignment");
+/* Arena payloads follow an 8-byte region pointer inside a 16-aligned slot. */
+_Static_assert(8 % KUSH_POINTER_ALIGN == 0, "arena payloads must be pointer aligned");
 /* Optional user chunk-sizing strategy. It is a noncapturing generated
    function with signature uint64_t(uint64_t need, uint64_t current) and is
    called only while sizing a fresh chunk. */
@@ -773,6 +791,8 @@ void kush_arena_box_release(uint64_t payload) {
     kush_arena_release_pointer(arena);
 }
 typedef struct { uint64_t length; uint64_t capacity; unsigned char data[]; } KushBytes;
+_Static_assert(sizeof(KushBytes) % KUSH_POINTER_ALIGN == 0,
+               "allocator blocks expose pointer-aligned data");
 #define KUSH_MAX_CAPACITY ((uint64_t)INT64_MAX - (uint64_t)sizeof(KushBytes))
 /* Byte buffers never change element width or shrink logical capacity. Their
    physical class is exactly round_up(sizeof(KushBytes)+capacity,16), including
@@ -3556,7 +3576,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
                 let slot = g.builder.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
                     (width * 8) as u32,
-                    3,
+                    STACK_SLOT_ALIGN_SHIFT,
                 ));
                 let pointer = g.builder.ins().stack_addr(I64, slot, 0);
                 for index in 0..width {
@@ -5282,7 +5302,7 @@ impl Generator<'_, '_> {
             let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                 ir::StackSlotKind::ExplicitSlot,
                 (width * 8) as u32,
-                3,
+                STACK_SLOT_ALIGN_SHIFT,
             ));
             let pointer = self.builder.ins().stack_addr(I64, slot, 0);
             arguments.push(pointer);
@@ -5351,7 +5371,7 @@ impl Generator<'_, '_> {
             let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                 ir::StackSlotKind::ExplicitSlot,
                 (self.program.width(result) * 8) as u32,
-                3,
+                STACK_SLOT_ALIGN_SHIFT,
             ));
             let pointer = self.builder.ins().stack_addr(I64, slot, 0);
             values.insert(0, pointer);
@@ -5610,7 +5630,7 @@ impl Generator<'_, '_> {
                     let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                         ir::StackSlotKind::ExplicitSlot,
                         (self.program.width(result) * 8) as u32,
-                        3,
+                        STACK_SLOT_ALIGN_SHIFT,
                     ));
                     let pointer = self.builder.ins().stack_addr(I64, slot, 0);
                     Some(pointer)
@@ -5687,7 +5707,7 @@ impl Generator<'_, '_> {
                                 self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                                     ir::StackSlotKind::ExplicitSlot,
                                     (self.program.width(result) * 8) as u32,
-                                    3,
+                                    STACK_SLOT_ALIGN_SHIFT,
                                 ));
                             self.builder.ins().stack_addr(I64, slot, 0)
                         });
@@ -5833,7 +5853,7 @@ impl Generator<'_, '_> {
                     let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                         ir::StackSlotKind::ExplicitSlot,
                         (self.program.width(result) * 8) as u32,
-                        3,
+                        STACK_SLOT_ALIGN_SHIFT,
                     ));
                     Some(self.builder.ins().stack_addr(I64, slot, 0))
                 } else {
@@ -6124,7 +6144,7 @@ impl Generator<'_, '_> {
                 let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
                     (result_width * 8).max(1) as u32,
-                    3,
+                    STACK_SLOT_ALIGN_SHIFT,
                 ));
                 let destination = self.builder.ins().stack_addr(I64, slot, 0);
                 self.builder.ins().brif(failed, error, &[], ok, &[]);
@@ -6360,7 +6380,7 @@ impl Generator<'_, '_> {
                 let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
                     (result_width * 8).max(1) as u32,
-                    3,
+                    STACK_SLOT_ALIGN_SHIFT,
                 ));
                 let destination = self.builder.ins().stack_addr(I64, slot, 0);
                 self.builder.ins().brif(failed, error, &[], ok, &[]);
@@ -6476,7 +6496,7 @@ impl Generator<'_, '_> {
                 let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
                     (result_width * 8).max(1) as u32,
-                    3,
+                    STACK_SLOT_ALIGN_SHIFT,
                 ));
                 let destination = self.builder.ins().stack_addr(I64, slot, 0);
                 self.builder.ins().brif(failed, error, &[], ok, &[]);
@@ -6570,7 +6590,7 @@ impl Generator<'_, '_> {
                 let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
                     (result_width * 8).max(1) as u32,
-                    3,
+                    STACK_SLOT_ALIGN_SHIFT,
                 ));
                 let destination = self.builder.ins().stack_addr(I64, slot, 0);
                 self.builder.ins().brif(failed, error, &[], ok, &[]);
@@ -6647,7 +6667,7 @@ impl Generator<'_, '_> {
                 let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
                     (result_width * 8).max(1) as u32,
-                    3,
+                    STACK_SLOT_ALIGN_SHIFT,
                 ));
                 let destination = self.builder.ins().stack_addr(I64, slot, 0);
                 self.builder.ins().brif(failed, error, &[], ok, &[]);
@@ -7540,7 +7560,7 @@ impl Generator<'_, '_> {
                         let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                             ir::StackSlotKind::ExplicitSlot,
                             (self.program.width(result) * 8).max(1) as u32,
-                            3,
+                            STACK_SLOT_ALIGN_SHIFT,
                         ));
                         Some(self.builder.ins().stack_addr(I64, slot, 0))
                     } else {
@@ -7623,7 +7643,7 @@ impl Generator<'_, '_> {
                     let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                         ir::StackSlotKind::ExplicitSlot,
                         (self.program.width(result_ty).max(1) * 8) as u32,
-                        3,
+                        STACK_SLOT_ALIGN_SHIFT,
                     ));
                     Some(self.builder.ins().stack_addr(I64, slot, 0))
                 } else {
@@ -8047,7 +8067,7 @@ impl Generator<'_, '_> {
         let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
             ir::StackSlotKind::ExplicitSlot,
             (words.max(1) * 8) as u32,
-            3,
+            STACK_SLOT_ALIGN_SHIFT,
         ));
         self.builder.ins().stack_addr(I64, slot, 0)
     }
@@ -8106,7 +8126,7 @@ impl Generator<'_, '_> {
         let stack = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
             ir::StackSlotKind::ExplicitSlot,
             8,
-            3,
+            STACK_SLOT_ALIGN_SHIFT,
         ));
         let pointer = self.builder.ins().stack_addr(I64, stack, 0);
         self.builder
@@ -8124,7 +8144,7 @@ impl Generator<'_, '_> {
         let stack = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
             ir::StackSlotKind::ExplicitSlot,
             (self.variables[slot].len().max(1) * 8) as u32,
-            3,
+            STACK_SLOT_ALIGN_SHIFT,
         ));
         let pointer = self.builder.ins().stack_addr(I64, stack, 0);
         self.builder
@@ -9021,7 +9041,7 @@ impl Generator<'_, '_> {
                 let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
                     (result_width * 8).max(1) as u32,
-                    3,
+                    STACK_SLOT_ALIGN_SHIFT,
                 ));
                 let destination = self.builder.ins().stack_addr(I64, slot, 0);
                 let zero = self.constant(0);
@@ -10067,6 +10087,151 @@ mod scalar_inline_codegen_tests {
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod allocator_runtime_tests {
     use super::*;
+
+    /// References to locals point into native stack slots; every slot must be
+    /// created with the contract alignment, never a literal.
+    #[test]
+    fn every_stack_slot_uses_the_pointer_alignment_contract() {
+        let source = include_str!("native.rs");
+        let marker = ["StackSlotData", "::new("].concat();
+        let mut slots = 0;
+        for (start, _) in source.match_indices(&marker) {
+            let call = &source[start..start + source[start..].find("));").unwrap()];
+            assert!(
+                call.contains("STACK_SLOT_ALIGN_SHIFT"),
+                "stack slot without the alignment contract: {call}"
+            );
+            slots += 1;
+        }
+        assert!(slots >= 17, "{slots}");
+        assert_eq!(1u64 << STACK_SLOT_ALIGN_SHIFT, POINTER_ALIGN);
+    }
+
+    /// UNBOX-ALIGN-CONTRACT: every allocation path returns a nonzero pointer
+    /// that is a multiple of `POINTER_ALIGN`, including pool reuse, growth,
+    /// fallible paths, arenas (with and without fresh chunks), allocator
+    /// blocks and vector/byte element storage.
+    #[test]
+    fn every_allocation_path_returns_nonzero_pointer_aligned_storage() {
+        let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+        let source = scratch.path().join("alignment-test.c");
+        let binary = scratch.path().join("alignment-test");
+        let test = r#"
+#undef main
+#include <assert.h>
+int64_t kush_entry(void) { return 0; }
+static uint64_t checked = 0;
+static void aligned(uint64_t pointer, uint64_t align) {
+    assert(pointer != 0);
+    assert(pointer % KUSH_POINTER_ALIGN == 0);
+    assert(pointer % align == 0);
+    ++checked;
+}
+int main(int argc, char **argv) {
+    (void)argc; (void)argv;
+    uint64_t live[64];
+    for (int round = 0; round < 3; ++round) {
+        /* Ordinary boxes: every pool class, the system path, and reuse. */
+        for (uint64_t bytes = 0; bytes <= 2 * KUSH_POOL_MAX; bytes += 8) {
+            uint64_t p = kush_alloc(bytes);
+            aligned(p, KUSH_ALLOC_ALIGN);
+            kush_free(p);
+        }
+        for (int i = 0; i < 64; ++i) { live[i] = kush_alloc((uint64_t)(i * 24)); aligned(live[i], KUSH_ALLOC_ALIGN); }
+        for (int i = 0; i < 64; ++i) kush_free(live[i]);
+        /* Fallible allocation and growth. */
+        uint64_t t = kush_try_alloc(40);
+        aligned(t, KUSH_ALLOC_ALIGN);
+        void *g = kush_grow((void *)(uintptr_t)t, 5000);
+        aligned((uint64_t)(uintptr_t)g, KUSH_ALLOC_ALIGN);
+        g = kush_try_grow(g, 9000);
+        aligned((uint64_t)(uintptr_t)g, KUSH_ALLOC_ALIGN);
+        kush_free((uint64_t)(uintptr_t)g);
+        /* Headerless buffers, bytes and vectors (element data included). */
+        for (uint64_t bytes = 16; bytes <= 2 * KUSH_POOL_MAX; bytes += 16) {
+            uint64_t b = kush_buffer_alloc(bytes, bytes - 16, 0);
+            aligned(b, KUSH_ALLOC_ALIGN);
+            kush_buffer_free(b);
+        }
+        for (int64_t capacity = 0; capacity < 3000; capacity += 97) {
+            uint64_t b = kush_bytes_with_capacity(capacity);
+            aligned(b, KUSH_ALLOC_ALIGN);
+            aligned((uint64_t)(uintptr_t)kush_alloc_block_data(b), KUSH_POINTER_ALIGN);
+            kush_bytes_free(b);
+            uint64_t tb = kush_try_bytes_with_capacity(capacity);
+            aligned(tb, KUSH_ALLOC_ALIGN);
+            kush_bytes_free(tb);
+        }
+        uint64_t v = kush_vec_with_capacity(1, 3);
+        for (int64_t i = 0; i < 200; ++i) {
+            uint64_t words[3] = {(uint64_t)i, 0, 0};
+            v = kush_vec_push(v, words, 3);
+            KushVec *vec = (KushVec *)(uintptr_t)v;
+            aligned(v, KUSH_ALLOC_ALIGN);
+            aligned((uint64_t)(uintptr_t)&vec->data[i * 3], KUSH_POINTER_ALIGN);
+        }
+        kush_buffer_free(v);
+        /* Arenas: odd sizes, fresh chunks and the fallible path. */
+        uint64_t arena = kush_arena_new();
+        aligned(arena, KUSH_ALLOC_ALIGN);
+        for (uint64_t bytes = 1; bytes < 3000; bytes += 37) {
+            uint64_t a = kush_arena_alloc(arena, bytes);
+            aligned(a, KUSH_POINTER_ALIGN);
+            uint64_t b = kush_arena_try_alloc(arena, bytes + 3);
+            aligned(b, KUSH_POINTER_ALIGN);
+            kush_arena_box_release(a);
+            kush_arena_box_release(b);
+        }
+        kush_arena_release(arena);
+    }
+    kush_pool_drain();
+    assert(kush_live_allocations == 0);
+    assert(checked > 3000);
+    return 0;
+}
+"#;
+        fs::write(
+            &source,
+            format!("#define main kush_runtime_process_main\n{RUNTIME}\n{test}"),
+        )
+        .unwrap();
+        let output = Command::new("cc")
+            .args([
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-DKUSH_HAS_TASKS=1",
+                "-DKUSH_STATS=1",
+                "-DKUSH_FUSION_COUNT=0",
+            ])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .arg("-lm")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(&binary)
+            .env_remove("KUSH_ALLOC_FAIL_AFTER")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(POINTER_ALIGN, 8);
+        assert!(
+            RUNTIME.contains("#define KUSH_POINTER_ALIGN ((uint64_t)8)"),
+            "the C runtime and POINTER_ALIGN must agree"
+        );
+    }
 
     #[test]
     fn headerless_buffers_preserve_growth_capacity_and_typed_release() {
