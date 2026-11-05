@@ -2482,6 +2482,9 @@ impl Checker<'_> {
                 };
                 let mut origins = BTreeSet::new();
                 let mut mutable_parameters = 0;
+                // A reference into one side of a checked split keeps that side,
+                // like a sliced result does.
+                let mut splits: Option<SplitLabels> = None;
                 for (leaves, argument) in parameters.iter().zip(args.iter()) {
                     for leaf in leaves {
                         let Some(parameter_lifetime) = &leaf.lifetime else {
@@ -2509,6 +2512,10 @@ impl Checker<'_> {
                             },
                         )?;
                         origins.extend(self.loan_return_origins(&loan));
+                        splits = Some(match splits {
+                            Some(current) => intersect_splits(&current, &loan.splits),
+                            None => loan.splits,
+                        });
                     }
                 }
                 if origins.is_empty() {
@@ -2524,18 +2531,20 @@ impl Checker<'_> {
                     ));
                 }
                 let lifetime = self.instantiate_result_lifetime(&mapping, &bounds, &lifetime);
+                let splits = splits.unwrap_or_default();
                 self.call_views.insert(
                     expr_ptr,
                     Loan {
                         origins: origins.clone(),
                         mutable,
-                        splits: SplitLabels::default(),
+                        splits: splits.clone(),
                         lifetime,
                         field: None,
                         ancestor: None,
                     },
                 );
                 self.call_origins.insert(expr_ptr, origins);
+                self.call_splits.insert(expr_ptr, splits);
             }
             CallResult::Record(leaves) => {
                 let mut provenance = RecordProvenance::default();
@@ -3025,6 +3034,30 @@ impl Checker<'_> {
                             capture.exclusive_origins.contains(&source)
                         }))
         })
+    }
+    /// A write through `*r = ...` or `r.field = ...` replaces storage that
+    /// views, element references, and borrowed-pattern bindings derived from
+    /// `r` may still observe. This also covers reference parameters, whose
+    /// ordinary capability suspension is not tracked as a local view.
+    fn check_write_through_reference(
+        &self,
+        reference: &Expr,
+        ptr: usize,
+        span: Span,
+    ) -> Result<()> {
+        let (ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot)) =
+            &through_coerce(reference).kind
+        else {
+            return Ok(());
+        };
+        if self.has_live_descendant(*slot, ptr, false) {
+            return Err(Diagnostic::new(
+                span,
+                "cannot write through a reference while a view, element reference, or pattern binding derived from it is live; wait until that borrow's last use",
+            )
+            .with_note(self.locals[*slot].span, "reference declared here"));
+        }
+        Ok(())
     }
     fn temporary_loan_at(&self, source: usize) -> bool {
         self.temporary_shared.contains(&source) || self.temporary_exclusive.contains(&source)
@@ -4908,6 +4941,7 @@ impl Checker<'_> {
                         "cannot replace a borrowed place with a linear value whose obligation would be laundered",
                     ));
                 }
+                self.check_write_through_reference(reference, expr_ptr, expr.span)?;
                 self.expr(reference)?;
                 self.expr(value)?;
             }
@@ -5366,6 +5400,7 @@ impl Checker<'_> {
                         "cannot store an owning or linear value in a record field through a reference; update an owning record value instead",
                     ));
                 }
+                self.check_write_through_reference(reference, expr_ptr, expr.span)?;
                 self.expr(reference)?;
                 self.expr(value)?;
             }
@@ -6362,7 +6397,13 @@ impl Checker<'_> {
                 // owners loaned; retaining the temporary scrutinee loan for
                 // the entire arm would defeat last-use release, especially
                 // when a destructuring let lowers the rest of the block here.
-                let loans = if scrutinee_provenance.is_some() {
+                // A borrowed DynArray scrutinee likewise transfers its loan to
+                // the element-reference bindings, which are views of their own.
+                let borrowed_array = matches!(scrutinee, Type::Ref(pointer)
+                    if self.pointees[pointer]
+                        .layout()
+                        .is_some_and(|id| self.enums[id].dynamic_array.is_some()));
+                let loans = if scrutinee_provenance.is_some() || borrowed_array {
                     entry_scrutinee_loans
                 } else {
                     self.loans.clone()

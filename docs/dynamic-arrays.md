@@ -191,8 +191,9 @@ copies. Over owning, linear, or view elements only names, `_`, and an unnamed
 the array cannot be moved, replaced, or mutated while one is live, and they
 cannot outlive the array's scope. Only slice patterns and `_` are accepted for
 a borrowed scrutinee; borrows of other types are still not matchable. The runtime length is not a finite variant tag, so a match
-over `DynArray` must end in an unguarded catch-all; the ordinary exhaustiveness
-check rejects anything else.
+over `DynArray` must contain an unguarded catch-all: `_`, a binding, or a
+pattern that is only `..` / `..rest`. The ordinary exhaustiveness check rejects
+anything else.
 
 ## Runtime-length arrays `[T; n <= C]`
 
@@ -247,7 +248,9 @@ Semantics:
 - **Indexing.** `a[i]` copies a copyable element. When the facts prove
   `0 <= i && i < n`, the read is proof-based and needs no `panic` effect;
   otherwise it is a checked read that requires `panic`, like dynamic indexing
-  of `[T; N]`. Native code keeps its bounds trap on the proved path as a
+  of `[T; N]`. The array may be a local or behind a `&` or `&mut` reference.
+  Facts about a local stop applying once `&mut` of it is taken, since writes
+  through the reference are invisible to the solver. Native code keeps its bounds trap on the proved path as a
   defensive check that can never fire.
 - **Views.** `&a[..]`, `&a[start..end]`, and `&mut` forms behave as for
   `DynArray` and cover exactly `n` elements. A view bound directly to a local
@@ -331,3 +334,27 @@ out-of-bounds reads and writes, runtime view bounds, mutable-view aliasing
 rejections, field-view aliasing/write-back, owner moves/drops while a view is
 live, pattern fallthrough/exhaustiveness/owning-element rejections, and layout
 rejection.
+
+## Review
+
+An independent review of the runtime-length array, pattern, slice-element
+place, and field-view work found two soundness holes and five smaller issues.
+All are fixed, and each has a regression test (`review_*` in
+`crates/kush/tests/advanced_types_effects.rs`):
+
+1. A write through a `&mut Record` parameter (`*h = ...`, `h.field = ...`)
+   was accepted while a view, element reference, or borrowed-pattern binding
+   derived from `h` was live, which could free a matched box. Such writes now
+   wait for the derived borrow's last use.
+2. A local whose address was taken by `&mut` kept its arithmetic facts (for
+   example a loop counter's `0 <= i`), so `Slice.at` could read outside the
+   slice. Such a local now leaves the fact system, and `&mut x` in a loop body
+   counts as a write of unknown direction.
+3. A borrowed match used directly as an outer arm's result was falsely
+   rejected; its scrutinee loan now ends with the match.
+4. A reference returned from one `split_at_mut` side conflicted with an
+   element reference into the other side; call results now keep the side.
+5. Diagnostics and limits: two length binders with one name are named apart in
+   a mismatch, a literal argument for a runtime-length parameter gets the
+   length-proof message, `[..rest]` alone is exhaustive, and `a[i]` works
+   through `&mut [T; n <= C]`.

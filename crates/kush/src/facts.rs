@@ -258,6 +258,10 @@ impl Certificate {
 pub(crate) struct Facts {
     known: Vec<Constraint>,
     versions: BTreeMap<usize, u32>,
+    /// Locals whose address was taken by `&mut`. A write through the
+    /// reference is not an assignment the checker can see, so such a local
+    /// is never a linear term from that point on.
+    opaque: BTreeSet<usize>,
 }
 
 /// Bounds for the Fourier–Motzkin search. These are work limits, not a claim of
@@ -303,6 +307,8 @@ impl Facts {
     /// about every value changed on either path.
     pub fn branch_join(base: &Self, left: &Self, right: &Self) -> Self {
         let mut result = base.clone();
+        result.opaque.extend(left.opaque.iter().copied());
+        result.opaque.extend(right.opaque.iter().copied());
         for slot in left.versions.keys().chain(right.versions.keys()) {
             let version = left.version(*slot).max(right.version(*slot));
             if version != base.version(*slot) {
@@ -320,6 +326,12 @@ impl Facts {
     }
     pub fn version(&self, slot: usize) -> u32 {
         self.versions.get(&slot).copied().unwrap_or(0)
+    }
+    /// `&mut slot` was taken: forget every fact about the slot and never
+    /// derive a new one, because later writes go through the reference.
+    pub fn make_opaque(&mut self, slot: usize) {
+        self.bump(slot);
+        self.opaque.insert(slot);
     }
     /// Assignment invalidates every fact about the old value.
     pub fn bump(&mut self, slot: usize) {
@@ -374,7 +386,7 @@ impl Facts {
         }
         match &expr.kind {
             ExprKind::Constant(n) => Some(Linear::constant(i128::from(*n))),
-            ExprKind::Local(slot) | ExprKind::Peek(slot) => {
+            ExprKind::Local(slot) | ExprKind::Peek(slot) if !self.opaque.contains(slot) => {
                 Some(Linear::variable(Term::Var(*slot, self.version(*slot))))
             }
             ExprKind::Unary(Kind::Minus, inner) => self.linear(inner)?.negate(),
@@ -402,7 +414,7 @@ impl Facts {
                 | Target::Slice(SliceOp::Len, _),
                 arguments,
             ) => {
-                let slot = owner_slot(&arguments[0])?;
+                let slot = owner_slot(&arguments[0]).filter(|slot| !self.opaque.contains(slot))?;
                 Some(Linear::variable(Term::Len(slot, self.version(slot))))
             }
             ExprKind::Block(block) if block.statements.is_empty() => {
@@ -416,7 +428,7 @@ impl Facts {
     pub fn assign(&mut self, slot: usize, value: &Expr) {
         let value = self.linear(value);
         self.bump(slot);
-        if let Some(value) = value {
+        if let Some(value) = value.filter(|_| !self.opaque.contains(&slot)) {
             let var = Linear::variable(Term::Var(slot, self.version(slot)));
             let mut out = Vec::new();
             compare(var, &Kind::EqEq, value, &mut out);
@@ -425,7 +437,7 @@ impl Facts {
     }
     /// Facts for a new binding `slot = value` at the slot's current version.
     pub fn define(&mut self, slot: usize, value: &Expr) {
-        if let Some(value) = self.linear(value) {
+        if let Some(value) = self.linear(value).filter(|_| !self.opaque.contains(&slot)) {
             let var = Linear::variable(Term::Var(slot, self.version(slot)));
             let mut out = Vec::new();
             compare(var, &Kind::EqEq, value, &mut out);

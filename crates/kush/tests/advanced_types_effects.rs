@@ -4236,7 +4236,7 @@ fn dynamic_array_field_views_through_references_and_temporaries() {
             Slice.len(v)
         }
         fn main() -> i64 ! {} { 0 }"#,
-        "while an exclusive '&mut [T]' view of it is live",
+        "cannot write through a reference while a view",
     );
     rejects(
         r#"
@@ -4423,4 +4423,251 @@ fn borrowed_dynamic_array_patterns_keep_the_array_loaned() {
         }"#,
         "cannot match a divergent, borrowed-reference",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Regressions from the independent DynArray review (A-REVIEW)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn review_writes_through_a_reference_parameter_respect_live_derived_borrows() {
+    // Finding 1: overwriting `*h` freed the boxes a borrowed-pattern binding
+    // still referenced.
+    rejects(
+        r#"
+        struct H { xs: DynArray<Box<i64>, 4>, k: i64 }
+        fn f(h: &mut H) -> i64 ! {alloc, panic} {
+            match &h.xs {
+                [x, ..] => { *h = H { xs: [], k: 0 }; let junk = Box.new(1234); Box.read(x) },
+                _ => 0,
+            }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut h = H { xs: [Box.new(42), Box.new(43)], k: 0 };
+            f(&mut h)
+        }"#,
+        "cannot write through a reference while a view, element reference, or pattern binding derived from it is live",
+    );
+    for write in ["*h = H { xs: [9], k: 0 };", "h.xs = [9];", "h.k = 7;"] {
+        rejects(
+            &format!(
+                r#"
+                struct H {{ xs: DynArray<i64, 4>, k: i64 }}
+                fn f(h: &mut H) -> i64 ! {{panic}} {{
+                    let s = &h.xs[..];
+                    {write}
+                    Slice.get(s, 0)
+                }}
+                fn main() -> i64 ! {{}} {{ 0 }}"#
+            ),
+            "derived from it is live",
+        );
+    }
+    // A plain field reference through the parameter is covered too.
+    rejects(
+        r#"
+        struct H { xs: DynArray<i64, 4>, k: i64 }
+        fn f(h: &mut H) -> i64 ! {panic} {
+            let p = &h.k;
+            *h = H { xs: [], k: 7 };
+            *p
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "derived from it is live",
+    );
+    // After the derived borrow's last use the write is fine.
+    let ok = r#"
+        struct H { xs: DynArray<i64, 4>, k: i64 }
+        fn f(h: &mut H) -> i64 ! {panic} {
+            let n = { let s = &h.xs[..]; Slice.get(s, 0) };
+            h.xs = [n + 1];
+            h.k = 2;
+            DynArray.get(&h.xs, 0) + h.k
+        }
+        fn main() -> i64 ! {panic} { let mut h = H { xs: [40], k: 0 }; f(&mut h) }"#;
+    assert_eq!(value(ok), 43);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(ok, 43);
+}
+
+#[test]
+fn review_mutable_borrows_remove_a_local_from_the_fact_system() {
+    // Finding 2: `0 <= i` survived a write through `&mut i`, so `Slice.at`
+    // read before the slice in native code.
+    for write in ["if i == 2 { let p = &mut i; *p = 0 - 3; }", "neg(&mut i);"] {
+        rejects(
+            &format!(
+                r#"
+                fn neg(p: &mut i64) -> Unit ! {{panic}} {{ *p = 0 - 1000; }}
+                fn main() -> i64 ! {{panic}} {{
+                    let a: [i64; 5] = [1, 1, 1, 1, 1];
+                    let v = &a[..];
+                    let mut i = 0;
+                    let mut acc = 0;
+                    while i < Slice.len(v) {{
+                        acc = acc + Slice.at(v, i, _);
+                        i = i + 1;
+                        {write}
+                        if acc > 3 {{ return acc; }}
+                    }}
+                    acc
+                }}"#
+            ),
+            "cannot prove",
+        );
+    }
+    // Straight-line: a fact established before `&mut` does not survive it.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: [i64; 5] = [1, 1, 1, 1, 1];
+            let v = &a[..];
+            let mut i = 2;
+            if 0 <= i && i < Slice.len(v) {
+                let p = &mut i;
+                *p = 0 - 3;
+                Slice.at(v, i, _)
+            } else { 0 }
+        }"#,
+        "proof obligation",
+    );
+    // The same through the runtime-length view fact.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 5;
+            let a: [i64; n <= 8] = Array.fill(n, 1);
+            let v = &a[..];
+            let mut i = 0;
+            let mut acc = 0;
+            while i < n {
+                acc = acc + Slice.at(v, i, _);
+                i = i + 1;
+                let p = &mut i;
+                *p = 0 - 3;
+            }
+            acc
+        }"#,
+        "cannot prove",
+    );
+}
+
+#[test]
+fn review_nested_borrowed_matches_release_their_scrutinee() {
+    // Finding 3: a borrowed match as an arm's tail was falsely rejected.
+    let source = r#"
+        enum Opt<T> { Some(T), None }
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<i64, 4> = [1, 2];
+            let o: Opt<DynArray<i64, 4>> = Opt.Some(a);
+            match o { Opt.Some(x) => match &x { [_, ..] => 5, _ => 0 }, Opt.None => 0 }
+        }"#;
+    assert_eq!(value(source), 5);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 5);
+    // An element reference that escapes the outer arm is still rejected:
+    // its storage is the arm's binding.
+    rejects(
+        r#"
+        enum Opt<T> { Some(T), None }
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 4> = [Box.new(1)];
+            let o: Opt<DynArray<Box<i64>, 4>> = Opt.Some(a);
+            let r = match o {
+                Opt.Some(x) => match &x { [b, ..] => b, _ => panic() },
+                Opt.None => panic(),
+            };
+            Box.read(r)
+        }"#,
+        "escapes",
+    );
+}
+
+#[test]
+fn review_returned_element_references_keep_their_split_side() {
+    // Finding 4: a reference returned from one split side conflicted with an
+    // element reference into the other side.
+    let source = r#"
+        struct P { x: i64, y: i64 }
+        fn bump<'a>(s: &'a mut [P], i: i64) -> &'a mut i64 ! {panic} { &mut s[i].y }
+        fn main() -> i64 ! {panic} {
+            let mut v: DynArray<P, 3> = [P { x: 1, y: 2 }, P { x: 3, y: 4 }, P { x: 5, y: 6 }];
+            {
+                let view: &mut [P] = &mut v[..];
+                let (l, r) = Slice.split_at_mut(view, 1);
+                let p = bump(r, 1);
+                let q = &mut l[0].x;
+                *p = *p + 10;
+                *q = 100;
+            }
+            let s = &v[..];
+            Slice.get(s, 2).y + Slice.get(s, 0).x
+        }"#;
+    assert_eq!(value(source), 116);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 116);
+    // The same side still conflicts.
+    rejects(
+        r#"
+        struct P { x: i64, y: i64 }
+        fn bump<'a>(s: &'a mut [P], i: i64) -> &'a mut i64 ! {panic} { &mut s[i].y }
+        fn main() -> i64 ! {panic} {
+            let mut v: DynArray<P, 3> = [P { x: 1, y: 2 }, P { x: 3, y: 4 }];
+            let view: &mut [P] = &mut v[..];
+            let (l, r) = Slice.split_at_mut(view, 1);
+            let q = &mut r[0].x;
+            let p = bump(r, 0);
+            *p + *q
+        }"#,
+        "cannot move an owner while it is borrowed",
+    );
+}
+
+#[test]
+fn review_diagnostics_and_small_limits() {
+    // Two binders with one name are named apart in the mismatch.
+    rejects(
+        r#"
+        fn mk(n: i64) -> [i64; n <= 8] ! {panic} { Array.fill(n, 1) }
+        fn main() -> i64 ! {panic} {
+            let k = 2;
+            let b = { let k = 7; mk(k) };
+            let c: [i64; k <= 8] = b;
+            0
+        }"#,
+        "two different bindings both named 'k'",
+    );
+    // A literal argument for a runtime-length parameter gets the proof rule.
+    rejects(
+        r#"
+        fn last(n: i64, a: [i64; n <= 8]) -> i64 ! {} { 0 }
+        fn main() -> i64 ! {} { let k = 5; last(k, [1, 2]) }"#,
+        "cannot prove that 'k' == 2",
+    );
+    let literal = r#"
+        fn count(n: i64, a: [i64; n <= 8]) -> i64 ! {} { n }
+        fn main() -> i64 ! {} { let k = 2; count(k, [1, 2]) }"#;
+    assert_eq!(value(literal), 2);
+    // `[..rest]` alone is exhaustive, and a later `_` is still accepted.
+    let rest = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1, 2];
+            let x = match a { [..rest] => DynArray.len(&rest) };
+            let y = match a { [..] => 10, _ => 0 };
+            x + y
+        }"#;
+    assert_eq!(value(rest), 12);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(rest, 12);
+    // Indexing through an exclusive reference to a runtime-length array.
+    let exclusive = r#"
+        fn f(n: i64, a: &mut [i64; n <= 4]) -> i64 ! {panic} { a[1] + a[2] }
+        fn main() -> i64 ! {panic} {
+            let k = 3;
+            let mut b: [i64; k <= 4] = Array.fill(k, 6);
+            f(k, &mut b)
+        }"#;
+    assert_eq!(value(exclusive), 12);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(exclusive, 12);
 }

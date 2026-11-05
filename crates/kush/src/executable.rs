@@ -16307,7 +16307,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Option<Expr>> {
         let array_ty = match base.ty {
-            Type::Ref(pointer) => self.types.pointees[pointer],
+            Type::Ref(pointer) | Type::RefMut(pointer) => self.types.pointees[pointer],
             ty => ty,
         };
         let Some(binder) = array_ty
@@ -16326,6 +16326,14 @@ impl Checker<'_, '_> {
                 span: base.span,
                 resource: None,
             },
+            // An exclusive reference is read without being moved: the read
+            // reborrows it as shared for this one element copy.
+            (ExprKind::Peek(slot), Type::RefMut(pointer)) => Expr {
+                kind: ExprKind::Peek(*slot),
+                ty: Type::Ref(pointer),
+                span: base.span,
+                resource: None,
+            },
             (ExprKind::Peek(slot), ty) if ty == array_ty => Expr {
                 kind: ExprKind::Borrow(*slot),
                 ty: Type::Ref(self.types.pointer(array_ty)),
@@ -16335,7 +16343,7 @@ impl Checker<'_, '_> {
             _ => {
                 return Err(Diagnostic::new(
                     base.span,
-                    "index a runtime-length array through a local binding or a shared reference parameter; bind the array to a local first",
+                    "index a runtime-length array through a local binding or a reference parameter; bind the array to a local first",
                 ));
             }
         };
@@ -16533,6 +16541,19 @@ impl Checker<'_, '_> {
             self.types.name(expected),
             self.types.name(actual)
         );
+        let binder = |ty: Type| {
+            ty.layout()
+                .and_then(|id| self.types.enums[id].runtime_length)
+        };
+        if let (Some(left), Some(right)) = (binder(expected), binder(actual))
+            && left != right
+            && self.resolution.bindings[left].name == self.resolution.bindings[right].name
+        {
+            message.push_str(&format!(
+                " (the lengths are two different bindings both named '{}'; a shadowed binding is a new length)",
+                self.resolution.bindings[left].name
+            ));
+        }
         if actual.layout().is_some()
             && actual.layout() == expected.layout()
             && self.mask(actual) & self.mask(expected) != 0
@@ -20896,6 +20917,11 @@ impl Checker<'_, '_> {
                     if let ast::ExprKind::Name(_) = &operand.kind {
                         let slot = c.slot(operand.span)?;
                         let value = c.borrow_local(slot, *mutable, span)?;
+                        if *mutable {
+                            // Writes through the reference are invisible to
+                            // the solver, so the local leaves the fact system.
+                            c.facts.make_opaque(slot);
+                        }
                         return match expected {
                             Some(expected) => c.coerce(value, expected, span),
                             None => Ok(value),
@@ -22087,6 +22113,10 @@ impl Checker<'_, '_> {
                     let mut arm_scalars = Vec::new();
                     // Variants still possible after earlier unguarded arms.
                     let mut remaining = c.mask(value.ty);
+                    // An unguarded `[..]` / `[..rest]` matches every DynArray
+                    // length. Coverage keeps treating it as a length pattern so
+                    // a later `_` stays accepted, but the match is exhaustive.
+                    let mut length_catch_all = false;
                     for arm in arms {
                         c.scalar_values = scalar_baseline.clone();
                         let pattern = c.pattern_refined(&arm.pattern, value.ty, remaining)?;
@@ -22118,6 +22148,11 @@ impl Checker<'_, '_> {
                         }
                         if guard.is_none() {
                             coverage.add(&pattern);
+                            length_catch_all |= matches!(
+                                &pattern,
+                                Pattern::DynArray { prefix, suffix, rest: true, .. }
+                                    if prefix.is_empty() && suffix.is_empty()
+                            );
                         }
                         checked.push(Arm {
                             pattern,
@@ -22125,7 +22160,9 @@ impl Checker<'_, '_> {
                             body,
                         });
                     }
-                    if coverage.useful(&Pattern::Any, value.ty, &c.types.enums, &c.types.unions)? {
+                    if !length_catch_all
+                        && coverage.useful(&Pattern::Any, value.ty, &c.types.enums, &c.types.unions)?
+                    {
                         return Err(Diagnostic::new(
                             span,
                             "non-exhaustive match; add missing cases or an unguarded catch-all",
@@ -27768,8 +27805,11 @@ impl Checker<'_, '_> {
         let mut values = Vec::new();
         for (declared, value) in pairs.iter() {
             let (declared, _) = split_grade(declared);
+            // A runtime-length array parameter takes the ordinary contextual
+            // path below, so a literal argument gets the length-proof rule.
             if let (ast::TypeKind::Array(element, length), ast::ExprKind::Array(items)) =
                 (&declared.kind, &value.kind)
+                && runtime_length_parts(length).is_none()
             {
                 let checked = self.infer_array_argument(
                     element,
@@ -32087,6 +32127,15 @@ impl Checker<'_, '_> {
                     if let Some(end) = end {
                         expr(end, out, calls);
                     }
+                }
+                K::Unary {
+                    op: Kind::Amp,
+                    mutable: true,
+                    operand,
+                } if matches!(operand.kind, K::Name(_)) => {
+                    // `&mut x` may write `x` through the reference: an update
+                    // of unknown direction.
+                    out.push((operand.span, None));
                 }
                 K::Unary { operand, .. }
                 | K::Try(operand)

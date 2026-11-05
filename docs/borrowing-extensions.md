@@ -595,6 +595,9 @@ let q = &mut right[1];      // the opposite split side: no conflict
   or `&'a mut T` (or a reference to a field inside the element). A shared view
   cannot back an exclusive result, and a local view's element cannot escape
   the frame.
+- **Writes through references.** `*r = value` and `r.field = value` are
+  rejected while a view, element reference, or borrowed-pattern binding
+  derived from `r` is live, including when `r` is a reference parameter.
 - **Runtime checks.** The index is checked against the view's runtime length
   when the reference is created, so the operation needs `panic`. A `&[i64]`
   over `Bytes` has byte-sized elements and no word-sized element address;
