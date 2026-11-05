@@ -4069,10 +4069,26 @@
       "deps": [
         "E-ABORT-PROPAGATE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/abortive-handlers.md 3.3: abort out of resume and resumable entries, dropping a pending continuation; dedicated use-after-free review.",
-      "commit": null,
-      "log": []
+      "commit": "1d40f61",
+      "log": [
+        {
+          "time": "2026-11-05 23:16:43",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 23:46:56",
+          "who": "agent",
+          "text": "done 1d40f61"
+        },
+        {
+          "time": "2026-11-05 23:46:56",
+          "who": "agent",
+          "text": "Scoped with the user to one-shot handlers of lexical operations; rest in E-ABORT-ENTRIES."
+        }
+      ]
     },
     {
       "id": "EFF-CAP-RESUME-CALLS",
@@ -4097,6 +4113,19 @@
       ],
       "status": "todo",
       "desc": "docs/effect-capabilities.md 3.2: by-reference-closure rules for a captured cap, including rejection across a non-tail perform; today lambdas cannot capture capabilities.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "E-ABORT-ENTRIES",
+      "title": "",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "E-ABORT-INTERACT"
+      ],
+      "status": "todo",
+      "desc": "docs/abortive-handlers.md 3.7: aborts out of resumable entries (dropping the caller's pending continuation k), through declared-operation non-tail handlers and through multishot resumptions; abort token calls inside a handle for the same operation; UAF review.",
       "commit": null,
       "log": []
     }
