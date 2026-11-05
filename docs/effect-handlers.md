@@ -204,7 +204,10 @@ Rules for suspendable bodies, checked after ownership:
   that is what the continuation returns to the handler;
 - a value holding a borrow (slice or text view, reference, borrowed record,
   task handle) cannot be live across a perform; a loan that ends before the
-  perform is fine;
+  perform is fine. Exception: a view or reference of storage declared
+  outside the handled body may stay live when the continuation does not
+  capture that storage and the handler does not write it (E-CPS-BORROW, see
+  [effect state machines](effect-state-machines.md#14-as-built));
 - a local the handler writes through its capture cannot be live across a
   perform;
 - a non-copyable local of the enclosing function that is used after a perform
@@ -298,8 +301,10 @@ reference evaluator.
   most twelve `effect` operations. There is no effect-polymorphic handler type
   over operation names, and the handler contract is a single operation per
   `handle`; several operations use nested handlers;
-- borrows of storage outside the handled body cannot be held across a perform
-  (plan node E-CPS-BORROW);
+- a borrow held across a perform must be a plain view or reference of
+  storage declared outside the handled body with known provenance; views of
+  body locals, views made in a loop whose owner the next iteration uses
+  again, borrowed records and by-reference closures stay rejected;
 - a called function with `@[0]` parameters or result has no resumable entry,
   and one whose own non-tail handled body contains `return` or `?` cannot be
   resumed by an outer handler; both are rejected under a non-tail handler;
