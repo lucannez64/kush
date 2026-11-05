@@ -264,6 +264,31 @@ fn recursive_calls_cannot_capture_their_own_length_binder() {
         fn main() -> i64 ! {panic} { let w = W { x: 0 }; w.go(0, 0, _) }"#,
         "a type argument of 'go' mentions its own length binder 'n'",
     );
+    // Review regression: the same through an inherited trait default, whose
+    // per-impl copy has its own binding while `n` belongs to the trait method.
+    rejects(
+        r#"
+        struct W<T> { x: T }
+        trait Go {
+            fn go(self: Self, n: i64, depth: i64, erased ok: { 0 <= n && n <= 4 }) -> i64 ! {} {
+                let a: [i64; n <= 4] = Array.fill(n, 5);
+                if depth == 0 {
+                    let w2 = W { x: a };
+                    let one: i64 = 1;
+                    w2.go(one, 1, _)
+                } else {
+                    let u: W<[i64; n <= 4]> | Self | Bool = self;
+                    match u {
+                        W<[i64; n <= 4]> @ w => { let y = w.x; if 0 < n { y[0] } else { 66 } },
+                        _ => 77,
+                    }
+                }
+            }
+        }
+        impl<T> Go for W<T> {}
+        fn main() -> i64 ! {} { let w = W { x: 0 }; w.go(0, 0, _) }"#,
+        "a type argument of 'go' mentions its own length binder 'n'",
+    );
     // A different function may still be instantiated with the caller's type.
     agrees(
         r#"

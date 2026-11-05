@@ -9780,10 +9780,21 @@ impl<'a> Functions<'a> {
         // being instantiated. Only a recursive call can write one, and in the
         // new activation that binder holds a different value, so a value of
         // the old length would get the new length's type.
+        // An inherited trait default runs under a synthesized per-impl
+        // binding, but its parameters and locals are owned by the trait
+        // method's own binding; both count as the function's own.
+        let body_owner = f
+            .parameters
+            .iter()
+            .find_map(|parameter| resolution.binder(parameter.span))
+            .and_then(|parameter| resolution.bindings[parameter].owner);
         for ty in substitution.types.values().chain(&substitution.self_type) {
             let captured = crate::runtime_types::runtime_length_binders(types, *ty)
                 .into_iter()
-                .find(|binder| resolution.bindings[*binder].owner == Some(binding));
+                .find(|binder| {
+                    let owner = resolution.bindings[*binder].owner;
+                    owner == Some(binding) || (owner.is_some() && owner == body_owner)
+                });
             if let Some(binder) = captured {
                 return Err(Diagnostic::new(
                     origin.unwrap_or(declared.span),
