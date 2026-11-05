@@ -1663,14 +1663,24 @@
       "deps": [
         "E-MULTI-PERFORM"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Functions whose row contains a declared op get a resumable form.",
-      "commit": null,
+      "commit": "8a3757b",
       "log": [
         {
           "time": "2026-11-05 06:50:44",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-05 07:18:40",
+          "who": "agent",
+          "text": "IR-based coloring (fixed point over the call graph of declared ops each function may perform); resumable entries g::resumable(args.., k) built on first use; await points marked by the checker from callee rows. Boat gate on 8a3757b: fmt, clippy, all tests pass."
+        },
+        {
+          "time": "2026-11-05 07:18:41",
+          "who": "agent",
+          "text": "done 8a3757b"
         }
       ]
     },
@@ -1683,10 +1693,26 @@
       "deps": [
         "E-CALLEE-COLOR"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "8a3757b",
+      "log": [
+        {
+          "time": "2026-11-05 07:18:41",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 07:18:41",
+          "who": "agent",
+          "text": "Real resumption across calls (user-approved behaviour change): return/?/normal completion continue the caller via k; tail points pass k (no allocation); unresumable paths (function values, trait objects, Task.scope, vector callbacks, nested handlers) rejected. Tests: two call levels, loops with owned values, recursion, return/?, direct entry kept under tail handlers."
+        },
+        {
+          "time": "2026-11-05 07:18:41",
+          "who": "agent",
+          "text": "done 8a3757b"
+        }
+      ]
     },
     {
       "id": "E-MULTISHOT-COPY",
@@ -1697,10 +1723,16 @@
       "deps": [
         "E-MULTI-PERFORM"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 07:12:02",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "E-MULTISHOT-DECL",
@@ -1726,10 +1758,16 @@
       "deps": [
         "E-DYN-RESUME"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 07:15:33",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "E-REVIEW",
