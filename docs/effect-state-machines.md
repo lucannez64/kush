@@ -487,6 +487,14 @@ is inherent (section 7).
    Kush has no unwinding that could abandon it and drop its live values.
 7. A non-tail perform inside the body of a nested non-tail handler or a
    nested declared-operation handler is rejected (multi-prompt capture).
+8. Added after the independent review: a point whose own call borrows a value
+   its continuation captures is rejected; locals holding by-reference
+   closures count as borrows; continuation code may not write a local the
+   handler captures by reference, nor (through a closure) one read after the
+   `handle`; a token must not be able to escape the handler through its
+   result type, payload type, or a written capture that can hold a function
+   value; and a `break`/`continue` in a `while` condition is rejected when the
+   loop is rebuilt around the condition.
 
 ### 14.1 Resumption across calls (E-CALLEE-COLOR, E-DYN-RESUME)
 

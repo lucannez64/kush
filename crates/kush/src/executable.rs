@@ -1342,6 +1342,9 @@ pub(crate) struct Suspendable {
     pub multishot: bool,
     /// Scalar locals the handler can write through a by-reference capture.
     pub handler_writes: Vec<usize>,
+    /// Locals the handler captures by reference; continuation code must
+    /// not write them, since the handler would read the original.
+    pub handler_refs: Vec<usize>,
     /// Effect row available at the handle site.
     pub effects: u16,
     pub body: Block,
@@ -11525,6 +11528,9 @@ enum ScalarValue {
 /// What `checked_effect_body` needs to build a `Suspendable` node.
 struct SuspendableSite {
     name: String,
+    handler_parameter: Type,
+    /// Locals the handler captures by reference (it reads or writes them).
+    handler_refs: Vec<usize>,
     handler_function: Option<usize>,
     /// The body performs the operation lexically outside its tail.
     lexical: bool,
@@ -23742,6 +23748,62 @@ impl Checker<'_, '_> {
     /// value reports the writing captures of its generated function; a local
     /// reports the captured targets recorded when it was bound. Unknown forms
     /// return `None` (they are never borrowed-capture closures in checked IR).
+    /// Locals a closure value captures by reference (reads or writes).
+    fn closure_reference_targets(&self, expr: &Expr) -> Vec<usize> {
+        let mut current = expr;
+        while let ExprKind::Coerce { value, .. } = &current.kind {
+            current = value;
+        }
+        let ExprKind::FnValue { function, captures } = &current.kind else {
+            return vec![];
+        };
+        let Some(body) = self
+            .functions
+            .bodies
+            .get(*function)
+            .and_then(Option::as_ref)
+        else {
+            return vec![];
+        };
+        body.capture_refs
+            .iter()
+            .enumerate()
+            .filter(|(_, by_reference)| **by_reference)
+            .filter_map(|(index, _)| match captures.get(index)?.kind {
+                ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => Some(slot),
+                _ => None,
+            })
+            .collect()
+    }
+    /// Whether a value of this type can hold a function value (directly, in
+    /// a field, element, union member, reference, or trait object).
+    fn contains_callable(&self, ty: Type) -> bool {
+        let mut pending = vec![ty];
+        let mut seen = BTreeSet::new();
+        while let Some(ty) = pending.pop() {
+            if !seen.insert(ty) {
+                continue;
+            }
+            match ty {
+                Type::Fn(_) | Type::Once(_) | Type::DynObj(_) | Type::Task(_) => return true,
+                Type::Box(p)
+                | Type::Vec(p)
+                | Type::Ref(p)
+                | Type::RefMut(p)
+                | Type::Slice(p)
+                | Type::SliceMut(p)
+                | Type::Annotated(p, _) => pending.push(self.types.pointees[p]),
+                Type::Enum(id) | Type::Variants(id, _) => {
+                    for variant in &self.types.enums[id].variants {
+                        pending.extend(variant.fields.iter().copied());
+                    }
+                }
+                Type::Union(id) => pending.extend(self.types.unions[id].members.iter().copied()),
+                _ => {}
+            }
+        }
+        false
+    }
     fn closure_write_targets(&self, expr: &Expr) -> Option<Vec<usize>> {
         let mut current = expr;
         loop {
@@ -30719,6 +30781,7 @@ impl Checker<'_, '_> {
             _ => None,
         };
         let handler_writes = self.closure_writes.get(&slot).cloned().unwrap_or_default();
+        let handler_refs = self.closure_reference_targets(&handler_value);
         self.handlers.push(HandlerScope {
             operation: operation.to_owned(),
             parameter: parameter_ty,
@@ -30746,6 +30809,8 @@ impl Checker<'_, '_> {
             span,
             region.then_some(SuspendableSite {
                 name: operation.to_owned(),
+                handler_parameter,
+                handler_refs: handler_refs.clone(),
                 lexical,
                 operation: declared.map(|declared| declared.id),
                 multishot,
@@ -30916,7 +30981,8 @@ impl Checker<'_, '_> {
                         result: ty,
                         token,
                         multishot: site.multishot,
-                        handler_writes: site.handler_writes,
+                        handler_writes: site.handler_writes.clone(),
+                        handler_refs: site.handler_refs.clone(),
                         effects: site.effects,
                         body: block,
                         span,
@@ -30927,6 +30993,37 @@ impl Checker<'_, '_> {
                 })),
                 ty,
             });
+        }
+        // A resumption token runs the rest of the body, whose effects and
+        // dynamic handlers belong to this `handle`; it must not outlive the
+        // handler activation. The handler can only hand it on through its
+        // result, its payload, or a local it writes through a capture.
+        let escape = if self.contains_callable(result_ty) {
+            Some(
+                "the operation result type can hold a function value, so the handler could return its resumption token",
+            )
+        } else if self.contains_callable(site.handler_parameter) {
+            Some(
+                "the handler's payload type can hold a function value, so the handler could store its resumption token",
+            )
+        } else if site
+            .handler_writes
+            .iter()
+            .any(|slot| self.contains_callable(self.locals[*slot].ty))
+        {
+            Some(
+                "the handler writes a captured local that can hold a function value, so it could store its resumption token",
+            )
+        } else {
+            None
+        };
+        if let Some(reason) = escape {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "{reason} and call it after the 'handle' ends, running the rest of the body outside it; use a tail-resumptive handler or a result type without function values"
+                ),
+            ));
         }
         if !site.lexical {
             if self.linear_type(result_ty) {
@@ -30955,7 +31052,8 @@ impl Checker<'_, '_> {
                 result: result_ty,
                 token,
                 multishot: site.multishot,
-                handler_writes: site.handler_writes,
+                handler_writes: site.handler_writes.clone(),
+                handler_refs: site.handler_refs.clone(),
                 effects: site.effects,
                 body: block,
                 span,

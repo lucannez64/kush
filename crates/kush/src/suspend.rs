@@ -534,6 +534,16 @@ fn point_paths(block: &Block) -> Result<BTreeMap<usize, Vec<Step>>> {
                 if contains_point(condition) {
                     return Err(misplaced(condition.span));
                 }
+                // The loop is rebuilt around the condition when resuming
+                // inside its body, which would retarget a jump in it.
+                if crate::executable::anf::exits_enclosing_loop(condition)
+                    && contains_point_block(body)
+                {
+                    return Err(Diagnostic::new(
+                        condition.span,
+                        "a 'break' or 'continue' inside the condition of a while loop whose body performs a non-tail operation is not supported; compute the condition in the loop body",
+                    ));
+                }
                 path.push(Step::Body);
                 in_block(body, path, out)?;
                 path.pop();
@@ -581,6 +591,13 @@ fn misplaced(span: Span) -> Diagnostic {
         span,
         "a non-tail 'perform' is not supported in this position; bind it with 'let' in the handled body",
     )
+}
+
+fn contains_point_block(block: &Block) -> bool {
+    block.statements.iter().any(|statement| match statement {
+        Statement::Let(_, value) | Statement::Expr(value) => contains_point(value),
+        Statement::Declare(_) => false,
+    }) || block.tail.as_deref().is_some_and(contains_point)
 }
 
 fn contains_point(expr: &Expr) -> bool {
@@ -847,7 +864,18 @@ fn check_escapes(block: &Block) -> Result<()> {
                 expr.span,
                 "a non-tail resumption continuation cannot 'break' or 'continue' to a loop outside the handled body",
             )),
-            ExprKind::Loop(_) | ExprKind::While(..) => {
+            ExprKind::While(condition, body) => {
+                // A jump in the condition targets an enclosing loop.
+                walk(condition, depth)?;
+                let wrapper = Expr {
+                    kind: ExprKind::Block(body.clone()),
+                    ty: body.ty,
+                    span: expr.span,
+                    resource: None,
+                };
+                walk(&wrapper, depth + 1)
+            }
+            ExprKind::Loop(_) => {
                 let mut result = Ok(());
                 expr.for_each_child(&mut |child| {
                     if result.is_ok() {
@@ -1039,6 +1067,11 @@ fn writing_closures(program: &Executable) -> BTreeMap<usize, Vec<bool>> {
 /// view local or a by-reference closure) whose source is unknown.
 fn point_borrows(call: &Expr, host: &Host) -> (Slots, bool) {
     fn operand(expr: &Expr, host: &Host, direct: &mut Slots, opaque: &mut bool) {
+        // A value whose type cannot hold a borrow ends every borrow made
+        // while computing it (`Vec.len(&v)`).
+        if !host.carries_borrow(expr.ty) {
+            return;
+        }
         match &expr.kind {
             ExprKind::Borrow(slot) | ExprKind::BorrowInit { slot, .. } => {
                 direct.insert(*slot);
@@ -1120,6 +1153,86 @@ struct Host {
     by_reference: Slots,
     /// Closures that write captured locals, by function index.
     capture_writes: BTreeMap<usize, Vec<bool>>,
+    /// Per record/enum layout: a value can hold a borrow or a closure.
+    carrying_layouts: Vec<bool>,
+    pointees: Vec<Type>,
+}
+
+impl Host {
+    /// Whether a value of `ty` can hold a borrow (conservatively: views,
+    /// references, closures, trait objects, unions, tasks, and data
+    /// containing them).
+    fn carries_borrow(&self, ty: Type) -> bool {
+        match ty {
+            Type::Slice(_)
+            | Type::SliceMut(_)
+            | Type::Str
+            | Type::StrMut
+            | Type::Ref(_)
+            | Type::RefMut(_)
+            | Type::Fn(_)
+            | Type::Once(_)
+            | Type::DynObj(_)
+            | Type::Union(_)
+            | Type::Task(_) => true,
+            Type::Enum(id) | Type::Variants(id, _) => self.carrying_layouts[id],
+            Type::Box(p) | Type::Vec(p) | Type::Annotated(p, _) => {
+                carries_in(self.pointees[p], &self.carrying_layouts, &self.pointees, 0)
+            }
+            _ => false,
+        }
+    }
+}
+
+fn carries_in(ty: Type, layouts: &[bool], pointees: &[Type], depth: usize) -> bool {
+    if depth > 16 {
+        return true;
+    }
+    match ty {
+        Type::Enum(id) | Type::Variants(id, _) => layouts[id],
+        Type::Box(p) | Type::Vec(p) | Type::Annotated(p, _) => {
+            carries_in(pointees[p], layouts, pointees, depth + 1)
+        }
+        Type::Slice(_)
+        | Type::SliceMut(_)
+        | Type::Str
+        | Type::StrMut
+        | Type::Ref(_)
+        | Type::RefMut(_)
+        | Type::Fn(_)
+        | Type::Once(_)
+        | Type::DynObj(_)
+        | Type::Union(_)
+        | Type::Task(_) => true,
+        _ => false,
+    }
+}
+
+/// Per layout: whether a value can hold a borrow or a closure, as a least
+/// fixed point over field types.
+fn carrying_layouts(program: &Executable) -> Vec<bool> {
+    let mut layouts = vec![false; program.enums.len()];
+    loop {
+        let mut changed = false;
+        for (index, layout) in program.enums.iter().enumerate() {
+            if layouts[index] {
+                continue;
+            }
+            let carries = layout.variants.iter().any(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .any(|field| carries_in(*field, &layouts, &program.pointees, 0))
+            });
+            if carries {
+                layouts[index] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break layouts;
+        }
+    }
 }
 
 /// What the machine builder needs about one suspendable body.
@@ -1130,6 +1243,9 @@ struct Spec {
     token: Type,
     multishot: bool,
     handler_writes: Vec<usize>,
+    /// Locals the handler captures by reference: continuation code must not
+    /// write them.
+    handler_refs: Vec<usize>,
     /// Effect row at the handle; `None` for a resumable entry, whose
     /// allocation is checked at the handle that awaits it.
     effects: Option<u16>,
@@ -1439,7 +1555,9 @@ fn build(
         site.resource = None;
     }
     // One continuation function per point.
-    let outer_live = |slot: usize| !bound.contains(&slot) && host.after.contains(&slot);
+    let outer_live = |slot: usize| {
+        (!bound.contains(&slot) && host.after.contains(&slot)) || spec.handler_refs.contains(&slot)
+    };
     let finish = |span: Span| {
         spec.finish.map(|slot| {
             Box::new(Expr {
@@ -1684,6 +1802,8 @@ fn lower_one(
         after,
         by_reference: by_reference_closures(program, &function.body),
         capture_writes: writing_closures(program),
+        carrying_layouts: carrying_layouts(program),
+        pointees: program.pointees.clone(),
     };
     let mut body = std::mem::replace(&mut program.functions[index].body, empty_block());
     let first_function = program.functions.len();
@@ -1695,6 +1815,7 @@ fn lower_one(
             token,
             multishot,
             handler_writes,
+            handler_refs,
             effects,
             body,
             span,
@@ -1705,6 +1826,7 @@ fn lower_one(
             token,
             multishot,
             handler_writes,
+            handler_refs,
             effects: Some(effects),
             awaited_allocates,
             finish: None,
@@ -2293,12 +2415,15 @@ fn resumable_entry(
         after: Slots::new(),
         by_reference: by_reference_closures(program, &body),
         capture_writes: writing_closures(program),
+        carrying_layouts: carrying_layouts(program),
+        pointees: program.pointees.clone(),
     };
     let spec = Spec {
         result,
         token: Type::Unit,
         multishot: false,
         handler_writes: vec![],
+        handler_refs: vec![],
         effects: None,
         awaited_allocates,
         finish: Some(k),

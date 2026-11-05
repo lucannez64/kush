@@ -1068,3 +1068,130 @@ fn review_performs_on_the_left_of_short_circuits_and_in_borrowed_temporaries() {
     );
     agrees(&temporary, 4102, "");
 }
+
+#[test]
+fn review_resumption_tokens_cannot_escape_the_handle() {
+    // Returning the token inside the result would let the rest of the body
+    // run after the handle, outside its effect row and dynamic handlers.
+    rejects(
+        r#"
+        enum G { Done(i64), More(i64, fn(G) -> G ! {}) }
+        fn make() -> G ! {io, panic} {
+            handle Yield: i64 -> G with fn(
+                x: i64,
+                resume: fn(G) -> G ! {},
+            ) -> G ! {} { G.More(x, resume) } {
+                let r = perform Yield(1);
+                print_i64(555);
+                r
+            }
+        }
+        fn main() -> i64 ! {io, panic} { match make() { G.Done(n) => n, G.More(x, k) => x } }"#,
+        "could return its resumption token",
+    );
+    rejects(
+        r#"
+        enum G { Done(i64), More(i64, linear once fn(G) -> G ! {}) }
+        fn make() -> G ! {io, alloc, panic} {
+            let n = 4;
+            handle Yield: i64 -> G with fn(
+                x: i64,
+                resume: linear once fn(G) -> G ! {},
+            ) -> G ! {} { G.More(x, resume) } {
+                let r = perform Yield(1);
+                print_i64(n);
+                r
+            }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            match make() { G.Done(n) => n, G.More(x, k) => match k(G.Done(1)) { G.Done(n) => n, G.More(y, k2) => y } }
+        }"#,
+        // A one-shot token makes the result type linear, which a non-tail
+        // resumption already refuses.
+        "linear operation result",
+    );
+}
+
+#[test]
+fn review_continuations_cannot_write_locals_the_handler_reads() {
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let mut n = 1;
+            handle Ask: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { let r = resume(x * 10); r + n } {
+                let a = perform Ask(1);
+                n = 50;
+                a
+            }
+        }"#,
+        "cannot write a local of the enclosing function",
+    );
+}
+
+#[test]
+fn review_jumps_in_while_conditions_keep_their_target_or_are_rejected() {
+    rejects(
+        &with_handler(
+            "",
+            "let mut s = 0;
+             let mut i = 0;
+             loop {
+                 i = i + 1;
+                 let mut j = 0;
+                 while { if j == 2 { break; } j < 5 } { let a = perform Ask(j); s = s + a; j = j + 1; }
+                 if i > 3 { break; }
+             }
+             s",
+        ),
+        "inside the condition of a while loop",
+    );
+    rejects(
+        &with_handler(
+            "",
+            "let mut j = 0;
+             loop {
+                 while { if j == 2 { break; } perform Ask(j) < 5 } { j = j + 1; }
+                 break;
+             }
+             j",
+        ),
+        "inside a while condition",
+    );
+    // Leaving the handled body from a while condition after a perform is a
+    // jump out of the continuation (an internal error before the fix).
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let mut out = 0;
+            loop {
+                let r = handle Ask: i64 -> i64 with fn(
+                    x: i64,
+                    resume: linear once fn(i64) -> i64 ! {},
+                ) -> i64 ! {panic} { let r = resume(x * 10); r + 1 } {
+                    let a = perform Ask(1);
+                    let mut j = 0;
+                    while { if a > 5 { break; } j < 3 } { j = j + 1; }
+                    a + j
+                };
+                out = r;
+                break;
+            }
+            out
+        }"#,
+        "cannot 'break' or 'continue' to a loop outside the handled body",
+    );
+}
+
+#[test]
+fn review_borrows_that_end_inside_the_payload_are_accepted() {
+    let source = with_handler(
+        "",
+        "let v: Vec<i64> = [1, 2, 3];
+         let b = perform Ask(Vec.len(&v));
+         b + Vec.len(&v)",
+    );
+    agrees(&source, 34, "");
+}

@@ -30,6 +30,22 @@ pub(crate) fn contains_suspend(expr: &Expr) -> bool {
     }
 }
 
+/// Whether `expr` contains a `break` or `continue` that targets a loop
+/// enclosing it (not one of its own loops). A `while` condition may do this,
+/// and moving such a condition inside a new loop would retarget the jump.
+pub(crate) fn exits_enclosing_loop(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Break(..) | ExprKind::Continue(_) => true,
+        ExprKind::Loop(_) => false,
+        ExprKind::While(condition, _) => exits_enclosing_loop(condition),
+        _ => {
+            let mut found = false;
+            expr.for_each_child(&mut |child| found |= exits_enclosing_loop(child));
+            found
+        }
+    }
+}
+
 fn block_contains_suspend(block: &Block) -> bool {
     block.statements.iter().any(|statement| match statement {
         Statement::Let(_, value) | Statement::Expr(value) => contains_suspend(value),
@@ -318,6 +334,14 @@ impl<T: Temporaries> Anf<'_, T> {
     /// `continue` still re-evaluates the condition at the loop head.
     fn while_to_loop(&mut self, expr: &mut Expr) -> Result<()> {
         let span = expr.span;
+        if let ExprKind::While(condition, _) = &expr.kind
+            && exits_enclosing_loop(condition)
+        {
+            return Err(Diagnostic::new(
+                condition.span,
+                "a 'break' or 'continue' inside a while condition that performs a non-tail operation is not supported; compute the condition in the loop body",
+            ));
+        }
         let ExprKind::While(condition, body) =
             std::mem::replace(&mut expr.kind, ExprKind::Constant(0))
         else {

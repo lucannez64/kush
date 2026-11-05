@@ -217,7 +217,20 @@ Rules for suspendable bodies, checked after ownership:
   `{alloc, panic}`;
 - a linear operation result is rejected for non-tail resumption;
 - a perform nested in a match guard, or inside the body of a nested non-tail
-  or declared-operation handler, is rejected.
+  or declared-operation handler, is rejected;
+- a call that can suspend may not borrow a value its continuation still uses
+  (`g(&mut v)` followed by a use of `v`); a borrow that ends inside an
+  argument (`Vec.len(&v)`) is fine;
+- a local holding a closure that captures by reference cannot live across a
+  perform, and continuation code cannot write a local the handler captures by
+  reference or a local read after the `handle`, directly or through a
+  closure;
+- the token must not outlive the handler: an operation result type, a handler
+  payload type, or a handler-written capture that can hold a function value
+  is rejected for non-tail resumption;
+- a `break`/`continue` inside a `while` condition is rejected when the loop
+  has to be rebuilt around a perform (the condition performs, or the body
+  performs).
 
 A one-shot token's linearity makes a second resumption a use-after-move, and a
 linear value held across a perform moves into exactly one continuation
@@ -272,6 +285,9 @@ reference evaluator.
   `handle`; several operations use nested handlers;
 - borrows of storage outside the handled body cannot be held across a perform
   (plan node E-CPS-BORROW);
+- a called function with `@[0]` parameters or result has no resumable entry,
+  and one whose own non-tail handled body contains `return` or `?` cannot be
+  resumed by an outer handler; both are rejected under a non-tail handler;
 - `perform` cannot be used in an erased logical definition or a total function.
 
 The tests in `crates/kush/tests/effect_state_machines.rs` and
