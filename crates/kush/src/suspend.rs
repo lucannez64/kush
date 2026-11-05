@@ -8,7 +8,8 @@
 //!
 //! 1. computes the locals live after each suspension point `i` (`L(i)`) with
 //!    a backward liveness over the checked IR, including loop fixed points;
-//! 2. checks the suspension rules of the design (no borrow across a point,
+//! 2. checks the suspension rules of the design (no borrow across a point
+//!    except a view of outer storage the continuation does not capture,
 //!    no handler-written local across a point, outer locals moved into the
 //!    machine are not used again by `F`, no `return`/`?`/outer `break` after a
 //!    point, `alloc` for a capturing resumption);
@@ -1091,6 +1092,155 @@ fn writing_closures(program: &Executable) -> BTreeMap<usize, Vec<bool>> {
         .collect()
 }
 
+/// A local that is a plain view or reference: its value is a pointer into
+/// storage owned by some other local (or by the caller).
+fn is_view_local(ty: Type) -> bool {
+    ty.is_view() || ty.is_ref()
+}
+
+/// Conservative loan provenance for the view and reference locals of a
+/// function body (E-CPS-BORROW): for each such local, the owner locals whose
+/// storage its value may point into. A parameter contributes no owner (its
+/// storage belongs to the caller, whose frame outlives this activation). A
+/// local is `None` (unknown) when any of its definitions is not one of the
+/// forms below, so the suspension rule falls back to rejecting it.
+///
+/// Understood value forms: `&x`, `&place`, `x[a..b]` / `&x[..]` (a slice of
+/// an owner, or of a view, which shares that view's owners), copies of
+/// another view local, coercions, and direct calls (the result may borrow
+/// from any borrow-carrying argument).
+fn borrow_origins(
+    body: &Block,
+    locals: &[Local],
+    parameters: usize,
+    carries: &dyn Fn(Type) -> bool,
+) -> BTreeMap<usize, Option<Slots>> {
+    fn collect<'a>(block: &'a Block, definitions: &mut Vec<(usize, &'a Expr)>, opaque: &mut Slots) {
+        for statement in &block.statements {
+            match statement {
+                Statement::Let(slot, value) => {
+                    definitions.push((*slot, value));
+                    walk(value, definitions, opaque);
+                }
+                Statement::Expr(value) => walk(value, definitions, opaque),
+                Statement::Declare(_) => {}
+            }
+        }
+        if let Some(tail) = &block.tail {
+            walk(tail, definitions, opaque);
+        }
+    }
+    fn walk<'a>(expr: &'a Expr, definitions: &mut Vec<(usize, &'a Expr)>, opaque: &mut Slots) {
+        match &expr.kind {
+            ExprKind::Assign(slot, value) | ExprKind::InitOwner { slot, value } => {
+                definitions.push((*slot, value));
+            }
+            ExprKind::BorrowInit { slot, .. } => {
+                opaque.insert(*slot);
+            }
+            ExprKind::Match(_, arms) => {
+                for arm in arms {
+                    crate::ownership::pattern_bindings(&arm.pattern, opaque);
+                }
+            }
+            _ => {}
+        }
+        let mut blocks = Vec::new();
+        let mut children = Vec::new();
+        block_children(expr, &mut |block| blocks.push(block), &mut |child| {
+            children.push(child)
+        });
+        for block in blocks {
+            collect(block, definitions, opaque);
+        }
+        for child in children {
+            walk(child, definitions, opaque);
+        }
+    }
+    let mut definitions = Vec::new();
+    let mut opaque = Slots::new();
+    collect(body, &mut definitions, &mut opaque);
+    let defined = definitions.iter().map(|(slot, _)| *slot).collect::<Slots>();
+    let mut origins = BTreeMap::new();
+    for (slot, local) in locals.iter().enumerate() {
+        if !is_view_local(local.ty) {
+            continue;
+        }
+        let known = !opaque.contains(&slot) && (slot < parameters || defined.contains(&slot));
+        origins.insert(slot, known.then(Slots::new));
+    }
+    loop {
+        let mut changed = false;
+        for (slot, value) in &definitions {
+            let Some(Some(current)) = origins.get(slot) else {
+                continue;
+            };
+            let next = roots(value, locals, &origins, carries).map(|found| {
+                let mut next = current.clone();
+                next.extend(found);
+                next
+            });
+            if next.as_ref() != Some(current) {
+                origins.insert(*slot, next);
+                changed = true;
+            }
+        }
+        if !changed {
+            break origins;
+        }
+    }
+}
+
+/// Owner locals a place expression's storage belongs to.
+fn place_roots(
+    place: &Expr,
+    locals: &[Local],
+    origins: &BTreeMap<usize, Option<Slots>>,
+) -> Option<Slots> {
+    let root = place_root(place)?;
+    if is_view_local(locals[root].ty) {
+        // A slice of a view, or a field of a referenced record: the
+        // storage is the view's (or reference's) own referent.
+        origins.get(&root).cloned().flatten()
+    } else {
+        Some(Slots::from([root]))
+    }
+}
+/// Owner locals a borrow-carrying value may point into, or `None` when its
+/// source is not one of the forms `borrow_origins` understands.
+fn roots(
+    expr: &Expr,
+    locals: &[Local],
+    origins: &BTreeMap<usize, Option<Slots>>,
+    carries: &dyn Fn(Type) -> bool,
+) -> Option<Slots> {
+    match &expr.kind {
+        ExprKind::Coerce { value, .. } => roots(value, locals, origins, carries),
+        ExprKind::Borrow(slot) => {
+            let mut out = Slots::from([*slot]);
+            if is_view_local(locals[*slot].ty) {
+                out.extend(origins.get(slot).cloned().flatten()?);
+            }
+            Some(out)
+        }
+        ExprKind::BorrowPlace(place) => place_roots(place, locals, origins),
+        ExprKind::Slice { base, .. } => place_roots(base, locals, origins),
+        ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot)
+            if is_view_local(locals[*slot].ty) =>
+        {
+            origins.get(slot).cloned().flatten()
+        }
+        ExprKind::Call(_, arguments) => {
+            let mut out = Slots::new();
+            for argument in arguments.iter().filter(|argument| carries(argument.ty)) {
+                out.extend(roots(argument, locals, origins, carries)?);
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 /// Locals a suspension point's own call borrows: directly (`&v`, `&mut v`,
 /// a place reference), plus whether it passes an opaque borrowed value (a
 /// view local or a by-reference closure) whose source is unknown.
@@ -1099,6 +1249,15 @@ fn point_borrows(call: &Expr, host: &Host) -> (Slots, bool) {
         // A value whose type cannot hold a borrow ends every borrow made
         // while computing it (`Vec.len(&v)`).
         if !host.carries_borrow(expr.ty) {
+            return;
+        }
+        // A view or reference with known owners borrows exactly those.
+        if (expr.ty.is_view() || expr.ty.is_ref())
+            && let Some(owners) = roots(expr, &host.locals, &host.origins, &|ty| {
+                host.carries_borrow(ty)
+            })
+        {
+            direct.extend(owners);
             return;
         }
         match &expr.kind {
@@ -1185,6 +1344,9 @@ struct Host {
     /// Per record/enum layout: a value can hold a borrow or a closure.
     carrying_layouts: Vec<bool>,
     pointees: Vec<Type>,
+    /// Per view or reference local: the owner locals it may borrow from,
+    /// or `None` when its source is not understood (see `borrow_origins`).
+    origins: BTreeMap<usize, Option<Slots>>,
 }
 
 impl Host {
@@ -1303,6 +1465,40 @@ struct Built {
     allocates: bool,
 }
 
+/// Whether a borrow-holding local live across a suspension point may stay
+/// live (E-CPS-BORROW). It must be a plain view or reference whose every
+/// possible owner is
+///
+/// - declared outside the handled body: suspension never pops a native or
+///   evaluator frame (the handler, the token and every continuation run
+///   nested inside the activation that reached the point, and the token
+///   cannot escape the handler), so such storage outlives every
+///   continuation and is never moved by the lowering;
+/// - not captured at this point: a captured owner is moved or copied into
+///   the continuation's environment, so the view would point at the stale
+///   original while the continuation used the copy;
+/// - not written by the handler through a capture, and not read by it at all
+///   when the view is exclusive.
+///
+/// Everything else the view can observe is ordinary code in the structured
+/// body, which ownership has already checked with the perform as a call.
+fn outer_borrow(host: &Host, spec: &Spec, bound: &Slots, captured: &[usize], slot: usize) -> bool {
+    let ty = host.locals[slot].ty;
+    if host.by_reference.contains(&slot) || !is_view_local(ty) {
+        return false;
+    }
+    let exclusive = ty.is_mut_slice() || matches!(ty, Type::RefMut(_));
+    let Some(Some(owners)) = host.origins.get(&slot) else {
+        return false;
+    };
+    owners.iter().all(|owner| {
+        !bound.contains(owner)
+            && !captured.contains(owner)
+            && !spec.handler_writes.contains(owner)
+            && !(exclusive && spec.handler_refs.contains(owner))
+    })
+}
+
 /// Turn a suspendable body into a region whose points leave it with the
 /// handler's (or the awaited entry's) result, plus one continuation function
 /// per point, numbered from `first_function`.
@@ -1379,11 +1575,13 @@ fn build(
         let at = point_spans[point];
         for slot in slots {
             let local = &locals[*slot];
-            if host.borrowed.get(*slot).copied().unwrap_or(true) || host.by_reference.contains(slot)
+            if (host.borrowed.get(*slot).copied().unwrap_or(true)
+                || host.by_reference.contains(slot))
+                && !outer_borrow(host, spec, &bound, slots, *slot)
             {
                 return Err(Diagnostic::new(
                     at,
-                    "a borrowed value (slice view, text view, reference, borrowed record, or task handle) cannot stay live across a non-tail 'perform'; end the borrow before the perform or pass an owned value",
+                    "a borrowed value (slice view, text view, reference, borrowed record, or task handle) cannot stay live across a non-tail 'perform' unless it is a view or reference of storage declared outside the handled body that the resumption neither captures nor lets the handler write; end the borrow before the perform or pass an owned value",
                 )
                 .with_note(local.span, "borrowed value declared here"));
             }
@@ -1907,7 +2105,15 @@ fn lower_one(
         live.block(&function.body, &Slots::new());
         live.target_after
     };
+    let layouts = carrying_layouts(program);
+    let origins = borrow_origins(
+        &function.body,
+        &function.locals,
+        function.parameters,
+        &|ty| carries_in(ty, &layouts, &program.pointees, 0),
+    );
     let host = Host {
+        origins,
         name: function.name.clone(),
         locals: function.locals.clone(),
         resources: function.resources.clone(),
@@ -2514,7 +2720,12 @@ fn resumable_entry(
     for_each_value_mut(&mut body, &mut |value| {
         rewrite_entry_exits(value, &cleanup, false)
     })?;
+    let layouts = carrying_layouts(program);
+    let origins = borrow_origins(&body, &locals, source.parameters, &|ty| {
+        carries_in(ty, &layouts, &program.pointees, 0)
+    });
     let host = Host {
+        origins,
         name: format!("{}::resumable", source.name),
         locals,
         resources,

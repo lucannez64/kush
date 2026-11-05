@@ -710,16 +710,19 @@ fn unresumable_calls_are_rejected() {
         ),
         "calling a function value that may perform 'Op'",
     );
-    // A borrow held across a perform inside a called function.
+    // A borrow of a body-local owner held across a perform inside a called
+    // function. (A view of a parameter is accepted since E-CPS-BORROW; see
+    // `views_of_outer_storage_cross_performs_in_called_functions`.)
     rejects(
         &declared(
-            "fn view(v: Vec<i64>) -> i64 ! {Op, alloc, panic} {
+            "fn view(n: i64) -> i64 ! {Op, alloc, panic} {
+                 let v: Vec<i64> = [n, n];
                  let s = &v[0..1];
                  let a = perform Op(1);
                  a + Slice.len(s)
              }",
             "alloc, panic",
-            "view([1, 2])",
+            "view(2)",
         ),
         "cannot stay live across a non-tail 'perform'",
     );
@@ -1639,4 +1642,274 @@ fn review_operand_borrows_keep_their_order_before_a_later_write() {
         with_handler("", "let x = 1; g(&x, perform Ask(0))")
     );
     agrees(&fine, 2, "");
+}
+
+// ---------------------------------------------------------------------------
+// Borrows of outer storage across a suspension (E-CPS-BORROW)
+// ---------------------------------------------------------------------------
+
+fn outer_borrow(before: &str, body: &str, after: &str) -> String {
+    format!(
+        "fn main() -> i64 ! {{io, alloc, panic}} {{
+            {before}
+            let res = {DOUBLING} {{ {body} }};
+            print_i64(res);
+            {after}
+            0
+        }}"
+    )
+}
+
+#[test]
+fn views_of_outer_storage_cross_a_perform() {
+    // A view of an inline array declared before the handle.
+    agrees(
+        &outer_borrow(
+            "let v = [1, 2, 3];",
+            "let s = &v[0..2]; let a = perform Ask(1); a + Slice.len(s) + s[1]",
+            "",
+        ),
+        0,
+        "15\n",
+    );
+    // A view declared outside the body, live across two performs.
+    agrees(
+        &outer_borrow(
+            "let v = [1, 2, 3]; let s = &v[1..3];",
+            "let a = perform Ask(1); let b = perform Ask(2); a + b + s[0] + s[1]",
+            "",
+        ),
+        0,
+        "37\n",
+    );
+    // A view of a heap vector, live across performs inside a loop.
+    agrees(
+        &outer_borrow(
+            "let mut w: Vec<i64> = Vec.new(); w = Vec.push(w, 5); w = Vec.push(w, 6);",
+            "let s = &w[..];
+             let mut i = 0;
+             let mut t = 0;
+             while i < 2 { let a = perform Ask(i); t = t + a + s[i]; i = i + 1; }
+             t",
+            "print_i64(Vec.len(&w));",
+        ),
+        0,
+        "23\n2\n",
+    );
+    // A text view of an outer `String`.
+    agrees(
+        &outer_borrow(
+            "let name = String.from(\"hello\");",
+            "let s = String.as_str(&name); let a = perform Ask(1); a + Str.len(s)",
+            "",
+        ),
+        0,
+        "16\n",
+    );
+}
+
+#[test]
+fn exclusive_views_of_outer_storage_write_the_original() {
+    // Writes through the view land in the enclosing function's storage, so
+    // they are visible after the handle.
+    agrees(
+        &outer_borrow(
+            "let mut v = [1, 2, 3];",
+            "let s = &mut v[0..2]; let a = perform Ask(1); Slice.set(s, 0, a); 0",
+            "print_i64(Slice.get(&v[..], 0));",
+        ),
+        0,
+        "1\n10\n",
+    );
+    agrees(
+        &format!(
+            "struct P {{ x: i64, y: i64 }} {}",
+            outer_borrow(
+                "let mut p = P { x: 1, y: 2 };",
+                "let r = &mut p;
+                 let a = perform Ask(1);
+                 r.x = a;
+                 let b = perform Ask(2);
+                 r.y = b;
+                 a + b",
+                "print_i64(p.x + p.y);",
+            )
+        ),
+        0,
+        "32\n30\n",
+    );
+}
+
+#[test]
+fn views_created_in_a_continuation_point_into_its_own_copy() {
+    // `w` and `arr` are moved into the first continuation; the views made
+    // there borrow that continuation's copies, which stay alive (and are not
+    // captured again) until the second continuation finishes. The fresh
+    // vector allocated after the second perform would reuse freed memory if
+    // `w` had been released early.
+    let source = outer_borrow(
+        "let mut w: Vec<i64> = Vec.new(); w = Vec.push(w, 40); w = Vec.push(w, 2);
+         let arr = [5, 6, 7];",
+        "let a = perform Ask(1);
+         let s = &w[..];
+         let t = &arr[1..];
+         let b = perform Ask(2);
+         let mut junk: Vec<i64> = Vec.new();
+         junk = Vec.push(junk, 999); junk = Vec.push(junk, 998);
+         a + b + s[0] + s[1] + t[1] + Vec.len(&junk)",
+        "",
+    );
+    // The evaluator reports a read through a view of released storage as a
+    // dangling-view error, so agreement also checks the owner's lifetime.
+    agrees(&source, 0, "83\n");
+}
+
+#[test]
+fn views_of_outer_storage_cross_multishot_resumptions() {
+    // The view is copyable, so each resumption gets its own copy of it.
+    agrees(
+        "fn main() -> i64 ! {io, alloc, panic} {
+            let arr = [5, 6, 7];
+            let res = handle Ask: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { let p = resume(1); let q = resume(2); p * 100 + q } {
+                let s = &arr[1..];
+                let a = perform Ask(0);
+                a + s[0]
+            };
+            print_i64(res);
+            0
+        }",
+        0,
+        "708\n",
+    );
+}
+
+#[test]
+fn views_of_outer_storage_cross_performs_in_called_functions() {
+    // `view` holds a view of its owned parameter and `outer` a view derived
+    // from its view parameter. Both owners belong to frames that stay alive
+    // until the handled body finishes; the junk vector would reuse `v`'s
+    // buffer if it were freed early.
+    let source = "effect Op: i64 -> i64;
+        fn view(v: Vec<i64>) -> i64 ! {Op, alloc, panic} {
+            let s = &v[0..2];
+            let a = perform Op(1);
+            let mut junk: Vec<i64> = Vec.new();
+            junk = Vec.push(junk, 999); junk = Vec.push(junk, 998);
+            a + s[0] + s[1] + Vec.len(&junk)
+        }
+        fn outer(xs: &[i64]) -> i64 ! {Op, alloc, panic} {
+            let s = &xs[1..];
+            let a = perform Op(2);
+            a + s[0]
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut w: Vec<i64> = Vec.new(); w = Vec.push(w, 40); w = Vec.push(w, 2);
+            let arr = [3, 4, 5];
+            let res = handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { let r = resume(x ^ 8); r ^ 4096 } {
+                let b = outer(&arr[..]);
+                view(w) + b
+            };
+            print_i64(res);
+            0
+        }";
+    // outer: 10 + 4; view: 9 + 40 + 2 + 2; each handler flips bit 12 once.
+    agrees(source, 0, "67\n");
+}
+
+#[test]
+fn borrows_that_the_resumption_could_invalidate_stay_rejected() {
+    let message = "cannot stay live across a non-tail 'perform'";
+    // The owner is declared inside the handled body.
+    rejects(
+        &outer_borrow(
+            "",
+            "let v = [1, 2, 3]; let s = &v[0..2]; let a = perform Ask(1); a + s[0]",
+            "",
+        ),
+        message,
+    );
+    // The continuation also uses the owner, so it is captured (moved or
+    // copied) while the view still points at the original.
+    rejects(
+        &outer_borrow(
+            "let v = [1, 2, 3];",
+            "let s = &v[0..2]; let a = perform Ask(1); a + Slice.len(&v[..]) + s[0]",
+            "",
+        ),
+        message,
+    );
+    rejects(
+        &outer_borrow(
+            "let mut v = [1, 2, 3];",
+            "let s = &mut v[0..2];
+             let a = perform Ask(1);
+             Slice.set(s, 0, a);
+             Slice.len(&v[..])",
+            "",
+        ),
+        message,
+    );
+    rejects(
+        &outer_borrow(
+            "let mut w: Vec<i64> = Vec.new(); w = Vec.push(w, 5);",
+            "let s = &w[..];
+             let a = perform Ask(1);
+             let n = s[0];
+             w = Vec.push(w, 1);
+             n + a + Vec.len(&w)",
+            "",
+        ),
+        message,
+    );
+    // A view made in a loop whose owner the next iteration uses again.
+    rejects(
+        &outer_borrow(
+            "let w = [5, 6];",
+            "let mut i = 0;
+             let mut t = 0;
+             while i < 2 { let s = &w[..]; let a = perform Ask(i); t = t + a + s[i]; i = i + 1; }
+             t",
+            "",
+        ),
+        message,
+    );
+    // The view's owner is not known (selected by a branch).
+    rejects(
+        &outer_borrow(
+            "let arr = [5, 6, 7]; let brr = [1, 2, 3]; let c = true;",
+            "let s = if c { &arr[..] } else { &brr[..] }; let a = perform Ask(1); a + s[0]",
+            "",
+        ),
+        message,
+    );
+    // A handler that writes the owner: ownership already rejects the borrow.
+    rejects(
+        "fn main() -> i64 ! {alloc, panic} {
+            let mut n = 1;
+            handle Ask: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { n = 50; let r = resume(x); r + 1 } {
+                let r = &n;
+                let a = perform Ask(1);
+                a + *r
+            }
+        }",
+        "exclusively captures",
+    );
+    // An awaited call that borrows an owner its continuation captures.
+    rejects(
+        &declared(
+            "fn outer(xs: &[i64]) -> i64 ! {Op, alloc, panic} { let a = perform Op(2); a + xs[0] }",
+            "alloc, panic",
+            "let arr = [3, 4, 5]; let b = outer(&arr[..]); b + Slice.len(&arr[..])",
+        ),
+        "this call can suspend while it borrows a value",
+    );
 }

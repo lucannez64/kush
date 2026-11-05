@@ -177,7 +177,8 @@ section 11 lists the intended relaxations.
    naming the value and the perform. A loan that ends before the perform is
    fine. Reason: the frame moves the continuation's data to the heap and the
    handler runs in between, so today's loan model (lexical, stack-rooted) does
-   not cover it.
+   not cover it. (Relaxed for views of storage owned outside the handled
+   body by E-CPS-BORROW; see section 14, rule 2.)
 3. **Pinned locals.** A local whose address is taken (`pinned`) and that is live
    across a suspension point is rejected, because a reference to it could only
    be live across the suspension too (rule 2), and moving it to the frame would
@@ -335,12 +336,10 @@ Single-shot results are never used to justify multishot safety.
 
 ## 11. Intended relaxations, not in the first implementation
 
-- **Borrows of outer storage across a suspension.** The token is a lexical,
-  non-escaping capability (it cannot outlive the `handle`), so a view of
-  storage owned *outside* the handled body could be held across a perform with
-  the handle's extent as its region. This needs the frame slot to carry the
-  loan, like a borrowed record field, and the token to be classed as a scoped
-  borrowed-capture closure. It is a separate node once the basic machine works.
+- **Borrows of outer storage across a suspension.** Implemented by
+  E-CPS-BORROW; see section 14, rule 2. No loan-carrying frame slot was
+  needed: the as-built lowering never pops the frame that owns outer storage
+  while a continuation can run.
 - **Slot overlap** by liveness interval colouring.
 - **Stack-segment fast path** for one-shot dynamic resumption, only if E-PERF
   shows that coloring is too costly.
@@ -469,8 +468,9 @@ is inherent (section 7).
    point), restricted to the handled body; grade-zero locals are erased and
    never captured.
 2. A local in `L(i)` whose type holds a borrow (view, text, reference,
-   borrowed record, task handle) is rejected. A pinned local whose references
-   end before the point is captured by value.
+   borrowed record, task handle) is rejected, except a plain view or
+   reference of *outer storage* (E-CPS-BORROW, below). A pinned local whose
+   references end before the point is captured by value.
 3. A local the handler writes through its capture is rejected if it is in
    `L(i)`.
 4. A local of the enclosing function that is not copyable and is in `L(i)` is
@@ -504,6 +504,48 @@ is inherent (section 7).
    result type, payload type, or a written capture that can hold a function
    value; and a `break`/`continue` in a `while` condition is rejected when the
    loop is rebuilt around the condition.
+
+**Borrows of outer storage (E-CPS-BORROW).** A view (`&[T]`, `&mut [T]`,
+`&str`, `&mut str`) or reference (`&T`, `&mut T`) may be live across a point
+when every owner it may borrow from
+
+- is declared outside the handled body (a local of the enclosing function
+  bound before the `handle`, or a parameter; for a resumable entry, a
+  parameter of the callee);
+- is not in `L(i)`, so the point does not move or copy it into the
+  continuation while the view still points at it; and
+- is not written by the handler through a capture, nor captured by it at all
+  when the view is exclusive.
+
+Why this is sound without a loan in the frame: suspension never returns
+from the activation that reached the point. `RegionExit(handler(p, token))`
+evaluates the handler *inside* that activation, the handler can only call the
+token before it returns (the token cannot escape, rule 8), and every
+continuation, awaited entry and the final `k` run nested inside that call.
+The enclosing function's frame, every caller frame of a resumable entry, and
+every earlier continuation's frame therefore stay alive and unmoved until the
+handled body has finished, and region cleanup drops body locals only after the
+handler call returns. A view made inside continuation code borrows that
+continuation's own copy of the owner, which the same nesting keeps alive. What
+the view can observe in between is either structured body code, which
+ownership checked with the perform as an ordinary call, or the handler, which
+reaches the owner only through its captures (checked above; ownership already
+rejects a borrow of a scalar the handler captures exclusively, and handlers
+capture arrays and vectors by value).
+
+Owners come from a conservative provenance pass over the function
+(`borrow_origins` in `crate::suspend`): `&x`, `&place`, slices of an owner or
+of another view, copies between view locals, and direct calls (the result may
+borrow from any borrow-carrying argument). A view defined any other way
+(branch-selected, from a closure call, a pattern binding, a borrowed record
+field) has unknown owners and stays rejected. The same provenance refines the
+"the point's own call borrows a captured value" check: an awaited call given
+`&arr[..]` now conflicts only when `arr` itself is captured.
+
+Limits: a view made inside a loop whose owner the next iteration uses again
+is rejected, because the owner is in `L(i)` (hoist the view out of the loop);
+borrowed records, reference containers, by-reference closures and task
+handles are still rejected across a point.
 
 ### 14.1 Resumption across calls (E-CALLEE-COLOR, E-DYN-RESUME)
 
