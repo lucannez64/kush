@@ -1723,14 +1723,24 @@
       "deps": [
         "E-MULTI-PERFORM"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "6f25825",
       "log": [
         {
           "time": "2026-11-05 07:12:02",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-05 07:26:27",
+          "who": "agent",
+          "text": "Handler specialization: multishot points with live values pass copies as arguments to a copy of the handler whose resume(y) calls the continuation directly; needs a noncapturing handler that only calls its token; owned/linear/graded values rejected. Boat gate passed."
+        },
+        {
+          "time": "2026-11-05 07:26:27",
+          "who": "agent",
+          "text": "done 6f25825"
         }
       ]
     },
@@ -1744,10 +1754,26 @@
         "E-DYN-RESUME",
         "E-MULTISHOT-COPY"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "6f25825",
+      "log": [
+        {
+          "time": "2026-11-05 07:26:27",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 07:26:27",
+          "who": "agent",
+          "text": "Multishot handlers for declared operations accepted for performs in the handled body; never pushed on the dynamic stack, so calls/spawned tasks that may perform the op are rejected. Multishot through called functions (frame-chain copy) not implemented; documented limit."
+        },
+        {
+          "time": "2026-11-05 07:26:27",
+          "who": "agent",
+          "text": "done 6f25825"
+        }
+      ]
     },
     {
       "id": "E-PERF",
@@ -1758,14 +1784,24 @@
       "deps": [
         "E-DYN-RESUME"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "c54f839",
       "log": [
         {
           "time": "2026-11-05 07:15:33",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-05 07:26:28",
+          "who": "agent",
+          "text": "Native: tail-resumptive lexical ~5-8 ns/perform vs 3.5 ns direct call; dynamic ~11 ns; non-tail ~120 ns lexical, ~210 ns through a call. 1e6 tail performs (lexical and dynamic) under ulimit -s 256. docs/effect-state-machines.md 14.3."
+        },
+        {
+          "time": "2026-11-05 07:26:28",
+          "who": "agent",
+          "text": "done c54f839"
         }
       ]
     },
@@ -1780,10 +1816,16 @@
         "E-MULTISHOT-DECL",
         "E-PERF"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 07:26:28",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "EFF",
