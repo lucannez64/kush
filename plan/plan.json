@@ -3116,10 +3116,51 @@
         "A-RT-NESTED-SIG",
         "A-PAT-MUT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": [],
+      "commit": "82a5db0",
+      "log": [
+        {
+          "time": "2026-11-05 15:20:50",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 15:38:03",
+          "who": "agent",
+          "text": "Round 1 (Opus reviewer, local): 1 soundness bug (recursion guard missed trait defaults) fixed in 0b72170 with regression test; 2 minor false rejections (disjoint record field / ..rest place in a record literal) left as limits."
+        },
+        {
+          "time": "2026-11-05 15:52:24",
+          "who": "agent",
+          "text": "Round 2 (fresh Opus reviewer, local): recursion-guard fix held; 1 soundness bug (rebinding merged union members, from 2273cec) fixed in 92df7a8 with regression tests; guard-write snapshot semantics documented."
+        },
+        {
+          "time": "2026-11-05 16:50:41",
+          "who": "agent",
+          "text": "Round 3 (fresh Opus reviewer, local): 3 layout soundness bugs (union reorder, subtype absorption, unions in generic definitions) fixed in 9231966 by a layout-isomorphism check, regression tests added."
+        },
+        {
+          "time": "2026-11-05 17:05:02",
+          "who": "agent",
+          "text": "Round 4 (fresh Opus reviewer, local): isomorphism check held; 2 soundness bugs (binders inside dyn missed by guard and by rebind via alias) fixed in 0ff06eb. Full local suite 1490 passed."
+        },
+        {
+          "time": "2026-11-05 17:17:46",
+          "who": "agent",
+          "text": "Round 5 (fresh Opus reviewer, local): NO soundness bug found. One false rejection from 0ff06eb (recursive binder forwarding) fixed in 82a5db0 with regression tests."
+        },
+        {
+          "time": "2026-11-05 17:23:01",
+          "who": "agent",
+          "text": "Focused re-check of 82a5db0 (fresh Opus reviewer): no leak, removal confirmed safe. Review closed: rounds 1-4 found 7 soundness bugs (all fixed + regression tests), round 5 and the re-check found none."
+        },
+        {
+          "time": "2026-11-05 17:23:01",
+          "who": "agent",
+          "text": "done 82a5db0"
+        }
+      ],
       "area": "dynarray"
     },
     {
@@ -3130,10 +3171,26 @@
       "deps": [
         "A-EXT-REVIEW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": [],
+      "commit": "0583a35",
+      "log": [
+        {
+          "time": "2026-11-05 17:23:01",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 17:29:37",
+          "who": "agent",
+          "text": "Local gate on 0583a35 (no Boat, -j2, 2 test threads): cargo fmt --check OK, mbx test -p kush 1491 passed 0 failed, mbx clippy -p kush --tests clean."
+        },
+        {
+          "time": "2026-11-05 17:29:37",
+          "who": "agent",
+          "text": "done 0583a35"
+        }
+      ],
       "area": "dynarray"
     },
     {
