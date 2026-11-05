@@ -111,10 +111,29 @@ exactly one initialized slot.
 
 A view through a record field (`&r.a[..]`, `&mut r.a[..]`, including nested
 fields such as `&mut r.inner.a[1..]`) aliases the record's inline storage. The
-record must be a direct local binding, so both backends can pin it; a temporary,
-call result, or reference-based record place is rejected. The field loan blocks
-replacing or mutating the record while the view is live, and an exclusive field
-view requires `let mut` on the record.
+record may be:
+
+- a direct local binding, which both backends pin; an exclusive field view
+  requires `let mut` on the record;
+- a record reference (`h: &Holder`, `h: &mut Holder`, a stored reference, or
+  a reference to a `Vec` element), which views the referent in place; an
+  exclusive view needs `&mut`, and a shared reference is never upgraded. A
+  `&'a Holder` parameter backs a returned `&'a [T]` field view;
+- a temporary or call result (`&make().xs[..]`), which is hoisted into hidden
+  storage for the enclosing block; the view cannot escape that block, and the
+  hidden record's owning fields are dropped exactly once at block end.
+
+```rust
+fn tail<'a>(h: &'a Holder) -> &'a [i64] ! {panic} { &h.xs[1..] }
+fn bump(h: &mut Holder) -> Unit ! {panic} {
+    let view: &mut [i64] = &mut h.xs[1..];
+    Slice.set(view, 0, 70);
+}
+```
+
+The field loan (through the reference's own loan, for a reference root) blocks
+replacing or mutating the record or the field while the view is live, and two
+exclusive views of one field conflict.
 
 ## Patterns
 
@@ -281,8 +300,7 @@ container of unbounded length. Runtime-length arrays cannot appear in generic
 function, method, trait, or foreign signatures, in `fn` types, or in lambda
 signatures, and a signature may only use them as a whole parameter/result or
 behind one reference. There is no element-wise owning move beyond
-push/pop of copyable values, no view of a `DynArray` inside a reference-based
-record place, and no borrowed element pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow
+push/pop of copyable values, and no borrowed element pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow
 for arbitrary lengths.
 
 The implementation is checked by `crates/kush/tests/advanced_types_effects.rs`

@@ -6770,7 +6770,25 @@ impl Generator<'_, '_> {
                     _ if field.is_some() => {
                         let (slot, offset) = projection_offset(base)
                             .expect("checked record-field DynArray view root");
-                        self.locations[slot].map(|location| (location, offset))
+                        let mut root = base.as_ref();
+                        while let ExprKind::Project(inner, _) = &root.kind {
+                            root = inner;
+                        }
+                        if root.ty.is_ref() {
+                            // Through a record reference: the record lives at
+                            // the reference's pointer, not in this frame.
+                            let pointer = self.local_words(slot)[0];
+                            Some((pointer, offset))
+                        } else {
+                            if let Some((slot, init)) = projection_root_init(base) {
+                                // A temporary record root is initialized at the
+                                // view's source position into its hidden slot.
+                                let values = lower!(self.expr(init));
+                                self.consume(init);
+                                self.store_initialized_owner(slot, &values);
+                            }
+                            self.locations[slot].map(|location| (location, offset))
+                        }
                     }
                     _ => None,
                 };
@@ -9500,9 +9518,23 @@ fn projection_offset(expr: &Expr) -> Option<(usize, usize)> {
                 offset += field;
                 current = base;
             }
-            ExprKind::Peek(slot) | ExprKind::Local(slot) | ExprKind::Move(slot) => {
+            ExprKind::Peek(slot)
+            | ExprKind::Local(slot)
+            | ExprKind::Move(slot)
+            | ExprKind::InitOwner { slot, .. } => {
                 return Some((*slot, offset));
             }
+            _ => return None,
+        }
+    }
+}
+/// The temporary-owner initializer at the root of a field projection chain.
+fn projection_root_init(expr: &Expr) -> Option<(usize, &Expr)> {
+    let mut current = expr;
+    loop {
+        match &current.kind {
+            ExprKind::Project(base, _) => current = base,
+            ExprKind::InitOwner { slot, value } => return Some((*slot, value)),
             _ => return None,
         }
     }

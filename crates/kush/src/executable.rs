@@ -25260,6 +25260,97 @@ impl Checker<'_, '_> {
     /// Only direct local places have stable storage that both backends can pin
     /// for a live `DynArray` view; temporaries, calls, and reference
     /// projections deliberately have no root.
+    /// Whether a field chain `a.b.c` starts at a direct local record binding
+    /// (not a reference and not a temporary).
+    fn field_root_is_local_record(&self, expr: &ast::Expr) -> bool {
+        let mut current = expr;
+        while let ast::ExprKind::Field { value, .. } = &current.kind {
+            if self.resolution.reference(current.span).is_some() {
+                return false;
+            }
+            current = value;
+        }
+        matches!(current.kind, ast::ExprKind::Name(_))
+            && self.slot(current.span).is_ok_and(|slot| {
+                self.locals[slot]
+                    .ty
+                    .layout()
+                    .is_some_and(|id| self.types.enums[id].record)
+            })
+    }
+    /// A `DynArray` field place rooted at a record reference or a hoisted
+    /// temporary record: the checked place, its element type, and the field
+    /// index path from the root record (the referent for a reference root).
+    /// `None` when the place is not a DynArray field, so the ordinary field
+    /// path reports its own diagnostic.
+    fn indirect_dyn_field_place(
+        &mut self,
+        value: &ast::Expr,
+        mutable: bool,
+    ) -> Result<Option<(Expr, Type, Vec<usize>)>> {
+        let place = self.checked_place(value, mutable)?;
+        let Some((element, _)) = place
+            .ty
+            .layout()
+            .and_then(|id| self.types.enums[id].dynamic_array)
+        else {
+            return Ok(None);
+        };
+        let mut path = Vec::new();
+        let mut current = &place;
+        let root = loop {
+            match &current.kind {
+                ExprKind::Project(base, offset) => {
+                    let record = match base.ty {
+                        Type::Ref(pointer) | Type::RefMut(pointer) => self.types.pointees[pointer],
+                        ty => ty,
+                    };
+                    let Some(index) = self.field_index_at(record, *offset) else {
+                        return Ok(None);
+                    };
+                    path.push(index);
+                    current = base;
+                }
+                ExprKind::Peek(slot) | ExprKind::Local(slot) | ExprKind::InitOwner { slot, .. } => {
+                    break (*slot, current.ty);
+                }
+                _ => return Ok(None),
+            }
+        };
+        path.reverse();
+        let (slot, root_ty) = root;
+        if mutable {
+            let writable = match root_ty {
+                Type::RefMut(_) => true,
+                Type::Ref(_) => false,
+                _ => self.locals[slot].mutable,
+            };
+            if !writable {
+                return Err(Diagnostic::new(
+                    value.span,
+                    "cannot create an exclusive '&mut [T]' view of a field behind a shared '&Record' reference; shared storage cannot be upgraded",
+                ));
+            }
+        }
+        if matches!(place.kind, ExprKind::Project(..)) {
+            Ok(Some((place, element, path)))
+        } else {
+            Ok(None)
+        }
+    }
+    /// The field index at a word offset of a record layout.
+    fn field_index_at(&self, ty: Type, offset: usize) -> Option<usize> {
+        let id = ty.layout().filter(|id| self.types.enums[*id].record)?;
+        let variant = &self.types.enums[id].variants[0];
+        let mut at = self.types.enums[id].tag_words();
+        for (index, field) in variant.fields.iter().enumerate() {
+            if at == offset {
+                return Some(index);
+            }
+            at += self.types.width(*field);
+        }
+        None
+    }
     fn projection_root(&self, expr: &Expr) -> Option<(usize, Vec<usize>)> {
         let mut path = Vec::new();
         let mut current = expr;
@@ -29250,6 +29341,15 @@ impl Checker<'_, '_> {
                 unreachable!("slice construction has slice type")
             };
             (base, self.types.pointees[pointer], None, None)
+        } else if matches!(value.kind, ast::ExprKind::Field { .. })
+            && !self.field_root_is_local_record(value)
+            && let Some((base, element, path)) = self.indirect_dyn_field_place(value, mutable)?
+        {
+            // A DynArray field reached through a record reference or a
+            // temporary record. A reference root aliases the caller's record;
+            // a temporary is hoisted into hidden storage that outlives the view
+            // until the enclosing block ends.
+            (base, element, None, Some(path))
         } else if matches!(value.kind, ast::ExprKind::Field { .. }) {
             // A nested record-field borrow: `outer.inner.view[..]`. The root is
             // still a direct local owner; the projection is checked by the

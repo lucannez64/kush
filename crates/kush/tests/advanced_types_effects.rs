@@ -2566,16 +2566,17 @@ fn runtime_sized_array_field_views_alias_the_record_storage() {
         }"#,
         "cannot move an owner while it is borrowed",
     );
-    // A view through a temporary record is not pinned and is rejected.
+    // A view through a temporary record is pinned in hidden storage for the
+    // enclosing block, so it cannot escape that block.
     rejects(
         r#"
         struct Holder { xs: DynArray<i64, 4> }
         fn make() -> Holder ! {panic} { Holder { xs: [1] } }
         fn main() -> i64 ! {panic} {
-            let view: &[i64] = &make().xs[..];
+            let view = { &make().xs[..] };
             Slice.len(view)
         }"#,
-        "bind the record to a local first",
+        "slice view would outlive the lexical scope of its owner",
     );
     // A view of a by-value parameter's inline field cannot escape the call.
     rejects(
@@ -4157,5 +4158,120 @@ fn dynamic_array_patterns_destructure_nested_elements() {
             match a { [(x, b)] => x, _ => 0 }
         }"#,
         "owning, linear, and view elements cannot be matched by value",
+    );
+}
+
+#[test]
+fn dynamic_array_field_views_through_references_and_temporaries() {
+    // Shared and exclusive views through record reference parameters.
+    let references = r#"
+        struct Holder { tag: i64, xs: DynArray<i64, 4> }
+        fn sum_view(h: &Holder) -> i64 ! {panic} {
+            let view: &[i64] = &h.xs[..];
+            Slice.len(view) + Slice.get(view, 1) + h.tag
+        }
+        fn bump(h: &mut Holder) -> Unit ! {panic} {
+            let view: &mut [i64] = &mut h.xs[1..];
+            Slice.set(view, 0, 70);
+        }
+        fn tail<'a>(h: &'a Holder) -> &'a [i64] ! {panic} { &h.xs[1..] }
+        fn main() -> i64 ! {panic} {
+            let mut h = Holder { tag: 5, xs: [10, 20, 30] };
+            let before = sum_view(&h);
+            bump(&mut h);
+            let t = tail(&h);
+            before + Slice.get(t, 0) + DynArray.get(&h.xs, 1)
+        }"#;
+    assert_eq!(value(references), 28 + 70 + 70);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(references, 168);
+    // A record reached through a Vec element reference.
+    let element = r#"
+        struct Holder { tag: i64, xs: DynArray<i64, 4> }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut hs: Vec<Holder> = [Holder { tag: 1, xs: [7, 8] }];
+            {
+                let r = &mut hs[0];
+                let v: &mut [i64] = &mut r.xs[..];
+                Slice.set(v, 1, 80);
+            }
+            let r = &hs[0];
+            let s: &[i64] = &r.xs[..];
+            Slice.get(s, 1) + Slice.len(s)
+        }"#;
+    assert_eq!(value(element), 82);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(element, 82);
+    // A temporary record is hoisted; its owning fields drop exactly once.
+    let temporary = r#"
+        struct Holder { b: Box<i64>, xs: DynArray<i64, 4> }
+        fn make() -> Holder ! {alloc, panic} { Holder { b: Box.new(5), xs: [1, 2, 3] } }
+        fn main() -> i64 ! {alloc, panic} {
+            let n = {
+                let v: &[i64] = &make().xs[1..];
+                Slice.len(v) + Slice.get(v, 1)
+            };
+            n
+        }"#;
+    let (result, stats) = evaluate(temporary);
+    assert_eq!(result, 5);
+    assert_eq!(stats.allocations, 1);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(temporary, 5);
+    // A shared reference is never upgraded to an exclusive view.
+    rejects(
+        r#"
+        struct Holder { tag: i64, xs: DynArray<i64, 4> }
+        fn bad(h: &Holder) -> i64 ! {panic} { let v: &mut [i64] = &mut h.xs[..]; 0 }
+        fn main() -> i64 ! {} { 0 }"#,
+        "behind a shared '&Record' reference",
+    );
+    // The field stays loaned through the reference while the view is live.
+    rejects(
+        r#"
+        struct Holder { tag: i64, xs: DynArray<i64, 4> }
+        fn bad(h: &mut Holder) -> i64 ! {panic} {
+            let v: &mut [i64] = &mut h.xs[..];
+            h.xs = [9];
+            Slice.len(v)
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "while an exclusive '&mut [T]' view of it is live",
+    );
+    rejects(
+        r#"
+        struct Holder { tag: i64, xs: DynArray<i64, 4> }
+        fn bad(h: &mut Holder) -> i64 ! {panic} {
+            let v: &mut [i64] = &mut h.xs[..];
+            let w: &mut [i64] = &mut h.xs[..];
+            Slice.len(v) + Slice.len(w)
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "while another view of the same owner is live",
+    );
+    // A returned field view keeps the caller's record loaned.
+    rejects(
+        r#"
+        struct Holder { tag: i64, xs: DynArray<i64, 4> }
+        fn tail<'a>(h: &'a Holder) -> &'a [i64] ! {panic} { &h.xs[1..] }
+        fn main() -> i64 ! {panic} {
+            let mut h = Holder { tag: 1, xs: [4, 5, 6] };
+            let v = tail(&h);
+            h = Holder { tag: 2, xs: [1] };
+            Slice.len(v)
+        }"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    // A view of a local's referent cannot escape the callee.
+    rejects(
+        r#"
+        struct Holder { tag: i64, xs: DynArray<i64, 4> }
+        fn leak<'a>(h: &'a Holder) -> &'a [i64] ! {panic} {
+            let local = Holder { tag: 1, xs: [1] };
+            let r = &local;
+            &r.xs[..]
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "slice view would outlive the lexical scope of its owner",
     );
 }

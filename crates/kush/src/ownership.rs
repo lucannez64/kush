@@ -1515,7 +1515,17 @@ impl Checker<'_> {
                 lifetime: if base.ty.is_view() {
                     self.view_loan(base).lifetime
                 } else {
-                    None
+                    // A DynArray field view through a record reference lives
+                    // as long as that reference's referent.
+                    let mut root = base.as_ref();
+                    while let ExprKind::Project(inner, _) = &root.kind {
+                        root = inner;
+                    }
+                    if root.ty.is_ref() && !std::ptr::eq(root, base.as_ref()) {
+                        self.view_loan(root).lifetime
+                    } else {
+                        None
+                    }
                 },
                 field: match &base.kind {
                     ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot)
@@ -3222,7 +3232,21 @@ impl Checker<'_> {
                         .layout()
                         .is_some_and(|id| self.enums[id].dynamic_array.is_some()) =>
             {
-                out.extend(self.view_loan(expr).origins.iter().copied());
+                let origins = self.view_loan(expr).origins;
+                if origins.is_empty() {
+                    // A DynArray field view of a hoisted temporary record has
+                    // no recorded field provenance; its storage is the hidden
+                    // owner at the projection root.
+                    let mut root = expr;
+                    while let ExprKind::Project(base, _) = &root.kind {
+                        root = base;
+                    }
+                    if let ExprKind::InitOwner { slot, .. } = &root.kind {
+                        out.insert(*slot);
+                    }
+                } else {
+                    out.extend(origins.iter().copied());
+                }
             }
             ExprKind::BorrowPlace(place) => {
                 out.extend(self.place_loan(place).origins.iter().copied());

@@ -769,8 +769,13 @@ struct SliceValue {
     len: usize,
     array: Option<Arc<Mutex<Value>>>,
     /// When the view is over a `DynArray` field of a record, the field index
-    /// path from the pinned record root in `array`.
+    /// path from the pinned record root in `array` (or from the referent of
+    /// `reference`).
     field: Option<Vec<usize>>,
+    /// A view over a `DynArray` field reached through a checked record
+    /// reference: the reference value itself. Reads go through the referent and
+    /// writes store the updated referent back without dropping anything.
+    reference: Option<Box<Value>>,
 }
 #[derive(Debug, Clone)]
 enum Value {
@@ -1795,7 +1800,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         pointee: Type,
         replacement: Value,
     ) -> Result<()> {
-        let old = match reference {
+        let old = self.reference_swap(reference, replacement)?;
+        if self.program.owns(pointee) {
+            self.drop_value(old)?;
+        }
+        Ok(())
+    }
+    /// Store `replacement` behind a checked reference and return the old
+    /// value without dropping it. Callers that update part of the referent in
+    /// place (a view over a referenced record field) write back the whole
+    /// referent this way, so no owner is dropped or duplicated.
+    fn reference_swap(&mut self, reference: &Value, replacement: Value) -> Result<Value> {
+        Ok(match reference {
             Value::RecordRef(cell) => std::mem::replace(&mut *cell.lock().unwrap(), replacement),
             Value::SliceElementRef { view, index, steps } => {
                 let mut element = self.slice_element(view, *index, Span::default())?;
@@ -1862,11 +1878,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     "internal error: reference write has no writable place",
                 ));
             }
-        };
-        if self.program.owns(pointee) {
-            self.drop_value(old)?;
-        }
-        Ok(())
+        })
     }
     /// Store a temporary-owner initializer into its already-declared hidden
     /// slot. Re-initializing the same source occurrence (for example a loop
@@ -2603,12 +2615,25 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         field: &Option<Vec<usize>>,
         frame: &mut Frame,
     ) -> Result<Flow> {
+        let mut reference = None;
         let array = if field.is_some() {
             let slot = projection_root_slot(base).ok_or_else(|| {
                 Diagnostic::new(expr.span, "internal error: field view has no record root")
             })?;
+            // A temporary record root is initialized at the view's source
+            // position; its hidden owner then pins it like a local.
+            if let Some((slot, init)) = projection_root_init(base) {
+                let value = value!(self.expr(init, frame));
+                self.consume(init, frame);
+                self.store_initialized_owner(slot, value, frame)?;
+            }
             let current = frame.locals[slot].clone();
+            let root_ty = self.program.functions[frame.function].locals[slot].ty;
+            if root_ty.is_ref() {
+                reference = Some(Box::new(current.clone()));
+            }
             let cell = match current {
+                _ if root_ty.is_ref() => Arc::new(Mutex::new(Value::Scalar(0))),
                 Value::RecordCell(cell) => cell,
                 value => {
                     let cell = Arc::new(Mutex::new(value));
@@ -2616,7 +2641,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     cell
                 }
             };
-            Some(cell)
+            reference.is_none().then_some(cell)
         } else {
             match &base.kind {
                 ExprKind::Peek(slot) | ExprKind::Local(slot)
@@ -2661,6 +2686,19 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
         };
         let base_value = match (&array, field) {
+            (None, Some(path)) if reference.is_some() => {
+                let referent = self
+                    .reference_read(reference.as_ref().unwrap(), Type::Unit)
+                    .ok_or_else(|| {
+                        Diagnostic::new(expr.span, "internal error: dangling field view reference")
+                    })?;
+                navigate_field(&referent, path).cloned().ok_or_else(|| {
+                    Diagnostic::new(
+                        expr.span,
+                        "internal error: DynArray field view has no array field",
+                    )
+                })?
+            }
             (Some(cell), Some(path)) => {
                 let value = cell.lock().unwrap().clone();
                 navigate_field(&value, path).cloned().ok_or_else(|| {
@@ -2712,6 +2750,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 len: end - start,
                 array: array.or(prior.array),
                 field: field.clone().or(prior.field),
+                reference: reference.or(prior.reference),
             })),
             base => Value::Slice(Box::new(SliceValue {
                 base: Box::new(base),
@@ -2719,6 +2758,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 len: end - start,
                 array,
                 field: field.clone(),
+                reference,
             })),
         }))
     }
@@ -2763,11 +2803,26 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             len,
             array,
             field,
+            reference,
         } = &**view;
         if index >= *len {
             return Err(Diagnostic::new(span, "panic: slice index out of bounds"));
         }
         let position = start + index;
+        if let (Some(reference), Some(path)) = (reference, field) {
+            let referent = self.reference_read(reference, Type::Unit).ok_or_else(|| {
+                Diagnostic::new(span, "internal error: dangling field view reference")
+            })?;
+            let Some(Value::DynArray { items, .. }) = navigate_field(&referent, path) else {
+                return Err(Diagnostic::new(
+                    span,
+                    "internal error: slice DynArray field is missing",
+                ));
+            };
+            return items.get(position).cloned().ok_or_else(|| {
+                Diagnostic::new(span, "internal error: slice array index out of bounds")
+            });
+        }
         if let Some(cell) = array {
             let value = cell.lock().unwrap();
             let value = match field {
@@ -2826,11 +2881,35 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             len,
             array,
             field,
+            reference,
         } = &**view;
         if index >= *len {
             return Err(Diagnostic::new(span, "panic: slice index out of bounds"));
         }
         let position = start + index;
+        if let (Some(reference), Some(path)) = (reference, field) {
+            let mut referent = self.reference_read(reference, Type::Unit).ok_or_else(|| {
+                Diagnostic::new(span, "internal error: dangling field view reference")
+            })?;
+            let Some(Value::DynArray { items, .. }) = navigate_field_mut(&mut referent, path)
+            else {
+                return Err(Diagnostic::new(
+                    span,
+                    "internal error: slice DynArray field is missing",
+                ));
+            };
+            let Some(slot) = items.get_mut(position) else {
+                return Err(Diagnostic::new(
+                    span,
+                    "internal error: slice array index out of bounds",
+                ));
+            };
+            // Copyable elements only: the old slot owns nothing.
+            *slot = value;
+            let reference = reference.clone();
+            self.reference_swap(&reference, referent)?;
+            return Ok(());
+        }
         if let Some(cell) = array {
             let mut cell = cell.lock().unwrap();
             let cell = match field {
@@ -3059,19 +3138,20 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value> {
-        let cell = match &args[0] {
-            Value::RecordRef(cell) => cell.clone(),
-            other => {
-                return Err(Diagnostic::new(
+        // Any checked reference may point at the array: a pinned local, a
+        // record field place, a vector element, or a slice element.
+        let borrowed = match &args[0] {
+            Value::RecordRef(cell) => cell.lock().unwrap().clone(),
+            other => self.reference_read(other, Type::Unit).ok_or_else(|| {
+                Diagnostic::new(
                     span,
                     format!(
                         "internal error: DynArray operation expected a borrow, found {other:?}"
                     ),
-                ));
-            }
+                )
+            })?,
         };
-        let borrowed = cell.lock().unwrap();
-        let Value::DynArray { items, .. } = &*borrowed else {
+        let Value::DynArray { items, .. } = &borrowed else {
             return Err(Diagnostic::new(
                 span,
                 "internal error: DynArray borrow does not point at a runtime-sized array",
@@ -6870,6 +6950,17 @@ fn navigate_field_mut<'a>(value: &'a mut Value, path: &[usize]) -> Option<&'a mu
     Some(current)
 }
 /// The direct local at the root of a field projection chain.
+/// The temporary-owner initializer at the root of a field projection chain.
+fn projection_root_init(expr: &Expr) -> Option<(usize, &Expr)> {
+    let mut current = expr;
+    loop {
+        match &current.kind {
+            ExprKind::Project(base, _) => current = base,
+            ExprKind::InitOwner { slot, value } => return Some((*slot, value)),
+            _ => return None,
+        }
+    }
+}
 fn projection_root_slot(expr: &Expr) -> Option<usize> {
     let mut current = expr;
     loop {
