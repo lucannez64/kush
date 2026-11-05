@@ -196,10 +196,16 @@
       "deps": [
         "BORROW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Decide the operations (ASCII case changes, char-boundary truncate, replace with same-width char) or record a language decision to keep &mut str excluded.",
-      "commit": null,
-      "log": []
+      "commit": "1ef9900",
+      "log": [
+        {
+          "time": "2026-11-05 03:22:44",
+          "who": "agent",
+          "text": "Decision: implement &mut str with ASCII case changes and same-width Str.set_scalar; no byte writes; docs/borrowed-text.md"
+        }
+      ]
     },
     {
       "id": "R-STR-TYPE",
@@ -210,10 +216,16 @@
       "deps": [
         "R-STR-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Lower &mut str; exclusive loan on the source String/Bytes; no length-changing writes through the view.",
-      "commit": null,
-      "log": []
+      "commit": "1ef9900",
+      "log": [
+        {
+          "time": "2026-11-05 03:22:44",
+          "who": "agent",
+          "text": "&mut str (Type::StrMut): exclusive loan on String, checked UTF-8 writes, eval+native, tests/mutable_text.rs"
+        }
+      ]
     },
     {
       "id": "R-STR-OPS",
@@ -224,10 +236,16 @@
       "deps": [
         "R-STR-TYPE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Each operation keeps UTF-8 valid by construction or checks at the boundary.",
-      "commit": null,
-      "log": []
+      "commit": "1ef9900",
+      "log": [
+        {
+          "time": "2026-11-05 03:22:44",
+          "who": "agent",
+          "text": "&mut str (Type::StrMut): exclusive loan on String, checked UTF-8 writes, eval+native, tests/mutable_text.rs"
+        }
+      ]
     },
     {
       "id": "R-STR-BACKENDS",
@@ -238,10 +256,16 @@
       "deps": [
         "R-STR-OPS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Native helpers and evaluator parity, balanced allocations.",
-      "commit": null,
-      "log": []
+      "commit": "1ef9900",
+      "log": [
+        {
+          "time": "2026-11-05 03:22:44",
+          "who": "agent",
+          "text": "&mut str (Type::StrMut): exclusive loan on String, checked UTF-8 writes, eval+native, tests/mutable_text.rs"
+        }
+      ]
     },
     {
       "id": "R-STR-TESTS",
@@ -252,10 +276,16 @@
       "deps": [
         "R-STR-BACKENDS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Invalid UTF-8 writes impossible, aliasing &mut str rejected, view cannot outlive owner.",
-      "commit": null,
-      "log": []
+      "commit": "1ef9900",
+      "log": [
+        {
+          "time": "2026-11-05 03:22:44",
+          "who": "agent",
+          "text": "&mut str (Type::StrMut): exclusive loan on String, checked UTF-8 writes, eval+native, tests/mutable_text.rs"
+        }
+      ]
     },
     {
       "id": "R-SLICE-PLACE-IR",
@@ -336,10 +366,16 @@
       "deps": [
         "BORROW"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Assigning a whole Holder<'a> replaces every leaf loan; lifetimes stay invariant under &mut.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 03:22:44",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "R-BREC-CHECK",
@@ -378,10 +414,26 @@
       "deps": [
         "BORROW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Feed the linear arithmetic facts (Fourier\u2013Motzkin) with index expressions used in place references.",
-      "commit": null,
-      "log": []
+      "commit": "1ef9900",
+      "log": [
+        {
+          "time": "2026-11-05 02:59:43",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 02:59:46",
+          "who": "agent",
+          "text": "Found unsound const-vs-runtime index disjointness (&mut xs[1] + &mut xs[i] accepted); fixing with per-place ids + checker-proved pair table"
+        },
+        {
+          "time": "2026-11-05 03:22:43",
+          "who": "agent",
+          "text": "Index-place ids + facts-proved distinct pairs; const-vs-runtime aliasing hole fixed; slice-view element places included; stored loans drop ids across iterations"
+        }
+      ]
     },
     {
       "id": "R-IDX-DISJOINT",
@@ -392,10 +444,16 @@
       "deps": [
         "R-IDX-FACTS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Fall back to conflict when not provable; never assume.",
-      "commit": null,
-      "log": []
+      "commit": "1ef9900",
+      "log": [
+        {
+          "time": "2026-11-05 03:22:43",
+          "who": "agent",
+          "text": "Index-place ids + facts-proved distinct pairs; const-vs-runtime aliasing hole fixed; slice-view element places included; stored loans drop ids across iterations"
+        }
+      ]
     },
     {
       "id": "R-IDX-TESTS",
@@ -406,10 +464,16 @@
       "deps": [
         "R-IDX-DISJOINT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "i==j paths, loop indices, unproven cases rejected; native/eval parity.",
-      "commit": null,
-      "log": []
+      "commit": "1ef9900",
+      "log": [
+        {
+          "time": "2026-11-05 03:22:43",
+          "who": "agent",
+          "text": "Index-place ids + facts-proved distinct pairs; const-vs-runtime aliasing hole fixed; slice-view element places included; stored loans drop ids across iterations"
+        }
+      ]
     },
     {
       "id": "R-TASKEXIT-DESIGN",
@@ -2019,10 +2083,21 @@
       "deps": [
         "R-SLICE-PLACE-BACKENDS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Aliasing through slice roots, split halves, bounds, escape, owner invalidation and native/evaluator parity.",
-      "commit": null,
-      "log": []
+      "commit": "1ef9900",
+      "log": [
+        {
+          "time": "2026-11-05 02:59:47",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 03:22:44",
+          "who": "agent",
+          "text": "Hostile tests: aliasing via owner/view/index, escapes, owner moves, loops, tasks (split sides), closures; also fixed container-held &mut loans not excluding new borrows"
+        }
+      ]
     },
     {
       "id": "LT-RECURSIVE-DESIGN",
