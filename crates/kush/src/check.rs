@@ -363,7 +363,11 @@ fn alias_refs_in_type(resolution: &Resolution, ty: &Type, out: &mut BTreeSet<Bin
                 alias_refs_in_type(resolution, argument, out);
             }
         }
-        TypeKind::Dyn(inner) => alias_refs_in_type(resolution, inner, out),
+        TypeKind::Dyn(bounds) => {
+            for inner in crate::ast::dyn_types(bounds) {
+                alias_refs_in_type(resolution, inner, out);
+            }
+        }
         TypeKind::Tuple(items) => {
             for item in items {
                 alias_refs_in_type(resolution, item, out);

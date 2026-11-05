@@ -1231,7 +1231,11 @@ impl Resolver {
                 // `Self` is not a binding. It is substituted by the concrete
                 // impl target before runtime type lowering.
                 TypeKind::SelfType => {}
-                TypeKind::Dyn(trait_path) => r.ty(trait_path)?,
+                TypeKind::Dyn(bounds) => {
+                    for inner in crate::ast::dyn_types(bounds) {
+                        r.ty(inner)?;
+                    }
+                }
                 TypeKind::Tuple(types) => {
                     for ty in types {
                         r.ty(ty)?;

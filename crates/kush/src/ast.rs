@@ -11,6 +11,28 @@ impl<T> Node<T> {
     }
 }
 pub type Type = Node<TypeKind>;
+
+/// One trait bound of a `dyn` object type: the trait path (a `Named` type whose
+/// span resolves to the trait) and explicit associated-type bindings, as in
+/// `Convert<i64, Out = Text>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynBound {
+    pub trait_ref: Type,
+    pub bindings: Vec<(String, Type)>,
+}
+
+impl DynBound {
+    /// Every syntactic type inside the bound: the trait path, then each bound
+    /// associated-type value.
+    pub fn types(&self) -> impl Iterator<Item = &Type> {
+        std::iter::once(&self.trait_ref).chain(self.bindings.iter().map(|(_, ty)| ty))
+    }
+}
+
+/// Every syntactic type inside a `dyn` bound list.
+pub fn dyn_types(bounds: &[DynBound]) -> impl Iterator<Item = &Type> {
+    bounds.iter().flat_map(DynBound::types)
+}
 pub type Expr = Node<ExprKind>;
 pub type Pattern = Node<PatternKind>;
 pub type Item = Node<ItemKind>;
@@ -344,13 +366,12 @@ pub enum TypeKind {
     /// signature. It is replaced by the concrete impl target before runtime
     /// type lowering.
     SelfType,
-    /// `dyn Trait` or `dyn Trait<Arguments>`: a closed-world trait object.
-    ///
-    /// The object type is represented as the normalized union of every
-    /// concrete impl target for the trait. Only traits with a finite, nonempty
-    /// set of concrete impls and object-safe owned-receiver methods admit this
-    /// type; the checker diagnoses every other use.
-    Dyn(Box<Type>),
+    /// `dyn Trait`, `dyn Trait<Arguments, Out = T>`, or `dyn A + B`: a trait
+    /// object. Each bound names one trait with its trait arguments and any
+    /// explicit associated-type bindings. The checker chooses the closed-world
+    /// union or the dynamic fat-object representation and diagnoses every
+    /// unsupported use.
+    Dyn(Vec<DynBound>),
     Function {
         /// Lifetimes bound by the arrow itself, as in `fn<'a>(&'a [T]) -> &'a [T]`.
         /// The arrow is polymorphic over them: every call picks fresh ones.

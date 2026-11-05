@@ -845,6 +845,56 @@ impl Parser {
     fn ty(&mut self) -> Result<Type> {
         self.type_bp(0)
     }
+    /// One trait bound of a `dyn` type: a trait path with optional arguments,
+    /// where `Name = Type` binds an associated type, as in
+    /// `Convert<i64, Out = Text>`. Bindings follow the trait arguments.
+    fn dyn_bound(&mut self) -> Result<crate::ast::DynBound> {
+        let start = self.current().span;
+        if !matches!(self.current().kind, Kind::Ident(_)) {
+            return Err(self.error(
+                "a trait object must name one declared trait, as in 'dyn Describe' or 'dyn Convert<i64>'",
+            ));
+        }
+        let path = self.path()?;
+        let mut arguments = Vec::new();
+        let mut bindings: Vec<(String, Type)> = Vec::new();
+        if self.eat(&Kind::Lt) {
+            while !self.at(&Kind::Gt) {
+                let binding = matches!(self.current().kind, Kind::Ident(_))
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|token| matches!(token.kind, Kind::Eq));
+                if binding {
+                    let name_span = self.current().span;
+                    let name = self.ident()?;
+                    self.bump();
+                    if bindings.iter().any(|(bound, _)| *bound == name) {
+                        return Err(Diagnostic::new(
+                            name_span,
+                            format!("associated type '{name}' is bound twice in this trait object"),
+                        ));
+                    }
+                    bindings.push((name, self.ty()?));
+                } else {
+                    if !bindings.is_empty() {
+                        return Err(self.error(
+                            "trait arguments must come before associated-type bindings, as in 'dyn Convert<i64, Out = Text>'",
+                        ));
+                    }
+                    arguments.push(self.specialization_argument()?);
+                }
+                if !self.eat(&Kind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&Kind::Gt, "'>' after trait object arguments")?;
+        }
+        Ok(crate::ast::DynBound {
+            trait_ref: Node::new(TypeKind::Named { path, arguments }, self.since(start)),
+            bindings,
+        })
+    }
     /// A usage grade inside `@[ ... ]`:
     ///
     /// ```text
@@ -1114,21 +1164,15 @@ impl Parser {
                 return Ok(Node::new(TypeKind::SelfType, self.since(path_start)));
             }
             if path == ["dyn"] {
-                let trait_path = self.ty()?;
+                let bound = self.dyn_bound()?;
                 if self.at(&Kind::Plus) {
                     return Err(Diagnostic::new(
                         self.current().span,
                         "multi-trait trait objects such as 'dyn A + B' are not supported; a closed-world dyn object already exposes every trait whose concrete member set coincides (qualify a shared method name as 'receiver.Trait.method(...)'), while an open dynamic object represents exactly one trait specialization",
                     ));
                 }
-                if !matches!(&trait_path.kind, TypeKind::Named { .. }) {
-                    return Err(Diagnostic::new(
-                        trait_path.span,
-                        "a trait object must name one declared trait, as in 'dyn Describe' or 'dyn Convert<i64>'",
-                    ));
-                }
                 return Ok(Node::new(
-                    TypeKind::Dyn(Box::new(trait_path)),
+                    TypeKind::Dyn(vec![bound]),
                     self.since(path_start),
                 ));
             }

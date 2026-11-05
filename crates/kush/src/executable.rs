@@ -2167,7 +2167,9 @@ pub(crate) fn type_mentions_binding(
         K::Structural { fields, .. } => fields
             .iter()
             .any(|field| type_mentions_binding(resolution, &field.ty, binder)),
-        K::Dyn(inner) => type_mentions_binding(resolution, inner, binder),
+        K::Dyn(bounds) => {
+            ast::dyn_types(bounds).any(|inner| type_mentions_binding(resolution, inner, binder))
+        }
         K::Slice(inner) => type_mentions_binding(resolution, inner, binder),
         K::Array(element, length) => {
             type_mentions_binding(resolution, element, binder)
@@ -4614,9 +4616,6 @@ struct Functions<'a> {
     dyn_calls: Vec<DynCallSpec>,
     /// Checked borrowed call sites on closed-world union objects.
     union_calls: Vec<UnionCallSpec>,
-    /// Associated-type values agreed by every concrete impl of one object
-    /// specialization. Used for `Self.Item` in object-safe method signatures.
-    object_associated: BTreeMap<(BindingId, TraitArguments), BTreeMap<String, Type>>,
     logical: &'a crate::check::LogicalEnvironment,
 }
 const MAX_FUNCTIONS: usize = 256;
@@ -4632,13 +4631,17 @@ const UNIFY_BACKTRACK_BUDGET: usize = 4096;
 fn dynamic_trait_set(module: &ast::Module, resolution: &Resolution) -> BTreeSet<BindingId> {
     fn scan(ty: &ast::Type, resolution: &Resolution, out: &mut BTreeSet<BindingId>) {
         match &ty.kind {
-            ast::TypeKind::Dyn(trait_path) => {
-                if let Some(id) = resolution.reference(trait_path.span)
-                    && resolution.bindings[id].kind == BindingKind::Trait
-                {
-                    out.insert(id);
+            ast::TypeKind::Dyn(bounds) => {
+                for bound in bounds {
+                    if let Some(id) = resolution.reference(bound.trait_ref.span)
+                        && resolution.bindings[id].kind == BindingKind::Trait
+                    {
+                        out.insert(id);
+                    }
                 }
-                scan(trait_path, resolution, out);
+                for inner in ast::dyn_types(bounds) {
+                    scan(inner, resolution, out);
+                }
             }
             ast::TypeKind::Named { arguments, .. } => {
                 for argument in arguments {
@@ -4841,7 +4844,6 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         dyn_methods: BTreeMap::new(),
         dyn_calls: Vec::new(),
         union_calls: Vec::new(),
-        object_associated: BTreeMap::new(),
         logical: &logical,
     };
     let mut effect_operations = BTreeMap::new();
@@ -5372,7 +5374,13 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             .iter()
             .map(|object| object.name.clone())
             .collect(),
-        dyn_members: functions.dyn_members,
+        // An object type that never had a member coerced into it still has
+        // an (empty) member table, so every backend can index it.
+        dyn_members: {
+            let mut members = functions.dyn_members;
+            members.resize_with(types.objects.len().max(members.len()), Vec::new);
+            members
+        },
         dyn_calls: functions.dyn_calls,
         union_calls: functions.union_calls,
         reference_labels: types.reference_labels,
@@ -5563,7 +5571,20 @@ fn type_key(ty: &ast::Type) -> String {
             }
             text
         }
-        ast::TypeKind::Dyn(inner) => format!("dyn {}", type_key(inner)),
+        ast::TypeKind::Dyn(bounds) => format!(
+            "dyn {}",
+            bounds
+                .iter()
+                .map(|bound| {
+                    let mut text = type_key(&bound.trait_ref);
+                    for (name, value) in &bound.bindings {
+                        text.push_str(&format!("[{name}={}]", type_key(value)));
+                    }
+                    text
+                })
+                .collect::<Vec<_>>()
+                .join(" + ")
+        ),
         ast::TypeKind::Structural { fields, row, .. } => {
             let mut fields = fields
                 .iter()
@@ -5750,7 +5771,19 @@ impl ContractNames {
                 }
                 ast::TypeKind::SelfType
             }
-            ast::TypeKind::Dyn(inner) => ast::TypeKind::Dyn(Box::new(self.ty(inner))),
+            ast::TypeKind::Dyn(bounds) => ast::TypeKind::Dyn(
+                bounds
+                    .iter()
+                    .map(|bound| ast::DynBound {
+                        trait_ref: self.ty(&bound.trait_ref),
+                        bindings: bound
+                            .bindings
+                            .iter()
+                            .map(|(name, value)| (name.clone(), self.ty(value)))
+                            .collect(),
+                    })
+                    .collect(),
+            ),
             ast::TypeKind::Lifetime(name) => ast::TypeKind::Lifetime(self.lifetime(name)),
             ast::TypeKind::Borrow {
                 lifetime,
@@ -6062,9 +6095,12 @@ pub(crate) fn trait_specialization_name(
 /// A trait receiver is owned `Self` or a single shared/exclusive borrow of
 /// `Self`. Lifetimes on the borrow are erased contract metadata and remain
 /// part of the exact signature comparison.
+/// One destructured level of a consumed projected field: the hidden binding
+/// (or root local) matched, its aggregate type, and the binding pattern.
+type ConsumedLevel = (usize, Type, Pattern);
 /// Put the destructuring levels built by `consume_object_field` around a
 /// consuming call, outermost aggregate first.
-fn wrap_consumed_field(levels: Vec<(usize, Type, Pattern)>, call: Expr) -> Expr {
+fn wrap_consumed_field(levels: Vec<ConsumedLevel>, call: Expr) -> Expr {
     let span = call.span;
     levels
         .into_iter()
@@ -6214,8 +6250,12 @@ fn type_self_associations(ty: &ast::Type, out: &mut BTreeSet<String>) {
         }
         ast::TypeKind::Slice(inner)
         | ast::TypeKind::Graded { inner, .. }
-        | ast::TypeKind::Borrow { inner, .. }
-        | ast::TypeKind::Dyn(inner) => type_self_associations(inner, out),
+        | ast::TypeKind::Borrow { inner, .. } => type_self_associations(inner, out),
+        ast::TypeKind::Dyn(bounds) => {
+            for inner in ast::dyn_types(bounds) {
+                type_self_associations(inner, out);
+            }
+        }
         ast::TypeKind::Array(inner, length) => {
             type_self_associations(inner, out);
             type_self_associations(length, out);
@@ -6340,7 +6380,7 @@ fn type_mentions_self(ty: &ast::Type) -> bool {
             fields.iter().any(|field| type_mentions_self(&field.ty))
                 || row.as_ref().is_some_and(|row| type_mentions_self(row))
         }
-        ast::TypeKind::Dyn(inner) => type_mentions_self(inner),
+        ast::TypeKind::Dyn(bounds) => ast::dyn_types(bounds).any(type_mentions_self),
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => {
             type_mentions_self(inner)
         }
@@ -6391,7 +6431,9 @@ fn type_mentions_self_outside_assoc(ty: &ast::Type, allowed: &BTreeSet<String>) 
         ast::TypeKind::Tuple(arguments) => arguments
             .iter()
             .any(|argument| type_mentions_self_outside_assoc(argument, allowed)),
-        ast::TypeKind::Dyn(inner) => type_mentions_self_outside_assoc(inner, allowed),
+        ast::TypeKind::Dyn(bounds) => {
+            ast::dyn_types(bounds).any(|inner| type_mentions_self_outside_assoc(inner, allowed))
+        }
         ast::TypeKind::Slice(inner) | ast::TypeKind::Graded { inner, .. } => {
             type_mentions_self_outside_assoc(inner, allowed)
         }
@@ -7555,9 +7597,7 @@ fn prepare_trait_objects<'a>(
                 // method signatures; generic impls are checked when a concrete
                 // member is registered at a coercion site.
                 if let Some(values) = object_associated.get(&arguments) {
-                    functions
-                        .object_associated
-                        .insert((trait_id, arguments.clone()), values.clone());
+                    types.agree_object_projections(trait_id, &arguments, values)?;
                 }
                 continue;
             }
@@ -7576,9 +7616,7 @@ fn prepare_trait_objects<'a>(
                 }
             };
             if let Some(values) = object_associated.get(&arguments) {
-                functions
-                    .object_associated
-                    .insert((trait_id, arguments.clone()), values.clone());
+                types.agree_object_projections(trait_id, &arguments, values)?;
             }
             types
                 .dyn_objects
@@ -7621,8 +7659,8 @@ fn type_has_open_row(ty: &ast::Type) -> bool {
         ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => {
             arguments.iter().any(type_has_open_row)
         }
-        ast::TypeKind::Dyn(inner)
-        | ast::TypeKind::Slice(inner)
+        ast::TypeKind::Dyn(bounds) => ast::dyn_types(bounds).any(type_has_open_row),
+        ast::TypeKind::Slice(inner)
         | ast::TypeKind::Graded { inner, .. }
         | ast::TypeKind::Borrow { inner, .. } => type_has_open_row(inner),
         ast::TypeKind::Array(element, length) => {
@@ -11173,8 +11211,12 @@ fn validate_runtime_length_signature(
                 }
                 Ok(())
             }
-            ast::TypeKind::Slice(inner) | ast::TypeKind::Dyn(inner) => {
-                walk(resolution, inner, allowed, false, restricted)
+            ast::TypeKind::Slice(inner) => walk(resolution, inner, allowed, false, restricted),
+            ast::TypeKind::Dyn(bounds) => {
+                for inner in ast::dyn_types(bounds) {
+                    walk(resolution, inner, allowed, false, restricted)?;
+                }
+                Ok(())
             }
             ast::TypeKind::Structural { fields, .. } => {
                 for field in fields {
@@ -11274,7 +11316,12 @@ fn validate_type_template(
             }
             validate_length_template(resolution, length, consts)
         }
-        ast::TypeKind::Dyn(inner) => validate_type_template(resolution, inner, consts, false, true),
+        ast::TypeKind::Dyn(bounds) => {
+            for inner in ast::dyn_types(bounds) {
+                validate_type_template(resolution, inner, consts, false, true)?;
+            }
+            Ok(())
+        }
         ast::TypeKind::Named { arguments, .. } => {
             if let Some(id) = resolution.reference(ty.span) {
                 let binding = &resolution.bindings[id];
@@ -11428,7 +11475,9 @@ fn type_references_binding(resolution: &Resolution, ty: &ast::Type, id: BindingI
                     .as_ref()
                     .is_some_and(|row| type_references_binding(resolution, row, id))
         }
-        ast::TypeKind::Dyn(inner) => type_references_binding(resolution, inner, id),
+        ast::TypeKind::Dyn(bounds) => {
+            ast::dyn_types(bounds).any(|inner| type_references_binding(resolution, inner, id))
+        }
         ast::TypeKind::Slice(inner)
         | ast::TypeKind::Borrow { inner, .. }
         | ast::TypeKind::Graded { inner, .. } => type_references_binding(resolution, inner, id),
@@ -12759,7 +12808,7 @@ impl Checker<'_, '_> {
         &mut self,
         place: Expr,
         span: Span,
-    ) -> Result<(Expr, Vec<(usize, Type, Pattern)>)> {
+    ) -> Result<(Expr, Vec<ConsumedLevel>)> {
         let mut path = Vec::new();
         let mut current = &place;
         let root = loop {
@@ -13711,8 +13760,8 @@ impl Checker<'_, '_> {
             }
         }
         substitution.self_projections = self
-            .functions
-            .object_associated
+            .types
+            .object_projections
             .get(&(trait_id, trait_arguments.clone()))
             .cloned()
             .unwrap_or_default();
@@ -13976,13 +14025,15 @@ impl Checker<'_, '_> {
                 &info.arguments,
                 span,
             )?;
-            let entry = self
-                .functions
-                .object_associated
-                .entry((info.trait_id, info.arguments.clone()))
-                .or_default();
+            let key = (info.trait_id, info.arguments.clone());
             for (name, lowered) in projections {
-                if let Some(previous) = entry.get(&name)
+                let previous = self
+                    .types
+                    .object_projections
+                    .get(&key)
+                    .and_then(|values| values.get(&name))
+                    .copied();
+                if let Some(previous) = &previous
                     && *previous != lowered
                 {
                     return Err(Diagnostic::new(
@@ -13995,7 +14046,11 @@ impl Checker<'_, '_> {
                         ),
                     ));
                 }
-                entry.insert(name, lowered);
+                self.types
+                    .object_projections
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(name, lowered);
             }
         }
         let mut methods = BTreeMap::new();
@@ -14752,8 +14807,8 @@ impl Checker<'_, '_> {
         substitution.grades = grades;
         substitution.effects = effects;
         substitution.self_projections = self
-            .functions
-            .object_associated
+            .types
+            .object_projections
             .get(&(trait_id, trait_arguments.clone()))
             .cloned()
             .unwrap_or_default();
@@ -16444,8 +16499,13 @@ impl Checker<'_, '_> {
                     }
                     Ok(())
                 }
+                ast::TypeKind::Dyn(bounds) => {
+                    for inner in ast::dyn_types(bounds) {
+                        walk(checker, inner, in_callable)?;
+                    }
+                    Ok(())
+                }
                 ast::TypeKind::Slice(inner)
-                | ast::TypeKind::Dyn(inner)
                 | ast::TypeKind::Borrow { inner, .. }
                 | ast::TypeKind::Graded { inner, .. } => walk(checker, inner, in_callable),
                 ast::TypeKind::Structural { fields, .. } => {
@@ -33311,7 +33371,21 @@ pub(crate) fn substitute_alias_type(
                     .collect(),
             }
         }
-        K::Dyn(inner) => K::Dyn(Box::new(substitute_alias_type(resolution, inner, map))),
+        K::Dyn(bounds) => K::Dyn(
+            bounds
+                .iter()
+                .map(|bound| ast::DynBound {
+                    trait_ref: substitute_alias_type(resolution, &bound.trait_ref, map),
+                    bindings: bound
+                        .bindings
+                        .iter()
+                        .map(|(name, value)| {
+                            (name.clone(), substitute_alias_type(resolution, value, map))
+                        })
+                        .collect(),
+                })
+                .collect(),
+        ),
         K::Integer(value) => K::Integer(value.clone()),
         K::Bool(value) => K::Bool(*value),
         K::Lifetime(name) => K::Lifetime(name.clone()),

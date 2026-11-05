@@ -551,6 +551,15 @@ pub(crate) struct Types<'a> {
     /// Declared generic parameters of every trait, used to classify `dyn`
     /// arguments as type, natural, grade, or effect arguments.
     trait_generics: BTreeMap<BindingId, Vec<ast::Generic>>,
+    /// Associated type names declared by every trait, so a `dyn Trait<Out = T>`
+    /// binding can be validated where it is lowered.
+    trait_associated_types: BTreeMap<BindingId, BTreeSet<String>>,
+    /// The single projected type of each associated type of one object
+    /// specialization `(trait, trait arguments)`, shared by every object type
+    /// that lists that trait. It is fixed by agreeing concrete impls, by an
+    /// explicit `dyn Trait<Out = T>` binding, or by the first registered
+    /// member; every later source must agree.
+    pub object_projections: BTreeMap<(BindingId, TraitArguments), BTreeMap<String, Type>>,
     /// Traits that cannot be used as `dyn` objects, with the checked reason.
     pub dyn_errors: BTreeMap<BindingId, String>,
     /// Monotonic source of compiler-internal lifetime identities for inferred
@@ -812,15 +821,32 @@ impl<'a> Types<'a> {
             object_cache: BTreeMap::new(),
             dynamic_traits,
             trait_generics: BTreeMap::new(),
+            trait_associated_types: BTreeMap::new(),
+            object_projections: BTreeMap::new(),
             dyn_errors: BTreeMap::new(),
             inferred_lifetimes: 0,
             reference_labels: vec![String::new()],
             variance: crate::variance::infer(module, resolution)?,
         };
         for declaration in &module.items {
-            if let ast::ItemKind::Trait { generics, .. } = &declaration.item.kind {
+            if let ast::ItemKind::Trait {
+                generics,
+                associated,
+                ..
+            } = &declaration.item.kind
+            {
                 let id = resolution.declarations[&declaration.item.span.start];
                 result.trait_generics.insert(id, generics.clone());
+                result.trait_associated_types.insert(
+                    id,
+                    associated
+                        .iter()
+                        .filter_map(|item| match item {
+                            ast::Associated::Type { name, .. } => Some(name.clone()),
+                            ast::Associated::Const { .. } => None,
+                        })
+                        .collect(),
+                );
             }
         }
         let monomorphic = result
@@ -1338,6 +1364,75 @@ impl<'a> Types<'a> {
     }
     /// Forget variant refinements, including inside a heterogeneous union.
     /// Stored and reassignable values keep the declared enum alternatives.
+    /// Fix or check one projected associated type of an object
+    /// specialization from an explicit `dyn Trait<Name = T>` binding.
+    pub(crate) fn bind_object_projection(
+        &mut self,
+        key: &(BindingId, TraitArguments),
+        name: &str,
+        value: Type,
+        span: Span,
+    ) -> Result<()> {
+        let previous = self
+            .object_projections
+            .get(key)
+            .and_then(|values| values.get(name))
+            .copied();
+        match previous {
+            Some(previous) if previous != value => Err(Diagnostic::new(
+                span,
+                format!(
+                    "this binding projects associated type '{name}' of 'dyn {}' as {}, but it is already fixed as {}; one object specialization has one projected type",
+                    self.resolution.bindings[key.0].name,
+                    self.name(value),
+                    self.name(previous)
+                ),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                self.object_projections
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(name.to_owned(), value);
+                Ok(())
+            }
+        }
+    }
+    /// Merge the associated values agreed by a trait's concrete impls into
+    /// the object projections, checking any binding lowered earlier.
+    pub(crate) fn agree_object_projections(
+        &mut self,
+        trait_id: BindingId,
+        arguments: &TraitArguments,
+        values: &BTreeMap<String, Type>,
+    ) -> Result<()> {
+        let key = (trait_id, arguments.clone());
+        for (name, value) in values {
+            let previous = self
+                .object_projections
+                .get(&key)
+                .and_then(|values| values.get(name))
+                .copied();
+            if let Some(previous) = previous
+                && previous != *value
+            {
+                return Err(Diagnostic::new(
+                    self.resolution.bindings[trait_id].span,
+                    format!(
+                        "the concrete impls of trait '{}' agree on associated type '{name}' as {}, but a 'dyn' binding fixes it as {}",
+                        self.resolution.bindings[trait_id].name,
+                        self.name(*value),
+                        self.name(previous)
+                    ),
+                ));
+            }
+            self.object_projections
+                .entry(key.clone())
+                .or_default()
+                .insert(name.clone(), *value);
+        }
+        Ok(())
+    }
     pub fn full(&mut self, ty: Type, span: Span) -> Result<Type> {
         match ty {
             Type::Variants(id, _) => Ok(Type::Enum(id)),
@@ -2744,7 +2839,14 @@ impl<'a> Types<'a> {
             }
             return self.tuple(elements, ty.span);
         }
-        if let ast::TypeKind::Dyn(trait_path) = &ty.kind {
+        if let ast::TypeKind::Dyn(bounds) = &ty.kind {
+            let [bound] = bounds.as_slice() else {
+                return Err(Diagnostic::new(
+                    ty.span,
+                    "multi-trait trait objects are not supported yet",
+                ));
+            };
+            let trait_path = &bound.trait_ref;
             let ast::TypeKind::Named { arguments, .. } = &trait_path.kind else {
                 return Err(Diagnostic::new(
                     trait_path.span,
@@ -2798,6 +2900,24 @@ impl<'a> Types<'a> {
                         self.resolution.bindings[trait_id].name
                     ),
                 ));
+            }
+            for (name, value) in &bound.bindings {
+                if !self
+                    .trait_associated_types
+                    .get(&trait_id)
+                    .is_some_and(|names| names.contains(name))
+                {
+                    return Err(Diagnostic::new(
+                        value.span,
+                        format!(
+                            "trait '{}' declares no associated type '{name}' to bind",
+                            self.resolution.bindings[trait_id].name
+                        ),
+                    ));
+                }
+                let lowered = self.lower(value, substitution, depth + 1)?;
+                let lowered = self.full(lowered, value.span)?;
+                self.bind_object_projection(&key, name, lowered, value.span)?;
             }
             if self.dynamic_traits.contains(&trait_id) {
                 if let Some(id) = self.object_cache.get(&key) {

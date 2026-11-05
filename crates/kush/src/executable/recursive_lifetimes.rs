@@ -531,9 +531,9 @@ impl<'a, 'r> Solver<'a, 'r> {
             ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => {
                 arguments.iter().any(Self::written_type_has_borrow)
             }
+            ast::TypeKind::Dyn(bounds) => ast::dyn_types(bounds).any(Self::written_type_has_borrow),
             ast::TypeKind::Slice(inner)
             | ast::TypeKind::Array(inner, _)
-            | ast::TypeKind::Dyn(inner)
             | ast::TypeKind::Graded { inner, .. } => Self::written_type_has_borrow(inner),
             ast::TypeKind::Function {
                 parameters, result, ..
@@ -855,9 +855,8 @@ impl<'a, 'r> Solver<'a, 'r> {
                 ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => {
                     arguments.iter().any(mentioned)
                 }
-                ast::TypeKind::Slice(inner)
-                | ast::TypeKind::Array(inner, _)
-                | ast::TypeKind::Dyn(inner) => mentioned(inner),
+                ast::TypeKind::Slice(inner) | ast::TypeKind::Array(inner, _) => mentioned(inner),
+                ast::TypeKind::Dyn(bounds) => ast::dyn_types(bounds).any(mentioned),
                 ast::TypeKind::Structural { fields, .. } => {
                     fields.iter().any(|field| mentioned(&field.ty))
                 }

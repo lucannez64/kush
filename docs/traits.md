@@ -675,7 +675,14 @@ Object safety is checked at every `dyn` use:
   default. When a projection is supplied only by a parameter-dependent generic
   impl, the first concrete member registered for an object specialization fixes
   the projected type and every later member must agree; this is a whole-program
-  checked table, not a per-value dictionary;
+  checked table, not a per-value dictionary. An explicit binding
+  `dyn Trait<Out = T>` fixes it earlier, at the point where the type is
+  written (signatures are lowered before bodies), so a function can project
+  `Self.Out` on an object before any member is coerced. The binding names the
+  same object type as `dyn Trait`; it must agree with the impls, with other
+  bindings, and with every member registered later. Trait arguments come
+  before bindings (`dyn Into<i64, Out = i64>`), a name may be bound once, and
+  it must be an associated type the trait declares;
 - no intrinsically linear or `@[1]` exact-use result through dynamic dispatch;
   ordinary affine owning results such as `Box<i64>` are allowed and dropped
   exactly once per alternative;
@@ -896,10 +903,9 @@ The following remain intentionally outside the implemented subset:
 - per-field partial moves: consuming dispatch on a projected field consumes
   the whole root aggregate (siblings are released after the call), and a field
   behind a reference cannot be consumed;
-- a required associated projection supplied only by a parameter-dependent
-  generic impl before any concrete member of that object specialization has
-  been registered. After the first member is registered its projection fixes the
-  object ABI and every later member must agree;
+- an associated projection supplied only by a parameter-dependent generic
+  impl, needed before any member is registered and not fixed by an explicit
+  `dyn Trait<Out = T>` binding;
 - associated `Nat`/grade/effect values, owning or `String` associated
   constants, and associated constants that depend on an impl type parameter;
 - effect parameters on impl headers, lifetime-parameterized impl headers, and

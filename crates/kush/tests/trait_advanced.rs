@@ -1287,15 +1287,14 @@ fn projected_method_receivers_cannot_duplicate_owners_and_keep_mutations() {
             "",
         );
     }
-    for (body, expected) in [(
-        "let pair = (Text {name: \"x\", count: 1}, 9); pair.0.consume()",
+    rejects(
+        &format!(
+            "{definitions} fn main() -> i64 ! {{alloc, panic}} {{
+                let pair = (Text {{name: \"x\", count: 1}}, 9); pair.0.consume()
+            }}"
+        ),
         "owned field",
-    )] {
-        rejects(
-            &format!("{definitions} fn main() -> i64 ! {{alloc, panic}} {{{body}}}"),
-            expected,
-        );
-    }
+    );
     rejects(
         &format!(
             "{definitions} fn main() -> i64 ! {{alloc, panic}} {{

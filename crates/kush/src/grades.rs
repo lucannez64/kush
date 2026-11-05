@@ -318,9 +318,10 @@ fn grade_occurrences(resolution: &Resolution, ty: &ast::Type, binder: BindingId)
             .iter()
             .map(|field| grade_occurrences(resolution, &field.ty, binder))
             .sum(),
-        K::Slice(inner) | K::Borrow { inner, .. } | K::Dyn(inner) => {
-            grade_occurrences(resolution, inner, binder)
-        }
+        K::Slice(inner) | K::Borrow { inner, .. } => grade_occurrences(resolution, inner, binder),
+        K::Dyn(bounds) => crate::ast::dyn_types(bounds)
+            .map(|inner| grade_occurrences(resolution, inner, binder))
+            .sum(),
         K::Array(element, length) => {
             grade_occurrences(resolution, element, binder)
                 + grade_occurrences(resolution, length, binder)
@@ -474,8 +475,9 @@ fn algebra_leaf(resolution: &Resolution, expr: &ast::Type) -> Option<AlgebraRef>
         K::Binary { left, right, .. } => {
             algebra_leaf(resolution, left).or_else(|| algebra_leaf(resolution, right))
         }
-        K::Slice(inner) | K::Borrow { inner, .. } | K::Dyn(inner) => {
-            algebra_leaf(resolution, inner)
+        K::Slice(inner) | K::Borrow { inner, .. } => algebra_leaf(resolution, inner),
+        K::Dyn(bounds) => {
+            crate::ast::dyn_types(bounds).find_map(|inner| algebra_leaf(resolution, inner))
         }
         _ => None,
     }
