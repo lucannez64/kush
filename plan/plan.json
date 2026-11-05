@@ -4045,10 +4045,21 @@
       "deps": [
         "E-ABORT-LEXICAL"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/abortive-handlers.md 3.3: hidden abort word, call-site checks, dynamic lookup, Flow::Abort, indirect calls, task barrier, mainline measurement (decision 5).",
-      "commit": null,
-      "log": []
+      "commit": "694eb7f",
+      "log": [
+        {
+          "time": "2026-11-05 22:45:12",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 23:12:22",
+          "who": "agent",
+          "text": "done 694eb7f"
+        }
+      ]
     },
     {
       "id": "E-ABORT-INTERACT",
