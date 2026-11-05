@@ -1,0 +1,3 @@
+effect Tick: i64 -> i64;
+fn work(op: cap Tick ! {}, x: i64) -> i64 ! {} { perform op(x) }
+fn main() -> i64 ! {panic} { handle Tick: i64 -> i64 as tick with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { resume(x ^ 5) } { let mut s = 0; let mut i = 0; while i < 10000000 { s = (s + work(tick, i)) & 1023; i = i + 1; } s & 255 } }

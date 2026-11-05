@@ -1,0 +1,1 @@
+fn main() -> i64 ! {panic} { handle Tick: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { resume(x ^ 5) } { let mut s = 0; let mut i = 0; while i < 10000000 { s = (s + perform Tick(i)) & 1023; i = i + 1; } s & 255 } }

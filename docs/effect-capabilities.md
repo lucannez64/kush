@@ -169,6 +169,25 @@ handle Ask: i64 -> i64 as ask with fn(x: i64, resume: linear once fn(i64) -> i64
 - Not yet: capturing handlers, non-tail and multishot handlers (EFF-CAP-RESUME),
   capabilities in lambdas.
 
+## 3.8 Measured acceptance (EFF-CAP-PERF)
+
+Decision 4's gate, on the E-PERF method with the programs in
+[benchmarks/effects](../benchmarks/effects/README.md) (10^7 iterations,
+`--release`, best of 7 interleaved runs, start-up subtracted, two runs):
+
+| Path | ns/iteration |
+| --- | --- |
+| direct call | 1.9-2.2 |
+| lexical perform, tail-resumptive | 3.5-3.7 |
+| capability perform in its own body | 3.5-3.7 |
+| capability perform in a called function | 4.5-4.7 |
+| declared perform in a called function (dynamic lookup) | 6.7-7.3 |
+
+A capability perform in a called function costs the lexical in-place path
+plus the extra call of the callee (about half a direct call), inside the
+5-8 ns band decision 4 names for the lexical path, and about a third less
+than the dynamic lookup it replaces. The gate passes; the feature stays.
+
 ## 4. Row algebra obligations (Katsumata)
 
 Kush rows are a finite bitset universe (4 builtin + up to 12 declared bits).
