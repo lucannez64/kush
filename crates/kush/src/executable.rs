@@ -32336,10 +32336,10 @@ impl Checker<'_, '_> {
             resource: None,
         };
         let call = self.coerce(call, result, span)?;
-        return match expected {
+        match expected {
             Some(expected) => self.coerce(call, expected, span),
             None => Ok(call),
-        };
+        }
     }
     fn perform_effect(
         &mut self,
