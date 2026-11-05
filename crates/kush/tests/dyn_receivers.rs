@@ -615,3 +615,113 @@ fn objects_sharing_one_representation_name_every_trait() {
         "found dyn Other or dyn Show",
     );
 }
+
+// D-SINGLE-JOIN: a one-impl object is the union of its single member, so a
+// join whose least upper bound is exactly that member set stays the object.
+
+fn single_main(body: &str) -> String {
+    format!(
+        r#"{SINGLE}
+        fn first<T>(a: T, b: T) -> T ! {{}} {{ let _ = b; a }}
+        fn main() -> i64 ! {{io, alloc, panic}} {{
+            let a: dyn Show = Text {{ tag: 1, name: String.from("a") }};
+            let n = 7;
+            {body}
+        }}"#
+    )
+}
+
+#[test]
+fn generic_inference_from_two_single_impl_objects_keeps_the_object() {
+    let stats = agrees(
+        &single_main(
+            r#"let b: dyn Show = Text { tag: 2, name: String.from("b") };
+            let mut q = first(a, b);
+            print_i64(q.bump());
+            print_i64(q.eat());
+            0"#,
+        ),
+        0,
+        "2\n20\n",
+    );
+    assert_eq!(stats.allocations, 2, "{stats:?}");
+}
+
+#[test]
+fn joins_of_an_object_and_its_member_type_become_the_object() {
+    let text = r#"Text { tag: 4, name: String.from("t") }"#;
+    // `n` is 7: the member arm gives 5/50, the object arm 2/20.
+    for (join, expected) in [
+        (format!("match n {{ 5 => a, _ => {text} }}"), "5\n50\n"),
+        (format!("match n {{ 5 => {text}, _ => a }}"), "2\n20\n"),
+        (format!("if n == 5 {{ a }} else {{ {text} }}"), "5\n50\n"),
+        (format!("if n == 7 {{ {text} }} else {{ a }}"), "5\n50\n"),
+        (format!("if n == 7 {{ a }} else {{ {text} }}"), "2\n20\n"),
+    ] {
+        let stats = agrees(
+            &single_main(&format!(
+                "let mut q = {join};
+                print_i64(q.bump());
+                print_i64(q.eat());
+                0"
+            )),
+            0,
+            expected,
+        );
+        // `a` always allocates; the member arm allocates only when taken.
+        let built = if expected.starts_with('5') { 2 } else { 1 };
+        assert_eq!(stats.allocations, built, "{join}: {stats:?}");
+    }
+    // The selected arm is the object `a`, and it still dispatches.
+    agrees(
+        &single_main(
+            r#"let q = match n { 7 => a, _ => Text { tag: 4, name: String.from("t") } };
+            q.show()"#,
+        ),
+        1,
+        "",
+    );
+}
+
+#[test]
+fn a_joined_object_is_still_not_its_member_type() {
+    rejects(
+        &single_main(
+            r#"let q = if n == 5 { a } else { Text { tag: 4, name: String.from("t") } };
+            let t: Text = q;
+            t.tag"#,
+        ),
+        "expected Text, found dyn Show",
+    );
+    rejects(
+        &single_main(
+            r#"let b: dyn Show = Text { tag: 2, name: String.from("b") };
+            let q = first(a, b);
+            q.tag"#,
+        ),
+        "field access requires a record value, found dyn Show",
+    );
+    // As for any union, the first argument fixes `T`: a plain member first
+    // makes `T = Text`, and the object is not a `Text`.
+    rejects(
+        &single_main(
+            r#"let q = first(Text { tag: 2, name: String.from("b") }, a);
+            0"#,
+        ),
+        "expected Text, found dyn Show",
+    );
+}
+
+#[test]
+fn joins_of_an_object_with_unrelated_types_still_flatten() {
+    // Unchanged behaviour (narrow fix): `dyn Show | i64` flattens to
+    // `Text | i64`, exactly as a multi-impl object flattens its members.
+    agrees(
+        &single_main(
+            r#"let q = if n == 7 { a } else { 3 };
+            match q { Text { tag, name } => tag + 40, _ => 9 }"#,
+        ),
+        41,
+        "",
+    );
+}

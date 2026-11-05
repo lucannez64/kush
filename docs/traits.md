@@ -917,9 +917,17 @@ objects: `pair.0.method()` dispatches on the object, and an object is never
 implicitly a value of its member type (`let t: Text = pair.0;` is a type
 mismatch, `expected Text, found dyn Show`). Traits that share the same single
 impl share one representation, and diagnostics name all of them (`dyn Other
-or dyn Show`). Remaining gap (D-SINGLE-JOIN): inferring a generic parameter
-from two such objects (`first(a, b)`) and a `match` mixing an object arm with
-a plain member arm still collapse to the member type and are rejected.
+or dyn Show`).
+
+A closed object is the union of its impls, so a join takes the least upper
+bound in that union lattice. When the bound is exactly a one-impl object's
+member set, the result is the object: `first(a, b)` with two such objects
+infers `T = dyn Show`, and `match n { 5 => a, _ => Text { .. } }` coerces the
+member arm into the object. A join with anything else flattens exactly as a
+multi-impl object does (`if c { a } else { 3 }` is `Text | i64` and can be
+matched on `Text { .. }`). As for every union, the first argument of a generic
+call fixes its parameter: `first(text, a)` infers `T = Text` and then rejects
+the object.
 
 ## Limits
 

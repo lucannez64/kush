@@ -1108,7 +1108,7 @@ impl<'a> Types<'a> {
                 for member in self.unions[id].members.clone() {
                     members.push(self.rebind_lengths_inner(member, map, span)?);
                 }
-                self.union(members, span)
+                self.rebuild_union(id, members, span)
             }
             Type::Ref(p) => Ok(Type::Ref(pointer(self, p)?)),
             Type::RefMut(p) => Ok(Type::RefMut(pointer(self, p)?)),
@@ -1695,12 +1695,10 @@ impl<'a> Types<'a> {
                         other => other,
                     })
                     .collect::<Vec<_>>();
-                // A one-member object union is already full; renormalizing it
-                // would collapse the object to its member type.
                 if widened == self.unions[id].members {
                     return Ok(ty);
                 }
-                self.union(widened, span)
+                self.rebuild_union(id, widened, span)
             }
             _ => Ok(ty),
         }
@@ -1968,7 +1966,7 @@ impl<'a> Types<'a> {
                 for member in members {
                     fresh_members.push(self.freshen_borrows_with(member, binders, map, span)?);
                 }
-                self.union(fresh_members, span)
+                self.rebuild_union(id, fresh_members, span)
             }
             Type::Enum(id) => {
                 let definition = self.enums[id].definition;
@@ -2075,7 +2073,7 @@ impl<'a> Types<'a> {
                 for member in members {
                     relabeled.push(self.relabel_lifetimes(member, map, span)?);
                 }
-                self.union(relabeled, span)
+                self.rebuild_union(id, relabeled, span)
             }
             Type::Box(p) => {
                 let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
@@ -3767,14 +3765,32 @@ impl<'a> Types<'a> {
     /// masks of one enum, sort/deduplicate, and reject alternatives whose
     /// representation cannot safely cross a union boundary.
     pub fn union(&mut self, members: Vec<Type>, span: Span) -> Result<Type> {
-        // A join of one closed trait object with itself (a one-member
-        // union) stays that object instead of collapsing to its member.
-        let mut present = members.iter().filter(|member| **member != Type::Never);
-        if let Some(first @ Type::Union(id)) = present.next().copied()
-            && self.unions[id].members.len() == 1
-            && present.all(|member| *member == first)
-        {
-            return Ok(first);
+        // A closed trait object is the union of its impls. When the join is
+        // exactly a one-impl object's member set (the object itself, its
+        // member type, or a refinement of it), the least upper bound is that
+        // object, so it keeps the object representation instead of
+        // collapsing to the member. Joins with anything else flatten as for
+        // a multi-impl object.
+        let present = members
+            .iter()
+            .copied()
+            .filter(|member| *member != Type::Never)
+            .collect::<Vec<_>>();
+        let objects = present
+            .iter()
+            .filter_map(|member| match member {
+                Type::Union(id) if self.unions[*id].members.len() == 1 => Some(*id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if let [id] = objects.into_iter().collect::<Vec<_>>()[..] {
+            let object = Type::Union(id);
+            let member = self.unions[id].members[0];
+            if present.iter().all(|ty| {
+                *ty == object || (!matches!(ty, Type::Union(_)) && self.subtype(*ty, member))
+            }) {
+                return Ok(object);
+            }
         }
         let mut atoms = Vec::new();
         let mut work = 0usize;
@@ -3874,6 +3890,18 @@ impl<'a> Types<'a> {
                 Ok(Type::Union(id))
             }
         }
+    }
+    /// Rebuild union `id` after mapping its members. A one-member union is
+    /// a closed trait object and stays one; renormalizing it with `union`
+    /// would collapse it to its member type.
+    fn rebuild_union(&mut self, id: usize, members: Vec<Type>, span: Span) -> Result<Type> {
+        if members == self.unions[id].members {
+            return Ok(Type::Union(id));
+        }
+        if self.unions[id].members.len() == 1 {
+            return self.object_union(members, span);
+        }
+        self.union(members, span)
     }
     /// The closed-world representation of a trait object. Unlike `union`, a
     /// single member stays a one-alternative union so the object keeps its

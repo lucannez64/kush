@@ -3744,10 +3744,16 @@
       "deps": [
         "D-SINGLE-TUPLE"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "first<T>(a, b) with two one-impl dyn objects, and match arms mixing an object with a plain member value, still collapse to the member type and are rejected (found by the D-SINGLE-TUPLE review).",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 18:57:10",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     }
   ]
 }
