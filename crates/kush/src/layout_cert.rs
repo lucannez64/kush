@@ -63,7 +63,7 @@ impl ValueSet {
         self.align == 1 && self.intervals == [(0, u64::MAX)]
     }
     pub(crate) fn contains(&self, value: u64) -> bool {
-        value % self.align == 0
+        value.is_multiple_of(self.align)
             && self
                 .intervals
                 .iter()
@@ -304,7 +304,9 @@ mod tests {
     /// The instantiated `Option` layouts of a program with one local per
     /// payload type, plus the whole enum table. A payload is identified by a
     /// predicate on the `Some` field's type.
-    fn layouts(payloads: &[(&str, fn(Type) -> bool)]) -> (Vec<Enum>, Vec<usize>) {
+    type Payload = (&'static str, fn(Type) -> bool);
+
+    fn layouts(payloads: &[Payload]) -> (Vec<Enum>, Vec<usize>) {
         let locals = payloads
             .iter()
             .enumerate()
@@ -336,7 +338,8 @@ mod tests {
 
     #[test]
     fn the_three_existing_niches_are_reproduced_bit_for_bit() {
-        let cases: [(&str, fn(Type) -> bool, i64); 5] = [
+        type Case = (&'static str, fn(Type) -> bool, i64);
+        let cases: [Case; 5] = [
             ("Box<i64>", |t| matches!(t, Type::Box(_)), 0),
             ("&P", |t| matches!(t, Type::Ref(_)), 0),
             ("&mut P", |t| matches!(t, Type::RefMut(_)), 0),

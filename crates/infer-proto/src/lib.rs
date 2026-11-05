@@ -884,11 +884,11 @@ fn co_occurring(table: &Occurrences, id: usize, positive: bool) -> Option<BTreeS
 }
 
 /// Replace every occurrence of a variable, then renormalize.
-fn substitute(out: &Out, from: usize, to: &Option<Out>, positive: bool) -> Option<Out> {
+fn substitute(out: &Out, from: usize, to: &Option<Out>) -> Option<Out> {
     let rebuild = |items: &BTreeSet<Out>, union: bool| -> Option<Out> {
         let mut set = BTreeSet::new();
         for item in items {
-            match substitute(item, from, to, positive) {
+            match substitute(item, from, to) {
                 Some(Out::Union(inner)) if union => set.extend(inner),
                 Some(Out::Inter(inner)) if !union => set.extend(inner),
                 Some(other) => {
@@ -908,8 +908,8 @@ fn substitute(out: &Out, from: usize, to: &Option<Out>, positive: bool) -> Optio
     match out {
         Out::Param(id) if *id == from => to.clone(),
         Out::Fun(a, b, bits) => Some(Out::Fun(
-            Box::new(substitute(a, from, to, !positive).unwrap_or(Out::Param(from))),
-            Box::new(substitute(b, from, to, positive).unwrap_or(Out::Param(from))),
+            Box::new(substitute(a, from, to).unwrap_or(Out::Param(from))),
+            Box::new(substitute(b, from, to).unwrap_or(Out::Param(from))),
             *bits,
         )),
         Out::Union(items) => rebuild(items, true),
@@ -943,26 +943,25 @@ pub fn simplify(out: &Out) -> Out {
             let lone = |sets: Option<&Vec<BTreeSet<Out>>>| {
                 sets.is_some_and(|sets| sets.iter().any(BTreeSet::is_empty))
             };
-            if (plus.is_none() || minus.is_none()) && !lone(plus) && !lone(minus) {
-                if let Some(next) = substitute(&out, *id, &None, true) {
-                    out = next;
-                    continue 'rounds;
-                }
+            if (plus.is_none() || minus.is_none())
+                && !lone(plus)
+                && !lone(minus)
+                && let Some(next) = substitute(&out, *id, &None)
+            {
+                out = next;
+                continue 'rounds;
             }
             // (3) Sandwiched between the same scalar.
             if let (Some(p), Some(m)) = (
                 co_occurring(&table, *id, true),
                 co_occurring(&table, *id, false),
-            ) {
-                if let Some(scalar) = p
-                    .intersection(&m)
-                    .find(|o| matches!(o, Out::Int | Out::Bool))
-                {
-                    if let Some(next) = substitute(&out, *id, &Some(scalar.clone()), true) {
-                        out = next;
-                        continue 'rounds;
-                    }
-                }
+            ) && let Some(scalar) = p
+                .intersection(&m)
+                .find(|o| matches!(o, Out::Int | Out::Bool))
+                && let Some(next) = substitute(&out, *id, &Some(scalar.clone()))
+            {
+                out = next;
+                continue 'rounds;
             }
             // (2) Mutual co-occurrence in one polarity.
             for positive in [true, false] {
@@ -975,12 +974,10 @@ pub fn simplify(out: &Out) -> Out {
                     };
                     if co_occurring(&table, other_id, positive)
                         .is_some_and(|theirs| theirs.contains(&Out::Param(*id)))
+                        && let Some(next) = substitute(&out, other_id, &Some(Out::Param(*id)))
                     {
-                        if let Some(next) = substitute(&out, other_id, &Some(Out::Param(*id)), true)
-                        {
-                            out = next;
-                            continue 'rounds;
-                        }
+                        out = next;
+                        continue 'rounds;
                     }
                 }
             }
@@ -1020,7 +1017,7 @@ pub fn merge_variable_joins(out: &Out) -> (Out, bool) {
     let mut out = out.clone();
     let mut merged = false;
     while let Some((keep, gone)) = find(&out) {
-        out = substitute(&out, gone, &Some(Out::Param(keep)), true).expect("nonempty");
+        out = substitute(&out, gone, &Some(Out::Param(keep))).expect("nonempty");
         merged = true;
     }
     (renumber(&out), merged)
