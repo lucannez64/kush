@@ -1427,10 +1427,31 @@
       "deps": [
         "E-CPS-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "e47c3cf",
+      "log": [
+        {
+          "time": "2026-11-05 06:13:44",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 06:13:44",
+          "who": "agent",
+          "text": "Implementation plan: per-suspension continuation closures (env = exact live set) instead of one union frame; in-place state 0 via Region/RegionExit; statically tail-resumptive lambda handlers keep the identity token everywhere (constant stack). Design doc to be updated with reasons."
+        },
+        {
+          "time": "2026-11-05 06:56:28",
+          "who": "agent",
+          "text": "Suspendable/Suspend IR from the checker; Suspend wraps the handler call so ownership/grades check it as a call. Boat gate 1441 tests pass."
+        },
+        {
+          "time": "2026-11-05 06:56:28",
+          "who": "agent",
+          "text": "done e47c3cf"
+        }
+      ]
     },
     {
       "id": "E-CPS-LIVENESS",
@@ -1441,10 +1462,21 @@
       "deps": [
         "E-CPS-IR"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Reuse ownership liveness; borrowed values at a suspension point rejected first.",
-      "commit": null,
-      "log": []
+      "commit": "e47c3cf",
+      "log": [
+        {
+          "time": "2026-11-05 06:56:28",
+          "who": "agent",
+          "text": "Backward liveness over checked IR with loop fixed points (crate::suspend::Live); rules: borrow, handler-written, outer moved/written locals, alloc for capturing resumptions; tests in tests/effect_state_machines.rs"
+        },
+        {
+          "time": "2026-11-05 06:56:28",
+          "who": "agent",
+          "text": "done e47c3cf"
+        }
+      ]
     },
     {
       "id": "E-CPS-FRAME",
@@ -1455,10 +1487,21 @@
       "deps": [
         "E-CPS-LIVENESS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "e47c3cf",
+      "log": [
+        {
+          "time": "2026-11-05 06:56:28",
+          "who": "agent",
+          "text": "Frame = per-point linear once closure env holding exactly L(i); continuation functions rebuilt structurally (blocks, branches, re-entered loops); drop glue = closure drop glue. Design doc section 14 explains the departure."
+        },
+        {
+          "time": "2026-11-05 06:56:28",
+          "who": "agent",
+          "text": "done e47c3cf"
+        }
+      ]
     },
     {
       "id": "E-CPS-EVAL",
@@ -1469,10 +1512,21 @@
       "deps": [
         "E-CPS-FRAME"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "e47c3cf",
+      "log": [
+        {
+          "time": "2026-11-05 06:56:28",
+          "who": "agent",
+          "text": "Evaluator: Region/RegionExit via Flow::Exit, parameter_slots prologue."
+        },
+        {
+          "time": "2026-11-05 06:56:28",
+          "who": "agent",
+          "text": "done e47c3cf"
+        }
+      ]
     },
     {
       "id": "E-CPS-NATIVE",
@@ -1483,10 +1537,21 @@
       "deps": [
         "E-CPS-FRAME"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "e47c3cf",
+      "log": [
+        {
+          "time": "2026-11-05 06:56:28",
+          "who": "agent",
+          "text": "Native: Region join/finish blocks, RegionExit cleanup + handler-depth restore, parameter_slots prologue. Tail-resumptive handlers use the identity token instead of tail calls; the 1e6-perform stack test is E-PERF."
+        },
+        {
+          "time": "2026-11-05 06:56:28",
+          "who": "agent",
+          "text": "done e47c3cf"
+        }
+      ]
     },
     {
       "id": "E-CPS-PARITY",
@@ -1498,10 +1563,21 @@
         "E-CPS-EVAL",
         "E-CPS-NATIVE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Same tests pass; tail identity fast path kept.",
-      "commit": null,
-      "log": []
+      "commit": "e47c3cf",
+      "log": [
+        {
+          "time": "2026-11-05 06:56:28",
+          "who": "agent",
+          "text": "resumption_continuation removed; tail identity and capture-free (no allocation) paths kept and tested; all existing handler tests pass through the new path."
+        },
+        {
+          "time": "2026-11-05 06:56:29",
+          "who": "agent",
+          "text": "done e47c3cf"
+        }
+      ]
     },
     {
       "id": "E-EXPR",
@@ -1512,10 +1588,21 @@
       "deps": [
         "E-CPS-PARITY"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "e47c3cf",
+      "log": [
+        {
+          "time": "2026-11-05 06:56:29",
+          "who": "agent",
+          "text": "ANF before ownership (executable/anf.rs): operands, call args, records, conditions, match scrutinee, && / ||, while conditions; output-order tests in both backends."
+        },
+        {
+          "time": "2026-11-05 06:56:29",
+          "who": "agent",
+          "text": "done e47c3cf"
+        }
+      ]
     },
     {
       "id": "E-MULTI-PERFORM",
@@ -1526,10 +1613,21 @@
       "deps": [
         "E-EXPR"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "e47c3cf",
+      "log": [
+        {
+          "time": "2026-11-05 06:56:29",
+          "who": "agent",
+          "text": "Several points, both branch arms, loops and nested loops, owned values across points with balanced allocations."
+        },
+        {
+          "time": "2026-11-05 06:56:29",
+          "who": "agent",
+          "text": "done e47c3cf"
+        }
+      ]
     },
     {
       "id": "E-CONTROL",
@@ -1540,10 +1638,21 @@
       "deps": [
         "E-MULTI-PERFORM"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "e47c3cf",
+      "log": [
+        {
+          "time": "2026-11-05 06:56:29",
+          "who": "agent",
+          "text": "break/continue (incl. break values) are state transitions in re-entered loops; early exits drop each owned value once. return/? after a perform are rejected under non-tail handlers (no unwinding to abandon the handler activation) and work in place under tail-resumptive handlers."
+        },
+        {
+          "time": "2026-11-05 06:56:29",
+          "who": "agent",
+          "text": "done e47c3cf"
+        }
+      ]
     },
     {
       "id": "E-CALLEE-COLOR",
@@ -1554,10 +1663,16 @@
       "deps": [
         "E-MULTI-PERFORM"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Functions whose row contains a declared op get a resumable form.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 06:50:44",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "E-DYN-RESUME",
