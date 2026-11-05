@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 type Result<T> = std::result::Result<T, Diagnostic>;
 /// Call-leaf path prefix marking an element inside a container reached through
 /// a reference parameter. It is checker-only and never names a record field.
-const CONTAINER_LEAF: usize = usize::MAX;
+use crate::runtime_types::CONTAINER_LEAF;
 pub(crate) fn check(program: &mut Executable) -> Result<()> {
     let mut owned = vec![false; program.enums.len()];
     let mut linear = program.enums.iter().map(|e| e.linear).collect::<Vec<_>>();
@@ -539,6 +539,14 @@ fn steps_distinct(left: usize, right: usize, relations: &BTreeSet<(usize, usize)
 }
 /// A container's or record's stored provenance without index-place
 /// identities: see [`FieldBorrow::strip_index_ids`].
+/// A write into a container or record reached through a place whose owner
+/// cannot be identified.
+fn untracked_write(span: Span) -> Diagnostic {
+    Diagnostic::new(
+        span,
+        "cannot track which owner this write through a place reference updates; borrow the container or record through a direct local or a reference parameter",
+    )
+}
 fn stripped_provenance(mut provenance: RecordProvenance) -> RecordProvenance {
     for loan in provenance.leaves.values_mut() {
         if let Some(field) = &mut loan.field {
@@ -1973,8 +1981,14 @@ impl Checker<'_> {
     /// Record a reference written into an owned container or through a
     /// `&mut` container parameter. `replace` updates the sole element leaf;
     /// `push` keeps the union of every possible element source.
-    fn merge_container_element(&mut self, receiver: &Expr, loan: Loan, replace: bool) {
+    #[must_use]
+    fn merge_container_element(&mut self, receiver: &Expr, loan: Loan, replace: bool) -> bool {
         let base = through_coerce(receiver);
+        if let ExprKind::BorrowPlace(place) = &base.kind {
+            let mut provenance = RecordProvenance::default();
+            provenance.leaves.insert(Vec::new(), loan);
+            return self.merge_into_place_owner(place, provenance);
+        }
         let slot = match &base.kind {
             ExprKind::Borrow(slot)
             | ExprKind::BorrowInit { slot, .. }
@@ -1982,7 +1996,7 @@ impl Checker<'_> {
             | ExprKind::Local(slot)
             | ExprKind::Peek(slot)
             | ExprKind::Move(slot) => *slot,
-            _ => return,
+            _ => return true,
         };
         // Writing through a stored `&mut` reference local changes the
         // container it points to. Record the element loan on that owner too,
@@ -2000,6 +2014,7 @@ impl Checker<'_> {
             }
         }
         self.merge_container_slot(slot, loan, replace);
+        true
     }
     fn merge_container_slot(&mut self, slot: usize, loan: Loan, replace: bool) {
         let mut provenance = self.record_sources[slot].clone().unwrap_or_default();
@@ -2046,19 +2061,23 @@ impl Checker<'_> {
     /// relative to one element. `replace` is used only where the container
     /// provably holds one element (`Box.set`); vector writes always keep the
     /// union of every possible element source.
+    #[must_use]
     fn merge_container_provenance(
         &mut self,
         receiver: &Expr,
         provenance: RecordProvenance,
         replace: bool,
-    ) {
+    ) -> bool {
         let base = through_coerce(receiver);
+        if let ExprKind::BorrowPlace(place) = &base.kind {
+            return self.merge_into_place_owner(place, provenance);
+        }
         let slot = match &base.kind {
             ExprKind::Borrow(slot)
             | ExprKind::Local(slot)
             | ExprKind::Peek(slot)
             | ExprKind::Move(slot) => *slot,
-            _ => return,
+            _ => return true,
         };
         if self.locals[slot].ty.is_ref() {
             let owners = self
@@ -2072,6 +2091,35 @@ impl Checker<'_> {
             }
         }
         self.merge_container_provenance_slot(slot, provenance, replace);
+        true
+    }
+    /// Merge leaves written through a place reference (`&mut o.b`,
+    /// `&mut v[i]`, `&mut o.v[i].h`) into the place's root owner. A container
+    /// adds no path step, so the leaves go under the place's field path with
+    /// index steps dropped; they are merged, never replaced, because other
+    /// elements or fields share that path. A place rooted at a reference
+    /// parameter writes caller storage, which the caller tracks. Returns
+    /// false when the owner cannot be identified (a place rooted at a stored
+    /// reference local); the caller must reject the write.
+    fn merge_into_place_owner(&mut self, place: &Expr, provenance: RecordProvenance) -> bool {
+        let Some((root, path)) = self.place_ident(place) else {
+            return false;
+        };
+        if self.locals[root].ty.is_ref() {
+            return root < self.parameter_count;
+        }
+        let prefix = path
+            .into_iter()
+            .filter(|step| step & (INDEX_PATH_MARK | RUNTIME_INDEX_MARK) == 0)
+            .collect::<Vec<_>>();
+        let mut placed = RecordProvenance::default();
+        for (path, loan) in provenance.leaves {
+            let mut full = prefix.clone();
+            full.extend(path);
+            placed.leaves.insert(full, loan);
+        }
+        self.merge_container_provenance_slot(root, placed, false);
+        true
     }
     fn merge_container_provenance_slot(
         &mut self,
@@ -2899,7 +2947,9 @@ impl Checker<'_> {
             match targets {
                 None => {
                     let merged = written.pop().unwrap_or_default();
-                    self.merge_container_provenance(argument, merged, false);
+                    if !self.merge_container_provenance(argument, merged, false) {
+                        return Err(untracked_write(span));
+                    }
                 }
                 Some(targets) => {
                     for ((owner, prefix, _), merged) in targets.iter().zip(&written) {
@@ -3089,14 +3139,11 @@ impl Checker<'_> {
                     let whole = path.is_empty();
                     return Ok(vec![(root, path, whole)]);
                 }
-                // One element of a container of borrowed records: container
-                // leaves are element-relative and shared by every element.
-                if path.len() == 1
-                    && container_carries_borrow(self.enums, self.pointees, self.locals[root].ty)
-                {
-                    return Ok(vec![(root, Vec::new(), false)]);
-                }
-                Err(unknown())
+                // An element of a container of borrowed records: a container
+                // adds no path step and its leaves are shared by every
+                // element, so drop the index steps and merge.
+                let prefix = path.into_iter().filter(|step| !index(step)).collect();
+                Ok(vec![(root, prefix, false)])
             };
         let base = through_coerce(reference);
         match &base.kind {
@@ -4816,10 +4863,57 @@ impl Checker<'_> {
             return Ok(());
         }
         let origins = self.view_origins(expr);
-        let roots = self.origins_roots(&origins);
         let splits = self.split_labels(expr);
         let mutable = expr.ty.is_mut_slice() || matches!(expr.ty, Type::RefMut(_));
         let field = self.view_loan(expr).field;
+        // `&mut record` is exclusive over the record and its exclusive leaves,
+        // but only shared over the storage behind its shared leaves: through
+        // the reference a shared leaf can be read or replaced, never written.
+        let mut shared_sources = BTreeSet::new();
+        if matches!(expr.ty, Type::RefMut(_))
+            && self
+                .referent(expr.ty)
+                .is_some_and(|referent| self.is_carrier_type(referent))
+        {
+            let provenance = self.container_provenance(expr);
+            let exclusive = provenance
+                .leaves
+                .values()
+                .filter(|loan| loan.mutable)
+                .flat_map(|loan| loan.origins.iter().copied())
+                .collect::<BTreeSet<_>>();
+            for loan in provenance.leaves.values().filter(|loan| !loan.mutable) {
+                for origin in &loan.origins {
+                    if origins.contains(origin) && !exclusive.contains(origin) {
+                        shared_sources.insert(*origin);
+                    }
+                }
+            }
+        }
+        if !shared_sources.is_empty() {
+            let exclusive_origins = origins
+                .difference(&shared_sources)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            self.retain_region(expr, exclusive_origins, splits.clone(), true, field.clone())?;
+            return self.retain_region(expr, shared_sources, splits, false, None);
+        }
+        if let Some(slot) = receiver {
+            self.reborrowed_views.insert(slot);
+        }
+        self.retain_region(expr, origins, splits, mutable, field)
+    }
+    /// Retain one view region for the rest of the enclosing expression, or
+    /// reject an overlap with a region already retained by it.
+    fn retain_region(
+        &mut self,
+        expr: &Expr,
+        origins: BTreeSet<usize>,
+        splits: SplitLabels,
+        mutable: bool,
+        field: Option<FieldBorrow>,
+    ) -> Result<()> {
+        let roots = self.origins_roots(&origins);
         for retained in &self.temporary_regions {
             let overlaps = origins.iter().any(|slot| retained.origins.contains(slot))
                 || roots.iter().any(|root| retained.roots.contains(root));
@@ -4836,9 +4930,6 @@ impl Checker<'_> {
                     "conflicting slice arguments: an exclusive view overlaps another view retained by this expression",
                 ));
             }
-        }
-        if let Some(slot) = receiver {
-            self.reborrowed_views.insert(slot);
         }
         self.temporary_regions.push(RetainedView {
             origins: origins.clone(),
@@ -5684,7 +5775,9 @@ impl Checker<'_> {
                             ));
                         }
                     }
-                    self.merge_container_provenance(reference, incoming, true);
+                    if !self.merge_container_provenance(reference, incoming, true) {
+                        return Err(untracked_write(expr.span));
+                    }
                 } else if self.element_carries_borrow(value.ty)
                     && let Some(loan) = self.reference_element_loan(value)
                 {
@@ -5737,7 +5830,9 @@ impl Checker<'_> {
                             ));
                         }
                     }
-                    self.merge_container_element(reference, loan, true);
+                    if !self.merge_container_element(reference, loan, true) {
+                        return Err(untracked_write(expr.span));
+                    }
                 }
             }
             ExprKind::Assign(slot, value) => {
@@ -6034,7 +6129,9 @@ impl Checker<'_> {
                                         | crate::executable::VecOp::SetBorrowed
                                 ) {
                                     let updated = provenance.clone();
-                                    self.merge_container_provenance(&args[0], updated, false);
+                                    if !self.merge_container_provenance(&args[0], updated, false) {
+                                        return Err(untracked_write(expr.span));
+                                    }
                                 }
                             } else if self.element_carries_borrow(element)
                                 && let Some(loan) = self.reference_element_loan(&args[value_index])
@@ -6100,7 +6197,9 @@ impl Checker<'_> {
                                         .get(&Vec::new())
                                         .cloned()
                                         .unwrap_or_default();
-                                    self.merge_container_element(&args[0], updated, false);
+                                    if !self.merge_container_element(&args[0], updated, false) {
+                                        return Err(untracked_write(expr.span));
+                                    }
                                 }
                             }
                         }

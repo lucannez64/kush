@@ -22793,7 +22793,7 @@ impl Checker<'_, '_> {
                 {
                     crate::runtime_types::borrow_leaves(self.types, *ty)
                 } else {
-                    Ok(Vec::new())
+                    crate::runtime_types::reference_referent_leaves(self.types, *ty)
                 }
             })
             .collect::<Result<Vec<_>>>()?;
@@ -23639,7 +23639,7 @@ impl Checker<'_, '_> {
                 {
                     crate::runtime_types::borrow_leaves(self.types, *ty)
                 } else {
-                    Ok(Vec::new())
+                    crate::runtime_types::reference_referent_leaves(self.types, *ty)
                 }
             })
             .collect::<Result<Vec<_>>>()?;

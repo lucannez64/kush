@@ -2348,6 +2348,20 @@ impl<'a> Types<'a> {
                 }
                 let mut leaves = Vec::new();
                 let lifetime = if ty.is_slice() || ty.is_ref() {
+                    leaves = reference_referent_leaves(self, ty)?;
+                    for leaf in &leaves {
+                        if let Some(name) = &leaf.lifetime
+                            && !declared.contains(name)
+                        {
+                            return Err(Diagnostic::new(
+                                parameter.ty.span,
+                                format!(
+                                    "lifetime '{name}' in a function arrow type must be bound by the arrow itself, as in fn<'{0}>(&mut Window<'{0}>) -> ...; an arrow cannot borrow for an outer lifetime",
+                                    name.trim_start_matches('\'')
+                                ),
+                            ));
+                        }
+                    }
                     Some(arrow_lifetime(
                         inner,
                         &declared,
@@ -5726,6 +5740,30 @@ pub(crate) fn is_borrowed_task_exit(types: &Types<'_>, ty: Type) -> bool {
                 .flat_map(|variant| variant.fields.iter())
                 .any(|field| has_borrow(types, *field))
     })
+}
+/// Call-leaf path prefix marking an element (or record leaf) reached through
+/// a reference parameter. It is checker-only and never names a record field.
+pub(crate) const CONTAINER_LEAF: usize = usize::MAX;
+/// The leaves behind a reference parameter whose referent is a reference
+/// container or a record with borrowed fields, each prefixed with
+/// `CONTAINER_LEAF`. A callable contract carries them so an indirect call
+/// merges what the callee may write into the caller's owner, exactly like a
+/// direct call.
+pub(crate) fn reference_referent_leaves(types: &Types<'_>, ty: Type) -> Result<Vec<BorrowLeaf>> {
+    let (Type::Ref(pointer) | Type::RefMut(pointer)) = ty else {
+        return Ok(Vec::new());
+    };
+    let referent = types.pointees[pointer];
+    if !is_reference_container(types, referent) && !is_borrowed_record(types, referent) {
+        return Ok(Vec::new());
+    }
+    Ok(borrow_leaves(types, referent)?
+        .into_iter()
+        .map(|mut leaf| {
+            leaf.path.insert(0, CONTAINER_LEAF);
+            leaf
+        })
+        .collect())
 }
 /// Whether `ty` is the conventional `TaskExit<R>` whose payload is a borrowed
 /// record without a nested `TaskExit`. A child task may return exactly this

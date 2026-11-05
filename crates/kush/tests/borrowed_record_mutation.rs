@@ -759,3 +759,279 @@ fn main() -> i64 ! {alloc, panic} {
         "",
     );
 }
+
+#[test]
+fn review_recheck_indirect_calls_and_container_field_places_merge_writes() {
+    // A write through a function value is merged like a direct call.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut w = Win { view: &a[..], note: 0 };
+    let f = set;
+    {
+        let b: Vec<i64> = [70, 71, 72, 73];
+        f(&mut w, &b[..]);
+    }
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    Slice.get(w.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "an outer container was updated with a reference to this block-local value",
+    );
+    // So is one through an annotated arrow binding.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut w = Win { view: &a[..], note: 0 };
+    let f: fn<'a>(&mut Win<'a>, &'a [i64]) -> Unit ! {} = set;
+    {
+        let b: Vec<i64> = [70, 71, 72, 73];
+        f(&mut w, &b[..]);
+    }
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    Slice.get(w.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "an outer container was updated with a reference to this block-local value",
+    );
+    // And a container parameter through a function value.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
+struct Point { x: i64, y: i64 }
+fn addw<'a>(v: &mut Vec<Win<'a>>, s: &'a [i64]) -> Unit ! {alloc, panic} { Vec.push(v, Win { view: s, note: 0 }); }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut v = [Win { view: &a[..], note: 0 }];
+    let f = addw;
+    {
+        let b: Vec<i64> = [70, 71, 72, 73];
+        f(&mut v, &b[..]);
+    }
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    Slice.get(Vec.get(&v, 1).view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "an outer container was updated with a reference to this block-local value",
+    );
+    // Pre-existing: a reference container written through a function value.
+    rejects(
+        r#"struct Point { x: i64, y: i64 }
+fn addv<'a>(v: &mut Vec<&'a Point>, s: &'a Point) -> Unit ! {alloc, panic} { Vec.push(v, s); }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut v: Vec<&Point> = [&a];
+    let f = addv;
+    {
+        let b = Point { x: 70, y: 71 };
+        f(&mut v, &b);
+    }
+    let junk = Point { x: 9, y: 9 };
+    Vec.get(&v, 1).x + junk.x * 0
+}"#,
+        "an outer container was updated with a reference to this block-local value",
+    );
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
+struct Point { x: i64, y: i64 }
+fn apply<'x>(f: fn<'a>(&mut Win<'a>, &'a [i64]) -> Unit ! {}, w: &mut Win<'x>) -> Unit ! {alloc, panic} {
+    let b: Vec<i64> = [70, 71, 72, 73];
+    f(w, &b[..]);
+}
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut w = Win { view: &a[..], note: 0 };
+    apply(set, &mut w);
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    Slice.get(w.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "this call would write a borrow of a local owner into a container whose declared element lifetime is lifetime 'x'",
+    );
+    // A function value passed to a helper.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
+fn apply<'x>(f: fn<'a>(&mut Win<'a>, &'a [i64]) -> Unit ! {}, w: &mut Win<'x>, v: &'x [i64]) -> Unit ! {} { f(w, v); }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut b: Vec<i64> = [70, 71, 72, 73];
+    let mut w = Win { view: &a[..], note: 0 };
+    apply(set, &mut w, &b[..]);
+    b = [1];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    Slice.get(w.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    // Pre-existing: Box.set through a field place of a record.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+struct O<'a> { b: Box<Win<'a>>, n: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut b: Vec<i64> = [70, 71, 72, 73];
+    let mut o = O { b: Box.new(Win { view: &a[..], note: 0 }), n: 0 };
+    Box.set(&mut o.b, Win { view: &b[..], note: 1 });
+    b = [1];
+    let w2 = Box.read(&o.b);
+    Slice.get(w2.view, 3)
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+struct Point { x: i64, y: i64 }
+struct O<'a> { b: Box<Win<'a>>, n: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut o = O { b: Box.new(Win { view: &a[..], note: 0 }), n: 0 };
+    {
+        let b: Vec<i64> = [70, 71, 72, 73];
+        Box.set(&mut o.b, Win { view: &b[..], note: 1 });
+    }
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    let w2 = Box.read(&o.b);
+    Slice.get(w2.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "an outer container was updated with a reference to this block-local value",
+    );
+    // A callee writing through a field place of a container.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
+fn setb<'a>(h: &mut Box<Win<'a>>, v: &'a [i64]) -> Unit ! {alloc, panic} { Box.set(h, Win { view: v, note: 7 }); }
+struct Outer<'a> { b: Box<Win<'a>>, n: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut b: Vec<i64> = [70, 71, 72, 73];
+    let mut o = Outer { b: Box.new(Win { view: &a[..], note: 0 }), n: 0 };
+    setb(&mut o.b, &b[..]);
+    b = [1];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    let w2 = Box.read(&o.b);
+    Slice.get(w2.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    // Vec.push through a field place.
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+struct O<'a> { v: Vec<Win<'a>>, n: i64 }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut o = O { v: [Win { view: &a[..], note: 0 }], n: 0 };
+    {
+        let b: Vec<i64> = [70, 71, 72, 73];
+        Vec.push(&mut o.v, Win { view: &b[..], note: 1 });
+    }
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    let w2 = Vec.get(&o.v, 1);
+    Slice.get(w2.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "an outer container was updated with a reference to this block-local value",
+    );
+    rejects(
+        r#"struct Win<'a> { view: &'a [i64], note: i64 }
+struct O<'a> { v: Vec<Win<'a>>, n: i64 }
+fn addw<'a>(v: &mut Vec<Win<'a>>, s: &'a [i64]) -> Unit ! {alloc, panic} { Vec.push(v, Win { view: s, note: 0 }); }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut b: Vec<i64> = [70, 71, 72, 73];
+    let mut o = O { v: [Win { view: &a[..], note: 0 }], n: 0 };
+    addw(&mut o.v, &b[..]);
+    b = [1];
+    let junk: Vec<i64> = [9, 9, 9, 9];
+    let w2 = Vec.get(&o.v, 1);
+    Slice.get(w2.view, 3) + Vec.get(&junk, 0) * 0
+}"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    // Positive: the same writes are accepted while every source stays live.
+    agrees(
+        r#"
+        struct Win<'a> { view: &'a [i64], note: i64 }
+        struct O<'a> { b: Box<Win<'a>>, n: i64 }
+        fn set<'a>(h: &mut Win<'a>, v: &'a [i64]) -> Unit ! {} { *h = Win { view: v, note: 7 }; }
+        fn main() -> i64 ! {alloc, panic} {
+            let a: Vec<i64> = [1, 2, 3, 4];
+            let b: Vec<i64> = [70, 71, 72, 73];
+            let mut w = Win { view: &a[..], note: 0 };
+            let f = set;
+            f(&mut w, &b[..]);
+            let g: fn<'x>(&mut Win<'x>, &'x [i64]) -> Unit ! {} = set;
+            g(&mut w, &b[..]);
+            let mut o = O { b: Box.new(Win { view: &a[..], note: 0 }), n: 0 };
+            Box.set(&mut o.b, Win { view: &b[..], note: 1 });
+            let w2 = Box.read(&o.b);
+            Slice.get(w.view, 3) + Slice.get(w2.view, 2) + w.note
+        }"#,
+        73 + 72 + 7,
+        "",
+    );
+}
+
+#[test]
+fn review_a_mutable_record_argument_shares_its_shared_leaf_sources() {
+    // `&mut h1` is exclusive over h1 but only shared over the storage behind
+    // its shared leaves, so another argument may share that storage.
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+struct Holder<'a> { point: &'a Point, note: i64 }
+struct Win<'a> { view: &'a [i64], note: i64 }
+struct Outer<'a> { other: &'a [i64], h: Win<'a> }
+fn steal<'a>(h: &mut Win<'a>, g: &Win<'a>) -> Unit ! {panic} { *h = Win { view: g.view, note: 1 }; }
+fn main() -> i64 ! {alloc, panic} {
+    let a: Vec<i64> = [1, 2, 3, 4];
+    let mut h1 = Win { view: &a[..], note: 0 };
+    let g = Win { view: &a[..], note: 5 };
+    steal(&mut h1, &g);
+    Slice.get(h1.view, 3) + g.note
+}"#,
+        9,
+        "",
+    );
+    agrees(
+        r#"struct Point { x: i64, y: i64 }
+struct Holder<'a> { point: &'a Point, note: i64 }
+struct Win<'a> { view: &'a [i64], note: i64 }
+struct Outer<'a> { other: &'a [i64], h: Win<'a> }
+fn steal<'a>(h: &mut Holder<'a>, g: &Holder<'a>) -> Unit ! {panic} { *h = Holder { point: g.point, note: 1 }; }
+fn main() -> i64 ! {alloc, panic} {
+    let a = Point { x: 1, y: 2 };
+    let mut h1 = Holder { point: &a, note: 0 };
+    let g = Holder { point: &a, note: 5 };
+    steal(&mut h1, &g);
+    h1.point.x + g.note
+}"#,
+        6,
+        "",
+    );
+    // An exclusive leaf keeps its source exclusive, and a shared leaf's
+    // source cannot be lent exclusively to the same call.
+    rejects(
+        r#"
+        struct Window<'a> { view: &'a mut [i64], note: i64 }
+        fn peek<'a>(h: &mut Window<'a>, other: &[i64]) -> Unit ! {} { }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut b: Vec<i64> = [1, 2];
+            let mut h = Window { view: &mut b[..], note: 0 };
+            peek(&mut h, &b[..]);
+            0
+        }"#,
+        "",
+    );
+    rejects(
+        r#"
+        struct Win<'a> { view: &'a [i64], note: i64 }
+        fn poke<'a>(h: &mut Win<'a>, other: &mut [i64]) -> Unit ! {} { }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut b: Vec<i64> = [1, 2];
+            let mut h = Win { view: &b[..], note: 0 };
+            poke(&mut h, &mut b[..]);
+            Slice.get(h.view, 0)
+        }"#,
+        "",
+    );
+}
