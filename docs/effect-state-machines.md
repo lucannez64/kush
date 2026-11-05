@@ -488,8 +488,9 @@ is inherent (section 7).
 7. A non-tail perform inside the body of a nested non-tail handler or a
    nested declared-operation handler is rejected (multi-prompt capture).
 8. Added after the independent reviews: a handler with an early `return`
-   or `?` is not tail-resumptive; a resumption token cannot be captured by a
-   spawned task; a point whose own call borrows a value
+   or `?` is not tail-resumptive; a resumption token (even inside a box,
+   record, or closure) cannot be captured by a spawned task; a capturing
+   `once` handler cannot resume performs in called functions; a point whose own call borrows a value
    its continuation captures is rejected; locals holding by-reference
    closures count as borrows; continuation code may not write a local the
    handler captures by reference, nor (through a closure) one read after the
@@ -532,8 +533,9 @@ continuation `k`.
   called from the handle's body and from other entries, never under a nested
   handler, so at a suspension the handle's frame is the innermost one for
   `D`. The handler itself may install handlers around its call of `resume`;
-  to keep deep semantics, a continuation of a declared-operation handle
-  records the stack depth at its point and resumes under a
+  to keep deep semantics, every one-shot continuation (of any handle whose
+  handler is not known to be transparent) records the stack depth at its
+  point and resumes under a
   `HandlerRedirect`, which pushes a redirect frame (only when frames were
   pushed above that depth) that makes lookups skip back to it. A handler
   known not to install handlers, and that only calls its token directly,
@@ -594,6 +596,8 @@ body completes; that is inherent to deep handlers with code after `resume`
 (section 7). The non-tail cost is dominated by one closure environment per
 suspension with live values and the deeper call chain; it was not tuned.
 
-The reference evaluator keeps its fixed nesting budget (128 nested
+The native handler stack holds 1024 frames per task (it was 64); a pending
+non-tail activation can use up to three of them when its handler installs a
+handler around `resume`. The reference evaluator keeps its fixed nesting budget (128 nested
 evaluations), so it runs only a few dozen pending non-tail handler
 activations (about ten for a loop like the one in the parity test); native code is limited by the machine stack instead.

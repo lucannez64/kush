@@ -282,6 +282,10 @@ reference evaluator.
   linear in the number of performs resumed before the body ends; the reference
   evaluator's fixed nesting budget allows only about ten of them;
 - a child task resumes inherited copyable frames with the identity token;
+- frames a multishot handler installs around its `resume` calls remain
+  visible to the resumed code (one-shot continuations hide them);
+- a capturing (`once`) handler for a declared operation cannot resume
+  performs in called functions (it is consumed by the first one);
 - declared effect rows are a finite 16-bit universe: four built-in bits plus at
   most twelve `effect` operations. There is no effect-polymorphic handler type
   over operation names, and the handler contract is a single operation per

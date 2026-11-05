@@ -1310,3 +1310,145 @@ fn review_resumed_code_does_not_see_frames_the_handler_pushed() {
     agrees(lexical, 96, "");
     agrees(called, 96, "");
 }
+
+#[test]
+fn review_tasks_spawned_in_continuations_inherit_visible_frames() {
+    // The redirect frame pushed for the resumed continuation is skipped, not
+    // a barrier: the child still inherits the copyable F frame below it.
+    let source = r#"
+        use std.task.TaskExit;
+        effect D: i64 -> i64;
+        effect E: i64 -> i64;
+        effect F: i64 -> i64;
+        fn f(n: i64) -> i64 ! {F, panic} { perform F(n) }
+        fn main() -> i64 ! {alloc, panic, suspend} {
+            handle F: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { r(y ^ 16) } {
+                handle D: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {
+                    handle E: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { r(y) } { resume(x) }
+                } {
+                    let a = perform D(1);
+                    let v = Task.scope(fn() -> i64 ! {alloc, panic, suspend, F} {
+                        let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic, suspend, F} { f(2) });
+                        match Task.join(t) { TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 }
+                    });
+                    a ^ v
+                }
+            }
+        }"#;
+    agrees(source, 19, "");
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn review_redirect_frames_fit_deep_native_chains() {
+    use std::process::Command;
+    // A handler that wraps resume in another handle keeps one handler frame
+    // and redirect frames per pending perform; forty pending performs used
+    // to exceed the 64-frame native handler stack.
+    let source = r#"
+        effect D: i64 -> i64;
+        effect E: i64 -> i64;
+        fn d(n: i64) -> i64 ! {D, panic} { perform D(n) }
+        fn main() -> i64 ! {alloc, panic} {
+            handle D: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {
+                handle E: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { r(y) } { resume(x ^ 1) }
+            } {
+                let mut i = 0;
+                let mut s = 0;
+                while i < 40 { s = s ^ d(i); i = i + 1; }
+                s
+            }
+        }"#;
+    let expected = (0..40i64).fold(0, |s, i| s ^ (i ^ 1));
+    let program = check(source).unwrap();
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let binary = scratch.path().join("deep-redirects");
+    kush::native::build(&program, &binary).unwrap();
+    let output = Command::new(&binary).output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some((expected & 255) as i32),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn review_lexical_handles_also_hide_handler_frames_from_resumed_code() {
+    let source = r#"
+        effect E: i64 -> i64;
+        fn e(n: i64) -> i64 ! {E, panic} { perform E(n) }
+        fn main() -> i64 ! {alloc, panic} {
+            handle E: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { r(y ^ 1) } {
+                handle Ask: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {alloc, panic} {
+                    handle E: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { r(y ^ 64) } {
+                        let v = resume(x);
+                        v
+                    }
+                } {
+                    let a = perform Ask(2);
+                    let b = e(16);
+                    a ^ b
+                }
+            }
+        }"#;
+    agrees(source, 19, "");
+}
+
+#[test]
+fn review_more_escape_and_write_routes_are_rejected() {
+    // A continuation writing an outer array through a mutable slice.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let mut arr: [i64; 3] = [1, 2, 3];
+            let r = handle Ask: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { let y = resume(x); y } {
+                let a = perform Ask(1);
+                Slice.set(&mut arr[..], 0, 50);
+                a
+            };
+            arr[0] + r
+        }"#,
+        "cannot write a local of the enclosing function",
+    );
+    // A token boxed before a spawned task captures it.
+    rejects(
+        r#"
+        use std.task.TaskExit;
+        fn main() -> i64 ! {alloc, panic, suspend} {
+            handle Ask: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {alloc, panic, suspend} {
+                let b = Box.new(resume);
+                Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+                    let t: Task<i64> = Task.spawn(fn() -> i64 ! {panic, suspend} { let r = Box.take(b); r(x) });
+                    match Task.join(t) { TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 }
+                })
+            } {
+                let a = perform Ask(1);
+                a + 1
+            }
+        }"#,
+        "cannot be moved into a spawned task",
+    );
+    // A capturing handler cannot serve resumable performs in called functions.
+    rejects(
+        r#"
+        effect D: i64 -> i64;
+        fn d(n: i64) -> i64 ! {D, panic} { perform D(n) }
+        fn main() -> i64 ! {alloc, panic} {
+            let base = 2;
+            handle D: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { let r = resume(x ^ base); r } {
+                d(1) ^ d(4)
+            }
+        }"#,
+        "cannot resume performs in called functions",
+    );
+}

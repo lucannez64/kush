@@ -4869,7 +4869,16 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     /// shared or duplicated.
     fn inheritable_handlers(&self) -> Vec<(usize, usize)> {
         let mut inherited = Vec::new();
-        for frame in self.dynamic_handlers.iter().rev() {
+        // Walk the frames visible here: a redirect frame skips the frames a
+        // handler pushed around the resumption that pushed it.
+        let mut index = self.dynamic_handlers.len();
+        while index > 0 {
+            index -= 1;
+            let frame = &self.dynamic_handlers[index];
+            if let Some(target) = frame.redirect {
+                index = target;
+                continue;
+            }
             if frame.consume {
                 break;
             }

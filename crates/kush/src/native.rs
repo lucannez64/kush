@@ -2045,7 +2045,7 @@ static int kush_ready_head = 0, kush_ready_tail = 0, kush_ready_count = 0;
    the duration of its body; a `perform` in a called function resolves the
    innermost matching entry. A one-shot entry transfers its environment on
    lookup, or drops it when popped without being consumed. */
-#define KUSH_HANDLER_MAX 64
+#define KUSH_HANDLER_MAX 1024
 typedef struct {
     int64_t operation;
     int64_t code;
@@ -2237,11 +2237,23 @@ uint64_t kush_task_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
         kush_handler_context *parent = kush_handlers();
         kush_handler_context *child = &kush_handler_contexts[id];
         child->depth = 0;
-        int start = parent->depth;
-        while (start > 0 && parent->frames[start - 1].environment == 0 &&
-               !parent->frames[start - 1].once) --start;
-        for (int i = start; i < parent->depth; ++i) {
-            child->frames[child->depth] = parent->frames[i];
+        /* Walk the frames visible to the parent: a redirect frame (pushed by
+           a resumed continuation) skips the frames its handler pushed. */
+        static int64_t picked[KUSH_HANDLER_MAX];
+        int64_t count = 0;
+        int64_t index = parent->depth - 1;
+        while (index >= 0) {
+            kush_handler_frame *frame = &parent->frames[index];
+            if (frame->operation == -1) {
+                index = frame->code - 1;
+                continue;
+            }
+            if (frame->environment != 0 || frame->once) break;
+            picked[count++] = index;
+            index -= 1;
+        }
+        for (int64_t i = count - 1; i >= 0; --i) {
+            child->frames[child->depth] = parent->frames[picked[i]];
             child->depth += 1;
         }
     }

@@ -914,7 +914,12 @@ fn check_escapes(block: &Block) -> Result<()> {
 /// The root local of a place expression, if any.
 fn place_root(expr: &Expr) -> Option<usize> {
     match &expr.kind {
-        ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => Some(*slot),
+        ExprKind::Local(slot)
+        | ExprKind::Peek(slot)
+        | ExprKind::Move(slot)
+        | ExprKind::Borrow(slot)
+        | ExprKind::BorrowInit { slot, .. } => Some(*slot),
+        ExprKind::Slice { base, .. } => place_root(base),
         ExprKind::Project(base, _) | ExprKind::PlaceIndex { base, .. } => place_root(base),
         _ => None,
     }
@@ -962,7 +967,14 @@ fn check_outer_writes(
             {
                 Some(*slot)
             }
-            ExprKind::BorrowPlace(place) if matches!(expr.ty, Type::RefMut(_)) => place_root(place),
+            ExprKind::BorrowPlace(place) | ExprKind::BorrowField(place)
+                if matches!(expr.ty, Type::RefMut(_)) =>
+            {
+                place_root(place)
+            }
+            ExprKind::Slice { base, .. } if expr.ty.is_mut_slice() || expr.ty == Type::StrMut => {
+                place_root(base)
+            }
             _ => None,
         };
         if let Some(slot) = written
@@ -1467,9 +1479,13 @@ fn build(
         .copied()
         .filter(|point| spec.multishot && !captures[point].is_empty())
         .collect::<Vec<_>>();
-    let allocates = order
-        .iter()
-        .any(|point| !captures[point].is_empty() && !specialized.contains(point));
+    // A one-shot continuation records the
+    // handler-stack depth at its point and resumes under a redirect, so
+    // frames the handler pushes around `resume` stay invisible to it.
+    let redirects = |point: usize| spec.redirect && matches!(tokens[&point], Type::Once(_));
+    let allocates = order.iter().any(|point| {
+        (!captures[point].is_empty() || redirects(*point)) && !specialized.contains(point)
+    });
     effects_check(allocates)?;
     let function_of = |point: usize| {
         first_function + order.iter().position(|p| *p == point).expect("known point")
@@ -1483,10 +1499,6 @@ fn build(
                 .expect("known point")
     };
     let cleanup = resources_in(&body, &host.local_resources);
-    // A one-shot continuation of a declared-operation handle records the
-    // handler-stack depth at its point and resumes under a redirect, so
-    // frames the handler pushes around `resume` stay invisible to it.
-    let redirects = |point: usize| spec.redirect && matches!(tokens[&point], Type::Once(_));
     // Replace every point by an exit whose value is the handler call (or the
     // awaited entry call) with the point's resumption token.
     let mut inputs = BTreeMap::new();
@@ -1923,7 +1935,7 @@ fn lower_one(
             awaited_allocates,
             finish: None,
             entries: entries.clone(),
-            redirect: operation.is_some() && !handler_is_transparent,
+            redirect: !handler_is_transparent,
             multishot_handler: multishot_handler.clone(),
             span,
         };
@@ -2764,6 +2776,42 @@ fn check_task_tokens(program: &Executable) -> Result<()> {
     if tokens.is_empty() {
         return Ok(());
     }
+    // Whether a value of `ty` can hold a token (in a box, field, element...).
+    let holds_token = |ty: Type| {
+        let mut pending = vec![ty];
+        let mut seen = BTreeSet::new();
+        while let Some(ty) = pending.pop() {
+            if !seen.insert(ty) {
+                continue;
+            }
+            if tokens.contains(&ty) {
+                return true;
+            }
+            match ty {
+                Type::DynObj(_) | Type::Task(_) | Type::AllocatorContext => return true,
+                Type::Box(p)
+                | Type::Vec(p)
+                | Type::ArenaBox(p)
+                | Type::AllocBox(p)
+                | Type::AllocVec(p)
+                | Type::Ref(p)
+                | Type::RefMut(p)
+                | Type::Slice(p)
+                | Type::SliceMut(p)
+                | Type::Annotated(p, _) => pending.push(program.pointees[p]),
+                Type::Enum(id) | Type::Variants(id, _) => {
+                    for variant in &program.enums[id].variants {
+                        pending.extend(variant.fields.iter().copied());
+                    }
+                }
+                Type::Union(id) => pending.extend(program.unions[id].members.iter().copied()),
+                // A closure value may itself have captured a token.
+                Type::Once(_) => return true,
+                _ => {}
+            }
+        }
+        false
+    };
     let captures_token = |expr: &Expr, holders: &Slots| {
         let mut expr = expr;
         while let ExprKind::Coerce { value, .. } = &expr.kind {
@@ -2771,7 +2819,7 @@ fn check_task_tokens(program: &Executable) -> Result<()> {
         }
         match &expr.kind {
             ExprKind::FnValue { captures, .. } => captures.iter().any(|capture| {
-                tokens.contains(&capture.ty)
+                holds_token(capture.ty)
                     || matches!(capture.kind, ExprKind::Local(s) | ExprKind::Move(s) if holders.contains(&s))
             }),
             ExprKind::Local(slot) | ExprKind::Move(slot) => holders.contains(slot),

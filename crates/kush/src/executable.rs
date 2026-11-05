@@ -11556,6 +11556,8 @@ enum ScalarValue {
 /// What `checked_effect_body` needs to build a `Suspendable` node.
 struct SuspendableSite {
     name: String,
+    /// The handler is a `once` callable, consumed by its first perform.
+    handler_once: bool,
     handler_parameter: Type,
     /// Locals the handler captures by reference (it reads or writes them).
     handler_refs: Vec<usize>,
@@ -30844,6 +30846,7 @@ impl Checker<'_, '_> {
             span,
             region.then_some(SuspendableSite {
                 name: operation.to_owned(),
+                handler_once: matches!(handler_type, Type::Once(_)),
                 handler_parameter,
                 handler_refs: handler_refs.clone(),
                 lexical,
@@ -30995,7 +30998,18 @@ impl Checker<'_, '_> {
         };
         if let Some(operation) = site.operation {
             let bit = self.operation_effect(&site.name);
+            let before = self.handlers.last().map_or(0, |scope| scope.points);
             self.mark_awaits_in_block(&mut block, operation, bit, &site.name, site.multishot)?;
+            let awaits = self.handlers.last().map_or(0, |scope| scope.points) > before;
+            if awaits && site.handler_once {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "a capturing ('once') handler for '{}' is consumed by its first perform, so it cannot resume performs in called functions, where a second perform would have no handler; use a noncapturing 'fn' handler",
+                        site.name
+                    ),
+                ));
+            }
         }
         if self.handlers.last().is_none_or(|scope| scope.points == 0) {
             if site.operation.is_none() {
