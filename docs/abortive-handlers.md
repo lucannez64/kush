@@ -2,7 +2,8 @@
 
 Status: **design, decided** (E-ABORT-DESIGN); the lexical part and
 propagation across calls are implemented (E-ABORT-LEXICAL, section 3.5;
-E-ABORT-PROPAGATE, section 3.6).
+E-ABORT-PROPAGATE, section 3.6), and aborts through one-shot resumptions of
+lexical operations (E-ABORT-INTERACT, section 3.7, scoped with the user).
 It answers how a handler that does not resume can discard the computation
 between a `perform` and its `handle` while dropping every live owned value
 exactly once, in the reference evaluator and natively, and keeps this
@@ -196,6 +197,49 @@ Tests: `crates/kush/tests/abortive_handlers.rs`; measurement:
   and a function resumed by one cannot abort out of itself
   (E-ABORT-INTERACT).
 
+### 3.7 As built (E-ABORT-INTERACT, scoped subset)
+
+Scoped with the user on 2026-11-05: aborts of **declared** abortive
+operations through **one-shot non-tail handlers of lexical (undeclared)
+operations**. Resumable entries, declared-operation non-tail handlers and
+multishot handlers keep rejecting such aborts (follow-up node
+E-ABORT-ENTRIES).
+
+- **Token rows (rule 3).** Such a handler may write its token as
+  `linear once fn(R) -> R ! {F}` where the row holds only declared abortive
+  operations. Calling the token then needs `F` in the handler's row, so the
+  handler's `k(x)` is an `AbortCall` that drops the handler's own live values
+  and returns; a handler that aborts before resuming leaves its linear token
+  pending and is rejected (rule 2). Tail-resumptive handlers may use such a
+  token too (the identity token gets the same type).
+- **What may cross the body.** A lexical `perform F`, a dynamic one, a call
+  that may abort, or the handler itself (when it may abort) may leave the
+  body of such a handle only if the token row names `F`; every crossed
+  non-tail body must allow it. Otherwise the diagnostics of 3.6 remain.
+- **Lowering.** The whole suspendable body is wrapped in an `AbortCall`
+  whose operations are the token row, so after the lowered `Region` the
+  enclosing function tests the abort word like after any call. An abort in
+  place (before the first suspension) jumps out directly. Inside a
+  continuation function, an exit to a scope that stayed in the enclosing
+  function becomes a dynamic `AbortPerform` of its operation (the scope
+  pushed a frame; continuations resume under the handler-depth redirect, so
+  frames the handler pushed around `resume` cannot intercept it), and a call
+  that could leave to such a scope propagates instead. The abort then
+  leaves the continuation like `return` (dropping its captured values),
+  returns through the handler's `k(...)` call (an `AbortCall` that drops the
+  handler's values), out of the previous continuation's region with a
+  placeholder value, and so on back to the region in the enclosing function.
+  No pending continuation is ever dropped in this subset: a continuation is
+  only reachable through a token that the handler has already called.
+- **Review fixes.** A handler that pushes an abortive frame is not
+  transparent, so its continuations resume under the depth redirect; calling
+  a token that may abort with `F` inside the handler's own `handle F` is
+  rejected (the abort may address a handle outside, which that call could
+  not route); a handler of a declared abortive operation takes exactly its
+  payload type (a dynamic perform does not convert the payload); and the
+  evaluator evaluates a dynamic abort's payload before the lookup, as native
+  code does.
+
 ## 4. Decisions
 
 1. **Abortive handlers use return-path propagation (option A)**, reusing the
@@ -224,4 +268,7 @@ Tests: `crates/kush/tests/abortive_handlers.rs`; measurement:
   of decision 5.
 - **E-ABORT-INTERACT** (M): aborts through non-tail and multishot handlers'
   resumptions and resumable entries (dropping a pending continuation), with a
-  dedicated use-after-free review.
+  dedicated use-after-free review. Done for the subset of 3.7.
+- **E-ABORT-ENTRIES** (L): aborts out of resumable entries (dropping the
+  caller's pending continuation `k`), through declared-operation non-tail
+  handlers and through multishot resumptions.

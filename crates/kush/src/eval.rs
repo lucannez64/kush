@@ -6592,6 +6592,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 label,
                 value,
                 cleanup,
+                ..
             } => {
                 let payload = value!(self.expr(value, frame));
                 self.consume(value, frame);
@@ -6601,6 +6602,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 return Ok(Flow::Abort(self.abort_activation(*label), payload));
             }
             ExprKind::AbortPerform { operation, value } => {
+                // The payload is evaluated before the lookup, as natively.
+                let payload = value!(self.expr(value, frame));
+                self.consume(value, frame);
                 let mut index = self.dynamic_handlers.len();
                 let activation = loop {
                     if index == 0 {
@@ -6621,8 +6625,6 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             .expect("an abortive operation has abortive frames");
                     }
                 };
-                let payload = value!(self.expr(value, frame));
-                self.consume(value, frame);
                 return Ok(Flow::Abort(activation, payload));
             }
             ExprKind::AbortCall {

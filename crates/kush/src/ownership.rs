@@ -7265,6 +7265,7 @@ impl Checker<'_> {
                 label,
                 value,
                 cleanup,
+                ..
             } => {
                 let index = self
                     .aborts

@@ -273,6 +273,8 @@ impl<T: Temporaries> Anf<'_, T> {
             | ExprKind::Project(value, _)
             | ExprKind::Assign(_, value)
             | ExprKind::Break(Some(value), _)
+            | ExprKind::AbortExit { value, .. }
+            | ExprKind::AbortPerform { value, .. }
             | ExprKind::Drop(value)
             | ExprKind::BoxNew(value)
             | ExprKind::InitOwner { value, .. }

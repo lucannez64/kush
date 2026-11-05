@@ -745,3 +745,278 @@ fn aborts_cannot_cross_tasks_callbacks_or_non_tail_handlers() {
         "cannot run in the body of a handler with code after 'resume'",
     );
 }
+
+/// E-ABORT-INTERACT (scoped with the user): a declared abortive operation may
+/// leave the body of a one-shot non-tail handler of a lexical operation when
+/// the handler's resumption token names it in its row. The abort then
+/// returns through every continuation and every handler activation that
+/// called `resume`, each dropping its own live values.
+fn interact(body: &str, handler_tail: &str) -> String {
+    format!(
+        "effect Fail: i64 -> Never;
+         fn check(x: i64) -> i64 ! {{Fail, panic}} {{ if x > 10 {{ perform Fail(x) }} else {{ x }} }}
+         fn main() -> i64 ! {{io, alloc, panic}} {{
+             let r = handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {{panic}} {{ c + 1000 }} {{
+                 let keep = Box.new(5);
+                 let v = handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {{Fail}}) -> i64 ! {{io, Fail, alloc, panic}} {{
+                     let mine = Box.new(x);
+                     print_i64(x);
+                     let r = k(x * 10);
+                     print_i64(r);
+                     {handler_tail}
+                     r + Box.take(mine)
+                 }} {{
+                     let held = Box.new(7);
+                     {body}
+                 }};
+                 v + Box.take(keep)
+             }};
+             r
+         }}"
+    )
+}
+
+#[test]
+fn an_abort_returns_through_continuations_and_handler_activations() {
+    // A call that aborts after two suspensions.
+    agrees(
+        &interact(
+            "let a = perform Ask(1); let b = perform Ask(a); check(b) + Box.take(held)",
+            "",
+        ),
+        1100,
+        "1\n10\n",
+    );
+    // The same body that does not abort: both handlers finish.
+    agrees(
+        &interact(
+            "let a = perform Ask(0); let b = perform Ask(a); check(b) + Box.take(held)",
+            "",
+        ),
+        // b = 0, so the body gives 7 and each handler adds its x = 0.
+        12,
+        "0\n0\n7\n7\n",
+    );
+    // A lexical abortive perform in continuation code (after a point) and in
+    // place (before the first point).
+    agrees(
+        &interact(
+            "let a = perform Ask(2); if a > 5 { perform Fail(a + Box.take(held)) }; a",
+            "",
+        ),
+        1027,
+        "2\n",
+    );
+    agrees(
+        &interact(
+            "if Box.take(held) == 7 { perform Fail(3) }; perform Ask(1)",
+            "",
+        ),
+        1003,
+        "",
+    );
+    // The handler aborts after its resumption returned.
+    agrees(
+        &interact(
+            "let a = perform Ask(4); a + Box.take(held)",
+            "if r > 40 { perform Fail(r) };",
+        ),
+        1047,
+        "4\n47\n",
+    );
+    // An abortive handle inside the continuation keeps its lexical exit.
+    agrees(
+        &interact(
+            "let a = perform Ask(3);
+             let inner = handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c } { check(a + 1) };
+             inner + Box.take(held)",
+            "",
+        ),
+        31 + 7 + 3 + 5,
+        "3\n38\n",
+    );
+}
+
+#[test]
+fn a_tail_resumptive_handler_may_name_aborts_in_its_token() {
+    agrees(
+        "effect Fail: i64 -> Never;
+         fn check(x: i64) -> i64 ! {Fail, panic} { if x > 10 { perform Fail(x) } else { x } }
+         fn main() -> i64 ! {alloc, panic} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c } {
+                 handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {Fail}) -> i64 ! {Fail, panic} { k(x + 1) } {
+                     let b = Box.new(1);
+                     check(perform Ask(20)) + Box.take(b)
+                 }
+             }
+         }",
+        21,
+        "",
+    );
+}
+
+#[test]
+fn aborts_through_resumptions_are_checked() {
+    // The token does not name the operation.
+    rejects(
+        &interact("let a = perform Ask(1); check(a)", "")
+            .replace(
+                "k: linear once fn(i64) -> i64 ! {Fail}",
+                "k: linear once fn(i64) -> i64 ! {}",
+            )
+            .replace("! {io, Fail, alloc, panic}", "! {io, alloc, panic}"),
+        "unless its one-shot resumption token names the abortive operation",
+    );
+    // A handler that may abort needs the operation in its token row.
+    rejects(
+        &interact("let a = perform Ask(1); a", "").replace(
+            "k: linear once fn(i64) -> i64 ! {Fail}",
+            "k: linear once fn(i64) -> i64 ! {}",
+        ),
+        "this handler may abort",
+    );
+    rejects(
+        &interact(
+            "let a = perform Ask(1); if a > 0 { perform Fail(a) }; a",
+            "",
+        )
+        .replace(
+            "k: linear once fn(i64) -> i64 ! {Fail}",
+            "k: linear once fn(i64) -> i64 ! {}",
+        ),
+        "name 'Fail' in the row of its one-shot resumption token",
+    );
+    // A handler that aborts before resuming leaves its token pending.
+    rejects(
+        "effect Fail: i64 -> Never;
+         fn main() -> i64 ! {panic} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c } {
+                 handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {Fail}) -> i64 ! {Fail, panic} {
+                     if x > 0 { perform Fail(x) };
+                     k(x) + 1
+                 } { let a = perform Ask(1); a }
+             }
+         }",
+        "linear value is not consumed",
+    );
+    // Only abortive operations, only one-shot tokens of lexical operations.
+    rejects(
+        "fn main() -> i64 ! {io, panic} {
+             handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {io}) -> i64 ! {io, panic} { k(x) + 1 } {
+                 let a = perform Ask(1); a
+             }
+         }",
+        "second parameter must be exactly",
+    );
+    rejects(
+        "effect Fail: i64 -> Never;
+         effect Ask: i64 -> i64;
+         fn main() -> i64 ! {panic} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c } {
+                 handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {Fail}) -> i64 ! {Fail, panic} { k(x) + 1 } {
+                     let a = perform Ask(1); a
+                 }
+             }
+         }",
+        "second parameter must be exactly",
+    );
+    rejects(
+        "effect Fail: i64 -> Never;
+         fn main() -> i64 ! {panic} {
+             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c } {
+                 handle Ask: i64 -> i64 with fn(x: i64, k: fn(i64) -> i64 ! {Fail}) -> i64 ! {Fail, panic} { k(x) + k(x) } {
+                     let a = perform Ask(1); a
+                 }
+             }
+         }",
+        "second parameter must be exactly",
+    );
+    // A lexical (undeclared) abortive operation cannot cross the body.
+    rejects(
+        "fn main() -> i64 ! {panic} {
+             handle Stop: i64 -> Never with fn(c: i64) -> i64 ! {} { c } {
+                 handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {panic} { k(x) + 1 } {
+                     let a = perform Ask(1);
+                     perform Stop(a)
+                 }
+             }
+         }",
+        "cannot leave the body of 'handle Ask'",
+    );
+}
+
+#[test]
+fn review_regressions_for_abortive_handlers() {
+    // A dynamic perform hands over the declared payload unconverted, so a
+    // handler for a declared abortive operation takes exactly that type
+    // (previously a wider handler parameter crashed both backends).
+    rejects(
+        "effect Fail: i64 -> Never;
+         fn fail(x: i64) -> i64 ! {Fail, panic} { perform Fail(x) }
+         fn main() -> i64 ! {panic} {
+             handle Fail: i64 -> Never with fn(c: i64 | Bool) -> i64 ! {panic} {
+                 match c { i64 @ n => n + 1, Bool @ _ => 99 }
+             } { fail(41) }
+         }",
+        "must take exactly its payload type",
+    );
+    // A handler that wraps `k(x)` in its own handle for the aborting
+    // operation could intercept an abort addressed to the outer handle (or
+    // receive one it cannot route); it is rejected.
+    rejects(
+        &interact("let a = perform Ask(2); perform Fail(1)", "").replace(
+            "let r = k(x * 10);",
+            "let r = handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {panic} { c + 50 } { k(x * 10) };",
+        ),
+        "cannot be called inside a 'handle' for the same abortive operation",
+    );
+    // The payload is evaluated before the handler lookup in both backends.
+    let source = "effect Fail: i64 -> Never;
+         fn fail() -> i64 ! {Fail, io, panic} { perform Fail({ print_i64(5); 1 }) }
+         fn main() -> i64 ! {Fail, io, panic} { fail() }";
+    let program = check(source).unwrap();
+    let mut output = Vec::new();
+    let error = program.evaluate(&mut output).unwrap_err();
+    assert!(
+        error.message.contains("no dynamically active handler"),
+        "{error:?}"
+    );
+    assert_eq!(String::from_utf8(output).unwrap(), "5\n");
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("abortive-order");
+        kush::native::build(&program, &binary).unwrap();
+        let native = std::process::Command::new(&binary).output().unwrap();
+        assert!(!native.status.success());
+        assert_eq!(String::from_utf8_lossy(&native.stdout), "5\n");
+    }
+}
+
+#[test]
+fn an_owner_moved_into_a_continuation_is_dropped_once_when_it_aborts() {
+    for (payload, expected) in [(20, 1020), (2, 6)] {
+        agrees(
+            &format!(
+                "effect Fail: i64 -> Never;
+                 fn check(x: i64) -> i64 ! {{Fail, panic}} {{ if x > 10 {{ perform Fail(x) }} else {{ x }} }}
+                 fn main() -> i64 ! {{alloc, panic}} {{
+                     handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {{panic}} {{ c + 1000 }} {{
+                         let outer = Box.new(3);
+                         let v = handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {{Fail}}) -> i64 ! {{Fail, alloc, panic}} {{
+                             let mine = Box.new(1);
+                             k(x) + Box.take(mine)
+                         }} {{
+                             let a = perform Ask({payload});
+                             let r = check(a);
+                             r + Box.take(outer)
+                         }};
+                         v
+                     }}
+                 }}"
+            ),
+            expected,
+            "",
+        );
+    }
+}

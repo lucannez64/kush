@@ -5874,6 +5874,7 @@ impl Generator<'_, '_> {
                 label,
                 value,
                 cleanup,
+                ..
             } => {
                 let values = lower!(self.expr(value));
                 self.consume(value);

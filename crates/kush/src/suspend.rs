@@ -64,6 +64,79 @@ pub(crate) fn lower(program: &mut Executable) -> Result<()> {
         lower_function(program, &mut context, index)?;
         index += 1;
     }
+    for function in &mut program.functions {
+        retarget_aborts_in_block(&mut function.body, &mut Vec::new())?;
+    }
+    Ok(())
+}
+
+/// After lowering, a continuation function holds code moved out of its
+/// handled body, but not the abortive scopes around that body
+/// (E-ABORT-INTERACT). An exit to such a scope becomes a dynamic abort of
+/// its declared operation, which leaves the continuation like `return` and
+/// travels back through the handler's resumption call; a call that may
+/// abort to it propagates instead.
+fn retarget_aborts_in_block(block: &mut Block, labels: &mut Vec<usize>) -> Result<()> {
+    for statement in &mut block.statements {
+        if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+            retarget_aborts(value, labels)?;
+        }
+    }
+    if let Some(tail) = block.tail.as_deref_mut() {
+        retarget_aborts(tail, labels)?;
+    }
+    Ok(())
+}
+
+fn retarget_aborts(expr: &mut Expr, labels: &mut Vec<usize>) -> Result<()> {
+    let mut result = Ok(());
+    match &mut expr.kind {
+        ExprKind::AbortScope {
+            label,
+            body,
+            handler,
+            ..
+        } => {
+            retarget_aborts(handler, labels)?;
+            labels.push(*label);
+            result = retarget_aborts_in_block(body, labels);
+            labels.pop();
+        }
+        _ => expr.for_each_child_mut(&mut |child| {
+            if result.is_ok() {
+                result = retarget_aborts(child, labels);
+            }
+        }),
+    }
+    result?;
+    match &mut expr.kind {
+        ExprKind::AbortExit {
+            label, operation, ..
+        } if !labels.contains(label) => {
+            let Some(operation) = *operation else {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    "internal error: an abort of a lexical operation was separated from its handle",
+                ));
+            };
+            let ExprKind::AbortExit { value, .. } =
+                std::mem::replace(&mut expr.kind, ExprKind::Constant(0))
+            else {
+                unreachable!()
+            };
+            expr.kind = ExprKind::AbortPerform { operation, value };
+        }
+        ExprKind::AbortCall {
+            exits, propagates, ..
+        } => {
+            let before = exits.len();
+            exits.retain(|(label, _)| labels.contains(label));
+            if exits.len() != before {
+                *propagates = true;
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -2111,7 +2184,12 @@ fn lower_one(
                     fn pushes(expr: &Expr) -> bool {
                         if matches!(
                             expr.kind,
-                            ExprKind::HandlerPush { .. } | ExprKind::HandlerRedirect { .. }
+                            ExprKind::HandlerPush { .. }
+                                | ExprKind::HandlerRedirect { .. }
+                                | ExprKind::AbortScope {
+                                    operation: Some(_),
+                                    ..
+                                }
                         ) {
                             return true;
                         }
@@ -2460,11 +2538,30 @@ pub(crate) fn mark_abort_calls(program: &mut Executable) -> Result<()> {
             operations.retain(|operation| self.abortive.contains(operation));
             operations
         }
+        /// The shape of a resumption token whose row names abortive
+        /// operations: `linear once fn(R) -> R ! {F, ..}`.
+        fn token_like(&self, ty: Type) -> bool {
+            let Type::Once(id) = ty else {
+                return false;
+            };
+            let signature = &self.program.function_types[id];
+            signature.parameters.len() == 1
+                && signature.parameters[0] == signature.result
+                && signature.effects != 0
+                && (self.row_operations)(signature.effects).len()
+                    == self
+                        .program
+                        .effect_bits
+                        .iter()
+                        .filter(|bit| **bit != 0 && signature.effects & **bit != 0)
+                        .count()
+                && signature.effects & crate::executable::EFFECT_BITS == 0
+        }
         fn walk(
             &self,
             expr: &mut Expr,
             scopes: &mut Vec<(usize, Option<usize>)>,
-            region: bool,
+            regions: &mut Vec<Region>,
         ) -> Result<()> {
             let barrier = match &expr.kind {
                 ExprKind::TaskSpawn { body, .. } | ExprKind::TaskScope { body, .. } => {
@@ -2483,51 +2580,117 @@ pub(crate) fn mark_abort_calls(program: &mut Executable) -> Result<()> {
                 return Err(Diagnostic::new(expr.span, message));
             }
             let mut result = Ok(());
-            match &mut expr.kind {
+            let operations = match &mut expr.kind {
                 ExprKind::AbortScope {
                     label,
                     body,
                     handler,
                     operation,
                 } => {
-                    result = self.walk(handler, scopes, region);
+                    result = self.walk(handler, scopes, regions);
                     scopes.push((*label, *operation));
                     if result.is_ok() {
-                        result = self.walk_block(body, scopes, region);
+                        result = self.walk_block(body, scopes, regions);
                     }
                     scopes.pop();
+                    BTreeSet::new()
                 }
                 ExprKind::Suspendable(suspendable) => {
-                    result = self.walk_block(&mut suspendable.body, scopes, true);
+                    // Only a one-shot handler of a lexical operation can pass
+                    // an abort through its token (E-ABORT-INTERACT).
+                    let row = if suspendable.operation.is_none() && !suspendable.multishot {
+                        (self.row_operations)((self.callable_effects)(suspendable.token))
+                    } else {
+                        BTreeSet::new()
+                    };
+                    regions.push(Region {
+                        scopes: scopes.len(),
+                        row: row.clone(),
+                    });
+                    result = self.walk_block(&mut suspendable.body, scopes, regions);
+                    regions.pop();
+                    // The lowered body is left with a placeholder when an
+                    // abort comes back through a handler call.
+                    row
                 }
-                _ => expr.for_each_child_mut(&mut |child| {
-                    if result.is_ok() {
-                        result = self.walk(child, scopes, region);
+                ExprKind::Suspend { call, callee, .. } => {
+                    let awaited = callee.is_some();
+                    call.for_each_child_mut(&mut |child| {
+                        if result.is_ok() {
+                            result = self.walk(child, scopes, regions);
+                        }
+                    });
+                    result?;
+                    // The handler call itself aborts out of the region; the
+                    // check after the region takes it.
+                    let operations = self.aborts_of(call);
+                    let row = regions.last().map(|region| &region.row);
+                    if operations
+                        .iter()
+                        .any(|operation| row.is_none_or(|row| !row.contains(operation)))
+                    {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            if awaited {
+                                "a call that may abort cannot run in the body of a handler with code after 'resume' unless its one-shot resumption token names the abortive operation; call it outside that handle"
+                            } else {
+                                "this handler may abort, so the resumption token of its one-shot handler must name the abortive operation in its row"
+                            },
+                        ));
                     }
-                }),
-            }
+                    return Ok(());
+                }
+                _ => {
+                    expr.for_each_child_mut(&mut |child| {
+                        if result.is_ok() {
+                            result = self.walk(child, scopes, regions);
+                        }
+                    });
+                    self.aborts_of(expr)
+                }
+            };
             result?;
-            let operations = self.aborts_of(expr);
             if operations.is_empty() {
                 return Ok(());
             }
-            if region {
-                return Err(Diagnostic::new(
-                    expr.span,
-                    "a call that may abort cannot run in the body of a handler with code after 'resume'; call it outside that handle",
-                ));
-            }
             let mut exits = Vec::new();
             let mut propagates = false;
+            // A resumption token runs its continuation under a redirect that
+            // hides frames pushed after the suspension, so an abort coming
+            // back through it may address a handle outside this function even
+            // when one for the same operation encloses the call here.
+            let token_call = match &expr.kind {
+                ExprKind::CallIndirect { callee, .. } => self.token_like(callee.ty),
+                _ => false,
+            };
             for operation in operations {
-                match scopes
+                let target = scopes
                     .iter()
-                    .rev()
-                    .find(|(_, scope)| *scope == Some(operation))
+                    .rposition(|(_, scope)| *scope == Some(operation));
+                if token_call && target.is_some() {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "a resumption token that may abort cannot be called inside a 'handle' for the same abortive operation; call it outside that handle",
+                    ));
+                }
+                // Every non-tail body the abort leaves must let it through.
+                let crossed = regions
+                    .iter()
+                    .filter(|region| target.is_none_or(|target| region.scopes > target));
+                if crossed
+                    .clone()
+                    .any(|region| !region.row.contains(&operation))
                 {
-                    Some((label, _)) => {
-                        if !exits.iter().any(|(target, _)| target == label) {
-                            exits.push((*label, Vec::new()));
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "a call that may abort cannot run in the body of a handler with code after 'resume' unless its one-shot resumption token names the abortive operation; call it outside that handle",
+                    ));
+                }
+                match target {
+                    Some(target) => {
+                        let label = scopes[target].0;
+                        if !exits.iter().any(|(existing, _)| *existing == label) {
+                            exits.push((label, Vec::new()));
                         }
                     }
                     None => propagates = true,
@@ -2558,18 +2721,24 @@ pub(crate) fn mark_abort_calls(program: &mut Executable) -> Result<()> {
             &self,
             block: &mut Block,
             scopes: &mut Vec<(usize, Option<usize>)>,
-            region: bool,
+            regions: &mut Vec<Region>,
         ) -> Result<()> {
             for statement in &mut block.statements {
                 if let Statement::Let(_, value) | Statement::Expr(value) = statement {
-                    self.walk(value, scopes, region)?;
+                    self.walk(value, scopes, regions)?;
                 }
             }
             if let Some(tail) = block.tail.as_deref_mut() {
-                self.walk(tail, scopes, region)?;
+                self.walk(tail, scopes, regions)?;
             }
             Ok(())
         }
+    }
+    /// An enclosing non-tail handled body: the number of abortive scopes
+    /// outside it and the abortive operations its token lets through.
+    struct Region {
+        scopes: usize,
+        row: BTreeSet<usize>,
     }
     let mut bodies: Vec<Block> = program
         .functions
@@ -2595,7 +2764,7 @@ pub(crate) fn mark_abort_calls(program: &mut Executable) -> Result<()> {
         };
         bodies
             .iter_mut()
-            .try_for_each(|body| marker.walk_block(body, &mut Vec::new(), false))
+            .try_for_each(|body| marker.walk_block(body, &mut Vec::new(), &mut Vec::new()))
     };
     for (function, body) in program.functions.iter_mut().zip(bodies) {
         function.body = body;

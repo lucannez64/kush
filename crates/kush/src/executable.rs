@@ -1251,6 +1251,10 @@ pub(crate) enum ExprKind {
         label: usize,
         value: Box<Expr>,
         cleanup: Vec<usize>,
+        /// The scope's declared operation. After lowering, an exit that a
+        /// continuation function carries away from its scope becomes an
+        /// `AbortPerform` of it (E-ABORT-INTERACT).
+        operation: Option<usize>,
     },
     /// Lowered form only: the current depth of the dynamic handler stack.
     HandlerDepth,
@@ -11985,6 +11989,7 @@ struct SuspendableSite {
     multishot: bool,
     handler_writes: Vec<usize>,
     effects: u16,
+    token_effects: u16,
 }
 struct HandlerScope {
     operation: String,
@@ -12007,6 +12012,9 @@ struct HandlerScope {
     /// Abortive operation (`-> Never`): the label of the `AbortScope` its
     /// performs leave (E-ABORT-LEXICAL).
     abort: Option<usize>,
+    /// Abortive operations that may leave the body through the resumption
+    /// token (its row; E-ABORT-INTERACT).
+    token_effects: u16,
 }
 
 struct Checker<'a, 't> {
@@ -31707,7 +31715,19 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
-        let multishot = if signature.parameters[1] == one_shot {
+        // A one-shot token of a lexical operation may name abortive
+        // operations that leave through it (E-ABORT-INTERACT).
+        let token_effects = match signature.parameters[1] {
+            Type::Once(id) if declared.is_none() => {
+                let effects = self.types.function_types[id].effects;
+                (effects != 0
+                    && effects & !self.abortive_bits() == 0
+                    && signature.parameters[1] == self.resume_type_with(result_ty, false, effects))
+                .then_some(effects)
+            }
+            _ => None,
+        };
+        let multishot = if signature.parameters[1] == one_shot || token_effects.is_some() {
             false
         } else if signature.parameters[1] == multi_shot {
             true
@@ -31845,6 +31865,7 @@ impl Checker<'_, '_> {
             points: 0,
             declared: declared.is_some(),
             abort: None,
+            token_effects: token_effects.unwrap_or(0),
         });
         // A lexical handle discharges the declared operation's row requirement
         // for its body: the body is checked as if `Op` were available, while the
@@ -31879,6 +31900,7 @@ impl Checker<'_, '_> {
                 handler_function,
                 handler_writes,
                 effects: saved_effects,
+                token_effects: token_effects.unwrap_or(0),
             }),
         );
         self.effects = saved_effects;
@@ -31987,6 +32009,17 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
+        // A dynamic perform hands over the declared payload unconverted.
+        if declared.is_some() && signature.parameters[0] != parameter_ty {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the handler of the declared abortive operation '{operation}' must take exactly its payload type {}, found {}",
+                    self.types.name(parameter_ty),
+                    self.types.name(signature.parameters[0])
+                ),
+            ));
+        }
         if signature.result == Type::Never || self.borrowing_type(signature.result) {
             return Err(Diagnostic::new(
                 span,
@@ -31996,13 +32029,7 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
-        let abortive_bits = self
-            .effect_operations
-            .iter()
-            .filter(|(_, operation)| operation.result == Type::Never)
-            .map(|(name, _)| self.operation_effect(name))
-            .fold(0, |bits, bit| bits | bit);
-        if signature.effects & abortive_bits != 0 {
+        if signature.effects & self.abortive_bits() != 0 {
             return Err(Diagnostic::new(
                 handler.span,
                 "a handler for an abortive operation cannot itself perform an abortive operation; handle it inside the handler",
@@ -32026,6 +32053,7 @@ impl Checker<'_, '_> {
             points: 0,
             declared: declared.is_some(),
             abort: Some(label),
+            token_effects: 0,
         });
         let operation_effect = self.operation_effect(operation);
         let saved_effects = self.effects;
@@ -32079,6 +32107,23 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
+    /// Row bits of every declared abortive operation.
+    fn abortive_bits(&self) -> u16 {
+        self.effect_operations
+            .iter()
+            .filter(|(_, operation)| operation.result == Type::Never)
+            .map(|(name, _)| self.operation_effect(name))
+            .fold(0, |bits, bit| bits | bit)
+    }
+    /// Whether an abort of `bit` from the top of the handler stack may leave
+    /// through every non-tail handler body above scope `index` (exclusive):
+    /// each must be a one-shot lexical handler whose token row names it.
+    fn abort_crossing(&self, start: usize, bit: u16) -> Option<&HandlerScope> {
+        self.handlers[start..].iter().find(|scope| {
+            scope.region
+                && (scope.declared || scope.multishot || bit == 0 || scope.token_effects & bit == 0)
+        })
+    }
     /// A type that can hold a borrow (view, reference, text or a record of
     /// them).
     fn borrowing_type(&self, ty: Type) -> bool {
@@ -32093,10 +32138,15 @@ impl Checker<'_, '_> {
     /// `fn(R) -> R`. The copyable form is only sound when the continuation
     /// owns no environment, which the checker enforces at the perform site.
     fn resume_type(&mut self, result: Type, multishot: bool) -> Type {
+        self.resume_type_with(result, multishot, 0)
+    }
+    /// A resumption token whose row names the abortive operations that may
+    /// leave through it (E-ABORT-INTERACT).
+    fn resume_type_with(&mut self, result: Type, multishot: bool, effects: u16) -> Type {
         let id = self.types.function_type_with(
             vec![result],
             result,
-            0,
+            effects,
             vec![None],
             None,
             !multishot,
@@ -32114,7 +32164,16 @@ impl Checker<'_, '_> {
     /// pointer exists, so a token that is transferred and called normally is
     /// still a one-shot operation result.
     fn resume_value(&mut self, result: Type, multishot: bool, span: Span) -> Result<Expr> {
-        let ty = self.resume_type(result, multishot);
+        self.resume_value_with(result, multishot, 0, span)
+    }
+    fn resume_value_with(
+        &mut self,
+        result: Type,
+        multishot: bool,
+        effects: u16,
+        span: Span,
+    ) -> Result<Expr> {
+        let ty = self.resume_type_with(result, multishot, effects);
         let (id, env_parameter) = match ty {
             Type::Once(id) => (id, true),
             Type::Fn(id) => (id, false),
@@ -32213,7 +32272,7 @@ impl Checker<'_, '_> {
             // scopes, trait objects, callbacks), which would otherwise run
             // with the identity token under this non-tail handler.
             let ty = block.ty;
-            let token = self.resume_type(result_ty, site.multishot);
+            let token = self.resume_type_with(result_ty, site.multishot, site.token_effects);
             return Ok(Block {
                 statements: vec![],
                 tail: Some(Box::new(Expr {
@@ -32290,7 +32349,7 @@ impl Checker<'_, '_> {
             })?;
         }
         self.anf_block(&mut block)?;
-        let token = self.resume_type(result_ty, site.multishot);
+        let token = self.resume_type_with(result_ty, site.multishot, site.token_effects);
         let suspendable = Expr {
             kind: ExprKind::Suspendable(Box::new(Suspendable {
                 handler_function: site.handler_function,
@@ -32538,6 +32597,7 @@ impl Checker<'_, '_> {
             scope.multishot,
         );
         let region = scope.region;
+        let token_effects = scope.token_effects;
         let handler_ty = self.locals[slot].ty;
         if let Some(label) = scope.abort {
             return self.abort_exit(index, label, operation_effect, value, span);
@@ -32577,7 +32637,7 @@ impl Checker<'_, '_> {
         if region {
             self.handlers[index].points += 1;
             let point = self.handlers[index].points;
-            let token = self.resume_type(result, multishot);
+            let token = self.resume_type_with(result, multishot, token_effects);
             let call = Expr {
                 kind: ExprKind::CallIndirect {
                     callee: Box::new(Expr {
@@ -32616,7 +32676,7 @@ impl Checker<'_, '_> {
                 None => Ok(suspend),
             };
         }
-        let resume = self.resume_value(result, multishot, span)?;
+        let resume = self.resume_value_with(result, multishot, token_effects, span)?;
         let call = Expr {
             kind: ExprKind::CallIndirect {
                 callee: Box::new(Expr {
@@ -32655,11 +32715,16 @@ impl Checker<'_, '_> {
                 scope.handler_parameter,
             )
         };
-        if let Some(inner) = self.handlers[index + 1..].iter().find(|inner| inner.region) {
+        let bit = if self.handlers[index].declared {
+            operation_effect
+        } else {
+            0
+        };
+        if let Some(inner) = self.abort_crossing(index + 1, bit) {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "the abortive 'perform {operation}' cannot leave the body of 'handle {}', whose handler has code after 'resume'; perform it outside that handle",
+                    "the abortive 'perform {operation}' cannot leave the body of 'handle {}', whose handler has code after 'resume'; perform it outside that handle, or name '{operation}' in the row of its one-shot resumption token",
                     inner.operation
                 ),
             ));
@@ -32667,11 +32732,19 @@ impl Checker<'_, '_> {
         self.require(operation_effect, span)?;
         let payload = self.expr_expected(value, Some(parameter))?;
         let payload = self.coerce_argument(payload, handler_parameter, span)?;
+        let declared = if self.handlers[index].declared {
+            self.effect_operations
+                .get(&operation)
+                .map(|declared| declared.id)
+        } else {
+            None
+        };
         Ok(Expr {
             kind: ExprKind::AbortExit {
                 label,
                 value: Box::new(payload),
                 cleanup: Vec::new(),
+                operation: declared,
             },
             ty: Type::Never,
             span,
@@ -32689,11 +32762,11 @@ impl Checker<'_, '_> {
         value: &ast::Expr,
         span: Span,
     ) -> Result<Expr> {
-        if let Some(inner) = self.handlers.iter().rev().find(|scope| scope.region) {
+        if let Some(inner) = self.abort_crossing(0, operation_effect) {
             return Err(Diagnostic::new(
                 span,
                 format!(
-                    "the abortive 'perform {operation}' cannot leave the body of 'handle {}', whose handler has code after 'resume'; perform it outside that handle",
+                    "the abortive 'perform {operation}' cannot leave the body of 'handle {}', whose handler has code after 'resume'; perform it outside that handle, or name '{operation}' in the row of its one-shot resumption token",
                     inner.operation
                 ),
             ));
