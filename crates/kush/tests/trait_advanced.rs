@@ -1251,7 +1251,7 @@ fn mutable_dynamic_dispatch_preserves_erased_argument_effects_and_writeback() {
 }
 
 #[test]
-fn projected_method_receivers_cannot_duplicate_owners_or_discard_mutations() {
+fn projected_method_receivers_cannot_duplicate_owners_and_keep_mutations() {
     let definitions = r#"
         struct Text { name: String, count: i64 }
         struct Other { count: i64 }
@@ -1264,11 +1264,19 @@ fn projected_method_receivers_cannot_duplicate_owners_or_discard_mutations() {
         impl Eat for Other { fn eat(self: Self) -> i64 ! {panic} { self.count } }
         impl Text { fn consume(self: Text) -> i64 ! {panic} { self.count } }
     "#;
+    // Mutable dispatch on a projected object field borrows the field in place;
+    // the write stays in the aggregate.
+    for body in [
+        "let mut pair: (dyn Bump, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.bump(5); pair.0.bump(0)",
+        "let mut wrap: Wrap<dyn Bump> = Wrap {value: Text {name: \"x\", count: 1}}; wrap.value.bump(5); wrap.value.bump(0)",
+    ] {
+        agrees(
+            &format!("{definitions} fn main() -> i64 ! {{alloc, panic}} {{{body}}}"),
+            6,
+            "",
+        );
+    }
     for (body, expected) in [
-        (
-            "let mut pair: (dyn Bump, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.bump(5)",
-            "direct local",
-        ),
         (
             "let pair: (dyn Eat, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.eat()",
             "owned field",
@@ -1276,10 +1284,6 @@ fn projected_method_receivers_cannot_duplicate_owners_or_discard_mutations() {
         (
             "let pair = (Text {name: \"x\", count: 1}, 9); pair.0.consume()",
             "owned field",
-        ),
-        (
-            "let mut wrap: Wrap<dyn Bump> = Wrap {value: Text {name: \"x\", count: 1}}; wrap.value.bump(5)",
-            "direct local",
         ),
     ] {
         rejects(
@@ -1293,12 +1297,12 @@ fn projected_method_receivers_cannot_duplicate_owners_or_discard_mutations() {
         let pair: (dyn Bump, i64) = (Other {{count: 1}}, 9); pair.0.bump(5)
     }}"
         ),
-        "direct local",
+        "needs a mutable owner",
     );
 }
 
 #[test]
-fn projected_copyable_dynamic_mutation_is_rejected_but_destructuring_owners_works() {
+fn projected_dynamic_mutation_needs_a_mutable_owner_and_destructuring_still_works() {
     rejects(
         r#"struct Counter { count: i64 }
         struct Other { count: i64 }
@@ -1309,7 +1313,7 @@ fn projected_copyable_dynamic_mutation_is_rejected_but_destructuring_owners_work
             let pair: (dyn Bump, i64) = (Counter {count: 1}, 9);
             pair.0.bump(); 0
         }"#,
-        "direct local",
+        "needs a mutable owner",
     );
     agrees(
         r#"struct Text { name: String, count: i64 }

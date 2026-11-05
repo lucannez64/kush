@@ -238,3 +238,152 @@ fn linear_temporary_receivers_must_still_be_consumed() {
         "",
     );
 }
+
+/// `Bump` has exclusive, shared, and view-returning methods. `Text` owns a
+/// `String`; `Other` is copyable. `OPEN_BUMP` adds a generic impl so the same
+/// programs also run through the open dynamic representation.
+const BUMP: &str = r#"
+struct Text { name: String, count: i64 }
+struct Other { count: i64 }
+trait Bump {
+    fn bump(self: &mut Self, by: i64) -> i64 ! {panic};
+    fn look(self: &Self) -> i64 ! {panic};
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
+}
+impl Bump for Text {
+    fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count }
+    fn look(self: &Self) -> i64 ! {panic} { self.count }
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values }
+}
+impl Bump for Other {
+    fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { self.count = self.count + by; self.count }
+    fn look(self: &Self) -> i64 ! {panic} { self.count }
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values }
+}
+struct Holder { inner: dyn Bump, tag: i64 }
+struct Outer { holder: Holder, extra: i64 }
+impl Holder {
+    fn poke(self: &mut Self, by: i64) -> i64 ! {panic} { self.inner.bump(by) }
+    fn peek(self: &Self) -> i64 ! {panic} { self.inner.look() }
+}
+fn poke_through(holder: &mut Holder) -> i64 ! {panic} { holder.inner.bump(100) }
+"#;
+
+const OPEN_BUMP: &str = r#"
+struct Wrap<T> { value: T }
+impl<T> Bump for Wrap<T> {
+    fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { by }
+    fn look(self: &Self) -> i64 ! {panic} { 0 }
+    fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values }
+}
+"#;
+
+fn bump_program(open: bool, main: &str) -> String {
+    format!(
+        "{BUMP}{}\nfn main() -> i64 ! {{io, alloc, panic}} {{\n{main}\n}}\n",
+        if open { OPEN_BUMP } else { "" }
+    )
+}
+
+#[test]
+fn mutable_dispatch_on_projected_fields_writes_in_place() {
+    for open in [false, true] {
+        agrees(
+            &bump_program(
+                open,
+                r#"
+                let mut pair: (dyn Bump, i64) = (Text { name: "x", count: 1 }, 9);
+                print_i64(pair.0.bump(5));
+                print_i64(pair.0.bump(pair.1));
+                print_i64(pair.0.look());
+                let mut outer = Outer {
+                    holder: Holder { inner: Other { count: 3 }, tag: 0 },
+                    extra: 1,
+                };
+                print_i64(outer.holder.inner.bump(4));
+                print_i64(outer.holder.inner.look());
+                let mut holder = Holder { inner: Text { name: "y", count: 20 }, tag: 1 };
+                print_i64(holder.poke(10));
+                print_i64(holder.peek());
+                print_i64(poke_through(&mut holder));
+                print_i64(holder.inner.look());
+                0"#,
+            ),
+            0,
+            "6\n15\n15\n7\n7\n30\n30\n130\n130\n",
+        );
+    }
+}
+
+#[test]
+fn projected_field_views_keep_their_owner_borrowed() {
+    for open in [false, true] {
+        agrees(
+            &bump_program(
+                open,
+                r#"
+                let values = [4, 5];
+                let mut pair: (dyn Bump, i64) = (Text { name: "x", count: 1 }, 9);
+                let view = pair.0.pick(&values[..]);
+                print_i64(view[1]);
+                pair = (Other { count: 2 }, 3);
+                print_i64(pair.0.bump(1));
+                0"#,
+            ),
+            0,
+            "5\n3\n",
+        );
+        rejects(
+            &bump_program(
+                open,
+                r#"
+                let values = [4, 5];
+                let mut pair: (dyn Bump, i64) = (Text { name: "x", count: 1 }, 9);
+                let view = pair.0.pick(&values[..]);
+                pair = (Other { count: 2 }, 3);
+                print_i64(view[1]);
+                0"#,
+            ),
+            "borrow",
+        );
+    }
+}
+
+#[test]
+fn projected_mutable_dispatch_respects_owner_capabilities_and_loans() {
+    for open in [false, true] {
+        for (main, expected) in [
+            (
+                "let pair: (dyn Bump, i64) = (Other { count: 1 }, 9); pair.0.bump(1)",
+                "needs a mutable owner",
+            ),
+            (
+                "let mut pair: (dyn Bump, i64) = (Other { count: 1 }, 9); pair.0.bump(pair.0.look())",
+                "exclusive borrow",
+            ),
+            (
+                "let mut pair: (dyn Bump, i64) = (Other { count: 1 }, 9); pair.0.bump({ pair = (Other { count: 5 }, 1); 0 })",
+                "borrows it",
+            ),
+            (
+                "let mut pair: (dyn Bump, i64) = (Other { count: 1 }, 9); let r = &pair; pair.0.bump(1) + r.1",
+                "overlapping borrow",
+            ),
+            (
+                "let mut pair: (dyn Bump, i64) = (Other { count: 1 }, 9); let moved = pair; pair.0.bump(1)",
+                "moved",
+            ),
+        ] {
+            rejects(&bump_program(open, main), expected);
+        }
+        rejects(
+            &format!(
+                "{BUMP}{}
+                fn bad(holder: &Holder) -> i64 ! {{panic}} {{ holder.inner.bump(1) }}
+                fn main() -> i64 ! {{alloc, panic}} {{ 0 }}",
+                if open { OPEN_BUMP } else { "" }
+            ),
+            "needs a mutable owner",
+        );
+    }
+}

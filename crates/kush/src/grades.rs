@@ -1574,7 +1574,6 @@ impl<'a> Checker<'a> {
                 return self.block(block, false, multiplier);
             }
             ExprKind::Project(base, _)
-            | ExprKind::BorrowField(base)
             | ExprKind::Unary(_, base)
             | ExprKind::BoxRead(base)
             | ExprKind::Coerce { value: base, .. } => {

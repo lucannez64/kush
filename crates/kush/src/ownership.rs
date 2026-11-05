@@ -5391,38 +5391,6 @@ impl Checker<'_> {
                 self.establish_local(*slot, value)?;
                 self.check_local_borrow(*slot, expr.ty, expr_ptr, expr.span)?;
             }
-            ExprKind::BorrowField(place) => {
-                self.expr(place)?;
-                let Some(field) = self.projection_field(place) else {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "internal error: projected borrow has no root place",
-                    ));
-                };
-                let root = field.root;
-                if !self.available[root] {
-                    return Err(self.use_after_move(
-                        root,
-                        expr.span,
-                        "cannot borrow a moved owner",
-                    ));
-                }
-                if self.exclusive_loaned_at(root, expr_ptr) {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "cannot create a shared projected borrow while an exclusive borrow of the owner is live",
-                    )
-                    .with_note(self.locals[root].span, "owner declared here"));
-                }
-                let owner_ty = self.locals[root].ty;
-                let record = owner_ty.layout().is_some_and(|id| self.enums[id].record)
-                    || matches!(owner_ty, Type::DynObj(_) | Type::Union(_));
-                self.temporary_shared.insert(root);
-                if record {
-                    self.shared_record_loans.insert(root);
-                }
-                self.loans.insert(root);
-            }
             ExprKind::BorrowPlace(place) => {
                 let old_place_borrow = self.place_borrow;
                 self.place_borrow = true;
@@ -7767,7 +7735,6 @@ fn expr_live(
         | ExprKind::Drop(value)
         | ExprKind::Return(value)
         | ExprKind::Project(value, _)
-        | ExprKind::BorrowField(value)
         | ExprKind::BorrowPlace(value)
         | ExprKind::Coerce { value, .. } => {
             live = expr_live(value, live_after, views, heads, exits, out);

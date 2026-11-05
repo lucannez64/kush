@@ -5754,13 +5754,17 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                                 }
                             },
                             ReceiverMode::Shared | ReceiverMode::Mutable => {
-                                let Value::RecordRef(cell) = first else {
-                                    return Err(Diagnostic::new(
-                                        expr.span,
-                                        "internal error: borrowed dynamic dispatch expected a trait-object reference",
-                                    ));
-                                };
-                                let object = cell.lock().unwrap().clone();
+                                // A whole-object reference or a field place.
+                                // The payload is a shared cell, so the method
+                                // reads and writes it in place either way.
+                                let object = self
+                                    .reference_read(&first, Type::Unit)
+                                    .ok_or_else(|| {
+                                        Diagnostic::new(
+                                            expr.span,
+                                            "internal error: borrowed dynamic dispatch expected a trait-object reference",
+                                        )
+                                    })?;
                                 let Value::DynObject { member, value } = object else {
                                     return Err(Diagnostic::new(
                                         expr.span,
@@ -5776,29 +5780,21 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
 
                     Target::UnionBorrowCall { spec, .. } => {
                         let spec = self.program.union_calls[*spec].clone();
-                        let first = values.remove(0);
-                        let Value::RecordRef(cell) = first else {
+                        let reference = values.remove(0);
+                        let mutable = spec.mode == ReceiverMode::Mutable;
+                        // The reference is a whole-object cell or a field
+                        // place. The payload is read here and, for an
+                        // exclusive call, written back below without dropping
+                        // the logically identical old value.
+                        let Some(Value::Union { tag, value }) =
+                            self.reference_read(&reference, Type::Unit)
+                        else {
                             return Err(Diagnostic::new(
                                 expr.span,
-                                "internal error: borrowed union dispatch expected a union reference",
+                                "internal error: borrowed union dispatch reference does not point at a union",
                             ));
                         };
-                        let mutable = spec.mode == ReceiverMode::Mutable;
-                        let (tag, payload) = {
-                            let mut whole = cell.lock().unwrap();
-                            let Value::Union { tag, value } = &mut *whole else {
-                                return Err(Diagnostic::new(
-                                    expr.span,
-                                    "internal error: borrowed union dispatch reference does not point at a union",
-                                ));
-                            };
-                            let tag = *tag;
-                            if mutable {
-                                (tag, std::mem::replace(&mut **value, Value::Scalar(0)))
-                            } else {
-                                (tag, (**value).clone())
-                            }
-                        };
+                        let payload = *value;
                         let (_, _, function) = spec
                             .members
                             .iter()
@@ -5829,10 +5825,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                                 Ok(cell) => cell.into_inner().unwrap(),
                                 Err(cell) => cell.lock().unwrap().clone(),
                             };
-                            *cell.lock().unwrap() = Value::Union {
-                                tag,
-                                value: Box::new(updated),
-                            };
+                            self.reference_swap(
+                                &reference,
+                                Value::Union {
+                                    tag,
+                                    value: Box::new(updated),
+                                },
+                            )?;
                         }
                         result
                     }
@@ -6567,13 +6566,6 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.consume(init, frame);
                 self.store_initialized_owner(*slot, value, frame)?;
                 self.borrow_local_value(*slot, frame)?
-            }
-            ExprKind::BorrowField(place) => {
-                let value = value!(self.expr(place, frame));
-                // A read-only view of an owning field. The cell holds an
-                // unowned alias; it is never dropped as a resource, so the
-                // field's owner keeps its single obligation.
-                Value::RecordRef(Arc::new(Mutex::new(value)))
             }
             ExprKind::BorrowPlace(place) => place_value!(self.borrow_place(place, frame)),
             ExprKind::PlaceIndex { .. } => place_value!(self.place_index_reference(expr, frame)),

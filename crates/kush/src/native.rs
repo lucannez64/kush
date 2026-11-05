@@ -5886,9 +5886,6 @@ impl Generator<'_, '_> {
                 self.store_initialized_owner(*slot, &values);
                 return Some(self.borrow_local_value(*slot));
             }
-            ExprKind::BorrowField(place) => {
-                return Some(vec![lower!(self.place_address(place))]);
-            }
             ExprKind::BorrowPlace(place) => {
                 return Some(vec![lower!(self.place_address(place))]);
             }

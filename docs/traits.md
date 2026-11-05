@@ -612,13 +612,24 @@ its layout is independent of impl collection. Generic fields written as `T`
 may still be instantiated later with an object type, so `Wrap<dyn Trait>` is
 also supported.
 
-Method receivers must not move an owning field out of its aggregate. Shared
-dispatch on an owning projected field borrows that exact place in place, so
-`pair.0.read()` and `self.inner.read()` are accepted without destructuring and
-without copying the field. Consuming or mutable dispatch on a projected field is
-still rejected: destructure an owning tuple or generic wrapper into a local
-before dispatching, because a mutable projection would otherwise need a writable
-place reference that the current backends do not synthesize.
+Method receivers must not move an owning field out of its aggregate. A trait
+object stored in a field chain (`pair.0`, `outer.holder.inner`, or
+`self.inner` behind a stored `&Self`/`&mut Self`) is a checked place, and
+borrowed dispatch takes a place reference to exactly that storage, like
+`&root.field` / `&mut root.field`:
+
+- shared dispatch (`pair.0.read()`) needs any owner capability;
+- exclusive dispatch (`pair.0.bump()`) needs a mutable owner: a `let mut`
+  local or a `&mut` reference. The write happens in the field itself, so no
+  write-back or copy is involved and nothing is duplicated;
+- the owner is loaned by the ordinary place-borrow rules: through every later
+  argument of the call, and for as long as a returned view lives. Reading a
+  structurally disjoint sibling (`pair.0.bump(pair.1)`) is allowed; touching
+  the same field, replacing the owner, or holding an overlapping reference is
+  rejected.
+
+Consuming dispatch on a projected field is still rejected; destructure the
+aggregate first.
 
 Object safety is checked at every `dyn` use:
 
@@ -666,8 +677,7 @@ explicit rejection; closed-world sharing is reached through one trait's `dyn`
 type and explicit qualification.
 
 References that escape their owner's scope remain outside this subset, and
-mutable/consuming dispatch on a projected field still requires destructuring
-first.
+consuming dispatch on a projected field still requires destructuring first.
 
 ## Checked contracts
 
@@ -810,10 +820,9 @@ The following remain intentionally outside the implemented subset:
   receiver has no lifetime, so the signature cannot express it. Temporary and
   other owned object values used with a borrowed method keep their hidden
   storage to the end of the enclosing block, so their views are supported;
-- mutable or consuming dispatch directly on an owning projected field
-  (`pair.0.bump()`, `self.inner.consume()`); shared dispatch on such a field is
-  borrowed in place, but mutable/consuming projections must be destructured into
-  a local first;
+- consuming dispatch directly on a projected field (`self.inner.consume()`);
+  shared and mutable dispatch on such a field borrow it in place, but a
+  consuming call must destructure the aggregate into a local first;
 - a required associated projection supplied only by a parameter-dependent
   generic impl before any concrete member of that object specialization has
   been registered. After the first member is registered its projection fixes the

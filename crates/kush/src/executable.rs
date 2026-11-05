@@ -910,11 +910,6 @@ pub(crate) enum ExprKind {
         slot: usize,
         value: Box<Expr>,
     },
-    /// A shared reference to a projected place, used only for read-only dynamic
-    /// dispatch on an owning field. The projection is evaluated in place; the
-    /// root owner stays live and is conservatively shared-borrowed while the
-    /// reference exists.
-    BorrowField(Box<Expr>),
     /// A checked reference to an addressable place: a record field chain, an
     /// inline-array element, or a vector element. Unlike `Borrow`, which names
     /// one direct local binding, the operand is a place expression whose
@@ -1420,7 +1415,6 @@ impl Expr {
             | ExprKind::TaskJoin { task: value, .. }
             | ExprKind::DynArrayPop { array: value, .. }
             | ExprKind::Project(value, _)
-            | ExprKind::BorrowField(value)
             | ExprKind::BorrowPlace(value)
             | ExprKind::InitOwner { value, .. }
             | ExprKind::BorrowInit { value, .. }
@@ -1642,7 +1636,6 @@ impl Expr {
             | ExprKind::TaskJoin { task: value, .. }
             | ExprKind::DynArrayPop { array: value, .. }
             | ExprKind::Project(value, _)
-            | ExprKind::BorrowField(value)
             | ExprKind::BorrowPlace(value)
             | ExprKind::InitOwner { value, .. }
             | ExprKind::BorrowInit { value, .. }
@@ -2585,7 +2578,6 @@ fn fusion_expr_safe(
         | ExprKind::BorrowInit { .. }
         | ExprKind::InitOwner { .. }
         | ExprKind::PlaceIndex { .. } => false,
-        ExprKind::BorrowField(_) => false,
         // No loop has a checked termination argument here.
         ExprKind::While(..) | ExprKind::Loop(_) => false,
         ExprKind::Call(Target::Function(index), arguments) => {
@@ -2847,7 +2839,6 @@ fn fuse_expr(
         | ExprKind::Assign(_, value)
         | ExprKind::Return(value)
         | ExprKind::Project(value, _)
-        | ExprKind::BorrowField(value)
         | ExprKind::BorrowPlace(value)
         | ExprKind::InitOwner { value, .. }
         | ExprKind::BorrowInit { value, .. }
@@ -12727,6 +12718,44 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
+    /// The checked storage place of a trait object stored in a field chain
+    /// `root.a.b`, rooted at a local aggregate or a stored record reference.
+    /// `None` for anything else (including a non-object field), so the caller
+    /// keeps its ordinary receiver path and diagnostics.
+    fn object_field_place(&mut self, expr: &ast::Expr) -> Option<Expr> {
+        if !matches!(expr.kind, ast::ExprKind::Field { .. }) || !self.is_place(expr) {
+            return None;
+        }
+        let place = self.checked_place(expr, false).ok()?;
+        self.is_object_type(place.ty).then_some(place)
+    }
+    /// Whether `ty` is a trait object in either representation.
+    fn is_object_type(&self, ty: Type) -> bool {
+        matches!(ty, Type::DynObj(_))
+            || (matches!(ty, Type::Union(_)) && self.functions.object_traits.contains_key(&ty))
+    }
+    /// A checked reference to a projected trait-object field for in-place
+    /// dispatch. Exclusive dispatch needs a mutable owner capability, exactly
+    /// like `&mut root.field`.
+    fn borrow_object_field(&mut self, place: Expr, mutable: bool, span: Span) -> Result<Expr> {
+        if mutable && !self.place_mutable(&place) {
+            return Err(Diagnostic::new(
+                span,
+                "a mutable dynamic method on a field needs a mutable owner; declare the owner with 'let mut' or reach it through '&mut'",
+            ));
+        }
+        let pointer = self.types.pointer(place.ty);
+        Ok(Expr {
+            kind: ExprKind::BorrowPlace(Box::new(place)),
+            ty: if mutable {
+                Type::RefMut(pointer)
+            } else {
+                Type::Ref(pointer)
+            },
+            span,
+            resource: None,
+        })
+    }
     /// Whether an expression is a pure place: a local name or a field chain
     /// rooted at one. Such receivers use the same non-moving read path as
     /// ordinary field projection.
@@ -13194,7 +13223,12 @@ impl Checker<'_, '_> {
         // Method declarations that would collide with a record field are
         // rejected when the impl is registered, so this cannot silently make a
         // method unreachable.
-        let mut receiver = if self.is_place(receiver_ast) {
+        // A trait object stored in a field (of a local aggregate, or behind a
+        // stored record reference) is a checked place: dispatch borrows that
+        // exact storage instead of reading or copying the field.
+        let mut receiver = if let Some(place) = self.object_field_place(receiver_ast) {
+            place
+        } else if self.is_place(receiver_ast) {
             self.place(receiver_ast)?
         } else {
             self.expr(receiver_ast)?
@@ -14176,26 +14210,14 @@ impl Checker<'_, '_> {
                             span,
                             resource: None,
                         }
-                    } else if contract.mode == ReceiverMode::Shared
-                        && matches!(receiver.kind, ExprKind::Project(..))
-                    {
-                        // Read-only dispatch on an owning projected field
-                        // borrows that exact place in place; the aggregate is
-                        // never moved or copied.
-                        if crate::runtime_types::has_borrow(self.types, contract.result) {
-                            return Err(Diagnostic::new(
-                                span,
-                                "a borrowed dynamic result requires a direct object local or stored reference; a projected receiver is borrowed only for this call",
-                            ));
-                        }
-                        let pointee = self.types.pointer(object_ty);
-                        Expr {
-                            kind: ExprKind::BorrowField(Box::new(receiver)),
-                            ty: Type::Ref(pointee),
-                            span,
-                            resource: None,
-                        }
-                    } else if !matches!(receiver.kind, ExprKind::Project(..)) {
+                    } else if matches!(receiver.kind, ExprKind::Project(..)) {
+                        // A projected object field is borrowed in place, so
+                        // the aggregate is never moved or copied, writes stay
+                        // in the field, and a returned view keeps the owner
+                        // borrowed like any other place reference.
+                        let mutable = contract.mode == ReceiverMode::Mutable;
+                        self.borrow_object_field(receiver, mutable, span)?
+                    } else {
                         // A temporary receiver owns its payload just like a
                         // local. Its hidden storage is declared in the
                         // enclosing statement list (exactly like `&temp()`),
@@ -14214,11 +14236,6 @@ impl Checker<'_, '_> {
                             span,
                             resource: None,
                         }
-                    } else {
-                        return Err(Diagnostic::new(
-                            span,
-                            "a borrowed dynamic method receiver must be a direct local binding or a stored '&dyn'/'&mut dyn' reference",
-                        ));
                     }
                 }
             }
@@ -14358,19 +14375,13 @@ impl Checker<'_, '_> {
                     "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
                 ));
             }
-            if receiver_mode == ReceiverMode::Mutable {
-                return Err(Diagnostic::new(
-                    receiver.span,
-                    "a mutable dynamic method receiver must be a direct local or reference binding; destructure the projected field first",
-                ));
-            }
         }
         let direct_receiver_slot = match &receiver.kind {
             ExprKind::Peek(slot) | ExprKind::Local(slot) => Some(*slot),
             _ => None,
         };
-        let projected_shared =
-            receiver_mode == ReceiverMode::Shared && matches!(receiver.kind, ExprKind::Project(..));
+        let projected = matches!(receiver_mode, ReceiverMode::Shared | ReceiverMode::Mutable)
+            && matches!(receiver.kind, ExprKind::Project(..));
         // A temporary receiver of a borrowed method gets hidden storage in the
         // enclosing statement list, exactly like an open object, so it also
         // dispatches in place and owning or linear members are never copied.
@@ -14379,7 +14390,7 @@ impl Checker<'_, '_> {
             && direct_receiver_slot.is_none()
             && matches!(receiver_mode, ReceiverMode::Shared | ReceiverMode::Mutable);
         let in_place = borrowed_object.is_some()
-            || projected_shared
+            || projected
             || temporary
             || (matches!(receiver_mode, ReceiverMode::Shared | ReceiverMode::Mutable)
                 && direct_receiver_slot.is_some());
@@ -14405,18 +14416,10 @@ impl Checker<'_, '_> {
                     _ => {}
                 }
                 (reference_ty, receiver)
-            } else if projected_shared {
-                let pointee = self.types.pointer(object_ty);
-                let ty = Type::Ref(pointee);
-                (
-                    ty,
-                    Expr {
-                        kind: ExprKind::BorrowField(Box::new(receiver)),
-                        ty,
-                        span,
-                        resource: None,
-                    },
-                )
+            } else if projected {
+                let mutable = receiver_mode == ReceiverMode::Mutable;
+                let borrow = self.borrow_object_field(receiver, mutable, span)?;
+                (borrow.ty, borrow)
             } else if temporary {
                 let mutable = receiver_mode == ReceiverMode::Mutable;
                 let slot = self.hoist_owner(object_ty, mutable, span)?;

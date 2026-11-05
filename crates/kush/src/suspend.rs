@@ -967,11 +967,7 @@ fn check_outer_writes(
             {
                 Some(*slot)
             }
-            ExprKind::BorrowPlace(place) | ExprKind::BorrowField(place)
-                if matches!(expr.ty, Type::RefMut(_)) =>
-            {
-                place_root(place)
-            }
+            ExprKind::BorrowPlace(place) if matches!(expr.ty, Type::RefMut(_)) => place_root(place),
             ExprKind::Slice { base, .. } if expr.ty.is_mut_slice() || expr.ty == Type::StrMut => {
                 place_root(base)
             }
@@ -1109,7 +1105,7 @@ fn point_borrows(call: &Expr, host: &Host) -> (Slots, bool) {
             ExprKind::Borrow(slot) | ExprKind::BorrowInit { slot, .. } => {
                 direct.insert(*slot);
             }
-            ExprKind::BorrowPlace(place) | ExprKind::BorrowField(place) => {
+            ExprKind::BorrowPlace(place) => {
                 if let Some(slot) = place_root(place) {
                     direct.insert(slot);
                 } else {
