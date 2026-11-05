@@ -696,6 +696,62 @@ type and explicit qualification.
 
 References that escape their owner's scope remain outside this subset.
 
+### Design: explicit associated bindings and multi-trait objects
+
+This section records the design of two extensions before they are built; the
+sections above describe them once implemented.
+
+**Explicit associated bindings.** `dyn Trait<Out = T>` names the *same* object
+type as `dyn Trait`: the object specialization is still identified by the
+trait and its trait arguments, and every specialization has exactly one
+projected type per associated type for the whole program. A binding fixes that
+projection when the type is lowered. Signatures are lowered before any body is
+checked, so a binding in a parameter or result type makes `Self.Out` usable
+before any member is coerced. If the projection is already fixed (by agreeing
+concrete impls, an earlier member, or an earlier binding), the binding must
+name the same type. Every member registered later is checked against it,
+exactly as against a projection fixed by the first member. A binding must name
+an associated type that the trait declares; repeating a name is an error.
+Binding a closed-world object checks the binding against the impls' agreed
+value; it never changes the representation.
+
+**Multi-trait objects.** `dyn A + B` (any number of distinct traits, each with
+its own trait and associated-type arguments) is an object whose members
+implement every listed trait. Design choices:
+
+- *Identity.* The bound list is canonicalized: sorted by trait and arguments,
+  with duplicates rejected, so `dyn A + B` and `dyn B + A` are one type. A
+  one-trait list is the ordinary `dyn A`.
+- *Representation.* Always the open dynamic fat object: two words, a member
+  identifier and an owned payload pointer, with the payload layout of the
+  concrete member. Every trait named in a multi-trait object uses the dynamic
+  representation (as a trait named in a nominal field does), so the closed
+  union never has to be converted. The layout never enumerates members.
+- *Tables (layout).* The object keeps one registered member list. Each member
+  entry holds a separate method table per listed trait: its keys are the
+  trait's position in the canonical list plus the usual method key (name and
+  monomorphized method arguments). Registering a member checks it against
+  every listed trait, instantiates each trait's object-safe methods, and fixes
+  or checks each trait's associated projections; the projections remain
+  keyed by `(trait, arguments)`, so `dyn A` and `dyn A + B` share one ABI per
+  trait specialization.
+- *Dispatch.* `object.method()` searches the listed traits. A name declared by
+  exactly one trait dispatches through that trait's table; a name declared by
+  several is ambiguous and must be qualified as `object.A.method()`. All
+  receiver modes, projected fields, temporaries, generic methods, and borrowed
+  views behave as for a one-trait dynamic object.
+- *Upcast.* An owned `dyn A + B` coerces to an object over any non-empty subset
+  of its traits (`dyn A`, `dyn B`, or `dyn A + C` from `dyn A + B + C`). Member
+  identifiers are indices into each object's own member list, so an upcast
+  records an edge `from -> to`: every member of `from` (present and registered
+  later) is registered in `to` too, and the runtime upcast maps the identifier
+  through that checked table. The payload pointer moves unchanged; nothing is
+  allocated, copied, or dropped. A reference `&(dyn A + B)` cannot be upcast,
+  because it points at the source object's identifier word; call the method
+  through the original reference instead.
+- *Not supported.* Lifetime bounds (`dyn A + 'a`), auto-trait-like markers,
+  downcasts, and upcasting through references.
+
 ## Checked contracts
 
 An impl method must match its trait method exactly, conservatively, after two
