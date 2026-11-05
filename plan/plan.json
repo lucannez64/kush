@@ -266,10 +266,21 @@
       "deps": [
         "BORROW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "`&s[i]` / `&mut s[i]` where s is a slice view.",
-      "commit": null,
-      "log": []
+      "commit": "6039c6b",
+      "log": [
+        {
+          "time": "2026-11-05 01:04:53",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 01:22:41",
+          "who": "agent",
+          "text": "done 6039c6b"
+        }
+      ]
     },
     {
       "id": "R-SLICE-PLACE-LOAN",
@@ -280,10 +291,16 @@
       "deps": [
         "R-SLICE-PLACE-IR"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Element place loans root at the view's owners; split_at_mut sides stay disjoint.",
-      "commit": null,
-      "log": []
+      "commit": "6039c6b",
+      "log": [
+        {
+          "time": "2026-11-05 01:22:41",
+          "who": "agent",
+          "text": "done 6039c6b"
+        }
+      ]
     },
     {
       "id": "R-SLICE-PLACE-BACKENDS",
@@ -294,10 +311,21 @@
       "deps": [
         "R-SLICE-PLACE-LOAN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "6039c6b",
+      "log": [
+        {
+          "time": "2026-11-05 01:22:41",
+          "who": "agent",
+          "text": "done 6039c6b"
+        },
+        {
+          "time": "2026-11-05 01:22:41",
+          "who": "agent",
+          "text": "Local gate: 1389 kush tests passed, clippy clean (mbx -j2)."
+        }
+      ]
     },
     {
       "id": "R-BREC-DESIGN",
