@@ -589,3 +589,28 @@ fn task_result_widening_inserts_checked_callable_adapters() {
     );
     compare(&source);
 }
+
+#[test]
+fn nested_task_scopes_fit_the_reference_evaluator_task_stack() {
+    // Each level is an ordinary call; the deepest one runs a task scope with
+    // a spawned child. Reference task threads used the default 2 MiB stack
+    // and overflowed at about five levels in debug builds.
+    let source = format!(
+        "{TASK_EXIT}
+        fn spawn_e(x: i64) -> i64 ! {{alloc, panic, suspend}} {{
+            Task.scope(fn() -> i64 ! {{alloc, panic, suspend}} {{
+                let t: Task<i64> = Task.spawn(fn() -> i64 ! {{panic, suspend}} {{ x + 1 }});
+                match Task.join(t) {{ TaskExit.Completed(v) => v, TaskExit.Cancelled => 0 }}
+            }})
+        }}
+        fn rec(n: i64) -> i64 ! {{alloc, panic, suspend}} {{
+            if n == 0 {{ spawn_e(1) }} else {{ rec(n - 1) + 1 }}
+        }}
+        fn main() -> i64 ! {{alloc, panic, suspend}} {{ rec(12) }}"
+    );
+    compare(&source);
+    let (exit, _) = check(&source)
+        .evaluate_with_io_and_stats(&mut std::io::empty(), &mut Vec::new())
+        .unwrap();
+    assert_eq!(exit, 14);
+}

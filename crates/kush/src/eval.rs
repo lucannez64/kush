@@ -19,6 +19,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 type Result<T> = std::result::Result<T, Diagnostic>;
+/// Stack size of a reference-evaluator task thread.
+const TASK_STACK_BYTES: usize = 64 * 1024 * 1024;
+
 impl Executable {
     /// Bounded reference evaluator; native execution does not have this budget.
     pub fn evaluate(&self, output: &mut dyn Write) -> Result<i64> {
@@ -375,7 +378,14 @@ impl Executable {
         };
         stats.allocation();
         stats.allocation();
-        let _ = scope.spawn(move || {
+        // Task threads get the main thread's stack budget: the reference
+        // evaluator's nesting limit assumes it, and the default 2 MiB thread
+        // stack overflowed a few nested task scopes in debug builds. Only the
+        // pages actually used are committed.
+        let task = thread::Builder::new()
+            .name(format!("kush-task-{id}"))
+            .stack_size(TASK_STACK_BYTES);
+        let spawned = task.spawn_scoped(scope, move || {
             let mut evaluator = evaluator;
             match evaluator.task.as_mut().unwrap().commands.recv() {
                 Ok(TaskCommand::Run) => {}
@@ -422,6 +432,8 @@ impl Executable {
                 .events
                 .send(TaskEvent::Done(outcome));
         });
+        // Like `Scope::spawn`, failing to create the thread is fatal.
+        spawned.expect("failed to start a reference evaluator task thread");
         records.push(TaskRecord {
             state: TaskState::Ready,
             commands,
