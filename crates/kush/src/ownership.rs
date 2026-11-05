@@ -1379,6 +1379,21 @@ impl Checker<'_> {
     /// the root binding as an ancestor capability and retain a structural
     /// field identity for disjoint-field exemption.
     fn place_loan(&self, place: &Expr) -> Loan {
+        if let Some(view) = slice_place_view(place) {
+            // An element of a slice view narrows the view's capability, like a
+            // subview: it roots at the view's owners, keeps its split side, and
+            // inherits its lifetime, so the owners stay loaned after the view
+            // binding's own last use and split_at_mut sides stay disjoint.
+            let parent = self.view_loan(view);
+            return Loan {
+                origins: self.view_origins(view),
+                mutable: false,
+                splits: parent.splits,
+                lifetime: parent.lifetime,
+                field: None,
+                ancestor: None,
+            };
+        }
         let leaf = self.view_loan(place);
         if !leaf.origins.is_empty() && !matches!(place.kind, ExprKind::PlaceIndex { .. }) {
             let mut loan = leaf;
@@ -3678,8 +3693,11 @@ impl Checker<'_> {
                     .with_note(self.locals[*origin].span, "shared reference declared here"));
                 }
                 for root in self.roots_of(*origin) {
+                    // A slice view parameter is caller storage: an element
+                    // reference `&s[i]` may be returned with its lifetime.
                     if root >= self.parameter_count
                         || (!self.locals[root].ty.is_ref()
+                            && !self.locals[root].ty.is_slice()
                             && !self.is_carrier_type(self.locals[root].ty))
                     {
                         return Err(Diagnostic::new(
@@ -3704,6 +3722,7 @@ impl Checker<'_> {
             }
             if *origin >= self.parameter_count
                 || (!self.locals[*origin].ty.is_ref()
+                    && !self.locals[*origin].ty.is_slice()
                     && !self.is_carrier_type(self.locals[*origin].ty))
             {
                 return Err(Diagnostic::new(
@@ -4147,14 +4166,10 @@ impl Checker<'_> {
                 .or_else(|| Some(self.anonymous_lifetime(&origins)));
             let mutable = matches!(self.locals[slot].ty, Type::RefMut(_));
             let field = loan.field.clone();
-            self.acquire_view(
-                slot,
-                mutable,
-                origins,
-                SplitLabels::default(),
-                lifetime.clone(),
-                field,
-            );
+            // An element reference into one side of a checked split keeps
+            // that side's label, so references into opposite sides coexist.
+            let splits = self.split_labels(expr);
+            self.acquire_view(slot, mutable, origins, splits, lifetime.clone(), field);
             self.reference_lifetimes[slot] = lifetime;
             if self.referent(self.locals[slot].ty).is_some_and(|referent| {
                 self.is_carrier_type(referent)
@@ -6803,6 +6818,16 @@ pub(crate) fn pattern_bindings(pattern: &Pattern, slots: &mut BTreeSet<usize>) {
     }
 }
 
+/// The slice view under a checked element place `view[i]`, through any field
+/// projections of that element (`view[i].x`).
+fn slice_place_view(place: &Expr) -> Option<&Expr> {
+    match &place.kind {
+        ExprKind::PlaceIndex { base, .. } if base.ty.is_slice() => Some(base),
+        ExprKind::Project(base, _) if !base.ty.is_ref() => slice_place_view(base),
+        ExprKind::Coerce { value, .. } => slice_place_view(value),
+        _ => None,
+    }
+}
 /// Values returned by breaks targeting this loop, excluding nested loops.
 /// Traverse all expression positions because a break can occur in an argument.
 pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {

@@ -5765,10 +5765,16 @@ fn reference_reaches_type(types: &Types<'_>, ty: Type, target: Type, mutable: bo
             .iter()
             .any(|field| contains(types, *field, target, depth + 1))
     }
-    let (Type::Ref(pointer) | Type::RefMut(pointer)) = ty else {
+    // A slice view parameter backs a reference to one of its elements (or a
+    // field inside one): `&s[i]` borrows the caller's storage behind `s`.
+    let (Type::Ref(pointer)
+    | Type::RefMut(pointer)
+    | Type::Slice(pointer)
+    | Type::SliceMut(pointer)) = ty
+    else {
         return false;
     };
-    if mutable && !matches!(ty, Type::RefMut(_)) {
+    if mutable && !matches!(ty, Type::RefMut(_) | Type::SliceMut(_)) {
         return false;
     }
     contains(types, types.pointees[pointer], target, 0)
@@ -10137,7 +10143,9 @@ impl<'a> Functions<'a> {
                 ));
             }
             if mutable_result
-                && !matching.iter().any(|(_, ty)| matches!(ty, Type::RefMut(_)))
+                && !matching
+                    .iter()
+                    .any(|(_, ty)| matches!(ty, Type::RefMut(_) | Type::SliceMut(_)))
                 && !referent_field_leaf(true)
                 && !parameter_leaf_sets.iter().any(|leaves| {
                     leaves.iter().any(|leaf| {
@@ -12073,13 +12081,41 @@ impl Checker<'_, '_> {
                     ));
                 }
                 let element = if let Some(pointer) = base.ty.slice_element() {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        format!(
-                            "an index place into a slice view is not supported; derive a checked slice subview instead (element type {})",
-                            self.types.name(self.types.pointees[pointer])
-                        ),
-                    ));
+                    // `&s[i]` / `&mut s[i]` address one element of a slice
+                    // view. The view is a capability over its owners, so the
+                    // element reference narrows that capability; the bound
+                    // (and a byte-backed view) is checked at creation.
+                    if mutable && !base.ty.is_mut_slice() {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "cannot create an exclusive element reference from a shared '&[T]' view; shared storage cannot be upgraded",
+                        ));
+                    }
+                    let element = self.types.pointees[pointer];
+                    if element.is_view() || element.is_ref() {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "an element reference would alias a borrowed view or reference; read the element by value instead",
+                        ));
+                    }
+                    self.require(PANIC, expr.span)?;
+                    let index = self.expr_expected(index, Some(Type::I64))?;
+                    self.expect(index.ty, Type::I64, index.span)?;
+                    if self.owned_type(element) || self.linear_type(element) {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "an index reference would alias an owning or linear element; move the element out with Vec.pop/Box.take or borrow a non-owning element",
+                        ));
+                    }
+                    return Ok(Expr {
+                        kind: ExprKind::PlaceIndex {
+                            base: Box::new(base),
+                            index: Box::new(index),
+                        },
+                        ty: element,
+                        span: expr.span,
+                        resource: None,
+                    });
                 } else if let Type::Vec(pointer) = base.ty {
                     self.types.pointees[pointer]
                 } else if let Some((element, _)) =
@@ -12159,8 +12195,8 @@ impl Checker<'_, '_> {
     fn place_mutable(&self, place: &Expr) -> bool {
         match &place.kind {
             ExprKind::Peek(slot) | ExprKind::Local(slot) | ExprKind::Move(slot) => match place.ty {
-                Type::Ref(_) => false,
-                Type::RefMut(_) => true,
+                Type::Ref(_) | Type::Slice(_) => false,
+                Type::RefMut(_) | Type::SliceMut(_) => true,
                 _ => self.locals[*slot].mutable,
             },
             ExprKind::Project(base, _) => self.place_mutable(base),

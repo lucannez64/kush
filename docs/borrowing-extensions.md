@@ -560,11 +560,55 @@ one function:
   lifetime constraints, variance, higher-kinded rows, or interprocedural
   constraint solving. Those remain outside the subset.
 
+### Slice-view element places
+
+`&s[i]` and `&mut s[i]` address one element of a slice view `s`, including
+through a field of a record element (`&mut s[i].y`). The view may be a local,
+a parameter, or one side of a `Slice.split_at_mut` pair, over an inline array,
+a `DynArray`, a record's `DynArray` field, or a `Vec<T>`.
+
+```rust
+fn last_mut<'a>(s: &'a mut [i64]) -> &'a mut i64 ! {panic} {
+    let n = Slice.len(s);
+    &mut s[n - 1]
+}
+
+let mut xs: [i64; 3] = [1, 2, 3];
+let view: &mut [i64] = &mut xs[..];
+let (left, right) = Slice.split_at_mut(view, 1);
+let p = &mut left[0];
+let q = &mut right[1];      // the opposite split side: no conflict
+*p = *p + *q;
+```
+
+- **Loans.** An element reference narrows the view's capability exactly like
+  a subview. It roots at the view's owners, not at the view binding, so the
+  owner stays loaned until the element reference's checked last use, even
+  after the view binding is dead or out of scope. It keeps the view's
+  `split_at_mut` side, so references into opposite sides coexist while two
+  references into one view (or one side) are aliasing errors, as is using the
+  view while an exclusive element reference is live.
+- **Mutability.** `&mut s[i]` needs an exclusive `&mut [T]` view; a shared
+  view is never upgraded. Owning, linear, view, and reference elements are
+  rejected.
+- **Results.** A `&'a [T]` or `&'a mut [T]` parameter backs a returned `&'a T`
+  or `&'a mut T` (or a reference to a field inside the element). A shared view
+  cannot back an exclusive result, and a local view's element cannot escape
+  the frame.
+- **Runtime checks.** The index is checked against the view's runtime length
+  when the reference is created, so the operation needs `panic`. A `&[i64]`
+  over `Bytes` has byte-sized elements and no word-sized element address;
+  creating an element reference into one panics in both backends.
+- **Representation.** Native code computes `data + index * stride` from the
+  view descriptor. The reference evaluator keeps the view and the index and
+  reads or writes through the view's own storage, so writes are visible to the
+  owner in both backends.
+
 ## Remaining deliberate limits
 
-- `&mut str`, `Vec.try_reserve` through `&mut Vec<T>`, and place references
-  into slice elements remain outside the subset; each is an explicit, tested
-  rejection. `&mut Bytes`/`&mut String` provide read access but no mutating
+- `&mut str` and `Vec.try_reserve` through `&mut Vec<T>` remain outside the
+  subset; each is an explicit, tested rejection. Two element references into
+  one view conflict even at distinct constant indices. `&mut Bytes`/`&mut String` provide read access but no mutating
   builtins. Temporary owners, record fields, and array/vector indices are
   supported through hidden storage or real element addresses as described
   above. A record with borrowed fields is still not mutated as a whole.
@@ -575,8 +619,9 @@ one function:
 - `&record.field` is supported for copyable, owning, and nested record fields.
   Shared reference, shared slice, and text fields remain readable through
   `&Record`; a slice field is sub-sliced with `&record.view[..]` or `&mut
-  record.view[..]`. A place reference into one slice element, or into a
-  container element whose type owns storage, remains an explicit rejection.
+  record.view[..]`, and one element of it is addressed with `&s[i]` (see
+  above). A place reference into a container element whose type owns storage
+  remains an explicit rejection.
   Outlives bounds are not part of a record declaration, so a projected
   reference borrows the whole record binding.
 - Containers of borrowed records are supported for `Box` and `Vec`; `AllocBox`

@@ -759,8 +759,10 @@ be returned across a task boundary.
   exclusive reference root; a record with borrowed fields is not mutated as a
   whole. `&mut str` remains unsupported because unrestricted byte mutation can
   invalidate UTF-8; a sound operation would have to replace complete Unicode
-  scalars with unchanged encoded length. Place references into slice elements
-  and containers of borrowed records remain unsupported.
+  scalars with unchanged encoded length. Place references into slice-view
+  elements (`&s[i]`, `&mut s[i]`) root at the view's owners; see
+  [borrowing-extensions.md](borrowing-extensions.md#slice-view-element-places).
+  Containers of borrowed records remain unsupported.
 - Dynamic disjoint-range reasoning is limited to `Slice.split_at_mut` pairs.
   There is no general range algebra, no arbitrary tuple of views, and no
   storage or forwarding of a split pair itself. Two separately written

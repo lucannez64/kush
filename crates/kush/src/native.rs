@@ -7831,6 +7831,31 @@ impl Generator<'_, '_> {
                         .iadd_imm_s(base_pointer, (*offset * 8) as i64),
                 )
             }
+            ExprKind::PlaceIndex { base, index } if base.ty.is_slice() => {
+                // A slice view is a `(data, length, stride, byte)` descriptor.
+                // The element address is `data + index * stride` after the
+                // bound check; a byte-backed view has no word-sized element
+                // and traps instead.
+                let descriptor = lower!(self.expr(base));
+                let index = lower!(self.scalar(index));
+                let negative = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::SignedLessThan, index, 0);
+                let beyond =
+                    self.builder
+                        .ins()
+                        .icmp(IntCC::SignedGreaterThanOrEqual, index, descriptor[1]);
+                let bytes = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::NotEqual, descriptor[3], 0);
+                let invalid = self.builder.ins().bor(negative, beyond);
+                let invalid = self.builder.ins().bor(invalid, bytes);
+                self.guard(invalid);
+                let offset = self.builder.ins().imul(index, descriptor[2]);
+                Some(self.builder.ins().iadd(descriptor[0], offset))
+            }
             ExprKind::PlaceIndex { base, index } => {
                 let location = lower!(self.place_address(base));
                 let index = lower!(self.scalar(index));

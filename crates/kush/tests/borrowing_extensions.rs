@@ -592,3 +592,300 @@ fn result_lifetime_elision_counts_a_single_record_field_source() {
         "",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Place references into slice-view elements: `&s[i]` and `&mut s[i]`
+// ---------------------------------------------------------------------------
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn native_aborts(source: &str) {
+    let program = check(source).unwrap();
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let binary = scratch.path().join("slice-place-abort");
+    kush::native::build(&program, &binary).unwrap();
+    let output = std::process::Command::new(&binary).output().unwrap();
+    assert!(!output.status.success(), "native code must abort: {source}");
+}
+
+#[test]
+fn slice_element_places_read_and_write_the_viewed_storage() {
+    // Array, DynArray, and Vec storage behind shared and exclusive views.
+    agrees(
+        r#"
+        fn bump(p: &mut i64) -> Unit ! {panic} { *p = *p + 10; }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            {
+                let view: &mut [i64] = &mut xs[..];
+                let p = &mut view[1];
+                bump(p);
+                *p = *p + 1;
+            }
+            let mut d: DynArray<i64, 4> = [4, 5];
+            {
+                let view: &mut [i64] = &mut d[1..];
+                let p = &mut view[0];
+                *p = 50;
+            }
+            let mut v: Vec<i64> = [7, 8, 9];
+            {
+                let view: &mut [i64] = &mut v[..];
+                let p = &mut view[2];
+                *p = 90;
+            }
+            let shared: &[i64] = &xs[..];
+            let q = &shared[2];
+            xs[1] + *q + DynArray.get(&d, 1) + Vec.get(&v, 2)
+        }"#,
+        13 + 3 + 50 + 90,
+        "",
+    );
+    // Record elements: field reads and writes through the element reference.
+    agrees(
+        r#"
+        struct Point { x: i64, y: i64 }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut v: Vec<Point> = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+            {
+                let view: &mut [Point] = &mut v[..];
+                let p = &mut view[1];
+                p.x = 30;
+            }
+            let mut ps: [Point; 2] = [Point { x: 5, y: 6 }, Point { x: 7, y: 8 }];
+            {
+                let view: &mut [Point] = &mut ps[..];
+                let y = &mut view[0].y;
+                *y = 60;
+            }
+            let s = &v[..];
+            let r = &s[1];
+            r.x + r.y + ps[0].y
+        }"#,
+        94,
+        "",
+    );
+}
+
+#[test]
+fn slice_element_references_return_through_slice_parameters() {
+    agrees(
+        r#"
+        struct Point { x: i64, y: i64 }
+        fn first<'a>(s: &'a [i64]) -> &'a i64 ! {panic} { &s[0] }
+        fn last_mut<'a>(s: &'a mut [i64]) -> &'a mut i64 ! {panic} {
+            let n = Slice.len(s);
+            &mut s[n - 1]
+        }
+        fn grow(s: &mut [Point]) -> Unit ! {panic} { let p = &mut s[1]; p.y = p.y + 30; }
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            {
+                let r = last_mut(&mut xs[..]);
+                *r = 40;
+            }
+            let r = first(&xs[..]);
+            let mut ps: [Point; 2] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+            grow(&mut ps[..]);
+            *r + xs[2] + ps[1].y
+        }"#,
+        1 + 40 + 34,
+        "",
+    );
+    // A shared view cannot back an exclusive result.
+    rejects(
+        "fn bad<'a>(s: &'a [i64]) -> &'a mut i64 ! {panic} { &mut s[0] } fn main() -> i64 ! {} { 0 }",
+        "does not appear on any reference parameter",
+    );
+    // A local view's element cannot escape the frame.
+    rejects(
+        r#"
+        fn leak<'a>(s: &'a [i64]) -> &'a i64 ! {panic} {
+            let xs: [i64; 2] = [1, 2];
+            let local = &xs[..];
+            &local[0]
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "reference escapes the lexical scope of the storage it borrows",
+    );
+    // The caller keeps the owner loaned while the returned element is live.
+    rejects(
+        r#"
+        fn first<'a>(s: &'a [i64]) -> &'a i64 ! {panic} { &s[0] }
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            let r = first(&xs[..]);
+            xs = [7, 8, 9];
+            *r
+        }"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+}
+
+#[test]
+fn slice_element_loans_root_at_the_views_owners() {
+    // The element reference outlives the view binding's last use, so the
+    // owner must stay loaned through the element itself.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            let view: &mut [i64] = &mut xs[..];
+            let p = &mut view[1];
+            xs = [4, 5, 6];
+            *p
+        }"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            let p = {
+                let view: &mut [i64] = &mut xs[..];
+                &mut view[1]
+            };
+            xs = [4, 5, 6];
+            *p
+        }"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let v: Vec<i64> = [1, 2, 3];
+            let view: &[i64] = &v[..];
+            let p = &view[0];
+            let moved = v;
+            *p + Vec.len(&moved)
+        }"#,
+        "cannot move an owner while it is borrowed",
+    );
+    // Two exclusive references to one view, or using the view while an
+    // exclusive element reference is live, are aliasing errors.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            let view: &mut [i64] = &mut xs[..];
+            let p = &mut view[1];
+            let q = &mut view[2];
+            *p + *q
+        }"#,
+        "child view derived from it is live",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            let view: &mut [i64] = &mut xs[..];
+            let p = &view[1];
+            Slice.set(view, 1, 9);
+            *p
+        }"#,
+        "child view derived from it is live",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let xs: [i64; 3] = [1, 2, 3];
+            let view: &[i64] = &xs[..];
+            let p = &mut view[1];
+            0
+        }"#,
+        "cannot create an exclusive element reference from a shared '&[T]' view",
+    );
+    // Owning elements are never aliased by an element reference.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let mut v: Vec<Box<i64>> = [Box.new(1)];
+            let view: &mut [Box<i64>] = &mut v[..];
+            let p = &mut view[0];
+            0
+        }"#,
+        "cannot",
+    );
+}
+
+#[test]
+fn slice_element_references_into_split_sides_stay_disjoint() {
+    agrees(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [5, 6, 7];
+            {
+                let view: &mut [i64] = &mut a[..];
+                let (left, right) = Slice.split_at_mut(view, 1);
+                let p = &mut left[0];
+                let q = &mut right[1];
+                *p = *p + *q;
+                *q = 70;
+            }
+            DynArray.get(&a, 0) + DynArray.get(&a, 2)
+        }"#,
+        12 + 70,
+        "",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [5, 6, 7];
+            let view: &mut [i64] = &mut a[..];
+            let (left, right) = Slice.split_at_mut(view, 1);
+            let p = &mut left[0];
+            let q = &mut left[0];
+            *p + *q
+        }"#,
+        "child view derived from it is live",
+    );
+}
+
+#[test]
+fn slice_element_places_check_the_bound_and_byte_backing_at_runtime() {
+    let out_of_bounds = r#"
+        fn main() -> i64 ! {panic} {
+            let xs: [i64; 3] = [1, 2, 3];
+            let view: &[i64] = &xs[..];
+            let i = 3;
+            let p = &view[i];
+            *p
+        }"#;
+    let program = check(out_of_bounds).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("slice index out of bounds"),
+        "{error:?}"
+    );
+    // A `&[i64]` over Bytes has byte-sized elements, so it has no word-sized
+    // element address.
+    let bytes = r#"
+        fn peek<'a>(s: &'a [i64]) -> &'a i64 ! {panic} { &s[0] }
+        fn main() -> i64 ! {alloc, panic} {
+            let bytes = Bytes.from("abc");
+            let raw: &[i64] = &bytes[..];
+            let p = peek(raw);
+            *p
+        }"#;
+    let program = check(bytes).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("byte-backed slice element"),
+        "{error:?}"
+    );
+    // The element reference needs `panic` because its bound is checked.
+    rejects(
+        r#"
+        fn main() -> i64 ! {} {
+            let xs: [i64; 3] = [1, 2, 3];
+            let view: &[i64] = &xs[..];
+            let p = &view[0];
+            0
+        }"#,
+        "operation requires effects {panic}",
+    );
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        native_aborts(out_of_bounds);
+        native_aborts(bytes);
+    }
+}

@@ -845,6 +845,15 @@ enum Value {
         index: usize,
         steps: Vec<(usize, Type)>,
     },
+    /// A checked reference to one element of a slice view. Reads and writes
+    /// go through the view's own storage (an array cell, a DynArray, a record
+    /// field, or a vector), so the owner observes every write; `steps` are
+    /// relative field offsets inside the element. It owns nothing.
+    SliceElementRef {
+        view: Box<Value>,
+        index: usize,
+        steps: Vec<(usize, Type)>,
+    },
     /// One normalized heterogeneous union alternative. Only the active
     /// alternative owns resources; dropping a union drops just this payload.
     Union {
@@ -927,6 +936,12 @@ enum ResolvedPlace {
     },
     Element {
         owner: usize,
+        index: usize,
+        steps: Vec<(usize, Type)>,
+        ty: Type,
+    },
+    SliceElement {
+        view: Box<Value>,
         index: usize,
         steps: Vec<(usize, Type)>,
         ty: Type,
@@ -1758,6 +1773,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let element = self.element_value(*owner, *index)?;
                 self.place_read(element, steps)
             }
+            Value::SliceElementRef { view, index, steps } => {
+                let element = self.slice_element(view, *index, Span::default()).ok()?;
+                self.place_read(element, steps)
+            }
             _ => None,
         }
     }
@@ -1778,6 +1797,20 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     ) -> Result<()> {
         let old = match reference {
             Value::RecordRef(cell) => std::mem::replace(&mut *cell.lock().unwrap(), replacement),
+            Value::SliceElementRef { view, index, steps } => {
+                let mut element = self.slice_element(view, *index, Span::default())?;
+                let old = self.place_take(&mut element, steps).ok_or_else(|| {
+                    Diagnostic::new(Span::default(), "internal error: element path is missing")
+                })?;
+                if !self.place_store(&mut element, steps, replacement) {
+                    return Err(Diagnostic::new(
+                        Span::default(),
+                        "internal error: element replacement has no target",
+                    ));
+                }
+                self.slice_set(view, *index, element, Span::default())?;
+                old
+            }
             Value::PlaceRef { root, steps, .. } => {
                 let mut whole = root.lock().unwrap().clone();
                 let old = self.place_take(&mut whole, steps).ok_or_else(|| {
@@ -1916,7 +1949,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     flow => return Ok(flow),
                 };
                 let (container, child) = match &resolved {
-                    ResolvedPlace::Cell { ty, .. } | ResolvedPlace::Element { ty, .. } => {
+                    ResolvedPlace::Cell { ty, .. }
+                    | ResolvedPlace::Element { ty, .. }
+                    | ResolvedPlace::SliceElement { ty, .. } => {
                         let (_, child) = self.place_child(*ty, *offset).ok_or_else(|| {
                             Diagnostic::new(place.span, "internal error: place offset has no field")
                         })?;
@@ -1925,12 +1960,51 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 };
                 match &mut resolved {
                     ResolvedPlace::Cell { steps, ty, .. }
-                    | ResolvedPlace::Element { steps, ty, .. } => {
+                    | ResolvedPlace::Element { steps, ty, .. }
+                    | ResolvedPlace::SliceElement { steps, ty, .. } => {
                         steps.push((*offset, container));
                         *ty = child;
                     }
                 }
                 Ok(PlaceFlow::Place(resolved))
+            }
+            ExprKind::PlaceIndex { base, index } if base.ty.is_slice() => {
+                // One element of a slice view: the view is evaluated (not
+                // moved), then the index is checked against its length. A
+                // byte-backed view has no word-sized element to address.
+                let view = match self.expr(base, frame)? {
+                    Flow::Value(value) => value,
+                    flow => return Ok(flow.into()),
+                };
+                let index = match self.expr(index, frame)? {
+                    Flow::Value(value) => value.scalar(),
+                    flow => return Ok(flow.into()),
+                };
+                let length = self.slice_len(&view, place.span)?;
+                let Some(index) = usize::try_from(index).ok().filter(|index| *index < length)
+                else {
+                    return Err(Diagnostic::new(
+                        place.span,
+                        "panic: slice index out of bounds",
+                    ));
+                };
+                if let Value::Slice(inner) = &view
+                    && inner.array.is_none()
+                    && let Value::Borrowed(id) | Value::Owned(id) = inner.base.as_ref()
+                    && matches!(self.heap.get(*id), Some(Value::Buffer { .. }))
+                {
+                    return Err(Diagnostic::new(
+                        place.span,
+                        "panic: a byte-backed slice element has no word-sized address",
+                    ));
+                }
+                let element = self.program.pointees[base.ty.slice_element().expect("slice")];
+                Ok(PlaceFlow::Place(ResolvedPlace::SliceElement {
+                    view: Box::new(view),
+                    index,
+                    steps: Vec::new(),
+                    ty: element,
+                }))
             }
             ExprKind::PlaceIndex { base, index } => {
                 // Resolve the base before evaluating the index, matching checking.
@@ -2000,7 +2074,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let offset = 1 + index * self.program.width(element);
                 match &mut resolved {
                     ResolvedPlace::Cell { steps, ty, .. }
-                    | ResolvedPlace::Element { steps, ty, .. } => {
+                    | ResolvedPlace::Element { steps, ty, .. }
+                    | ResolvedPlace::SliceElement { steps, ty, .. } => {
                         steps.push((offset, container));
                         *ty = element;
                     }
@@ -2043,6 +2118,16 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 steps.push((offset, pointee));
                 Ok(ResolvedPlace::Cell {
                     root: root.clone(),
+                    steps,
+                    ty: child,
+                })
+            }
+            Value::SliceElementRef { view, index, steps } => {
+                let mut steps = steps.clone();
+                steps.push((offset, pointee));
+                Ok(ResolvedPlace::SliceElement {
+                    view: view.clone(),
+                    index: *index,
                     steps,
                     ty: child,
                 })
@@ -2162,6 +2247,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         };
         Ok(PlaceFlow::Value(match resolved {
             ResolvedPlace::Cell { root, steps, .. } => Value::PlaceRef { root, steps },
+            ResolvedPlace::SliceElement {
+                view, index, steps, ..
+            } => Value::SliceElementRef { view, index, steps },
             ResolvedPlace::Element {
                 owner,
                 index,
@@ -2219,6 +2307,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         };
         Ok(PlaceFlow::Value(match resolved {
             ResolvedPlace::Cell { root, steps, .. } => Value::PlaceRef { root, steps },
+            ResolvedPlace::SliceElement {
+                view, index, steps, ..
+            } => Value::SliceElementRef { view, index, steps },
             ResolvedPlace::Element {
                 owner,
                 index,
@@ -6076,6 +6167,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         })?;
                         (pointee, value)
                     }
+                    Value::SliceElementRef { view, index, steps } => {
+                        let pointer = base.ty.ref_pointee().expect("record reference");
+                        let pointee = self.program.pointees[pointer];
+                        let element = self.slice_element(&view, index, expr.span)?;
+                        let value = self.place_read(element, &steps).ok_or_else(|| {
+                            Diagnostic::new(
+                                expr.span,
+                                "internal error: projected slice element reference is missing",
+                            )
+                        })?;
+                        (pointee, value)
+                    }
                     value => (base.ty, value),
                 };
                 project(
@@ -6417,6 +6520,24 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         };
                         items[index] = element;
                         self.heap.insert(owner, vector);
+                    }
+                    Value::SliceElementRef { view, index, steps } => {
+                        let mut element = self.slice_element(&view, index, expr.span)?;
+                        let target =
+                            self.place_navigate_mut(&mut element, &steps)
+                                .ok_or_else(|| {
+                                    Diagnostic::new(
+                                        expr.span,
+                                        "internal error: slice element field write has no target",
+                                    )
+                                })?;
+                        if !assign(target) {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "internal ownership error: record field write has no matching field",
+                            ));
+                        }
+                        self.slice_set(&view, index, element, expr.span)?;
                     }
                     _ => {
                         return Err(Diagnostic::new(

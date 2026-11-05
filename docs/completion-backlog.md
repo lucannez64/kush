@@ -38,8 +38,10 @@ and remaining limits.
   only non-owning, non-linear referents, and `*p = value` replaces an affine
   referent by destroying the old payload exactly once. A temporary aggregate or
   owning handle is hoisted into hidden storage whose cleanup follows every
-  checked reference. Remaining exclusions: `&mut str` (unrestricted byte writes
-  can invalidate UTF-8), place references into slice elements, mutation of a
+  checked reference. Slice-view element places (`&s[i]`, `&mut s[i]`) root at
+  the view's owners and keep `split_at_mut` sides disjoint. Remaining
+  exclusions: `&mut str` (unrestricted byte writes can invalidate UTF-8),
+  mutation of a
   record with borrowed fields as a whole, runtime-index disjointness (all
   dynamic indices of one base conflict), and a child task returning a borrowed
   `TaskExit`. See
