@@ -4098,10 +4098,26 @@
       "deps": [
         "EFF-CAP-RESUME"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/effect-capabilities.md 3.7 design note: resumable entries keyed by cap parameter index, await points at calls passing non-tail capabilities, real-token handler calls in entries, scoped-borrow capability representation for capturing handlers; UAF/stale-copy review.",
-      "commit": null,
-      "log": []
+      "commit": "7c02eef",
+      "log": [
+        {
+          "time": "2026-11-05 23:47:12",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 00:10:38",
+          "who": "agent",
+          "text": "done 7c02eef"
+        },
+        {
+          "time": "2026-11-06 00:10:38",
+          "who": "agent",
+          "text": "Scoped with the user to noncapturing one-shot non-tail handlers; capturing and multishot moved to follow-ups."
+        }
+      ]
     },
     {
       "id": "EFF-CAP-LAMBDA",
@@ -4126,6 +4142,32 @@
       ],
       "status": "todo",
       "desc": "docs/abortive-handlers.md 3.7: aborts out of resumable entries (dropping the caller's pending continuation k), through declared-operation non-tail handlers and through multishot resumptions; abort token calls inside a handle for the same operation; UAF review.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-CAP-RESUME-CAPTURING",
+      "title": "Capturing capabilities across calls",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "EFF-CAP-RESUME-CALLS"
+      ],
+      "status": "todo",
+      "desc": "docs/effect-capabilities.md (As built EFF-CAP-RESUME-CALLS): capturing (once) handlers across calls via a handler-cell capability (code, environment, runtime consumed flag) in the handle frame; one perform across all callees; changes how cap values are passed; UAF review.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-CAP-RESUME-MULTISHOT",
+      "title": "Multishot capabilities across calls",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "EFF-CAP-RESUME-CALLS"
+      ],
+      "status": "todo",
+      "desc": "Multishot capabilities across calls: needs new cap syntax for a copyable token (confirm spelling with the user, e.g. cap multi Op) and continuation-chain copying across calls, which does not exist for declared operations either.",
       "commit": null,
       "log": []
     }
