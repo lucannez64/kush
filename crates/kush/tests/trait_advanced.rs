@@ -965,19 +965,6 @@ fn object_methods_may_project_a_shared_associated_type() {
 
 #[test]
 fn object_safety_rejections_are_explicit() {
-    rejects(
-        r#"
-        struct Text { name: String }
-        struct Point { x: i64 }
-        trait Describe { fn describe(self: &Self) -> i64 ! {panic}; }
-        impl Describe for Text { fn describe(self: &Self) -> i64 ! {panic} { 1 } }
-        impl Describe for Point { fn describe(self: &Self) -> i64 ! {panic} { 2 } }
-        fn make() -> dyn Describe ! {panic} { Text { name: "x" } }
-        fn main() -> i64 ! {panic} {
-            make().describe()
-        }"#,
-        "needs copyable members",
-    );
     // A `Self`-dependent non-receiver parameter would have a different ABI per
     // member and cannot cross a dynamic boundary.
     rejects(
@@ -1645,8 +1632,8 @@ fn open_object_methods_may_return_a_view_of_a_caller_argument() {
 }
 
 #[test]
-fn borrowed_object_results_require_a_stable_receiver_and_borrowed_receiver() {
-    rejects(
+fn borrowed_object_results_through_temporary_and_owned_receivers() {
+    agrees(
         r#"
         trait Pick {
             fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
@@ -1658,9 +1645,10 @@ fn borrowed_object_results_require_a_stable_receiver_and_borrowed_receiver() {
         fn make() -> dyn Pick ! {panic} { A { tag: 1 } }
         fn main() -> i64 ! {alloc, panic} {
             let values = [1, 2];
-            make().pick(&values[..])[0]
+            make().pick(&values[..])[1]
         }"#,
-        "temporary receiver would be dropped",
+        2,
+        "",
     );
     agrees(
         r#"
@@ -1993,8 +1981,8 @@ fn temporary_shared_receivers_of_open_objects_bind_to_a_hidden_place() {
 }
 
 #[test]
-fn temporary_shared_receivers_still_reject_borrowed_results() {
-    rejects(
+fn temporary_shared_receivers_return_receiver_tied_views() {
+    agrees(
         r#"
         trait Pick {
             fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic};
@@ -2006,9 +1994,10 @@ fn temporary_shared_receivers_still_reject_borrowed_results() {
         fn make() -> dyn Pick ! {alloc, panic} { W { value: A { tag: 1 } } }
         fn main() -> i64 ! {alloc, alloc, panic} {
             let values = [1, 2];
-            make().pick(&values[..])[0]
+            make().pick(&values[..])[1]
         }"#,
-        "temporary receiver would be dropped",
+        2,
+        "",
     );
 }
 

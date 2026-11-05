@@ -565,14 +565,31 @@ Three receiver modes dispatch dynamically in both representations:
   in the payload and are visible to the owner without an explicit write-back
   step. A dynamic call on a direct object local requires `let mut`.
 
-A *temporary* shared receiver of a dynamic object is bound to a hidden local
-and borrowed for the call, so an owning payload is released exactly once after
-the dispatch. If the method returns a borrowed view, the result must name an
-explicit lifetime that is disjoint from the receiver lifetime and derives from
-another caller-owned argument; an elided or receiver-tied view is rejected
-because the hidden temporary is dropped at the end of the call. A temporary
-mutable receiver is consumed by the ordinary union write-back path and its
-updated value is dropped because no later read can observe it.
+A receiver that is an owned object *value* rather than a place (a call
+result such as `make().read()`, a block, `if`, or `match` value, or
+`Box.take(boxed)`) is kept in hidden storage, in both representations and for
+shared and mutable methods alike. The rule is the one `&temp()` already
+follows: the storage is declared in the enclosing statement list, initialized
+at the receiver's source position (so evaluation order, short-circuiting, and
+loop conditions are unchanged), dispatched in place, and released exactly once
+at the end of that block. The temporary therefore lives at least to the end of
+its statement, and a `let` that binds a view of it keeps working for the rest
+of the block, like Rust's temporary lifetime extension:
+
+```kush
+let values = [5, 6, 7];
+let tied = make().pick(&values[..]);   // view tied to the receiver lifetime
+let elided = make().el();              // elided view of the receiver
+print_i64(tied[2] + elided[0]);
+```
+
+A receiver-tied or elided view of the hidden storage is checked exactly like a
+view of an ordinary local: it may not leave the block (for example
+`let v = { make().el() };` or returning `make().pick(values)` from a function
+are rejected as outliving their owner). A linear temporary still has to be
+consumed, so a borrowed call on one is rejected as an unconsumed linear value;
+call a consuming method instead. A mutable call on a temporary updates the
+hidden storage, which is then dropped because nothing can read it again.
 
 The checker reserves a borrowed receiver through every later argument, so a
 nested argument cannot replace, mutate, or read a receiver reserved by an
@@ -621,9 +638,8 @@ Object safety is checked at every `dyn` use:
   lifetime relation is checked against the selected member contract, so the
   returned view cannot outlive its source. An owned receiver may return a view
   of another caller-owned argument (it has no receiver lifetime). A temporary
-  receiver may do the same only when the result lifetime is explicit and
-  disjoint from the receiver lifetime; an elided or receiver-tied view is
-  rejected because the temporary is dropped at the end of the call;
+  or other owned object value lives in hidden block storage, so it may return
+  any view a local receiver could, including elided and receiver-tied views;
 - no bare `Self` in non-receiver parameters or in the result, so every
   alternative has the same ABI; `Self.Item` is allowed when every impl agrees
   on that associated type, including when the type is inherited from a trait
@@ -649,10 +665,9 @@ exactly one trait specialization. The surface syntax `dyn A + B` is therefore an
 explicit rejection; closed-world sharing is reached through one trait's `dyn`
 type and explicit qualification.
 
-References that escape their owner's scope remain outside this subset. A
-receiver-tied borrowed result through an owned or temporary receiver is also
-rejected, and mutable/consuming dispatch on a projected field still requires
-destructuring first.
+References that escape their owner's scope remain outside this subset, and
+mutable/consuming dispatch on a projected field still requires destructuring
+first.
 
 ## Checked contracts
 
@@ -747,8 +762,10 @@ the receiver, and the general `&Self`/`&mut Self` escape or reborrow-alias
 system is not implemented. Object methods may also return a borrowed view tied
 to a borrowed receiver or another caller-owned argument; dynamic dispatch uses
 the selected member's checked borrow contract as the lifetime witness, so the
-result's loan is tracked like a static call. An owned or temporary receiver
-cannot return a borrowed view.
+result's loan is tracked like a static call. A consuming `self: Self` method
+has no receiver lifetime, so it can only return a view of another argument; a
+borrowed method called on a temporary object borrows its hidden block storage
+(see the trait-object section).
 
 Generic methods compose with borrowed receivers: the generic parameters are
 ordinary inferred/explicit type, grade, natural, or effect arguments, while the
@@ -789,11 +806,10 @@ The following remain intentionally outside the implemented subset:
 - FFI-compatible vtables and open-world membership beyond a whole-program
   checked method table; a dynamic object still requires every impl that can be
   coerced in the program to be known at compile time;
-- a borrowed result tied to the receiver through an *owned* or *temporary*
-  receiver. Owned receivers have no receiver lifetime, so only views of other
-  caller-owned arguments are supported; a temporary receiver allows the same
-  argument-tied views but not an elided or receiver-tied one. Bind the object
-  to a local or a stored reference for a receiver-tied view;
+- a view tied to the receiver of a consuming `self: Self` method: such a
+  receiver has no lifetime, so the signature cannot express it. Temporary and
+  other owned object values used with a borrowed method keep their hidden
+  storage to the end of the enclosing block, so their views are supported;
 - mutable or consuming dispatch directly on an owning projected field
   (`pair.0.bump()`, `self.inner.consume()`); shared dispatch on such a field is
   borrowed in place, but mutable/consuming projections must be destructured into

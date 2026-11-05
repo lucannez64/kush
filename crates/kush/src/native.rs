@@ -7339,20 +7339,6 @@ impl Generator<'_, '_> {
                 let pointer = lower!(self.scalar(reference));
                 return Some(self.load_words(pointer, 0, self.program.width(expr.ty)));
             }
-            ExprKind::RefWrite(reference, replacement) => {
-                let pointer = lower!(self.scalar(reference));
-                let value = lower!(self.expr(replacement));
-                for (index, word) in value.iter().enumerate() {
-                    self.builder.ins().store(
-                        ir::MemFlagsData::new(),
-                        *word,
-                        pointer,
-                        (index * 8) as i32,
-                    );
-                }
-                self.consume(replacement);
-                self.constant(0)
-            }
             ExprKind::RefAssign(reference, offset, replacement) => {
                 let pointer = lower!(self.scalar(reference));
                 let value = lower!(self.expr(replacement));
@@ -7690,10 +7676,7 @@ impl Generator<'_, '_> {
             }
             ExprKind::Call(target, args) => {
                 let erased_parameters = match target {
-                    Target::Function(index)
-                    | Target::ObjectFunction {
-                        function: index, ..
-                    } => {
+                    Target::Function(index) => {
                         let function = &self.program.functions[*index];
                         (0..args.len())
                             .map(|position| {
@@ -7859,10 +7842,7 @@ impl Generator<'_, '_> {
                     }
                     Target::Str(op) => return Some(self.str_call(*op, values, expr.ty)),
                     Target::Foreign(index) => return self.foreign_call(*index, &values),
-                    Target::Function(index)
-                    | Target::ObjectFunction {
-                        function: index, ..
-                    } => return Some(self.function_call(*index, values)),
+                    Target::Function(index) => return Some(self.function_call(*index, values)),
                     Target::DynCall { spec, .. } => return Some(self.dyn_call(*spec, values)),
                     Target::UnionBorrowCall { spec, .. } => {
                         return Some(self.union_borrow_call(*spec, values));

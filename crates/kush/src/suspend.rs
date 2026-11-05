@@ -2035,13 +2035,9 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
                     ExprKind::DynamicPerform { operation, .. } => {
                         add(&BTreeSet::from([*operation]));
                     }
-                    ExprKind::Call(
-                        crate::executable::Target::Function(callee)
-                        | crate::executable::Target::ObjectFunction {
-                            function: callee, ..
-                        },
-                        _,
-                    ) => add(&current[*callee]),
+                    ExprKind::Call(crate::executable::Target::Function(callee), _) => {
+                        add(&current[*callee])
+                    }
                     ExprKind::Call(crate::executable::Target::DynCall { spec }, _) => {
                         let spec = &program.dyn_calls[*spec];
                         for member in &program.dyn_members[spec.object] {
@@ -2157,9 +2153,6 @@ fn check_unresumable_paths(
             ExprKind::CallIndirect { callee, .. } => callable(callee.ty),
             ExprKind::TaskScope { body, .. } => callable(body.ty),
             ExprKind::VecMap { callbacks, .. } => callbacks.iter().any(|c| callable(c.ty)),
-            ExprKind::Call(crate::executable::Target::ObjectFunction { function, .. }, _) => {
-                performs(*function)
-            }
             ExprKind::Call(crate::executable::Target::DynCall { spec }, _) => {
                 let spec = &program.dyn_calls[*spec];
                 program.dyn_members[spec.object].iter().any(|member| {

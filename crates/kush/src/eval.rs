@@ -5703,10 +5703,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     Target::AllocVec(op, element) => {
                         self.alloc_vec_call(*op, *element, values, expr.ty, expr.span)?
                     }
-                    Target::Function(index)
-                    | Target::ObjectFunction {
-                        function: index, ..
-                    } => {
+                    Target::Function(index) => {
                         let function = &self.program.functions[*index];
                         let mut physical = Vec::with_capacity(values.len());
                         for (position, value) in values.into_iter().enumerate() {
@@ -6690,19 +6687,6 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         "internal error: whole-value reference read has no inline storage",
                     )
                 })?
-            }
-            ExprKind::RefWrite(reference_expr, replacement_expr) => {
-                let reference = value!(self.expr(reference_expr, frame));
-                let replacement = value!(self.expr(replacement_expr, frame));
-                let Value::RecordRef(cell) = reference else {
-                    return Err(Diagnostic::new(
-                        expr.span,
-                        "internal error: whole-value reference write has no inline storage",
-                    ));
-                };
-                self.consume(replacement_expr, frame);
-                *cell.lock().unwrap() = replacement;
-                Value::Scalar(0)
             }
             ExprKind::DerefWrite(reference_expr, replacement_expr) => {
                 let reference = value!(self.expr(reference_expr, frame));

@@ -489,13 +489,6 @@ pub(crate) enum Target {
     /// the imported function's instance; the native backend emits a C ABI call
     /// and the reference interpreter rejects it explicitly.
     Foreign(usize),
-    /// A synthesized borrowed object call reserves its source place while
-    /// later arguments evaluate. Mutable calls also return it for write-back.
-    ObjectFunction {
-        function: usize,
-        receiver: Option<usize>,
-        mutable: bool,
-    },
     /// A call on an open/generic trait object. `spec` indexes
     /// `Executable::dyn_calls`; the receiver is the owned fat object or a
     /// one-word reference to it.
@@ -1087,11 +1080,6 @@ pub(crate) enum ExprKind {
     /// borrowed trait object (`&dyn Trait`/`&mut dyn Trait`); the referent is
     /// copyable, so the read does not duplicate owning storage.
     RefRead(Box<Expr>),
-    /// Replace the whole referent through a checked exclusive reference and
-    /// return Unit. Used to write a mutated borrowed trait object back; the
-    /// runtime value it overwrites is logically the same payload, so nothing
-    /// is destroyed here.
-    RefWrite(Box<Expr>, Box<Expr>),
     /// Replace the referent of a user-visible `*p = value`. The old affine
     /// (non-linear) payload is destroyed exactly once before the new value is
     /// stored. Owning handles use their dedicated operations instead.
@@ -1474,7 +1462,6 @@ impl Expr {
                 left: a, right: b, ..
             }
             | ExprKind::RefAssign(a, _, b)
-            | ExprKind::RefWrite(a, b)
             | ExprKind::DynamicPerform {
                 payload: a,
                 resume: b,
@@ -1697,7 +1684,6 @@ impl Expr {
                 left: a, right: b, ..
             }
             | ExprKind::RefAssign(a, _, b)
-            | ExprKind::RefWrite(a, b)
             | ExprKind::DynamicPerform {
                 payload: a,
                 resume: b,
@@ -2593,7 +2579,6 @@ fn fusion_expr_safe(
         // A whole-value reference read/write is never fused: it depends on
         // aliasing storage and has no total, capture-free callback shape.
         ExprKind::RefRead(_)
-        | ExprKind::RefWrite(_, _)
         | ExprKind::DerefWrite(_, _)
         | ExprKind::BoxWrite(_, _)
         | ExprKind::BorrowPlace(_)
@@ -2603,7 +2588,6 @@ fn fusion_expr_safe(
         ExprKind::BorrowField(_) => false,
         // No loop has a checked termination argument here.
         ExprKind::While(..) | ExprKind::Loop(_) => false,
-        ExprKind::Call(Target::ObjectFunction { .. }, _) => false,
         ExprKind::Call(Target::Function(index), arguments) => {
             fusion_function_safe(*index, signatures, bodies, memo, visiting)
                 && arguments
@@ -2872,9 +2856,7 @@ fn fuse_expr(
             fuse_expr(base, types, signatures, safety, fusions);
             fuse_expr(index, types, signatures, safety, fusions);
         }
-        ExprKind::RefWrite(reference, value)
-        | ExprKind::DerefWrite(reference, value)
-        | ExprKind::BoxWrite(reference, value) => {
+        ExprKind::DerefWrite(reference, value) | ExprKind::BoxWrite(reference, value) => {
             fuse_expr(reference, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
         }
@@ -13488,39 +13470,6 @@ impl Checker<'_, '_> {
         }
         Ok(None)
     }
-    /// Whether a temporary shared receiver may return this method's result.
-    /// A receiver-tied view would dangle when the hidden temporary is dropped,
-    /// but a view explicitly tied only to another (caller-owned) argument is
-    /// safe. Elided borrowed results are conservatively receiver-tied.
-    fn temporary_receiver_may_return_view(&self, trait_id: BindingId, name: &str) -> bool {
-        let Some(method) = self.functions.traits[&trait_id]
-            .methods
-            .get(name)
-            .map(|method| method.function)
-        else {
-            return true;
-        };
-        let mut receiver_lifetimes = BTreeSet::new();
-        if let Some(receiver) = method.parameters.first() {
-            type_lifetimes(&receiver.ty, &mut receiver_lifetimes);
-        }
-        let mut result_lifetimes = BTreeSet::new();
-        type_lifetimes(&method.result, &mut result_lifetimes);
-        let result_borrows = !result_lifetimes.is_empty()
-            || matches!(
-                &method.result.kind,
-                ast::TypeKind::Borrow { .. } | ast::TypeKind::Slice(_)
-            )
-            || matches!(
-                &method.result.kind,
-                ast::TypeKind::Named { path, .. }
-                    if path.len() == 1 && path[0] == "str"
-            );
-        if !result_borrows {
-            return true;
-        }
-        !result_lifetimes.is_empty() && result_lifetimes.is_disjoint(&receiver_lifetimes)
-    }
     /// Lower the checked contract of one object method: trait-argument and
     /// `Self` substitution, associated projection normalization, usage grades,
     /// result contract, and the declared effect row.
@@ -14167,7 +14116,6 @@ impl Checker<'_, '_> {
             ExprKind::Peek(slot) | ExprKind::Local(slot) => Some(*slot),
             _ => None,
         };
-        let mut temporary_receiver = None;
         let receiver = if let Some((_, reference_ty)) = borrowed_object {
             match (contract.mode, reference_ty) {
                 (ReceiverMode::Owned, _) => {
@@ -14247,24 +14195,22 @@ impl Checker<'_, '_> {
                             span,
                             resource: None,
                         }
-                    } else if contract.mode == ReceiverMode::Shared {
-                        // A temporary shared receiver owns its payload just
-                        // like a local. Bind it to one hidden local and borrow
-                        // that place; the block drops it after the call, so the
-                        // payload is released exactly once. A borrowed result
-                        // could outlive this drop and remains rejected.
-                        if !self.temporary_receiver_may_return_view(info.trait_id, name) {
-                            return Err(Diagnostic::new(
-                                span,
-                                "a borrowed dynamic result requires a direct object local or stored reference; a temporary receiver would be dropped before the result is used",
-                            ));
-                        }
-                        let temp = self.temp(object_ty, span)?;
-                        let pointee = self.types.pointer(object_ty);
-                        temporary_receiver = Some((temp, receiver));
+                    } else if !matches!(receiver.kind, ExprKind::Project(..)) {
+                        // A temporary receiver owns its payload just like a
+                        // local. Its hidden storage is declared in the
+                        // enclosing statement list (exactly like `&temp()`),
+                        // initialized here in source order, and released at
+                        // the end of that block. A receiver-tied view of it is
+                        // therefore checked like a view of an ordinary local.
+                        let mutable = contract.mode == ReceiverMode::Mutable;
+                        let slot = self.hoist_owner(object_ty, mutable, span)?;
+                        let borrow = self.borrow_local(slot, mutable, span)?;
                         Expr {
-                            kind: ExprKind::Borrow(temp),
-                            ty: Type::Ref(pointee),
+                            kind: ExprKind::BorrowInit {
+                                slot,
+                                value: Box::new(receiver),
+                            },
+                            ty: borrow.ty,
                             span,
                             resource: None,
                         }
@@ -14306,19 +14252,6 @@ impl Checker<'_, '_> {
             span,
             resource: None,
         };
-        let value = match temporary_receiver {
-            Some((temp, original)) => Expr {
-                kind: ExprKind::Block(Block {
-                    statements: vec![Statement::Let(temp, original)],
-                    tail: Some(Box::new(value)),
-                    ty: contract.value_type,
-                }),
-                ty: contract.value_type,
-                span,
-                resource: None,
-            },
-            None => value,
-        };
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
@@ -14342,10 +14275,6 @@ impl Checker<'_, '_> {
         // has value semantics, so this neither moves nor duplicates owning
         // storage. Mutable dispatch writes the updated object back through an
         // exclusive reference.
-        let reference_slot = match &receiver.kind {
-            ExprKind::Peek(slot) | ExprKind::Local(slot) => Some((*slot, receiver.ty)),
-            _ => None,
-        };
         let borrowed_object = receiver.ty.ref_pointee().map(|pointer| {
             let pointee = self.types.pointees[pointer];
             (pointee, receiver.ty)
@@ -14442,8 +14371,16 @@ impl Checker<'_, '_> {
         };
         let projected_shared =
             receiver_mode == ReceiverMode::Shared && matches!(receiver.kind, ExprKind::Project(..));
+        // A temporary receiver of a borrowed method gets hidden storage in the
+        // enclosing statement list, exactly like an open object, so it also
+        // dispatches in place and owning or linear members are never copied.
+        let temporary = borrowed_object.is_none()
+            && !matches!(receiver.kind, ExprKind::Project(..))
+            && direct_receiver_slot.is_none()
+            && matches!(receiver_mode, ReceiverMode::Shared | ReceiverMode::Mutable);
         let in_place = borrowed_object.is_some()
             || projected_shared
+            || temporary
             || (matches!(receiver_mode, ReceiverMode::Shared | ReceiverMode::Mutable)
                 && direct_receiver_slot.is_some());
         if in_place {
@@ -14475,6 +14412,23 @@ impl Checker<'_, '_> {
                     ty,
                     Expr {
                         kind: ExprKind::BorrowField(Box::new(receiver)),
+                        ty,
+                        span,
+                        resource: None,
+                    },
+                )
+            } else if temporary {
+                let mutable = receiver_mode == ReceiverMode::Mutable;
+                let slot = self.hoist_owner(object_ty, mutable, span)?;
+                let borrow = self.borrow_local(slot, mutable, span)?;
+                let ty = borrow.ty;
+                (
+                    ty,
+                    Expr {
+                        kind: ExprKind::BorrowInit {
+                            slot,
+                            value: Box::new(receiver),
+                        },
                         ty,
                         span,
                         resource: None,
@@ -14555,24 +14509,17 @@ impl Checker<'_, '_> {
                 None => Ok(value),
             };
         }
-        if receiver_mode == ReceiverMode::Shared
-            && (crate::runtime_types::type_owns(
-                &self.types.enums,
-                &self.types.unions,
-                object_ty,
-                0,
-            ) || self.linear_type(object_ty))
-        {
+        // Every borrowed receiver (stored reference, direct local, projected
+        // field, or temporary in hidden storage) dispatched in place above, so
+        // only a consuming receiver remains. It moves the object into the
+        // checked dispatcher exactly once.
+        if receiver_mode != ReceiverMode::Owned || borrowed_object.is_some() {
             return Err(Diagnostic::new(
                 span,
-                format!(
-                    "a shared dynamic method on a temporary object needs copyable members; '{}' owns storage or is linear. Bind the object with 'let' or call through a stored reference",
-                    self.types.name(object_ty)
-                ),
+                "internal error: a borrowed closed-world dispatch was not lowered in place",
             ));
         }
-        let (dispatcher, method_result) =
-            self.dynamic_dispatcher(trait_id, &trait_arguments, name, receiver_mode, span)?;
+        let (dispatcher, _) = self.dynamic_dispatcher(trait_id, &trait_arguments, name, span)?;
         let signature = self.functions.signatures[dispatcher].clone();
         if arguments.len() + 1 != signature.parameters.len() {
             return Err(Diagnostic::new(
@@ -14585,54 +14532,7 @@ impl Checker<'_, '_> {
             ));
         }
         self.require(signature.effects, span)?;
-        if receiver_mode != ReceiverMode::Owned
-            && !self.temporary_receiver_may_return_view(trait_id, name)
-        {
-            return Err(Diagnostic::new(
-                span,
-                "a borrowed dynamic result requires a direct object local or stored reference; a temporary receiver would be dropped before the result is used",
-            ));
-        }
-        let mut writeback = None;
-        let mut receiver = if let Some((object, reference_ty)) = borrowed_object {
-            match (reference_ty, receiver_mode) {
-                (Type::Ref(_), ReceiverMode::Mutable) => {
-                    return Err(Diagnostic::new(
-                        span,
-                        "cannot call an exclusive dynamic method through a shared '&dyn' reference; bind the object with '&mut' or call on the owning local",
-                    ));
-                }
-                (_, ReceiverMode::Owned) => {
-                    return Err(Diagnostic::new(
-                        span,
-                        "cannot call an owning dynamic method through a borrowed trait object; call it on the owning value instead",
-                    ));
-                }
-                (Type::RefMut(_), ReceiverMode::Mutable) => {
-                    let Some((slot, _)) = reference_slot else {
-                        return Err(Diagnostic::new(
-                            span,
-                            "a mutable borrowed trait-object call requires a reference binding, as in '&mut object'",
-                        ));
-                    };
-                    writeback = Some(Expr {
-                        kind: ExprKind::Peek(slot),
-                        ty: reference_ty,
-                        span,
-                        resource: None,
-                    });
-                }
-                _ => {}
-            }
-            Expr {
-                kind: ExprKind::RefRead(Box::new(receiver)),
-                ty: object,
-                span,
-                resource: None,
-            }
-        } else {
-            receiver
-        };
+        let mut receiver = receiver;
         if let ExprKind::Peek(slot) = &receiver.kind {
             let slot = *slot;
             let ty = receiver.ty;
@@ -14644,198 +14544,14 @@ impl Checker<'_, '_> {
                 resource: None,
             };
         }
-        if receiver_mode == ReceiverMode::Mutable
-            && borrowed_object.is_none()
-            && let ExprKind::Local(slot) = receiver.kind
-            && !self.locals[slot].mutable
-        {
-            return Err(Diagnostic::new(
-                span,
-                "a mutable dynamic method requires a mutable object binding; declare it with 'let mut'",
-            ));
-        }
         let mut values = vec![receiver];
         for (argument, ty) in arguments.iter().zip(&signature.parameters[1..]) {
             let value = self.expr_expected(argument, Some(*ty))?;
             values.push(self.coerce_argument(value, *ty, span)?);
         }
         self.apply_effect_writes(signature.effects);
-        if receiver_mode == ReceiverMode::Mutable {
-            // The receiver was rewritten to a local/parameter place when it is
-            // one. Move the object into the dispatcher, which returns the
-            // updated object and the method result, then store the updated
-            // object back into the same place. A temporary receiver is consumed
-            // and its updated value is dropped because no later read can
-            // observe it.
-            let direct_slot = match &values[0].kind {
-                ExprKind::Local(slot) => Some(*slot),
-                _ => None,
-            };
-            let object = signature.parameters[0];
-            let result_ty = method_result;
-            let tuple_ty = self.types.tuple(vec![object, result_ty], span)?;
-            let tmp = self.temp(tuple_ty, span)?;
-            let extracted = self.temp(result_ty, span)?;
-            let call = Expr {
-                kind: ExprKind::Call(
-                    Target::ObjectFunction {
-                        function: dispatcher,
-                        receiver: direct_slot.or(reference_slot.map(|(slot, _)| slot)),
-                        mutable: true,
-                    },
-                    values,
-                ),
-                ty: tuple_ty,
-                span,
-                resource: None,
-            };
-            let object_width = self.types.width(object);
-            let (pattern, arm_body) = if let Some(slot) = direct_slot {
-                let updated = self.temp(object, span)?;
-                (
-                    Pattern::Variant {
-                        tag: 0,
-                        tagged: true,
-                        niche: None,
-                        fields: vec![
-                            (1, Pattern::Bind(updated)),
-                            (1 + object_width, Pattern::Bind(extracted)),
-                        ],
-                    },
-                    Block {
-                        statements: vec![Statement::Expr(Expr {
-                            kind: ExprKind::Assign(
-                                slot,
-                                Box::new(Expr {
-                                    kind: ExprKind::Local(updated),
-                                    ty: object,
-                                    span,
-                                    resource: None,
-                                }),
-                            ),
-                            ty: Type::Unit,
-                            span,
-                            resource: None,
-                        })],
-                        tail: Some(Box::new(Expr {
-                            kind: ExprKind::Local(extracted),
-                            ty: result_ty,
-                            span,
-                            resource: None,
-                        })),
-                        ty: result_ty,
-                    },
-                )
-            } else if let Some(reference) = writeback {
-                let updated = self.temp(object, span)?;
-                (
-                    Pattern::Variant {
-                        tag: 0,
-                        tagged: true,
-                        niche: None,
-                        fields: vec![
-                            (1, Pattern::Bind(updated)),
-                            (1 + object_width, Pattern::Bind(extracted)),
-                        ],
-                    },
-                    Block {
-                        statements: vec![Statement::Expr(Expr {
-                            kind: ExprKind::RefWrite(
-                                Box::new(reference),
-                                Box::new(Expr {
-                                    kind: ExprKind::Local(updated),
-                                    ty: object,
-                                    span,
-                                    resource: None,
-                                }),
-                            ),
-                            ty: Type::Unit,
-                            span,
-                            resource: None,
-                        })],
-                        tail: Some(Box::new(Expr {
-                            kind: ExprKind::Local(extracted),
-                            ty: result_ty,
-                            span,
-                            resource: None,
-                        })),
-                        ty: result_ty,
-                    },
-                )
-            } else {
-                (
-                    Pattern::Variant {
-                        tag: 0,
-                        tagged: true,
-                        niche: None,
-                        fields: vec![
-                            (1, Pattern::Any),
-                            (1 + object_width, Pattern::Bind(extracted)),
-                        ],
-                    },
-                    Block {
-                        statements: Vec::new(),
-                        tail: Some(Box::new(Expr {
-                            kind: ExprKind::Local(extracted),
-                            ty: result_ty,
-                            span,
-                            resource: None,
-                        })),
-                        ty: result_ty,
-                    },
-                )
-            };
-            let block = Block {
-                statements: vec![Statement::Let(tmp, call)],
-                tail: Some(Box::new(Expr {
-                    kind: ExprKind::Match(
-                        Box::new(Expr {
-                            kind: ExprKind::Local(tmp),
-                            ty: tuple_ty,
-                            span,
-                            resource: None,
-                        }),
-                        vec![Arm {
-                            pattern,
-                            guard: None,
-                            body: Expr {
-                                kind: ExprKind::Block(arm_body),
-                                ty: result_ty,
-                                span,
-                                resource: None,
-                            },
-                        }],
-                    ),
-                    ty: result_ty,
-                    span,
-                    resource: None,
-                })),
-                ty: result_ty,
-            };
-            let value = Expr {
-                kind: ExprKind::Block(block),
-                ty: result_ty,
-                span,
-                resource: None,
-            };
-            return match expected {
-                Some(expected) => self.coerce(value, expected, span),
-                None => Ok(value),
-            };
-        }
         let value = Expr {
-            kind: ExprKind::Call(
-                if receiver_mode == ReceiverMode::Shared {
-                    Target::ObjectFunction {
-                        function: dispatcher,
-                        receiver: reference_slot.map(|(slot, _)| slot),
-                        mutable: false,
-                    }
-                } else {
-                    Target::Function(dispatcher)
-                },
-                values,
-            ),
+            kind: ExprKind::Call(Target::Function(dispatcher), values),
             ty: call_result_type(&signature),
             span,
             resource: None,
@@ -14845,17 +14561,17 @@ impl Checker<'_, '_> {
             None => Ok(value),
         }
     }
-    /// Build (or reuse) the checked dispatcher for one object method. The
-    /// dispatcher takes the object union by value, matches its concrete
-    /// alternative, and calls that impl's method. No vtable, erasure, or
-    /// runtime allocation is introduced, and every alternative remains an
-    /// ordinary checked function call.
+    /// Build (or reuse) the checked dispatcher for one consuming object
+    /// method. The dispatcher takes the object union by value, matches its
+    /// concrete alternative, and calls that impl's method. No vtable, erasure,
+    /// or runtime allocation is introduced, and every alternative remains an
+    /// ordinary checked function call. Borrowed receivers never use a
+    /// dispatcher: they dispatch in place through `UnionBorrowCall`.
     fn dynamic_dispatcher(
         &mut self,
         trait_id: BindingId,
         trait_arguments: &TraitArguments,
         name: &str,
-        receiver_mode: ReceiverMode,
         span: Span,
     ) -> Result<(usize, Type)> {
         let key = (trait_id, trait_arguments.clone(), name.to_owned());
@@ -14910,8 +14626,6 @@ impl Checker<'_, '_> {
             .get(&(trait_id, trait_arguments.clone()))
             .cloned()
             .unwrap_or_default();
-        let shared_receiver = receiver_mode == ReceiverMode::Shared;
-        let mutable_receiver = receiver_mode == ReceiverMode::Mutable;
         let mut parameters = vec![object];
         let mut parameter_grades = vec![None];
         for parameter in &method.parameters[1..] {
@@ -14938,14 +14652,7 @@ impl Checker<'_, '_> {
         }
         let result_erased = result_grade.is_some_and(Grade::is_zero);
         let method_value_type = if result_erased { Type::Unit } else { result };
-        // A mutable dispatcher returns `(updated object, method result)` so the
-        // caller can write the mutated object back into its direct local. Other
-        // modes return the method result directly.
-        let function_result = if mutable_receiver {
-            self.types.tuple(vec![object, method_value_type], span)?
-        } else {
-            method_value_type
-        };
+        let function_result = method_value_type;
         let mut locals = parameters
             .iter()
             .map(|ty| Local {
@@ -15030,27 +14737,11 @@ impl Checker<'_, '_> {
                 grade: None,
                 span,
             });
-            let receiver_argument = if mutable_receiver {
-                Expr {
-                    kind: ExprKind::Borrow(payload),
-                    ty: Type::RefMut(self.types.pointer(member)),
-                    span,
-                    resource: None,
-                }
-            } else if shared_receiver {
-                Expr {
-                    kind: ExprKind::Borrow(payload),
-                    ty: Type::Ref(self.types.pointer(member)),
-                    span,
-                    resource: None,
-                }
-            } else {
-                Expr {
-                    kind: ExprKind::Local(payload),
-                    ty: member,
-                    span,
-                    resource: None,
-                }
+            let receiver_argument = Expr {
+                kind: ExprKind::Local(payload),
+                ty: member,
+                span,
+                resource: None,
             };
             let mut call_arguments = vec![receiver_argument];
             for (slot, ty) in parameters.iter().enumerate().skip(1) {
@@ -15080,67 +14771,7 @@ impl Checker<'_, '_> {
                 span,
                 resource: None,
             };
-            let body = if mutable_receiver {
-                // The method must run before the mutated payload is read. Bind
-                // its result in a hidden local, then build the tuple in the
-                // required field order `(updated object, result)`.
-                let result_slot = locals.len();
-                locals.push(Local {
-                    ty: method_value_type,
-                    mutable: false,
-                    linear: false,
-                    pinned: false,
-                    grade: None,
-                    span,
-                });
-                let updated_union = Expr {
-                    kind: ExprKind::Coerce {
-                        value: Box::new(Expr {
-                            kind: ExprKind::Move(payload),
-                            ty: member,
-                            span,
-                            resource: None,
-                        }),
-                        to: object,
-                        coercion: Coercion::Inject { tag },
-                    },
-                    ty: object,
-                    span,
-                    resource: None,
-                };
-                let tuple_layout = function_result
-                    .layout()
-                    .expect("mutable dispatcher result is a tuple layout");
-                Expr {
-                    kind: ExprKind::Block(Block {
-                        statements: vec![Statement::Let(result_slot, method_call)],
-                        tail: Some(Box::new(Expr {
-                            kind: ExprKind::Construct {
-                                enum_id: tuple_layout,
-                                tag: 0,
-                                fields: vec![
-                                    updated_union,
-                                    Expr {
-                                        kind: ExprKind::Local(result_slot),
-                                        ty: method_value_type,
-                                        span,
-                                        resource: None,
-                                    },
-                                ],
-                            },
-                            ty: function_result,
-                            span,
-                            resource: None,
-                        })),
-                        ty: function_result,
-                    }),
-                    ty: function_result,
-                    span,
-                    resource: None,
-                }
-            } else {
-                method_call
-            };
+            let body = method_call;
             arms.push(Arm {
                 pattern: Pattern::Type {
                     tag,
@@ -15186,7 +14817,7 @@ impl Checker<'_, '_> {
             resources: vec![],
             local_resources: vec![],
             parameter_grades: parameter_grades.clone(),
-            result_grade: if mutable_receiver { None } else { result_grade },
+            result_grade,
             parameter_lifetimes: witness_parameter_lifetimes.clone(),
             result_lifetime: witness_result_lifetime.clone(),
             lifetime_bounds: witness_bounds.clone(),
@@ -15210,7 +14841,7 @@ impl Checker<'_, '_> {
             effect_arguments: BTreeMap::new(),
             origin: None,
             parameter_grades,
-            result_grade: if mutable_receiver { None } else { result_grade },
+            result_grade,
             parameter_lifetimes: witness_parameter_lifetimes,
             result_lifetime: witness_result_lifetime,
             lifetime_bounds: witness_bounds,
@@ -20295,17 +19926,13 @@ impl Checker<'_, '_> {
     /// `@[1]` surface grade.
     fn copyable_result_grade(&self, expr: &Expr) -> Option<Grade> {
         match &expr.kind {
-            ExprKind::Call(
-                Target::Function(index)
-                | Target::ObjectFunction {
-                    function: index, ..
-                },
-                _,
-            ) => self.functions.signatures.get(*index).and_then(|signature| {
-                signature
-                    .result_grade
-                    .filter(|grade| grade.is_one() && !self.owned_type(signature.result))
-            }),
+            ExprKind::Call(Target::Function(index), _) => {
+                self.functions.signatures.get(*index).and_then(|signature| {
+                    signature
+                        .result_grade
+                        .filter(|grade| grade.is_one() && !self.owned_type(signature.result))
+                })
+            }
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
                 Type::Fn(id) | Type::Once(id) => {
                     self.types.function_types.get(id).and_then(|signature| {
@@ -20391,13 +20018,7 @@ impl Checker<'_, '_> {
         }
         match &expr.kind {
             ExprKind::Local(slot) | ExprKind::Move(slot) => self.locals[*slot].linear,
-            ExprKind::Call(
-                Target::Function(index)
-                | Target::ObjectFunction {
-                    function: index, ..
-                },
-                _,
-            ) => self
+            ExprKind::Call(Target::Function(index), _) => self
                 .functions
                 .signatures
                 .get(*index)
@@ -31288,16 +30909,6 @@ impl Checker<'_, '_> {
             }
             ExprKind::Call(Target::Function(function), _) => {
                 (self.functions.signatures[*function].effects & bit != 0).then_some(*function)
-            }
-            ExprKind::Call(Target::ObjectFunction { function, .. }, _)
-                if self.functions.signatures[*function].effects & bit != 0 =>
-            {
-                return Err(Diagnostic::new(
-                    expr.span,
-                    format!(
-                        "a borrowed trait-object call that may perform '{name}' cannot be resumed by a handler with code after 'resume'; call a named function"
-                    ),
-                ));
             }
             ExprKind::CallIndirect { callee, .. }
                 if Self::function_parts(callee.ty)
