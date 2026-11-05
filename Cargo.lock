@@ -289,6 +289,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kush-infer-proto"
+version = "0.1.0"
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/kush"]
+members = ["crates/kush", "crates/infer-proto"]
 resolver = "3"
 
 [workspace.package]
