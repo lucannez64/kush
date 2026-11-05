@@ -267,8 +267,18 @@ Semantics:
   binder is replaced by the caller's, so `fn f(n: i64, a: [i64; n <= 8])`
   called as `f(k, b)` requires `b: [i64; k <= 8]`, and the result of
   `fn make(n: i64) -> [i64; n <= 8]` called as `make(k)` has type
-  `[i64; k <= 8]`. Generic functions, methods, and trait items cannot mention
-  runtime-length arrays in their signatures.
+  `[i64; k <= 8]`. Generic functions, impl methods, and trait items follow
+  the same rule: generic inference reads the element type and capacity from
+  a runtime-length argument (`fn first<T, C: Nat>(n: i64, a: [T; n <= C])`),
+  and a method call substitutes its explicit arguments' binders (the receiver
+  is never a binder). A trait and its impl must spell the binder with the
+  same parameter name. A trait whose method mentions a runtime-length array
+  is not object-safe: a `dyn` call has no static callee to substitute into.
+  Foreign signatures cannot mention runtime-length arrays.
+- **Recursive instances.** A type argument may not mention a length binder
+  of the function being instantiated, as in `go::<[i64; n <= 4]>(...)` inside
+  `go`. Each activation has its own `n`, so such an instance would give a
+  value built with the outer `n` the inner `n`'s type.
 - **First-class functions.** Lambda signatures and `fn`/`once fn` types cannot
   mention runtime-length arrays, and a function whose signature does cannot be
   used as a value. An indirect call cannot substitute the caller's binder, so
@@ -320,9 +330,9 @@ stack allocation with a hidden layout descriptor, and not a general dependent
 array. The capacity is always a compile-time `Nat`; the length is a runtime
 word. A runtime array length without a capacity, such as `[i64; n]`, remains
 an explicit diagnostic that suggests `[T; n <= C]`; use `Vec<T>` for an owned
-container of unbounded length. Runtime-length arrays cannot appear in generic
-function, method, trait, or foreign signatures, in `fn` types, or in lambda
-signatures, and a signature may only use them as a whole parameter/result or
+container of unbounded length. Runtime-length arrays cannot appear in foreign
+signatures, `fn` types, lambda signatures, or methods of a trait used as a
+`dyn` object, and a signature may only use them as a whole parameter/result or
 behind one reference. There is no element-wise owning move beyond
 push/pop of copyable values, and no `&mut` (exclusive) borrowed pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow
 for arbitrary lengths.

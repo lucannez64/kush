@@ -7452,6 +7452,19 @@ fn prepare_trait_objects<'a>(
                     ));
                     break;
                 }
+                // A dynamic call has no static callee whose length binders the
+                // call site could replace with the caller's.
+                if f.parameters
+                    .iter()
+                    .map(|parameter| &parameter.ty)
+                    .chain(std::iter::once(&f.result))
+                    .any(type_mentions_runtime_length)
+                {
+                    reason = Some(format!(
+                        "method '{name}' mentions a runtime-length array [T; n <= C]; call it through a concrete receiver"
+                    ));
+                    break;
+                }
             }
         }
         if reason.is_none()
@@ -9758,6 +9771,24 @@ impl<'a> Functions<'a> {
         let instantiated_self =
             impl_arguments.map(|index| self.impl_instantiations[index].self_type);
         substitution.self_type = instantiated_self.or(declared.self_ty);
+        // A type argument may not name a runtime-length binder of the function
+        // being instantiated. Only a recursive call can write one, and in the
+        // new activation that binder holds a different value, so a value of
+        // the old length would get the new length's type.
+        for ty in substitution.types.values().chain(&substitution.self_type) {
+            let captured = crate::runtime_types::runtime_length_binders(types, *ty)
+                .into_iter()
+                .find(|binder| resolution.bindings[*binder].owner == Some(binding));
+            if let Some(binder) = captured {
+                return Err(Diagnostic::new(
+                    origin.unwrap_or(declared.span),
+                    format!(
+                        "a type argument of '{}' mentions its own length binder '{}'; each call gets a new '{}', so pass the array as an ordinary runtime-length parameter instead",
+                        f.name, resolution.bindings[binder].name, resolution.bindings[binder].name
+                    ),
+                ));
+            }
+        }
         // Projections in an impl's own associated values may depend on a bound
         // of an impl parameter, as in `impl<T: Show> Wrap for W<T> { type Out =
         // T.Out; }`. Install those projections before lowering signatures.
@@ -11109,9 +11140,10 @@ fn validate_erased_parameters(
 /// during specialization.
 /// Runtime-length arrays in a signature. A parameter or result may be
 /// `[T; n <= C]` or a direct reference to one, where `n` is an earlier `i64`
-/// parameter (any `i64` parameter for the result). Calls substitute the
-/// caller's binder, so the shape is restricted to positions the call site
-/// rewrites. Generic functions and methods cannot use them.
+/// parameter (any `i64` parameter for the result; never a method receiver).
+/// Calls substitute the caller's binder, so the shape is restricted to
+/// positions the call site rewrites. Generic functions, methods, and trait
+/// items may use them; foreign signatures and `fn` types may not.
 fn validate_runtime_length_signature(
     resolution: &Resolution,
     f: &ast::Function,
@@ -11196,28 +11228,31 @@ fn validate_runtime_length_signature(
             _ => Ok(()),
         }
     }
-    let restricted = if method {
-        Some("a method signature")
-    } else if f.foreign.is_some() {
+    let restricted = if f.foreign.is_some() {
         Some("a foreign function signature")
-    } else if !f.generics.is_empty() {
-        Some("a generic function signature")
     } else {
         None
     };
-    let all = f
-        .parameters
+    // A method receiver is never a length binder: the call site substitutes
+    // binders from the explicit argument list only.
+    let binders = if method {
+        &f.parameters[1.min(f.parameters.len())..]
+    } else {
+        &f.parameters[..]
+    };
+    let all = binders
         .iter()
         .filter(|parameter| !parameter.erased && is_i64(&parameter.ty))
         .filter_map(|parameter| resolution.binder(parameter.span))
         .collect::<BTreeSet<_>>();
     let mut earlier = BTreeSet::new();
-    for parameter in &f.parameters {
+    for (index, parameter) in f.parameters.iter().enumerate() {
         if parameter.erased {
             continue;
         }
         walk(resolution, &parameter.ty, &earlier, true, restricted)?;
         if is_i64(&parameter.ty)
+            && (!method || index > 0)
             && let Some(id) = resolution.binder(parameter.span)
         {
             earlier.insert(id);
@@ -11351,6 +11386,42 @@ fn validate_type_template(
         ast::TypeKind::Predicate(_) => Ok(()),
         ast::TypeKind::Lifetime(_) | ast::TypeKind::SelfType => Ok(()),
         ast::TypeKind::Integer(_) | ast::TypeKind::Bool(_) => Ok(()),
+    }
+}
+
+/// Whether a written type mentions a runtime-length array `[T; n <= C]`
+/// anywhere.
+pub(crate) fn type_mentions_runtime_length(ty: &ast::Type) -> bool {
+    match &ty.kind {
+        ast::TypeKind::Array(element, length) => {
+            runtime_length_parts(length).is_some() || type_mentions_runtime_length(element)
+        }
+        ast::TypeKind::Borrow { inner, .. }
+        | ast::TypeKind::Graded { inner, .. }
+        | ast::TypeKind::Slice(inner)
+        | ast::TypeKind::Dyn(inner) => type_mentions_runtime_length(inner),
+        ast::TypeKind::Named { arguments, .. } => {
+            arguments.iter().any(type_mentions_runtime_length)
+        }
+        ast::TypeKind::Tuple(items) => items.iter().any(type_mentions_runtime_length),
+        ast::TypeKind::Structural { fields, row, .. } => {
+            fields
+                .iter()
+                .any(|field| type_mentions_runtime_length(&field.ty))
+                || row.as_deref().is_some_and(type_mentions_runtime_length)
+        }
+        ast::TypeKind::Binary { left, right, .. } => {
+            type_mentions_runtime_length(left) || type_mentions_runtime_length(right)
+        }
+        ast::TypeKind::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(|parameter| type_mentions_runtime_length(&parameter.ty))
+                || type_mentions_runtime_length(result)
+        }
+        _ => false,
     }
 }
 
@@ -15302,9 +15373,13 @@ impl Checker<'_, '_> {
             .iter()
             .map(|lifetime| lifetime.name.clone())
             .collect::<BTreeSet<_>>();
+        // Runtime-length binders in the method signature are replaced by the
+        // caller's bindings, exactly as for a free-function call.
+        let lengths = self.call_runtime_lengths(f, 1, arguments)?;
         let mut prechecked = None;
         let mut generic_arguments = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         if !f.generics.is_empty() {
+            self.pending_lengths = lengths.clone();
             let pairs = f.parameters[1..]
                 .iter()
                 .zip(arguments)
@@ -15406,6 +15481,7 @@ impl Checker<'_, '_> {
                         .next()
                         .expect("inferred method argument in runtime order"),
                     None => {
+                        let ty = self.types.rebind_lengths(ty, &lengths, evidence.span)?;
                         let wanted = if lifetime_binders.is_empty() {
                             ty
                         } else {
@@ -15456,12 +15532,15 @@ impl Checker<'_, '_> {
         } else if crate::runtime_types::grade_erases(signature.result_grade) {
             Type::Unit
         } else {
-            self.types
-                .relabel_lifetimes(signature.result, &lifetime_map, span)?
+            let result = self
+                .types
+                .relabel_lifetimes(signature.result, &lifetime_map, span)?;
+            self.types.rebind_lengths(result, &lengths, span)?
         };
         let mut coerced = Vec::with_capacity(values.len());
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
             let ty = self.types.relabel_lifetimes(*ty, &lifetime_map, span)?;
+            let ty = self.types.rebind_lengths(ty, &lengths, span)?;
             coerced.push(self.coerce_argument(value, ty, span)?);
         }
         self.apply_effect_writes(signature.effects);
@@ -17011,6 +17090,7 @@ impl Checker<'_, '_> {
     fn call_runtime_lengths(
         &self,
         f: &ast::Function,
+        skip: usize,
         arguments: &[ast::Expr],
     ) -> Result<BTreeMap<BindingId, BindingId>> {
         fn collect(resolution: &Resolution, ty: &ast::Type, out: &mut BTreeSet<BindingId>) {
@@ -17023,19 +17103,39 @@ impl Checker<'_, '_> {
                     }
                     collect(resolution, element, out);
                 }
-                ast::TypeKind::Borrow { inner, .. } | ast::TypeKind::Graded { inner, .. } => {
-                    collect(resolution, inner, out)
+                ast::TypeKind::Borrow { inner, .. }
+                | ast::TypeKind::Graded { inner, .. }
+                | ast::TypeKind::Slice(inner) => collect(resolution, inner, out),
+                ast::TypeKind::Named { arguments, .. } => {
+                    for argument in arguments {
+                        collect(resolution, argument, out);
+                    }
+                }
+                ast::TypeKind::Tuple(items) => {
+                    for item in items {
+                        collect(resolution, item, out);
+                    }
+                }
+                ast::TypeKind::Structural { fields, .. } => {
+                    for field in fields {
+                        collect(resolution, &field.ty, out);
+                    }
+                }
+                ast::TypeKind::Binary { left, right, .. } => {
+                    collect(resolution, left, out);
+                    collect(resolution, right, out);
                 }
                 _ => {}
             }
         }
+        let parameters = &f.parameters[skip.min(f.parameters.len())..];
         let mut binders = BTreeSet::new();
-        for parameter in f.parameters.iter().filter(|parameter| !parameter.erased) {
+        for parameter in parameters.iter().filter(|parameter| !parameter.erased) {
             collect(self.resolution, &parameter.ty, &mut binders);
         }
         collect(self.resolution, &f.result, &mut binders);
         let mut map = BTreeMap::new();
-        for (parameter, argument) in f.parameters.iter().zip(arguments) {
+        for (parameter, argument) in parameters.iter().zip(arguments) {
             let Some(binder) = self.resolution.binder(parameter.span) else {
                 continue;
             };
@@ -27695,6 +27795,29 @@ impl Checker<'_, '_> {
                     }
                 }
             }
+            ast::TypeKind::Array(element, length)
+                if let Some((_, capacity)) = runtime_length_parts(length) =>
+            {
+                // `[T; n <= C]` infers `T` and `C` from a runtime-length
+                // actual. The binder itself is checked by the final argument
+                // coercion against the caller's substituted binder.
+                if let Some(layout) = actual.layout()
+                    && self.types.enums[layout].runtime_length.is_some()
+                    && let Some((actual_element, actual_capacity)) =
+                        self.types.enums[layout].dynamic_array
+                {
+                    self.unify(
+                        element,
+                        actual_element,
+                        type_vars,
+                        const_vars,
+                        effect_vars,
+                        subst,
+                        span,
+                    )?;
+                    self.unify_length(capacity, actual_capacity, const_vars, subst, span)?;
+                }
+            }
             ast::TypeKind::Array(element, length) => {
                 if let Some(layout) = actual.layout()
                     && let Some((actual_element, actual_length)) = self.types.enums[layout].array
@@ -29222,7 +29345,7 @@ impl Checker<'_, '_> {
             .iter()
             .map(|lifetime| lifetime.name.clone())
             .collect::<BTreeSet<_>>();
-        let lengths = self.call_runtime_lengths(f, arguments)?;
+        let lengths = self.call_runtime_lengths(f, 0, arguments)?;
         self.pending_lengths = lengths.clone();
         let (type_arguments, grade_arguments, const_arguments, effect_arguments, values) = self
             .infer(
