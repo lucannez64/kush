@@ -3678,10 +3678,26 @@
       "deps": [
         "EFF-ROW-LAWS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/effect-capabilities.md section 3: handle Op as op, cap Op ! {e} parameters, perform op(x) without dynamic lookup; scoped-borrow escape rules; dynamic semantics unchanged; parity/cleanup/rejection tests.",
-      "commit": null,
-      "log": []
+      "commit": "be470f4",
+      "log": [
+        {
+          "time": "2026-11-05 19:48:00",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "Boat gate on ecb2c4a: fmt, cargo test (1612 tests), clippy passed. Reviewed by a subagent; findings fixed in dbfc85b. 15 capability tests in both backends; as/cap contextual."
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "done be470f4"
+        }
+      ]
     },
     {
       "id": "EFF-CAP-RESUME",
@@ -3691,10 +3707,26 @@
       "deps": [
         "EFF-CAP-LEXICAL"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Resumable entries keyed by cap parameters (effect-capabilities.md 3.4).",
-      "commit": null,
-      "log": []
+      "commit": "a050c26",
+      "log": [
+        {
+          "time": "2026-11-05 19:58:22",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "Scoped with the user: non-tail/multishot/capturing capability handlers in their own body; cross-call part is EFF-CAP-RESUME-CALLS. Boat gate on ecb2c4a: fmt, cargo test (1612 tests), clippy passed. Reviewed by a subagent; findings fixed in dbfc85b."
+        },
+        {
+          "time": "2026-11-05 22:15:04",
+          "who": "agent",
+          "text": "done a050c26"
+        }
+      ]
     },
     {
       "id": "EFF-CAP-PERF",
@@ -3704,10 +3736,26 @@
       "deps": [
         "EFF-CAP-LEXICAL"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Acceptance gate (effect-capabilities.md decision 4) on the E-PERF harness.",
-      "commit": null,
-      "log": []
+      "commit": "a892ce1",
+      "log": [
+        {
+          "time": "2026-11-05 19:54:45",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "Gate passes: cap perform in callee 4.5-4.7 ns vs lexical 3.5-3.7 ns vs dynamic 6.7-7.3 ns (benchmarks/effects). Boat gate on ecb2c4a: fmt, cargo test (1612 tests), clippy passed. Reviewed by a subagent; findings fixed in dbfc85b."
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "done a892ce1"
+        }
+      ]
     },
     {
       "id": "E-ABORT-DESIGN",
@@ -3746,10 +3794,26 @@
       "deps": [
         "RES-UNBOX-CERT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/unboxing-certificates.md sections 3-4: re-derive the three existing niche layouts through a checked certificate with no layout change; generate decoders from certificates.",
-      "commit": null,
-      "log": []
+      "commit": "c0eae59",
+      "log": [
+        {
+          "time": "2026-11-05 19:24:06",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "Boat gate on ecb2c4a: fmt, cargo test (1612 tests), clippy passed. Reviewed by a subagent; findings fixed in dbfc85b. Certificates reproduce 0/2/0x110000 bit for bit; forged certificates refused; boundary parity test."
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "done c0eae59"
+        }
+      ]
     },
     {
       "id": "UNBOX-ALIGN-CONTRACT",
@@ -3759,14 +3823,24 @@
       "deps": [
         "RES-UNBOX-CERT"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "unboxing-certificates.md section 6: pooled, headerless, system, arena, user allocator and stack references; prerequisite for alignment niches.",
-      "commit": null,
+      "commit": "f27067f",
       "log": [
         {
           "time": "2026-11-05 19:19:45",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "Boat gate on ecb2c4a: fmt, cargo test (1612 tests), clippy passed. Reviewed by a subagent; findings fixed in dbfc85b. Runtime test drives every allocation path; stack slots use STACK_SLOT_ALIGN_SHIFT."
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "done f27067f"
         }
       ]
     },
@@ -3778,10 +3852,26 @@
       "deps": [
         "UNBOX-CERT-CHECKER"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "unboxing-certificates.md section 5 with the section 6 hostile tests and a measured benefit.",
-      "commit": null,
-      "log": []
+      "commit": "4ba6cbb",
+      "log": [
+        {
+          "time": "2026-11-05 19:26:25",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "Measured, not adopted: census of 84 programs/291 layouts finds 0 candidates; best case 64.5->33.4 MB, 0.37->0.34 s (benchmarks/unboxing). Layouts unchanged. Boat gate on ecb2c4a: fmt, cargo test (1612 tests), clippy passed. Reviewed by a subagent; findings fixed in dbfc85b."
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "done 4ba6cbb"
+        }
+      ]
     },
     {
       "id": "UNBOX-TAG-NICHE",
@@ -3791,10 +3881,26 @@
       "deps": [
         "UNBOX-CERT-CHECKER"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "unboxing-certificates.md section 5.",
-      "commit": null,
-      "log": []
+      "commit": "4ba6cbb",
+      "log": [
+        {
+          "time": "2026-11-05 19:26:25",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "Measured, not adopted: 0 candidates in the census; best case 95.8->64.5 MB, 0.34->0.32 s. Layouts unchanged. Boat gate on ecb2c4a: fmt, cargo test (1612 tests), clippy passed. Reviewed by a subagent; findings fixed in dbfc85b."
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "done 4ba6cbb"
+        }
+      ]
     },
     {
       "id": "I-PROTO-SIMPLIFY",
@@ -3804,10 +3910,26 @@
       "deps": [
         "RES-INFERENCE-PROTOTYPE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/inference-prototype.md finding 5: co-occurrence simplification in crates/infer-proto; re-run the corpus.",
-      "commit": null,
-      "log": []
+      "commit": "df008ea",
+      "log": [
+        {
+          "time": "2026-11-05 19:28:56",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "Boat gate on ecb2c4a: fmt, cargo test (1612 tests), clippy passed. Reviewed by a subagent; findings fixed in dbfc85b. Co-occurrence simplification; twice prints as fn twice<T>(f: fn(T) -> T, x: T) -> T (instance flagged)."
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "done df008ea"
+        }
+      ]
     },
     {
       "id": "I-LAMBDA-INFER",
@@ -3817,10 +3939,26 @@
       "deps": [
         "I-PROTO-SIMPLIFY"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/inference-prototype.md decisions 3-4: only Direct Kush types, no implicit union coercion/adapters, no recursive types, ungraded, ownership fixed by use sites, step and depth budgets; otherwise ask for the annotation.",
-      "commit": null,
-      "log": []
+      "commit": "16ea595",
+      "log": [
+        {
+          "time": "2026-11-05 19:47:35",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "Boat gate on ecb2c4a: fmt, cargo test (1612 tests), clippy passed. Reviewed by a subagent; findings fixed in dbfc85b. Contextual, generic-call and first-use inference; corpus: 22 of 25 example lambdas infer with identical results."
+        },
+        {
+          "time": "2026-11-05 22:15:03",
+          "who": "agent",
+          "text": "done 16ea595"
+        }
+      ]
     },
     {
       "id": "D-SINGLE-JOIN",
@@ -3900,6 +4038,32 @@
       ],
       "status": "todo",
       "desc": "docs/abortive-handlers.md 3.3: abort out of resume and resumable entries, dropping a pending continuation; dedicated use-after-free review.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-CAP-RESUME-CALLS",
+      "title": "Non-tail and multishot capabilities across calls",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "EFF-CAP-RESUME"
+      ],
+      "status": "todo",
+      "desc": "docs/effect-capabilities.md 3.7 design note: resumable entries keyed by cap parameter index, await points at calls passing non-tail capabilities, real-token handler calls in entries, scoped-borrow capability representation for capturing handlers; UAF/stale-copy review.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-CAP-LAMBDA",
+      "title": "Capabilities captured by non-escaping lambdas",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "EFF-CAP-LEXICAL"
+      ],
+      "status": "todo",
+      "desc": "docs/effect-capabilities.md 3.2: by-reference-closure rules for a captured cap, including rejection across a non-tail perform; today lambdas cannot capture capabilities.",
       "commit": null,
       "log": []
     }
