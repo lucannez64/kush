@@ -117,7 +117,8 @@ Lexa split therefore maps to:
   as calls; this is the only path the feature should optimize;
 - **rare**: abort-like handlers that do not resume. They require unwinding
   frames between the perform and the handle while dropping their live owned
-  values. Kush has no unwinding; this is a separate design (E-ABORT-DESIGN)
+  values. Kush has no unwinding; this is a separate design (E-ABORT-DESIGN, decided in
+  [abortive handlers](abortive-handlers.md))
   and must not be smuggled in through capabilities.
 
 ### 3.6 What does not change

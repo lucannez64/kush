@@ -203,7 +203,8 @@ unannotated target parameter is demand 1 and the callee may copy it, so
 5. **Effect-sensitive demand stays conservative.** The `max(1, r)` effect
    demand and the "side-effecting block under high demand is counted under
    that demand" rule remain; a precise version needs an effect analysis and is
-   a separate node.
+   a separate node (decided in [effect-sensitive demand](grade-effect-demand.md):
+   kept conservative).
 
 ## 7. Follow-up nodes
 

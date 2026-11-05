@@ -224,4 +224,12 @@ stating its decisions and adding follow-up implementation nodes to the plan:
 - RES-UNBOX-CERT: [unboxing certificates](unboxing-certificates.md)
   (checked value-set disjointness, expansion stops at indirections).
 
+Follow-up research nodes:
+
+- GRADE-EFFECT-DEMAND: [effect-sensitive demand](grade-effect-demand.md)
+  (precise value-flow rule specified; kept conservative because hoisting is
+  always enough and the precise rule would reject accepted programs).
+- E-ABORT-DESIGN: [abortive handlers](abortive-handlers.md) (return-path
+  propagation reusing the `?` cleanup, no native unwinding).
+
 No theorem from the cited papers is claimed for Kush.
