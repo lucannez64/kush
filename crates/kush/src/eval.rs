@@ -6585,6 +6585,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
             Pattern::DynArray {
                 prefix,
+                suffix,
                 rest_binding,
                 ..
             } => {
@@ -6595,6 +6596,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     self.local_active(*slot, frame);
                 }
                 for (pattern, item) in prefix.iter().zip(items) {
+                    self.activate_pattern(pattern, item, frame)?;
+                }
+                let start = items.len() - suffix.len();
+                for (pattern, item) in suffix.iter().zip(&items[start..]) {
                     self.activate_pattern(pattern, item, frame)?;
                 }
             }
@@ -6628,19 +6633,29 @@ fn pattern_test(pattern: &Pattern, value: &Value) -> bool {
             };
             tag == actual && pattern_test(inner, value)
         }
-        Pattern::DynArray { prefix, rest, .. } => {
+        Pattern::DynArray {
+            prefix,
+            suffix,
+            rest,
+            ..
+        } => {
             let Value::DynArray { items, .. } = value else {
                 return false;
             };
+            let required = prefix.len() + suffix.len();
             let length_ok = if *rest {
-                items.len() >= prefix.len()
+                items.len() >= required
             } else {
-                items.len() == prefix.len()
+                items.len() == required
             };
             length_ok
                 && prefix
                     .iter()
                     .zip(items)
+                    .all(|(pattern, item)| pattern_test(pattern, item))
+                && suffix
+                    .iter()
+                    .zip(&items[items.len() - suffix.len()..])
                     .all(|(pattern, item)| pattern_test(pattern, item))
         }
     }
@@ -6674,6 +6689,7 @@ fn pattern_matches(pattern: &Pattern, value: &Value, locals: &mut [Value]) -> bo
         Pattern::DynArray {
             capacity,
             prefix,
+            suffix,
             rest_binding,
             ..
         } => {
@@ -6683,9 +6699,13 @@ fn pattern_matches(pattern: &Pattern, value: &Value, locals: &mut [Value]) -> bo
             for (pattern, item) in prefix.iter().zip(items) {
                 pattern_matches(pattern, item, locals);
             }
+            let end = items.len() - suffix.len();
+            for (pattern, item) in suffix.iter().zip(&items[end..]) {
+                pattern_matches(pattern, item, locals);
+            }
             if let Some(slot) = rest_binding {
                 locals[*slot] = Value::DynArray {
-                    items: items[prefix.len()..].to_vec(),
+                    items: items[prefix.len()..end].to_vec(),
                     capacity: *capacity,
                 };
             }

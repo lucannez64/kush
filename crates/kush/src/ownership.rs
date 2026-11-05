@@ -6783,13 +6783,14 @@ pub(crate) fn pattern_bindings(pattern: &Pattern, slots: &mut BTreeSet<usize>) {
         Pattern::Type { inner, .. } => pattern_bindings(inner, slots),
         Pattern::DynArray {
             prefix,
+            suffix,
             rest_binding,
             ..
         } => {
             if let Some(slot) = rest_binding {
                 slots.insert(*slot);
             }
-            for p in prefix {
+            for p in prefix.iter().chain(suffix) {
                 pattern_bindings(p, slots);
             }
         }

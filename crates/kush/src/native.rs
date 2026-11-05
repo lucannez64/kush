@@ -9277,13 +9277,15 @@ impl Generator<'_, '_> {
             }
             Pattern::DynArray {
                 element,
+                capacity,
                 prefix,
+                suffix,
                 rest,
                 ..
             } => {
                 let width = self.program.width(*element);
                 let length = values[0];
-                let required = prefix.len() as i64;
+                let required = (prefix.len() + suffix.len()) as i64;
                 let mut result = if *rest {
                     self.builder.ins().icmp_imm_s(
                         IntCC::UnsignedGreaterThanOrEqual,
@@ -9299,9 +9301,50 @@ impl Generator<'_, '_> {
                     let field = self.pattern(pattern, &values[1 + index * width..]);
                     result = self.builder.ins().band(result, field);
                 }
+                for (index, pattern) in suffix.iter().enumerate() {
+                    let words = self.dyn_suffix_element(
+                        values,
+                        width,
+                        *capacity,
+                        prefix.len(),
+                        suffix.len(),
+                        index,
+                    );
+                    let field = self.pattern(pattern, &words);
+                    result = self.builder.ins().band(result, field);
+                }
                 result
             }
         }
+    }
+    /// The words of suffix element `index` of a DynArray pattern: the slot at
+    /// `length - suffix + index`, selected over the SSA slots it may occupy
+    /// (from `prefix + index` up to `capacity - suffix + index`). When the
+    /// length guard fails the selected words are unused.
+    fn dyn_suffix_element(
+        &mut self,
+        values: &[Value],
+        width: usize,
+        capacity: usize,
+        prefix: usize,
+        suffix: usize,
+        index: usize,
+    ) -> Vec<Value> {
+        let length = values[0];
+        let mut words = vec![self.constant(0); width];
+        for slot in prefix + index..=capacity - suffix + index {
+            let here =
+                self.builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, length, (slot + suffix - index) as i64);
+            for (word, out) in words.iter_mut().enumerate() {
+                *out = self
+                    .builder
+                    .ins()
+                    .select(here, values[1 + slot * width + word], *out);
+            }
+        }
+        words
     }
     fn dispose_pattern(&mut self, pattern: &Pattern, ty: Type, values: &[Value]) {
         match pattern {
@@ -9357,12 +9400,24 @@ impl Generator<'_, '_> {
                 element,
                 capacity,
                 prefix,
+                suffix,
                 rest_binding,
                 ..
             } => {
                 let width = self.program.width(*element);
                 for (index, pattern) in prefix.iter().enumerate() {
                     self.bind_pattern(pattern, &values[1 + index * width..]);
+                }
+                for (index, pattern) in suffix.iter().enumerate() {
+                    let words = self.dyn_suffix_element(
+                        values,
+                        width,
+                        *capacity,
+                        prefix.len(),
+                        suffix.len(),
+                        index,
+                    );
+                    self.bind_pattern(pattern, &words);
                 }
                 if let Some(slot) = rest_binding {
                     let zero = self.constant(0);
@@ -9371,14 +9426,16 @@ impl Generator<'_, '_> {
                     let rest_length = self
                         .builder
                         .ins()
-                        .iadd_imm_s(length, -(prefix.len() as i64));
+                        .iadd_imm_s(length, -((prefix.len() + suffix.len()) as i64));
                     tail[0] = rest_length;
-                    for position in 0..capacity.saturating_sub(prefix.len()) {
+                    for position in 0..capacity.saturating_sub(prefix.len() + suffix.len()) {
                         let source = prefix.len() + position;
+                        // The middle slot `source` is live when it is before
+                        // the suffix: `length > source + suffix`.
                         let active = self.builder.ins().icmp_imm_s(
                             IntCC::UnsignedGreaterThan,
                             length,
-                            source as i64,
+                            (source + suffix.len()) as i64,
                         );
                         for word in 0..width {
                             let value = values[1 + source * width + word];
@@ -9433,9 +9490,14 @@ fn has_bindings(p: &Pattern) -> bool {
         Pattern::Or(ps) => ps.iter().any(has_bindings),
         Pattern::DynArray {
             prefix,
+            suffix,
             rest_binding,
             ..
-        } => rest_binding.is_some() || prefix.iter().any(has_bindings),
+        } => {
+            rest_binding.is_some()
+                || prefix.iter().any(has_bindings)
+                || suffix.iter().any(has_bindings)
+        }
         _ => false,
     }
 }

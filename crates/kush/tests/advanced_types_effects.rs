@@ -4016,3 +4016,146 @@ fn monotone_loop_counters_keep_their_lower_bound_for_proofs() {
         "cannot prove",
     );
 }
+
+#[test]
+fn dynamic_array_patterns_match_a_suffix_after_the_rest() {
+    let source = r#"
+        fn ends(a: DynArray<i64, 5>) -> i64 ! {panic} {
+            match a {
+                [] => 1000,
+                [x] => x,
+                [first, .., last] => first * 10 + last,
+                _ => 0,
+            }
+        }
+        fn middle(a: DynArray<i64, 5>) -> i64 ! {panic} {
+            match a {
+                [..mid, 9] => 500 + DynArray.len(&mid),
+                [a, ..mid, y, z] => a + y + z + 100 * DynArray.len(&mid) + 1000 * DynArray.get(&mid, 0),
+                _ => 7,
+            }
+        }
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 5> = [1, 2, 3, 4];
+            let b: DynArray<i64, 5> = [6];
+            let c: DynArray<i64, 5> = [1, 2, 9];
+            let d: DynArray<i64, 5> = [1, 5, 6, 2, 3];
+            let e: DynArray<i64, 5> = [8, 9];
+            ends(a) + ends(b) + middle(c) + middle(d) + middle(e)
+        }"#;
+    // 14 + 6 + 502 + (1 + 2 + 3 + 200 + 5000) + 501.
+    assert_eq!(value(source), 6229);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 6229);
+    // A suffix needs enough live elements: a one-element array cannot match
+    // `[first, .., last]`, and a guard falls through to the next arm.
+    let short = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [4];
+            let b: DynArray<i64, 4> = [4, 5, 6];
+            let x = match a { [first, .., last] => first + last, _ => 1 };
+            let y = match b {
+                [.., last] if last == 9 => 100,
+                [.., before, 6] => before,
+                _ => 0,
+            };
+            x + y
+        }"#;
+    assert_eq!(value(short), 6);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(short, 6);
+    // A runtime-length array accepts a suffix too, and its middle is a plain
+    // DynArray.
+    let runtime = r#"
+        fn main() -> i64 ! {panic} {
+            let n = 4;
+            let a: [i64; n <= 4] = Array.fill(n, 3);
+            match a {
+                [x, ..mid, y] => x + y + DynArray.len(&mid),
+                _ => 0,
+            }
+        }"#;
+    assert_eq!(value(runtime), 8);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(runtime, 8);
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1];
+            match a { [.., x, ..] => x, _ => 0 }
+        }"#,
+        "at most one '..'",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 2> = [1];
+            match a { [x, .., y, z] => x, _ => 0 }
+        }"#,
+        "DynArray pattern has 3 element(s) but the capacity is 2",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: [i64; 3] = [1, 2, 3];
+            match a { [x, .., y] => x, _ => 0 }
+        }"#,
+        "inline array patterns require an exact element count",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 2> = [Box.new(1)];
+            match a { [.., x] => 0, _ => 1 }
+        }"#,
+        "owning, linear, and view elements cannot be matched by value",
+    );
+}
+
+#[test]
+fn dynamic_array_patterns_destructure_nested_elements() {
+    let source = r#"
+        enum Opt { Some(i64), None }
+        struct Pair { left: i64, right: i64 }
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<(i64, i64), 4> = [(1, 2), (3, 4)];
+            let b: DynArray<[i64; 2], 3> = [[5, 6]];
+            let c: DynArray<Opt, 3> = [Opt.Some(7), Opt.None];
+            let d: DynArray<Pair, 3> = [Pair { left: 8, right: 9 }];
+            let e: DynArray<DynArray<i64, 2>, 3> = [[1, 2], [3]];
+            let x = match a { [(p, q), .., (r, s)] => p + q + r + s, _ => 0 };
+            let y = match b { [[u, v]] => u * v, _ => 0 };
+            let z = match c { [Opt.Some(w), Opt.None] => w, _ => 0 };
+            let w = match d { [Pair { left, right }] => left * right, _ => 0 };
+            let v = match e { [[f, ..], .., [g]] => f + g, _ => 0 };
+            x + y + z + w + v
+        }"#;
+    // 10 + 30 + 7 + 72 + 4.
+    assert_eq!(value(source), 123);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 123);
+    // A nested literal or variant that does not match falls through.
+    let fallthrough = r#"
+        enum Opt { Some(i64), None }
+        fn main() -> i64 ! {panic} {
+            let c: DynArray<Opt, 3> = [Opt.None, Opt.Some(3)];
+            match c {
+                [Opt.Some(x), ..] => x,
+                [.., Opt.Some(0)] => 50,
+                [.., Opt.Some(y)] => y * 10,
+                _ => 0,
+            }
+        }"#;
+    assert_eq!(value(fallthrough), 30);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(fallthrough, 30);
+    // A nested owner is still not copied out of the array.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<(i64, Box<i64>), 2> = [(1, Box.new(2))];
+            match a { [(x, b)] => x, _ => 0 }
+        }"#,
+        "owning, linear, and view elements cannot be matched by value",
+    );
+}

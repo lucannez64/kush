@@ -130,14 +130,27 @@ match a {
 }
 ```
 
-`[]`, `[x]`, `[x, y]` require exactly that live length. A trailing `..` matches
-any remaining length; `..rest` additionally binds the tail as a fresh
-`DynArray<T, capacity>` containing copies of the remaining elements (the
-original capacity bound is kept). Literal sub-patterns are checked elementwise,
-and guards may fall through to a later arm. Only a trailing rest is supported;
-a suffix after the rest is an explicit rejection. Elements must be copyable
-one-word or concrete values, so owning, linear, and view elements cannot be
-matched by value. The runtime length is not a finite variant tag, so a match
+`[]`, `[x]`, `[x, y]` require exactly that live length. A `..` matches any
+remaining length, and patterns after it match the trailing live elements,
+counted back from the runtime length:
+
+```rust
+match a {
+    [first, .., last] => first + last,          // needs length >= 2
+    [..mid, 9] => DynArray.len(&mid),           // last element is 9
+    [x, ..mid, y, z] => x + y + z,
+    _ => 0,
+}
+```
+
+`..rest` additionally binds the middle as a fresh `DynArray<T, capacity>`
+containing copies of the elements between the prefix and the suffix (the
+original capacity bound is kept). A pattern has at most one `..`, and its
+prefix plus suffix may not exceed the capacity. Element sub-patterns are
+ordinary patterns, so literals, tuples, fixed arrays, records, enum variants,
+and nested `DynArray` patterns all work elementwise, and guards may fall
+through to a later arm. Elements must be copyable one-word or concrete values,
+so owning, linear, and view elements cannot be matched by value. The runtime length is not a finite variant tag, so a match
 over `DynArray` must end in an unguarded catch-all; the ordinary exhaustiveness
 check rejects anything else.
 
@@ -269,8 +282,7 @@ function, method, trait, or foreign signatures, in `fn` types, or in lambda
 signatures, and a signature may only use them as a whole parameter/result or
 behind one reference. There is no element-wise owning move beyond
 push/pop of copyable values, no view of a `DynArray` inside a reference-based
-record place, no suffix after a `..` pattern, and no recursive/borrowed element
-pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow
+record place, and no borrowed element pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow
 for arbitrary lengths.
 
 The implementation is checked by `crates/kush/tests/advanced_types_effects.rs`

@@ -1518,13 +1518,15 @@ pub(crate) enum Pattern {
         inner: Box<Pattern>,
     },
     /// A length-checked pattern over a runtime-sized inline array. `prefix`
-    /// patterns match the leading live slots; `rest` allows any remaining
-    /// length and `rest_binding` receives a copy of the tail as
-    /// `DynArray<element, capacity>`. Elements must be copyable.
+    /// patterns match the leading live slots and `suffix` patterns the
+    /// trailing ones; `rest` allows any length in between and `rest_binding`
+    /// receives a copy of the middle as `DynArray<element, capacity>`. A
+    /// suffix is only present with a rest. Elements must be copyable.
     DynArray {
         element: Type,
         capacity: usize,
         prefix: Vec<Pattern>,
+        suffix: Vec<Pattern>,
         rest: bool,
         rest_binding: Option<usize>,
     },
@@ -32286,6 +32288,7 @@ impl Checker<'_, '_> {
                         ));
                     }
                     let mut prefix = Vec::new();
+                    let mut suffix = Vec::new();
                     let mut rest = false;
                     let mut rest_binding = None;
                     // A runtime-length array's tail has a different length, so
@@ -32322,20 +32325,20 @@ impl Checker<'_, '_> {
                             };
                             continue;
                         }
+                        // Elements after the rest match the trailing slots,
+                        // counted back from the runtime length.
                         if rest {
-                            return Err(Diagnostic::new(
-                                part.span,
-                                "a DynArray pattern supports only a trailing '..' or '..name' rest; a suffix after the rest is not implemented",
-                            ));
+                            suffix.push(c.pattern(part, element, bindings)?);
+                        } else {
+                            prefix.push(c.pattern(part, element, bindings)?);
                         }
-                        prefix.push(c.pattern(part, element, bindings)?);
                     }
-                    if prefix.len() > capacity {
+                    if prefix.len() + suffix.len() > capacity {
                         return Err(Diagnostic::new(
                             pattern.span,
                             format!(
                                 "DynArray pattern has {} element(s) but the capacity is {capacity}",
-                                prefix.len()
+                                prefix.len() + suffix.len()
                             ),
                         ));
                     }
@@ -32343,6 +32346,7 @@ impl Checker<'_, '_> {
                         element,
                         capacity,
                         prefix,
+                        suffix,
                         rest,
                         rest_binding,
                     });
