@@ -290,26 +290,20 @@ and adds it to the checked method table. Dispatch resolves the identifier and
 calls that member's function, so adding an impl changes the table, not the value
 layout. Native and reference cleanup agree.
 
-Owned receivers consume the object once. Shared and mutable receivers on a
-direct local or a stored `&dyn`/`&mut dyn` dispatch in place: the payload is
-borrowed rather than copied, mutations are visible directly, and owning or
-linear members remain valid in the object. A *temporary* shared receiver that
-owns storage or is linear remains an error because there is no caller-owned
-place to borrow. Object safety requires ordinary type parameters, no generic
-method type parameters, no `Self` in non-receiver parameters/results, no erased
-proof parameters, and consistent associated values (including defaults).
-Lifetime parameters and borrowed results are accepted when the result is tied
-to a borrowed receiver or another caller-owned argument; dispatch uses the
-selected member's checked borrow contract so the returned view cannot outlive
-its source. An owned receiver cannot return a borrowed result, and a temporary
-receiver cannot return a view of itself. Two closed-union traits with identical
-member sets share one representation; an unqualified name that both declare is
-ambiguous and requires `object.Trait.method(...)`. A dynamic object represents
-exactly one trait specialization.
+Owned receivers consume the object once. Shared and mutable receivers dispatch
+in place on a direct local, a stored `&dyn`/`&mut dyn`, a projected field
+(`pair.0.bump()`), or a temporary held in hidden block storage, so owning and
+linear members are never copied and receiver-tied views are checked like views
+of a local. Consuming dispatch on a projected field consumes the aggregate like
+a destructuring. Object safety requires no `Self` in non-receiver
+parameters/results, no erased proof parameters, and consistent associated
+values; `dyn Trait<Out = T>` fixes a projection explicitly. Multi-trait objects
+`dyn A + B` use the dynamic representation with one method table per trait,
+require qualification for a shared method name, and upcast (owned) to any subset
+of their traits. Two closed-union traits with identical member sets still share
+one representation.
 
-Object methods returning a borrow through an owned or temporary receiver,
-associated projections supplied
-only by a generic impl whose value depends on the impl parameter, owning or
+Owning or
 `String` associated constants, associated constants that depend on an impl type
 parameter, effect/lifetime impl parameters, `default fn`, negative impls, and
 arbitrary-overlap specialization remain outside this subset. See

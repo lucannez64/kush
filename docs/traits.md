@@ -937,6 +937,10 @@ The following remain intentionally outside the implemented subset:
   `dyn Trait<Effect>` cannot be named);
 - upcasting a reference to a multi-trait object, downcasts, and lifetime
   bounds on objects (`dyn A + 'a`);
+- a closed-world object whose trait has exactly one concrete impl is stored as
+  that member type inside a tuple, so `pair.0.method()` there follows the
+  static method rules (a projected borrowed or consuming static call is
+  rejected) instead of object dispatch;
 - `DynArray` elements and fields erased by structural width subtyping may not
   contain a dynamic object, since object linearity is only known after every
   member is registered;
@@ -1028,9 +1032,31 @@ when the view is explicitly tied to a caller argument, temporary shared
 receivers of owning open objects, shared dispatch on owning projected fields
 (`pair.0.read()`, `self.inner.read()`), non-type (`Nat`/`Grade`) object
 arguments, and explicit object-safety and borrowed-object rejections
-(receiver-tied views through temporary receivers, mutable and consuming
-projected dispatch, associated-type disagreement, no impls, temporary shared
-dispatch of a closed-world owning object, mutable-through-shared dispatch,
-owning-through-borrowed dispatch, and multi-trait `dyn A + B` syntax). Each
+(associated-type disagreement, no impls, mutable projected dispatch through an
+immutable owner, mutable-through-shared dispatch, and owning-through-borrowed
+dispatch), plus positive versions of formerly rejected cases (temporary
+receiver views, closed-world temporaries, projected mutation and consumption,
+and `dyn A + B`). Each
 accepted program is compared between the reference evaluator and the native
 backend.
+
+`dyn_receivers.rs` covers receivers that are not a plain local, in both object
+representations: temporaries and other owned object values (blocks, `if`,
+`Box.take`) in hidden block storage, receiver-tied and elided views through
+them, loop and short-circuit initialization, views that would outlive the
+block, linear temporaries, mutable dispatch on tuple fields, nested record
+fields, and fields behind `&mut`/`&` references, views that keep a projected
+owner borrowed, loan conflicts with arguments, and consuming dispatch on
+projected fields (sibling cleanup, linear siblings, borrowed and loop-carried
+roots, fields behind references). `dyn_objects.rs` covers explicit associated
+bindings (projection before any member, conflicts with members, impls, other
+bindings, and nominal fields, syntax errors) and multi-trait objects
+(dispatch, qualification including generic trait components, ambiguity,
+upcasts to subsets including members registered after the upcast, fields,
+`Box`, `Vec`, temporaries, linear members, bindings on a component, and
+rejections). Each accepted program is compared between the reference
+evaluator and the native backend with balanced allocations.
+
+An independent review of this work ran about 100 probe programs on both
+backends against the temporary, projected, consuming, binding, and
+multi-trait paths and found no soundness bug.

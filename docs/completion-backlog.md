@@ -118,51 +118,31 @@ and remaining limits.
   and tested. Effect parameters have no determining position in an impl header
   and are rejected as unconstrained; lifetime parameters remain rejected by the
   parser.
-- [ ] Trait objects and checked dynamic dispatch/object safety. **Partial:**
-  Two checked representations are implemented. A finite non-generic member set
-  keeps the closed-world union (`owned`, copyable shared, and mutable receivers
-  with temporary write-back, object arguments, associated item/default
-  agreement). A trait with a generic/blanket impl, a generic method, or one
-  appearing in a nominal field (including `Box<dyn Trait>`/`Vec<dyn Trait>`),
-  uses a two-word dynamic fat object: a registered member identifier and an
-  owned payload pointer. Coercion registers the concrete member's checked
-  method table, instantiates generic and non-type (`Nat`/`Grade`) impl
-  parameters, allocates the payload under `alloc`, and dispatch resolves the
-  identifier at runtime. A trait whose only impls are generic or blanket impls
-  is usable as `dyn`: its table starts empty and members are registered at
-  coercion. Generic methods are monomorphized per call-site type/`Nat`/grade/
-  effect argument list into the member table, including later members and later
-  call sites. Shared and mutable `&dyn`/`&mut dyn` and direct-local calls
-  dispatch in place without copying, so borrowed objects with owning or linear
-  members work; linear objects still require explicit consumption. Lifetime-
-  parameterized object methods may return a view tied to a borrowed receiver or
-  another caller-owned argument. An owned receiver may return a view of a
-  caller-owned argument (it has no receiver lifetime). A temporary shared
-  dynamic receiver is bound to a hidden local and may likewise return an
-  explicit argument-tied view, but an elided or receiver-tied view remains
-  rejected. Associated projections supplied only by a parameter-dependent
-  generic impl are fixed by the first concrete member registered for that
-  object specialization; every later member must agree. Shared dispatch on an
-  owning projected field (`pair.0.read()`, `self.inner.read()`) borrows the
-  field in place. Remaining explicit rejections: receiver-tied borrowed results
-  through owned or temporary receivers, mutable or consuming dispatch on a
-  projected field, an associated projection needed before any member of that
-  object specialization is registered, and multi-trait `dyn A + B` syntax
-  (closed-world objects already share coincident member sets; an open dynamic
-  object represents one trait specialization). Effect-row trait parameters do
-  not exist in the language, so `dyn Trait<Effect>` cannot be named. The
-  dynamic representation is a whole-program checked member table with a fixed
-  fat-object layout, not an FFI-compatible vtable or arbitrary open-world
-  membership.
+- [x] Trait objects and checked dynamic dispatch/object safety. Two checked
+  representations: a finite non-generic member set keeps the closed-world union;
+  a trait with a generic/blanket impl, a generic method, a nominal-field use, or
+  a multi-trait use takes a two-word dynamic fat object (member identifier and
+  owned payload) with a whole-program checked member table. Implemented: owned,
+  shared, and mutable dispatch on locals, stored `&dyn`/`&mut dyn`, temporaries
+  and other owned object values (kept in hidden block storage, so receiver-tied
+  and elided views work), and projected fields (`pair.0.bump()` in place;
+  `pair.0.eat()` consumes the aggregate like a destructuring); generic methods
+  per call site; `Nat`/`Grade` trait arguments; explicit associated bindings
+  `dyn Trait<Out = T>` that fix a projection before any member exists; and
+  multi-trait objects `dyn A + B` with per-trait member tables, qualified
+  dispatch, and owned upcasts to any subset of their traits. Remaining
+  boundaries: no FFI-compatible vtable or open-world membership, no reference
+  upcasts or downcasts, no per-field partial moves, no exact-use `@[1]` object
+  results, and a one-impl closed object inside a tuple collapses to its member
+  type (see [traits.md](traits.md#limits)). Effect-row trait parameters do not
+  exist, so `dyn Trait<Effect>` cannot be named. Reviewed independently in
+  `D-REVIEW` (about 100 probes, no soundness finding).
 - [x] Specialization with an explicit deterministic coherence contract. Unique
   most-specific resolution, concrete-over-generic preference, duplicate
   rejection, and incomparable-overlap rejection are implemented and tested.
   `default fn`, negative impls, and arbitrary overlap remain rejected.
 
-Open trait work still includes receiver-tied borrowed results through an owned
-or temporary receiver, exact-use `@[1]` object-method results, mutable or
-consuming dispatch on projected fields, projections needed before any member of
-an object specialization is registered, multi-trait `dyn A + B` syntax, owning
+Open trait work still includes exact-use `@[1]` object-method results, owning
 or `String` associated constants, associated constants depending on an impl
 type parameter, and lifetime/effect impl parameters. The dynamic representation
 is a whole-program checked member table with a fixed fat-object layout, not an

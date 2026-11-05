@@ -423,3 +423,39 @@ fn multi_trait_objects_keep_linear_members_linear_and_bind_projections() {
         "",
     );
 }
+
+#[test]
+fn generic_trait_components_are_qualified_with_their_arguments() {
+    let stats = agrees(
+        r#"
+        struct W<T> { value: T }
+        trait Into<X> { fn into(self: &Self, x: X) -> i64 ! {panic}; }
+        impl<T> Into<i64> for W<T> { fn into(self: &Self, x: i64) -> i64 ! {panic} { x + 1 } }
+        impl<T> Into<Bool> for W<T> {
+            fn into(self: &Self, x: Bool) -> i64 ! {panic} { if x { 10 } else { 20 } }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let o: dyn Into<i64> + Into<Bool> = W { value: 0 };
+            print_i64(o.Into::<i64>.into(4));
+            print_i64(o.Into::<Bool>.into(true));
+            let a: dyn Into<Bool> = o;
+            print_i64(a.into(false));
+            0
+        }"#,
+        0,
+        "5\n10\n20\n",
+    );
+    assert_eq!(stats.allocations, 1);
+    rejects(
+        r#"
+        struct W<T> { value: T }
+        trait Into<X> { fn into(self: &Self, x: X) -> i64 ! {panic}; }
+        impl<T> Into<i64> for W<T> { fn into(self: &Self, x: i64) -> i64 ! {panic} { x + 1 } }
+        impl<T> Into<Bool> for W<T> { fn into(self: &Self, x: Bool) -> i64 ! {panic} { 1 } }
+        fn main() -> i64 ! {alloc, panic} {
+            let o: dyn Into<i64> + Into<Bool> = W { value: 0 };
+            o.into(4)
+        }"#,
+        "disambiguate",
+    );
+}
