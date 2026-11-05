@@ -6062,6 +6062,35 @@ pub(crate) fn trait_specialization_name(
 /// A trait receiver is owned `Self` or a single shared/exclusive borrow of
 /// `Self`. Lifetimes on the borrow are erased contract metadata and remain
 /// part of the exact signature comparison.
+/// Put the destructuring levels built by `consume_object_field` around a
+/// consuming call, outermost aggregate first.
+fn wrap_consumed_field(levels: Vec<(usize, Type, Pattern)>, call: Expr) -> Expr {
+    let span = call.span;
+    levels
+        .into_iter()
+        .rev()
+        .fold(call, |body, (scrutinee, ty, pattern)| {
+            let result = body.ty;
+            Expr {
+                kind: ExprKind::Match(
+                    Box::new(Expr {
+                        kind: ExprKind::Local(scrutinee),
+                        ty,
+                        span,
+                        resource: None,
+                    }),
+                    vec![Arm {
+                        pattern,
+                        guard: None,
+                        body,
+                    }],
+                ),
+                ty: result,
+                span,
+                resource: None,
+            }
+        })
+}
 fn valid_trait_receiver(ty: &ast::Type) -> bool {
     match &ty.kind {
         ast::TypeKind::SelfType => true,
@@ -12718,6 +12747,102 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
+    /// Consuming dispatch on a projected object field, `root.a.b.method()`.
+    /// The root aggregate is consumed exactly as a destructuring pattern
+    /// would consume it: every level of the path is matched into hidden
+    /// bindings, the selected field moves into the receiver, and every sibling
+    /// field is released when the call's scope ends. A linear sibling cannot
+    /// be released implicitly, and a field behind a reference cannot be moved
+    /// at all. Returns the receiver (a hidden binding) and the match levels
+    /// that `wrap_consumed_field` puts around the call.
+    fn consume_object_field(
+        &mut self,
+        place: Expr,
+        span: Span,
+    ) -> Result<(Expr, Vec<(usize, Type, Pattern)>)> {
+        let mut path = Vec::new();
+        let mut current = &place;
+        let root = loop {
+            match &current.kind {
+                ExprKind::Project(base, offset) => {
+                    path.push((*offset, base.ty));
+                    current = base;
+                }
+                ExprKind::Peek(slot) | ExprKind::Local(slot) if !current.ty.is_ref() => {
+                    break *slot;
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        place.span,
+                        "cannot move a trait object out of a field behind a reference; call a borrowed method, or move the owning aggregate itself",
+                    ));
+                }
+            }
+        };
+        path.reverse();
+        let mut levels = Vec::new();
+        let mut scrutinee = root;
+        for (offset, container) in path {
+            let Some(layout) = container.layout().filter(|id| self.types.enums[*id].record) else {
+                return Err(Diagnostic::new(
+                    place.span,
+                    "internal error: projected object field has no record layout",
+                ));
+            };
+            let variant = self.types.enums[layout].variants[0].clone();
+            let mut field_offset = self.types.enums[layout].tag_words();
+            let mut fields = Vec::new();
+            let mut selected = None;
+            for (index, field_ty) in variant.fields.iter().enumerate() {
+                if field_offset != offset && self.linear_type(*field_ty) {
+                    let name = variant
+                        .names
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| index.to_string());
+                    return Err(Diagnostic::new(
+                        place.span,
+                        format!(
+                            "consuming dispatch on a projected field releases its sibling fields, but field '{name}' of {} is linear; destructure the aggregate and consume that field",
+                            self.types.name(container)
+                        ),
+                    ));
+                }
+                let slot = self.temp(*field_ty, span)?;
+                if field_offset == offset {
+                    selected = Some(slot);
+                }
+                fields.push((field_offset, Pattern::Bind(slot)));
+                field_offset += self.types.width(*field_ty);
+            }
+            let Some(selected) = selected else {
+                return Err(Diagnostic::new(
+                    place.span,
+                    "internal error: projected object field offset is not a field boundary",
+                ));
+            };
+            levels.push((
+                scrutinee,
+                container,
+                Pattern::Variant {
+                    tag: 0,
+                    tagged: self.types.enums[layout].tag_words() != 0,
+                    niche: self.types.enums[layout].niche(),
+                    fields,
+                },
+            ));
+            scrutinee = selected;
+        }
+        Ok((
+            Expr {
+                kind: ExprKind::Local(scrutinee),
+                ty: place.ty,
+                span: place.span,
+                resource: None,
+            },
+            levels,
+        ))
+    }
     /// The checked storage place of a trait object stored in a field chain
     /// `root.a.b`, rooted at a local aggregate or a stored record reference.
     /// `None` for anything else (including a non-object field), so the caller
@@ -14150,6 +14275,7 @@ impl Checker<'_, '_> {
             ExprKind::Peek(slot) | ExprKind::Local(slot) => Some(*slot),
             _ => None,
         };
+        let mut consumed_field = Vec::new();
         let receiver = if let Some((_, reference_ty)) = borrowed_object {
             match (contract.mode, reference_ty) {
                 (ReceiverMode::Owned, _) => {
@@ -14171,12 +14297,10 @@ impl Checker<'_, '_> {
             match contract.mode {
                 ReceiverMode::Owned => {
                     if matches!(receiver.kind, ExprKind::Project(..)) {
-                        return Err(Diagnostic::new(
-                            receiver.span,
-                            "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
-                        ));
-                    }
-                    if let ExprKind::Peek(slot) = &receiver.kind {
+                        let (field, levels) = self.consume_object_field(receiver, span)?;
+                        consumed_field = levels;
+                        field
+                    } else if let ExprKind::Peek(slot) = &receiver.kind {
                         let slot = *slot;
                         let ty = receiver.ty;
                         let receiver_span = receiver.span;
@@ -14269,6 +14393,7 @@ impl Checker<'_, '_> {
             span,
             resource: None,
         };
+        let value = wrap_consumed_field(consumed_field, value);
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
@@ -14368,14 +14493,16 @@ impl Checker<'_, '_> {
                 )
             })?;
         let receiver_mode = trait_receiver_mode(method);
-        if matches!(receiver.kind, ExprKind::Project(..)) {
-            if receiver_mode == ReceiverMode::Owned {
-                return Err(Diagnostic::new(
-                    receiver.span,
-                    "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
-                ));
-            }
-        }
+        let mut consumed_field = Vec::new();
+        let receiver = if receiver_mode == ReceiverMode::Owned
+            && matches!(receiver.kind, ExprKind::Project(..))
+        {
+            let (field, levels) = self.consume_object_field(receiver, span)?;
+            consumed_field = levels;
+            field
+        } else {
+            receiver
+        };
         let direct_receiver_slot = match &receiver.kind {
             ExprKind::Peek(slot) | ExprKind::Local(slot) => Some(*slot),
             _ => None,
@@ -14559,6 +14686,7 @@ impl Checker<'_, '_> {
             span,
             resource: None,
         };
+        let value = wrap_consumed_field(consumed_field, value);
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),

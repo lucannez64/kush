@@ -628,8 +628,26 @@ borrowed dispatch takes a place reference to exactly that storage, like
   the same field, replacing the owner, or holding an overlapping reference is
   rejected.
 
-Consuming dispatch on a projected field is still rejected; destructure the
-aggregate first.
+Consuming dispatch on a projected field (`pair.0.eat()`,
+`outer.holder.inner.eat()`) consumes the root aggregate exactly as a
+destructuring pattern would. The checker matches each level of the path into
+hidden bindings, moves the selected object into the receiver, and releases the
+sibling fields when the call ends:
+
+```kush
+let pair: (dyn Eat, String) = (Text { name: "x", count: 1 }, "sibling");
+print_i64(pair.0.eat(0));   // like `let (object, rest) = pair; object.eat(0)`
+// `pair` (including `pair.1`) is moved from here on.
+```
+
+The language has no per-field move state, so siblings are not usable after the
+call; destructure first to keep them. The receiver is evaluated before the
+arguments, so an argument cannot read the consumed aggregate
+(`pair.0.eat(pair.1)` is rejected as a use after move). A linear sibling is
+rejected, as a wildcard on it would be, and so is a field behind a reference
+(nothing may be moved out of borrowed storage). The usual move rules apply to
+the root: it cannot be consumed while borrowed or inside a loop that uses it
+again.
 
 Object safety is checked at every `dyn` use:
 
@@ -676,8 +694,7 @@ exactly one trait specialization. The surface syntax `dyn A + B` is therefore an
 explicit rejection; closed-world sharing is reached through one trait's `dyn`
 type and explicit qualification.
 
-References that escape their owner's scope remain outside this subset, and
-consuming dispatch on a projected field still requires destructuring first.
+References that escape their owner's scope remain outside this subset.
 
 ## Checked contracts
 
@@ -820,9 +837,9 @@ The following remain intentionally outside the implemented subset:
   receiver has no lifetime, so the signature cannot express it. Temporary and
   other owned object values used with a borrowed method keep their hidden
   storage to the end of the enclosing block, so their views are supported;
-- consuming dispatch directly on a projected field (`self.inner.consume()`);
-  shared and mutable dispatch on such a field borrow it in place, but a
-  consuming call must destructure the aggregate into a local first;
+- per-field partial moves: consuming dispatch on a projected field consumes
+  the whole root aggregate (siblings are released after the call), and a field
+  behind a reference cannot be consumed;
 - a required associated projection supplied only by a parameter-dependent
   generic impl before any concrete member of that object specialization has
   been registered. After the first member is registered its projection fixes the

@@ -260,16 +260,18 @@ impl Bump for Other {
     fn look(self: &Self) -> i64 ! {panic} { self.count }
     fn pick<'a>(self: &'a Self, values: &'a [i64]) -> &'a [i64] ! {panic} { values }
 }
-struct Holder { inner: dyn Bump, tag: i64 }
-struct Outer { holder: Holder, extra: i64 }
-impl Holder {
-    fn poke(self: &mut Self, by: i64) -> i64 ! {panic} { self.inner.bump(by) }
-    fn peek(self: &Self) -> i64 ! {panic} { self.inner.look() }
-}
-fn poke_through(holder: &mut Holder) -> i64 ! {panic} { holder.inner.bump(100) }
+struct Holder<T> { inner: T, tag: i64 }
+struct Outer<T> { holder: Holder<T>, extra: i64 }
+fn poke(holder: &mut Holder<dyn Bump>, by: i64) -> i64 ! {panic} { holder.inner.bump(by) }
+fn peek(holder: &Holder<dyn Bump>) -> i64 ! {panic} { holder.inner.look() }
 "#;
 
 const OPEN_BUMP: &str = r#"
+struct Nominal { inner: dyn Bump, tag: i64 }
+impl Nominal {
+    fn poke(self: &mut Self, by: i64) -> i64 ! {panic} { self.inner.bump(by) }
+    fn peek(self: &Self) -> i64 ! {panic} { self.inner.look() }
+}
 struct Wrap<T> { value: T }
 impl<T> Bump for Wrap<T> {
     fn bump(self: &mut Self, by: i64) -> i64 ! {panic} { by }
@@ -296,23 +298,36 @@ fn mutable_dispatch_on_projected_fields_writes_in_place() {
                 print_i64(pair.0.bump(5));
                 print_i64(pair.0.bump(pair.1));
                 print_i64(pair.0.look());
-                let mut outer = Outer {
+                let mut outer: Outer<dyn Bump> = Outer {
                     holder: Holder { inner: Other { count: 3 }, tag: 0 },
                     extra: 1,
                 };
                 print_i64(outer.holder.inner.bump(4));
                 print_i64(outer.holder.inner.look());
-                let mut holder = Holder { inner: Text { name: "y", count: 20 }, tag: 1 };
-                print_i64(holder.poke(10));
-                print_i64(holder.peek());
-                print_i64(poke_through(&mut holder));
+                let mut holder: Holder<dyn Bump> = Holder { inner: Text { name: "y", count: 20 }, tag: 1 };
+                print_i64(poke(&mut holder, 10));
+                print_i64(peek(&holder));
                 print_i64(holder.inner.look());
                 0"#,
             ),
             0,
-            "6\n15\n15\n7\n7\n30\n30\n130\n130\n",
+            "6\n15\n15\n7\n7\n30\n30\n30\n",
         );
     }
+    // A nominal field spelling `dyn Bump` is reached through `&mut self`.
+    agrees(
+        &bump_program(
+            true,
+            r#"
+            let mut nominal = Nominal { inner: Text { name: "z", count: 1 }, tag: 0 };
+            print_i64(nominal.poke(10));
+            print_i64(nominal.peek());
+            print_i64(nominal.inner.bump(1));
+            0"#,
+        ),
+        0,
+        "11\n11\n12\n",
+    );
 }
 
 #[test]
@@ -379,11 +394,114 @@ fn projected_mutable_dispatch_respects_owner_capabilities_and_loans() {
         rejects(
             &format!(
                 "{BUMP}{}
-                fn bad(holder: &Holder) -> i64 ! {{panic}} {{ holder.inner.bump(1) }}
+                fn bad(holder: &Holder<dyn Bump>) -> i64 ! {{panic}} {{ holder.inner.bump(1) }}
                 fn main() -> i64 ! {{alloc, panic}} {{ 0 }}",
                 if open { OPEN_BUMP } else { "" }
             ),
             "needs a mutable owner",
+        );
+    }
+}
+
+/// Consuming methods; `Ticket` is linear and must be consumed exactly once.
+const EAT: &str = r#"
+#[linear]
+struct Ticket { id: i64 }
+struct Text { name: String, count: i64 }
+struct Other { count: i64 }
+trait Eat { fn eat(self: Self, extra: i64) -> i64 ! {panic}; }
+impl Eat for Text { fn eat(self: Self, extra: i64) -> i64 ! {panic} { self.count + extra } }
+impl Eat for Other { fn eat(self: Self, extra: i64) -> i64 ! {panic} { self.count + extra } }
+impl Eat for Ticket {
+    fn eat(self: Self, extra: i64) -> i64 ! {panic} { let Ticket { id } = self; id + extra }
+}
+struct Holder<T> { inner: T, label: String }
+struct Outer<T> { holder: Holder<T>, extra: Vec<i64> }
+fn ticket() -> Ticket @[1] ! {} { Ticket { id: 40 } }
+"#;
+
+const OPEN_EAT: &str = r#"
+struct Wrap<T> { value: T }
+impl<T> Eat for Wrap<T> { fn eat(self: Self, extra: i64) -> i64 ! {panic} { 100 + extra } }
+"#;
+
+fn eat_program(open: bool, main: &str) -> String {
+    format!(
+        "{EAT}{}\nfn main() -> i64 ! {{io, alloc, panic}} {{\n{main}\n}}\n",
+        if open { OPEN_EAT } else { "" }
+    )
+}
+
+#[test]
+fn consuming_dispatch_on_projected_fields_consumes_the_aggregate_once() {
+    let main = r#"
+        let pair: (dyn Eat, String) = (Text { name: "x", count: 1 }, "sibling");
+        print_i64(pair.0.eat(0));
+        let mut items: Vec<i64> = Vec.new();
+        items = Vec.push(items, 3);
+        let outer: Outer<dyn Eat> = Outer {
+            holder: Holder { inner: Other { count: 7 }, label: "label" },
+            extra: items,
+        };
+        print_i64(outer.holder.inner.eat(0));
+        let mut again: (i64, dyn Eat) = (4, Text { name: "y", count: 9 });
+        print_i64(again.1.eat(1));
+        again = (5, Other { count: 2 });
+        print_i64(again.1.eat(0));
+        let linear: (dyn Eat, i64) = (ticket(), 9);
+        print_i64(linear.0.eat(2));
+        0"#;
+    let output = "1\n7\n10\n2\n42\n";
+    // Every sibling String/Vec is released exactly once (checked by `run`);
+    // the open representation adds one payload for each of the five objects.
+    let closed = agrees(&eat_program(false, main), 0, output);
+    let open = agrees(&eat_program(true, main), 0, output);
+    assert_eq!(open.allocations, closed.allocations + 5);
+}
+
+#[test]
+fn consuming_projected_dispatch_follows_destructuring_rules() {
+    for open in [false, true] {
+        for (main, expected) in [
+            // The aggregate is consumed by the receiver, before the arguments.
+            (
+                r#"let pair: (dyn Eat, i64) = (Other { count: 1 }, 9); print_i64(pair.0.eat(0)); print_i64(pair.1); 0"#,
+                "moved",
+            ),
+            (
+                r#"let pair: (dyn Eat, i64) = (Other { count: 1 }, 9); pair.0.eat(pair.1)"#,
+                "moved",
+            ),
+            // A linear sibling cannot be released implicitly.
+            (
+                r#"let pair: (dyn Eat, Ticket) = (Other { count: 1 }, ticket()); pair.0.eat(0)"#,
+                "is linear",
+            ),
+            // A borrowed or loop-carried owner cannot be consumed.
+            (
+                r#"let pair: (dyn Eat, i64) = (Other { count: 1 }, 9); let r = &pair; let a = pair.0.eat(0); a + r.1"#,
+                "borrowed",
+            ),
+            (
+                r#"let pair: (dyn Eat, i64) = (Other { count: 1 }, 9); let mut i = 0; while i < 2 { i = i + pair.0.eat(0); } i"#,
+                "loop",
+            ),
+            // An unconsumed linear object field still has to be consumed.
+            (
+                r#"let pair: (dyn Eat, i64) = (ticket(), 9); print_i64(pair.1); 0"#,
+                "linear value is not consumed",
+            ),
+        ] {
+            rejects(&eat_program(open, main), expected);
+        }
+        rejects(
+            &format!(
+                "{EAT}{}
+                fn bad(holder: &Holder<dyn Eat>) -> i64 ! {{panic}} {{ holder.inner.eat(0) }}
+                fn main() -> i64 ! {{alloc, panic}} {{ 0 }}",
+                if open { OPEN_EAT } else { "" }
+            ),
+            "behind a reference",
         );
     }
 }

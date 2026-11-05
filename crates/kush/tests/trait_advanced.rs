@@ -1264,6 +1264,17 @@ fn projected_method_receivers_cannot_duplicate_owners_and_keep_mutations() {
         impl Eat for Other { fn eat(self: Self) -> i64 ! {panic} { self.count } }
         impl Text { fn consume(self: Text) -> i64 ! {panic} { self.count } }
     "#;
+    // Consuming dispatch on a projected object field consumes the aggregate
+    // like a destructuring; the static owned-field case below stays rejected.
+    agrees(
+        &format!(
+            "{definitions} fn main() -> i64 ! {{alloc, panic}} {{
+                let pair: (dyn Eat, i64) = (Text {{name: \"x\", count: 6}}, 9); pair.0.eat()
+            }}"
+        ),
+        6,
+        "",
+    );
     // Mutable dispatch on a projected object field borrows the field in place;
     // the write stays in the aggregate.
     for body in [
@@ -1276,16 +1287,10 @@ fn projected_method_receivers_cannot_duplicate_owners_and_keep_mutations() {
             "",
         );
     }
-    for (body, expected) in [
-        (
-            "let pair: (dyn Eat, i64) = (Text {name: \"x\", count: 1}, 9); pair.0.eat()",
-            "owned field",
-        ),
-        (
-            "let pair = (Text {name: \"x\", count: 1}, 9); pair.0.consume()",
-            "owned field",
-        ),
-    ] {
+    for (body, expected) in [(
+        "let pair = (Text {name: \"x\", count: 1}, 9); pair.0.consume()",
+        "owned field",
+    )] {
         rejects(
             &format!("{definitions} fn main() -> i64 ! {{alloc, panic}} {{{body}}}"),
             expected,
