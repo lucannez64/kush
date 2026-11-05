@@ -524,6 +524,9 @@ pub(crate) struct Types<'a> {
     /// open/generic member set, or any trait used inside a nominal field, uses
     /// the dynamically dispatched fat object below.
     pub dyn_objects: BTreeMap<(BindingId, TraitArguments), Type>,
+    /// Payload and result of each declared effect operation, for lowering
+    /// `cap Op ! {e}` (EFF-CAP-LEXICAL).
+    pub capability_operations: BTreeMap<String, (Type, Type)>,
     /// Dynamically dispatched trait-object specializations, indexed by
     /// `Type::DynObj`. Interning is by `(trait, trait arguments)`.
     pub objects: Vec<DynObjectType>,
@@ -802,6 +805,7 @@ impl<'a> Types<'a> {
             function_cache: BTreeMap::new(),
             active: BTreeSet::new(),
             dyn_objects: BTreeMap::new(),
+            capability_operations: BTreeMap::new(),
             objects: Vec::new(),
             object_cache: BTreeMap::new(),
             dynamic_traits,
@@ -2471,6 +2475,19 @@ impl<'a> Types<'a> {
                     "lifetime '{name}' is not a runtime type; lifetimes may appear only as arguments of a record or alias type"
                 ),
             ));
+        }
+        if let ast::TypeKind::Capability { operation, effects } = &ty.kind {
+            let Some((parameter, result)) = self.capability_operations.get(operation).copied()
+            else {
+                return Err(Diagnostic::new(
+                    ty.span,
+                    format!(
+                        "'cap {operation}' needs a declared effect operation; write 'effect {operation}: P -> R;'"
+                    ),
+                ));
+            };
+            let bits = effect_bits_with(self.resolution, effects, &substitution.effects)?;
+            return Ok(Type::Fn(self.capability_arrow(parameter, result, bits)));
         }
         if matches!(ty.kind, ast::TypeKind::SelfType) {
             return substitution.self_type.ok_or_else(|| {
@@ -4335,6 +4352,30 @@ impl<'a> Types<'a> {
             .iter()
             .zip(&target.parameter_grades)
             .all(|(source, target)| grade_contract_compatible(*source, *target))
+    }
+    /// The handler arrow a capability for an operation `P -> R` with handler
+    /// row `effects` stands for: `fn(P, linear once fn(R) -> R ! {}) -> R ! {e}`.
+    pub fn capability_arrow(&mut self, parameter: Type, result: Type, effects: u16) -> usize {
+        let token = self.function_type_with(
+            vec![result],
+            result,
+            0,
+            vec![None],
+            None,
+            true,
+            true,
+            BorrowSig::default(),
+        );
+        self.function_type_with(
+            vec![parameter, Type::Once(token)],
+            result,
+            effects,
+            vec![None, None],
+            None,
+            false,
+            false,
+            BorrowSig::default(),
+        )
     }
     pub fn pointer(&mut self, ty: Type) -> usize {
         if let Some(index) = self.pointees.iter().position(|t| *t == ty) {

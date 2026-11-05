@@ -2213,6 +2213,9 @@ pub(crate) fn type_mentions_binding(
             type_mentions_binding(resolution, inner, binder)
                 || type_mentions_binding(resolution, grade, binder)
         }
+        K::Capability { effects, .. } => effects
+            .iter()
+            .any(|effect| type_mentions_binding(resolution, effect, binder)),
         K::Integer(_) | K::Bool(_) | K::Lifetime(_) | K::SelfType | K::Infer | K::Predicate(_) => {
             false
         }
@@ -2493,6 +2496,100 @@ fn collect_block_returns<'a>(block: &'a ast::Block, out: &mut Vec<&'a ast::Expr>
     if let Some(tail) = &block.tail {
         collect_body_returns(tail, out);
     }
+}
+/// A capability type `cap Op` is second-class: it is accepted only as the
+/// whole type of a named function parameter. Anywhere else it is rejected.
+fn reject_capability_type(ty: &ast::Type) -> Result<()> {
+    let mut found = None;
+    fn walk(ty: &ast::Type, found: &mut Option<Span>) {
+        if found.is_some() {
+            return;
+        }
+        match &ty.kind {
+            ast::TypeKind::Capability { .. } => *found = Some(ty.span),
+            ast::TypeKind::Named { arguments, .. } | ast::TypeKind::Tuple(arguments) => {
+                arguments.iter().for_each(|argument| walk(argument, found));
+            }
+            ast::TypeKind::Slice(inner)
+            | ast::TypeKind::Borrow { inner, .. }
+            | ast::TypeKind::Graded { inner, .. } => walk(inner, found),
+            ast::TypeKind::Array(inner, length) => {
+                walk(inner, found);
+                walk(length, found);
+            }
+            ast::TypeKind::Structural { fields, .. } => {
+                fields.iter().for_each(|field| walk(&field.ty, found));
+            }
+            ast::TypeKind::Binary { left, right, .. } => {
+                walk(left, found);
+                walk(right, found);
+            }
+            ast::TypeKind::Function {
+                parameters, result, ..
+            } => {
+                parameters
+                    .iter()
+                    .for_each(|parameter| walk(&parameter.ty, found));
+                walk(result, found);
+            }
+            ast::TypeKind::Dyn(bounds) => {
+                crate::ast::dyn_types(bounds).for_each(|inner| walk(inner, found));
+            }
+            _ => {}
+        }
+    }
+    walk(ty, &mut found);
+    match found {
+        Some(span) => Err(Diagnostic::new(
+            span,
+            "a capability type 'cap Op' is second-class: it is only allowed as the whole type of a named function parameter, never stored, returned, nested or used in a function value type",
+        )),
+        None => Ok(()),
+    }
+}
+/// Reject capability types in declarations that store or name values.
+fn reject_stored_capabilities(module: &ast::Module) -> Result<()> {
+    for declaration in &module.items {
+        match &declaration.item.kind {
+            ast::ItemKind::Struct { fields, .. } => {
+                for field in fields {
+                    reject_capability_type(&field.ty)?;
+                }
+            }
+            ast::ItemKind::Enum { variants, .. } => {
+                for variant in variants {
+                    match &variant.payload {
+                        ast::Payload::Unit => {}
+                        ast::Payload::Tuple(types) => {
+                            for ty in types {
+                                reject_capability_type(ty)?;
+                            }
+                        }
+                        ast::Payload::Fields(fields) | ast::Payload::Record(fields) => {
+                            for field in fields {
+                                reject_capability_type(&field.ty)?;
+                            }
+                        }
+                    }
+                }
+            }
+            ast::ItemKind::Alias { ty, .. } => reject_capability_type(ty)?,
+            ast::ItemKind::Effect {
+                parameter, result, ..
+            } => {
+                reject_capability_type(parameter)?;
+                reject_capability_type(result)?;
+            }
+            ast::ItemKind::Function(function) => {
+                reject_capability_type(&function.result)?;
+                for effect in &function.effects {
+                    reject_capability_type(effect)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 /// Whether a lambda omits a parameter, result or effect annotation.
 fn lambda_has_holes(lambda: &ast::Lambda) -> bool {
@@ -4847,6 +4944,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     let injected = inject_allocator_protocol(program)?;
     let program = &injected;
     let module = &program.module;
+    reject_stored_capabilities(module)?;
     let mut resolution = resolve::resolve_program(program)?;
     // Default trait methods inherited by an impl need one synthetic function
     // binding per (impl, method) pair. Allocate them before `Types` borrows the
@@ -4948,6 +5046,9 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 result,
             },
         );
+        types
+            .capability_operations
+            .insert(name.clone(), (parameter, result));
     }
     let mut effect_bits = vec![0; effect_operations.len()];
     for (name, operation) in &effect_operations {
@@ -5220,6 +5321,9 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             lambda_holes: BTreeMap::new(),
             lambda_hint: None,
             required_effects: std::cell::Cell::new(0),
+            pending_capability: None,
+            capability_slots: BTreeSet::new(),
+            capability_argument: false,
             resolution,
             types: &mut types,
             functions: &mut functions,
@@ -5286,6 +5390,9 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 } else {
                     let (ty, grade) = runtime.next().unwrap();
                     let slot = checker.bind(p.span, *ty, false)?;
+                    if matches!(split_grade(&p.ty).0.kind, ast::TypeKind::Capability { .. }) {
+                        checker.capability_slots.insert(slot);
+                    }
                     checker.locals[slot].grade = *grade;
                     checker.locals[slot].linear =
                         grade.is_some_and(Grade::is_one) && checker.owned_type(*ty);
@@ -5689,6 +5796,10 @@ fn type_key(ty: &ast::Type) -> String {
         ast::TypeKind::Lifetime(name) => format!("'{name}"),
         ast::TypeKind::SelfType => "Self".to_owned(),
         ast::TypeKind::Infer => "_".to_owned(),
+        ast::TypeKind::Capability { operation, effects } => format!(
+            "cap {operation} ! {{{}}}",
+            effects.iter().map(type_key).collect::<Vec<_>>().join(", ")
+        ),
         ast::TypeKind::Function {
             lifetimes,
             parameters,
@@ -5824,6 +5935,10 @@ impl ContractNames {
                 }
             }
             ast::TypeKind::Infer => ast::TypeKind::Infer,
+            ast::TypeKind::Capability { operation, effects } => ast::TypeKind::Capability {
+                operation: operation.clone(),
+                effects: effects.iter().map(|effect| self.ty(effect)).collect(),
+            },
             ast::TypeKind::SelfType => {
                 if let Some(self_ty) = &self.self_ty {
                     return self_ty.clone();
@@ -6342,6 +6457,7 @@ fn type_self_associations(ty: &ast::Type, out: &mut BTreeSet<String>) {
         | ast::TypeKind::Lifetime(_)
         | ast::TypeKind::SelfType
         | ast::TypeKind::Infer
+        | ast::TypeKind::Capability { .. }
         | ast::TypeKind::Predicate(_) => {}
     }
 }
@@ -6431,7 +6547,7 @@ fn validate_associated_type_defaults(associated: &[ast::Associated]) -> Result<(
 fn type_mentions_self(ty: &ast::Type) -> bool {
     match &ty.kind {
         ast::TypeKind::SelfType => true,
-        ast::TypeKind::Infer => false,
+        ast::TypeKind::Infer | ast::TypeKind::Capability { .. } => false,
         ast::TypeKind::Named { path, arguments } => {
             path.first().is_some_and(|name| name == "Self")
                 || arguments.iter().any(type_mentions_self)
@@ -7886,7 +8002,8 @@ fn validate_impl_pattern(
         | ast::TypeKind::Lifetime(_)
         | ast::TypeKind::Predicate(_)
         | ast::TypeKind::SelfType
-        | ast::TypeKind::Infer => Err(Diagnostic::new(
+        | ast::TypeKind::Infer
+        | ast::TypeKind::Capability { .. } => Err(Diagnostic::new(
             pattern.span,
             format!(
                 "an impl {what} must be an owned nominal type pattern built from the impl's type parameters; borrows, slices, arrows, unions, grades, lifetimes, predicates, and 'Self' are not supported (searched {})",
@@ -10083,6 +10200,9 @@ impl<'a> Functions<'a> {
         let mut lifetime_bounds = build_lifetime_bounds(&f.lifetimes)?;
         for p in f.parameters.iter().filter(|p| !p.erased) {
             let (ty, grade) = split_grade(&p.ty);
+            if !matches!(ty.kind, ast::TypeKind::Capability { .. }) {
+                reject_capability_type(ty)?;
+            }
             parameters.push(types.ty_in(ty, &substitution)?);
             parameter_grades.push(
                 grade
@@ -11495,7 +11615,10 @@ fn validate_type_template(
             validate_type_template(resolution, right, consts, in_length, false)
         }
         ast::TypeKind::Predicate(_) => Ok(()),
-        ast::TypeKind::Lifetime(_) | ast::TypeKind::SelfType | ast::TypeKind::Infer => Ok(()),
+        ast::TypeKind::Lifetime(_)
+        | ast::TypeKind::SelfType
+        | ast::TypeKind::Infer
+        | ast::TypeKind::Capability { .. } => Ok(()),
         ast::TypeKind::Integer(_) | ast::TypeKind::Bool(_) => Ok(()),
     }
 }
@@ -11641,6 +11764,7 @@ fn type_references_binding(resolution: &Resolution, ty: &ast::Type, id: BindingI
         | ast::TypeKind::Lifetime(_)
         | ast::TypeKind::SelfType
         | ast::TypeKind::Infer
+        | ast::TypeKind::Capability { .. }
         | ast::TypeKind::Predicate(_) => false,
     }
 }
@@ -11860,6 +11984,12 @@ struct Checker<'a, 't> {
     /// Union of every effect `require`d in the current lambda body; an
     /// omitted lambda row is inferred as exactly these bits.
     required_effects: std::cell::Cell<u16>,
+    /// The binder span of `handle Op as op`, consumed by `handle_effect`.
+    pending_capability: Option<Span>,
+    /// Locals holding a second-class capability (EFF-CAP-LEXICAL).
+    capability_slots: BTreeSet<usize>,
+    /// Set while checking an argument passed to a `cap` parameter.
+    capability_argument: bool,
     /// Erased proof parameters in scope: binder -> proposition.
     proofs: BTreeMap<BindingId, crate::facts::Proposition>,
     /// Checked logical definitions and their kernel names.
@@ -16662,6 +16792,7 @@ impl Checker<'_, '_> {
         ))
     }
     fn ty(&mut self, ty: &ast::Type) -> Result<Type> {
+        reject_capability_type(ty)?;
         if matches!(ty.kind, ast::TypeKind::Infer) {
             return self
                 .lambda_holes
@@ -20936,9 +21067,11 @@ impl Checker<'_, '_> {
                 result,
                 handler,
                 body,
+                capability,
             } = &expr.kind
             {
-                return c.handle_effect(
+                c.pending_capability = capability.as_ref().map(|(_, span)| *span);
+                let checked = c.handle_effect(
                     operation,
                     parameter,
                     result,
@@ -20947,6 +21080,8 @@ impl Checker<'_, '_> {
                     expected,
                     span,
                 );
+                c.pending_capability = None;
+                return checked;
             }
             if let ast::ExprKind::Perform { operation, value } = &expr.kind {
                 return c.perform_effect(operation, value, expected, span);
@@ -21114,6 +21249,19 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::Name(_) => {
                     if let Some(id) = c.resolution.reference(span) {
+                        if let Some(slot) = c.slots.get(&id)
+                            && c.capability_slots.contains(slot)
+                            && !std::mem::take(&mut c.capability_argument)
+                        {
+                            return Err(Diagnostic::new(
+                                span,
+                                format!(
+                                    "'{}' is a second-class capability: it can only be passed directly to a 'cap' parameter or used as 'perform {}(...)'",
+                                    c.resolution.bindings[id].name,
+                                    c.resolution.bindings[id].name
+                                ),
+                            ));
+                        }
                         if c.logical.names.contains_key(&id) {
                             return Err(Diagnostic::new(
                                 span,
@@ -23151,6 +23299,15 @@ impl Checker<'_, '_> {
         scope_root: bool,
     ) -> Result<Expr> {
         let captures = self.lambda_captures(lambda);
+        if captures
+            .iter()
+            .any(|slot| self.capability_slots.contains(slot))
+        {
+            return Err(Diagnostic::new(
+                span,
+                "a lambda cannot capture a second-class capability; pass it to a function with a 'cap' parameter instead",
+            ));
+        }
         let once = !captures.is_empty();
         let inference = self.prepare_lambda_inference(lambda, span, expected)?;
         // A mutable scalar capture is a live view: the environment stores the
@@ -23742,6 +23899,7 @@ impl Checker<'_, '_> {
         // written decides the shared/exclusive loan and proof invalidation.
         let capture_body_mutable = capture_refs.clone();
         let saved_locals = std::mem::take(&mut self.locals);
+        let saved_capabilities = std::mem::take(&mut self.capability_slots);
         let saved_slots = std::mem::take(&mut self.slots);
         let saved_result = self.result;
         let saved_parameter_lifetimes = std::mem::take(&mut self.parameter_lifetimes);
@@ -23847,6 +24005,7 @@ impl Checker<'_, '_> {
         self.handlers = saved_handlers;
         let locals = std::mem::take(&mut self.locals);
         self.locals = saved_locals;
+        self.capability_slots = saved_capabilities;
         self.slots = saved_slots;
         self.result = saved_result;
         self.parameter_lifetimes = saved_parameter_lifetimes;
@@ -24595,6 +24754,20 @@ impl Checker<'_, '_> {
                 span,
                 format!(
                     "foreign function '{}' can only be called directly; a C function pointer has no checked Kush callable type",
+                    f.name
+                ),
+            ));
+        }
+        if f.parameters.iter().any(|parameter| {
+            matches!(
+                split_grade(&parameter.ty).0.kind,
+                ast::TypeKind::Capability { .. }
+            )
+        }) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "'{}' has a capability parameter and can only be called directly; as a function value it would let a capability be forged or escape",
                     f.name
                 ),
             ));
@@ -29031,7 +29204,26 @@ impl Checker<'_, '_> {
                 }
                 (other, _) => other,
             };
-            let value = self.expr_expected(value, wanted)?;
+            // A capability argument must be a capability local, passed as is.
+            let capability_parameter = matches!(declared.kind, ast::TypeKind::Capability { .. });
+            if capability_parameter {
+                let is_capability = matches!(value.kind, ast::ExprKind::Name(_))
+                    && self
+                        .resolution
+                        .reference(value.span)
+                        .and_then(|id| self.slots.get(&id))
+                        .is_some_and(|slot| self.capability_slots.contains(slot));
+                if !is_capability {
+                    return Err(Diagnostic::new(
+                        value.span,
+                        "a 'cap' parameter takes a capability bound by 'handle Op as op' or a 'cap' parameter, passed by name",
+                    ));
+                }
+                self.capability_argument = true;
+            }
+            let value = self.expr_expected(value, wanted);
+            self.capability_argument = false;
+            let value = value?;
             constraints.push((declared, value.ty));
             let before = subst.clone();
             if let Err(error) = self.unify(
@@ -31340,9 +31532,18 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
+        let capability = self.pending_capability.take();
         let parameter_ty = self.ty(parameter)?;
         let result_ty = self.ty(result)?;
         let declared = self.effect_operations.get(operation).copied();
+        if capability.is_some() && declared.is_none() {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "'handle {operation} as ...' binds a capability, which needs a declared effect operation; write 'effect {operation}: P -> R;'"
+                ),
+            ));
+        }
         if let Some(declared) = declared
             && (parameter_ty != declared.parameter || result_ty != declared.result)
         {
@@ -31419,7 +31620,29 @@ impl Checker<'_, '_> {
             ));
         }
         self.require(signature.effects, span)?;
-        if declared.is_some() {
+        // A capability handler with effects is capability-only: it is not
+        // pushed on the dynamic stack, so no call can perform `Op` by name
+        // through it and hide its effects from a row.
+        let capability_only = capability.is_some() && signature.effects != 0;
+        if capability.is_some() {
+            let noncapturing = matches!(
+                &handler_value.kind,
+                ExprKind::FnValue { captures, .. } if captures.is_empty()
+            ) && matches!(handler_value.ty, Type::Fn(_));
+            if multishot || !tail_resumptive_handler(self.resolution, handler) {
+                return Err(Diagnostic::new(
+                    handler.span,
+                    "a capability handler must be one-shot and tail-resumptive ('resume(e)' as its only use of the token, in tail position); non-tail and multishot capabilities are EFF-CAP-RESUME",
+                ));
+            }
+            if !noncapturing {
+                return Err(Diagnostic::new(
+                    handler.span,
+                    "a capability handler must be a noncapturing lambda or function; capturing capability handlers are not supported yet",
+                ));
+            }
+        }
+        if declared.is_some() && !capability_only {
             if !matches!(handler_value.ty, Type::Fn(_) | Type::Once(_)) {
                 return Err(Diagnostic::new(
                     handler.span,
@@ -31433,8 +31656,16 @@ impl Checker<'_, '_> {
                 ));
             }
         }
+        let declared = declared.filter(|_| !capability_only);
         let handler_type = handler_value.ty;
         let slot = self.fresh_local(span, handler_type)?;
+        if let Some(binder) = capability {
+            let id = self.resolution.binder(binder).ok_or_else(|| {
+                Diagnostic::new(binder, "internal error: unresolved capability binder")
+            })?;
+            self.slots.insert(id, slot);
+            self.capability_slots.insert(slot);
+        }
         self.locals[slot].linear = signature.linear;
         if let Some(targets) = self.closure_write_targets(&handler_value) {
             self.closure_writes.insert(slot, targets);
@@ -31463,6 +31694,12 @@ impl Checker<'_, '_> {
             || shadows_handler_effects)
             && (lexical || declared.is_some()))
             || (declared.is_some() && multishot);
+        if capability.is_some() && region {
+            return Err(Diagnostic::new(
+                handler.span,
+                "a capability handler must run in place: this handler shadows effects the body handles, so it would suspend; non-tail capabilities are EFF-CAP-RESUME",
+            ));
+        }
         let handler_function = match &handler_value.kind {
             ExprKind::FnValue { function, captures } if captures.is_empty() => Some(*function),
             _ => None,
@@ -31922,6 +32159,48 @@ impl Checker<'_, '_> {
         Ok(())
     }
     /// Check a direct `perform` against the innermost lexical handler.
+    /// `perform op(x)` through a capability: an indirect call of exactly the
+    /// bound handler with the identity token. No dynamic lookup, so neither
+    /// the operation's row bit nor `panic` for a missing handler is required;
+    /// the handler's own row is.
+    fn capability_perform(
+        &mut self,
+        slot: usize,
+        value: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        let handler_ty = self.locals[slot].ty;
+        let Type::Fn(arrow) = handler_ty else {
+            return Err(Diagnostic::new(
+                span,
+                "internal error: a capability is not a handler function",
+            ));
+        };
+        let arrow = self.types.function_types[arrow].clone();
+        self.require(arrow.effects, span)?;
+        let payload = self.expr_expected(value, Some(arrow.parameters[0]))?;
+        let payload = self.coerce_argument(payload, arrow.parameters[0], span)?;
+        let resume = self.resume_value(arrow.result, false, span)?;
+        let call = Expr {
+            kind: ExprKind::CallIndirect {
+                callee: Box::new(Expr {
+                    kind: ExprKind::Local(slot),
+                    ty: handler_ty,
+                    span,
+                    resource: None,
+                }),
+                arguments: vec![payload, resume],
+            },
+            ty: arrow.result,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(call, expected, span),
+            None => Ok(call),
+        }
+    }
     fn perform_effect(
         &mut self,
         operation: &str,
@@ -31929,6 +32208,12 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
+        if let Some(id) = self.resolution.reference(span)
+            && let Some(&slot) = self.slots.get(&id)
+            && self.capability_slots.contains(&slot)
+        {
+            return self.capability_perform(slot, value, expected, span);
+        }
         let operation_effect = self.operation_effect(operation);
         if let Some(index) = self
             .handlers
@@ -34237,6 +34522,10 @@ pub(crate) fn substitute_alias_type(
         K::Predicate(expr) => K::Predicate(expr.clone()),
         K::SelfType => K::SelfType,
         K::Infer => K::Infer,
+        K::Capability { operation, effects } => K::Capability {
+            operation: operation.clone(),
+            effects: effects.clone(),
+        },
     };
     ast::Type::new(kind, ty.span)
 }

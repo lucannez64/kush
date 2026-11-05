@@ -362,6 +362,12 @@ pub enum TypeKind {
     /// `Window<'a, i64>`. It is not a runtime type: it is erased and only
     /// participates in static borrow checking.
     Lifetime(String),
+    /// `cap Op ! {e}`: a second-class capability for the declared operation
+    /// `Op` whose handler has row `e`. Only a named function parameter type.
+    Capability {
+        operation: String,
+        effects: Vec<Type>,
+    },
     /// The receiver type placeholder `Self` inside a trait/impl method
     /// signature. It is replaced by the concrete impl target before runtime
     /// type lowering.
@@ -479,6 +485,9 @@ pub enum ExprKind {
         result: Box<Type>,
         handler: Box<Expr>,
         body: Box<Block>,
+        /// `handle Op: P -> R as op with h { .. }`: a second-class capability
+        /// bound to this activation for the body (EFF-CAP-LEXICAL).
+        capability: Option<(String, crate::Span)>,
     },
     /// `perform Op(value)`: call the innermost lexical handler for `Op`.
     Perform {

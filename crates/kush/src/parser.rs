@@ -1163,6 +1163,20 @@ impl Parser {
                 }
                 return Ok(Node::new(TypeKind::SelfType, self.since(path_start)));
             }
+            // Contextual `cap Op ! {e}`: only when a name follows, so a type
+            // or binding called `cap` keeps working.
+            if path == ["cap"] && matches!(self.current().kind, Kind::Ident(_)) {
+                let operation = self.ident()?;
+                let effects = if self.at(&Kind::Bang) {
+                    self.effects()?
+                } else {
+                    Vec::new()
+                };
+                return Ok(Node::new(
+                    TypeKind::Capability { operation, effects },
+                    self.since(path_start),
+                ));
+            }
             if path == ["dyn"] {
                 let mut bounds = vec![self.dyn_bound()?];
                 while self.eat(&Kind::Plus) {
@@ -1759,6 +1773,15 @@ impl Parser {
                 let parameter = Box::new(self.ty()?);
                 self.expect(&Kind::Arrow, "'->' in a handled operation signature")?;
                 let result = Box::new(self.ty()?);
+                // Contextual `as name`: `as` stays an ordinary identifier.
+                let capability = if matches!(&self.current().kind, Kind::Ident(word) if word == "as")
+                {
+                    self.bump();
+                    let span = self.current().span;
+                    Some((self.ident()?, span))
+                } else {
+                    None
+                };
                 self.expect(&Kind::With, "'with' before the handler expression")?;
                 let handler = Box::new(self.expr()?);
                 let body = Box::new(self.block()?);
@@ -1768,6 +1791,7 @@ impl Parser {
                     result,
                     handler,
                     body,
+                    capability,
                 }
             }
             Kind::Perform => {

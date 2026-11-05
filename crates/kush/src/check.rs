@@ -409,6 +409,11 @@ fn alias_refs_in_type(resolution: &Resolution, ty: &Type, out: &mut BTreeSet<Bin
         | TypeKind::Lifetime(_)
         | TypeKind::SelfType
         | TypeKind::Infer => {}
+        TypeKind::Capability { effects, .. } => {
+            for effect in effects {
+                alias_refs_in_type(resolution, effect, out);
+            }
+        }
     }
 }
 

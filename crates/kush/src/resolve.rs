@@ -508,6 +508,17 @@ impl Resolver {
             .insert((span.start, span.end), id);
         Ok(id)
     }
+    /// A local or parameter named `name` in an enclosing scope: the
+    /// candidate capability of `perform name(x)`. The checker decides whether
+    /// it really is a capability.
+    fn local_capability(&self, name: &str) -> Option<BindingId> {
+        let id = self.scopes.iter().rev().find_map(|scope| scope.get(name))?;
+        matches!(
+            self.result.bindings[*id].kind,
+            BindingKind::Local | BindingKind::Parameter
+        )
+        .then_some(*id)
+    }
     fn scoped<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.scopes.push(BTreeMap::new());
         let result = f(self);
@@ -1234,6 +1245,11 @@ impl Resolver {
                 // `Self` is not a binding. It is substituted by the concrete
                 // impl target before runtime type lowering.
                 TypeKind::SelfType | TypeKind::Infer => {}
+                TypeKind::Capability { effects, .. } => {
+                    for effect in effects {
+                        r.ty(effect)?;
+                    }
+                }
                 TypeKind::Dyn(bounds) => {
                     for inner in crate::ast::dyn_types(bounds) {
                         r.ty(inner)?;
@@ -1453,14 +1469,34 @@ impl Resolver {
                     result,
                     handler,
                     body,
+                    capability,
                     operation: _,
                 } => {
                     r.ty(parameter)?;
                     r.ty(result)?;
                     r.expr(handler)?;
-                    r.block(body)?;
+                    match capability {
+                        Some((name, span)) => r.scoped(|r| {
+                            r.local(name, BindingKind::Local, *span, false)?;
+                            r.block(body)
+                        })?,
+                        None => r.block(body)?,
+                    }
                 }
-                ExprKind::Perform { value, operation: _ } => r.expr(value)?,
+                ExprKind::Perform { value, operation } => {
+                    // `perform op(x)` through a capability binding in scope:
+                    // the perform expression's span refers to that binding.
+                    if let Some(id) = r.local_capability(operation) {
+                        r.result.references.push(Reference {
+                            span: expr.span,
+                            binding: id,
+                        });
+                        r.result
+                            .references_by_span
+                            .insert((expr.span.start, expr.span.end), id);
+                    }
+                    r.expr(value)?
+                }
                 ExprKind::Unary { operand, .. } | ExprKind::Try(operand) => r.expr(operand)?,
                 ExprKind::Binary { left, right, .. } => {
                     r.expr(left)?;

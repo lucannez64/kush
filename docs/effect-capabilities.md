@@ -129,6 +129,46 @@ Lexa split therefore maps to:
 - Capabilities do not cross task boundaries (second-class), so the inheritance
   barrier needs no change.
 
+## 3.7 As built (EFF-CAP-LEXICAL)
+
+Implemented for **declared** operations and **noncapturing, one-shot,
+tail-resumptive** handlers (`crates/kush/tests/effect_capabilities.rs`):
+
+```text
+effect Ask: i64 -> i64;
+fn step(op: cap Ask ! {panic}, x: i64) -> i64 ! {panic} { perform op(x) + 1 }
+handle Ask: i64 -> i64 as ask with fn(x: i64, resume: linear once fn(i64) -> i64 ! {})
+    -> i64 ! {panic} { resume(x + 100) } { step(ask, 1) }
+```
+
+- `as` and `cap` are contextual: `as` only after a handled signature, `cap`
+  only at the start of a type followed by a name; `let cap = 1; let as = 2;`
+  and fields named `cap`/`as` keep working (tested).
+- `cap Op ! {e}` lowers to the handler arrow
+  `fn(P, linear once fn(R) -> R ! {}) -> R ! {e}`; arrow subtyping gives
+  `cap Op ! {e1}` <: `cap Op ! {e2}` for `e1 ⊆ e2`. The runtime value is the
+  handler's function pointer: noncapturing, copyable, never dropped, so no
+  environment can be freed under a capability.
+- `perform op(x)` is an indirect call of that handler with the identity
+  token: the existing in-place tail-resumptive path, with no dynamic lookup,
+  no `Op` row bit and no `panic` for a missing handler; the handler's row is
+  required. A capability names one activation: an inner dynamic handler for
+  the same operation does not intercept it (tested).
+- **Second class.** A capability local may only be passed by name to a `cap`
+  parameter of a named function or used as `perform op(..)`; any other read
+  (let, return, field, call, function argument, lambda capture) is rejected.
+  `cap` types are allowed only as the whole type of a named function
+  parameter; functions with a `cap` parameter cannot become function values.
+- **Dynamic visibility (refinement of 3.1).** A pure handler bound `as op`
+  also pushes the dynamic frame, as written above. A handler with effects
+  cannot be dynamically visible (callers' rows would hide its effects), so it
+  is capability-only: performs of `Op` by name inside the body's called
+  functions reach an outer handler or abort with `panic`, exactly like a
+  missing handler (tested in both backends). No existing program is affected:
+  the `as` form is new.
+- Not yet: capturing handlers, non-tail and multishot handlers (EFF-CAP-RESUME),
+  capabilities in lambdas.
+
 ## 4. Row algebra obligations (Katsumata)
 
 Kush rows are a finite bitset universe (4 builtin + up to 12 declared bits).
