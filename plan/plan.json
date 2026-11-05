@@ -4021,10 +4021,21 @@
       "deps": [
         "E-ABORT-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/abortive-handlers.md 3.1-3.2: Never-result operations, token-free handlers, labelled early exit with ? cleanup; confirm surface syntax with the user first.",
-      "commit": null,
-      "log": []
+      "commit": "55f0f8c",
+      "log": [
+        {
+          "time": "2026-11-05 22:22:35",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 22:44:24",
+          "who": "agent",
+          "text": "done 55f0f8c"
+        }
+      ]
     },
     {
       "id": "E-ABORT-PROPAGATE",
