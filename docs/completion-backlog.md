@@ -13,38 +13,35 @@ Integrated on `main` in `401662d` and `342537d`; see
 [expanded borrowing contracts](borrowing-extensions.md) for the exact contract
 and remaining limits.
 
-- [ ] General shared/exclusive reference support, including escape and reborrow
-  contracts. **Partial:** reference parameters may be returned and reborrowed
-  through calls; stored shared/exclusive reference locals, implicit use
-  reborrow, explicit `&*p`/`&mut *p`, shared and exclusive
-  `&Box`/`&Vec`/`&Bytes`/`&String` escape contracts, direct reference fields in
-  nominal records, and reading shared reference/slice/text fields through
-  `&Record` are checked. `Box<&T>`, `Vec<&T>`, `Box<&str>`, and `Vec<&str>`
-  element containers carry explicit type-level lifetime annotations and
-  preserve owner loans through construction, reads, calls, records, and arrows.
-  `Vec<Holder<'a>>` and `Box<Holder<'a>>` store borrowed records with per-field
-  element provenance; construction, indexed reads, `push`/`set`/`clear`, box
-  reads/takes, `&mut` writes, records, and direct/indirect calls keep every
-  field owner loaned. Mutable owner borrows are supported for `&mut Box`/`&mut
-  Vec`/`&mut Bytes`/`&mut String`: `Box.set` and
-  `Vec.push`/`set`/`clear`/`reserve` update the caller's container, and a
-  written reference must outlive the declared element lifetime. A call that
-  mutates a `&mut` container also merges the written reference's owner loan into
-  the caller's container provenance. General `&place`/`&mut place` references
-  now alias nested and owning record fields, inline-array elements, `Vec<T>`
-  elements, and hidden temporary owners; both backends use real storage
-  identity, structural disjointness (record fields and distinct constant
-  indices), ancestor suspension, and last-use release. General `*p` reads copy
-  only non-owning, non-linear referents, and `*p = value` replaces an affine
-  referent by destroying the old payload exactly once. A temporary aggregate or
-  owning handle is hoisted into hidden storage whose cleanup follows every
-  checked reference. Slice-view element places (`&s[i]`, `&mut s[i]`) root at
-  the view's owners and keep `split_at_mut` sides disjoint. Remaining
-  exclusions: `&mut str` (unrestricted byte writes can invalidate UTF-8),
-  mutation of a
-  record with borrowed fields as a whole, runtime-index disjointness (all
-  dynamic indices of one base conflict), and a child task returning a borrowed
-  `TaskExit`. See
+- [x] General shared/exclusive reference support, including escape and reborrow
+  contracts. Reference parameters may be returned and reborrowed through
+  calls; stored shared/exclusive reference locals, implicit use reborrow,
+  explicit `&*p`/`&mut *p`, shared and exclusive `&Box`/`&Vec`/`&Bytes`/
+  `&String` escape contracts, direct reference fields in nominal records, and
+  reading shared reference/slice/text fields through `&Record` are checked.
+  `Box<&T>`, `Vec<&T>`, `Box<&str>`, `Vec<&str>`, `Vec<Holder<'a>>`, and
+  `Box<Holder<'a>>` carry per-element provenance through construction, reads,
+  writes, records, and direct/indirect calls. General `&place`/`&mut place`
+  references alias record fields, inline-array and `Vec<T>` elements,
+  slice-view elements (`&s[i]`, `&mut s[i]`), and hidden temporary owners, with
+  real storage identity, ancestor suspension, and last-use release. Two index
+  places of one base are disjoint only when the linear facts prove their
+  indices distinct (an `i != j` condition, an order, or `k`/`k + 1`); this also
+  closed a hole where `&mut v[1]` and `&mut v[i]` were treated as disjoint.
+  `&mut str` is an exclusive text view with checked, length-preserving UTF-8
+  writes (ASCII case changes and same-width `Str.set_scalar`). A record with
+  borrowed fields is replaced as a whole through `&mut Holder<'a>`, with every
+  written leaf outliving `'a` and the owner keeping the written sources
+  borrowed, including through fields, container elements, function values, and
+  callees. A child task may return a borrowed `TaskExit<R>` joined in its own
+  scope. Four independent review rounds' findings are fixed with regression
+  tests. Accepted limits: a single borrowed field is not assigned through
+  `&mut` (replace the record); writes whose owner or field path cannot be
+  identified (block/branch/call-result receivers, places through stored
+  reference locals) are rejected; elided element lifetimes of a parameter
+  container are not write destinations; `Vec.try_reserve` through `&mut`
+  stays excluded; disjointness is per path, not a range algebra; and only one
+  level of borrowed `TaskExit` may cross a child task. See
   [borrowing-extensions.md](borrowing-extensions.md).
 - [x] Broader sound lifetime inference. Function/arrow/lambda
   results can be inferred from a single record-field source or a per-field body

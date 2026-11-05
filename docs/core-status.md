@@ -165,7 +165,9 @@ capability machinery for owner loans, last-use release, nested subviews, helper
 returns with explicit or elided lifetimes, explicit outlives bounds, and
 later-argument loans. Text views are deliberately excluded from records,
 tuples, arrays, `Vec`, `Box`, enums, unions, generic type parameters, closures,
-tasks, and arrow types; `&mut str` is rejected. The full Boat run passes **551
+tasks, and arrow types; `&mut str` was rejected at this milestone (it is now a
+checked exclusive view, see [borrowed text](borrowed-text.md#exclusive-text-views)).
+The full Boat run passes **551
 automated tests**, formatting, and Clippy with warnings denied. See
 [borrowed text views](borrowed-text.md).
 

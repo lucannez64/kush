@@ -14,10 +14,15 @@ per-field body lifetime inference, inferred outlives bounds, multi-source
 anonymous intersection results, destructuring-derived inference,
 helper-call body inference, addressable place references (nested/owning record
 fields, inline-array and vector indices, and hidden temporary owners), checked
-`*p` reads and `*p = value` replacement, and returned field references rooted
-in a `&Record` parameter. The reference evaluator and the Cranelift native
+`*p` reads and `*p = value` replacement, returned field references rooted
+in a `&Record` parameter, slice-view element places, facts-proved runtime
+index disjointness, exclusive `&mut str` text views with checked UTF-8 writes,
+whole mutation of borrowed records through `&mut Holder<'a>`, and borrowed
+`TaskExit` results from child tasks. The reference evaluator and the Cranelift native
 backend agree on every positive case in `tests/borrowing_extensions.rs`,
-`tests/borrowing_references.rs`, and `tests/strings.rs`. This is an engineering
+`tests/borrowing_references.rs`, `tests/strings.rs`,
+`tests/index_disjointness.rs`, `tests/mutable_text.rs`,
+`tests/borrowed_record_mutation.rs`, and `tests/borrowed_task_exit.rs`. This is an engineering
 contract inside the existing capability model, not a formal soundness proof.
 
 This page records the precise additions and the remaining deliberate limits.
