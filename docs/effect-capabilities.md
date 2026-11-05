@@ -166,8 +166,35 @@ handle Ask: i64 -> i64 as ask with fn(x: i64, resume: linear once fn(i64) -> i64
   functions reach an outer handler or abort with `panic`, exactly like a
   missing handler (tested in both backends). No existing program is affected:
   the `as` form is new.
-- Not yet: capturing handlers, non-tail and multishot handlers (EFF-CAP-RESUME),
-  capabilities in lambdas.
+- **Non-tail, multishot and capturing handlers (EFF-CAP-RESUME, scoped with
+  the user).** Any handler may be bound `as op`. A perform through the
+  capability in its own `handle` body uses the lexical machinery of that
+  activation (state machines for non-tail, copied continuations for
+  multishot), chosen by activation rather than by name, and agrees with the
+  by-name perform in both backends (tested). Only noncapturing, one-shot,
+  tail-resumptive capabilities may be passed to `cap` parameters; passing any
+  other is rejected, because a callee would need a resumable entry keyed by
+  the capability parameter (section 3.4). That cross-call part is
+  EFF-CAP-RESUME-CALLS. As before, a capturing (`once`) handler serves one
+  perform, by name or by capability.
+- Not yet: cross-call non-tail capabilities, capabilities captured by lambdas.
+
+### EFF-CAP-RESUME-CALLS design note
+
+The resumable-entry pipeline (checker await marking, `suspend::performs`
+coloring, `g::resumable` entries, real-token handler calls) is keyed by
+declared operation ids. The cross-call extension adds a second key, the
+capability parameter index: a function whose body performs through cap
+parameter `i` (directly or by forwarding it to such a parameter) is colored
+for `cap i`; a call site is an await point when the argument is a non-tail
+capability or a forwarded cap parameter colored at the caller; inside the
+resumable entry, `perform op(x)` calls the capability's handler with the real
+continuation token instead of looking up the dynamic stack. The capability
+then also carries the activation's frame (for capturing handlers), so it
+needs the scoped-borrow representation of section 3.2 rather than a bare
+function pointer. Review focus: continuation frames that hold the capability
+must not outlive the activation (use-after-free) or copy its environment
+(stale copies).
 
 ## 3.8 Measured acceptance (EFF-CAP-PERF)
 

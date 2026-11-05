@@ -234,31 +234,134 @@ fn capabilities_are_second_class() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// EFF-CAP-RESUME: non-tail, multishot and capturing capability handlers
+// ---------------------------------------------------------------------------
+
+/// The same body performed through the capability and by name must agree.
+fn same_as_by_name(handler: &str, row: &str, body: &str, expected: i64) {
+    for (binding, target) in [("as ask ", "ask"), ("", "Ask")] {
+        let source = format!(
+            "effect Ask: i64 -> i64;
+             fn main() -> i64 ! {{{row}}} {{
+                 handle Ask: i64 -> i64 {binding}with {handler} {{ {} }}
+             }}",
+            body.replace("TARGET", target)
+        );
+        agrees(&source, expected, "");
+    }
+}
+
 #[test]
-fn only_noncapturing_tail_resumptive_handlers_bind_capabilities() {
+fn non_tail_capability_handlers_resume_in_their_own_body() {
+    // The handler runs code after `resume`: each perform suspends the rest
+    // of the body; an owned box is live across every perform.
+    let stats_body = "let b = Box.new(7);
+         let mut sum = 0;
+         let mut i = 0;
+         while i < 3 { sum = sum + perform TARGET(i); i = i + 1; }
+         sum + Box.take(b)";
+    same_as_by_name(
+        "fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { let r = resume(x | 16); r ^ 1 }",
+        "alloc, panic",
+        stats_body,
+        // (16 + 17 + 18 + 7) with the low bit flipped by three activations.
+        ((16 + 17 + 18 + 7) ^ 1) as i64,
+    );
+}
+
+#[test]
+fn multishot_capability_handlers_copy_the_continuation() {
+    same_as_by_name(
+        "fn(x: i64, resume: fn(i64) -> i64 ! {}) -> i64 ! {} { let a = resume(1); let b = resume(2); a ^ (b | 1024) }",
+        "panic",
+        "let base = 40; let v = perform TARGET(0); v + base",
+        41 ^ (42 | 1024),
+    );
+}
+
+#[test]
+fn capturing_capability_handlers_run_in_their_own_body() {
+    agrees(
+        "effect Ask: i64 -> i64;
+         fn main() -> i64 ! {alloc, panic} {
+             let k = 100;
+             handle Ask: i64 -> i64 as ask with fn(
+                 x: i64,
+                 resume: linear once fn(i64) -> i64 ! {},
+             ) -> i64 ! {panic} { resume(x + k) } { perform ask(1) + 2 }
+         }",
+        103,
+        "",
+    );
+}
+
+#[test]
+fn only_in_place_capabilities_cross_calls() {
+    let step = "fn step(op: cap Ask ! {}, x: i64) -> i64 ! {} { perform op(x) }";
+    for handler in [
+        // non-tail
+        "fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { let r = resume(x); r ^ 1 }",
+        // multishot
+        "fn(x: i64, resume: fn(i64) -> i64 ! {}) -> i64 ! {} { resume(x) }",
+    ] {
+        rejects(
+            &format!(
+                "effect Ask: i64 -> i64;
+                 {step}
+                 fn main() -> i64 ! {{panic}} {{
+                     handle Ask: i64 -> i64 as ask with {handler} {{ step(ask, 1) }}
+                 }}"
+            ),
+            "EFF-CAP-RESUME-CALLS",
+        );
+    }
+    // A capturing in-place handler cannot cross calls either.
+    rejects(
+        &format!(
+            "effect Ask: i64 -> i64;
+             {step}
+             fn main() -> i64 ! {{alloc, panic}} {{
+                 let k = 4;
+                 handle Ask: i64 -> i64 as ask with fn(
+                     x: i64,
+                     resume: linear once fn(i64) -> i64 ! {{}},
+                 ) -> i64 ! {{}} {{ resume(x | k) }} {{ step(ask, 1) }}
+             }}"
+        ),
+        "EFF-CAP-RESUME-CALLS",
+    );
+}
+
+#[test]
+fn a_non_tail_capability_names_its_activation_inside_a_nested_handle() {
+    // Performing the outer non-tail capability inside a nested handle for
+    // the same operation would have to reinstate the inner handler.
     rejects(
         "effect Ask: i64 -> i64;
          fn main() -> i64 ! {panic} {
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
-             ) -> i64 ! {panic} { let r = resume(x); r + 1 } { perform ask(1) }
+             ) -> i64 ! {} { let r = resume(x); r ^ 1 } {
+                 let a = perform ask(1);
+                 handle Ask: i64 -> i64 with fn(
+                     y: i64,
+                     resume: linear once fn(i64) -> i64 ! {},
+                 ) -> i64 ! {} { resume(y) } { let b = perform ask(2); a + b }
+             }
          }",
-        "tail-resumptive",
+        "nested 'handle",
     );
     rejects(
         "effect Ask: i64 -> i64;
-         fn main() -> i64 ! {alloc, panic} {
-             let b = Box.new(1);
-             handle Ask: i64 -> i64 as ask with fn(
+         fn main() -> i64 ! {panic} {
+             handle Ask: i64 -> i64 as op with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
-             ) -> i64 ! {panic} { resume(x + Box.take(b)) } { perform ask(1) }
-         }",
-        "noncapturing",
-    );
-    rejects(
-        "fn main() -> i64 ! {panic} {
+             ) -> i64 ! {} { resume(x) } { 0 }
+         }
+         fn other() -> i64 ! {panic} {
              handle Local: i64 -> i64 as op with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},

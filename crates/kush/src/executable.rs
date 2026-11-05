@@ -5323,6 +5323,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             required_effects: std::cell::Cell::new(0),
             pending_capability: None,
             capability_slots: BTreeSet::new(),
+            capability_passable: BTreeSet::new(),
             capability_argument: false,
             resolution,
             types: &mut types,
@@ -5392,6 +5393,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     let slot = checker.bind(p.span, *ty, false)?;
                     if matches!(split_grade(&p.ty).0.kind, ast::TypeKind::Capability { .. }) {
                         checker.capability_slots.insert(slot);
+                        checker.capability_passable.insert(slot);
                     }
                     checker.locals[slot].grade = *grade;
                     checker.locals[slot].linear =
@@ -11985,9 +11987,13 @@ struct Checker<'a, 't> {
     /// omitted lambda row is inferred as exactly these bits.
     required_effects: std::cell::Cell<u16>,
     /// The binder span of `handle Op as op`, consumed by `handle_effect`.
-    pending_capability: Option<Span>,
+    pending_capability: Option<(String, Span)>,
     /// Locals holding a second-class capability (EFF-CAP-LEXICAL).
     capability_slots: BTreeSet<usize>,
+    /// Capabilities that may be passed to functions: `cap` parameters and
+    /// noncapturing, one-shot, tail-resumptive handlers. Others can only be
+    /// performed in their own handle body (EFF-CAP-RESUME).
+    capability_passable: BTreeSet<usize>,
     /// Set while checking an argument passed to a `cap` parameter.
     capability_argument: bool,
     /// Erased proof parameters in scope: binder -> proposition.
@@ -21070,7 +21076,7 @@ impl Checker<'_, '_> {
                 capability,
             } = &expr.kind
             {
-                c.pending_capability = capability.as_ref().map(|(_, span)| *span);
+                c.pending_capability = capability.clone();
                 let checked = c.handle_effect(
                     operation,
                     parameter,
@@ -23900,6 +23906,7 @@ impl Checker<'_, '_> {
         let capture_body_mutable = capture_refs.clone();
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_capabilities = std::mem::take(&mut self.capability_slots);
+        let saved_passable = std::mem::take(&mut self.capability_passable);
         let saved_slots = std::mem::take(&mut self.slots);
         let saved_result = self.result;
         let saved_parameter_lifetimes = std::mem::take(&mut self.parameter_lifetimes);
@@ -24006,6 +24013,7 @@ impl Checker<'_, '_> {
         let locals = std::mem::take(&mut self.locals);
         self.locals = saved_locals;
         self.capability_slots = saved_capabilities;
+        self.capability_passable = saved_passable;
         self.slots = saved_slots;
         self.result = saved_result;
         self.parameter_lifetimes = saved_parameter_lifetimes;
@@ -29207,16 +29215,21 @@ impl Checker<'_, '_> {
             // A capability argument must be a capability local, passed as is.
             let capability_parameter = matches!(declared.kind, ast::TypeKind::Capability { .. });
             if capability_parameter {
-                let is_capability = matches!(value.kind, ast::ExprKind::Name(_))
-                    && self
-                        .resolution
-                        .reference(value.span)
-                        .and_then(|id| self.slots.get(&id))
-                        .is_some_and(|slot| self.capability_slots.contains(slot));
-                if !is_capability {
+                let slot = matches!(value.kind, ast::ExprKind::Name(_))
+                    .then(|| self.resolution.reference(value.span))
+                    .flatten()
+                    .and_then(|id| self.slots.get(&id).copied())
+                    .filter(|slot| self.capability_slots.contains(slot));
+                let Some(slot) = slot else {
                     return Err(Diagnostic::new(
                         value.span,
                         "a 'cap' parameter takes a capability bound by 'handle Op as op' or a 'cap' parameter, passed by name",
+                    ));
+                };
+                if !self.capability_passable.contains(&slot) {
+                    return Err(Diagnostic::new(
+                        value.span,
+                        "this capability's handler is not a noncapturing, one-shot, tail-resumptive handler, so it can only be performed in its own 'handle' body; passing it to a function needs resumable entries keyed by capability (EFF-CAP-RESUME-CALLS)",
                     ));
                 }
                 self.capability_argument = true;
@@ -31624,24 +31637,16 @@ impl Checker<'_, '_> {
         // pushed on the dynamic stack, so no call can perform `Op` by name
         // through it and hide its effects from a row.
         let capability_only = capability.is_some() && signature.effects != 0;
-        if capability.is_some() {
-            let noncapturing = matches!(
-                &handler_value.kind,
-                ExprKind::FnValue { captures, .. } if captures.is_empty()
-            ) && matches!(handler_value.ty, Type::Fn(_));
-            if multishot || !tail_resumptive_handler(self.resolution, handler) {
-                return Err(Diagnostic::new(
-                    handler.span,
-                    "a capability handler must be one-shot and tail-resumptive ('resume(e)' as its only use of the token, in tail position); non-tail and multishot capabilities are EFF-CAP-RESUME",
-                ));
-            }
-            if !noncapturing {
-                return Err(Diagnostic::new(
-                    handler.span,
-                    "a capability handler must be a noncapturing lambda or function; capturing capability handlers are not supported yet",
-                ));
-            }
-        }
+        // Only a noncapturing, one-shot, tail-resumptive capability runs in
+        // place anywhere, so only it may be passed to functions; any other
+        // handler bound `as op` is performed through the lexical machinery
+        // of its own body.
+        let passable = matches!(
+            &handler_value.kind,
+            ExprKind::FnValue { captures, .. } if captures.is_empty()
+        ) && matches!(handler_value.ty, Type::Fn(_))
+            && !multishot
+            && tail_resumptive_handler(self.resolution, handler);
         if declared.is_some() && !capability_only {
             if !matches!(handler_value.ty, Type::Fn(_) | Type::Once(_)) {
                 return Err(Diagnostic::new(
@@ -31659,9 +31664,9 @@ impl Checker<'_, '_> {
         let declared = declared.filter(|_| !capability_only);
         let handler_type = handler_value.ty;
         let slot = self.fresh_local(span, handler_type)?;
-        if let Some(binder) = capability {
-            let id = self.resolution.binder(binder).ok_or_else(|| {
-                Diagnostic::new(binder, "internal error: unresolved capability binder")
+        if let Some((_, binder)) = &capability {
+            let id = self.resolution.binder(*binder).ok_or_else(|| {
+                Diagnostic::new(*binder, "internal error: unresolved capability binder")
             })?;
             self.slots.insert(id, slot);
             self.capability_slots.insert(slot);
@@ -31678,7 +31683,10 @@ impl Checker<'_, '_> {
         // place. Otherwise any perform outside the body's tail suspends.
         // A declared operation can also be performed by called functions;
         // under a non-tail handler those calls become await points.
-        let lexical = body_has_non_tail_perform(body, operation);
+        let lexical = body_has_non_tail_perform(body, operation)
+            || capability
+                .as_ref()
+                .is_some_and(|(name, _)| body_has_non_tail_perform(body, name));
         // A multishot handler for a declared operation is never pushed on the
         // dynamic stack (a dynamic perform supplies the one-shot token), so
         // its body is always checked as suspendable and calls that could
@@ -31694,11 +31702,8 @@ impl Checker<'_, '_> {
             || shadows_handler_effects)
             && (lexical || declared.is_some()))
             || (declared.is_some() && multishot);
-        if capability.is_some() && region {
-            return Err(Diagnostic::new(
-                handler.span,
-                "a capability handler must run in place: this handler shadows effects the body handles, so it would suspend; non-tail capabilities are EFF-CAP-RESUME",
-            ));
+        if capability.is_some() && passable && !region {
+            self.capability_passable.insert(slot);
         }
         let handler_function = match &handler_value.kind {
             ExprKind::FnValue { function, captures } if captures.is_empty() => Some(*function),
@@ -32170,6 +32175,18 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
+        if let Some(index) = self.handlers.iter().rposition(|scope| scope.slot == slot) {
+            let operation = self.handlers[index].operation.clone();
+            let operation_effect = self.operation_effect(&operation);
+            return self.lexical_perform(
+                index,
+                &operation,
+                operation_effect,
+                value,
+                expected,
+                span,
+            );
+        }
         let handler_ty = self.locals[slot].ty;
         let Type::Fn(arrow) = handler_ty else {
             return Err(Diagnostic::new(
@@ -32201,6 +32218,108 @@ impl Checker<'_, '_> {
             None => Ok(call),
         }
     }
+    /// A perform served by the lexical handler scope `index` of this function.
+    fn lexical_perform(
+        &mut self,
+        index: usize,
+        operation: &str,
+        operation_effect: u16,
+        value: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        let scope = &self.handlers[index];
+        let (parameter, result, slot, handler_parameter, handler_result, effects, multishot) = (
+            scope.parameter,
+            scope.result,
+            scope.slot,
+            scope.handler_parameter,
+            scope.handler_result,
+            scope.effects,
+            scope.multishot,
+        );
+        let region = scope.region;
+        let handler_ty = self.locals[slot].ty;
+        if region
+            && let Some(inner) = self.handlers[index + 1..]
+                .iter()
+                .find(|inner| inner.region || inner.declared)
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "a non-tail 'perform {operation}' inside the body of a nested 'handle {}' is not supported: resuming it would have to reinstate the inner handler; perform it outside the nested handle or make the outer handler tail-resumptive",
+                    inner.operation
+                ),
+            ));
+        }
+        self.require(effects | operation_effect, span)?;
+        let payload = self.expr_expected(value, Some(parameter))?;
+        let payload = self.coerce_argument(payload, handler_parameter, span)?;
+        self.apply_handler_writes(slot);
+        if region {
+            self.handlers[index].points += 1;
+            let point = self.handlers[index].points;
+            let token = self.resume_type(result, multishot);
+            let call = Expr {
+                kind: ExprKind::CallIndirect {
+                    callee: Box::new(Expr {
+                        kind: ExprKind::Local(slot),
+                        ty: handler_ty,
+                        span,
+                        resource: None,
+                    }),
+                    arguments: vec![
+                        payload,
+                        Expr {
+                            kind: ExprKind::Erased(token),
+                            ty: token,
+                            span,
+                            resource: None,
+                        },
+                    ],
+                },
+                ty: handler_result,
+                span,
+                resource: None,
+            };
+            let call = self.coerce(call, result, span)?;
+            let suspend = Expr {
+                kind: ExprKind::Suspend {
+                    point,
+                    call: Box::new(call),
+                    callee: None,
+                },
+                ty: result,
+                span,
+                resource: None,
+            };
+            return match expected {
+                Some(expected) => self.coerce(suspend, expected, span),
+                None => Ok(suspend),
+            };
+        }
+        let resume = self.resume_value(result, multishot, span)?;
+        let call = Expr {
+            kind: ExprKind::CallIndirect {
+                callee: Box::new(Expr {
+                    kind: ExprKind::Local(slot),
+                    ty: handler_ty,
+                    span,
+                    resource: None,
+                }),
+                arguments: vec![payload, resume],
+            },
+            ty: handler_result,
+            span,
+            resource: None,
+        };
+        let call = self.coerce(call, result, span)?;
+        return match expected {
+            Some(expected) => self.coerce(call, expected, span),
+            None => Ok(call),
+        };
+    }
     fn perform_effect(
         &mut self,
         operation: &str,
@@ -32220,97 +32339,7 @@ impl Checker<'_, '_> {
             .iter()
             .rposition(|scope| scope.operation == operation)
         {
-            let scope = &self.handlers[index];
-            let (parameter, result, slot, handler_parameter, handler_result, effects, multishot) = (
-                scope.parameter,
-                scope.result,
-                scope.slot,
-                scope.handler_parameter,
-                scope.handler_result,
-                scope.effects,
-                scope.multishot,
-            );
-            let region = scope.region;
-            let handler_ty = self.locals[slot].ty;
-            if region
-                && let Some(inner) = self.handlers[index + 1..]
-                    .iter()
-                    .find(|inner| inner.region || inner.declared)
-            {
-                return Err(Diagnostic::new(
-                    span,
-                    format!(
-                        "a non-tail 'perform {operation}' inside the body of a nested 'handle {}' is not supported: resuming it would have to reinstate the inner handler; perform it outside the nested handle or make the outer handler tail-resumptive",
-                        inner.operation
-                    ),
-                ));
-            }
-            self.require(effects | operation_effect, span)?;
-            let payload = self.expr_expected(value, Some(parameter))?;
-            let payload = self.coerce_argument(payload, handler_parameter, span)?;
-            self.apply_handler_writes(slot);
-            if region {
-                self.handlers[index].points += 1;
-                let point = self.handlers[index].points;
-                let token = self.resume_type(result, multishot);
-                let call = Expr {
-                    kind: ExprKind::CallIndirect {
-                        callee: Box::new(Expr {
-                            kind: ExprKind::Local(slot),
-                            ty: handler_ty,
-                            span,
-                            resource: None,
-                        }),
-                        arguments: vec![
-                            payload,
-                            Expr {
-                                kind: ExprKind::Erased(token),
-                                ty: token,
-                                span,
-                                resource: None,
-                            },
-                        ],
-                    },
-                    ty: handler_result,
-                    span,
-                    resource: None,
-                };
-                let call = self.coerce(call, result, span)?;
-                let suspend = Expr {
-                    kind: ExprKind::Suspend {
-                        point,
-                        call: Box::new(call),
-                        callee: None,
-                    },
-                    ty: result,
-                    span,
-                    resource: None,
-                };
-                return match expected {
-                    Some(expected) => self.coerce(suspend, expected, span),
-                    None => Ok(suspend),
-                };
-            }
-            let resume = self.resume_value(result, multishot, span)?;
-            let call = Expr {
-                kind: ExprKind::CallIndirect {
-                    callee: Box::new(Expr {
-                        kind: ExprKind::Local(slot),
-                        ty: handler_ty,
-                        span,
-                        resource: None,
-                    }),
-                    arguments: vec![payload, resume],
-                },
-                ty: handler_result,
-                span,
-                resource: None,
-            };
-            let call = self.coerce(call, result, span)?;
-            return match expected {
-                Some(expected) => self.coerce(call, expected, span),
-                None => Ok(call),
-            };
+            return self.lexical_perform(index, operation, operation_effect, value, expected, span);
         }
         let Some(declared) = self.effect_operations.get(operation).copied() else {
             return Err(Diagnostic::new(
