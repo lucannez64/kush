@@ -1521,6 +1521,19 @@ impl<'a> Checker<'a> {
                 }
                 self.block(body, false, multiplier)?;
             }
+            ExprKind::Suspendable(suspendable) => {
+                self.block(&suspendable.body, false, multiplier)?;
+            }
+            // A suspension calls the handler once with the payload; the
+            // resumed continuation is the rest of this same checked body.
+            ExprKind::Suspend { call, .. } => {
+                if !self.expr(call, multiplier)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::Region { .. } | ExprKind::RegionExit { .. } => {
+                unreachable!("grades run before suspendable bodies are lowered")
+            }
             ExprKind::DynamicPerform {
                 payload, resume, ..
             } => {

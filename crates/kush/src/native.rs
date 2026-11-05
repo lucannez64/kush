@@ -3327,8 +3327,12 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
         if f.closure.is_some() {
             sig.params.push(AbiParam::new(I64));
         }
-        for (index, local) in f.locals[captures..f.parameters].iter().enumerate() {
-            let slot = captures + index;
+        for position in captures..f.parameters {
+            let slot = position;
+            let local = &f.locals[f
+                .parameter_slots
+                .as_ref()
+                .map_or(position, |slots| slots[position])];
             if f.parameter_grades
                 .get(slot)
                 .copied()
@@ -3453,6 +3457,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
             task_wrappers: &task_wrappers,
             task_pointer_drops: &task_pointer_drops,
             loops: Vec::new(),
+            regions: Vec::new(),
             slice_layouts: BTreeMap::new(),
             upper_bounds: Vec::new(),
         };
@@ -3546,9 +3551,13 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
             offset += 1;
             if captures != 0 {
                 let mut capture_offset = 8i32;
-                for i in 0..captures {
+                for position in 0..captures {
+                    let i = f
+                        .parameter_slots
+                        .as_ref()
+                        .map_or(position, |slots| slots[position]);
                     let width = g.variables[i].len();
-                    if f.capture_refs.get(i).copied().unwrap_or(false) {
+                    if f.capture_refs.get(position).copied().unwrap_or(false) {
                         // The environment stores the caller's stack address.
                         // Reads and writes of this capture go through it.
                         let pointer = g.builder.ins().load(
@@ -3574,9 +3583,13 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
                 emit_drop(&mut g.builder, g.module, free, &[environment]);
             }
         }
-        for i in captures..f.parameters {
+        for position in captures..f.parameters {
+            let i = f
+                .parameter_slots
+                .as_ref()
+                .map_or(position, |slots| slots[position]);
             if f.parameter_grades
-                .get(i)
+                .get(position)
                 .copied()
                 .flatten()
                 .is_some_and(Grade::is_zero)
@@ -4560,6 +4573,9 @@ struct Generator<'a, 'b> {
     /// loop entry). Break/continue restore the handler depth so a dynamic
     /// handler frame inside the body cannot survive an early loop exit.
     loops: Vec<(ir::Block, ir::Block, bool, Option<Variable>)>,
+    /// (exit join, finish block, handler depth at entry) of each enclosing
+    /// lowered suspendable region; `RegionExit` leaves the innermost one.
+    regions: Vec<(Option<ir::Block>, Option<ir::Block>, Option<Variable>)>,
     literal_data: &'b BTreeMap<usize, DataId>,
     allocate: FuncId,
     try_allocate: FuncId,
@@ -5278,6 +5294,38 @@ impl Generator<'_, '_> {
             self.builder.inst_results(call).to_vec()
         }
     }
+    /// Emit an indirect call whose physical argument words (return pointer,
+    /// environment, and arguments) are already assembled.
+    fn finish_indirect_call(
+        &mut self,
+        id: usize,
+        code: Value,
+        pointer: Option<Value>,
+        values: Vec<Value>,
+    ) -> Words {
+        let signature = self.program.function_types[id].clone();
+        let result = signature.result;
+        let result_erased = signature.result_erased();
+        let ir_signature = self.indirect_signature(id);
+        let ir_signature = self.builder.import_signature(ir_signature);
+        let call = self
+            .builder
+            .ins()
+            .call_indirect(ir_signature, code, &values);
+        if result_erased {
+            return vec![self.constant(0)];
+        }
+        if let Some(pointer) = pointer {
+            return (0..self.program.width(result))
+                .map(|i| {
+                    self.builder
+                        .ins()
+                        .load(I64, ir::MemFlagsData::new(), pointer, (i * 8) as i32)
+                })
+                .collect();
+        }
+        self.builder.inst_results(call).to_vec()
+    }
     fn indirect_signature(&self, id: usize) -> ir::Signature {
         let once = self.program.function_types[id].once;
         self.indirect_signature_mode(id, once)
@@ -5502,30 +5550,98 @@ impl Generator<'_, '_> {
                 for argument in arguments {
                     self.consume(argument);
                 }
-                let signature = self.indirect_signature(id);
-                let signature = self.builder.import_signature(signature);
-                let call = self
-                    .builder
-                    .ins()
-                    .call_indirect(signature, callable[0], &values);
-                if result_erased {
-                    return Some(vec![self.constant(0)]);
+                return Some(self.finish_indirect_call(id, callable[0], pointer, values));
+            }
+            ExprKind::Region { body, finish, .. } => {
+                let exit = self.join(expr.ty);
+                let finish_block = match finish {
+                    Some(_) if body.ty != Type::Never => {
+                        let block = self.builder.create_block();
+                        for _ in 0..self.program.width(body.ty) {
+                            self.builder.append_block_param(block, I64);
+                        }
+                        Some(block)
+                    }
+                    Some(_) => Some(self.builder.create_block()),
+                    None => None,
+                };
+                let depth = self.capture_handler_depth();
+                self.regions.push((exit, finish_block, depth));
+                let finished = self.block(body);
+                self.regions.pop();
+                if let Some(values) = finished {
+                    match (finish_block, exit) {
+                        (Some(block), _) => self.jump(block, &values),
+                        (None, Some(exit)) => self.jump(exit, &values),
+                        (None, None) => unreachable!("a completing region has a value"),
+                    }
                 }
-                if let Some(pointer) = pointer {
-                    return Some(
-                        (0..self.program.width(result))
-                            .map(|i| {
-                                self.builder.ins().load(
-                                    I64,
-                                    ir::MemFlagsData::new(),
-                                    pointer,
-                                    (i * 8) as i32,
-                                )
-                            })
-                            .collect(),
-                    );
+                if let (Some(block), Some(finish)) = (finish_block, finish) {
+                    self.builder.switch_to_block(block);
+                    let arguments = self.builder.block_params(block).to_vec();
+                    if let Some(callable) = self.expr(finish) {
+                        self.consume(finish);
+                        let Some((id, once)) = (match finish.ty {
+                            Type::Fn(id) => Some((id, false)),
+                            Type::Once(id) => Some((id, true)),
+                            _ => None,
+                        }) else {
+                            unreachable!("checked region finish callable")
+                        };
+                        let result = self.program.function_types[id].result;
+                        let pointer = aggregate_result(self.program, result).then(|| {
+                            let slot =
+                                self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                                    ir::StackSlotKind::ExplicitSlot,
+                                    (self.program.width(result) * 8) as u32,
+                                    3,
+                                ));
+                            self.builder.ins().stack_addr(I64, slot, 0)
+                        });
+                        let mut values = Vec::new();
+                        if let Some(pointer) = pointer {
+                            values.push(pointer);
+                        }
+                        if once {
+                            values.push(callable[1]);
+                        }
+                        values.extend(arguments);
+                        let words = self.finish_indirect_call(id, callable[0], pointer, values);
+                        match exit {
+                            Some(exit) => self.jump(exit, &words),
+                            None => {
+                                self.builder.ins().trap(ir::TrapCode::user(1).unwrap());
+                            }
+                        }
+                    }
                 }
-                return Some(self.builder.inst_results(call).to_vec());
+                let exit = exit?;
+                self.builder.switch_to_block(exit);
+                return Some(self.builder.block_params(exit).to_vec());
+            }
+            ExprKind::RegionExit {
+                value,
+                finish,
+                cleanup,
+            } => {
+                let values = lower!(self.expr(value));
+                self.consume(value);
+                for id in cleanup {
+                    self.cleanup(Some(*id));
+                }
+                let (exit, finish_block, depth) = *self.regions.last().unwrap();
+                self.restore_handler_depth(depth);
+                let target = if *finish { finish_block } else { exit };
+                match target {
+                    Some(target) => self.jump(target, &values),
+                    None => {
+                        self.builder.ins().trap(ir::TrapCode::user(1).unwrap());
+                    }
+                }
+                return None;
+            }
+            ExprKind::Suspendable(_) | ExprKind::Suspend { .. } => {
+                unreachable!("suspendable bodies are lowered before code generation")
             }
             ExprKind::HandlerPush {
                 operation,

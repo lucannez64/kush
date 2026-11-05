@@ -1275,63 +1275,58 @@ fn a_tail_perform_keeps_the_allocation_free_identity_resumption() {
 
 #[test]
 fn non_tail_resumption_rejects_unsupported_continuation_shapes() {
-    // The perform must be the whole value of a top-level statement; a nested
-    // operand would need a more general expression continuation.
-    rejects(
-        r#"
-        fn main() -> i64 ! {panic} {
-            handle Op: i64 -> i64 with fn(
+    // A handler with code after `resume` observes the continuation, so these
+    // bodies run as resumable state machines.
+    let handler = r#"handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(x) } {
-                let a = perform Op(20) + 1;
-                a
-            }
-        }"#,
-        "non-tail 'perform' must be the entire value",
+            ) -> i64 ! {panic} { let r = resume(x); r * 2 }"#;
+    // A perform nested in an operand and several performs are resumable.
+    let nested =
+        format!("fn main() -> i64 ! {{panic}} {{ {handler} {{ let a = perform Op(20) + 1; a }} }}");
+    assert_eq!(value(&nested), 42);
+    let several = format!(
+        "fn main() -> i64 ! {{alloc, panic}} {{ {handler} {{ let a = perform Op(1); let b = perform Op(2); a + b }} }}"
     );
-    // Two non-tail performs would need a multi-prompt continuation.
-    rejects(
-        r#"
-        fn main() -> i64 ! {panic} {
-            handle Op: i64 -> i64 with fn(
-                x: i64,
-                resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(x) } {
-                let a = perform Op(1);
-                let b = perform Op(2);
-                a + b
-            }
-        }"#,
-        "non-tail 'perform' must be the entire value",
-    );
+    // resume(1) -> resume(2) -> 3, doubled by the inner then the outer
+    // handler activation.
+    assert_eq!(value(&several), 12);
     // The body result is the operation result under real resumption.
     rejects(
-        r#"
-        fn main() -> i64 ! {panic} {
-            handle Op: i64 -> i64 with fn(
-                x: i64,
-                resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {panic} { resume(x) } {
-                let a = perform Op(20);
-                a > 0
-            }
-        }"#,
+        &format!(
+            "fn main() -> i64 ! {{panic}} {{ {handler} {{ let a = perform Op(20); a > 0 }} }}"
+        ),
         "type mismatch",
     );
     // Control transfers cannot cross the resumption boundary.
     rejects(
-        r#"
+        &format!(
+            "fn main() -> i64 ! {{panic}} {{ {handler} {{ let a = perform Op(20); return a; }} }}"
+        ),
+        "cannot 'return' out of the handled body",
+    );
+    rejects(
+        &format!(
+            "fn main() -> i64 ! {{panic}} {{ let mut i = 0; while i < 2 {{ i = i + 1; {handler} {{ let a = perform Op(20); if a > 0 {{ break; }} a }}; }} i }}"
+        ),
+        "cannot 'break' or 'continue' to a loop outside the handled body",
+    );
+    // A tail-resumptive handler continues in place, so a return after its
+    // perform is an ordinary return.
+    assert_eq!(
+        value(
+            r#"
         fn main() -> i64 ! {panic} {
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
             ) -> i64 ! {panic} { resume(x) } {
                 let a = perform Op(20);
-                return a;
+                return a + 1;
             }
-        }"#,
-        "cannot 'return' out of the handled body",
+        }"#
+        ),
+        21
     );
     // A linear operation result would let the continuation transfer an
     // obligation the linear resume token cannot describe.
@@ -1343,7 +1338,7 @@ fn non_tail_resumption_rejects_unsupported_continuation_shapes() {
             handle Op: Token -> Token with fn(
                 x: Token,
                 resume: linear once fn(Token) -> Token ! {},
-            ) -> Token ! {panic} { resume(x) } {
+            ) -> Token ! {panic} { let r = resume(x); r } {
                 let a = perform Op(Token { id: 1 });
                 a
             }
@@ -1399,7 +1394,8 @@ fn multishot_resumption_reuses_a_capture_free_continuation() {
                 x: i64,
                 resume: fn(i64) -> i64 ! {},
             ) -> i64 ! {} {
-                resume(x)
+                let r = resume(x);
+                r
             } {
                 let v = perform Op(0);
                 v + n
@@ -1416,7 +1412,7 @@ fn multishot_resumption_reuses_a_capture_free_continuation() {
             handle Op: Token -> Token with fn(
                 x: Token,
                 resume: fn(Token) -> Token ! {},
-            ) -> Token ! {} { resume(x) } {
+            ) -> Token ! {} { let r = resume(x); r } {
                 let a = perform Op(Token { id: 1 });
                 a
             }
@@ -2815,19 +2811,35 @@ fn non_tail_continuations_reject_try_but_allow_local_loops_and_mut_results() {
     rejects(
         r#"
         enum Result<T, E> { Ok(T), Err(E) }
-        fn work() -> i64 ! {panic} {
-            let r = handle Op: i64 -> Result<i64, i64> with fn(
+        fn work() -> Result<i64, i64> ! {panic} {
+            handle Op: i64 -> Result<i64, i64> with fn(
+                x: i64, resume: linear once fn(Result<i64, i64>) -> Result<i64, i64> ! {},
+            ) -> Result<i64, i64> ! {panic} { let r = resume(Err(7)); r } {
+                let a = perform Op(1);
+                let v = a?;
+                Ok(v + 1)
+            }
+        }
+        fn main() -> i64 ! {panic} { match work() { Ok(v) => v, Err(e) => e } }"#,
+        "cannot use '?'",
+    );
+    // A tail-resumptive handler continues in place, so `?` after its perform
+    // returns from the enclosing function as usual.
+    let in_place = r#"
+        enum Result<T, E> { Ok(T), Err(E) }
+        fn work() -> Result<i64, i64> ! {panic} {
+            handle Op: i64 -> Result<i64, i64> with fn(
                 x: i64, resume: linear once fn(Result<i64, i64>) -> Result<i64, i64> ! {},
             ) -> Result<i64, i64> ! {panic} { resume(Err(7)) } {
                 let a = perform Op(1);
                 let v = a?;
                 Ok(v + 1)
-            };
-            match r { Ok(v) => v, Err(e) => e }
+            }
         }
-        fn main() -> i64 ! {panic} { work() }"#,
-        "cannot use '?'",
-    );
+        fn main() -> i64 ! {panic} { match work() { Ok(v) => v, Err(e) => e } }"#;
+    assert_eq!(value(in_place), 7);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(in_place, 7);
     assert_eq!(
         value(
             r#"

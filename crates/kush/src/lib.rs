@@ -27,6 +27,7 @@ pub mod project;
 pub mod resolve;
 mod runtime_types;
 pub mod source;
+mod suspend;
 mod variance;
 
 pub use check::check;

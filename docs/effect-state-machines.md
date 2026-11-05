@@ -1,11 +1,9 @@
 # Handled bodies as resumable state machines (design)
 
-Status: **design** (plan node E-CPS-DESIGN). Nothing here is implemented yet.
-This document fixes the representation, the checking rules, and the per-node
-obligations for the E-CPS-* chain and the effect nodes that build on it
-(E-EXPR, E-MULTI-PERFORM, E-CONTROL, E-CALLEE-COLOR, E-DYN-RESUME,
-E-MULTISHOT-*). The current handler fragment is described in
-[effect handlers](effect-handlers.md).
+Status: **implemented** for lexical performs (E-CPS-IR through E-CONTROL).
+Sections 1-13 are the design as written for E-CPS-DESIGN; section 14
+describes what was built and where it departs from the design, and why.
+The handler fragment is described in [effect handlers](effect-handlers.md).
 
 ## 1. Where we start
 
@@ -403,3 +401,89 @@ constant native stack.
 The independent review (E-REVIEW) should in particular try to observe a value
 twice or never through a frame: every owned slot must leave the frame exactly
 once, through a `FrameLoad`, a drop, or a copy that is itself dropped.
+
+## 14. As built
+
+The pipeline of section 4 is implemented as designed: the checker produces
+`ExprKind::Suspendable`/`ExprKind::Suspend`, an ANF step
+(`executable/anf.rs`) puts every point in statement position before
+ownership, ownership and grades check the structured body (a `Suspend` wraps
+the ordinary handler call, so it is checked exactly like one), and
+`crate::suspend` lowers it afterwards. Three details differ from sections 5,
+7 and 8.
+
+**One frame per suspension point, not one frame per handle.** The frame of a
+point is the environment of a `linear once` closure over that point's
+continuation function, holding exactly `L(i)`. `FrameNew`/`FrameStore` are the
+closure construction (captures are moves), `FrameLoad` is the closure
+prologue, `FrameFree` is the existing environment release on call, and the
+drop glue is the existing closure drop glue. Reasons:
+
+- the token needs a closure environment anyway (the handler receives an
+  ordinary `once fn` value), so a separate persistent frame would cost one
+  more allocation per handle, not fewer;
+- each environment holds only that point's live set, so there are no
+  uninitialized slots, no per-state initialized-slot sets, and no
+  "every slot must be empty" assertion to maintain: ownership of every value
+  is a move into exactly one environment and a move out of it;
+- both backends already run closures, so parity is by construction and the
+  only new primitives are `Region`/`RegionExit` (below) and a per-function
+  `parameter_slots` map that lets a continuation keep the enclosing
+  function's slot numbering;
+- a capture-free point is a plain code pointer, so the capture-free and
+  multishot-capture-free paths keep allocating nothing.
+
+The cost is one environment allocation per suspension that has live values,
+instead of one per handle plus one token environment per suspension.
+
+**Code before the first suspension runs in place.** The handled body stays in
+the enclosing function as a `Region`; a point becomes
+`RegionExit(handler(payload, token))`, which evaluates the handler call,
+drops the region's active resources, pops dynamic handler frames installed
+inside the region, and leaves the region with the handler's result. Only the
+code after a point lives in continuation functions. This keeps today's
+behaviour for code before the perform: writes to outer locals are visible
+after the handle, and borrows of outer storage that end before the first
+perform need no rule at all. The continuation of point `i` is rebuilt
+structurally from the path to the point: the rest of each enclosing block
+(earlier `let` slots are re-declared so their lexical cleanup is unchanged),
+the taken branch of an `if`/`match`, and for an enclosing loop
+`{ let mut first = true; loop { if first { first = false; rest } else
+{ [if !cond { break }] body } } }`, so `break`/`continue` keep their targets.
+Each continuation body is itself a `Region`.
+
+**Tail-resumptive handlers never suspend.** A handler written as a lambda at
+the `handle` whose only use of the token is `resume(e)` in tail position
+(through `if`/`match`/blocks/`return`) computes `h(p, k) = k(e)`. Every
+perform of such a handler uses the identity token and continues in place,
+anywhere in the body (expressions, loops, `return`, `?`), with no allocation
+and constant native stack. This replaces the `tail` calling-convention plan of
+section 7: there is no handler-to-token-to-driver chain to turn into tail
+calls. Non-tail handlers still nest one handler activation per perform, which
+is inherent (section 7).
+
+**Checking rules as implemented** (`crate::suspend`, after ownership):
+
+1. `L(i)` is a backward liveness over the checked IR (loops to a fixed
+   point), restricted to the handled body; grade-zero locals are erased and
+   never captured.
+2. A local in `L(i)` whose type holds a borrow (view, text, reference,
+   borrowed record, task handle) is rejected. A pinned local whose references
+   end before the point is captured by value.
+3. A local the handler writes through its capture is rejected if it is in
+   `L(i)`.
+4. A local of the enclosing function that is not copyable and is in `L(i)` is
+   moved into the continuation; it is rejected if the function uses it after
+   the `handle`. A continuation that writes a local of the enclosing function
+   (assignment or mutable borrow) is rejected if the function reads it after
+   the `handle`, because the continuation works on its own copy.
+5. A capturing continuation requires `{alloc, panic}` at the handle.
+6. `return`, `?`, and `break`/`continue` to a loop outside the body are
+   rejected in continuation code (code reachable after a point). They are
+   allowed before the first point (they run in place) and anywhere under a
+   tail-resumptive handler. Section 13 asked for `return` through a
+   resumption; it is not implemented because the handler activation that
+   called `resume` is still on the stack and has code after the call, and
+   Kush has no unwinding that could abandon it and drop its live values.
+7. A non-tail perform inside the body of a nested non-tail handler or a
+   nested declared-operation handler is rejected (multi-prompt capture).

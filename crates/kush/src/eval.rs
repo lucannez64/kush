@@ -961,6 +961,7 @@ enum PlaceFlow {
     Return(Value),
     Break(Value),
     Continue,
+    Exit(Value, bool),
 }
 impl From<Flow> for PlaceFlow {
     fn from(flow: Flow) -> Self {
@@ -969,6 +970,7 @@ impl From<Flow> for PlaceFlow {
             Flow::Return(value) => PlaceFlow::Return(value),
             Flow::Break(value) => PlaceFlow::Break(value),
             Flow::Continue => PlaceFlow::Continue,
+            Flow::Exit(value, finish) => PlaceFlow::Exit(value, finish),
         }
     }
 }
@@ -978,6 +980,8 @@ enum Flow {
     Return(Value),
     Break(Value),
     Continue,
+    /// Leave the innermost `Region`; the flag applies the region's finish.
+    Exit(Value, bool),
 }
 struct Frame {
     function: usize,
@@ -1198,6 +1202,7 @@ macro_rules! place_value {
             PlaceFlow::Return(v) => return Ok(Flow::Return(v)),
             PlaceFlow::Break(v) => return Ok(Flow::Break(v)),
             PlaceFlow::Continue => return Ok(Flow::Continue),
+            PlaceFlow::Exit(v, finish) => return Ok(Flow::Exit(v, finish)),
             PlaceFlow::Place(_) => unreachable!("a place evaluation has no ordinary place flow"),
         }
     };
@@ -5011,14 +5016,21 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             locals: vec![Value::Scalar(0); f.locals.len()],
             resources: vec![None; f.resources.len()],
         };
-        frame.locals[..captures.len()].clone_from_slice(&captures);
-        for slot in 0..captures.len() {
-            self.local_active(slot, &mut frame);
+        let slot_of = |position: usize| {
+            f.parameter_slots
+                .as_ref()
+                .map_or(position, |slots| slots[position])
+        };
+        let capture_count = captures.len();
+        for (position, capture) in captures.into_iter().enumerate() {
+            frame.locals[slot_of(position)] = capture;
+            self.local_active(slot_of(position), &mut frame);
         }
         let mut args = args.into_iter();
-        for slot in captures.len()..f.parameters {
+        for position in capture_count..f.parameters {
+            let slot = slot_of(position);
             if f.parameter_grades
-                .get(slot)
+                .get(position)
                 .copied()
                 .flatten()
                 .is_some_and(Grade::is_zero)
@@ -5055,7 +5067,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     v
                 }
             }
-            Flow::Break(_) | Flow::Continue => unreachable!("loop exits are checked"),
+            Flow::Break(_) | Flow::Continue | Flow::Exit(..) => {
+                unreachable!("loop and region exits are checked")
+            }
         })
     }
     fn block(&mut self, block: &Block, frame: &mut Frame) -> Result<Flow> {
@@ -6379,7 +6393,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 match self.block(body, frame)? {
                     Flow::Value(_) | Flow::Continue => {}
                     Flow::Break(_) => break Value::Scalar(0),
-                    returned @ Flow::Return(_) => return Ok(returned),
+                    returned @ (Flow::Return(_) | Flow::Exit(..)) => return Ok(returned),
                 }
             },
             ExprKind::Loop(body) => loop {
@@ -6392,7 +6406,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 match self.block(body, frame)? {
                     Flow::Value(_) | Flow::Continue => {}
                     Flow::Break(value) => break value,
-                    returned @ Flow::Return(_) => return Ok(returned),
+                    returned @ (Flow::Return(_) | Flow::Exit(..)) => return Ok(returned),
                 }
             },
             ExprKind::Break(value, cleanup) => {
@@ -6414,6 +6428,39 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     self.drop_resource(Some(*id), frame)?;
                 }
                 return Ok(Flow::Continue);
+            }
+            ExprKind::Region { body, finish, .. } => {
+                let (value, apply) = match self.block(body, frame)? {
+                    Flow::Value(value) => (value, true),
+                    Flow::Exit(value, apply) => (value, apply),
+                    other => return Ok(other),
+                };
+                match finish {
+                    Some(finish) if apply => {
+                        let callable = value!(self.expr(finish, frame));
+                        self.consume(finish, frame);
+                        self.call_value(callable, vec![value])?
+                    }
+                    _ => value,
+                }
+            }
+            ExprKind::RegionExit {
+                value,
+                finish,
+                cleanup,
+            } => {
+                let exited = value!(self.expr(value, frame));
+                self.consume(value, frame);
+                for id in cleanup {
+                    self.drop_resource(Some(*id), frame)?;
+                }
+                return Ok(Flow::Exit(exited, *finish));
+            }
+            ExprKind::Suspendable(_) | ExprKind::Suspend { .. } => {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    "internal error: a suspendable body reached the evaluator unlowered",
+                ));
             }
             ExprKind::Move(slot) => {
                 if let Some(id) = self.program.functions[frame.function].local_resources[*slot] {

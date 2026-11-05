@@ -13,6 +13,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod anf;
 mod recursive_lifetimes;
 
 type Result<T> = std::result::Result<T, Diagnostic>;
@@ -285,7 +286,7 @@ pub struct Executable {
     /// tables remain available while all other program metadata is dropped.
     pub(crate) _grade_algebras: Vec<std::sync::Arc<crate::grades::Algebra>>,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Function {
     pub name: String,
     /// Number of initial locals that are runtime parameters. For a capturing
@@ -333,6 +334,11 @@ pub(crate) struct Function {
     /// place was created. The ownership pass uses them to keep two element
     /// references into one array, vector, or view live together.
     pub index_relations: BTreeSet<(usize, usize)>,
+    /// Local slot receiving each physical capture and parameter, in ABI order.
+    /// `None` is the ordinary layout `0..parameters`. Continuation functions
+    /// synthesized by `crate::suspend` keep the enclosing function's slot
+    /// numbering and receive their captures at those slots.
+    pub parameter_slots: Option<Vec<usize>>,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Local {
@@ -348,13 +354,13 @@ pub(crate) struct Local {
     pub grade: Option<Grade>,
     pub span: Span,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Block {
     pub statements: Vec<Statement>,
     pub tail: Option<Box<Expr>>,
     pub ty: Type,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Statement {
     Let(usize, Expr),
     /// Declare hidden backing storage for a temporary owner without
@@ -364,7 +370,7 @@ pub(crate) enum Statement {
     Declare(usize),
     Expr(Expr),
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Expr {
     pub kind: ExprKind,
     pub ty: Type,
@@ -863,7 +869,7 @@ pub(crate) enum DynArrayOp {
     Get,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum ExprKind {
     Constant(i64),
     BytesLiteral(Vec<u8>),
@@ -1172,6 +1178,38 @@ pub(crate) enum ExprKind {
         resume: Box<Expr>,
         handler: usize,
     },
+    /// A handled body whose handler is not statically tail-resumptive and
+    /// that performs its operation outside the body's tail. Produced by the
+    /// checker and checked by ownership and grades in this structured form;
+    /// `crate::suspend::lower` replaces it by a `Region` plus one continuation
+    /// closure per suspension point (see `docs/effect-state-machines.md`).
+    Suspendable(Box<Suspendable>),
+    /// One suspension point of the innermost enclosing `Suspendable`. It has
+    /// the operation result type and, after the checker's ANF step, is always
+    /// the whole value of a `let`, an expression statement, or a block tail.
+    /// `call` is the handler call `CallIndirect(handler, [payload,
+    /// Erased(token)])`, so ownership and grades check a suspension exactly
+    /// like a call of the handler; the lowering supplies the real token.
+    Suspend {
+        point: usize,
+        call: Box<Expr>,
+    },
+    /// Lowered form only: a block that `RegionExit` can leave from any depth.
+    /// A normal completion yields the body value, applied to `finish` when
+    /// present. An exit pops the dynamic handler frames installed inside.
+    Region {
+        body: Block,
+        finish: Option<Box<Expr>>,
+    },
+    /// Lowered form only: evaluate `value`, drop the active resources listed
+    /// in `cleanup`, pop handler frames installed inside the region, and leave
+    /// the innermost `Region` with the value (applied to its `finish` when
+    /// `finish` is set).
+    RegionExit {
+        value: Box<Expr>,
+        finish: bool,
+        cleanup: Vec<usize>,
+    },
     /// Append one element, consuming and returning the same inline storage.
     /// The runtime length check panics before any out-of-capacity store.
     DynArrayPush {
@@ -1266,7 +1304,28 @@ pub(crate) enum ExprKind {
     Break(Option<Box<Expr>>, Vec<usize>),
     Continue(Vec<usize>),
 }
-#[derive(Debug)]
+/// The checked description of a suspendable handled body.
+#[derive(Debug, Clone)]
+pub(crate) struct Suspendable {
+    /// Operation result type, which is also the body result type.
+    pub result: Type,
+    /// The resumption token type handed to the handler.
+    pub token: Type,
+    pub multishot: bool,
+    /// Scalar locals the handler can write through a by-reference capture.
+    pub handler_writes: Vec<usize>,
+    /// Effect row available at the handle site.
+    pub effects: u16,
+    /// Per local slot of the enclosing function (as of the handle): the
+    /// value holds a borrow (view, text, reference, borrowed record, or task
+    /// handle) and cannot live across a suspension.
+    pub borrowed: Vec<bool>,
+    /// Per local slot: the value is copyable (neither owning nor linear).
+    pub copyable: Vec<bool>,
+    pub body: Block,
+    pub span: Span,
+}
+#[derive(Debug, Clone)]
 pub(crate) struct Arm {
     pub pattern: Pattern,
     pub guard: Option<Expr>,
@@ -1458,6 +1517,15 @@ impl Expr {
                 }
             }
             ExprKind::Block(b) | ExprKind::Loop(b) => block(b, f),
+            ExprKind::Suspendable(suspendable) => block(&suspendable.body, f),
+            ExprKind::Suspend { call, .. } => f(call),
+            ExprKind::Region { body, finish, .. } => {
+                block(body, f);
+                if let Some(finish) = finish {
+                    f(finish);
+                }
+            }
+            ExprKind::RegionExit { value, .. } => f(value),
             ExprKind::If(condition, yes, no) => {
                 f(condition);
                 block(yes, f);
@@ -1474,6 +1542,224 @@ impl Expr {
                         f(guard);
                     }
                     f(&arm.body);
+                }
+            }
+            ExprKind::HandlerPush { handler, body, .. } => {
+                f(handler);
+                block(body, f);
+            }
+            ExprKind::Slice {
+                base, start, end, ..
+            } => {
+                f(base);
+                if let Some(start) = start {
+                    f(start);
+                }
+                if let Some(end) = end {
+                    f(end);
+                }
+            }
+        }
+    }
+    /// Mutable twin of `for_each_child`; same children in the same order.
+    pub(crate) fn for_each_child_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        fn block(b: &mut Block, f: &mut dyn FnMut(&mut Expr)) {
+            for statement in &mut b.statements {
+                match statement {
+                    Statement::Let(_, value) | Statement::Expr(value) => f(value),
+                    Statement::Declare(_) => {}
+                }
+            }
+            if let Some(tail) = &mut b.tail {
+                f(tail);
+            }
+        }
+        match &mut self.kind {
+            ExprKind::Constant(_)
+            | ExprKind::BytesLiteral(_)
+            | ExprKind::Erased(_)
+            | ExprKind::Local(_)
+            | ExprKind::Move(_)
+            | ExprKind::Borrow(_)
+            | ExprKind::Peek(_)
+            | ExprKind::ArenaNew
+            | ExprKind::TaskYield
+            | ExprKind::TaskCheckCancel
+            | ExprKind::DynArrayNew { .. }
+            | ExprKind::Break(None, _)
+            | ExprKind::Continue(_) => {}
+            ExprKind::Coerce { value, .. }
+            | ExprKind::Try { value, .. }
+            | ExprKind::BoxNew(value)
+            | ExprKind::BoxTake(value)
+            | ExprKind::BoxRead(value)
+            | ExprKind::BoxTryNew { value, .. }
+            | ExprKind::BytesTryWithCapacity {
+                capacity: value, ..
+            }
+            | ExprKind::ArenaNewWith { strategy: value }
+            | ExprKind::AllocBoxRead(value)
+            | ExprKind::AllocBoxTake(value)
+            | ExprKind::ArenaBoxRead(value)
+            | ExprKind::ArenaBoxTake(value)
+            | ExprKind::Drop(value)
+            | ExprKind::Unary(_, value)
+            | ExprKind::Assign(_, value)
+            | ExprKind::RefRead(value)
+            | ExprKind::Return(value)
+            | ExprKind::TaskSpawn { body: value, .. }
+            | ExprKind::TaskScope { body: value, .. }
+            | ExprKind::TaskCancel(value)
+            | ExprKind::TaskJoin { task: value, .. }
+            | ExprKind::DynArrayPop { array: value, .. }
+            | ExprKind::Project(value, _)
+            | ExprKind::BorrowField(value)
+            | ExprKind::BorrowPlace(value)
+            | ExprKind::InitOwner { value, .. }
+            | ExprKind::BorrowInit { value, .. }
+            | ExprKind::Break(Some(value), _) => f(value),
+            ExprKind::PlaceIndex { base, index, .. } => {
+                f(base);
+                f(index);
+            }
+            ExprKind::BoxWrite(a, b)
+            | ExprKind::DerefWrite(a, b)
+            | ExprKind::BoxReuse {
+                owner: a,
+                payload: b,
+            }
+            | ExprKind::BoxReuseGrow {
+                owner: a,
+                payload: b,
+            }
+            | ExprKind::BoxTryReuse {
+                owner: a,
+                payload: b,
+                ..
+            }
+            | ExprKind::ArenaAlloc { arena: a, value: b }
+            | ExprKind::ArenaTryAlloc {
+                arena: a, value: b, ..
+            }
+            | ExprKind::AllocBoxNew {
+                allocator: a,
+                value: b,
+            }
+            | ExprKind::AllocBoxTryNew {
+                allocator: a,
+                value: b,
+                ..
+            }
+            | ExprKind::Binary(_, a, b)
+            | ExprKind::StructEq {
+                left: a, right: b, ..
+            }
+            | ExprKind::RefAssign(a, _, b)
+            | ExprKind::RefWrite(a, b)
+            | ExprKind::DynamicPerform {
+                payload: a,
+                resume: b,
+                ..
+            }
+            | ExprKind::DynArrayPush {
+                array: a, value: b, ..
+            }
+            | ExprKind::DynArrayFill {
+                length: a,
+                value: b,
+                ..
+            }
+            | ExprKind::DynArrayEqual {
+                left: a, right: b, ..
+            }
+            | ExprKind::BytesAt(a, b) => {
+                f(a);
+                f(b);
+            }
+            ExprKind::AllocatorNew {
+                alloc,
+                free,
+                realloc,
+            } => {
+                f(alloc);
+                f(free);
+                if let Some(realloc) = realloc {
+                    f(realloc);
+                }
+            }
+            ExprKind::AllocatorContextNew { value, .. }
+            | ExprKind::AllocatorContextShare(value) => {
+                f(value);
+            }
+            ExprKind::AllocVecNew {
+                allocator,
+                capacity,
+                ..
+            } => {
+                f(allocator);
+                if let Some(capacity) = capacity {
+                    f(capacity);
+                }
+            }
+            ExprKind::DynArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                f(array);
+                f(index);
+                f(value);
+            }
+            ExprKind::Construct { fields: items, .. }
+            | ExprKind::Call(_, items)
+            | ExprKind::FnValue {
+                captures: items, ..
+            } => {
+                for item in items.iter_mut() {
+                    f(item);
+                }
+            }
+            ExprKind::CallIndirect { callee, arguments } => {
+                f(callee);
+                for argument in arguments.iter_mut() {
+                    f(argument);
+                }
+            }
+            ExprKind::VecMap {
+                vector, callbacks, ..
+            } => {
+                f(vector);
+                for callback in callbacks.iter_mut() {
+                    f(callback);
+                }
+            }
+            ExprKind::Block(b) | ExprKind::Loop(b) => block(b, f),
+            ExprKind::Suspendable(suspendable) => block(&mut suspendable.body, f),
+            ExprKind::Suspend { call, .. } => f(call),
+            ExprKind::Region { body, finish, .. } => {
+                block(body, f);
+                if let Some(finish) = finish {
+                    f(finish);
+                }
+            }
+            ExprKind::RegionExit { value, .. } => f(value),
+            ExprKind::If(condition, yes, no) => {
+                f(condition);
+                block(yes, f);
+                block(no, f);
+            }
+            ExprKind::While(condition, body) => {
+                f(condition);
+                block(body, f);
+            }
+            ExprKind::Match(value, arms) => {
+                f(value);
+                for arm in arms.iter_mut() {
+                    if let Some(guard) = &mut arm.guard {
+                        f(guard);
+                    }
+                    f(&mut arm.body);
                 }
             }
             ExprKind::HandlerPush { handler, body, .. } => {
@@ -2321,6 +2607,11 @@ fn fusion_expr_safe(
         // changes a reference count, so neither is an inert fusion stage.
         | ExprKind::AllocatorContextNew { .. }
         | ExprKind::AllocatorContextShare(_) => false,
+        // A suspension runs arbitrary handler code.
+        ExprKind::Suspendable(_)
+        | ExprKind::Suspend { .. }
+        | ExprKind::Region { .. }
+        | ExprKind::RegionExit { .. } => false,
         ExprKind::FnValue { function, captures } => {
             captures
                 .iter()
@@ -2556,6 +2847,17 @@ fn fuse_expr(
         ExprKind::AllocatorContextNew { value, .. } | ExprKind::AllocatorContextShare(value) => {
             fuse_expr(value, types, signatures, safety, fusions)
         }
+        ExprKind::Suspendable(suspendable) => {
+            fuse_block(&mut suspendable.body, types, signatures, safety, fusions)
+        }
+        ExprKind::Suspend { call, .. } => fuse_expr(call, types, signatures, safety, fusions),
+        ExprKind::Region { body, finish, .. } => {
+            fuse_block(body, types, signatures, safety, fusions);
+            if let Some(finish) = finish {
+                fuse_expr(finish, types, signatures, safety, fusions);
+            }
+        }
+        ExprKind::RegionExit { value, .. } => fuse_expr(value, types, signatures, safety, fusions),
         ExprKind::AllocBoxNew { allocator, value }
         | ExprKind::AllocBoxTryNew {
             allocator, value, ..
@@ -4878,7 +5180,6 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             unify_open_choice: false,
             partition_bound: BTreeSet::new(),
             row_bound: BTreeSet::new(),
-            continuation_depth: 0,
             hoisted: Vec::new(),
             next_index_place: 0,
             index_relations: BTreeSet::new(),
@@ -4990,6 +5291,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 .map(|lifetime| lifetime.name.clone())
                 .collect(),
             index_relations: checker.index_relations.clone(),
+            parameter_slots: None,
         });
     }
     // Re-check every proof certificate without the search that produced it.
@@ -5044,6 +5346,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     };
     crate::ownership::check(&mut executable)?;
     crate::grades::check(&executable)?;
+    crate::suspend::lower(&mut executable)?;
     Ok(executable)
 }
 /// A span-insensitive key for the simple expression forms admitted in erased
@@ -10460,6 +10763,7 @@ impl<'a> Functions<'a> {
                     .map(|lifetime| lifetime.name.clone())
                     .collect(),
                 index_relations: BTreeSet::new(),
+                parameter_slots: None,
             }));
         } else {
             self.bodies.push(None);
@@ -11180,17 +11484,15 @@ enum ScalarValue {
     /// stable index until [`Checker::fresh_scalar_value`] appends a binder.
     Unknown,
 }
-/// One non-tail lexical `perform` selected for continuation lowering.
-struct NonTailPerform<'a> {
-    index: usize,
-    value: &'a ast::Expr,
-    pattern: Option<&'a ast::Pattern>,
-    annotation: Option<&'a ast::Type>,
-    mutable: bool,
-}
 /// One lexical effect-handler binding. The handler is materialized in a hidden
 /// local so `perform` can call it and the ownership pass can enforce the
 /// callable's one-shot/linear contract.
+/// What `checked_effect_body` needs to build a `Suspendable` node.
+struct SuspendableSite {
+    multishot: bool,
+    handler_writes: Vec<usize>,
+    effects: u16,
+}
 struct HandlerScope {
     operation: String,
     parameter: Type,
@@ -11202,6 +11504,13 @@ struct HandlerScope {
     /// The handler accepts the copyable multishot resumption token. Only a
     /// capture-free continuation has that representation.
     multishot: bool,
+    /// Performs of this operation become `Suspend` points of a suspendable
+    /// body instead of identity-token handler calls.
+    region: bool,
+    /// Suspension points issued so far for this handle.
+    points: usize,
+    /// The handle pushes a dynamic handler frame (declared operation).
+    declared: bool,
 }
 
 struct Checker<'a, 't> {
@@ -11341,11 +11650,6 @@ struct Checker<'a, 't> {
     /// call. Parameters mentioning them are checked without a tentative
     /// expected row so a residual-row mismatch is reported by unification.
     row_bound: BTreeSet<BindingId>,
-    /// Nonzero while checking the synthesized continuation of a non-tail
-    /// effect resumption. Such a continuation must not `return`, `break`, or
-    /// `continue` out of the handled body: those control transfers would cross
-    /// the resumption boundary and have no sound lowering in this fragment.
-    continuation_depth: usize,
     /// Hidden owner bindings hoisted out of an expression so a checked
     /// reference to a temporary has real storage. Each enclosing statement
     /// list drains the entries created while checking it; the local's resource
@@ -14807,6 +15111,7 @@ impl Checker<'_, '_> {
             lifetime_bounds: witness_bounds.clone(),
             declared_lifetimes: BTreeSet::new(),
             index_relations: BTreeSet::new(),
+            parameter_slots: None,
         };
         let signature = Signature {
             call_contract: None,
@@ -18244,6 +18549,7 @@ impl Checker<'_, '_> {
             lifetime_bounds: signature.borrows.bounds.clone(),
             declared_lifetimes: BTreeSet::new(),
             index_relations: BTreeSet::new(),
+            parameter_slots: None,
         };
         let synthetic = Signature {
             call_contract: None,
@@ -22067,12 +22373,6 @@ impl Checker<'_, '_> {
                     )
                 }
                 ast::ExprKind::Return(value) => {
-                    if c.continuation_depth != 0 {
-                        return Err(Diagnostic::new(
-                            span,
-                            "a non-tail resumption continuation cannot 'return' out of the handled body; use the resumption result or restructure the handler",
-                        ));
-                    }
                     let value = if let Some(value) = value {
                         c.expr_expected_result(value, Some(c.result))?
                     } else {
@@ -22185,12 +22485,6 @@ impl Checker<'_, '_> {
                     (ExprKind::If(Box::new(condition), then, otherwise), ty)
                 }
                 ast::ExprKind::Try(value) => {
-                    if c.continuation_depth != 0 {
-                        return Err(Diagnostic::new(
-                            span,
-                            "a non-tail resumption continuation cannot use '?': it would return across the resumption; match on the result instead",
-                        ));
-                    }
                     let value = c.expr(value)?;
                     let input = c.types.result(value.ty, span)?;
                     let output = c.types.result(c.result, span)?;
@@ -23219,9 +23513,6 @@ impl Checker<'_, '_> {
         // body, never to indirect calls. A lambda is a separate callable, so it
         // cannot capture the hidden handler local by name.
         let saved_handlers = std::mem::take(&mut self.handlers);
-        // A lambda body is its own function: `return`/`?` inside it never
-        // crosses an enclosing resumption.
-        let saved_continuation_depth = std::mem::replace(&mut self.continuation_depth, 0);
         let mut child_parameter_lifetimes = capture_lifetimes.clone();
         child_parameter_lifetimes.extend(lambda_lifetimes.clone());
         let checked = (|| {
@@ -23291,7 +23582,6 @@ impl Checker<'_, '_> {
             Ok((body, obligation, written))
         })();
         self.truncate_kernel(kernel_mark);
-        self.continuation_depth = saved_continuation_depth;
         self.scope_depth = saved_scope_depth;
         self.handlers = saved_handlers;
         let locals = std::mem::take(&mut self.locals);
@@ -23370,6 +23660,7 @@ impl Checker<'_, '_> {
             lifetime_bounds: BTreeSet::new(),
             declared_lifetimes: BTreeSet::new(),
             index_relations: self.index_relations.clone(),
+            parameter_slots: None,
         };
         let index = self.functions.add_synthetic(signature, function)?;
         let ty = if once {
@@ -30368,6 +30659,13 @@ impl Checker<'_, '_> {
         }
         let handler_parameter = signature.parameters[0];
         let handler_result = signature.result;
+        // A statically tail-resumptive handler (`resume(e)` as its only use of
+        // the token, in tail position) observes no continuation: `h(p, k)` is
+        // `k(e)`, so every perform may use the identity token and continue in
+        // place. Otherwise any perform outside the body's tail suspends.
+        let region = !tail_resumptive_handler(self.resolution, handler)
+            && body_has_non_tail_perform(body, operation);
+        let handler_writes = self.closure_writes.get(&slot).cloned().unwrap_or_default();
         self.handlers.push(HandlerScope {
             operation: operation.to_owned(),
             parameter: parameter_ty,
@@ -30377,6 +30675,9 @@ impl Checker<'_, '_> {
             handler_result,
             effects: signature.effects,
             multishot,
+            region,
+            points: 0,
+            declared: declared.is_some(),
         });
         // A lexical handle discharges the declared operation's row requirement
         // for its body: the body is checked as if `Op` were available, while the
@@ -30387,17 +30688,14 @@ impl Checker<'_, '_> {
         self.effects |= operation_effect;
         let checked = self.checked_effect_body(
             body,
-            operation,
-            parameter_ty,
             result_ty,
             expected,
             span,
-            slot,
-            handler_type,
-            handler_parameter,
-            handler_result,
-            signature.effects,
-            multishot,
+            region.then_some(SuspendableSite {
+                multishot,
+                handler_writes,
+                effects: saved_effects,
+            }),
         );
         self.effects = saved_effects;
         self.handlers.pop();
@@ -30507,396 +30805,76 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
-    /// Check the body of a lexical handler, choosing between tail-resumptive
-    /// lowering and a real one-shot continuation.
+    /// Check the body of a lexical handler.
     ///
-    /// A `perform` in tail position has an empty continuation, so the identity
-    /// resumption token is exactly the right semantics and needs no allocation.
-    /// A `perform` that is the whole value of a top-level `let`/expression
-    /// statement has a real continuation: the rest of the handled body is
-    /// checked as a separate `linear once fn(R) -> R` closure that captures the
-    /// values live at the perform point. The handler may then do work after
-    /// `resume(x)` returns, and `resume(x)` returns the result of the remaining
-    /// body. Other placements are explicit rejections rather than silently
-    /// falling back to identity semantics.
-    #[allow(clippy::too_many_arguments)]
+    /// Without a suspendable site every perform resolves to an identity-token
+    /// handler call (`perform_effect`). With one, performs became `Suspend`
+    /// points; the body is put in A-normal form so each point is a statement
+    /// value, and wrapped in a `Suspendable` node that `crate::suspend`
+    /// lowers after ownership and grades have checked it as written.
     fn checked_effect_body(
         &mut self,
         body: &ast::Block,
-        operation: &str,
-        parameter_ty: Type,
         result_ty: Type,
         expected: Option<Type>,
         span: Span,
-        slot: usize,
-        handler_ty: Type,
-        handler_parameter: Type,
-        handler_result: Type,
-        effects: u16,
-        multishot: bool,
+        site: Option<SuspendableSite>,
     ) -> Result<Block> {
-        let unsupported = || {
-            Diagnostic::new(
-                span,
-                "a non-tail 'perform' must be the entire value of a top-level 'let' or expression statement of the handled body; bind intermediate subexpressions first, or use a declared 'effect' with a called function",
-            )
-        };
-        let tail_perform = body.tail.as_deref().filter(|tail| {
-            matches!(&tail.kind, ast::ExprKind::Perform { operation: name, .. } if name == operation)
-        });
-        if tail_perform.is_some() {
-            for statement in &body.statements {
-                let value = match statement {
-                    ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => value,
-                };
-                if contains_lexical_perform(value, operation) {
-                    return Err(unsupported());
-                }
-            }
-            return self.block(body, expected);
-        }
-        if body
-            .tail
-            .as_deref()
-            .is_some_and(|tail| contains_lexical_perform(tail, operation))
-        {
-            return Err(unsupported());
-        }
-        let mut perform: Option<NonTailPerform> = None;
-        for (index, statement) in body.statements.iter().enumerate() {
-            let (value, pattern, ty, mutable) = match statement {
-                ast::Statement::Let {
-                    value,
-                    pattern,
-                    ty,
-                    mutable,
-                    ..
-                } => (value, Some(pattern), ty.as_ref(), *mutable),
-                ast::Statement::Expr(value) => (value, None, None, false),
-            };
-            if matches!(&value.kind, ast::ExprKind::Perform { operation: name, .. } if name == operation)
-            {
-                if perform.is_some() {
-                    return Err(unsupported());
-                }
-                perform = Some(NonTailPerform {
-                    index,
-                    value,
-                    pattern,
-                    annotation: ty,
-                    mutable,
-                });
-            } else if contains_lexical_perform(value, operation) {
-                return Err(unsupported());
-            }
-        }
-        let Some(perform) = perform else {
+        let Some(site) = site else {
             return self.block(body, expected);
         };
-        let NonTailPerform {
-            index,
-            value: perform_value,
-            pattern,
-            annotation,
-            mutable,
-        } = perform;
-        let ast::ExprKind::Perform { value, .. } = &perform_value.kind else {
-            unreachable!("perform shape checked above")
-        };
-        let prefix = self.statements(&body.statements[..index], None, span, Some(Type::Unit))?;
-        if prefix.ty == Type::Never {
-            return Err(Diagnostic::new(
-                span,
-                "this perform is unreachable because the preceding statements diverge",
-            ));
-        }
-        self.require(effects, span)?;
-        let payload = self.expr_expected(value, Some(parameter_ty))?;
-        let payload = self.coerce_argument(payload, handler_parameter, span)?;
-        let mut result_slot = None;
-        let mut result_id = None;
-        if let Some(pattern) = pattern {
-            let ast::PatternKind::Name(path) = &pattern.kind else {
-                return Err(Diagnostic::new(
-                    pattern.span,
-                    "a non-tail resumption result must be bound by a simple name",
-                ));
-            };
-            if path.len() != 1 || self.is_constructor_pattern(pattern) {
-                return Err(Diagnostic::new(
-                    pattern.span,
-                    "a non-tail resumption result must be bound by a simple name",
-                ));
-            }
-            let grade = match annotation {
-                Some(annotation) => {
-                    let (inner, grade) = split_grade(annotation);
-                    let inner_ty = self.ty(inner)?;
-                    self.expect(result_ty, inner_ty, pattern.span)?;
-                    grade
-                        .map(|grade| grades::evaluate(self.resolution, &self.grades, grade))
-                        .transpose()?
-                }
-                None => None,
-            };
-            let slot = self.bind(pattern.span, result_ty, mutable)?;
-            self.locals[slot].grade = grade;
-            let id = self.resolution.binder(pattern.span).unwrap();
-            self.admit_scalar_index(id, result_ty, pattern.span)?;
-            result_slot = Some(slot);
-            result_id = Some(id);
-        }
-        let suffix = &body.statements[index + 1..];
-        let mut references = BTreeSet::new();
-        for statement in suffix {
-            match statement {
-                ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
-                    collect_expr_refs(self.resolution, value, &mut references)
-                }
-            }
-        }
-        if let Some(tail) = &body.tail {
-            collect_expr_refs(self.resolution, tail, &mut references);
-        }
-        let captures = references
-            .iter()
-            .filter_map(|id| self.slots.get(id).copied())
-            .filter(|slot| Some(*slot) != result_slot)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        // The handler can write before invoking the resumed suffix.
-        self.apply_handler_writes(slot);
-        let resume = self.resumption_continuation(
-            captures,
-            (result_id, result_ty, mutable),
-            suffix,
-            body.tail.as_deref(),
-            span,
-            multishot,
-        )?;
-        let handler = Expr {
-            kind: ExprKind::Local(slot),
-            ty: handler_ty,
-            span,
-            resource: None,
-        };
-        let call = Expr {
-            kind: ExprKind::CallIndirect {
-                callee: Box::new(handler),
-                arguments: vec![payload, resume],
-            },
-            ty: handler_result,
-            span,
-            resource: None,
-        };
-        let call = self.coerce(call, result_ty, span)?;
-        let call = match expected {
-            Some(expected) => self.coerce(call, expected, span)?,
-            None => call,
-        };
-        let ty = call.ty;
-        Ok(Block {
-            statements: prefix.statements,
-            tail: Some(Box::new(call)),
-            ty,
-        })
-    }
-    /// Build the one-shot continuation closure for a non-tail perform. The
-    /// closure is a `linear once fn(R) -> R` whose environment holds the values
-    /// live at the perform point; it is consumed by the handler's resumption
-    /// token. The closure body is the remaining handled body checked with the
-    /// operation result bound to the single call parameter.
-    fn resumption_continuation(
-        &mut self,
-        captures: Vec<usize>,
-        // The perform's result binding: its name, type, and `mut`-ness.
-        (result_id, result_ty, result_mutable): (Option<crate::resolve::BindingId>, Type, bool),
-        statements: &[ast::Statement],
-        tail: Option<&ast::Expr>,
-        span: Span,
-        multishot: bool,
-    ) -> Result<Expr> {
-        if multishot && !captures.is_empty() {
-            return Err(Diagnostic::new(
-                span,
-                "multishot resumption requires a continuation with no captured values; the copyable resumption token cannot own an environment. Copy the needed values into the operation payload or use a one-shot 'linear once fn' handler",
-            ));
-        }
         if self.linear_type(result_ty) {
             return Err(Diagnostic::new(
                 span,
                 "non-tail resumption of a linear operation result is not supported; return an owning value through the resumption or use a tail-resuming handler",
             ));
         }
-        for slot in &captures {
-            let local = self.locals[*slot];
-            let ty = local.ty;
-            if ty.is_view()
-                || ty.is_ref()
-                || ty.is_text()
-                || crate::runtime_types::has_borrow(self.types, ty)
-                || crate::runtime_types::contains_task(self.types, ty)
-            {
-                return Err(Diagnostic::new(
-                    span,
-                    "a non-tail resumption continuation cannot capture a borrowed view, reference, task handle, or borrowed record; pass the borrowed value to a named function instead",
-                )
-                .with_note(local.span, "captured value declared here"));
-            }
-            if local.mutable {
-                return Err(Diagnostic::new(
-                    span,
-                    "a non-tail resumption continuation cannot capture a mutable local; copy the value into an immutable local before the perform",
-                )
-                .with_note(local.span, "mutable capture declared here"));
-            }
-            if local.grade.is_some_and(Grade::is_zero) {
-                return Err(Diagnostic::new(
-                    span,
-                    "a non-tail resumption continuation cannot capture a value graded @[0]",
-                )
-                .with_note(local.span, "grade @[0] binding declared here"));
-            }
-        }
-        let capture_types = captures
+        let mut block = self.block(body, Some(result_ty))?;
+        self.expect(block.ty, result_ty, span)?;
+        self.anf_block(&mut block)?;
+        let token = self.resume_type(result_ty, site.multishot);
+        let borrowed = self
+            .locals
             .iter()
-            .map(|slot| self.locals[*slot].ty)
-            .collect::<Vec<_>>();
-        let capture_obligations = captures
-            .iter()
-            .map(|slot| {
-                let local = self.locals[*slot];
-                local.linear || local.grade.is_some_and(Grade::is_one) || self.linear_type(local.ty)
+            .map(|local| {
+                let ty = local.ty;
+                ty.is_view()
+                    || ty.is_ref()
+                    || ty.is_text()
+                    || crate::runtime_types::has_borrow(self.types, ty)
+                    || crate::runtime_types::contains_task(self.types, ty)
             })
-            .collect::<Vec<_>>();
-        let capture_grades = captures
+            .collect();
+        let copyable = self
+            .locals
             .iter()
-            .map(|slot| self.locals[*slot].grade)
-            .collect::<Vec<_>>();
-        let capture_spans = captures
-            .iter()
-            .map(|slot| self.locals[*slot].span)
-            .collect::<Vec<_>>();
-        let capture_expressions = captures
-            .iter()
-            .map(|slot| Expr {
-                kind: ExprKind::Local(*slot),
-                ty: self.locals[*slot].ty,
-                span: self.locals[*slot].span,
-                resource: None,
-            })
-            .collect::<Vec<_>>();
-        let capture_ids = captures
-            .iter()
-            .map(|slot| {
-                self.slots
-                    .iter()
-                    .find(|(_, outer)| *outer == slot)
-                    .map(|(id, _)| *id)
-            })
-            .collect::<Vec<_>>();
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_slots = std::mem::take(&mut self.slots);
-        let saved_result = self.result;
-        let saved_result_grade = self.result_grade;
-        let saved_effects = self.effects;
-        let saved_loops = std::mem::take(&mut self.loops);
-        let saved_facts = std::mem::take(&mut self.facts);
-        let saved_written = std::mem::take(&mut self.written_slots);
-        let saved_closure_writes = std::mem::take(&mut self.closure_writes);
-        let saved_handlers = std::mem::take(&mut self.handlers);
-        let saved_scope_depth = self.scope_depth;
-        let kernel_mark = self.kernel_locals.len();
-        self.continuation_depth += 1;
-        let checked = (|| {
-            let mut locals = Vec::new();
-            for (index, ty) in capture_types.iter().enumerate() {
-                locals.push(Local {
-                    ty: *ty,
-                    mutable: false,
-                    linear: capture_obligations[index],
-                    pinned: false,
-                    grade: capture_grades[index],
-                    span: capture_spans[index],
-                });
-            }
-            let result_slot = locals.len();
-            locals.push(Local {
-                ty: result_ty,
-                mutable: result_mutable,
-                linear: false,
-                pinned: false,
-                grade: None,
+            .map(|local| !local.linear && !self.owned_type(local.ty) && !self.linear_type(local.ty))
+            .collect();
+        let suspendable = Expr {
+            kind: ExprKind::Suspendable(Box::new(Suspendable {
+                result: result_ty,
+                token,
+                multishot: site.multishot,
+                handler_writes: site.handler_writes,
+                effects: site.effects,
+                borrowed,
+                copyable,
+                body: block,
                 span,
-            });
-            let mut slots = BTreeMap::new();
-            for (index, id) in capture_ids.iter().enumerate() {
-                if let Some(id) = id {
-                    slots.insert(*id, index);
-                }
-            }
-            if let Some(id) = result_id {
-                slots.insert(id, result_slot);
-            }
-            self.locals = locals;
-            self.slots = slots;
-            self.result = result_ty;
-            self.result_grade = None;
-            self.effects = saved_effects;
-            self.loops.clear();
-            self.facts = crate::facts::Facts::default();
-            self.scope_depth = 0;
-            if let Some(id) = result_id {
-                self.admit_scalar_index(id, result_ty, span)?;
-            }
-            let body = self.statements(statements, tail, span, Some(result_ty))?;
-            self.expect(body.ty, result_ty, span)?;
-            Ok(body)
-        })();
-        self.truncate_kernel(kernel_mark);
-        self.continuation_depth -= 1;
-        self.scope_depth = saved_scope_depth;
-        self.handlers = saved_handlers;
-        let locals = std::mem::take(&mut self.locals);
-        self.locals = saved_locals;
-        self.slots = saved_slots;
-        self.result = saved_result;
-        self.result_grade = saved_result_grade;
-        self.effects = saved_effects;
-        self.loops = saved_loops;
-        self.facts = saved_facts;
-        self.written_slots = saved_written;
-        self.closure_writes = saved_closure_writes;
-        let body = checked?;
-        if !captures.is_empty() {
-            // Building an environment is a real allocation.
-            self.require(ALLOC | PANIC, span)?;
-        }
-        let ty = self.resume_type(result_ty, multishot);
-        let (id, env_parameter) = match ty {
-            Type::Once(id) => (id, true),
-            Type::Fn(id) => (id, false),
-            _ => unreachable!("resume type is callable"),
-        };
-        let signature = self.types.function_types[id].clone();
-        let function = self.register_adapter(
-            "effect resumption",
-            &signature,
-            capture_types,
-            env_parameter,
-            locals,
-            body,
-            span,
-        )?;
-        Ok(Expr {
-            kind: ExprKind::FnValue {
-                function,
-                captures: capture_expressions,
-            },
-            ty,
+            })),
+            ty: result_ty,
             span,
             resource: None,
+        };
+        let value = match expected {
+            Some(expected) => self.coerce(suspendable, expected, span)?,
+            None => suspendable,
+        };
+        let ty = value.ty;
+        Ok(Block {
+            statements: vec![],
+            tail: Some(Box::new(value)),
+            ty,
         })
     }
     /// Check a direct `perform` against the innermost lexical handler.
@@ -30908,12 +30886,12 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Expr> {
         let operation_effect = self.operation_effect(operation);
-        if let Some(scope) = self
+        if let Some(index) = self
             .handlers
             .iter()
-            .rev()
-            .find(|scope| scope.operation == operation)
+            .rposition(|scope| scope.operation == operation)
         {
+            let scope = &self.handlers[index];
             let (parameter, result, slot, handler_parameter, handler_result, effects, multishot) = (
                 scope.parameter,
                 scope.result,
@@ -30923,11 +30901,66 @@ impl Checker<'_, '_> {
                 scope.effects,
                 scope.multishot,
             );
+            let region = scope.region;
             let handler_ty = self.locals[slot].ty;
+            if region
+                && let Some(inner) = self.handlers[index + 1..]
+                    .iter()
+                    .find(|inner| inner.region || inner.declared)
+            {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "a non-tail 'perform {operation}' inside the body of a nested 'handle {}' is not supported: resuming it would have to reinstate the inner handler; perform it outside the nested handle or make the outer handler tail-resumptive",
+                        inner.operation
+                    ),
+                ));
+            }
             self.require(effects | operation_effect, span)?;
             let payload = self.expr_expected(value, Some(parameter))?;
             let payload = self.coerce_argument(payload, handler_parameter, span)?;
             self.apply_handler_writes(slot);
+            if region {
+                self.handlers[index].points += 1;
+                let point = self.handlers[index].points;
+                let token = self.resume_type(result, multishot);
+                let call = Expr {
+                    kind: ExprKind::CallIndirect {
+                        callee: Box::new(Expr {
+                            kind: ExprKind::Local(slot),
+                            ty: handler_ty,
+                            span,
+                            resource: None,
+                        }),
+                        arguments: vec![
+                            payload,
+                            Expr {
+                                kind: ExprKind::Erased(token),
+                                ty: token,
+                                span,
+                                resource: None,
+                            },
+                        ],
+                    },
+                    ty: handler_result,
+                    span,
+                    resource: None,
+                };
+                let call = self.coerce(call, result, span)?;
+                let suspend = Expr {
+                    kind: ExprKind::Suspend {
+                        point,
+                        call: Box::new(call),
+                    },
+                    ty: result,
+                    span,
+                    resource: None,
+                };
+                return match expected {
+                    Some(expected) => self.coerce(suspend, expected, span),
+                    None => Ok(suspend),
+                };
+            }
             let resume = self.resume_value(result, multishot, span)?;
             let call = Expr {
                 kind: ExprKind::CallIndirect {
@@ -33235,6 +33268,99 @@ fn block_allocates(block: &Block) -> bool {
 /// operation shadow the outer one, and lambdas are separate callables that do
 /// not inherit a lexical handler. Used only to classify the handled body before
 /// choosing the tail-resumptive or continuation lowering.
+/// Whether a handler is a lambda whose resumption token is used only as
+/// `resume(e)` in tail position, with `e` and every statement independent of
+/// the token. Such a handler computes `h(p, k) = k(e)`, so resuming with the
+/// identity token and continuing in place is the same computation.
+fn tail_resumptive_handler(resolution: &Resolution, handler: &ast::Expr) -> bool {
+    let ast::ExprKind::Lambda(lambda) = &handler.kind else {
+        return false;
+    };
+    let Some(token) = lambda
+        .parameters
+        .get(1)
+        .and_then(|parameter| resolution.binder(parameter.span))
+    else {
+        return false;
+    };
+    let mentions = |expr: &ast::Expr| {
+        let mut refs = BTreeSet::new();
+        collect_expr_refs(resolution, expr, &mut refs);
+        refs.contains(&token)
+    };
+    fn statement_value(statement: &ast::Statement) -> &ast::Expr {
+        match statement {
+            ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => value,
+        }
+    }
+    fn tail(
+        resolution: &Resolution,
+        token: BindingId,
+        mentions: &dyn Fn(&ast::Expr) -> bool,
+        expr: &ast::Expr,
+    ) -> bool {
+        match &expr.kind {
+            ast::ExprKind::Call { callee, arguments } => {
+                resolution.reference(callee.span) == Some(token)
+                    && matches!(callee.kind, ast::ExprKind::Name(_))
+                    && arguments.len() == 1
+                    && !mentions(&arguments[0])
+            }
+            ast::ExprKind::Block(block) => block_tail(resolution, token, mentions, block),
+            ast::ExprKind::If {
+                condition,
+                then,
+                otherwise,
+            } => {
+                !mentions(condition)
+                    && block_tail(resolution, token, mentions, then)
+                    && otherwise
+                        .as_deref()
+                        .is_some_and(|otherwise| tail(resolution, token, mentions, otherwise))
+            }
+            ast::ExprKind::Match { value, arms } => {
+                !mentions(value)
+                    && arms.iter().all(|arm| {
+                        arm.guard.as_ref().is_none_or(|guard| !mentions(guard))
+                            && tail(resolution, token, mentions, &arm.body)
+                    })
+            }
+            ast::ExprKind::Return(Some(value)) => tail(resolution, token, mentions, value),
+            _ => false,
+        }
+    }
+    fn block_tail(
+        resolution: &Resolution,
+        token: BindingId,
+        mentions: &dyn Fn(&ast::Expr) -> bool,
+        block: &ast::Block,
+    ) -> bool {
+        block
+            .statements
+            .iter()
+            .all(|statement| !mentions(statement_value(statement)))
+            && block
+                .tail
+                .as_deref()
+                .is_some_and(|value| tail(resolution, token, mentions, value))
+    }
+    block_tail(resolution, token, &mentions, &lambda.body)
+}
+/// Whether a handled body performs `operation` lexically anywhere other than
+/// as the body's whole tail expression (which keeps the identity token).
+fn body_has_non_tail_perform(body: &ast::Block, operation: &str) -> bool {
+    body.statements.iter().any(|statement| match statement {
+        ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
+            contains_lexical_perform(value, operation)
+        }
+    }) || body.tail.as_deref().is_some_and(|tail| match &tail.kind {
+        ast::ExprKind::Perform {
+            operation: name,
+            value,
+        } if name == operation => contains_lexical_perform(value, operation),
+        _ => contains_lexical_perform(tail, operation),
+    })
+}
 fn contains_lexical_perform(expr: &ast::Expr, operation: &str) -> bool {
     match &expr.kind {
         ast::ExprKind::Perform {

@@ -6908,6 +6908,11 @@ impl Checker<'_> {
                 self.expr(handler)?;
                 self.block(body)?;
             }
+            ExprKind::Suspendable(suspendable) => self.block(&mut suspendable.body)?,
+            ExprKind::Suspend { call, .. } => self.expr(call)?,
+            ExprKind::Region { .. } | ExprKind::RegionExit { .. } => {
+                unreachable!("ownership runs before suspendable bodies are lowered")
+            }
             ExprKind::DynamicPerform {
                 payload, resume, ..
             } => {
@@ -7918,6 +7923,22 @@ fn expr_live(
         ExprKind::HandlerPush { handler, body, .. } => {
             live = block_live(body, live_after, views, heads, exits, out);
             live = expr_live(handler, &live, views, heads, exits, out);
+        }
+        ExprKind::Suspendable(suspendable) => {
+            live = block_live(&suspendable.body, live_after, views, heads, exits, out);
+        }
+        ExprKind::Suspend { call, .. } => {
+            live = expr_live(call, live_after, views, heads, exits, out);
+        }
+        ExprKind::Region { body, finish, .. } => {
+            let after = match finish {
+                Some(finish) => expr_live(finish, live_after, views, heads, exits, out),
+                None => live_after.clone(),
+            };
+            live = block_live(body, &after, views, heads, exits, out);
+        }
+        ExprKind::RegionExit { value, .. } => {
+            live = expr_live(value, live_after, views, heads, exits, out);
         }
         ExprKind::DynamicPerform {
             payload, resume, ..
