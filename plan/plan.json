@@ -986,10 +986,26 @@
         "TRAITS",
         "BORROW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Hidden temporary receiver owner extended like Rust temporary lifetime extension.",
-      "commit": null,
-      "log": []
+      "commit": "f8f72c4",
+      "log": [
+        {
+          "time": "2026-11-05 14:35:58",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 14:50:35",
+          "who": "agent",
+          "text": "Hidden statement storage for temporary/owned object receivers (f8f72c4); local trait suites pass; Boat gate running."
+        },
+        {
+          "time": "2026-11-05 14:58:33",
+          "who": "agent",
+          "text": "Temporary/owned object receivers live in hidden block storage (like &temp()); receiver-tied and elided views checked like local views. Boat gate: 1481 tests, fmt, clippy."
+        }
+      ]
     },
     {
       "id": "D-TEMP-VIEW",
@@ -1001,10 +1017,16 @@
         "D-TEMP-SCOPE",
         "LT-SOLVER"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "f8f72c4",
+      "log": [
+        {
+          "time": "2026-11-05 14:58:33",
+          "who": "agent",
+          "text": "Temporary/owned object receivers live in hidden block storage (like &temp()); receiver-tied and elided views checked like local views. Boat gate: 1481 tests, fmt, clippy."
+        }
+      ]
     },
     {
       "id": "D-OWNED-VIEW",
@@ -1015,10 +1037,16 @@
       "deps": [
         "D-TEMP-SCOPE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Move the payload into hidden storage that outlives the view.",
-      "commit": null,
-      "log": []
+      "commit": "f8f72c4",
+      "log": [
+        {
+          "time": "2026-11-05 14:58:34",
+          "who": "agent",
+          "text": "Temporary/owned object receivers live in hidden block storage (like &temp()); receiver-tied and elided views checked like local views. Boat gate: 1481 tests, fmt, clippy."
+        }
+      ]
     },
     {
       "id": "D-PROJ-MUT",
@@ -1029,10 +1057,16 @@
       "deps": [
         "TRAITS"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "`pair.0.bump()` via place references, no ownership duplication, writes kept.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 14:50:36",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "D-PROJ-CONSUME",
