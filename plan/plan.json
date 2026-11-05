@@ -1147,9 +1147,9 @@
       "deps": [
         "TRAITS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "fa13f85",
       "log": [
         {
           "time": "2026-11-05 15:33:41",
@@ -1170,6 +1170,11 @@
           "time": "2026-11-05 15:44:32",
           "who": "agent",
           "text": "Implemented together in fa13f85 (syntax, per-component tables, dispatch + upcast); dyn_objects.rs multi tests pass locally, clippy clean; Boat gate running."
+        },
+        {
+          "time": "2026-11-05 15:52:27",
+          "who": "agent",
+          "text": "Boat gate at fa13f85: 1494 tests, fmt, clippy pass."
         }
       ]
     },
@@ -1182,9 +1187,9 @@
       "deps": [
         "D-MULTI-SYNTAX"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "fa13f85",
       "log": [
         {
           "time": "2026-11-05 15:44:33",
@@ -1195,6 +1200,11 @@
           "time": "2026-11-05 15:44:33",
           "who": "agent",
           "text": "Implemented together in fa13f85 (syntax, per-component tables, dispatch + upcast); dyn_objects.rs multi tests pass locally, clippy clean; Boat gate running."
+        },
+        {
+          "time": "2026-11-05 15:52:27",
+          "who": "agent",
+          "text": "Boat gate at fa13f85: 1494 tests, fmt, clippy pass."
         }
       ]
     },
@@ -1207,9 +1217,9 @@
       "deps": [
         "D-MULTI-LAYOUT"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "fa13f85",
       "log": [
         {
           "time": "2026-11-05 15:44:33",
@@ -1220,6 +1230,11 @@
           "time": "2026-11-05 15:44:34",
           "who": "agent",
           "text": "Implemented together in fa13f85 (syntax, per-component tables, dispatch + upcast); dyn_objects.rs multi tests pass locally, clippy clean; Boat gate running."
+        },
+        {
+          "time": "2026-11-05 15:52:27",
+          "who": "agent",
+          "text": "Boat gate at fa13f85: 1494 tests, fmt, clippy pass."
         }
       ]
     },
@@ -1236,10 +1251,16 @@
         "D-ASSOC-EARLY",
         "D-MULTI-DISPATCH"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 15:52:28",
+          "who": "agent",
+          "text": "Independent reviewer agent with Boat probe access; scope f8f72c4..fa13f85."
+        }
+      ]
     },
     {
       "id": "DYN",
