@@ -61,9 +61,12 @@ and their lexical lifetime rules.
 This adds concrete length-indexed storage, compile-time const length
 parameters, symbolic lengths in generic records/enums/aliases, checked
 kernel-normalized length/index computation, and explicit specialization or
-narrow length inference. A runtime-sized `[T; n]` layout remains rejected. The
+narrow length inference. `[T; n]` with a runtime `n` remains rejected because
+its layout is not static. A runtime-length array names a static capacity
+instead, `[T; n <= C]`, where `n` is an immutable `i64` binding; its length
+always equals `n`, and reads proved by `0 <= i && i < n` need no check. The
 separate `DynArray<T, capacity>` type provides inline fixed-capacity storage
-with a runtime length and checked push/read/drop layout contracts; see
+with a growable runtime length. Both are described in
 [runtime-sized inline arrays](dynamic-arrays.md). General dependent
 propositions over runtime values and proof-based dynamic indexing over arbitrary
 array expressions remain out of scope. See

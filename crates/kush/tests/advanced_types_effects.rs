@@ -3426,3 +3426,593 @@ fn a_result_hint_cannot_fix_a_row_variable_before_the_arguments() {
         42
     );
 }
+
+// ---------------------------------------------------------------------------
+// Runtime-length arrays `[T; n <= C]`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn runtime_length_arrays_fill_and_read_with_length_proofs() {
+    // The erased bound proves both the fill and the read, so the function
+    // needs no effect at all.
+    let source = r#"
+        fn pick(n: i64, i: i64, erased ok: { 0 <= i && i < n && n <= 8 }) -> i64 ! {} {
+            let a: [i64; n <= 8] = Array.fill(n, 7);
+            a[i]
+        }
+        fn main() -> i64 ! {panic} {
+            let k = 5;
+            let j = 3;
+            pick(k, j, _) * 6
+        }"#;
+    assert_eq!(value(source), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 42);
+    // A loop guard `i < n` and the monotone counter prove every read; only the
+    // checked `+` needs `panic`.
+    let looped = r#"
+        fn sum_all(n: i64, erased ok: { 0 <= n && n <= 8 }) -> i64 ! {panic} {
+            let a: [i64; n <= 8] = Array.fill(n, 2);
+            let mut i = 0;
+            let mut acc = 0;
+            while i < n {
+                acc = acc + a[i];
+                i = i + 1;
+            }
+            acc
+        }
+        fn main() -> i64 ! {panic} { let k = 6; sum_all(k, _) }"#;
+    assert_eq!(value(looped), 12);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(looped, 12);
+    // Branch facts prove the bound for a local binder.
+    let branch = r#"
+        fn main() -> i64 ! {} {
+            let n = 3;
+            if 0 <= n && n <= 4 {
+                let a: [i64; n <= 4] = Array.fill(n, 5);
+                if n > 2 { a[2] } else { 0 }
+            } else {
+                0
+            }
+        }"#;
+    assert_eq!(value(branch), 5);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(branch, 5);
+    // Without a proof, the read is a checked operation and needs `panic`.
+    rejects(
+        r#"
+        fn pick(n: i64, i: i64, erased ok: { 0 <= n && n <= 8 }) -> i64 ! {} {
+            let a: [i64; n <= 8] = Array.fill(n, 7);
+            a[i]
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "operation requires effects {panic}",
+    );
+    // Without a proof, the fill is a checked operation and needs `panic`.
+    rejects(
+        r#"
+        fn build(n: i64) -> i64 ! {} {
+            let a: [i64; n <= 8] = Array.fill(n, 7);
+            0
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "operation requires effects {panic}",
+    );
+}
+
+#[test]
+fn runtime_length_arrays_check_unproved_lengths_and_indices_at_runtime() {
+    let too_long = r#"
+        fn build(n: i64) -> i64 ! {panic} {
+            let a: [i64; n <= 4] = Array.fill(n, 1);
+            DynArray.len(&a)
+        }
+        fn main() -> i64 ! {panic} { let k = 9; build(k) }"#;
+    let program = check(too_long).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("out of range for its capacity"),
+        "{error:?}"
+    );
+    let negative = r#"
+        fn build(n: i64) -> i64 ! {panic} {
+            let a: [i64; n <= 4] = Array.fill(n, 1);
+            DynArray.len(&a)
+        }
+        fn main() -> i64 ! {panic} { let k = 0 - 1; build(k) }"#;
+    let program = check(negative).unwrap();
+    assert!(program.evaluate(&mut Vec::new()).is_err());
+    let out_of_bounds = r#"
+        fn read(n: i64, i: i64) -> i64 ! {panic} {
+            let a: [i64; n <= 4] = Array.fill(n, 1);
+            a[i]
+        }
+        fn main() -> i64 ! {panic} { let k = 2; read(k, 2) }"#;
+    let program = check(out_of_bounds).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(error.message.contains("index out of bounds"), "{error:?}");
+    let fine = r#"
+        fn read(n: i64, i: i64) -> i64 ! {panic} {
+            let a: [i64; n <= 4] = Array.fill(n, 9);
+            a[i] + DynArray.len(&a)
+        }
+        fn main() -> i64 ! {panic} { let k = 4; read(k, 3) }"#;
+    assert_eq!(value(fine), 13);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        agrees(fine, 13);
+        use std::process::Command;
+        for source in [too_long, out_of_bounds] {
+            let program = check(source).unwrap();
+            let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+            let binary = scratch.path().join("runtime-length-abort");
+            kush::native::build(&program, &binary).unwrap();
+            let output = Command::new(&binary).output().unwrap();
+            assert!(!output.status.success(), "native code must abort: {source}");
+        }
+    }
+}
+
+#[test]
+fn runtime_length_arrays_substitute_the_callers_binder_at_calls() {
+    let source = r#"
+        fn make(n: i64) -> [i64; n <= 4] ! {panic} { Array.fill(n, 7) }
+        fn first(n: i64, a: &[i64; n <= 4]) -> i64 ! {panic} { a[0] }
+        fn last(n: i64, a: [i64; n <= 4]) -> i64 ! {panic} { a[n - 1] }
+        fn main() -> i64 ! {panic} {
+            let k = 3;
+            let a = make(k);
+            let b: [i64; k <= 4] = make(k);
+            first(k, &a) + last(k, b) + DynArray.len(&a)
+        }"#;
+    assert_eq!(value(source), 17);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 17);
+    // The argument for a length parameter must be a named immutable binding.
+    rejects(
+        r#"
+        fn make(n: i64) -> [i64; n <= 4] ! {panic} { Array.fill(n, 7) }
+        fn main() -> i64 ! {panic} { let a = make(3); 0 }"#,
+        "sizes a runtime-length array in the signature of 'make'",
+    );
+    rejects(
+        r#"
+        fn make(n: i64) -> [i64; n <= 4] ! {panic} { Array.fill(n, 7) }
+        fn main() -> i64 ! {panic} { let mut k = 3; let a = make(k); 0 }"#,
+        "must be an immutable i64 parameter or local",
+    );
+    // A value for one binder is not a value for another, even when both
+    // hold the same number.
+    rejects(
+        r#"
+        fn last(n: i64, a: [i64; n <= 4]) -> i64 ! {panic} { a[n - 1] }
+        fn main() -> i64 ! {panic} {
+            let k = 3;
+            let m = 3;
+            let a: [i64; m <= 4] = Array.fill(m, 1);
+            last(k, a)
+        }"#,
+        "type mismatch: expected [i64; k <= 4], found [i64; m <= 4]",
+    );
+    // A recursive call must pass the same binder; an alias is a new binder.
+    rejects(
+        r#"
+        fn walk(n: i64, a: [i64; n <= 4]) -> i64 ! {panic} {
+            let m = n;
+            walk(m, a)
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "type mismatch",
+    );
+}
+
+#[test]
+fn runtime_length_array_types_keep_their_binder() {
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let m = 3;
+            let a: [i64; n <= 4] = Array.fill(n, 1);
+            let b: [i64; m <= 4] = a;
+            0
+        }"#,
+        "type mismatch: expected [i64; m <= 4], found [i64; n <= 4]",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let a: [i64; n <= 4] = Array.fill(n, 1);
+            let b: DynArray<i64, 4> = a;
+            0
+        }"#,
+        "type mismatch",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let a: DynArray<i64, 4> = [1, 2, 3];
+            let b: [i64; n <= 4] = a;
+            0
+        }"#,
+        "type mismatch",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let a: [i64; n <= 8] = Array.fill(n, 1);
+            let b: [i64; n <= 4] = a;
+            0
+        }"#,
+        "type mismatch",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let m = 3;
+            let a: [i64; n <= 4] = Array.fill(m, 1);
+            0
+        }"#,
+        "but the expected type has length 'n'",
+    );
+}
+
+#[test]
+fn runtime_length_array_binders_and_positions_are_checked() {
+    rejects(
+        "fn bad(n: i64) -> [i64; n] ! {} { [] } fn main() -> i64 ! {} { 0 }",
+        "give a runtime-length array an inline capacity as [T; n <= C]",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut n = 3;
+            let a: [i64; n <= 4] = Array.fill(n, 1);
+            0
+        }"#,
+        "must be an immutable i64 parameter or local",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = true;
+            let a: [i64; n <= 4] = Array.fill(n, 1);
+            0
+        }"#,
+        "must be an immutable i64 parameter or local",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let a: [i64; n <= 32] = Array.fill(n, 1);
+            0
+        }"#,
+        "capacity must be 1..31",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let a: [[i64; 4]; n <= 8] = Array.fill(n, [0, 0, 0, 0]);
+            0
+        }"#,
+        "32-word inline layout budget",
+    );
+    rejects(
+        "fn f(a: [i64; n <= 4], n: i64) -> i64 ! {} { 0 } fn main() -> i64 ! {} { 0 }",
+        "must be the name of an immutable i64 parameter or local",
+    );
+    rejects(
+        "fn f(n: i64, b: Bool) -> [i64; b <= 4] ! {} { 0 } fn main() -> i64 ! {} { 0 }",
+        "must be an earlier i64 parameter of the same function",
+    );
+    rejects(
+        "fn f(n: i64, a: Vec<[i64; n <= 4]>) -> i64 ! {} { 0 } fn main() -> i64 ! {} { 0 }",
+        "must be a whole parameter or result type",
+    );
+    rejects(
+        "fn f<T>(n: i64, a: [T; n <= 4]) -> i64 ! {} { 0 } fn main() -> i64 ! {} { 0 }",
+        "a generic function signature cannot mention a runtime-length array",
+    );
+    rejects(
+        r#"
+        struct S { x: i64 }
+        impl S { fn f(self: Self, n: i64, a: [i64; n <= 4]) -> i64 ! {} { 0 } }
+        fn main() -> i64 ! {} { 0 }"#,
+        "a method signature cannot mention a runtime-length array",
+    );
+    rejects(
+        "struct S { a: [i64; n <= 4] } fn main() -> i64 ! {} { 0 }",
+        "must be the name of an immutable i64 parameter or local",
+    );
+}
+
+#[test]
+fn runtime_length_arrays_are_not_first_class_function_signatures() {
+    rejects(
+        r#"
+        fn make(n: i64) -> [i64; n <= 4] ! {panic} { Array.fill(n, 7) }
+        fn main() -> i64 ! {panic} { let f = make; 0 }"#,
+        "cannot be a first-class value",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let n = 2;
+            let f = fn(a: [i64; n <= 4]) -> i64 ! {panic} { a[0] };
+            0
+        }"#,
+        "lambdas cannot mention a runtime-length array",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let n = 2;
+            let f = fn() -> [i64; n <= 4] ! {panic} { Array.fill(n, 1) };
+            0
+        }"#,
+        "lambdas cannot mention a runtime-length array",
+    );
+}
+
+#[test]
+fn runtime_length_arrays_keep_their_length_fixed() {
+    for (operation, fragment) in [
+        (
+            "let b = DynArray.push(a, 3);",
+            "DynArray.push would change the length",
+        ),
+        (
+            "let (b, x) = DynArray.pop(a);",
+            "DynArray.pop would change the length",
+        ),
+    ] {
+        rejects(
+            &format!(
+                r#"
+                fn main() -> i64 ! {{panic}} {{
+                    let n = 3;
+                    let a: [i64; n <= 4] = Array.fill(n, 1);
+                    {operation}
+                    0
+                }}"#
+            ),
+            fragment,
+        );
+    }
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 0;
+            let a: [i64; n <= 4] = DynArray.new();
+            0
+        }"#,
+        "cannot start empty",
+    );
+    // `set` keeps the length, so it is allowed and keeps the type.
+    let set = r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let a: [i64; n <= 4] = Array.fill(n, 1);
+            let a: [i64; n <= 4] = DynArray.set(a, 1, 40);
+            a[1] + DynArray.get(&a, 0) + DynArray.len(&a)
+        }"#;
+    assert_eq!(value(set), 44);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(set, 44);
+}
+
+#[test]
+fn runtime_length_literals_need_a_proved_length_and_drop_owners() {
+    let source = r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let n = 2;
+            let a: [Box<i64>; n <= 4] = [Box.new(20), Box.new(22)];
+            DynArray.len(&a)
+        }"#;
+    let (result, stats) = evaluate(source);
+    assert_eq!(result, 2);
+    assert_eq!(stats.allocations, 2);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 2);
+    let branch = r#"
+        fn count(n: i64) -> i64 ! {alloc, panic} {
+            if n == 3 {
+                let a: [Box<i64>; n <= 4] = [Box.new(1), Box.new(2), Box.new(3)];
+                DynArray.len(&a)
+            } else {
+                0
+            }
+        }
+        fn main() -> i64 ! {alloc, panic} { let k = 3; count(k) + 10 * count(2) }"#;
+    let (result, stats) = evaluate(branch);
+    assert_eq!(result, 3);
+    assert_eq!(stats.allocations, 3);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(branch, 3);
+    rejects(
+        r#"
+        fn count(n: i64) -> i64 ! {panic} {
+            let a: [i64; n <= 4] = [1, 2, 3];
+            DynArray.len(&a)
+        }
+        fn main() -> i64 ! {} { 0 }"#,
+        "cannot prove that 'n' == 3",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 2;
+            let a: [i64; n <= 4] = [1, 2, 3];
+            0
+        }"#,
+        "cannot prove that 'n' == 3",
+    );
+    // Copying owners is rejected rather than duplicating them.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let n = 2;
+            let b = Box.new(1);
+            let a: [Box<i64>; n <= 4] = Array.fill(n, b);
+            0
+        }"#,
+        "Array.fill copies its element",
+    );
+}
+
+#[test]
+fn runtime_length_views_cover_exactly_n_elements() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let mut a: [i64; n <= 4] = Array.fill(n, 4);
+            {
+                let view: &mut [i64] = &mut a[1..];
+                Slice.set(view, 0, 30);
+            }
+            let all = &a[..];
+            let mut acc = 0;
+            let mut i = 0;
+            while i < n {
+                acc = acc + Slice.at(all, i, _);
+                i = i + 1;
+            }
+            acc + 100 * Slice.len(all)
+        }"#;
+    assert_eq!(value(source), 38 + 300);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 338);
+    // The recorded view length is the binder, so an index beyond it is not
+    // proved.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let a: [i64; n <= 4] = Array.fill(n, 4);
+            let all = &a[..];
+            Slice.at(all, 3, _)
+        }"#,
+        "cannot prove",
+    );
+    // Replacing the owner while a view is live is still rejected.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let mut a: [i64; n <= 4] = Array.fill(n, 4);
+            let all = &a[..];
+            a = Array.fill(n, 5);
+            Slice.len(all)
+        }"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+}
+
+#[test]
+fn runtime_length_arrays_match_compare_and_bind_plain_tails() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let a: [i64; n <= 4] = Array.fill(n, 5);
+            let b: [i64; n <= 4] = Array.fill(n, 5);
+            let same = if a == b { 100 } else { 0 };
+            same + match a {
+                [x, ..rest] => {
+                    let grown: DynArray<i64, 4> = DynArray.push(rest, 1);
+                    x + DynArray.len(&grown)
+                },
+                _ => 0,
+            }
+        }"#;
+    assert_eq!(value(source), 108);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 108);
+}
+
+#[test]
+fn runtime_length_arrays_flow_through_generics_closures_and_owning_calls() {
+    // A generic body sees the caller's binder only through `T`; its own
+    // annotations are not re-validated against the callee's scope.
+    let generic = r#"
+        fn keep<T>(x: T) -> T ! {} { let y: T = x; y }
+        fn main() -> i64 ! {panic} {
+            let n = 3;
+            let a: [i64; n <= 4] = Array.fill(n, 6);
+            let b: [i64; n <= 4] = keep(a);
+            b[2] + DynArray.len(&b)
+        }"#;
+    assert_eq!(value(generic), 9);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(generic, 9);
+    // A closure that captures the array reads it with a checked index.
+    let closure = r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let n = 2;
+            let a: [i64; n <= 4] = Array.fill(n, 21);
+            let f = fn() -> i64 ! {panic} { a[0] + a[1] };
+            f()
+        }"#;
+    assert_eq!(value(closure), 42);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(closure, 42);
+    // Owning elements move into a callee and are dropped there exactly once.
+    let owning = r#"
+        fn consume(n: i64, a: [Box<i64>; n <= 4]) -> i64 ! {} { n }
+        fn give(n: i64) -> [Box<i64>; n <= 4] ! {alloc, panic} {
+            if n == 2 { [Box.new(1), Box.new(2)] } else { panic() }
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let k = 2;
+            let a = give(k);
+            consume(k, a)
+        }"#;
+    let (result, stats) = evaluate(owning);
+    assert_eq!(result, 2);
+    assert_eq!(stats.allocations, 2);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(owning, 2);
+}
+
+#[test]
+fn monotone_loop_counters_keep_their_lower_bound_for_proofs() {
+    // Regression: a counter that only increases keeps `0 <= i` from loop
+    // entry, so `Slice.at` inside the loop is provable from the guard.
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let xs: [i64; 3] = [1, 2, 3];
+            let view = &xs[..];
+            let mut i = 0;
+            let mut acc = 0;
+            while i < Slice.len(view) {
+                acc = acc + Slice.at(view, i, _);
+                i = i + 1;
+            }
+            acc
+        }"#;
+    assert_eq!(value(source), 6);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(source, 6);
+    // A counter that may decrease keeps no lower bound.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let xs: [i64; 3] = [1, 2, 3];
+            let view = &xs[..];
+            let mut i = 2;
+            let mut acc = 0;
+            while i < Slice.len(view) {
+                acc = acc + Slice.at(view, i, _);
+                i = i - 1;
+            }
+            acc
+        }"#,
+        "cannot prove",
+    );
+}

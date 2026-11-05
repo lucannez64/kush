@@ -3992,6 +3992,9 @@ impl Checker<'_> {
             ExprKind::DynArrayPush { array, value, .. } => {
                 self.value_moves_linear(array) || self.value_moves_linear(value)
             }
+            ExprKind::DynArrayFill { length, value, .. } => {
+                self.value_moves_linear(length) || self.value_moves_linear(value)
+            }
             ExprKind::DynArraySet {
                 array,
                 index,
@@ -6181,6 +6184,11 @@ impl Checker<'_> {
                 }
             }
             ExprKind::DynArrayNew { .. } => {}
+            ExprKind::DynArrayFill { length, value, .. } => {
+                // The length is read first, then the copyable element.
+                self.expr(length)?;
+                self.expr(value)?;
+            }
             ExprKind::DynArrayPush { array, value, .. } => {
                 // The array is consumed and returned in the same inline
                 // storage; the element is evaluated only after the array.
@@ -6837,6 +6845,10 @@ pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
                 walk(array, out);
                 walk(value, out);
             }
+            ExprKind::DynArrayFill { length, value, .. } => {
+                walk(length, out);
+                walk(value, out);
+            }
             ExprKind::DynArraySet {
                 array,
                 index,
@@ -7146,6 +7158,10 @@ fn expr_live(
         ExprKind::DynArrayPush { array, value, .. } => {
             live = expr_live(value, live_after, views, heads, exits, out);
             live = expr_live(array, &live, views, heads, exits, out);
+        }
+        ExprKind::DynArrayFill { length, value, .. } => {
+            live = expr_live(value, live_after, views, heads, exits, out);
+            live = expr_live(length, &live, views, heads, exits, out);
         }
         ExprKind::DynArraySet {
             array,

@@ -223,12 +223,14 @@ machine `i64` remain distinct; there is no implicit conversion.
 This is a usable restricted dependent fragment, not the full calculus in the
 [v0.1 design](spec-v0.1.md):
 
-- **No runtime-sized `[T; n]` layout.** `[T; n]` with a runtime `n` is still
-  rejected rather than lowering to a dynamic stack layout. The separate
-  `DynArray<T, capacity>` type provides inline storage with a compile-time
-  capacity and a runtime length, checked in both backends; see
-  [runtime-sized inline arrays](dynamic-arrays.md). There is no implicit
-  conversion between `DynArray`, `[T; N]`, `Vec<T>`, or a slice.
+- **No unbounded runtime `[T; n]` layout.** `[T; n]` with a runtime `n` is
+  still rejected rather than lowering to a dynamic stack layout. A
+  runtime-length array states a compile-time capacity, `[T; n <= C]`, and binds
+  its length to an immutable `i64` runtime index `n`. `DynArray<T, capacity>`
+  provides the same inline storage with a growable runtime length. Both are
+  checked in both backends; see [runtime-sized inline arrays](dynamic-arrays.md).
+  There is no implicit conversion between `[T; n <= C]`, `DynArray`, `[T; N]`,
+  `Vec<T>`, or a slice.
 - Length inference reads an actual inline array, a literal array, or a generic
   alias whose expansion is an array; it does not solve general equations such as
   `N + 1 = 3`, and there is no partial specialization (`f::<i64>` with `N`
@@ -239,8 +241,9 @@ This is a usable restricted dependent fragment, not the full calculus in the
   the kernel budget. User-defined `total enum` data and its eliminator are
   available to erased proofs (see [logical data](logical-data.md)), and
   constructor-local binders make `Fin<N>` expressible as logical evidence, but
-  there are no general type-level functions returning runtime layouts, no
-  arithmetic solver obligations, and no runtime-dependent inline array lengths.
+  there are no general type-level functions returning runtime layouts and no
+  arithmetic solver obligations. The only runtime-dependent inline array
+  length is the bounded `[T; n <= C]` form.
 - Aliases are expanded by name in runtime types, but there is no separate
   alias-unification inference for generic runtime parameters.
 - A runtime alias is not a first-class logical definition; it is erased from the
@@ -249,5 +252,6 @@ This is a usable restricted dependent fragment, not the full calculus in the
   machine representation, and conversion is checked rather than truncating.
 - Runtime scalar proof indices are a narrow, separate bridge: only immutable
   `i64`/`Bool`/`Unit` values, only as symbolic indices (never arithmetic or
-  evidence), and never as inline array lengths. See
+  evidence), and as inline array lengths only through the bounded
+  `[T; n <= C]` form. See
   [runtime indices](runtime-indices.md) for its own exact limits.

@@ -4,6 +4,9 @@ Status: implemented for owned inline storage with a compile-time capacity and a
 runtime length, contextual literals, equality, shared and exclusive slice views
 over the live prefix (including views through a record field), and
 length-checked patterns, in the reference evaluator and the Cranelift backend.
+Runtime-length arrays `[T; n <= C]`, whose length is bound to an immutable
+`i64` runtime index, use the same storage and add length proofs; see
+[below](#runtime-length-arrays-t-n--c).
 
 ```rust
 fn main() -> i64 ! {panic} {
@@ -138,6 +141,96 @@ matched by value. The runtime length is not a finite variant tag, so a match
 over `DynArray` must end in an unguarded catch-all; the ordinary exhaustiveness
 check rejects anything else.
 
+## Runtime-length arrays `[T; n <= C]`
+
+A runtime-length inline array names its length with an immutable runtime `i64`
+binding and states a compile-time capacity:
+
+```rust
+fn pick(n: i64, i: i64, erased ok: { 0 <= i && i < n && n <= 8 }) -> i64 ! {} {
+    let a: [i64; n <= 8] = Array.fill(n, 7);   // proved 0 <= n <= 8: no check
+    a[i]                                       // proved 0 <= i < n: no panic
+}
+
+fn sum_all(n: i64, erased ok: { 0 <= n && n <= 8 }) -> i64 ! {panic} {
+    let a: [i64; n <= 8] = Array.fill(n, 2);
+    let mut i = 0;
+    let mut acc = 0;
+    while i < n {
+        acc = acc + a[i];   // the read is proved; only the checked `+` needs panic
+        i = i + 1;
+    }
+    acc
+}
+```
+
+This follows the spec's storage rule (section 12): the layout is static, and the
+runtime-varying length is carried with the storage. Runtime-sized stack
+allocation remains unavailable, as section 10 requires.
+
+Semantics:
+
+- **Length binder.** `n` must name an immutable `i64` parameter or `let` local
+  in scope. `let mut n` is rejected: the value the type talks about may never
+  change. The capacity `C` is an ordinary compile-time length expression.
+- **Layout.** Exactly the `DynArray<T, C>` layout: word zero holds the runtime
+  length, which always equals `n`, followed by `C` inline slots. The same
+  capacity and 32-word limits apply, the same element restrictions apply (no
+  borrows, views, tasks, or linear values), and nothing is allocated.
+- **Type identity.** The binder is part of the type. `[i64; n <= 8]`,
+  `[i64; m <= 8]`, `[i64; n <= 4]`, and `DynArray<i64, 8>` are four different
+  types, so two values of one type always have the same length. There is no
+  implicit conversion between them.
+- **Construction.** `Array.fill(n, value)` copies one copyable value into the
+  first `n` slots; the capacity comes from the expected type or from
+  `Array.fill::<T, C>(n, value)`. When the facts in scope prove
+  `0 <= n && n <= C`, construction has no check and needs no effect. Otherwise
+  it checks the bound at run time and requires `panic`. A contextual literal
+  `[e1, ..., ek]` builds a runtime-length array only when the facts prove
+  `n == k`; there is no runtime fallback for literals. Literal elements may
+  own resources.
+- **Drop.** Exactly the `DynArray` rule: the first `n` slots are destroyed
+  once, and slots past the length are never read or dropped.
+- **Indexing.** `a[i]` copies a copyable element. When the facts prove
+  `0 <= i && i < n`, the read is proof-based and needs no `panic` effect;
+  otherwise it is a checked read that requires `panic`, like dynamic indexing
+  of `[T; N]`. Native code keeps its bounds trap on the proved path as a
+  defensive check that can never fire.
+- **Views.** `&a[..]`, `&a[start..end]`, and `&mut` forms behave as for
+  `DynArray` and cover exactly `n` elements. A view bound directly to a local
+  (`let v = &a[..]`) also records the fact `Slice.len(v) == n`, so
+  `Slice.at(v, i, _)` can be proved from facts about `n`.
+- **Other operations.** `DynArray.len`, `DynArray.get`, `DynArray.set`, `==`,
+  `!=`, and `match` patterns work as for `DynArray`; a `..rest` binding is a
+  plain `DynArray<T, C>`. `DynArray.push` and `DynArray.pop` are rejected
+  because they would change the length.
+- **Signatures and calls.** A parameter or result type may be a runtime-length
+  array, or a direct `&`/`&mut` reference to one, whose binder is an earlier
+  `i64` parameter of the same function. At each call the actual argument for
+  that parameter must be the name of an immutable `i64` binding; the callee's
+  binder is replaced by the caller's, so `fn f(n: i64, a: [i64; n <= 8])`
+  called as `f(k, b)` requires `b: [i64; k <= 8]`, and the result of
+  `fn make(n: i64) -> [i64; n <= 8]` called as `make(k)` has type
+  `[i64; k <= 8]`. Generic functions, methods, and trait items cannot mention
+  runtime-length arrays in their signatures.
+- **First-class functions.** Lambda signatures and `fn`/`once fn` types cannot
+  mention runtime-length arrays, and a function whose signature does cannot be
+  used as a value. An indirect call cannot substitute the caller's binder, so
+  allowing it would let two calls produce one type with two lengths.
+
+Plain `[T; n]` with a runtime `n` stays a compile-time diagnostic, which now
+suggests `[T; n <= C]`.
+
+Why this is sound: a value of type `[T; n <= C]` can only be created by a
+construction that establishes `length == n` for the current value of `n`, or by
+a call whose binder was replaced by a caller binding with the same value. `n`
+cannot be reassigned. The language has no deferred local type inference
+(`Vec.new()` needs an annotation and lambdas declare their result types), so a
+binding declared outside `n`'s scope can never be given a type that mentions
+`n`. Values from two activations of one binder (two loop iterations or two
+recursive calls) can therefore never meet at one type. Proof-based reads use
+only facts about the binder that is in scope.
+
 ## Layout and lifetime contract
 
 The checked layout is:
@@ -166,12 +259,15 @@ words 1 .. 1 + capacity: inline element slots
 
 ## Limits
 
-This is not `[T; n]` with a runtime `n`, not a dynamically sized stack allocation
-with a hidden layout descriptor, and not a general dependent array. The capacity
-is always a compile-time `Nat`; the length is a runtime word. A runtime array
-length in a type annotation such as `[i64; n]` remains an explicit diagnostic:
-use `Vec<T>` for an owned runtime-sized container or `DynArray<T, capacity>` for
-inline storage with a static bound. There is no element-wise owning move beyond
+This is not an unbounded `[T; n]` with a runtime `n`, not a dynamically sized
+stack allocation with a hidden layout descriptor, and not a general dependent
+array. The capacity is always a compile-time `Nat`; the length is a runtime
+word. A runtime array length without a capacity, such as `[i64; n]`, remains
+an explicit diagnostic that suggests `[T; n <= C]`; use `Vec<T>` for an owned
+container of unbounded length. Runtime-length arrays cannot appear in generic
+function, method, trait, or foreign signatures, in `fn` types, or in lambda
+signatures, and a signature may only use them as a whole parameter/result or
+behind one reference. There is no element-wise owning move beyond
 push/pop of copyable values, no view of a `DynArray` inside a reference-based
 record place, no suffix after a `..` pattern, and no recursive/borrowed element
 pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow

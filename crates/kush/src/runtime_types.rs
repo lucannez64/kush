@@ -47,6 +47,9 @@ pub(crate) struct Subst {
     /// Concrete closed-world values for `Self::Item` on a trait object. They are
     /// populated only after every impl of the object specialization agrees.
     pub self_projections: BTreeMap<String, Type>,
+    /// Runtime-length binder renaming for a call: callee parameter binder ->
+    /// the caller's immutable `i64` binding passed for it.
+    pub lengths: BTreeMap<BindingId, BindingId>,
 }
 #[derive(Clone, Copy)]
 struct Alias<'a> {
@@ -90,6 +93,10 @@ pub(crate) struct Enum {
     /// length in word zero. Fields beyond the length are uninitialized and must
     /// never be dropped or read.
     pub dynamic_array: Option<(Type, usize)>,
+    /// For a runtime-length array `[T; n <= C]`: the immutable `i64` binder
+    /// whose value always equals the runtime length. The layout is exactly
+    /// the `dynamic_array` layout; the binder only distinguishes the type.
+    pub runtime_length: Option<BindingId>,
     /// An anonymous tuple layout; `arguments` are its element types.
     pub tuple: bool,
     /// Declared `#[linear]`: values must be consumed, never implicitly dropped.
@@ -881,6 +888,7 @@ impl<'a> Types<'a> {
             linear: false,
             array: Some((element, length)),
             dynamic_array: None,
+            runtime_length: None,
             tuple: false,
             structural: false,
             foreign: None,
@@ -892,6 +900,58 @@ impl<'a> Types<'a> {
     /// storage. The capacity is a compile-time bound, so the layout is finite
     /// and a value may be moved or returned without a hidden stack pointer.
     pub fn dynamic_array(&mut self, element: Type, capacity: usize, span: Span) -> Result<Type> {
+        self.inline_array(element, capacity, None, span)
+    }
+    /// Replace runtime-length binders at a call boundary. Signatures only
+    /// admit `[T; n <= C]` directly or behind one reference, so these are the
+    /// only positions rewritten.
+    pub fn rebind_lengths(
+        &mut self,
+        ty: Type,
+        map: &BTreeMap<BindingId, BindingId>,
+        span: Span,
+    ) -> Result<Type> {
+        if map.is_empty() {
+            return Ok(ty);
+        }
+        match ty {
+            Type::Enum(id) if self.enums[id].runtime_length.is_some() => {
+                let binder = self.enums[id].runtime_length.expect("runtime length");
+                let (element, capacity) = self.enums[id]
+                    .dynamic_array
+                    .expect("runtime arrays use the DynArray layout");
+                let binder = map.get(&binder).copied().unwrap_or(binder);
+                self.runtime_array(element, capacity, binder, span)
+            }
+            Type::Ref(p) => {
+                let inner = self.rebind_lengths(self.pointees[p], map, span)?;
+                Ok(Type::Ref(self.pointer(inner)))
+            }
+            Type::RefMut(p) => {
+                let inner = self.rebind_lengths(self.pointees[p], map, span)?;
+                Ok(Type::RefMut(self.pointer(inner)))
+            }
+            _ => Ok(ty),
+        }
+    }
+    /// Intern a runtime-length array `[T; n <= C]`: the `DynArray<T, C>`
+    /// layout tagged with the binder whose value is the runtime length.
+    pub fn runtime_array(
+        &mut self,
+        element: Type,
+        capacity: usize,
+        binder: BindingId,
+        span: Span,
+    ) -> Result<Type> {
+        self.inline_array(element, capacity, Some(binder), span)
+    }
+    fn inline_array(
+        &mut self,
+        element: Type,
+        capacity: usize,
+        binder: Option<BindingId>,
+        span: Span,
+    ) -> Result<Type> {
         if capacity == 0 || capacity > 31 {
             return Err(Diagnostic::new(
                 span,
@@ -929,11 +989,9 @@ impl<'a> Types<'a> {
                 "DynArray exceeds the 32-word inline layout budget; reduce its capacity or element width",
             ));
         }
-        if let Some(id) = self
-            .enums
-            .iter()
-            .position(|e| e.dynamic_array == Some((element, capacity)))
-        {
+        if let Some(id) = self.enums.iter().position(|e| {
+            e.dynamic_array == Some((element, capacity)) && e.runtime_length == binder
+        }) {
             return Ok(Type::Enum(id));
         }
         if self.enums.len() >= 256 {
@@ -942,7 +1000,15 @@ impl<'a> Types<'a> {
         let id = self.enums.len();
         self.enums.push(Enum {
             definition: usize::MAX,
-            name: format!("DynArray<{}; {}>", self.name(element), capacity),
+            name: match binder {
+                Some(binder) => format!(
+                    "[{}; {} <= {}]",
+                    self.name(element),
+                    self.resolution.bindings[binder].name,
+                    capacity
+                ),
+                None => format!("DynArray<{}; {}>", self.name(element), capacity),
+            },
             arguments: vec![element],
             consts: vec![capacity],
             lifetimes: vec![],
@@ -961,6 +1027,7 @@ impl<'a> Types<'a> {
             linear: false,
             array: None,
             dynamic_array: Some((element, capacity)),
+            runtime_length: binder,
             tuple: false,
             structural: false,
             foreign: None,
@@ -1079,6 +1146,7 @@ impl<'a> Types<'a> {
             linear,
             array: None,
             dynamic_array: None,
+            runtime_length: None,
             tuple: false,
             structural: true,
             foreign: None,
@@ -1166,6 +1234,7 @@ impl<'a> Types<'a> {
             linear,
             array: None,
             dynamic_array: None,
+            runtime_length: None,
             tuple: true,
             structural: false,
             foreign: None,
@@ -1330,6 +1399,11 @@ impl<'a> Types<'a> {
                     if types.enums[a].structural || types.enums[b].structural {
                         // Structural rows are interned by canonical field row,
                         // so only exact identity is representation-equivalent.
+                        return false;
+                    }
+                    if types.enums[a].runtime_length != types.enums[b].runtime_length {
+                        // The length binder is part of a runtime-length
+                        // array's identity, not an erased label.
                         return false;
                     }
                     let (a, b) = (&types.enums[a], &types.enums[b]);
@@ -2116,6 +2190,20 @@ impl<'a> Types<'a> {
                 ));
             }
             return Ok(Type::Ref(self.pointer(inner)));
+        }
+        if let ast::TypeKind::Array(element, length) = &ty.kind
+            && let Some((binder, capacity)) = crate::executable::runtime_length_parts(length)
+        {
+            let element = self.lower(element, substitution, depth + 1)?;
+            let binder = crate::executable::runtime_length_binder(self.resolution, binder)?;
+            let binder = substitution.lengths.get(&binder).copied().unwrap_or(binder);
+            let capacity = crate::length::eval_type(
+                self.resolution,
+                self.logical,
+                &substitution.consts,
+                capacity,
+            )?;
+            return self.runtime_array(element, capacity, binder, ty.span);
         }
         if let ast::TypeKind::Array(element, length) = &ty.kind {
             let element = self.lower(element, substitution, depth + 1)?;
@@ -3937,6 +4025,7 @@ impl<'a> Types<'a> {
             result: None,
             array: None,
             dynamic_array: None,
+            runtime_length: None,
             tuple: false,
             record: def.fields.is_some(),
             field_lifetimes: Vec::new(),
@@ -3976,6 +4065,7 @@ impl<'a> Types<'a> {
                 linear: def.linear,
                 array: None,
                 dynamic_array: None,
+                runtime_length: None,
                 tuple: false,
                 structural: false,
                 foreign: Some(foreign),
@@ -4277,6 +4367,7 @@ impl<'a> Types<'a> {
                 result,
                 array: None,
                 dynamic_array: None,
+                runtime_length: None,
                 tuple: false,
                 record: def.fields.is_some(),
                 field_lifetimes,
@@ -5316,6 +5407,59 @@ fn validate_record_declaration(
 }
 /// Whether a type contains a shared/exclusive slice view, a borrowed owner
 /// reference, or a record with such a leaf.
+/// Every runtime-length binder (`n` in `[T; n <= C]`) mentioned by a type,
+/// through references, containers, aggregates, unions, and callables.
+pub(crate) fn runtime_length_binders(types: &Types<'_>, ty: Type) -> BTreeSet<BindingId> {
+    fn go(types: &Types<'_>, ty: Type, seen: &mut BTreeSet<Type>, out: &mut BTreeSet<BindingId>) {
+        if !seen.insert(ty) {
+            return;
+        }
+        match ty {
+            Type::Annotated(p, _)
+            | Type::Ref(p)
+            | Type::RefMut(p)
+            | Type::Slice(p)
+            | Type::SliceMut(p)
+            | Type::Box(p)
+            | Type::ArenaBox(p)
+            | Type::Vec(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p)
+            | Type::Task(p) => go(types, types.pointees[p], seen, out),
+            Type::Enum(id) | Type::Variants(id, _) => {
+                let layout = &types.enums[id];
+                out.extend(layout.runtime_length);
+                for field in layout
+                    .variants
+                    .iter()
+                    .flat_map(|variant| variant.fields.iter())
+                {
+                    go(types, *field, seen, out);
+                }
+                for argument in &layout.arguments {
+                    go(types, *argument, seen, out);
+                }
+            }
+            Type::Union(id) => {
+                for member in &types.unions[id].members {
+                    go(types, *member, seen, out);
+                }
+            }
+            Type::Fn(id) | Type::Once(id) => {
+                if let Some(function) = types.function_types.get(id) {
+                    for parameter in &function.parameters {
+                        go(types, *parameter, seen, out);
+                    }
+                    go(types, function.result, seen, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = BTreeSet::new();
+    go(types, ty, &mut BTreeSet::new(), &mut out);
+    out
+}
 pub(crate) fn has_borrow(types: &Types<'_>, ty: Type) -> bool {
     fn go(types: &Types<'_>, ty: Type, seen: &mut BTreeSet<Type>) -> bool {
         if !seen.insert(ty) {

@@ -357,6 +357,7 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "DynArray.get",
     "DynArray.set",
     "DynArray.pop",
+    "Array.fill",
     "Box",
     "Box.new",
     "Box.take",

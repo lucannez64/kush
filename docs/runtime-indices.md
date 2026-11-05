@@ -331,8 +331,10 @@ fn consume(erased p: Eq<i64, 0, 0>); consume(n)
   where the checker records a literal value for a binding. This conservative
   choice keeps freezing simple and avoids reusing an initializer after
   arbitrary control flow.
-- Runtime scalar values cannot size inline arrays. `[T; n]` still requires a
-  compile-time `Nat` length; use `Vec<T>` or `&[T]` for runtime lengths.
+- Runtime scalar values size inline arrays only through a static capacity:
+  `[T; n <= C]` binds the length to an immutable `i64` index `n`, and plain
+  `[T; n]` still requires a compile-time `Nat` length. See
+  [runtime-sized inline arrays](dynamic-arrays.md#runtime-length-arrays-t-n--c).
 - Kernel evidence always comes from a checked logical term; there is no
   implicit argument, tactic, or user-supplied axiom. The *separate* arithmetic
   `{ ... }` fragment has the bounded linear proof search described in 4a, but it

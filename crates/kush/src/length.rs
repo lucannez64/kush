@@ -245,7 +245,7 @@ impl Evaluator<'_> {
                 Mode::Index => Ok(None),
                 Mode::Length => Err(Diagnostic::new(
                     span,
-                    "depends on a runtime value; use Vec<T> or an immutable &[T] view for a length that is not statically known",
+                    "depends on a runtime value; give a runtime-length array an inline capacity as [T; n <= C], or use Vec<T> or a &[T] view",
                 )),
             },
             BindingKind::Generic => Err(Diagnostic::new(

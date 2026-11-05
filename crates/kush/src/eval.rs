@@ -5907,6 +5907,35 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 items.push(value);
                 array
             }
+            ExprKind::DynArrayFill {
+                length: length_expr,
+                value: value_expr,
+                capacity,
+                check,
+                ..
+            } => {
+                let length = value!(self.expr(length_expr, frame));
+                let value = value!(self.expr(value_expr, frame));
+                self.consume(length_expr, frame);
+                self.consume(value_expr, frame);
+                let length = usize::try_from(length.scalar())
+                    .ok()
+                    .filter(|length| length <= capacity);
+                let Some(length) = length else {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        if *check {
+                            "panic: runtime array length out of range for its capacity"
+                        } else {
+                            "internal error: a proved runtime array length is out of range"
+                        },
+                    ));
+                };
+                Value::DynArray {
+                    items: vec![value; length],
+                    capacity: *capacity,
+                }
+            }
             ExprKind::DynArraySet {
                 array: array_expr,
                 index: index_expr,

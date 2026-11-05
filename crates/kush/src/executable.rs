@@ -1150,6 +1150,17 @@ pub(crate) enum ExprKind {
         element: Type,
         capacity: usize,
     },
+    /// Construct a runtime-length array `[T; n <= C]`: evaluate the length,
+    /// then one copyable element, and store it in the first `length` slots.
+    /// `check` requests the runtime `0 <= length <= capacity` guard; it is
+    /// off when the bound was proved from facts.
+    DynArrayFill {
+        length: Box<Expr>,
+        value: Box<Expr>,
+        element: Type,
+        capacity: usize,
+        check: bool,
+    },
     /// Overwrite one initialized slot in place. Copyable elements only; the
     /// inline storage and runtime length are preserved.
     DynArraySet {
@@ -1345,6 +1356,11 @@ impl Expr {
             }
             | ExprKind::DynArrayPush {
                 array: a, value: b, ..
+            }
+            | ExprKind::DynArrayFill {
+                length: a,
+                value: b,
+                ..
             }
             | ExprKind::DynArrayEqual {
                 left: a, right: b, ..
@@ -2303,6 +2319,10 @@ fn fusion_expr_safe(
             safe(array, signatures, bodies, memo, visiting)
                 && safe(value, signatures, bodies, memo, visiting)
         }
+        ExprKind::DynArrayFill { length, value, .. } => {
+            safe(length, signatures, bodies, memo, visiting)
+                && safe(value, signatures, bodies, memo, visiting)
+        }
         ExprKind::HandlerPush { handler, body, .. } => {
             safe(handler, signatures, bodies, memo, visiting)
                 && fusion_block_safe(body, signatures, bodies, memo, visiting)
@@ -2525,6 +2545,10 @@ fn fuse_expr(
         }
         ExprKind::DynArrayPush { array, value, .. } => {
             fuse_expr(array, types, signatures, safety, fusions);
+            fuse_expr(value, types, signatures, safety, fusions);
+        }
+        ExprKind::DynArrayFill { length, value, .. } => {
+            fuse_expr(length, types, signatures, safety, fusions);
             fuse_expr(value, types, signatures, safety, fusions);
         }
         ExprKind::HandlerPush { handler, body, .. } => {
@@ -4582,6 +4606,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         }
         validate_erased_parameters(resolution, &logical, f)?;
         validate_length_templates(resolution, f)?;
+        validate_runtime_length_signature(resolution, f, false)?;
         if f.body.is_none() {
             let Some(symbol) = &f.foreign else {
                 return Err(Diagnostic::new(
@@ -4818,6 +4843,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             row_bound: BTreeSet::new(),
             continuation_depth: 0,
             hoisted: Vec::new(),
+            pending_lengths: BTreeMap::new(),
         };
         let body = (|| {
             let mut runtime = sig.parameters.iter().zip(&sig.parameter_grades);
@@ -6226,6 +6252,7 @@ fn collect_methods<'a>(
             }
             validate_erased_parameters(resolution, logical, f)?;
             validate_length_templates(resolution, f)?;
+            validate_runtime_length_signature(resolution, f, true)?;
             if signatures
                 .insert(
                     f.name.clone(),
@@ -6647,6 +6674,7 @@ fn collect_methods<'a>(
             }
             validate_erased_parameters(resolution, logical, f)?;
             validate_length_templates(resolution, f)?;
+            validate_runtime_length_signature(resolution, f, true)?;
             let binding = resolution.method(method.span).ok_or_else(|| {
                 Diagnostic::new(method.span, "internal error: impl method has no binding")
             })?;
@@ -8551,6 +8579,7 @@ fn collect_generic_impl<'a>(
         }
         validate_erased_parameters(resolution, logical, f)?;
         validate_length_templates(resolution, f)?;
+        validate_runtime_length_signature(resolution, f, true)?;
         let binding = resolution.method(method.span).ok_or_else(|| {
             Diagnostic::new(method.span, "internal error: impl method has no binding")
         })?;
@@ -10657,6 +10686,125 @@ fn validate_erased_parameters(
 /// catches unbound, type/grade, and runtime-dependent lengths even when the
 /// generic function is never instantiated; concrete lengths are still checked
 /// during specialization.
+/// Runtime-length arrays in a signature. A parameter or result may be
+/// `[T; n <= C]` or a direct reference to one, where `n` is an earlier `i64`
+/// parameter (any `i64` parameter for the result). Calls substitute the
+/// caller's binder, so the shape is restricted to positions the call site
+/// rewrites. Generic functions and methods cannot use them.
+fn validate_runtime_length_signature(
+    resolution: &Resolution,
+    f: &ast::Function,
+    method: bool,
+) -> Result<()> {
+    fn is_i64(ty: &ast::Type) -> bool {
+        matches!(&split_grade(ty).0.kind, ast::TypeKind::Named { path, arguments } if path.len() == 1 && path[0] == "i64" && arguments.is_empty())
+    }
+    fn walk(
+        resolution: &Resolution,
+        ty: &ast::Type,
+        allowed: &BTreeSet<BindingId>,
+        direct: bool,
+        restricted: Option<&'static str>,
+    ) -> Result<()> {
+        match &ty.kind {
+            ast::TypeKind::Array(element, length) => {
+                if let Some((binder, capacity)) = runtime_length_parts(length) {
+                    if let Some(reason) = restricted {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            format!("{reason} cannot mention a runtime-length array [T; n <= C]"),
+                        ));
+                    }
+                    if !direct {
+                        return Err(Diagnostic::new(
+                            ty.span,
+                            "in a signature, a runtime-length array must be a whole parameter or result type, or a direct reference to one",
+                        ));
+                    }
+                    let id = runtime_length_binder(resolution, binder)?;
+                    if !allowed.contains(&id) {
+                        return Err(Diagnostic::new(
+                            binder.span,
+                            "the length of a runtime-length array in a signature must be an earlier i64 parameter of the same function",
+                        ));
+                    }
+                    walk(resolution, capacity, allowed, false, restricted)?;
+                }
+                walk(resolution, element, allowed, false, restricted)
+            }
+            ast::TypeKind::Borrow { inner, .. } => {
+                walk(resolution, inner, allowed, direct, restricted)
+            }
+            ast::TypeKind::Graded { inner, .. } => {
+                walk(resolution, inner, allowed, direct, restricted)
+            }
+            ast::TypeKind::Named { arguments, .. } => {
+                for argument in arguments {
+                    walk(resolution, argument, allowed, false, restricted)?;
+                }
+                Ok(())
+            }
+            ast::TypeKind::Tuple(items) => {
+                for item in items {
+                    walk(resolution, item, allowed, false, restricted)?;
+                }
+                Ok(())
+            }
+            ast::TypeKind::Slice(inner) | ast::TypeKind::Dyn(inner) => {
+                walk(resolution, inner, allowed, false, restricted)
+            }
+            ast::TypeKind::Structural { fields, .. } => {
+                for field in fields {
+                    walk(resolution, &field.ty, allowed, false, restricted)?;
+                }
+                Ok(())
+            }
+            ast::TypeKind::Binary { left, right, .. } => {
+                walk(resolution, left, allowed, false, restricted)?;
+                walk(resolution, right, allowed, false, restricted)
+            }
+            ast::TypeKind::Function {
+                parameters, result, ..
+            } => {
+                let reason = Some("a fn/once fn type");
+                for parameter in parameters {
+                    walk(resolution, &parameter.ty, allowed, false, reason)?;
+                }
+                walk(resolution, result, allowed, false, reason)
+            }
+            _ => Ok(()),
+        }
+    }
+    let restricted = if method {
+        Some("a method signature")
+    } else if f.foreign.is_some() {
+        Some("a foreign function signature")
+    } else if !f.generics.is_empty() {
+        Some("a generic function signature")
+    } else {
+        None
+    };
+    let all = f
+        .parameters
+        .iter()
+        .filter(|parameter| !parameter.erased && is_i64(&parameter.ty))
+        .filter_map(|parameter| resolution.binder(parameter.span))
+        .collect::<BTreeSet<_>>();
+    let mut earlier = BTreeSet::new();
+    for parameter in &f.parameters {
+        if parameter.erased {
+            continue;
+        }
+        walk(resolution, &parameter.ty, &earlier, true, restricted)?;
+        if is_i64(&parameter.ty)
+            && let Some(id) = resolution.binder(parameter.span)
+        {
+            earlier.insert(id);
+        }
+    }
+    walk(resolution, &f.result, &all, true, restricted)
+}
+
 fn validate_length_templates(resolution: &Resolution, f: &ast::Function) -> Result<()> {
     let types = f
         .parameters
@@ -10697,6 +10845,10 @@ fn validate_type_template(
     match &ty.kind {
         ast::TypeKind::Array(element, length) => {
             validate_type_template(resolution, element, consts, false, false)?;
+            if let Some((binder, capacity)) = runtime_length_parts(length) {
+                runtime_length_binder(resolution, binder)?;
+                return validate_length_template(resolution, capacity, consts);
+            }
             validate_length_template(resolution, length, consts)
         }
         ast::TypeKind::Dyn(inner) => validate_type_template(resolution, inner, consts, false, true),
@@ -10727,7 +10879,7 @@ fn validate_type_template(
                 {
                     return Err(Diagnostic::new(
                         ty.span,
-                        "array length depends on a runtime value; use Vec<T> or an immutable &[T] view for a length that is not statically known",
+                        "array length depends on a runtime value; give a runtime-length array an inline capacity as [T; n <= C], or use Vec<T> or a &[T] view",
                     ));
                 }
             }
@@ -10779,6 +10931,48 @@ fn validate_type_template(
         ast::TypeKind::Lifetime(_) | ast::TypeKind::SelfType => Ok(()),
         ast::TypeKind::Integer(_) | ast::TypeKind::Bool(_) => Ok(()),
     }
+}
+
+/// Split the length of a runtime-length array `[T; n <= C]` into the binder
+/// expression `n` and the compile-time capacity `C`.
+pub(crate) fn runtime_length_parts(length: &ast::Type) -> Option<(&ast::Type, &ast::Type)> {
+    match &length.kind {
+        ast::TypeKind::Binary {
+            op: Kind::Le,
+            left,
+            right,
+        } => Some((left, right)),
+        _ => None,
+    }
+}
+
+/// Resolve the length binder of `[T; n <= C]`. It must be a plain name of a
+/// runtime parameter or local; whether it is an immutable `i64` is checked
+/// where the binding's type is known.
+pub(crate) fn runtime_length_binder(
+    resolution: &Resolution,
+    binder: &ast::Type,
+) -> Result<BindingId> {
+    let error = || {
+        Diagnostic::new(
+            binder.span,
+            "the length of [T; n <= C] must be the name of an immutable i64 parameter or local",
+        )
+    };
+    let ast::TypeKind::Named { path, arguments } = &binder.kind else {
+        return Err(error());
+    };
+    if path.len() != 1 || !arguments.is_empty() {
+        return Err(error());
+    }
+    let id = resolution.reference(binder.span).ok_or_else(error)?;
+    if !matches!(
+        resolution.bindings[id].kind,
+        BindingKind::Parameter | BindingKind::Local
+    ) {
+        return Err(error());
+    }
+    Ok(id)
 }
 
 fn validate_length_template(
@@ -11107,6 +11301,9 @@ struct Checker<'a, 't> {
     /// list drains the entries created while checking it; the local's resource
     /// drops at that block's end, after every checked reference's last use.
     hoisted: Vec<Statement>,
+    /// Runtime-length binder renaming for the call whose `infer` is about to
+    /// run: callee `i64` parameter -> caller binding passed for it.
+    pending_lengths: BTreeMap<BindingId, BindingId>,
 }
 /// One actual lifetime supplied for a callee-declared binder at a parameter
 /// occurrence. The polarity decides whether the actual identity must equal the
@@ -12124,6 +12321,7 @@ impl Checker<'_, '_> {
             associated_types: BTreeMap::new(),
             projections: BTreeMap::new(),
             self_projections: BTreeMap::new(),
+            lengths: BTreeMap::new(),
         };
         evaluate_trait_arguments(
             self.types,
@@ -12735,6 +12933,7 @@ impl Checker<'_, '_> {
             associated_types: BTreeMap::new(),
             projections: BTreeMap::new(),
             self_projections: BTreeMap::new(),
+            lengths: BTreeMap::new(),
         };
         let required = evaluate_trait_arguments(
             self.types,
@@ -15839,8 +16038,337 @@ impl Checker<'_, '_> {
             associated_types: BTreeMap::new(),
             projections: BTreeMap::new(),
             self_projections: BTreeMap::new(),
+            lengths: BTreeMap::new(),
         };
-        self.types.ty_in(ty, &subst)
+        let lowered = self.types.ty_in(ty, &subst)?;
+        self.check_runtime_lengths(ty)?;
+        Ok(lowered)
+    }
+    /// The local slot of a runtime-length binder. The binder must be an
+    /// immutable `i64` parameter or local in scope, so the value the type
+    /// describes can never change.
+    fn runtime_length_slot(&self, binder: BindingId, span: Span) -> Result<usize> {
+        let error = || {
+            Diagnostic::new(
+                span,
+                format!(
+                    "the length '{}' of a runtime-length array must be an immutable i64 parameter or local in scope",
+                    self.resolution.bindings[binder].name
+                ),
+            )
+        };
+        let slot = *self.slots.get(&binder).ok_or_else(error)?;
+        let local = &self.locals[slot];
+        if local.ty != Type::I64 || local.mutable {
+            return Err(error());
+        }
+        Ok(slot)
+    }
+    /// Validate every runtime-length binder written in an annotation in this
+    /// body. Binders that arrive through a generic substitution were checked
+    /// where the caller wrote them. A written callable type cannot carry one:
+    /// an indirect call cannot substitute the caller's binder.
+    fn check_runtime_lengths(&self, ty: &ast::Type) -> Result<()> {
+        fn walk(checker: &Checker<'_, '_>, ty: &ast::Type, in_callable: bool) -> Result<()> {
+            match &ty.kind {
+                ast::TypeKind::Array(element, length) => {
+                    if let Some((binder, _)) = runtime_length_parts(length) {
+                        if in_callable {
+                            return Err(Diagnostic::new(
+                                ty.span,
+                                "fn/once fn types and lambdas cannot mention a runtime-length array [T; n <= C]; call a named function instead",
+                            ));
+                        }
+                        let id = runtime_length_binder(checker.resolution, binder)?;
+                        checker.runtime_length_slot(id, binder.span)?;
+                    }
+                    walk(checker, element, in_callable)
+                }
+                ast::TypeKind::Named { arguments, .. } => {
+                    for argument in arguments {
+                        walk(checker, argument, in_callable)?;
+                    }
+                    Ok(())
+                }
+                ast::TypeKind::Tuple(items) => {
+                    for item in items {
+                        walk(checker, item, in_callable)?;
+                    }
+                    Ok(())
+                }
+                ast::TypeKind::Slice(inner)
+                | ast::TypeKind::Dyn(inner)
+                | ast::TypeKind::Borrow { inner, .. }
+                | ast::TypeKind::Graded { inner, .. } => walk(checker, inner, in_callable),
+                ast::TypeKind::Structural { fields, .. } => {
+                    for field in fields {
+                        walk(checker, &field.ty, in_callable)?;
+                    }
+                    Ok(())
+                }
+                ast::TypeKind::Binary { left, right, .. } => {
+                    walk(checker, left, in_callable)?;
+                    walk(checker, right, in_callable)
+                }
+                ast::TypeKind::Function {
+                    parameters, result, ..
+                } => {
+                    for parameter in parameters {
+                        walk(checker, &parameter.ty, true)?;
+                    }
+                    walk(checker, result, true)
+                }
+                _ => Ok(()),
+            }
+        }
+        walk(self, ty, false)
+    }
+    /// `let v = &a[..]` over a runtime-length array `[T; n <= C]` records
+    /// `Slice.len(v) == n`, so `Slice.at(v, i, _)` can be proved from facts
+    /// about `n`.
+    fn define_view_length(&mut self, slot: usize, value: &Expr) {
+        let ExprKind::Slice {
+            base,
+            start: None,
+            end: None,
+            text: false,
+            ..
+        } = &value.kind
+        else {
+            return;
+        };
+        let owner = match base.ty {
+            Type::Ref(pointer) | Type::RefMut(pointer) => self.types.pointees[pointer],
+            ty => ty,
+        };
+        let Some(binder) = owner
+            .layout()
+            .and_then(|id| self.types.enums[id].runtime_length)
+        else {
+            return;
+        };
+        let Ok(length) = self.runtime_length_term(binder, value.span) else {
+            return;
+        };
+        let view =
+            crate::facts::Linear::variable(crate::facts::Term::Len(slot, self.facts.version(slot)));
+        let mut facts = Vec::new();
+        crate::facts::compare(view, &Kind::EqEq, length, &mut facts);
+        self.facts.add(facts);
+    }
+    /// `a[i]` on a runtime-length array `[T; n <= C]` (a local or a shared
+    /// reference to one). When the facts prove `0 <= i && i < n` the read is
+    /// proof-based and needs no `panic` effect; otherwise it is a checked read.
+    /// Both lower to the checked `DynArray` read, whose bound check cannot
+    /// fire on the proved path.
+    fn runtime_array_index(
+        &mut self,
+        base: &Expr,
+        index: &ast::Expr,
+        span: Span,
+    ) -> Result<Option<Expr>> {
+        let array_ty = match base.ty {
+            Type::Ref(pointer) => self.types.pointees[pointer],
+            ty => ty,
+        };
+        let Some(binder) = array_ty
+            .layout()
+            .and_then(|id| self.types.enums[id].runtime_length)
+        else {
+            return Ok(None);
+        };
+        let (element, _) = self.types.enums[array_ty.layout().unwrap()]
+            .dynamic_array
+            .expect("runtime arrays use the DynArray layout");
+        let array = match (&base.kind, base.ty) {
+            (ExprKind::Peek(slot), Type::Ref(_)) => Expr {
+                kind: ExprKind::Local(*slot),
+                ty: base.ty,
+                span: base.span,
+                resource: None,
+            },
+            (ExprKind::Peek(slot), ty) if ty == array_ty => Expr {
+                kind: ExprKind::Borrow(*slot),
+                ty: Type::Ref(self.types.pointer(array_ty)),
+                span: base.span,
+                resource: None,
+            },
+            _ => {
+                return Err(Diagnostic::new(
+                    base.span,
+                    "index a runtime-length array through a local binding or a shared reference parameter; bind the array to a local first",
+                ));
+            }
+        };
+        if self.owned_type(element) || self.linear_type(element) || element.is_view() {
+            return Err(Diagnostic::new(
+                span,
+                "indexing a runtime-length array copies the element, but it owns resources, is linear, or is a view",
+            ));
+        }
+        let index = self.expr_expected(index, Some(Type::I64))?;
+        self.expect(index.ty, Type::I64, index.span)?;
+        let length = self.runtime_length_term(binder, span).ok();
+        let proved = match (self.facts.linear(&index), length) {
+            (Some(position), Some(length)) => self.try_prove(
+                vec![
+                    (
+                        crate::facts::Linear::constant(0),
+                        Kind::Le,
+                        position.clone(),
+                    ),
+                    (position, Kind::Lt, length),
+                ],
+                "0 <= index && index < n",
+                span,
+            ),
+            _ => false,
+        };
+        if !proved {
+            self.require(PANIC, span)?;
+        }
+        let ty = if index.ty == Type::Never {
+            Type::Never
+        } else {
+            element
+        };
+        Ok(Some(Expr {
+            kind: ExprKind::Call(
+                Target::DynArray(DynArrayOp::Get, element),
+                vec![array, index],
+            ),
+            ty,
+            span,
+            resource: None,
+        }))
+    }
+    /// `DynArray.push`/`pop` change the runtime length, which a runtime-length
+    /// array's type fixes to its binder.
+    fn reject_length_change(&self, ty: Type, name: &str, span: Span) -> Result<()> {
+        let Some(binder) = ty
+            .layout()
+            .and_then(|id| self.types.enums[id].runtime_length)
+        else {
+            return Ok(());
+        };
+        Err(Diagnostic::new(
+            span,
+            format!(
+                "{name} would change the length of a [T; {} <= C], which always equals '{}'; use a DynArray<T, C> for a growable length",
+                self.resolution.bindings[binder].name, self.resolution.bindings[binder].name
+            ),
+        ))
+    }
+    /// A lambda is called indirectly, so its signature cannot carry a
+    /// runtime-length binder the call would have to substitute.
+    fn reject_lambda_runtime_length(&self, ty: Type, span: Span) -> Result<()> {
+        if crate::runtime_types::runtime_length_binders(self.types, ty).is_empty() {
+            return Ok(());
+        }
+        Err(Diagnostic::new(
+            span,
+            "fn/once fn types and lambdas cannot mention a runtime-length array [T; n <= C]; call a named function instead",
+        ))
+    }
+    /// The solver term for the current value of a runtime-length binder.
+    fn runtime_length_term(&self, binder: BindingId, span: Span) -> Result<crate::facts::Linear> {
+        let slot = self.runtime_length_slot(binder, span)?;
+        Ok(crate::facts::Linear::variable(crate::facts::Term::Var(
+            slot,
+            self.facts.version(slot),
+        )))
+    }
+    /// Try to prove `l op r` for every atom from the facts in scope without
+    /// reporting a failure. Proved goals record checked certificates.
+    fn try_prove(
+        &mut self,
+        atoms: Vec<(crate::facts::Linear, Kind, crate::facts::Linear)>,
+        text: &str,
+        span: Span,
+    ) -> bool {
+        let mut goals = Vec::new();
+        let mut wanted = 0;
+        for (left, op, right) in atoms {
+            wanted += if op == Kind::EqEq { 2 } else { 1 };
+            crate::facts::compare(left, &op, right, &mut goals);
+        }
+        // An overflowing translation drops a goal; never treat that as proved.
+        if goals.len() != wanted {
+            return false;
+        }
+        let mut proofs = Vec::with_capacity(goals.len());
+        for goal in goals {
+            let Some(proof) = self.facts.prove(&goal) else {
+                return false;
+            };
+            proofs.push((goal, proof));
+        }
+        for (goal, proof) in proofs {
+            let hypotheses = self.facts.snapshot(&goal);
+            self.functions.certificates.push(crate::facts::Certificate {
+                span,
+                obligation: text.to_owned(),
+                goal,
+                proof,
+                hypotheses,
+            });
+        }
+        true
+    }
+    /// The caller binding for each callee `i64` parameter that sizes a
+    /// runtime-length array in the callee's signature. The actual must name an
+    /// immutable `i64` binding in scope.
+    fn call_runtime_lengths(
+        &self,
+        f: &ast::Function,
+        arguments: &[ast::Expr],
+    ) -> Result<BTreeMap<BindingId, BindingId>> {
+        fn collect(resolution: &Resolution, ty: &ast::Type, out: &mut BTreeSet<BindingId>) {
+            match &ty.kind {
+                ast::TypeKind::Array(element, length) => {
+                    if let Some((binder, _)) = runtime_length_parts(length)
+                        && let Ok(id) = runtime_length_binder(resolution, binder)
+                    {
+                        out.insert(id);
+                    }
+                    collect(resolution, element, out);
+                }
+                ast::TypeKind::Borrow { inner, .. } | ast::TypeKind::Graded { inner, .. } => {
+                    collect(resolution, inner, out)
+                }
+                _ => {}
+            }
+        }
+        let mut binders = BTreeSet::new();
+        for parameter in f.parameters.iter().filter(|parameter| !parameter.erased) {
+            collect(self.resolution, &parameter.ty, &mut binders);
+        }
+        collect(self.resolution, &f.result, &mut binders);
+        let mut map = BTreeMap::new();
+        for (parameter, argument) in f.parameters.iter().zip(arguments) {
+            let Some(binder) = self.resolution.binder(parameter.span) else {
+                continue;
+            };
+            if !binders.contains(&binder) {
+                continue;
+            }
+            let error = || {
+                Diagnostic::new(
+                    argument.span,
+                    format!(
+                        "'{}' sizes a runtime-length array in the signature of '{}'; pass the name of an immutable i64 local",
+                        parameter.name, f.name
+                    ),
+                )
+            };
+            let ast::ExprKind::Name(_) = &argument.kind else {
+                return Err(error());
+            };
+            let actual = self.resolution.reference(argument.span).ok_or_else(error)?;
+            self.runtime_length_slot(actual, argument.span)?;
+            map.insert(binder, actual);
+        }
+        Ok(map)
     }
     /// Strip an outer result-transfer grade (through transparent aliases) for
     /// call-site inference. The grade itself is validated when the concrete
@@ -18939,6 +19467,7 @@ impl Checker<'_, '_> {
                         self.alias_scalar_index(id, source);
                     }
                     self.facts.define(slot, &value);
+                    self.define_view_length(slot, &value);
                     let must_use = self.copyable_result_grade(&value);
                     if let Some(required) = must_use
                         && let Some(annotation) = grade
@@ -19219,6 +19748,9 @@ impl Checker<'_, '_> {
             ExprKind::DynArrayPush { array, value, .. } => {
                 self.value_moves_linear(array) || self.value_moves_linear(value)
             }
+            ExprKind::DynArrayFill { length, value, .. } => {
+                self.value_moves_linear(length) || self.value_moves_linear(value)
+            }
             ExprKind::DynArraySet {
                 array,
                 index,
@@ -19338,6 +19870,9 @@ impl Checker<'_, '_> {
                 ExprKind::ArenaNewWith { strategy } => find(checker, strategy),
                 ExprKind::DynArrayPush { array, value, .. } => {
                     find(checker, array).or_else(|| find(checker, value))
+                }
+                ExprKind::DynArrayFill { length, value, .. } => {
+                    find(checker, length).or_else(|| find(checker, value))
                 }
                 ExprKind::DynArraySet {
                     array,
@@ -19855,6 +20390,33 @@ impl Checker<'_, '_> {
                                 ),
                             ));
                         }
+                        // A runtime-length target `[T; n <= C]` accepts a
+                        // literal only when the facts prove `n == k`. There is
+                        // no runtime fallback for a literal.
+                        let runtime_binder = expected
+                            .and_then(|ty| ty.layout())
+                            .and_then(|id| c.types.enums[id].runtime_length);
+                        if let Some(binder) = runtime_binder {
+                            let term = c.runtime_length_term(binder, span)?;
+                            let count = values.len() as i128;
+                            if !c.try_prove(
+                                vec![(term, Kind::EqEq, crate::facts::Linear::constant(count))],
+                                &format!("n == {count}"),
+                                span,
+                            ) {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    format!(
+                                        "cannot prove that '{}' == {} for this [T; {} <= {capacity}] literal; check the length first (for example 'if {} == {} {{ ... }}') or use Array.fill",
+                                        c.resolution.bindings[binder].name,
+                                        values.len(),
+                                        c.resolution.bindings[binder].name,
+                                        c.resolution.bindings[binder].name,
+                                        values.len()
+                                    ),
+                                ));
+                            }
+                        }
                         let literal_ty = c.types.dynamic_array(element, capacity, span)?;
                         let mut current = Expr {
                             kind: ExprKind::DynArrayNew {
@@ -19880,6 +20442,11 @@ impl Checker<'_, '_> {
                                 span,
                                 resource: None,
                             };
+                        }
+                        if runtime_binder.is_some() && current.ty != Type::Never {
+                            // Same inline layout; the proof above fixes the
+                            // length to the binder.
+                            current.ty = expected.expect("runtime-length literal target");
                         }
                         return match expected {
                             Some(expected) => c.coerce(current, expected, span),
@@ -19921,6 +20488,12 @@ impl Checker<'_, '_> {
                             span,
                             resource: None,
                         };
+                        return match expected {
+                            Some(expected) => c.coerce(value, expected, span),
+                            None => Ok(value),
+                        };
+                    }
+                    if let Some(value) = c.runtime_array_index(&base, index, span)? {
                         return match expected {
                             Some(expected) => c.coerce(value, expected, span),
                             None => Ok(value),
@@ -20906,7 +21479,9 @@ impl Checker<'_, '_> {
                     if binding.kind == BindingKind::Builtin && binding.name.starts_with("Task.") {
                         return c.task_call(&binding.name.clone(), explicit, arguments, expected, span);
                     }
-                    if binding.kind == BindingKind::Builtin && binding.name.starts_with("DynArray.") {
+                    if binding.kind == BindingKind::Builtin
+                        && (binding.name.starts_with("DynArray.") || binding.name == "Array.fill")
+                    {
                         return c.dyn_array_call(
                             &binding.name.clone(),
                             explicit,
@@ -21797,6 +22372,7 @@ impl Checker<'_, '_> {
                 .map(|grade| grades::evaluate(self.resolution, &self.grades, grade))
                 .transpose()?;
             let ty = self.ty(inner)?;
+            self.reject_lambda_runtime_length(ty, parameter.ty.span)?;
             // Slice parameters have independent lifetimes. A lambda may also
             // take a record with borrowed slice fields by value; its per-field
             // contract travels in the callable's borrow signature.
@@ -21819,6 +22395,7 @@ impl Checker<'_, '_> {
         let (result_inner, result_grade) =
             result_contract(self.resolution, self.types, &self.grades, &lambda.result)?;
         let result = self.ty(&result_inner)?;
+        self.reject_lambda_runtime_length(result, lambda.result.span)?;
         validate_result_contract(
             result_grade,
             self.owned_type(result),
@@ -22654,6 +23231,20 @@ impl Checker<'_, '_> {
             Some(span),
         )?;
         let signature = self.functions.signatures[index].clone();
+        if signature
+            .parameters
+            .iter()
+            .chain([&signature.result])
+            .any(|ty| !crate::runtime_types::runtime_length_binders(self.types, *ty).is_empty())
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "'{}' has a runtime-length array in its signature and cannot be a first-class value; call it directly so the length binder is substituted",
+                    f.name
+                ),
+            ));
+        }
         // Slice parameters/results and borrowed record fields carry their
         // lifetime contract in the callable type. Owner references and text
         // views remain direct-call only.
@@ -26831,6 +27422,7 @@ impl Checker<'_, '_> {
             .collect::<Vec<_>>();
         let mut subst = base.cloned().unwrap_or_default();
         subst.self_type = self_type;
+        subst.lengths = std::mem::take(&mut self.pending_lengths);
         let constraint_mark = self.effect_constraints.len();
         // `(declared pattern, actual type)` for every parameter and result
         // hint. A failed unification is deferred only long enough for the
@@ -27682,6 +28274,8 @@ impl Checker<'_, '_> {
             .iter()
             .map(|lifetime| lifetime.name.clone())
             .collect::<BTreeSet<_>>();
+        let lengths = self.call_runtime_lengths(f, arguments)?;
+        self.pending_lengths = lengths.clone();
         let (type_arguments, grade_arguments, const_arguments, effect_arguments, values) = self
             .infer(
                 &f.generics,
@@ -27729,12 +28323,15 @@ impl Checker<'_, '_> {
         } else if crate::runtime_types::grade_erases(signature.result_grade) {
             Type::Unit
         } else {
-            self.types
-                .relabel_lifetimes(signature.result, &lifetime_map, span)?
+            let result = self
+                .types
+                .relabel_lifetimes(signature.result, &lifetime_map, span)?;
+            self.types.rebind_lengths(result, &lengths, span)?
         };
         let mut coerced = Vec::with_capacity(values.len());
         for (value, ty) in values.into_iter().zip(&signature.parameters) {
             let ty = self.types.relabel_lifetimes(*ty, &lifetime_map, span)?;
+            let ty = self.types.rebind_lengths(ty, &lengths, span)?;
             coerced.push(self.coerce_argument(value, ty, span)?);
         }
         let values = coerced;
@@ -29973,7 +30570,97 @@ impl Checker<'_, '_> {
             }
             None => None,
         };
+        let expected_binder = expected
+            .and_then(|ty| ty.layout())
+            .and_then(|id| self.types.enums[id].runtime_length);
         match name {
+            "Array.fill" => {
+                let (element, capacity) = explicit_layout.or(from_expected).ok_or_else(|| {
+                    Diagnostic::new(
+                        span,
+                        "cannot infer the element type and capacity of Array.fill; annotate the binding as [T; n <= C] or write Array.fill::<T, C>(n, value)",
+                    )
+                })?;
+                if arguments.len() != 2 {
+                    return Err(Diagnostic::new(
+                        span,
+                        "Array.fill takes the length binder and one copyable element",
+                    ));
+                }
+                let binder_error = || {
+                    Diagnostic::new(
+                        arguments[0].span,
+                        "the length of Array.fill must be the name of an immutable i64 parameter or local; it becomes the n of [T; n <= C]",
+                    )
+                };
+                let ast::ExprKind::Name(_) = &arguments[0].kind else {
+                    return Err(binder_error());
+                };
+                let binder = self
+                    .resolution
+                    .reference(arguments[0].span)
+                    .ok_or_else(binder_error)?;
+                self.runtime_length_slot(binder, arguments[0].span)?;
+                if let Some(expected_binder) = expected_binder
+                    && expected_binder != binder
+                {
+                    return Err(Diagnostic::new(
+                        arguments[0].span,
+                        format!(
+                            "Array.fill builds a [T; {} <= C], but the expected type has length '{}'",
+                            self.resolution.bindings[binder].name,
+                            self.resolution.bindings[expected_binder].name
+                        ),
+                    ));
+                }
+                let ty = self.types.runtime_array(element, capacity, binder, span)?;
+                let length = self.expr_expected(&arguments[0], Some(Type::I64))?;
+                self.expect(length.ty, Type::I64, arguments[0].span)?;
+                let value = self.expr_expected(&arguments[1], Some(element))?;
+                self.expect(value.ty, element, arguments[1].span)?;
+                if self.owned_type(element) || self.linear_type(element) || element.is_view() {
+                    return Err(Diagnostic::new(
+                        arguments[1].span,
+                        "Array.fill copies its element into every slot; owning, linear, and view elements need a literal with a proved length",
+                    ));
+                }
+                let term = self.runtime_length_term(binder, arguments[0].span)?;
+                let proved = self.try_prove(
+                    vec![
+                        (crate::facts::Linear::constant(0), Kind::Le, term.clone()),
+                        (
+                            term,
+                            Kind::Le,
+                            crate::facts::Linear::constant(capacity as i128),
+                        ),
+                    ],
+                    &format!("0 <= n && n <= {capacity}"),
+                    span,
+                );
+                if !proved {
+                    self.require(PANIC, span)?;
+                }
+                let value = Expr {
+                    kind: ExprKind::DynArrayFill {
+                        length: Box::new(length),
+                        value: Box::new(value),
+                        element,
+                        capacity,
+                        check: !proved,
+                    },
+                    ty,
+                    span,
+                    resource: None,
+                };
+                match expected {
+                    Some(expected) => self.coerce(value, expected, span),
+                    None => Ok(value),
+                }
+            }
+            "DynArray.new" if expected_binder.is_some() => Err(Diagnostic::new(
+                span,
+                "a runtime-length array [T; n <= C] cannot start empty; build it with Array.fill(n, value) or a literal whose length is proved equal to n",
+            )),
             "DynArray.new" => {
                 let (element, capacity) = explicit_layout.or(from_expected).ok_or_else(|| {
                     Diagnostic::new(
@@ -30027,6 +30714,7 @@ impl Checker<'_, '_> {
                         "DynArray.push requires a runtime-sized inline array",
                     ));
                 };
+                self.reject_length_change(array.ty, name, arguments[0].span)?;
                 let ty = array.ty;
                 let value = self.expr_expected(&arguments[1], Some(element))?;
                 self.expect(value.ty, element, arguments[1].span)?;
@@ -30082,6 +30770,9 @@ impl Checker<'_, '_> {
                         format!("{name} requires a runtime-sized inline array"),
                     ));
                 };
+                if name == "DynArray.pop" {
+                    self.reject_length_change(array.ty, name, arguments[0].span)?;
+                }
                 if self.owned_type(element) || self.linear_type(element) || element.is_view() {
                     return Err(Diagnostic::new(
                         span,
@@ -31597,6 +32288,16 @@ impl Checker<'_, '_> {
                     let mut prefix = Vec::new();
                     let mut rest = false;
                     let mut rest_binding = None;
+                    // A runtime-length array's tail has a different length, so
+                    // `..rest` is a plain DynArray with the same capacity.
+                    let rest_ty = if ty
+                        .layout()
+                        .is_some_and(|id| c.types.enums[id].runtime_length.is_some())
+                    {
+                        c.types.dynamic_array(element, capacity, pattern.span)?
+                    } else {
+                        ty
+                    };
                     for part in parts {
                         if let ast::PatternKind::Rest(name) = &part.kind {
                             if rest {
@@ -31609,11 +32310,11 @@ impl Checker<'_, '_> {
                             rest_binding = match name {
                                 Some(name) => {
                                     if let Some((slot, previous)) = bindings.get(name) {
-                                        c.expect(ty, *previous, part.span)?;
+                                        c.expect(rest_ty, *previous, part.span)?;
                                         Some(*slot)
                                     } else {
-                                        let slot = c.bind(part.span, ty, false)?;
-                                        bindings.insert(name.clone(), (slot, ty));
+                                        let slot = c.bind(part.span, rest_ty, false)?;
+                                        bindings.insert(name.clone(), (slot, rest_ty));
                                         Some(slot)
                                     }
                                 }

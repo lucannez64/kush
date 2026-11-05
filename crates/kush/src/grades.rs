@@ -1470,6 +1470,14 @@ impl<'a> Checker<'a> {
             | ExprKind::BytesLiteral(_)
             | ExprKind::Erased(_)
             | ExprKind::DynArrayNew { .. } => {}
+            ExprKind::DynArrayFill { length, value, .. } => {
+                if !self.expr(length, Grade::ONE)? {
+                    return Ok(false);
+                }
+                if !self.expr(value, Grade::ONE)? {
+                    return Ok(false);
+                }
+            }
             ExprKind::DynArrayPush { array, value, .. } => {
                 if !self.expr(array, multiplier)? {
                     return Ok(false);

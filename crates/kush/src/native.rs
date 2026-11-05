@@ -6518,6 +6518,43 @@ impl Generator<'_, '_> {
                 }
                 return Some(out);
             }
+            ExprKind::DynArrayFill {
+                length: length_expr,
+                value,
+                element,
+                capacity,
+                ..
+            } => {
+                let length = lower!(self.scalar(length_expr));
+                self.consume(length_expr);
+                let item = lower!(self.expr(value));
+                self.consume(value);
+                // A checked fill traps on a length outside 0..=capacity. A
+                // proved fill keeps the same trap as a defensive check that
+                // cannot fire (the unsigned compare also rejects negatives).
+                let bad = self.builder.ins().icmp_imm_s(
+                    IntCC::UnsignedGreaterThan,
+                    length,
+                    *capacity as i64,
+                );
+                self.guard(bad);
+                let element_width = self.program.width(*element);
+                let zero = self.constant(0);
+                let mut out = vec![zero; 1 + element_width * capacity];
+                out[0] = length;
+                for slot in 0..*capacity {
+                    let active = self.builder.ins().icmp_imm_s(
+                        IntCC::SignedGreaterThan,
+                        length,
+                        slot as i64,
+                    );
+                    for (word, value) in item.iter().take(element_width).enumerate() {
+                        let index = 1 + slot * element_width + word;
+                        out[index] = self.builder.ins().select(active, *value, zero);
+                    }
+                }
+                return Some(out);
+            }
             ExprKind::DynArraySet {
                 array,
                 index,

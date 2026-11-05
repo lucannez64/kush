@@ -459,6 +459,25 @@ impl Facts {
                     negative = Some(*term);
                 }
             }
+            // A one-variable bound `c*x <= d` (or `-c*x <= d`) is a difference
+            // constraint against zero: `x - 0 <= d/c` (or `0 - x <= d/c`).
+            if constraint.coefficients.len() == 1 {
+                let (term, coefficient) = constraint
+                    .coefficients
+                    .iter()
+                    .next()
+                    .map(|(term, coefficient)| (*term, *coefficient))
+                    .expect("one coefficient");
+                if term != Term::Zero && coefficient != 0 {
+                    let bound = constraint.bound.div_euclid(coefficient.abs());
+                    if coefficient > 0 {
+                        differences.push((Term::Zero, term, bound));
+                    } else {
+                        differences.push((term, Term::Zero, bound));
+                    }
+                }
+                continue;
+            }
             let (Some(left), Some(right)) = (positive, negative) else {
                 continue;
             };

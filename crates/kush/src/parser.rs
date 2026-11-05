@@ -1268,7 +1268,24 @@ impl Parser {
     /// constant arguments, and `+`/`-`/`*`/`/`/`%` over those. Evaluation and
     /// rejection of runtime-dependent lengths happen during type lowering.
     fn array_length(&mut self) -> Result<Type> {
-        self.nested(|p| p.array_length_bp(0))
+        self.nested(|p| {
+            let start = p.current().span;
+            let length = p.array_length_bp(0)?;
+            // `[T; n <= C]`: a runtime-length array whose length is the
+            // immutable scalar `n` and whose inline capacity is `C`.
+            if p.eat(&Kind::Le) {
+                let capacity = p.array_length_bp(0)?;
+                return Ok(Node::new(
+                    TypeKind::Binary {
+                        op: Kind::Le,
+                        left: Box::new(length),
+                        right: Box::new(capacity),
+                    },
+                    p.since(start),
+                ));
+            }
+            Ok(length)
+        })
     }
     fn array_length_bp(&mut self, min: u8) -> Result<Type> {
         let start = self.current().span;
