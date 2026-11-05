@@ -1816,14 +1816,64 @@
         "E-MULTISHOT-DECL",
         "E-PERF"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "cf7b312",
       "log": [
         {
           "time": "2026-11-05 07:26:28",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-05 07:55:37",
+          "who": "agent",
+          "text": "Round 1 (independent reviewer): 6 findings - native UAF via &mut arg to awaited call, by-ref closure across perform, closure write to outer local, Task.scope not rejected without points, perform left of &&/||, perform in borrowed temporary. All fixed with regressions in bd91ded."
+        },
+        {
+          "time": "2026-11-05 08:25:04",
+          "who": "agent",
+          "text": "Round 2 (fresh reviewer): token escape via result type (pre-existing soundness hole), continuation write to handler by-ref capture, while-condition jump retargeting (wrong result/hang/internal error), false rejection of borrows ending inside payloads, undocumented limits. Fixed with regressions in 58df1b8."
+        },
+        {
+          "time": "2026-11-05 08:56:14",
+          "who": "agent",
+          "text": "Round 3 (fresh reviewer): escape via ArenaBox (bypassed round-2 check), token into spawned task, early-return handler misclassified as tail-resumptive, handler re-handling the op around resume visible to resumed callee code. Fixed in 7ab9ed5 (runtime redirect frames for deep semantics)."
+        },
+        {
+          "time": "2026-11-05 09:20:25",
+          "who": "agent",
+          "text": "Round 4 (fresh reviewer): redirect frame as inheritance barrier and 64-frame limit (regressions from round 3 fix), redirect missing for lexical/multishot handles, outer write via mutable slice, boxed token into spawned task, once handler with callee performs. Fixed in 3b5e639; multishot frame visibility documented as a limit."
+        },
+        {
+          "time": "2026-11-05 12:33:19",
+          "who": "agent",
+          "text": "Round 5 (fresh reviewer): closure holding a mutable slice across a perform (wrong result), consumed once frame falling through to an outer handler (user chose runtime abort), tail handler whose own perform was caught by the body's handler, perform as array index wrongly rejected, broken doc example. Fixed in acd1cc2."
+        },
+        {
+          "time": "2026-11-05 12:57:23",
+          "who": "agent",
+          "text": "Round 6 (fresh reviewer): single finding, multishot token stored through a captured &mut [G] view. Fixed in de0d017; opaque handler parameters documented."
+        },
+        {
+          "time": "2026-11-05 13:27:22",
+          "who": "agent",
+          "text": "Round 7 (fresh reviewer): no soundness bug, no wrong result; one native Cranelift verification crash for entries whose body never completes. Fixed in cf7b312."
+        },
+        {
+          "time": "2026-11-05 13:36:40",
+          "who": "agent",
+          "text": "Round 8 (fresh reviewer): no findings; cf7b312 fix holds across every non-completing body shape, both backends and --release."
+        },
+        {
+          "time": "2026-11-05 13:43:29",
+          "who": "agent",
+          "text": "8 independent rounds; rounds 1-6 found soundness bugs (all fixed with regressions: bd91ded 58df1b8 7ab9ed5 3b5e639 acd1cc2 de0d017), round 7 a native crash only (cf7b312), round 8 clean. Final Boat gate on 4a4ec00: fmt, clippy, 1473 tests pass."
+        },
+        {
+          "time": "2026-11-05 13:43:29",
+          "who": "agent",
+          "text": "done cf7b312"
         }
       ]
     },
@@ -1836,10 +1886,26 @@
       "deps": [
         "E-REVIEW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "4a4ec00",
+      "log": [
+        {
+          "time": "2026-11-05 13:43:29",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 13:43:29",
+          "who": "agent",
+          "text": "docs/effect-handlers.md rewritten for the resumable fragment (d1a5a42 and review commits); docs/completion-backlog.md item ticked (4a4ec00). Boat gate on 4a4ec00 passes (1473 tests)."
+        },
+        {
+          "time": "2026-11-05 13:43:29",
+          "who": "agent",
+          "text": "done 4a4ec00"
+        }
+      ]
     },
     {
       "id": "P-CLOSURE-LT",
