@@ -5214,6 +5214,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             facts: crate::facts::Facts::default(),
             written_slots: BTreeSet::new(),
             closure_writes: BTreeMap::new(),
+            closure_captures: BTreeMap::new(),
             proofs: BTreeMap::new(),
             logical: &logical,
             kernel_locals: Vec::new(),
@@ -11556,6 +11557,8 @@ enum ScalarValue {
 /// What `checked_effect_body` needs to build a `Suspendable` node.
 struct SuspendableSite {
     name: String,
+    /// Types of the values the handler closure captures.
+    handler_captures: Vec<Type>,
     /// The handler is a `once` callable, consumed by its first perform.
     handler_once: bool,
     handler_parameter: Type,
@@ -11639,6 +11642,8 @@ struct Checker<'a, 't> {
     /// Populated when a local is bound to a capturing lambda and consulted by
     /// indirect calls so proof facts never survive a writing call.
     closure_writes: BTreeMap<usize, Vec<usize>>,
+    /// Types captured by the closure value a local holds, when known.
+    closure_captures: BTreeMap<usize, Vec<Type>>,
     /// Erased proof parameters in scope: binder -> proposition.
     proofs: BTreeMap<BindingId, crate::facts::Proposition>,
     /// Checked logical definitions and their kernel names.
@@ -20144,6 +20149,10 @@ impl Checker<'_, '_> {
                     if let Some(targets) = self.closure_write_targets(&value) {
                         self.closure_writes.insert(slot, targets);
                     }
+                    self.closure_captures.remove(&slot);
+                    if let Some(types) = self.closure_capture_types(&value) {
+                        self.closure_captures.insert(slot, types);
+                    }
                     // Both immutable and mutable scalar bindings are symbolic
                     // index candidates. A mutable one is versioned: assignment
                     // appends a new binder instead of reinterpreting an old
@@ -21630,6 +21639,10 @@ impl Checker<'_, '_> {
                         c.closure_writes.remove(&slot);
                         if let Some(targets) = c.closure_write_targets(&value) {
                             c.closure_writes.insert(slot, targets);
+                        }
+                        c.closure_captures.remove(&slot);
+                        if let Some(types) = c.closure_capture_types(&value) {
+                            c.closure_captures.insert(slot, types);
                         }
                         let ty = if value.ty == Type::Never {
                             Type::Never
@@ -23578,6 +23591,7 @@ impl Checker<'_, '_> {
         let saved_facts = std::mem::take(&mut self.facts);
         let saved_written = std::mem::take(&mut self.written_slots);
         let saved_closure_writes = std::mem::take(&mut self.closure_writes);
+        let saved_closure_captures = std::mem::take(&mut self.closure_captures);
         let capture_ids = captures
             .iter()
             .map(|slot| {
@@ -23676,6 +23690,7 @@ impl Checker<'_, '_> {
         self.facts = saved_facts;
         self.written_slots = saved_written;
         self.closure_writes = saved_closure_writes;
+        self.closure_captures = saved_closure_captures;
         let (body, obligation, written) = checked?;
         let capture_writes = (0..captures.len())
             .map(|index| written.contains(&index))
@@ -23778,6 +23793,23 @@ impl Checker<'_, '_> {
     /// value reports the writing captures of its generated function; a local
     /// reports the captured targets recorded when it was bound. Unknown forms
     /// return `None` (they are never borrowed-capture closures in checked IR).
+    /// Types a closure value captures: from a closure literal, or from the
+    /// closure a local was bound to.
+    fn closure_capture_types(&self, expr: &Expr) -> Option<Vec<Type>> {
+        let mut current = expr;
+        while let ExprKind::Coerce { value, .. } = &current.kind {
+            current = value;
+        }
+        match &current.kind {
+            ExprKind::FnValue { captures, .. } => {
+                Some(captures.iter().map(|capture| capture.ty).collect())
+            }
+            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
+                self.closure_captures.get(slot).cloned()
+            }
+            _ => None,
+        }
+    }
     /// Locals a closure value captures by reference (reads or writes).
     fn closure_reference_targets(&self, expr: &Expr) -> Vec<usize> {
         let mut current = expr;
@@ -23804,6 +23836,41 @@ impl Checker<'_, '_> {
                 _ => None,
             })
             .collect()
+    }
+    /// Whether a value of this type gives mutable access (an exclusive view
+    /// or reference, possibly inside a record or container) to storage that
+    /// can hold a function value.
+    fn mutable_callable_storage(&self, ty: Type) -> bool {
+        let mut pending = vec![ty];
+        let mut seen = BTreeSet::new();
+        while let Some(ty) = pending.pop() {
+            if !seen.insert(ty) {
+                continue;
+            }
+            match ty {
+                Type::RefMut(p) | Type::SliceMut(p) => {
+                    if self.contains_callable(self.types.pointees[p]) {
+                        return true;
+                    }
+                }
+                Type::Box(p)
+                | Type::Vec(p)
+                | Type::Ref(p)
+                | Type::Slice(p)
+                | Type::ArenaBox(p)
+                | Type::AllocBox(p)
+                | Type::AllocVec(p)
+                | Type::Annotated(p, _) => pending.push(self.types.pointees[p]),
+                Type::Enum(id) | Type::Variants(id, _) => {
+                    for variant in &self.types.enums[id].variants {
+                        pending.extend(variant.fields.iter().copied());
+                    }
+                }
+                Type::Union(id) => pending.extend(self.types.unions[id].members.iter().copied()),
+                _ => {}
+            }
+        }
+        false
     }
     /// Whether a value of this type can hold a function value (directly, in
     /// a field, element, union member, reference, or trait object).
@@ -30827,6 +30894,12 @@ impl Checker<'_, '_> {
         };
         let handler_writes = self.closure_writes.get(&slot).cloned().unwrap_or_default();
         let handler_refs = self.closure_reference_targets(&handler_value);
+        // Types of the handler's captured values. An opaque handler value
+        // (not a lambda or function here) was checked where it was built;
+        // its captures are not visible.
+        let handler_capture_types = self
+            .closure_capture_types(&handler_value)
+            .unwrap_or_default();
         self.handlers.push(HandlerScope {
             operation: operation.to_owned(),
             parameter: parameter_ty,
@@ -30854,6 +30927,7 @@ impl Checker<'_, '_> {
             span,
             region.then_some(SuspendableSite {
                 name: operation.to_owned(),
+                handler_captures: handler_capture_types.clone(),
                 handler_once: matches!(handler_type, Type::Once(_)),
                 handler_parameter,
                 handler_refs: handler_refs.clone(),
@@ -31067,9 +31141,13 @@ impl Checker<'_, '_> {
             .handler_writes
             .iter()
             .any(|slot| self.contains_callable(self.locals[*slot].ty))
+            || site
+                .handler_captures
+                .iter()
+                .any(|ty| self.mutable_callable_storage(*ty))
         {
             Some(
-                "the handler writes a captured local that can hold a function value, so it could store its resumption token",
+                "the handler writes a captured local, or captures mutable access to storage, that can hold a function value, so it could store its resumption token",
             )
         } else {
             None

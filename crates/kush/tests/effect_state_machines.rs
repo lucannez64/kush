@@ -1551,3 +1551,41 @@ fn review_a_perform_can_index_a_local_array() {
     // Ask(0) resumes with 0, so arr[0] = 4, plus one activation.
     agrees(&source, 5, "");
 }
+
+#[test]
+fn review_handlers_cannot_store_tokens_through_captured_mutable_views() {
+    let lambda = r#"
+        enum G { Done(i64), More(fn(i64) -> i64 ! {}) }
+        fn pure_apply(k: fn(i64) -> i64 ! {}) -> i64 ! {} { k(7) }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut arr: [G; 1] = [G.Done(0)];
+            let v = {
+                let view = &mut arr[..];
+                handle Yield: i64 -> i64 with fn(x: i64, resume: fn(i64) -> i64 ! {}) -> i64 ! {panic} {
+                    Slice.set(view, 0, G.More(resume));
+                    x
+                } {
+                    let y = perform Yield(1);
+                    print_i64(555);
+                    y + 1
+                }
+            };
+            let [g] = arr;
+            match g { G.More(k) => pure_apply(k), G.Done(n) => n + v }
+        }"#;
+    rejects(lambda, "captures mutable access to storage");
+    // The same handler bound to a local first.
+    let bound = lambda.replace(
+        "handle Yield: i64 -> i64 with fn(x: i64, resume: fn(i64) -> i64 ! {}) -> i64 ! {panic} {
+                    Slice.set(view, 0, G.More(resume));
+                    x
+                } {",
+        "let h = fn(x: i64, resume: fn(i64) -> i64 ! {}) -> i64 ! {panic} {
+                    Slice.set(view, 0, G.More(resume));
+                    x
+                };
+                handle Yield: i64 -> i64 with h {",
+    );
+    assert_ne!(bound, lambda);
+    rejects(&bound, "captures mutable access to storage");
+}

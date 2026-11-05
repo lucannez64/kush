@@ -228,8 +228,11 @@ Rules for suspendable bodies, checked after ownership:
   reference or a local read after the `handle`, directly or through a
   closure;
 - the token must not outlive the handler: an operation result type, a handler
-  payload type, or a handler-written capture that can hold a function value
-  is rejected for non-tail resumption;
+  payload type, a handler-written capture, or a captured mutable view or
+  reference to storage that can hold a function value is rejected for
+  non-tail resumption. Captures are known for a handler written at the
+  `handle` or bound to a local; a handler received as a function parameter
+  is opaque to this check;
 - a handler whose row contains a declared operation that the handled body
   also handles is not treated as tail-resumptive (run in place, its perform
   would reach the body's handler);
