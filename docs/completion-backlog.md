@@ -266,34 +266,26 @@ outstanding implementation item.
   unions remain an explicit-specialization boundary. The independent review's
   seven findings are fixed with regressions, and soundness held throughout. See
   [subtyping.md](subtyping.md#contextual-and-algebraic-inference).
-- [ ] Effect handlers and checked resumption ownership. **Partial, still
-  open:** lexical one-shot `handle`/`perform`, nested shadowing, first-class
-  handler callables, a linear resumption token, handler-effect propagation,
-  owning payload/cleanup checks, and declared `effect` operations with a
-  dynamic one-shot handler stack across called functions work in both backends.
-  A tail `perform` keeps the allocation-free identity token; a `perform` that is
-  the whole value of a top-level statement lowers to a real one-shot
-  continuation closure, so the handler can run code after `resume(x)` returns.
-  The continuation fragment requires exactly one such perform, the body result
-  to equal the operation result, no `return`/`break`/`continue` through the
-  resumption, and rejects mutable/borrowed captures; a capturing continuation
-  requires `alloc`. A dynamically resolved `perform` requires `panic`, since a
-  missing handler aborts. New since the previous checkpoint: a declared
-  `effect Op` is also a concrete effect-row entry checked like
-  `io`/`alloc`/`panic`/`suspend` (a perform requires `Op`; a lexical handle
-  discharges it for its body), with a finite sixteen-bit row universe (at most
-  twelve declared operations). Dynamic frames accept pure capturing `once`
-  handlers and own/drop their environment exactly once on pop or early exit; a
-  child task inherits the innermost contiguous suffix of copyable noncapturing
-  frames while capturing/one-shot frames are an isolation boundary. A
-  capture-free continuation may use the copyable `fn(R) -> R` multishot token
-  and be resumed zero or more times. Still missing and explicitly rejected:
-  general expression-context continuations and multiple non-tail performs per
-  handled body (a single top-level statement perform only), non-tail
-  resumption of a dynamically resolved perform across the call stack (dynamic
-  performs remain tail-resumptive identity), and multishot for continuations
-  with nonempty (even copyable) captures, which keep an owned environment.
-  See [effect-handlers.md](effect-handlers.md).
+- [x] Effect handlers and checked resumption ownership. Deep, one-shot by
+  default handlers with a linear resumption token, first-class handler
+  callables, nested shadowing, handler-effect propagation, and declared
+  `effect` operations that are concrete effect-row entries resolved through a
+  dynamic handler stack, in both backends with balanced cleanup. A handler that
+  only ends with `resume(e)` continues in place with the allocation-free
+  identity token (10^6 performs in constant stack). Any other handler compiles
+  the handled body as a resumable state machine: performs may appear in
+  expressions, branches, loops, and called functions (through generated
+  resumable entries), with `break`/`continue` as state transitions and every
+  owned value dropped once; each suspension's token owns exactly the values
+  live there. Multishot `fn(R) -> R` tokens copy those values per resumption
+  for a known handler. Checked rules reject borrows, handler-shared or
+  outer-written locals, escaping tokens, and unresumable call paths across a
+  suspension. Remaining limits (no `return`/`?` out of a handled body after a
+  perform under a non-tail handler, no multi-prompt capture, no multishot
+  through called functions, borrows of outer storage across a perform) are
+  listed in [effect-handlers.md](effect-handlers.md#limits); the design and
+  eight independent review rounds are in
+  [effect-state-machines.md](effect-state-machines.md).
 - [x] General row constraints beyond concrete exclusions. A finite Boolean
   constraint solver accumulates inclusion constraints across every higher-order
   argument, unions evidence from repeated row variables, and supports arbitrarily
