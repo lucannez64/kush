@@ -366,14 +366,24 @@
       "deps": [
         "BORROW"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Assigning a whole Holder<'a> replaces every leaf loan; lifetimes stay invariant under &mut.",
-      "commit": null,
+      "commit": "b45e207",
       "log": [
         {
           "time": "2026-11-05 03:22:44",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-05 03:28:33",
+          "who": "agent",
+          "text": "Rules in docs/borrowing-extensions.md#whole-mutation-of-borrowed-records"
+        },
+        {
+          "time": "2026-11-05 03:38:46",
+          "who": "agent",
+          "text": "Whole-record replacement via &mut Holder<'a>; leaf check + owner replace/merge; caller merge through call leaves"
         }
       ]
     },
@@ -386,10 +396,16 @@
       "deps": [
         "R-BREC-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Leaf provenance replaced atomically; old leaves released only after the write.",
-      "commit": null,
-      "log": []
+      "commit": "b45e207",
+      "log": [
+        {
+          "time": "2026-11-05 03:38:46",
+          "who": "agent",
+          "text": "Whole-record replacement via &mut Holder<'a>; leaf check + owner replace/merge; caller merge through call leaves"
+        }
+      ]
     },
     {
       "id": "R-BREC-TESTS",
@@ -400,10 +416,16 @@
       "deps": [
         "R-BREC-CHECK"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Shorter-lived reference written through &mut Holder<'long> rejected.",
-      "commit": null,
-      "log": []
+      "commit": "b45e207",
+      "log": [
+        {
+          "time": "2026-11-05 03:38:46",
+          "who": "agent",
+          "text": "Whole-record replacement via &mut Holder<'a>; leaf check + owner replace/merge; caller merge through call leaves"
+        }
+      ]
     },
     {
       "id": "R-IDX-FACTS",
@@ -485,10 +507,16 @@
         "BORROW",
         "LT-SOLVER"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "A child may return a view tied to the task scope's borrowed inputs.",
-      "commit": null,
-      "log": []
+      "commit": "b45e207",
+      "log": [
+        {
+          "time": "2026-11-05 03:38:46",
+          "who": "agent",
+          "text": "One-level borrowed TaskExit<R> child results; TaskExit<TaskExit<R>> join; cancellation tested in both backends"
+        }
+      ]
     },
     {
       "id": "R-TASKEXIT-CHECK",
@@ -499,10 +527,16 @@
       "deps": [
         "R-TASKEXIT-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "b45e207",
+      "log": [
+        {
+          "time": "2026-11-05 03:38:46",
+          "who": "agent",
+          "text": "One-level borrowed TaskExit<R> child results; TaskExit<TaskExit<R>> join; cancellation tested in both backends"
+        }
+      ]
     },
     {
       "id": "R-TASKEXIT-BACKENDS",
@@ -513,10 +547,16 @@
       "deps": [
         "R-TASKEXIT-CHECK"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Cancelled child never exposes a dangling view.",
-      "commit": null,
-      "log": []
+      "commit": "b45e207",
+      "log": [
+        {
+          "time": "2026-11-05 03:38:47",
+          "who": "agent",
+          "text": "One-level borrowed TaskExit<R> child results; TaskExit<TaskExit<R>> join; cancellation tested in both backends"
+        }
+      ]
     },
     {
       "id": "R-REVIEW",
@@ -531,10 +571,21 @@
         "R-IDX-TESTS",
         "R-TASKEXIT-BACKENDS"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 03:38:47",
+          "who": "agent",
+          "text": "Full Boat gate before review: 1417 tests, fmt, clippy pass at b45e207"
+        },
+        {
+          "time": "2026-11-05 03:38:47",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "REF",
