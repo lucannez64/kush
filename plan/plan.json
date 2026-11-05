@@ -1862,10 +1862,26 @@
         "A-PAT-NESTED",
         "A-PLACE-VIEW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "017f51e",
+      "log": [
+        {
+          "time": "2026-11-05 01:52:31",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 02:31:44",
+          "who": "agent",
+          "text": "done 017f51e"
+        },
+        {
+          "time": "2026-11-05 02:31:44",
+          "who": "agent",
+          "text": "Independent reviewer agent: 2 soundness + 3 false-rejection/diagnostic findings, all fixed with regression tests in 017f51e. Boat gate: fmt, 1397 tests, clippy all passed."
+        }
+      ]
     },
     {
       "id": "DA",
