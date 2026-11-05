@@ -1009,39 +1009,55 @@ fn check_outer_writes(
 /// through moves between locals): the closure's type does not show the
 /// borrow, but holding it across a suspension is holding a borrow.
 fn by_reference_closures(program: &Executable, body: &Block) -> Slots {
-    fn holds(program: &Executable, out: &Slots, value: &Expr) -> bool {
+    let layouts = carrying_layouts(program);
+    let holds = |out: &Slots, value: &Expr| -> bool {
         let mut value = value;
         while let ExprKind::Coerce { value: inner, .. } = &value.kind {
             value = inner;
         }
         match &value.kind {
-            ExprKind::FnValue { function, .. } => {
+            // A closure holds a borrow if it captures by reference or
+            // captures a value that holds one (a view, a reference, ...).
+            ExprKind::FnValue { function, captures } => {
                 program.functions[*function].capture_refs.iter().any(|r| *r)
+                    || captures
+                        .iter()
+                        .any(|capture| carries_in(capture.ty, &layouts, &program.pointees, 0))
             }
             ExprKind::Local(source) | ExprKind::Move(source) => out.contains(source),
             _ => false,
         }
-    }
-    fn in_block(block: &Block, program: &Executable, out: &mut Slots, changed: &mut bool) {
+    };
+    fn in_block(
+        block: &Block,
+        holds: &dyn Fn(&Slots, &Expr) -> bool,
+        out: &mut Slots,
+        changed: &mut bool,
+    ) {
         for statement in &block.statements {
             match statement {
                 Statement::Let(slot, value) => {
-                    if holds(program, out, value) && out.insert(*slot) {
+                    if holds(out, value) && out.insert(*slot) {
                         *changed = true;
                     }
-                    in_expr(value, program, out, changed);
+                    in_expr(value, holds, out, changed);
                 }
-                Statement::Expr(value) => in_expr(value, program, out, changed),
+                Statement::Expr(value) => in_expr(value, holds, out, changed),
                 Statement::Declare(_) => {}
             }
         }
         if let Some(tail) = &block.tail {
-            in_expr(tail, program, out, changed);
+            in_expr(tail, holds, out, changed);
         }
     }
-    fn in_expr(expr: &Expr, program: &Executable, out: &mut Slots, changed: &mut bool) {
+    fn in_expr(
+        expr: &Expr,
+        holds: &dyn Fn(&Slots, &Expr) -> bool,
+        out: &mut Slots,
+        changed: &mut bool,
+    ) {
         if let ExprKind::Assign(slot, value) = &expr.kind
-            && holds(program, out, value)
+            && holds(out, value)
             && out.insert(*slot)
         {
             *changed = true;
@@ -1052,16 +1068,16 @@ fn by_reference_closures(program: &Executable, body: &Block) -> Slots {
             children.push(child)
         });
         for block in blocks {
-            in_block(block, program, out, changed);
+            in_block(block, holds, out, changed);
         }
         for child in children {
-            in_expr(child, program, out, changed);
+            in_expr(child, holds, out, changed);
         }
     }
     let mut out = Slots::new();
     loop {
         let mut changed = false;
-        in_block(body, program, &mut out, &mut changed);
+        in_block(body, &holds, &mut out, &mut changed);
         if !changed {
             break out;
         }

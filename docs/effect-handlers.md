@@ -123,8 +123,9 @@ string tag. A declared operation may be handled lexically and in addition:
 A dynamic frame accepts a pure handler of either callable mode. A copyable
 noncapturing `fn` frame serves any number of performs. A capturing `once fn`
 frame owns its environment: the first perform transfers it to the call (the
-callee frees it), a second perform no longer resolves that frame, and an
-unconsumed frame is dropped exactly once when the frame pops, or when an early
+callee frees it), a second perform aborts with no active handler (the
+consumed frame still discharges its operation, so the lookup does not fall
+through to an outer handler for the same operation), and an unconsumed frame is dropped exactly once when the frame pops, or when an early
 `return`, `break`, or `continue` leaves the handled body. A handler with
 arbitrary effects is rejected because a called function's row would otherwise
 omit them. A lexical handler for a declared operation is checked by the same
@@ -229,6 +230,9 @@ Rules for suspendable bodies, checked after ownership:
 - the token must not outlive the handler: an operation result type, a handler
   payload type, or a handler-written capture that can hold a function value
   is rejected for non-tail resumption;
+- a handler whose row contains a declared operation that the handled body
+  also handles is not treated as tail-resumptive (run in place, its perform
+  would reach the body's handler);
 - a resumption token cannot be captured by a spawned task, which would run
   the rest of the body without the handle's dynamic handlers;
 - a `break`/`continue` inside a `while` condition is rejected when the loop

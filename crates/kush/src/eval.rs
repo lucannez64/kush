@@ -5179,8 +5179,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 index = target;
                 continue;
             }
-            if candidate.operation == operation && candidate.handler.is_some() {
-                break Some(index);
+            if candidate.operation == operation {
+                // A consumed once frame still discharges its operation: a
+                // later perform must not fall through to an outer handler.
+                break candidate.handler.is_some().then_some(index);
             }
         };
         let Some(index) = found else {

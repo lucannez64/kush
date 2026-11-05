@@ -348,34 +348,35 @@ Single-shot results are never used to justify multishot safety.
 ## 12. Worked example
 
 ```rust
-effect Ask: i64 -> i64;
-
 fn main() -> i64 ! {alloc, panic} {
-    handle Ask: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} {
+    handle Ask: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {panic} {
         resume(x * 10)
     } {
-        let mut total = 0;
+        let mut sum = 0;
         let mut i = 0;
         while i < 3 {
             let a = perform Ask(i);   // point 1, inside a loop
-            total = total + a;
+            sum = sum + a;
             i = i + 1;
         }
-        total
+        sum
     }
 }
 // 0 + 10 + 20 = 30
 ```
 
-Live after point 1: `total`, `i` (and the bound result `a`, which is a local
-of state 1 only). Frame: `{ state, total: i64, i: i64 }`, all copyable, so a
+(As built, this handler is tail-resumptive, so it takes the identity path
+of section 14; with `let r = resume(x * 10); r` it runs as the machine below.)
+
+Live after point 1: `sum`, `i` (and the bound result `a`, which is a local
+of state 1 only). Frame: `{ state, sum: i64, i: i64 }`, all copyable, so a
 multishot token would also be allowed. States:
 
 ```text
-state 0: total = 0; i = 0; f.state = 2; continue
-state 2 (loop head): if !(i < 3) { return Done(total) }
-         store total, i; f.state = 1; return Yield(i)
-state 1: load total, i; a = input; total = total + a; i = i + 1;
+state 0: sum = 0; i = 0; f.state = 2; continue
+state 2 (loop head): if !(i < 3) { return Done(sum) }
+         store sum, i; f.state = 1; return Yield(i)
+state 1: load sum, i; a = input; sum = sum + a; i = i + 1;
          f.state = 2; continue
 ```
 
@@ -490,7 +491,12 @@ is inherent (section 7).
 8. Added after the independent reviews: a handler with an early `return`
    or `?` is not tail-resumptive; a resumption token (even inside a box,
    record, or closure) cannot be captured by a spawned task; a capturing
-   `once` handler cannot resume performs in called functions; a point whose own call borrows a value
+   `once` handler cannot resume performs in called functions; a closure
+   capturing a value that holds a borrow counts as a borrow; a handler
+   whose row contains a declared operation the body also handles is not
+   tail-resumptive; a consumed `once` frame stops dynamic lookup instead of
+   letting it fall through to an outer handler (user-approved behaviour
+   change); a point whose own call borrows a value
    its continuation captures is rejected; locals holding by-reference
    closures count as borrows; continuation code may not write a local the
    handler captures by reference, nor (through a closure) one read after the

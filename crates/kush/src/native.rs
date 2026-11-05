@@ -2131,7 +2131,10 @@ int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
             index = frame->code;
             continue;
         }
-        if (frame->operation != operation || frame->consumed) continue;
+        if (frame->operation != operation) continue;
+        /* A consumed once frame still discharges its operation: a later
+           perform must not fall through to an outer handler. */
+        if (frame->consumed) return 0;
         out[0] = frame->code;
         out[1] = frame->environment;
         out[2] = frame->once;

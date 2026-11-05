@@ -30810,7 +30810,15 @@ impl Checker<'_, '_> {
         // dynamic stack (a dynamic perform supplies the one-shot token), so
         // its body is always checked as suspendable and calls that could
         // perform the operation are rejected.
-        let region = (!tail_resumptive_handler(self.resolution, handler)
+        // A tail-resumptive handler runs in place at the perform, under any
+        // handler the body installed. If its own row has a declared
+        // operation that the body also handles, its perform would reach the
+        // body's handler instead of the one outside this `handle`; such a
+        // handler suspends instead, where performs inside nested handles are
+        // rejected.
+        let shadows_handler_effects = body_handles_any(body, signature.effects, self.resolution);
+        let region = ((!tail_resumptive_handler(self.resolution, handler)
+            || shadows_handler_effects)
             && (lexical || declared.is_some()))
             || (declared.is_some() && multishot);
         let handler_function = match &handler_value.kind {
@@ -33737,6 +33745,131 @@ fn tail_resumptive_handler(resolution: &Resolution, handler: &ast::Expr) -> bool
                 .is_some_and(|value| tail(resolution, token, mentions, value))
     }
     block_tail(resolution, token, &mentions, &lambda.body)
+}
+/// Visit the direct child expressions of an AST expression; blocks are
+/// expanded into their statement values and tail. Lambda bodies are
+/// children too; callers that must not enter them check for lambdas first.
+fn ast_children<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::Expr)) {
+    fn block<'a>(block: &'a ast::Block, f: &mut dyn FnMut(&'a ast::Expr)) {
+        for statement in &block.statements {
+            match statement {
+                ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => f(value),
+            }
+        }
+        if let Some(tail) = &block.tail {
+            f(tail);
+        }
+    }
+    use ast::ExprKind as E;
+    match &expr.kind {
+        E::Name(_)
+        | E::Integer(_)
+        | E::Float(_)
+        | E::String(_)
+        | E::Char(_)
+        | E::Bool(_)
+        | E::Continue
+        | E::Return(None)
+        | E::Break(None) => {}
+        E::Tuple(values) | E::Array(values) => values.iter().for_each(f),
+        E::StructuralLiteral(fields) => fields.iter().for_each(|(_, value)| f(value)),
+        E::Record { ty, fields } => {
+            f(ty);
+            fields.iter().for_each(|(_, value)| f(value));
+        }
+        E::Block(inner) | E::Loop(inner) => block(inner, f),
+        E::Unary { operand, .. } | E::Cast { value: operand, .. } | E::Try(operand) => f(operand),
+        E::Return(Some(value)) | E::Break(Some(value)) => f(value),
+        E::Binary { left, right, .. } => {
+            f(left);
+            f(right);
+        }
+        E::Call { callee, arguments } => {
+            f(callee);
+            arguments.iter().for_each(f);
+        }
+        E::Handle { handler, body, .. } => {
+            f(handler);
+            block(body, f);
+        }
+        E::Perform { value, .. } => f(value),
+        E::Lambda(lambda) => block(&lambda.body, f),
+        E::Specialize { callee, .. } => f(callee),
+        E::Field { value, .. } => f(value),
+        E::Index { value, index } => {
+            f(value);
+            f(index);
+        }
+        E::Slice { value, start, end } => {
+            f(value);
+            if let Some(start) = start {
+                f(start);
+            }
+            if let Some(end) = end {
+                f(end);
+            }
+        }
+        E::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            f(condition);
+            block(then, f);
+            if let Some(otherwise) = otherwise {
+                f(otherwise);
+            }
+        }
+        E::Match { value, arms } => {
+            f(value);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    f(guard);
+                }
+                f(&arm.body);
+            }
+        }
+        E::While { condition, body } => {
+            f(condition);
+            block(body, f);
+        }
+    }
+}
+/// Whether a block contains (outside lambdas) a `handle` for a declared
+/// operation whose effect bit is in `effects`.
+fn body_handles_any(body: &ast::Block, effects: u16, resolution: &Resolution) -> bool {
+    fn handles(expr: &ast::Expr, effects: u16, resolution: &Resolution) -> bool {
+        match &expr.kind {
+            ast::ExprKind::Handle {
+                operation, body, ..
+            } => {
+                resolution
+                    .effect_bits
+                    .get(operation)
+                    .is_some_and(|bit| effects & bit != 0)
+                    || block(body, effects, resolution)
+            }
+            ast::ExprKind::Lambda(_) => false,
+            _ => {
+                let mut found = false;
+                ast_children(expr, &mut |child| {
+                    found |= handles(child, effects, resolution)
+                });
+                found
+            }
+        }
+    }
+    fn block(body: &ast::Block, effects: u16, resolution: &Resolution) -> bool {
+        body.statements.iter().any(|statement| match statement {
+            ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
+                handles(value, effects, resolution)
+            }
+        }) || body
+            .tail
+            .as_deref()
+            .is_some_and(|tail| handles(tail, effects, resolution))
+    }
+    effects & !(IO | ALLOC | PANIC | SUSPEND) != 0 && block(body, effects, resolution)
 }
 /// Whether an expression contains `return` or `?` outside nested lambdas.
 fn exits_early(expr: &ast::Expr) -> bool {

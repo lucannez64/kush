@@ -267,10 +267,31 @@ impl<T: Temporaries> Anf<'_, T> {
         };
         for (index, operand) in operands.into_iter().enumerate() {
             if index < last {
-                if matches!(
-                    operand.kind,
-                    ExprKind::Constant(_) | ExprKind::Erased(_) | ExprKind::Peek(_)
-                ) {
+                // A borrow or place read of a local is taken after the
+                // suspension instead; nothing can change the local in between
+                // (handler writes and borrows across points are rejected).
+                let local_view = matches!(
+                    &operand.kind,
+                    ExprKind::Slice {
+                        base,
+                        start: None,
+                        end: None,
+                        check: false,
+                        ..
+                    } if matches!(
+                        base.kind,
+                        ExprKind::Borrow(_) | ExprKind::Peek(_) | ExprKind::Local(_)
+                    )
+                );
+                if local_view
+                    || matches!(
+                        operand.kind,
+                        ExprKind::Constant(_)
+                            | ExprKind::Erased(_)
+                            | ExprKind::Peek(_)
+                            | ExprKind::Borrow(_)
+                    )
+                {
                     continue;
                 }
                 self.anf_value(operand, out)?;

@@ -1452,3 +1452,102 @@ fn review_more_escape_and_write_routes_are_rejected() {
         "cannot resume performs in called functions",
     );
 }
+
+#[test]
+fn review_closures_holding_views_cannot_cross_a_perform() {
+    rejects(
+        &with_handler(
+            "",
+            "let mut arr: [i64; 3] = [1, 2, 3];
+             let ms = &mut arr[..];
+             let g = fn() -> Unit ! {panic} { Slice.set(ms, 0, 50); };
+             let a = perform Ask(1);
+             g();
+             a + arr[0]",
+        ),
+        "cannot stay live across a non-tail 'perform'",
+    );
+}
+
+#[test]
+fn review_a_consumed_once_frame_does_not_fall_through() {
+    // The inner capturing handler is used up by d(1); d(2) must not reach the
+    // outer handler, whose operation the inner handle discharged.
+    let source = r#"
+        effect D: i64 -> i64;
+        fn d(n: i64) -> i64 ! {D, panic} { perform D(n) }
+        fn inner() -> i64 ! {alloc, panic} {
+            let base = 1000;
+            handle D: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { k(x | base) } {
+                let a = d(1);
+                let b = d(2);
+                a + b
+            }
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            handle D: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { let r = resume(x | 64); r ^ 4096 } {
+                let q = inner();
+                q
+            }
+        }"#;
+    let program = check(source).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("no dynamically active handler"),
+        "{error:?}"
+    );
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("consumed-once");
+        kush::native::build(&program, &binary).unwrap();
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert_ne!(output.status.code(), Some(0));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn review_tail_handlers_with_shadowed_effects_do_not_run_in_place() {
+    // The handler performs D; the body handles D itself around the perform.
+    // Running the handler in place would let the body's D handler serve it.
+    rejects(
+        r#"
+        effect D: i64 -> i64;
+        fn main() -> i64 ! {io, alloc, panic} {
+            handle D: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { r(y ^ 16) } {
+                handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {D, panic} { k(perform D(x)) } {
+                    handle D: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { r(y ^ 64) } {
+                        let a = perform Ask(1);
+                        a
+                    }
+                }
+            }
+        }"#,
+        "inside the body of a nested 'handle D' is not supported",
+    );
+    // Without the inner handle the handler is still tail-resumptive.
+    let plain = r#"
+        effect D: i64 -> i64;
+        fn main() -> i64 ! {alloc, panic} {
+            handle D: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { r(y ^ 16) } {
+                handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {D, panic} { k(perform D(x)) } {
+                    let a = perform Ask(1);
+                    a
+                }
+            }
+        }"#;
+    agrees(plain, 17, "");
+}
+
+#[test]
+fn review_a_perform_can_index_a_local_array() {
+    let source = with_handler(
+        "",
+        "let arr: [i64; 3] = [4, 5, 6];
+         let v = arr[perform Ask(0)];
+         v",
+    );
+    // Ask(0) resumes with 0, so arr[0] = 4, plus one activation.
+    agrees(&source, 5, "");
+}
