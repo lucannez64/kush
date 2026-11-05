@@ -207,3 +207,21 @@ contract](borrow-model-contract.md), with focused baseline regressions in
 not claimed. Active implementation work now prioritizes LIFE's variance,
 recursive-summary and row/result dependency chains; unrelated research changes
 remain open and do not block that chain.
+
+## Research node deliverables
+
+The four remaining research nodes are closed by design documents, each
+stating its decisions and adding follow-up implementation nodes to the plan:
+
+- RES-GRADE-MODEL: [grade model](grade-model.md) (two-zone judgement,
+  scaling substitution, erasure obligations E1-E6).
+- RES-EFFECT-CAPABILITY: [effect capabilities](effect-capabilities.md)
+  (second-class lexical capabilities beside unchanged dynamic handlers; row
+  algebra obligations).
+- RES-INFERENCE-PROTOTYPE: [inference prototype](inference-prototype.md) and
+  the isolated `crates/infer-proto` corpus (adopt only local lambda
+  annotation inference).
+- RES-UNBOX-CERT: [unboxing certificates](unboxing-certificates.md)
+  (checked value-set disjointness, expansion stops at indirections).
+
+No theorem from the cited papers is claimed for Kush.
