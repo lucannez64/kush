@@ -221,7 +221,9 @@ binding may leave the match; it still cannot outlive the array's scope. A
 after the bindings' last use. As with `&mut s[i]`, elements must be
 non-owning, non-linear, non-view values: an exclusive reference to an owning
 element is rejected. By-value sub-patterns (literals, tuples, records,
-variants) test copies, a name may be bound only once, and the same
+variants) test copies of a snapshot taken when the match starts, so a guard
+that writes through a binding and then fails does not change what later arms
+test; a name may be bound only once, and the same
 slice-pattern-or-`_` arm rule applies. The runtime length is not a finite variant tag, so a match
 over `DynArray` must contain an unguarded catch-all: `_`, a binding, or a
 pattern that is only `..` / `..rest`. The ordinary exhaustiveness check rejects
@@ -298,7 +300,10 @@ Semantics:
   arrays, generic records and enums, structural rows, and unions (for
   example `v: &Vec<[i64; n <= 4]>` or `-> Pair<[i64; n <= 4]>`). Each binder
   must be an earlier `i64` parameter of the same function (any `i64`
-  parameter for the result). At each call the actual argument for
+  parameter for the result). A call whose binders would make two members of a
+  union in the signature the same type (`[i64; n <= 4] | [i64; m <= 4]`
+  called as `f(k, k, ...)`, or `T | [i64; n <= 4]` with `T = [i64; k <= 4]`)
+  is rejected: the callee's union has two members and a fixed layout. At each call the actual argument for
   that parameter must be the name of an immutable `i64` binding; the callee's
   binder is replaced by the caller's, so `fn f(n: i64, a: [i64; n <= 8])`
   called as `f(k, b)` requires `b: [i64; k <= 8]`, and the result of

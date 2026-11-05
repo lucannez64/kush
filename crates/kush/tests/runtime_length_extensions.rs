@@ -710,3 +710,69 @@ fn exclusive_pattern_arms_release_owners_on_every_exit() {
     assert_eq!(stats.allocations, stats.deallocations);
     assert!(stats.allocations >= 6);
 }
+
+#[test]
+fn rebinding_never_merges_union_members() {
+    // Review regression: `f(k, k, ...)` made the callee's two union members
+    // one type at the call site, so the caller read the union's words as a
+    // plain array (a proved read trapped natively; the evaluator crashed).
+    for program in [
+        r#"
+        fn f(n: i64, m: i64, a: [i64; n <= 4], b: [i64; m <= 4], pick: Bool) -> [i64; n <= 4] | [i64; m <= 4] ! {} {
+            if pick { a } else { b }
+        }
+        fn main() -> i64 ! {} {
+            let k: i64 = 4;
+            let x: [i64; k <= 4] = Array.fill(k, 5);
+            let y: [i64; k <= 4] = Array.fill(k, 7);
+            let r = f(k, k, x, y, false);
+            let z: [i64; k <= 4] = r;
+            z[3]
+        }"#,
+        r#"
+        fn f<T>(n: i64, x: T, a: [i64; n <= 4], pick: Bool) -> T | [i64; n <= 4] ! {} {
+            if pick { x } else { a }
+        }
+        fn main() -> i64 ! {} {
+            let k: i64 = 4;
+            let x: [i64; k <= 4] = Array.fill(k, 5);
+            let y: [i64; k <= 4] = Array.fill(k, 7);
+            let r = f(k, x, y, false);
+            let z: [i64; k <= 4] = r;
+            z[3]
+        }"#,
+        r#"
+        fn f(n: i64, m: i64, u: [i64; n <= 4] | [i64; m <= 4], erased ok: { n == 4 && m == 4 }) -> i64 ! {} {
+            match u { [i64; n <= 4] @ a => a[3], [i64; m <= 4] @ b => b[2] }
+        }
+        fn main() -> i64 ! {} {
+            let k: i64 = 4;
+            let x: [i64; k <= 4] = Array.fill(k, 5);
+            f(k, k, x, _)
+        }"#,
+    ] {
+        rejects(
+            program,
+            "makes two members of a union in the callee's signature the same",
+        );
+    }
+    // Distinct caller binders keep the union and its members.
+    agrees(
+        r#"
+        fn f(n: i64, m: i64, a: [i64; n <= 4], b: [i64; m <= 4], pick: Bool) -> [i64; n <= 4] | [i64; m <= 4] ! {} {
+            if pick { a } else { b }
+        }
+        fn main() -> i64 ! {panic} {
+            let k: i64 = 4;
+            let j: i64 = 2;
+            let x: [i64; k <= 4] = Array.fill(k, 5);
+            let y: [i64; j <= 4] = Array.fill(j, 7);
+            let r = f(k, j, x, y, false);
+            match r {
+                [i64; k <= 4] @ a => DynArray.len(&a),
+                [i64; j <= 4] @ b => DynArray.len(&b) * 10 + DynArray.get(&b, 1),
+            }
+        }"#,
+        27,
+    );
+}

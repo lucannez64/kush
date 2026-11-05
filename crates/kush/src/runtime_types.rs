@@ -974,6 +974,16 @@ impl<'a> Types<'a> {
                 for member in self.unions[id].members.clone() {
                     members.push(self.rebind_lengths(member, map, span)?);
                 }
+                // The callee was compiled with distinct members. If the
+                // caller's binders make two of them equal, the union would
+                // normalize to a different layout than the callee's.
+                let distinct = members.iter().collect::<BTreeSet<_>>().len();
+                if distinct != members.len() {
+                    return Err(Diagnostic::new(
+                        span,
+                        "this call makes two members of a union in the callee's signature the same runtime-length type; pass distinct length bindings",
+                    ));
+                }
                 self.union(members, span)
             }
             Type::Ref(p) => Ok(Type::Ref(pointer(self, p)?)),
