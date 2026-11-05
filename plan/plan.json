@@ -1810,14 +1810,29 @@
       "deps": [
         "R-SLICE-PLACE-BACKENDS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "9778652",
       "log": [
         {
           "time": "2026-11-03 15:23:23",
           "who": "agent",
           "text": "End-to-end place views need implemented slice-place backends, not just loan rules."
+        },
+        {
+          "time": "2026-11-05 01:22:49",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 01:37:23",
+          "who": "agent",
+          "text": "done 9778652"
+        },
+        {
+          "time": "2026-11-05 01:37:23",
+          "who": "agent",
+          "text": "Local gate: 1390 kush tests, clippy clean."
         }
       ]
     },
