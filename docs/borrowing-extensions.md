@@ -226,9 +226,9 @@ let element = &mut values[1];
   from another index of the same base only when the linear facts prove the
   two values distinct (see [runtime index disjointness](#runtime-index-disjointness)).
 - `&mut` requires a mutable root binding or an exclusive reference root. A
-  shared root is never upgraded. A record with borrowed fields remains
-  read-only for whole-record borrowing; owned metadata of such a record is not
-  mutated through `&mut Record`.
+  shared root is never upgraded. A record with borrowed fields may be borrowed
+  `&mut` and replaced as a whole; see
+  [whole mutation of borrowed records](#whole-mutation-of-borrowed-records).
 - An owning field (`Box`, `Vec`, `Bytes`, `String`) is referenced through the
   same allocation handle as a direct `&mut` borrow, so `Box.set`, `Vec.push`,
   `Vec.set`, and the read builtins keep working through the projected
@@ -333,6 +333,49 @@ or `s.as_mut_str()`, or narrowed from another `&mut str` with
 `&mut v[start..end]`. It holds an exclusive loan on the String until its last
 use. Its checked writes never change the byte length and keep the bytes valid
 UTF-8; see [borrowed text](borrowed-text.md#exclusive-text-views).
+
+## Whole mutation of borrowed records
+
+A record with borrowed fields may be borrowed exclusively and replaced as a
+whole:
+
+```rust
+struct Holder<'a> { point: &'a Point, note: i64 }
+
+fn reset<'a>(h: &mut Holder<'a>, p: &'a Point) -> Unit ! {} {
+    *h = Holder { point: p, note: 7 };   // every leaf replaced at once
+}
+fn bump<'a>(h: &mut Holder<'a>) -> Unit ! {panic} { h.note = h.note + 1; }
+
+let mut h = Holder { point: &a, note: 1 };
+reset(&mut h, &b);    // h now borrows b: b cannot be replaced while h lives
+```
+
+- **Invariance.** Lifetimes are invariant under `&mut`. Every leaf of the
+  written value must outlive the record's lifetime. A lifetime declared by the
+  function is a rigid destination, so `fn bad<'long, 'short>(h: &mut
+  Holder<'long>, p: &'short Point)` cannot write `p`, and `*h = other` with
+  `other: Holder<'b>` needs `'b: 'a`. Without a declared label the destination
+  keeps the lifetime its current leaves carry, which is how a block-local
+  owner is kept out of an outer record.
+- **Leaf provenance.** The value is evaluated first; then the owner's leaves
+  are replaced in one step. A reference with exactly one possible owner
+  replaces that owner's leaves, while a branch-selected reference (`if c {
+  &mut h1 } else { &mut h2 }`) merges the new leaves into every candidate. A
+  call through a `&mut Holder<'a>` parameter conservatively merges every
+  argument that can flow into `'a` into the caller's record, exactly like a
+  `&mut` container parameter. Values read before the write keep their own
+  loans.
+- **Exclusivity.** `&mut h` needs `let mut h` and excludes every other borrow
+  of `h` while it lives. An exclusive leaf (`&'a mut [T]`) is never replaced by
+  a shared borrow, and a written exclusive source stays exclusively borrowed.
+- **Fields.** Copyable owned metadata (`h.note = ...`) is written through
+  `&mut Holder` as for any record. Assigning a single borrowed field through
+  the reference is rejected; replace the record. Owned metadata of the old
+  record (for example a `String` field) is dropped exactly once by the write.
+- **Limit.** Returning a field reference (`h.point`) from a `&mut Holder<'a>`
+  parameter infers an extra bound that the outer reference outlives `'a`, so
+  callers usually cannot satisfy it. Take `&Holder<'a>` for such readers.
 
 ## Reference storage, escape, and reborrow
 
@@ -537,11 +580,50 @@ fn make<'a>(window: Window<'a>) -> TaskExit<Window<'a>> ! {alloc, panic, suspend
   rebinds the same per-field origins in the caller. Passing the value through a
   helper or callable keeps those origins live and still rejects replacing the
   owner while the joined value is used.
-- A child task still cannot return a borrowed `TaskExit<T>`, and a lambda or
-  task cannot hide a borrowed `TaskExit<T>` in its environment: match it in the
-  scope that joined it before capturing it.
+- A child task may return a borrowed `TaskExit<R>` that it joined in its own
+  scope (see [borrowed exits from child tasks](#borrowed-exits-from-child-tasks)).
+  A lambda or task still cannot hide a borrowed `TaskExit<T>` in its
+  environment: match it in the scope that joined it before capturing it.
 - `Task.scope` cannot return a reference element container directly; return
   the borrowed record it was built from, or keep the container lexical.
+
+## Borrowed exits from child tasks
+
+A child task may return a borrowed `TaskExit<R>` that it produced by joining a
+grandchild in its own `Task.scope`:
+
+```rust
+fn make<'a>(window: Window<'a>) -> TaskExit<TaskExit<Window<'a>>> ! {alloc, panic, suspend} {
+    Task.scope(fn() -> TaskExit<TaskExit<Window<'a>>> ! {alloc, panic, suspend} {
+        let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
+            Task.scope(fn() -> TaskExit<Window<'a>> ! {alloc, panic, suspend} {
+                Task.join(Task.spawn(fn() -> Window<'a> ! {panic, suspend} { window }))
+            })
+        });
+        Task.join(t)     // TaskExit<TaskExit<Window<'a>>>
+    })
+}
+```
+
+- **Scope rule.** The exit's leaves must come from the child's captures,
+  exactly like a borrowed-record child result; those captures are storage the
+  enclosing scope captured from outside, which stays loaned until the scope's
+  final join and then for as long as the joined value is used. A grandchild
+  that returns a view of the child's own storage is rejected.
+- **Shape.** Only one level is allowed: `Task<TaskExit<R>>` with `R` a
+  borrowed record. Joining it produces `TaskExit<TaskExit<R>>`, the only
+  nested borrowed exit. User code still cannot construct a `Completed` exit
+  with a borrowed payload; only `Task.join` produces one.
+- **Matching.** Matching both levels rebinds the same per-field loans, so
+  replacing the outer owner while `w` from `Completed(Completed(w))` (or the
+  unmatched exit) is live is rejected. The nested exit may cross function
+  boundaries like a single-level exit.
+- **Cancellation.** A cancelled grandchild gives an inner `Cancelled`. A
+  cancelled child that has already returned its exit drops it in the worker
+  (borrowed descriptors are inert and owned metadata is released once), so the
+  parent sees an outer `Cancelled` and never a view. The grandchild was joined
+  inside the child's scope before the child returned, so no task can still
+  hold the storage.
 
 ## Lifetime inference boundaries
 
@@ -679,11 +761,14 @@ let q = &mut right[1];      // the opposite split side: no conflict
   closures, tasks, or arrows. `&mut Bytes`/`&mut String` provide read access
   but no mutating builtins. Temporary owners, record fields, and array/vector indices are
   supported through hidden storage or real element addresses as described
-  above. A record with borrowed fields is still not mutated as a whole.
-- A child task cannot return a borrowed `TaskExit<T>` (rejected when the
-  `Task<TaskExit<...>>` result type is formed), and a lambda or task cannot
-  capture a borrowed `TaskExit<T>` in its environment. Match it in the scope
-  that joined it before hiding it in a callable or child task.
+  above. A borrowed field of a record is replaced only with the whole record
+  (`*h = Holder { .. }`); a single borrowed-field assignment through `&mut`
+  is rejected.
+- A child task may return one level of borrowed `TaskExit<R>` (`R` a
+  borrowed record); `Task<TaskExit<TaskExit<R>>>` is rejected when the type is
+  formed. A lambda or task cannot capture a borrowed `TaskExit<T>` in its
+  environment. Match it in the scope that joined it before hiding it in a
+  callable or child task.
 - `&record.field` is supported for copyable, owning, and nested record fields.
   Shared reference, shared slice, and text fields remain readable through
   `&Record`; a slice field is sub-sliced with `&record.view[..]` or `&mut

@@ -774,13 +774,13 @@ fn borrowed_task_exit_child_and_environment_boundaries_are_rejected() {
         struct Window<'a> { view: &'a [i64], start: i64 }
         fn run<'a>(window: Window<'a>) -> i64 ! {alloc, panic, suspend} {
             Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
-                let t: Task<TaskExit<Window<'a>>> = Task.spawn(fn() -> TaskExit<Window<'a>> ! {panic, suspend} { panic() });
+                let t: Task<TaskExit<TaskExit<Window<'a>>>> = Task.spawn(fn() -> TaskExit<TaskExit<Window<'a>>> ! {panic, suspend} { panic() });
                 Task.join(t);
                 0
             })
         }
         fn main() -> i64 ! {alloc, panic, suspend} { 0 }"#,
-        "a child task cannot return a borrowed TaskExit",
+        "a child task may return TaskExit<R> only for a borrowed record R",
     );
     rejects(
         r#"use std.task.TaskExit;

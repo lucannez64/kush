@@ -350,10 +350,10 @@ fn shared_receivers_cannot_write_or_be_upgraded() {
     rejects(
         r#"
         struct View<'a> { view: &'a [i64] }
-        fn bad<'a>(view: &mut View<'a>) -> Unit ! {panic} {}
+        fn bad<'a>(view: &mut View<'a>, other: &'a [i64]) -> Unit ! {panic} { view.view = other; }
         fn main() -> Unit ! {panic} {}
         "#,
-        "borrowed fields",
+        "non-borrowed record fields",
     );
 }
 

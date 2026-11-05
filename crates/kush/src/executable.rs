@@ -12049,12 +12049,6 @@ impl Checker<'_, '_> {
                 | Type::String
                 | Type::Vec(_)
         );
-        if mutable && record && self.types.enums[ty.layout().expect("record layout")].borrowed {
-            return Err(Diagnostic::new(
-                span,
-                "cannot mutably borrow a record with borrowed fields; only owned metadata of an owning record may be updated through '&mut Record'",
-            ));
-        }
         if mutable
             && !record
             && !object
@@ -28412,10 +28406,12 @@ impl Checker<'_, '_> {
                 }
                 let (mut body, result, _, result_grade) =
                     self.task_callable(&arguments[0], false, true, "Task.spawn", span)?;
-                if crate::runtime_types::contains_task_exit_borrow(self.types, result) {
+                if crate::runtime_types::contains_task_exit_borrow(self.types, result)
+                    && !crate::runtime_types::is_child_task_exit(self.types, result)
+                {
                     return Err(Diagnostic::new(
                         span,
-                        "a task cannot return TaskExit<T>; a joined borrow is lexical to the enclosing scope, and a task result is joined explicitly",
+                        "a task may return a borrowed TaskExit<R> only for a borrowed record R joined from its own scope; a nested borrowed TaskExit must be matched in the scope that joined it",
                     ));
                 }
                 if crate::runtime_types::contains_task(self.types, result) {

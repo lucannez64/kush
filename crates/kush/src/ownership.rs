@@ -101,9 +101,16 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
                     // well, so a call that mutates the caller's container can
                     // relate every written reference to the declared element
                     // lifetime.
+                    // An exclusive reference to a record with borrowed
+                    // fields exposes its leaves the same way: the callee may
+                    // replace the whole record.
                     if let Some(container) =
                         referent_of(&program.pointees, local.ty).filter(|container| {
                             container_carries_borrow(&program.enums, &program.pointees, *container)
+                                || (matches!(local.ty, Type::RefMut(_))
+                                    && container
+                                        .layout()
+                                        .is_some_and(|id| program.enums[id].borrowed))
                         })
                     {
                         for leaf in leaves_of(
@@ -2864,6 +2871,82 @@ impl Checker<'_> {
         }
         Ok(())
     }
+    /// `*reference = value` for a record with borrowed fields. Every written
+    /// leaf must outlive the destination's lifetime: a lifetime declared by
+    /// this function is a rigid destination (lifetimes are invariant under
+    /// `&mut`), otherwise the destination keeps the lifetime its current
+    /// leaves already carry. The owner behind the reference then holds the
+    /// new leaves; a reference with one possible owner replaces that owner's
+    /// leaves, otherwise they are merged. The old leaves stay checked until
+    /// the write, which happens after the value is evaluated.
+    fn write_borrowed_record(
+        &mut self,
+        reference: &Expr,
+        value: &Expr,
+        referent: Type,
+        span: Span,
+    ) -> Result<()> {
+        let expected = leaves_of(
+            self.enums,
+            self.pointees,
+            self.reference_labels,
+            self.variance,
+            referent,
+        )?;
+        let existing = self.container_provenance(reference);
+        let incoming = self.borrowed_element_provenance(value);
+        for leaf in &expected {
+            let Some(loan) = incoming.leaves.get(&leaf.path) else {
+                return Err(Diagnostic::new(
+                    span,
+                    "the borrowed record written through this reference is missing provenance for a declared borrowed field",
+                ));
+            };
+            if leaf.mutable && !loan.mutable {
+                return Err(Diagnostic::new(
+                    span,
+                    "an exclusive borrowed field cannot be replaced by a shared borrow; shared storage cannot be upgraded",
+                ));
+            }
+            let Some(declared) =
+                self.write_destination_label(leaf.lifetime.as_ref(), &leaf.path, &existing)
+            else {
+                continue;
+            };
+            let written = loan.lifetime.clone().or_else(|| {
+                (!loan.origins.is_empty()).then(|| self.anonymous_lifetime(&loan.origins))
+            });
+            if !written
+                .as_deref()
+                .is_some_and(|written| self.actual_outlives(written, &declared))
+            {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "the record written through this '&mut' reference has a field with {}, which does not outlive the record's lifetime {}; lifetimes are invariant under '&mut', so the written source must live at least as long",
+                        written
+                            .as_deref()
+                            .map(describe_actual)
+                            .unwrap_or_else(|| "a temporary or local owner".to_owned()),
+                        describe_lifetime(&declared)
+                    ),
+                ));
+            }
+        }
+        let base = through_coerce(reference);
+        let owners = match &base.kind {
+            ExprKind::Borrow(_) => 1,
+            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => self
+                .view_loan(base)
+                .origins
+                .into_iter()
+                .filter(|owner| *owner != *slot && self.is_carrier_type(self.locals[*owner].ty))
+                .count(),
+            _ => 0,
+        };
+        self.merge_container_provenance(reference, incoming, owners == 1);
+        Ok(())
+    }
     fn argument_leaf_loan(&self, argument: &Expr, path: &[usize]) -> Option<Loan> {
         if let Some(rest) = path.strip_prefix(&[CONTAINER_LEAF]) {
             return self
@@ -5085,6 +5168,11 @@ impl Checker<'_> {
                 self.check_write_through_reference(reference, expr_ptr, expr.span)?;
                 self.expr(reference)?;
                 self.expr(value)?;
+                if let Some(referent) = self.referent(reference.ty)
+                    && referent.layout().is_some_and(|id| self.enums[id].borrowed)
+                {
+                    self.write_borrowed_record(reference, value, referent, expr.span)?;
+                }
             }
             ExprKind::Block(block) => self.block(block)?,
             ExprKind::Coerce { value, .. } => self.expr(value)?,

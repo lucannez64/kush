@@ -2104,12 +2104,10 @@ impl<'a> Types<'a> {
             let record = inner.layout().is_some_and(|id| self.enums[id].record);
             if record {
                 if *mutable {
-                    if self.enums[inner.layout().expect("record layout")].borrowed {
-                        return Err(Diagnostic::new(
-                            ty.span,
-                            "exclusive '&mut Record' receivers and parameters are not supported for records with borrowed fields; borrow the record shared, or update its owned metadata through an owning value",
-                        ));
-                    }
+                    // A record with borrowed fields is mutable through
+                    // `&mut Record` too: the ownership pass checks every
+                    // written leaf against the record's declared lifetimes,
+                    // which stay invariant under `&mut`.
                     return Ok(Type::RefMut(self.pointer(inner)));
                 }
                 return Ok(Type::Ref(self.pointer(inner)));
@@ -2897,11 +2895,15 @@ impl<'a> Types<'a> {
                 let inner = self.full(inner, ty.span)?;
                 let direct_reference = matches!(inner, Type::Ref(_) | Type::RefMut(_) | Type::Str)
                     && matches!(arguments[0].kind, ast::TypeKind::Borrow { .. });
-                let task_borrowed_record = b.name == "Task" && is_borrowed_record(self, inner);
-                if b.name == "Task" && is_borrowed_task_exit(self, inner) {
+                let task_borrowed_record = b.name == "Task"
+                    && (is_borrowed_record(self, inner) || is_child_task_exit(self, inner));
+                if b.name == "Task"
+                    && is_borrowed_task_exit(self, inner)
+                    && !is_child_task_exit(self, inner)
+                {
                     return Err(Diagnostic::new(
                         ty.span,
-                        "a child task cannot return a borrowed TaskExit<T>; join the child in the scope that owns the borrowed storage and match the exit there",
+                        "a child task may return TaskExit<R> only for a borrowed record R; a nested borrowed TaskExit must be matched in the scope that joined it",
                     ));
                 }
                 let borrowed_record_element =
@@ -4315,7 +4317,10 @@ impl<'a> Types<'a> {
                     && def.generics.len() == 1
                     && arguments.len() == 1
                     && variants.len() == 2
-                    && is_borrowed_record(self, arguments[0])
+                    && (is_borrowed_record(self, arguments[0])
+                        // `Task.join` of a child that returned a joined
+                        // borrowed exit: `TaskExit<TaskExit<R>>`.
+                        || is_child_task_exit(self, arguments[0]))
                     && completed.is_some_and(|index| {
                         variants[index].tuple && variants[index].fields == [arguments[0]]
                     })
@@ -5721,6 +5726,22 @@ pub(crate) fn is_borrowed_task_exit(types: &Types<'_>, ty: Type) -> bool {
                 .flat_map(|variant| variant.fields.iter())
                 .any(|field| has_borrow(types, *field))
     })
+}
+/// Whether `ty` is the conventional `TaskExit<R>` whose payload is a borrowed
+/// record without a nested `TaskExit`. A child task may return exactly this
+/// shape: the payload's leaves come from the child's captures, which the
+/// enclosing scope keeps loaned until its final join.
+pub(crate) fn is_child_task_exit(types: &Types<'_>, ty: Type) -> bool {
+    is_borrowed_task_exit(types, ty)
+        && ty.layout().is_some_and(|id| {
+            types.enums[id]
+                .variants
+                .iter()
+                .flat_map(|variant| variant.fields.iter())
+                .all(|field| {
+                    is_borrowed_record(types, *field) && !contains_task_exit_borrow(types, *field)
+                })
+        })
 }
 /// Whether `ty` is an owning container whose element is (or contains) a
 /// directly declared reference leaf. Such a value carries borrow provenance

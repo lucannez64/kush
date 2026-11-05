@@ -756,10 +756,11 @@ be returned across a task boundary.
   Stored reference locals, explicit reborrows, and `&record.field` place
   references are supported, including returning a field reference from a
   reference parameter. A mutable place reference requires a mutable root or an
-  exclusive reference root; a record with borrowed fields is not mutated as a
-  whole. `&mut str` remains unsupported because unrestricted byte mutation can
-  invalidate UTF-8; a sound operation would have to replace complete Unicode
-  scalars with unchanged encoded length. Place references into slice-view
+  exclusive reference root; a record with borrowed fields may be replaced as a
+  whole through `&mut Holder<'a>`, with every written leaf outliving `'a`.
+  `&mut str` allows only length-preserving writes that keep UTF-8 valid (ASCII
+  case changes and same-width `Str.set_scalar`). Two element references into
+  one base coexist when the facts prove their indices distinct. Place references into slice-view
   elements (`&s[i]`, `&mut s[i]`) root at the view's owners; see
   [borrowing-extensions.md](borrowing-extensions.md#slice-view-element-places).
   Containers of borrowed records remain unsupported.
