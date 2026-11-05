@@ -1737,10 +1737,21 @@
       "deps": [
         "MEM"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "85f85d9",
+      "log": [
+        {
+          "time": "2026-11-05 01:00:21",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 01:04:47",
+          "who": "agent",
+          "text": "done 85f85d9"
+        }
+      ]
     },
     {
       "id": "A-PAT-NESTED",
@@ -1754,7 +1765,13 @@
       "status": "todo",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 01:04:48",
+          "who": "agent",
+          "text": "Recursive element patterns already work for copyable elements; tests added in 85f85d9. Borrowed element patterns build on R-SLICE-PLACE element references."
+        }
+      ]
     },
     {
       "id": "A-PLACE-VIEW",
