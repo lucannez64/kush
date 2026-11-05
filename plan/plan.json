@@ -1402,14 +1402,19 @@
         "ROWS",
         "GRADES"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Frame layout, states per perform point, ownership of captured live values.",
-      "commit": null,
+      "commit": "c8f80e1",
       "log": [
         {
           "time": "2026-11-03 17:27:25",
           "who": "agent",
           "text": "Research action: compare OCaml PLDI2021 one-shot stack segments with explicit state-machine plan; lexical Zero Lexa is a separate semantics/rare-effect design, not a drop-in dynamic handler replacement."
+        },
+        {
+          "time": "2026-11-05 05:49:35",
+          "who": "agent",
+          "text": "Design in docs/effect-state-machines.md: state machines over stack segments; check-then-lower; frame/step/drop-glue; coloring for dynamic resumption"
         }
       ]
     },
@@ -2826,6 +2831,19 @@
       "commit": null,
       "log": [],
       "area": "dynarray"
+    },
+    {
+      "id": "E-CPS-BORROW",
+      "title": "Borrows of outer storage held across a suspension",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "E-MULTI-PERFORM"
+      ],
+      "status": "todo",
+      "desc": "Relax rule 2 of docs/effect-state-machines.md: views of storage owned outside the handled body may live across a perform with the handle's extent as region; token classed as a scoped borrowed-capture closure.",
+      "commit": null,
+      "log": []
     }
   ]
 }
