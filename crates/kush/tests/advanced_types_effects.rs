@@ -1191,7 +1191,7 @@ fn declared_effect_names_are_checked_row_entries() {
         "excluded",
     );
     // A declared operation's dynamic perform supplies the one-shot token, so a
-    // multishot handler contract cannot be shared with called functions.
+    // multishot handler cannot be reached from called functions.
     rejects(
         r#"
         effect Op: i64 -> i64;
@@ -1204,7 +1204,7 @@ fn declared_effect_names_are_checked_row_entries() {
                 deep()
             }
         }"#,
-        "multishot resumption is not supported for a declared operation",
+        "multishot resumption of 'Op' through a called function is not supported",
     );
 }
 
@@ -1384,8 +1384,9 @@ fn multishot_resumption_reuses_a_capture_free_continuation() {
     assert_eq!(value(tail), 7);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(tail, 7);
-    // A captured environment would make the token owning, so multishot with
-    // captures stays an explicit rejection rather than silently sharing it.
+    // A handler that lets the copyable token escape cannot be specialized,
+    // so multishot with captured values stays an explicit rejection rather
+    // than silently sharing an environment.
     rejects(
         r#"
         fn main() -> i64 ! {alloc, panic} {
@@ -1394,8 +1395,8 @@ fn multishot_resumption_reuses_a_capture_free_continuation() {
                 x: i64,
                 resume: fn(i64) -> i64 ! {},
             ) -> i64 ! {} {
-                let r = resume(x);
-                r
+                let again = resume;
+                again(x)
             } {
                 let v = perform Op(0);
                 v + n

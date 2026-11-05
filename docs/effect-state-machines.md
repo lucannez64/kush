@@ -532,3 +532,25 @@ continuation `k`.
   such programs now give the deep-handler result, the same one a lexical
   perform gives; a body that calls such functions must then produce the
   operation result type. Handlers that are tail-resumptive are unaffected.
+
+### 14.2 Multishot (E-MULTISHOT-COPY, E-MULTISHOT-DECL)
+
+A multishot token has the copyable type `fn(R) -> R`, a single code pointer
+with no environment, so "copy the frame before each resumption" (section 10)
+cannot be done through the token value. Instead the handler is specialized:
+
+- A capture-free point keeps the plain code-pointer token, as before.
+- A point with live values requires the handler to be a noncapturing lambda
+  (or function name) whose token parameter is used only as the callee of
+  direct calls, and every live value to be copyable and ungraded; otherwise
+  it is rejected, naming the value. The point then calls a copy of the
+  handler that takes the live values as extra parameters, and in which every
+  `resume(y)` is a direct call of the point's continuation with those values
+  and `y`. Each resumption therefore starts from its own copy of the frame;
+  nothing is allocated and nothing is shared.
+- A multishot handler for a declared operation is accepted. It is never
+  pushed on the dynamic handler stack (a dynamic perform supplies the
+  one-shot token, whose representation differs), so its body is always
+  suspendable and a call that may perform the operation, or a task spawned
+  to perform it, is rejected. Multishot resumption through a chain of called
+  functions (the frame-chain copy of section 10) is not implemented.

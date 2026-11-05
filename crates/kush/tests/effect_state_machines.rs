@@ -739,3 +739,116 @@ fn unresumable_calls_are_rejected() {
         "must produce the operation result type",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Multishot by copying the live values (E-MULTISHOT-COPY, E-MULTISHOT-DECL)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn multishot_resumptions_each_get_a_copy_of_the_live_values() {
+    let source = r#"
+        fn main() -> i64 ! {panic} {
+            let n = 100;
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} {
+                let a = resume(1);
+                let b = resume(2);
+                a * 1000 + b
+            } {
+                let base = n + 5;
+                let v = perform Op(0);
+                v + base
+            }
+        }"#;
+    let (result, stats, _) = evaluate(source);
+    assert_eq!(result, 106107);
+    // Copyable values travel as arguments: nothing is allocated.
+    assert_eq!(stats.allocations, 0);
+    agrees(source, 106107, "");
+    // Every combination of choices through a loop with mutable state:
+    // s = c0 + 2 * c1 summed over the four combinations.
+    let choices = r#"
+        fn main() -> i64 ! {panic} {
+            handle Choose: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { let a = resume(0); let b = resume(1); a + b } {
+                let mut s = 0;
+                let mut i = 0;
+                while i < 2 {
+                    let c = perform Choose(i);
+                    s = s + c * (i + 1);
+                    i = i + 1;
+                }
+                s
+            }
+        }"#;
+    agrees(choices, 6, "");
+}
+
+#[test]
+fn multishot_rejects_owned_values_and_escaping_tokens() {
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { let a = resume(1); let b = resume(2); a + b } {
+                let b = Box.new(5);
+                let v = perform Op(0);
+                v + Box.take(b)
+            }
+        }"#,
+        "owned, linear, or graded and cannot be copied",
+    );
+    rejects(
+        r#"
+        fn apply(f: fn(i64) -> i64 ! {}, x: i64) -> i64 ! {} { f(x) }
+        fn main() -> i64 ! {panic} {
+            let n = 1;
+            handle Op: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { let a = apply(resume, 1); a } {
+                let v = perform Op(0);
+                v + n
+            }
+        }"#,
+        "only calls its resumption directly",
+    );
+}
+
+#[test]
+fn declared_operations_accept_multishot_handlers() {
+    // Pure handler: bitwise arithmetic only. Each perform yields 0 then 1;
+    // the handler ORs the two runs, so the result has both bits.
+    let source = r#"
+        effect Choose: i64 -> i64;
+        fn main() -> i64 ! {panic} {
+            handle Choose: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { let a = resume(0); let b = resume(1); a | b } {
+                let shift = 4;
+                let c = perform Choose(1);
+                let d = perform Choose(2);
+                (c << shift) | d
+            }
+        }"#;
+    agrees(source, 17, "");
+    rejects(
+        r#"
+        effect Choose: i64 -> i64;
+        fn pick() -> i64 ! {Choose, panic} { perform Choose(1) }
+        fn main() -> i64 ! {panic} {
+            handle Choose: i64 -> i64 with fn(
+                x: i64,
+                resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(0) } { pick() }
+        }"#,
+        "multishot resumption of 'Choose' through a called function is not supported",
+    );
+}

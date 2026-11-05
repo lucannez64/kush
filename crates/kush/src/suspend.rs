@@ -991,6 +991,10 @@ struct Spec {
     finish: Option<usize>,
     /// Resumable entry index and continuation token type per awaited callee.
     entries: BTreeMap<usize, (usize, Type)>,
+    /// The handler, when it is a known noncapturing function that only calls
+    /// its resumption directly: multishot points with captured values call a
+    /// specialization of it.
+    multishot_handler: Option<MultishotHandler>,
     span: Span,
 }
 
@@ -1075,11 +1079,23 @@ fn build(
             }
         }
         if spec.multishot && !slots.is_empty() {
-            return Err(Diagnostic::new(
-                at,
-                "multishot resumption requires a continuation with no captured values; the copyable resumption token cannot own an environment. Copy the needed values into the operation payload or use a one-shot 'linear once fn' handler",
-            )
-            .with_note(locals[slots[0]].span, "captured value declared here"));
+            if spec.multishot_handler.is_none() {
+                return Err(Diagnostic::new(
+                    at,
+                    "multishot resumption requires a continuation with no captured values unless the handler is a lambda (or function name) without captures that only calls its resumption directly; the copyable resumption token cannot own an environment",
+                )
+                .with_note(locals[slots[0]].span, "captured value declared here"));
+            }
+            if let Some(slot) = slots.iter().find(|slot| {
+                !host.copyable.get(**slot).copied().unwrap_or(false)
+                    || locals[**slot].grade.is_some()
+            }) {
+                return Err(Diagnostic::new(
+                    at,
+                    "multishot resumption copies the continuation's live values for each resume, but this value is owned, linear, or graded and cannot be copied; keep it out of the multishot continuation or use a one-shot 'linear once fn' handler",
+                )
+                .with_note(locals[*slot].span, "captured value declared here"));
+            }
         }
     }
     let effects_check = |allocates: bool| -> Result<()> {
@@ -1141,10 +1157,27 @@ fn build(
             order.push(*point);
         }
     }
-    let allocates = order.iter().any(|point| !captures[point].is_empty());
+    // A multishot point with live values passes them by value to a
+    // specialization of the handler instead of building an environment.
+    let specialized = order
+        .iter()
+        .copied()
+        .filter(|point| spec.multishot && !captures[point].is_empty())
+        .collect::<Vec<_>>();
+    let allocates = order
+        .iter()
+        .any(|point| !captures[point].is_empty() && !specialized.contains(point));
     effects_check(allocates)?;
     let function_of = |point: usize| {
         first_function + order.iter().position(|p| *p == point).expect("known point")
+    };
+    let specialization_of = |point: usize| {
+        first_function
+            + order.len()
+            + specialized
+                .iter()
+                .position(|p| *p == point)
+                .expect("known point")
     };
     let cleanup = resources_in(&body, &host.local_resources);
     // Replace every point by an exit whose value is the handler call (or the
@@ -1161,6 +1194,26 @@ fn build(
             unreachable!("paths lead to suspension points")
         };
         let token_ty = tokens[point];
+        if specialized.contains(point) {
+            let environment = captures[point]
+                .iter()
+                .map(|slot| Expr {
+                    kind: ExprKind::Local(*slot),
+                    ty: locals[*slot].ty,
+                    span,
+                    resource: None,
+                })
+                .collect();
+            call_specialization(&mut call, specialization_of(*point), environment);
+            site.kind = ExprKind::RegionExit {
+                value: call,
+                finish: false,
+                cleanup: cleanup.clone(),
+            };
+            site.ty = Type::Never;
+            site.resource = None;
+            continue;
+        }
         let token = if direct(*point, token_ty) {
             Expr {
                 kind: ExprKind::Move(spec.finish.expect("direct points need k")),
@@ -1297,6 +1350,54 @@ fn build(
             local_copyable: vec![],
         });
     }
+    // Handler specializations: `resume(y)` calls the point's continuation
+    // directly with copies of the captured values.
+    for point in &specialized {
+        let handler = spec
+            .multishot_handler
+            .as_ref()
+            .expect("checked above for captured multishot points");
+        let mut function = handler.function.clone();
+        let mut environment = Vec::new();
+        for slot in &captures[point] {
+            environment.push(function.locals.len());
+            function.locals.push(Local {
+                mutable: false,
+                linear: false,
+                pinned: false,
+                grade: None,
+                ..locals[*slot]
+            });
+            function.local_resources.push(None);
+        }
+        let continuation = function_of(*point);
+        rewrite_resume_calls(&mut function.body, handler.token, &|span, argument| {
+            let mut arguments = environment
+                .iter()
+                .zip(&captures[point])
+                .map(|(slot, outer)| Expr {
+                    kind: ExprKind::Local(*slot),
+                    ty: locals[*outer].ty,
+                    span,
+                    resource: None,
+                })
+                .collect::<Vec<_>>();
+            arguments.push(argument);
+            ExprKind::Call(crate::executable::Target::Function(continuation), arguments)
+        });
+        let mut parameter_slots = vec![handler.payload];
+        parameter_slots.extend(environment.iter().copied());
+        let mut parameter_grades = vec![function.parameter_grades.first().copied().flatten()];
+        parameter_grades.resize(parameter_slots.len(), None);
+        function.name = format!("{}::multishot#{point}", function.name);
+        function.parameters = parameter_slots.len();
+        function.parameter_grades = parameter_grades;
+        function.parameter_lifetimes = vec![None; parameter_slots.len()];
+        function.parameter_slots = Some(parameter_slots);
+        function.local_borrowed = vec![];
+        function.local_copyable = vec![];
+        continuations.push(function);
+    }
     Ok(Built {
         body,
         continuations,
@@ -1343,12 +1444,28 @@ fn lower_one(
     index: usize,
     target: *const Suspendable,
 ) -> Result<()> {
-    let (operation, result, awaited) = {
+    let (operation, result, awaited, multishot) = {
         let suspendable = find_in_block(&program.functions[index].body, target)
             .expect("target suspendable exists");
         let mut awaited = BTreeSet::new();
         awaited_callees(&suspendable.body, &mut awaited);
-        (suspendable.operation, suspendable.result, awaited)
+        (
+            suspendable.operation,
+            suspendable.result,
+            awaited,
+            suspendable
+                .multishot
+                .then_some(suspendable.handler_function)
+                .flatten(),
+        )
+    };
+    // A multishot handler is specialized from its lowered body.
+    let multishot_handler = match multishot {
+        Some(handler) if !context.lowering.contains(&handler) => {
+            lower_function(program, context, handler)?;
+            multishot_handler(program, handler)
+        }
+        _ => None,
     };
     // Resumable entries first: building one may lower other functions and
     // append functions, but never moves this function's body.
@@ -1410,6 +1527,7 @@ fn lower_one(
             awaited_allocates,
             finish: None,
             entries: entries.clone(),
+            multishot_handler: multishot_handler.clone(),
             span,
         };
         let built = build(&host, &spec, body, first_function, &owns)?;
@@ -1998,6 +2116,7 @@ fn resumable_entry(
         awaited_allocates,
         finish: Some(k),
         entries,
+        multishot_handler: None,
         span: source.span,
     };
     let first_function = program.functions.len();
@@ -2089,4 +2208,127 @@ fn tail_path(body: &Block, path: &[Step]) -> bool {
         }
     }
     block(body, path)
+}
+
+/// A known multishot handler: a noncapturing function `fn(P, fn(R) -> R)`
+/// whose token parameter is used only as the callee of direct calls.
+#[derive(Clone)]
+struct MultishotHandler {
+    function: Function,
+    payload: usize,
+    token: usize,
+}
+
+/// The handler as a multishot specialization source, if it qualifies.
+fn multishot_handler(program: &Executable, function: usize) -> Option<MultishotHandler> {
+    let handler = &program.functions[function];
+    if handler.closure.is_some()
+        || handler.parameters != 2
+        || handler.parameter_slots.is_some()
+        || program.foreign_functions[function].is_some()
+        || handler
+            .parameter_grades
+            .iter()
+            .any(|grade| grade.is_some_and(Grade::is_zero))
+    {
+        return None;
+    }
+    let token = 1;
+    fn only_called(expr: &Expr, token: usize) -> bool {
+        match &expr.kind {
+            ExprKind::CallIndirect { callee, arguments }
+                if matches!(
+                    callee.kind,
+                    ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot)
+                        if slot == token
+                ) =>
+            {
+                arguments
+                    .iter()
+                    .all(|argument| only_called(argument, token))
+            }
+            ExprKind::Local(slot)
+            | ExprKind::Move(slot)
+            | ExprKind::Peek(slot)
+            | ExprKind::Borrow(slot)
+                if *slot == token =>
+            {
+                false
+            }
+            ExprKind::Assign(slot, _)
+            | ExprKind::InitOwner { slot, .. }
+            | ExprKind::BorrowInit { slot, .. }
+                if *slot == token =>
+            {
+                false
+            }
+            _ => {
+                let mut ok = true;
+                expr.for_each_child(&mut |child| ok &= only_called(child, token));
+                ok
+            }
+        }
+    }
+    let body = &handler.body;
+    let ok = body.statements.iter().all(|statement| match statement {
+        Statement::Let(slot, value) => *slot != token && only_called(value, token),
+        Statement::Expr(value) => only_called(value, token),
+        Statement::Declare(slot) => *slot != token,
+    }) && body
+        .tail
+        .as_deref()
+        .is_none_or(|tail| only_called(tail, token));
+    ok.then(|| MultishotHandler {
+        function: handler.clone(),
+        payload: 0,
+        token,
+    })
+}
+
+/// Replace every direct call of the token parameter by `make(span, argument)`.
+fn rewrite_resume_calls(block: &mut Block, token: usize, make: &dyn Fn(Span, Expr) -> ExprKind) {
+    fn walk(expr: &mut Expr, token: usize, make: &dyn Fn(Span, Expr) -> ExprKind) {
+        expr.for_each_child_mut(&mut |child| walk(child, token, make));
+        let is_resume = matches!(
+            &expr.kind,
+            ExprKind::CallIndirect { callee, .. }
+                if matches!(
+                    callee.kind,
+                    ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot)
+                        if slot == token
+                )
+        );
+        if is_resume {
+            let ExprKind::CallIndirect { mut arguments, .. } =
+                std::mem::replace(&mut expr.kind, ExprKind::Constant(0))
+            else {
+                unreachable!("matched above")
+            };
+            let argument = arguments.pop().expect("a resumption takes one argument");
+            expr.kind = make(expr.span, argument);
+        }
+    }
+    for statement in &mut block.statements {
+        if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+            walk(value, token, make);
+        }
+    }
+    if let Some(tail) = block.tail.as_deref_mut() {
+        walk(tail, token, make);
+    }
+}
+
+/// Turn a multishot point's handler call into a direct call of the handler
+/// specialization with the payload and the captured values.
+fn call_specialization(call: &mut Expr, function: usize, environment: Vec<Expr>) {
+    match &mut call.kind {
+        ExprKind::Coerce { value, .. } => call_specialization(value, function, environment),
+        ExprKind::CallIndirect { arguments, .. } => {
+            let payload = arguments.remove(0);
+            let mut values = vec![payload];
+            values.extend(environment);
+            call.kind = ExprKind::Call(crate::executable::Target::Function(function), values);
+        }
+        _ => unreachable!("a multishot point wraps the handler call"),
+    }
 }

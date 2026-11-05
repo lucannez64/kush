@@ -1329,6 +1329,9 @@ pub(crate) enum ExprKind {
 /// The checked description of a suspendable handled body.
 #[derive(Debug, Clone)]
 pub(crate) struct Suspendable {
+    /// The handler's function when it is a noncapturing lambda or function
+    /// name; multishot resumption with captured values specializes it.
+    pub handler_function: Option<usize>,
     /// The declared operation id when the handled operation is declared;
     /// calls of functions that may perform it are await points.
     pub operation: Option<usize>,
@@ -11522,6 +11525,7 @@ enum ScalarValue {
 /// What `checked_effect_body` needs to build a `Suspendable` node.
 struct SuspendableSite {
     name: String,
+    handler_function: Option<usize>,
     /// The body performs the operation lexically outside its tail.
     lexical: bool,
     operation: Option<usize>,
@@ -30653,12 +30657,6 @@ impl Checker<'_, '_> {
                 ),
             ));
         };
-        if declared.is_some() && multishot {
-            return Err(Diagnostic::new(
-                span,
-                "multishot resumption is not supported for a declared operation: a dynamic perform always supplies the one-shot linear resumption token, so the handler contract would differ between lexical and called-function performs",
-            ));
-        }
         if !self.subtype(parameter_ty, signature.parameters[0]) {
             return Err(Diagnostic::new(
                 span,
@@ -30709,8 +30707,17 @@ impl Checker<'_, '_> {
         // A declared operation can also be performed by called functions;
         // under a non-tail handler those calls become await points.
         let lexical = body_has_non_tail_perform(body, operation);
-        let region =
-            !tail_resumptive_handler(self.resolution, handler) && (lexical || declared.is_some());
+        // A multishot handler for a declared operation is never pushed on the
+        // dynamic stack (a dynamic perform supplies the one-shot token), so
+        // its body is always checked as suspendable and calls that could
+        // perform the operation are rejected.
+        let region = (!tail_resumptive_handler(self.resolution, handler)
+            && (lexical || declared.is_some()))
+            || (declared.is_some() && multishot);
+        let handler_function = match &handler_value.kind {
+            ExprKind::FnValue { function, captures } if captures.is_empty() => Some(*function),
+            _ => None,
+        };
         let handler_writes = self.closure_writes.get(&slot).cloned().unwrap_or_default();
         self.handlers.push(HandlerScope {
             operation: operation.to_owned(),
@@ -30742,6 +30749,7 @@ impl Checker<'_, '_> {
                 lexical,
                 operation: declared.map(|declared| declared.id),
                 multishot,
+                handler_function,
                 handler_writes,
                 effects: saved_effects,
             }),
@@ -30750,7 +30758,7 @@ impl Checker<'_, '_> {
         self.handlers.pop();
         let inner = checked?;
         let ty = inner.ty;
-        let tail = match declared {
+        let tail = match declared.filter(|_| !multishot) {
             Some(declared) => Expr {
                 kind: ExprKind::HandlerPush {
                     operation: declared.id,
@@ -30887,7 +30895,7 @@ impl Checker<'_, '_> {
         };
         if let Some(operation) = site.operation {
             let bit = self.operation_effect(&site.name);
-            self.mark_awaits_in_block(&mut block, operation, bit, &site.name, false)?;
+            self.mark_awaits_in_block(&mut block, operation, bit, &site.name, site.multishot)?;
         }
         if self.handlers.last().is_none_or(|scope| scope.points == 0) {
             return Ok(block);
@@ -30914,6 +30922,7 @@ impl Checker<'_, '_> {
         let token = self.resume_type(result_ty, site.multishot);
         let suspendable = Expr {
             kind: ExprKind::Suspendable(Box::new(Suspendable {
+                handler_function: site.handler_function,
                 operation: site.operation,
                 result: result_ty,
                 token,
@@ -30967,15 +30976,15 @@ impl Checker<'_, '_> {
         operation: usize,
         bit: u16,
         name: &str,
-        nested: bool,
+        multishot: bool,
     ) -> Result<()> {
         for statement in &mut block.statements {
             if let Statement::Let(_, value) | Statement::Expr(value) = statement {
-                self.mark_awaits(value, operation, bit, name, nested)?;
+                self.mark_awaits(value, operation, bit, name, false, multishot)?;
             }
         }
         if let Some(tail) = block.tail.as_deref_mut() {
-            self.mark_awaits(tail, operation, bit, name, nested)?;
+            self.mark_awaits(tail, operation, bit, name, false, multishot)?;
         }
         Ok(())
     }
@@ -30986,6 +30995,7 @@ impl Checker<'_, '_> {
         bit: u16,
         name: &str,
         nested: bool,
+        multishot: bool,
     ) -> Result<()> {
         let nested = match &expr.kind {
             ExprKind::HandlerPush {
@@ -30997,11 +31007,24 @@ impl Checker<'_, '_> {
         let mut result = Ok(());
         expr.for_each_child_mut(&mut |child| {
             if result.is_ok() {
-                result = self.mark_awaits(child, operation, bit, name, nested);
+                result = self.mark_awaits(child, operation, bit, name, nested, multishot);
             }
         });
         result?;
         let callee = match &expr.kind {
+            ExprKind::TaskSpawn { body, .. }
+                if multishot
+                    && Self::function_parts(body.ty).is_some_and(|(id, _)| {
+                        self.types.function_types[id].effects & bit != 0
+                    }) =>
+            {
+                return Err(Diagnostic::new(
+                    expr.span,
+                    format!(
+                        "a task spawned under a multishot handler for '{name}' cannot perform it: the handler is not visible to other tasks"
+                    ),
+                ));
+            }
             ExprKind::Call(Target::Function(function), _) => {
                 (self.functions.signatures[*function].effects & bit != 0).then_some(*function)
             }
@@ -31036,6 +31059,14 @@ impl Checker<'_, '_> {
                 expr.span,
                 format!(
                     "a call that may perform '{name}' inside a nested handler for another operation cannot be resumed by the outer handler; move the call out of the nested 'handle'"
+                ),
+            ));
+        }
+        if multishot {
+            return Err(Diagnostic::new(
+                expr.span,
+                format!(
+                    "multishot resumption of '{name}' through a called function is not supported; perform '{name}' directly in the handled body"
                 ),
             ));
         }
