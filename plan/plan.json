@@ -3997,14 +3997,19 @@
       "deps": [
         "GRADE-EFFECT-DEMAND"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "docs/grade-effect-demand.md decision 3: diagnostic-only hint when an exact-grade violation comes from statement-position uses in a block argument under demand >= 2; verdicts unchanged.",
-      "commit": null,
+      "commit": "fe37872",
       "log": [
         {
           "time": "2026-11-05 22:19:57",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-05 22:22:31",
+          "who": "agent",
+          "text": "done fe37872"
         }
       ]
     },
