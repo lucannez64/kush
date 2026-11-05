@@ -936,7 +936,24 @@ struct Checker<'a> {
     loops: Vec<Frame>,
     /// A match guard is evaluated a path-dependent number of times.
     guard: bool,
+    /// Diagnostic only (GRADE-DEMAND-HINT): the next block expression is a
+    /// call argument at demand >= 2, and the span of the argument block whose
+    /// expression statements are being checked, if any.
+    hint_next_block: bool,
+    hint_block: Option<Span>,
+    /// Per slot: (occurrences, counted amount, argument block) of uses in
+    /// statement position of such a block. Never affects verdicts.
+    hinted: BTreeMap<usize, (u64, Grade, Span)>,
     steps: usize,
+}
+/// A call argument that is a block literal passed at demand >= 2: its
+/// statement-position uses are the ones the hoisting hint is about.
+fn hoistable_block(argument: &Expr, demand: Grade) -> bool {
+    let mut argument = argument;
+    while let ExprKind::Coerce { value, .. } = &argument.kind {
+        argument = value;
+    }
+    matches!(argument.kind, ExprKind::Block(_)) && !demand.is_zero() && !demand.is_one()
 }
 /// A conservative per-function traversal budget. It bounds compiler work on
 /// adversarial expression graphs; it is not a program-runtime budget.
@@ -951,6 +968,9 @@ impl<'a> Checker<'a> {
             counts: BTreeMap::new(),
             loops: Vec::new(),
             guard: false,
+            hint_next_block: false,
+            hint_block: None,
+            hinted: BTreeMap::new(),
             steps: 0,
         }
     }
@@ -1225,6 +1245,7 @@ impl<'a> Checker<'a> {
             self.active.remove(index);
         }
         self.counts.remove(&slot);
+        self.hinted.remove(&slot);
     }
     /// Record `amount` uses of `slot`. `amount` is already the full multiplicity
     /// for this occurrence. Consuming uses pass `Grade::ONE`.
@@ -1242,6 +1263,11 @@ impl<'a> Checker<'a> {
         }
         let current = self.counts.get(&slot).copied().unwrap_or(Grade::ZERO);
         self.counts.insert(slot, current.saturating_add(amount));
+        if let Some(block) = self.hint_block {
+            let entry = self.hinted.entry(slot).or_insert((0, Grade::ZERO, block));
+            entry.0 = entry.0.saturating_add(1);
+            entry.1 = entry.1.saturating_add(amount);
+        }
         Ok(())
     }
     fn grade_error(&self, slot: usize, span: Span, action: &str, detail: &str) -> Diagnostic {
@@ -1275,15 +1301,48 @@ impl<'a> Checker<'a> {
                         "the value is used {seen_text} time(s) on this path; the annotation requires exactly {wanted}"
                     )
                 };
-                return Err(self.grade_error(
+                let error = self.grade_error(
                     *slot,
                     span,
                     &format!("is not used consistently before {reason}"),
                     &detail,
-                ));
+                );
+                return Err(self.with_hoist_hint(*slot, seen, wanted, error));
             }
         }
         Ok(())
+    }
+    /// GRADE-DEMAND-HINT (docs/grade-effect-demand.md decision 3): when the
+    /// mismatch disappears if every statement-position use inside a block
+    /// argument at demand >= 2 counted once, suggest hoisting that block.
+    /// Diagnostic text only; the verdict is unchanged.
+    fn with_hoist_hint(
+        &self,
+        slot: usize,
+        seen: Grade,
+        wanted: Grade,
+        error: Diagnostic,
+    ) -> Diagnostic {
+        let Some(&(occurrences, Grade::Finite(scaled), block)) = self.hinted.get(&slot) else {
+            return error;
+        };
+        let (Grade::Finite(seen), Grade::Finite(wanted)) = (seen, wanted) else {
+            return error;
+        };
+        if occurrences == 0 || scaled <= occurrences {
+            return error;
+        }
+        if seen
+            .checked_sub(scaled)
+            .and_then(|rest| rest.checked_add(occurrences))
+            != Some(wanted)
+        {
+            return error;
+        }
+        error.with_note(
+            block,
+            "help: this block argument runs once, but uses in its statements are counted once per use the parameter demands; hoist it before the call (`let t = { ... }; f(t)`) to count them once",
+        )
     }
     /// A back-edge or `continue`: the next iteration starts from the loop head.
     /// Outer exact grades must be restored; loop-local bindings must finish
@@ -1423,6 +1482,7 @@ impl<'a> Checker<'a> {
     }
     fn block(&mut self, block: &Block, loop_body: bool, multiplier: Grade) -> Result<bool> {
         self.tick(block_span(block))?;
+        let hinting = std::mem::take(&mut self.hint_next_block).then(|| block_span(block));
         let active_start = self.active.len();
         let mut survives = true;
         for statement in &block.statements {
@@ -1439,7 +1499,13 @@ impl<'a> Checker<'a> {
                     // that borrows it; declaration itself has no grade effect.
                 }
                 Statement::Expr(expr) => {
-                    survives = self.expr(expr, multiplier)?;
+                    let saved = self.hint_block;
+                    if let Some(span) = hinting {
+                        self.hint_block = Some(span);
+                    }
+                    let result = self.expr(expr, multiplier);
+                    self.hint_block = saved;
+                    survives = result?;
                     if !survives {
                         break;
                     }
@@ -1808,7 +1874,10 @@ impl<'a> Checker<'a> {
                     }
                     let demand = self.demand(*target, index);
                     let nested = multiplier.saturating_mul(demand);
-                    if !self.expr(argument, nested)? {
+                    self.hint_next_block = hoistable_block(argument, demand);
+                    let result = self.expr(argument, nested);
+                    self.hint_next_block = false;
+                    if !result? {
                         return Ok(false);
                     }
                 }
@@ -1839,7 +1908,10 @@ impl<'a> Checker<'a> {
                         Some(grade) => grade,
                     };
                     let nested = multiplier.saturating_mul(demand);
-                    if !self.expr(argument, nested)? {
+                    self.hint_next_block = hoistable_block(argument, demand);
+                    let result = self.expr(argument, nested);
+                    self.hint_next_block = false;
+                    if !result? {
                         return Ok(false);
                     }
                 }
