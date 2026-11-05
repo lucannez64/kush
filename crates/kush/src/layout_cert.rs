@@ -571,3 +571,142 @@ mod tests {
         assert_eq!(ValueSet::top().first_free(), None);
     }
 }
+
+/// Measurement harness for UNBOX-MULTI-NICHE and UNBOX-TAG-NICHE: how many
+/// instantiated layouts in the repository's Kush programs would lose their
+/// tag word under each extension. Run with
+/// `mbx test -p kush --lib layout_cert::census -- --ignored --nocapture`.
+#[cfg(test)]
+mod census {
+    use super::*;
+
+    #[derive(Debug, Default)]
+    struct Counts {
+        programs: usize,
+        failed: usize,
+        layouts: usize,
+        tagged: usize,
+        niche_today: usize,
+        multi_empty: Vec<String>,
+        nested: Vec<String>,
+        tag_niche: Vec<String>,
+    }
+
+    fn classify(enums: &[Enum], file: &str, counts: &mut Counts) {
+        for layout in enums {
+            counts.layouts += 1;
+            if !eligible(layout) || layout.tuple || layout.structural {
+                continue;
+            }
+            if layout.niche().is_some() {
+                counts.niche_today += 1;
+                continue;
+            }
+            if layout.tag_words() == 0 {
+                continue;
+            }
+            counts.tagged += 1;
+            let empties = layout
+                .variants
+                .iter()
+                .filter(|v| v.fields.is_empty())
+                .count();
+            let payloads = layout
+                .variants
+                .iter()
+                .filter(|v| !v.fields.is_empty())
+                .collect::<Vec<_>>();
+            let [payload] = payloads.as_slice() else {
+                continue;
+            };
+            let [field] = payload.fields.as_slice() else {
+                continue;
+            };
+            let name = format!("{file}: {}", layout.name);
+            if empties == 0 {
+                continue;
+            }
+            match field {
+                Type::Enum(inner) if enums[*inner].niche().is_some() => counts.nested.push(name),
+                Type::Enum(inner)
+                    if enums[*inner].tag_words() == 1
+                        && eligible(&enums[*inner])
+                        && !enums[*inner].tuple =>
+                {
+                    counts.tag_niche.push(name)
+                }
+                Type::Bool | Type::Char | Type::Box(_) | Type::Ref(_) | Type::RefMut(_)
+                    if empties >= 2 =>
+                {
+                    counts.multi_empty.push(name)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn census_of_extension_candidates() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        for directory in [
+            "examples",
+            "benchmarks",
+            "crates/kush/std",
+            "crates/kush/tests/fixtures",
+        ] {
+            let mut stack = vec![root.join(directory)];
+            while let Some(path) = stack.pop() {
+                for entry in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().is_some_and(|e| e == "kush") {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+        files.sort();
+        let mut counts = Counts::default();
+        for file in &files {
+            let source = std::fs::read_to_string(file).unwrap();
+            let name = file.strip_prefix(&root).unwrap().display().to_string();
+            match crate::executable::check(&source) {
+                Ok(program) => {
+                    counts.programs += 1;
+                    classify(&program.enums, &name, &mut counts);
+                }
+                Err(_) => counts.failed += 1,
+            }
+        }
+        // Projects: load each manifest's entry with its modules.
+        for manifest in [
+            "benchmarks/json-memory/Kush.toml",
+            "benchmarks/feature-pipeline/kush/Kush.toml",
+            "examples/otp-tui/Kush.toml",
+            "examples/todo-cli/Kush.toml",
+            "examples/project-demo/Kush.toml",
+        ] {
+            let Ok(project) = crate::project::load_manifest(&root.join(manifest)) else {
+                counts.failed += 1;
+                continue;
+            };
+            let entry = project.package.entry_path();
+            match project
+                .load_program(&entry)
+                .ok()
+                .and_then(|program| crate::executable::check_program(&program).ok())
+            {
+                Some(checked) => {
+                    counts.programs += 1;
+                    classify(&checked.enums, manifest, &mut counts);
+                }
+                None => counts.failed += 1,
+            }
+        }
+        println!("files: {}", files.len());
+        println!("{counts:#?}");
+    }
+}

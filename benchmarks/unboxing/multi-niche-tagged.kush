@@ -1,0 +1,22 @@
+enum E { A, B, Some(Bool) }
+fn make(i: i64) -> E ! {panic} {
+    let r = i % 4;
+    if r == 0 { E.A } else { if r == 1 { E.B } else { E.Some(r == 2) } }
+}
+fn main() -> i64 ! {alloc, panic} {
+    let n = 4000000;
+    let mut v: Vec<E> = Vec.with_capacity(n);
+    let mut i = 0;
+    while i < n { v = Vec.push(v, make(i)); i = i + 1; }
+    let mut acc = 0;
+    let mut round = 0;
+    while round < 20 {
+        let mut j = 0;
+        while j < n {
+            acc = acc + match Vec.get(&v, j) { E.A => 1, E.B => 2, E.Some(true) => 3, E.Some(false) => 5 };
+            j = j + 1;
+        }
+        round = round + 1;
+    }
+    acc % 251
+}

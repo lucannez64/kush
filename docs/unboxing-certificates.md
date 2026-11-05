@@ -177,6 +177,34 @@ foreign resources and bridge layouts stay `⊤`. An alignment niche may
 therefore use `1..7` for `Box`/references, but none is enabled: that
 extension still needs its own node and measurement.
 
+### Extensions measured (UNBOX-MULTI-NICHE, UNBOX-TAG-NICHE): not adopted
+
+Census (2026-11-05, `layout_cert::census`): every single-file program under
+`examples/`, `benchmarks/`, `crates/kush/std` and the test fixtures, plus the
+five project entries (json-memory, feature-pipeline, otp-tui, todo-cli,
+project-demo): 84 programs, 291 instantiated layouts, 45 with a tag word, 6
+niche-encoded today. **Zero** layouts would lose their tag under either
+extension: none has several empty variants beside a `Bool`/`Char`/pointer
+payload, none nests a niche-encoded enum under another empty variant, and
+none wraps a tagged enum with an empty variant.
+
+Best case ([benchmarks/unboxing](../benchmarks/unboxing/README.md)), a
+4M-element vector scanned 20 times, release build:
+
+| Extension | Words | Peak RSS | Time |
+| --- | --- | --- | --- |
+| several empty variants (`A, B, Some(Bool)`) | 2 → 1 | 64.5 → 33.4 MB | 0.37 → 0.34 s |
+| tag-word niche (`Option<Inner>`, 2-variant `Inner`) | 3 → 2 | 95.8 → 64.5 MB | 0.34 → 0.32 s |
+
+The gain is real per value (one word, 6-8% scan time) but applies to no
+layout any repository program uses, while each extension changes native
+layouts, every builtin producer's encoding and drop glue. Decision: keep
+today's layouts and close both nodes on this evidence. The checker already
+models nested niche enums in `value_set`, so revisiting needs only a chooser
+rule, a generalised decoder (`NotIn` several constants) and the section 6
+hostile tests; reopen when the census finds candidates in real programs or a
+user workload shows dense vectors of such enums.
+
 ## 7. Decisions
 
 1. Unboxing is driven by **checked certificates** over a per-word value-set

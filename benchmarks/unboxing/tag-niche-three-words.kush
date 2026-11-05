@@ -1,0 +1,23 @@
+enum Inner { X(i64), Y(i64) }
+enum Opt { None, Some(Inner) }
+fn make(i: i64) -> Opt ! {panic} {
+    let r = i % 3;
+    if r == 0 { Opt.None } else { if r == 1 { Opt.Some(Inner.X(i)) } else { Opt.Some(Inner.Y(i)) } }
+}
+fn main() -> i64 ! {alloc, panic} {
+    let n = 4000000;
+    let mut v: Vec<Opt> = Vec.with_capacity(n);
+    let mut i = 0;
+    while i < n { v = Vec.push(v, make(i)); i = i + 1; }
+    let mut acc = 0;
+    let mut round = 0;
+    while round < 20 {
+        let mut j = 0;
+        while j < n {
+            acc = acc + match Vec.get(&v, j) { Opt.None => 1, Opt.Some(Inner.X(a)) => a % 7, Opt.Some(Inner.Y(b)) => b % 5 };
+            j = j + 1;
+        }
+        round = round + 1;
+    }
+    acc % 251
+}
