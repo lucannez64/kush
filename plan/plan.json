@@ -3079,10 +3079,31 @@
       "deps": [
         "DA"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "match &mut a binds &mut T per element, with pairwise-disjoint loans like split_at_mut sides.",
-      "commit": null,
-      "log": [],
+      "commit": "c4894d3",
+      "log": [
+        {
+          "time": "2026-11-05 14:53:54",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 15:08:41",
+          "who": "agent",
+          "text": "Implemented (uncommitted): match &mut binds &mut T / &mut [T] with one split group per binding; split_labels now honours view-derived ref locals (split_at_mut element refs to one call). 11 extension tests pass; full local suite running before commit."
+        },
+        {
+          "time": "2026-11-05 15:20:49",
+          "who": "agent",
+          "text": "Local gate: full kush suite 1487 passed (-j2, 2 test threads)"
+        },
+        {
+          "time": "2026-11-05 15:20:50",
+          "who": "agent",
+          "text": "done c4894d3"
+        }
+      ],
       "area": "dynarray"
     },
     {
