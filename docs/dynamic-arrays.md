@@ -190,7 +190,39 @@ copies. Over owning, linear, or view elements only names, `_`, and an unnamed
 `..` are accepted. The bindings are shared views rooted at the array's owners:
 the array cannot be moved, replaced, or mutated while one is live, and they
 cannot outlive the array's scope. Only slice patterns and `_` are accepted for
-a borrowed scrutinee; borrows of other types are still not matchable. The runtime length is not a finite variant tag, so a match
+a borrowed scrutinee; borrows of other types are still not matchable.
+
+Matching an exclusive borrow (`match &mut a { ... }` on a `let mut` array or
+field, or a `&mut DynArray<T, C>` / `&mut [T; n <= C]` parameter) binds
+`&mut T` per named element and `&mut [T]` for `..rest`:
+
+```rust
+fn swap(p: &mut i64, q: &mut i64) -> Unit ! {} { let t = *p; *p = *q; *q = t; }
+
+let mut a: DynArray<i64, 4> = [3, 4, 5];
+match &mut a {
+    [x, .., y] => swap(x, y),                 // two disjoint &mut i64
+    _ => {},
+};
+match &mut a {
+    [x, ..rest] => { *x = *x + 1; Slice.set(rest, 0, 9); },
+    _ => {},
+};
+```
+
+The bindings are pairwise-disjoint loans, like the two sides of
+`Slice.split_at_mut`: each binding gets its own split group, so two bindings
+(and references derived from them, such as `&mut rest[0]`) may be used and
+passed to one call together, while every other access to the array (a read,
+a view, `&mut a` again, `DynArray.push`/`set`, a move, or a write through the
+reference the array came from) waits for the last use of every binding. A
+binding may leave the match; it still cannot outlive the array's scope. A
+`&mut` parameter scrutinee is reborrowed, so the parameter is usable again
+after the bindings' last use. As with `&mut s[i]`, elements must be
+non-owning, non-linear, non-view values: an exclusive reference to an owning
+element is rejected. By-value sub-patterns (literals, tuples, records,
+variants) test copies, a name may be bound only once, and the same
+slice-pattern-or-`_` arm rule applies. The runtime length is not a finite variant tag, so a match
 over `DynArray` must contain an unguarded catch-all: `_`, a binding, or a
 pattern that is only `..` / `..rest`. The ordinary exhaustiveness check rejects
 anything else.
@@ -337,7 +369,8 @@ an explicit diagnostic that suggests `[T; n <= C]`; use `Vec<T>` for an owned
 container of unbounded length. Runtime-length arrays cannot appear in foreign
 signatures, `fn` types, lambda signatures, or methods of a trait used as a
 `dyn` object, or inside a `dyn` type in any signature. There is no element-wise owning move beyond
-push/pop of copyable values, and no `&mut` (exclusive) borrowed pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow
+push/pop of copyable values, and an exclusive (`&mut`) borrowed pattern
+cannot bind owning, linear, or view elements. `Vec<T>` remains the growable owning container and `&[T]` the borrow
 for arbitrary lengths.
 
 The implementation is checked by `crates/kush/tests/advanced_types_effects.rs`

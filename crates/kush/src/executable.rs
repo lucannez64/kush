@@ -1896,6 +1896,11 @@ pub(crate) enum Pattern {
         /// `&[T]` view of the middle; other element patterns test copies of
         /// copyable elements.
         borrowed: bool,
+        /// For a `&mut DynArray` scrutinee: the first of one fresh split group
+        /// per exclusive binding (element names then `..rest`, in order). Each
+        /// binding takes the opposite side from every other binding, so the
+        /// `&mut T` and `&mut [T]` bindings are pairwise disjoint loans.
+        exclusive: Option<usize>,
     },
 }
 #[derive(Clone)]
@@ -16783,35 +16788,64 @@ impl Checker<'_, '_> {
     /// elements are matched without moving or copying them; `..rest` binds a
     /// `&[T]` view of the middle. Copyable elements may also use ordinary
     /// by-value sub-patterns, which test copies.
+    ///
+    /// Over an exclusive `&mut` scrutinee, element names bind `&mut T` and
+    /// `..rest` binds `&mut [T]`. Each such binding gets its own split group,
+    /// so the bindings are pairwise disjoint loans of the array. Like
+    /// `&mut s[i]`, this requires non-owning, non-linear, non-view elements.
     fn borrowed_dyn_pattern(
         &mut self,
         parts: &[ast::Pattern],
         element: Type,
         capacity: usize,
+        exclusive: bool,
         span: Span,
         bindings: &mut BTreeMap<String, (usize, Type)>,
     ) -> Result<Pattern> {
         let copyable =
             !(self.owned_type(element) || self.linear_type(element) || element.is_view());
+        if exclusive && (!copyable || element.is_ref()) {
+            return Err(Diagnostic::new(
+                span,
+                "a '&mut DynArray' pattern binds '&mut T' element references, which would alias an owning, linear, or view element; match a shared borrow instead, or move elements out with DynArray.pop",
+            ));
+        }
         let element_pointer = self.types.pointer(element);
-        let reference = Type::Ref(element_pointer);
-        let view = Type::Slice(element_pointer);
+        let (reference, view) = if exclusive {
+            (
+                Type::RefMut(element_pointer),
+                Type::SliceMut(element_pointer),
+            )
+        } else {
+            (Type::Ref(element_pointer), Type::Slice(element_pointer))
+        };
         let mut prefix = Vec::new();
         let mut suffix = Vec::new();
         let mut rest = false;
         let mut rest_binding = None;
+        let mut exclusive_slots = BTreeSet::new();
         let bind = |checker: &mut Self,
                     name: &str,
                     ty: Type,
                     part: &ast::Pattern,
-                    bindings: &mut BTreeMap<String, (usize, Type)>|
+                    bindings: &mut BTreeMap<String, (usize, Type)>,
+                    exclusive_slots: &mut BTreeSet<usize>|
          -> Result<usize> {
             if let Some((slot, previous)) = bindings.get(name) {
+                // Two exclusive references to different elements cannot share
+                // one name.
+                if exclusive && exclusive_slots.contains(slot) {
+                    return Err(Diagnostic::new(
+                        part.span,
+                        format!("'{name}' is bound twice in one '&mut DynArray' pattern"),
+                    ));
+                }
                 checker.expect(ty, *previous, part.span)?;
                 return Ok(*slot);
             }
             let slot = checker.bind(part.span, ty, false)?;
             bindings.insert(name.to_owned(), (slot, ty));
+            exclusive_slots.insert(slot);
             Ok(slot)
         };
         for part in parts {
@@ -16831,7 +16865,14 @@ impl Checker<'_, '_> {
                                 "a borrowed DynArray pattern cannot bind '..name' over owning, linear, or view elements: a '&[T]' view of them has no checked operations; use '..' and bind the elements you need",
                             ));
                         }
-                        rest_binding = Some(bind(self, name, view, part, bindings)?);
+                        rest_binding = Some(bind(
+                            self,
+                            name,
+                            view,
+                            part,
+                            bindings,
+                            &mut exclusive_slots,
+                        )?);
                     }
                     continue;
                 }
@@ -16839,7 +16880,14 @@ impl Checker<'_, '_> {
                 ast::PatternKind::Name(path)
                     if path.len() == 1 && !self.is_constructor_pattern(part) =>
                 {
-                    Pattern::Bind(bind(self, &path[0], reference, part, bindings)?)
+                    Pattern::Bind(bind(
+                        self,
+                        &path[0],
+                        reference,
+                        part,
+                        bindings,
+                        &mut exclusive_slots,
+                    )?)
                 }
                 _ if copyable => self.pattern(part, element, bindings)?,
                 _ => {
@@ -16864,6 +16912,17 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
+        // One split group per exclusive binding; see `Pattern::DynArray`.
+        let exclusive = exclusive.then(|| {
+            let base = self.next_split;
+            self.next_split += prefix
+                .iter()
+                .chain(&suffix)
+                .filter(|pattern| matches!(pattern, Pattern::Bind(_)))
+                .count()
+                + usize::from(rest_binding.is_some());
+            base
+        });
         Ok(Pattern::DynArray {
             element,
             capacity,
@@ -16872,6 +16931,7 @@ impl Checker<'_, '_> {
             rest,
             rest_binding,
             borrowed: true,
+            exclusive,
         })
     }
     /// `let v = &a[..]` over a runtime-length array `[T; n <= C]` records
@@ -22690,9 +22750,10 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::Match { value, arms } => {
                     let value = c.expr(value)?;
-                    // A shared reference to a DynArray is matched by borrowed
-                    // slice patterns; every other borrow is rejected.
-                    let borrowed_array = matches!(value.ty, Type::Ref(pointer)
+                    // A shared or exclusive reference to a DynArray is matched
+                    // by borrowed slice patterns; every other borrow is
+                    // rejected.
+                    let borrowed_array = matches!(value.ty, Type::Ref(pointer) | Type::RefMut(pointer)
                         if c.types.pointees[pointer]
                             .layout()
                             .is_some_and(|id| c.types.enums[id].dynamic_array.is_some()));
@@ -22715,7 +22776,7 @@ impl Checker<'_, '_> {
                     {
                         return Err(Diagnostic::new(
                             arm.pattern.span,
-                            "a match on a '&DynArray' borrow supports slice patterns such as '[x, .., y]' and '_'",
+                            "a match on a '&DynArray' or '&mut DynArray' borrow supports slice patterns such as '[x, .., y]' and '_'",
                         ));
                     }
                     let mut coverage = Coverage::new(span);
@@ -33364,12 +33425,20 @@ impl Checker<'_, '_> {
                 });
             }
             if let ast::PatternKind::Slice(parts) = &pattern.kind
-                && let Type::Ref(pointer) = ty
+                && let Type::Ref(pointer) | Type::RefMut(pointer) = ty
                 && let Some((element, capacity)) = c.types.pointees[pointer]
                     .layout()
                     .and_then(|id| c.types.enums[id].dynamic_array)
             {
-                return c.borrowed_dyn_pattern(parts, element, capacity, pattern.span, bindings);
+                let exclusive = matches!(ty, Type::RefMut(_));
+                return c.borrowed_dyn_pattern(
+                    parts,
+                    element,
+                    capacity,
+                    exclusive,
+                    pattern.span,
+                    bindings,
+                );
             }
             if let ast::PatternKind::Slice(parts) = &pattern.kind {
                 if let Some((element, capacity)) = ty
@@ -33445,6 +33514,7 @@ impl Checker<'_, '_> {
                         rest,
                         rest_binding,
                         borrowed: false,
+                        exclusive: None,
                     });
                 }
                 let Some((element, length)) = ty.layout().and_then(|id| c.types.enums[id].array)

@@ -3819,12 +3819,15 @@ impl Checker<'_> {
                     None => labels,
                 }
             }
+            // An element reference derived from a view (`&mut side[i]`, or a
+            // `&mut DynArray` pattern binding) keeps that view's split sides.
             ExprKind::Local(slot)
             | ExprKind::Move(slot)
             | ExprKind::Peek(slot)
             | ExprKind::Borrow(slot)
             | ExprKind::BorrowInit { slot, .. }
-                if self.locals[*slot].ty.is_view() =>
+                if self.locals[*slot].ty.is_view()
+                    || (self.locals[*slot].ty.is_ref() && self.view_sources[*slot].is_some()) =>
             {
                 self.view_splits[*slot].clone()
             }
@@ -6993,6 +6996,7 @@ impl Checker<'_> {
                     .get(&wrapped_site)
                     .cloned()
                     .or_else(|| wrapped_slot.and_then(|slot| self.wrapped_locals[slot].clone()));
+                let entry_exclusive_loans = self.exclusive_loans.clone();
                 self.expr(value)?;
                 let wrapped = self
                     .wrapped_results
@@ -7017,7 +7021,7 @@ impl Checker<'_> {
                 // when a destructuring let lowers the rest of the block here.
                 // A borrowed DynArray scrutinee likewise transfers its loan to
                 // the element-reference bindings, which are views of their own.
-                let borrowed_array = matches!(scrutinee, Type::Ref(pointer)
+                let borrowed_array = matches!(scrutinee, Type::Ref(pointer) | Type::RefMut(pointer)
                     if self.pointees[pointer]
                         .layout()
                         .is_some_and(|id| self.enums[id].dynamic_array.is_some()));
@@ -7026,6 +7030,13 @@ impl Checker<'_> {
                 } else {
                     self.loans.clone()
                 };
+                // A `&mut DynArray` scrutinee's call-scoped exclusive loan
+                // likewise moves to the exclusive bindings, whose own views
+                // keep the array suspended until their last use. Keeping it
+                // would reject disjoint borrows of those bindings.
+                if borrowed_array && matches!(scrutinee, Type::RefMut(_)) {
+                    self.exclusive_loans = entry_exclusive_loans;
+                }
                 let mut joined: Option<Vec<bool>> = None;
                 let mut result_loans = loans.clone();
                 for arm in arms {
@@ -7047,12 +7058,17 @@ impl Checker<'_> {
                         suffix,
                         rest_binding,
                         borrowed: true,
+                        exclusive,
                         ..
                     } = &arm.pattern
                     {
-                        // Element references and the `&[T]` rest view borrow
-                        // the scrutinee's storage: they are shared views rooted
-                        // at its owners, live until their own last use.
+                        // Element references and the rest view borrow the
+                        // scrutinee's storage: they are views rooted at its
+                        // owners, live until their own last use. Over `&mut`,
+                        // they are exclusive, and binding `i` takes side
+                        // `true` of its own split group and side `false` of
+                        // every other binding's group, so any two bindings
+                        // are disjoint while every other view still conflicts.
                         let origins = self.view_origins(value);
                         let lifetime = self.view_loan(value).lifetime.or_else(|| {
                             (!origins.is_empty()).then(|| self.anonymous_lifetime(&origins))
@@ -7067,12 +7083,19 @@ impl Checker<'_> {
                             })
                             .chain(*rest_binding)
                             .collect::<Vec<_>>();
-                        for slot in slots {
+                        let count = slots.len();
+                        for (index, slot) in slots.into_iter().enumerate() {
+                            let mut labels = splits.clone();
+                            if let Some(base) = exclusive {
+                                for other in 0..count {
+                                    labels = labels.with(base + other, other == index);
+                                }
+                            }
                             self.acquire_view(
                                 slot,
-                                false,
+                                exclusive.is_some(),
                                 origins.clone(),
-                                splits.clone(),
+                                labels,
                                 lifetime.clone(),
                                 None,
                             );

@@ -408,3 +408,280 @@ fn nested_signature_binders_reject_mismatches_and_unsubstitutable_positions() {
         "must be the name of an immutable i64 parameter or local",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Exclusive borrowed DynArray patterns
+// ---------------------------------------------------------------------------
+
+#[test]
+fn exclusive_patterns_bind_disjoint_element_references() {
+    agrees(
+        r#"
+        struct Point { x: i64, y: i64 }
+        fn bump(n: i64, a: &mut [i64; n <= 4]) -> Unit ! {panic} {
+            match a {
+                [x, ..rest] => { *x = *x + 100; Slice.set(rest, 0, 7); },
+                _ => {},
+            }
+        }
+        fn bump_points(a: &mut DynArray<Point, 4>) -> Unit ! {panic} {
+            match a {
+                [p, .., q] => { p.x = 50; q.y = 60; },
+                _ => {},
+            }
+        }
+        fn main() -> i64 ! {panic} {
+            let k: i64 = 3;
+            let mut a: [i64; k <= 4] = [1, 2, 3];
+            bump(k, &mut a);
+            let mut swap: DynArray<i64, 4> = [4, 9];
+            match &mut swap {
+                [x, y] => { let t = *x; *x = *y; *y = t; },
+                _ => {},
+            }
+            // A literal sub-pattern tests a copy; the guard reads a binding.
+            let mut i = 0;
+            let mut hits = 0;
+            while i < 3 {
+                match &mut swap {
+                    [9, y] if *y < 6 => { *y = *y + 1; hits = hits + 1; },
+                    _ => {},
+                }
+                i = i + 1;
+            }
+            let mut ps: DynArray<Point, 4> = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+            bump_points(&mut ps);
+            // (101 + 7 + 3) + (9 * 10 + 6) + 2 + (50 + 60) = 319
+            a[0] + a[1] + a[2] + DynArray.get(&swap, 0) * 10 + DynArray.get(&swap, 1) + hits
+                + DynArray.get(&ps, 0).x + DynArray.get(&ps, 1).y - 256
+        }"#,
+        63,
+    );
+    // Two bindings may be passed to one call, and a reference into the rest
+    // view coexists with a prefix binding.
+    agrees(
+        r#"
+        fn swap(p: &mut i64, q: &mut i64) -> Unit ! {} { let t = *p; *p = *q; *q = t; }
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [3, 4, 5, 6];
+            match &mut a { [x, .., y] => swap(x, y), _ => {} };
+            match &mut a {
+                [x, ..rest] => {
+                    let y: &mut i64 = &mut rest[0];
+                    *y = 20;
+                    *x = *x + 1;
+                    Slice.set(rest, 1, 30);
+                },
+                _ => {},
+            };
+            // [7, 20, 30, 3]
+            DynArray.get(&a, 0) + DynArray.get(&a, 1) + DynArray.get(&a, 2) + DynArray.get(&a, 3)
+        }"#,
+        60,
+    );
+    // Split sides of `Slice.split_at_mut` likewise pass element references
+    // from both sides to one call.
+    agrees(
+        r#"
+        fn swap(p: &mut i64, q: &mut i64) -> Unit ! {} { let t = *p; *p = *q; *q = t; }
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [3, 4, 5];
+            {
+                let v: &mut [i64] = &mut a[..];
+                let (l, r) = Slice.split_at_mut(v, 1);
+                let p = &mut l[0];
+                let q = &mut r[1];
+                swap(p, q);
+            }
+            DynArray.get(&a, 0) * 10 + DynArray.get(&a, 2)
+        }"#,
+        53,
+    );
+    // A binding may leave the match; the array is usable after its last use.
+    // A `&mut` parameter scrutinee is reborrowed, not consumed.
+    agrees(
+        r#"
+        fn first(a: &mut DynArray<i64, 4>) -> i64 ! {panic} {
+            let r: &mut i64 = match a { [x, ..] => x, _ => return 0 };
+            *r = 1;
+            DynArray.get(a, 0) + DynArray.len(a)
+        }
+        fn main() -> i64 ! {panic} {
+            let mut b: DynArray<i64, 4> = [5, 2];
+            let u = first(&mut b);
+            let mut c: DynArray<(i64, i64), 4> = [(1, 2), (3, 4)];
+            match &mut c { [(1, _), p] => { *p = (7, 8); }, _ => {} };
+            let (s, t) = DynArray.get(&c, 1);
+            u + DynArray.get(&b, 0) * 10 + s + t
+        }"#,
+        28,
+    );
+}
+
+#[test]
+fn exclusive_pattern_bindings_suspend_the_array() {
+    let program = |body: &str| {
+        format!(
+            "struct H {{ xs: DynArray<i64, 4>, n: i64 }}
+            fn eat(a: DynArray<i64, 4>) -> i64 ! {{}} {{ 0 }}
+            fn main() -> i64 ! {{panic}} {{
+                let mut a: DynArray<i64, 4> = [1, 2, 3];
+                let mut h = H {{ xs: [1, 2], n: 4 }};
+                {body}
+                0
+            }}"
+        )
+    };
+    for (body, fragment) in [
+        (
+            "match &mut a { [x, ..] => { let z = DynArray.get(&a, 1); *x = z; }, _ => {} };",
+            "cannot borrow an owner while an exclusive '&mut [T]' view of it is live",
+        ),
+        (
+            "match &mut a { [x, ..] => { let v: &[i64] = &a[..]; *x = Slice.get(v, 0); }, _ => {} };",
+            "while an exclusive '&mut [T]' view of the same owner is live",
+        ),
+        (
+            "match &mut a { [x, ..] => { let v: &mut [i64] = &mut a[..]; Slice.set(v, 0, 3); *x = 1; }, _ => {} };",
+            "cannot create an exclusive '&mut [T]' view while another view",
+        ),
+        (
+            "match &mut a { [x, ..] => { a = DynArray.push(a, 3); *x = 1; }, _ => {} };",
+            "cannot replace an owner while a slice view or reference borrows it",
+        ),
+        (
+            "match &mut a { [x, ..] => { let q = eat(a); *x = 1; }, _ => {} };",
+            "cannot read an owner while an exclusive '&mut [T]' view of it is live",
+        ),
+        (
+            "match &mut a { [x, ..] if DynArray.len(&a) > 1 => { *x = 1; }, _ => {} };",
+            "cannot borrow an owner while an exclusive '&mut [T]' view of it is live",
+        ),
+        (
+            "let r: &mut i64 = match &mut a { [x, ..] => x, _ => return 0 };
+             let z = DynArray.get(&a, 0); *r = 5;",
+            "cannot borrow an owner while an exclusive '&mut [T]' view of it is live",
+        ),
+        (
+            "let r: &mut i64 = match &mut a { [x, ..] => x, _ => return 0 };
+             match &mut a { [y, ..] => { *y = 3; }, _ => {} };
+             *r = 5;",
+            "cannot borrow an owner while an exclusive '&mut [T]' view of it is live",
+        ),
+        (
+            "match &mut a { [x, ..rest] => { let y: &mut i64 = &mut rest[0]; Slice.set(rest, 0, 5); *y = 20; }, _ => {} };",
+            "cannot use a slice view while a child view derived from it is live",
+        ),
+        (
+            "match &mut h.xs { [x, y] => { let q = DynArray.get(&h.xs, 0); *x = q; }, _ => {} };",
+            "cannot create a shared place borrow while an exclusive borrow",
+        ),
+        (
+            "let r: &mut i64 = { let mut b: DynArray<i64, 4> = [1, 2]; match &mut b { [x, ..] => x, _ => return 0 } };
+             *r = 5;",
+            "reference escapes the lexical scope of the storage it borrows",
+        ),
+    ] {
+        rejects(&program(body), fragment);
+    }
+    rejects(
+        r#"
+        fn upd(a: &mut DynArray<i64, 4>) -> i64 ! {panic} {
+            match a { [x, ..] => { let n = DynArray.len(a); *x = n; }, _ => {} }
+            0
+        }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "cannot use an owner while an exclusive '&mut [T]' view of it is live",
+    );
+    rejects(
+        r#"
+        struct H { xs: DynArray<i64, 4>, n: i64 }
+        fn upd(h: &mut H) -> Unit ! {panic} {
+            match &mut h.xs { [x, ..] => { *h = H { xs: [], n: 0 }; *x = 42; }, _ => {} }
+        }
+        fn main() -> i64 ! {panic} { 0 }"#,
+        "cannot write through a reference while a view, element reference, or pattern binding derived from it is live",
+    );
+}
+
+#[test]
+fn exclusive_patterns_reject_owning_elements_and_shared_storage() {
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic, alloc} {
+            let mut a: DynArray<Box<i64>, 4> = [Box.new(1)];
+            match &mut a { [x, ..] => 0, _ => 1 }
+        }"#,
+        "a '&mut DynArray' pattern binds '&mut T' element references, which would alias an owning",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1, 2];
+            match &mut a { [x, ..] => { *x = 3; }, _ => {} }
+            0
+        }"#,
+        "cannot mutably borrow an immutable binding",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [1, 2];
+            match &mut a { [x, x] => { *x = 3; }, _ => {} }
+            0
+        }"#,
+        "duplicate pattern binding 'x'",
+    );
+    rejects(
+        r#"
+        fn f(a: &DynArray<i64, 4>) -> Unit ! {} { match a { [x, ..] => { *x = 1; }, _ => {} } }
+        fn main() -> i64 ! {} { 0 }"#,
+        "cannot write through a shared reference",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut a: DynArray<i64, 4> = [1, 2];
+            match &mut a { [x, ..] => 0, y => 1 }
+        }"#,
+        "supports slice patterns such as '[x, .., y]' and '_'",
+    );
+}
+
+#[test]
+fn exclusive_pattern_arms_release_owners_on_every_exit() {
+    // Early return, loop exit, and normal arm completion with owning locals
+    // live around the exclusive bindings: every box is released once.
+    let stats = agrees(
+        r#"
+        fn pick(a: &mut DynArray<i64, 4>, b: Box<i64>) -> i64 ! {panic, alloc} {
+            let keep = Box.new(5);
+            match a {
+                [x, ..] if *x > 10 => { *x = 0; return Box.read(&b) + Box.read(&keep); },
+                [x, y, ..] => { *y = Box.read(&b); *x = *x + 1; },
+                _ => {},
+            }
+            Box.read(&keep)
+        }
+        fn main() -> i64 ! {panic, alloc} {
+            let mut a: DynArray<i64, 4> = [20, 2];
+            let first = pick(&mut a, Box.new(7));     // 12, a = [0, 2]
+            let second = pick(&mut a, Box.new(9));    // 5,  a = [1, 9]
+            let mut i = 0;
+            while i < 4 {
+                let guard = Box.new(i);
+                match &mut a {
+                    [x, ..] if *x > 2 => { break; },
+                    [x, ..] => { *x = *x + Box.read(&guard); },
+                    _ => {},
+                }
+                i = i + 1;
+            }
+            // a[0]: 1 -> 1 -> 2 -> 4 -> break
+            first + second + DynArray.get(&a, 0) + DynArray.get(&a, 1)
+        }"#,
+        30,
+    );
+    assert_eq!(stats.allocations, stats.deallocations);
+    assert!(stats.allocations >= 6);
+}
