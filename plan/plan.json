@@ -2612,6 +2612,78 @@
           "text": "Opus review CLOSE (16 probes); Boat gate 1364 at 0b99b61"
         }
       ]
+    },
+    {
+      "id": "A-RT-GENERIC",
+      "title": "Runtime-length arrays in generic and method signatures",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "DA"
+      ],
+      "status": "todo",
+      "desc": "Substitute the caller's length binder in generic inference and method dispatch so generic fns, impl methods, and trait items may use [T; n <= C].",
+      "commit": null,
+      "log": [],
+      "area": "dynarray"
+    },
+    {
+      "id": "A-RT-NESTED-SIG",
+      "title": "Runtime-length arrays nested in signature types",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "A-RT-GENERIC"
+      ],
+      "status": "todo",
+      "desc": "Rebind length binders inside Vec/Box/tuple/record arguments of a signature, not only a whole parameter/result or one reference.",
+      "commit": null,
+      "log": [],
+      "area": "dynarray"
+    },
+    {
+      "id": "A-PAT-MUT",
+      "title": "Exclusive borrowed DynArray patterns",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "DA"
+      ],
+      "status": "todo",
+      "desc": "match &mut a binds &mut T per element, with pairwise-disjoint loans like split_at_mut sides.",
+      "commit": null,
+      "log": [],
+      "area": "dynarray"
+    },
+    {
+      "id": "A-EXT-REVIEW",
+      "title": "Independent review: DynArray extensions",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "A-RT-GENERIC",
+        "A-RT-NESTED-SIG",
+        "A-PAT-MUT"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": [],
+      "area": "dynarray"
+    },
+    {
+      "id": "DA-EXT",
+      "title": "Close: runtime-length array extensions",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "A-EXT-REVIEW"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": [],
+      "area": "dynarray"
     }
   ]
 }
