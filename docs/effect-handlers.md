@@ -231,8 +231,9 @@ Rules for suspendable bodies, checked after ownership:
   payload type, a handler-written capture, or a captured mutable view or
   reference to storage that can hold a function value is rejected for
   non-tail resumption. Captures are known for a handler written at the
-  `handle` or bound to a local; a handler received as a function parameter
-  is opaque to this check;
+  `handle` or bound to a local; a closure with borrowed captures cannot
+  reach a `handle` any other way (it can only be called immediately or bound
+  directly to a local);
 - a handler whose row contains a declared operation that the handled body
   also handles is not treated as tail-resumptive (run in place, its perform
   would reach the body's handler);
