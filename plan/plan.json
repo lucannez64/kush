@@ -571,9 +571,9 @@
         "R-IDX-TESTS",
         "R-TASKEXIT-BACKENDS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "a17f4b4",
       "log": [
         {
           "time": "2026-11-05 03:38:47",
@@ -584,6 +584,16 @@
           "time": "2026-11-05 03:38:47",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-05 05:24:30",
+          "who": "agent",
+          "text": "Four independent reviewer rounds: 3+3+2+4 confirmed holes (partial-owner writes, call-site field places, generic self-nesting, indirect calls, container field places, elided parameter container elements, untracked receivers, stored &mut reference arguments), all fixed with regression tests in 2f5d8bf, 13b47fd, edd790f, a17f4b4. Final Boat gate 1425 tests, fmt, clippy."
+        },
+        {
+          "time": "2026-11-05 05:24:30",
+          "who": "agent",
+          "text": "done a17f4b4"
         }
       ]
     },
@@ -596,10 +606,16 @@
       "deps": [
         "R-REVIEW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Check the backlog item; update borrowing-extensions.md.",
-      "commit": null,
-      "log": []
+      "commit": "f3d6feb",
+      "log": [
+        {
+          "time": "2026-11-05 05:24:31",
+          "who": "agent",
+          "text": "Backlog item ticked; borrowing-extensions.md updated"
+        }
+      ]
     },
     {
       "id": "LT-GRAPH",
