@@ -4127,10 +4127,21 @@
       "deps": [
         "EFF-CAP-LEXICAL"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/effect-capabilities.md 3.2: by-reference-closure rules for a captured cap, including rejection across a non-tail perform; today lambdas cannot capture capabilities.",
-      "commit": null,
-      "log": []
+      "commit": "2282c13",
+      "log": [
+        {
+          "time": "2026-11-06 00:10:54",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 00:32:11",
+          "who": "agent",
+          "text": "done 2282c13"
+        }
+      ]
     },
     {
       "id": "E-ABORT-ENTRIES",
