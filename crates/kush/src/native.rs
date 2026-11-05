@@ -40,6 +40,13 @@ pub(crate) const STACK_SLOT_ALIGN_SHIFT: u8 = 3;
 /// The pointer alignment every native allocation path and stack reference
 /// guarantees, in bytes.
 pub(crate) const POINTER_ALIGN: u64 = 1 << STACK_SLOT_ALIGN_SHIFT;
+/// The Cranelift comparison for a certificate decoder.
+fn decoder_test(decoder: crate::layout_cert::Decoder) -> (IntCC, i64) {
+    match decoder {
+        crate::layout_cert::Decoder::Equal(constant) => (IntCC::Equal, constant),
+        crate::layout_cert::Decoder::NotEqual(constant) => (IntCC::NotEqual, constant),
+    }
+}
 
 type Result<T> = std::result::Result<T, Diagnostic>;
 fn error(message: impl std::fmt::Display) -> Diagnostic {
@@ -4238,15 +4245,8 @@ fn synthesize_drops(
                         let hit = builder.create_block();
                         let next = builder.create_block();
                         let condition = if let Some(niche) = program.enums[index].niche() {
-                            builder.ins().icmp_imm_s(
-                                if tag == niche.empty_tag {
-                                    IntCC::Equal
-                                } else {
-                                    IntCC::NotEqual
-                                },
-                                args[0],
-                                niche.sentinel,
-                            )
+                            let (cc, constant) = decoder_test(niche.decoder(tag));
+                            builder.ins().icmp_imm_s(cc, args[0], constant)
                         } else if program.enums[index].tag_words() == 0 {
                             builder.ins().iconst(ir::types::I8, 1)
                         } else {
@@ -8294,12 +8294,14 @@ impl Generator<'_, '_> {
         let layout = ty.layout().expect("enum constructor layout");
         let definition = &self.program.enums[layout];
         if let Some(niche) = definition.niche() {
-            return if tag == niche.empty_tag {
-                vec![self.constant(niche.sentinel)]
-            } else {
-                debug_assert_eq!(tag, niche.payload_tag);
-                debug_assert_eq!(payload.len(), 1);
-                payload.to_vec()
+            // Encoding is the inverse of the certificate's decoder: an empty
+            // variant stores its constant, the payload keeps its own words.
+            return match niche.decoder(tag) {
+                crate::layout_cert::Decoder::Equal(constant) => vec![self.constant(constant)],
+                crate::layout_cert::Decoder::NotEqual(_) => {
+                    debug_assert_eq!(payload.len(), 1);
+                    payload.to_vec()
+                }
             };
         }
         let mut words = Vec::with_capacity(definition.words);
@@ -9625,15 +9627,8 @@ impl Generator<'_, '_> {
                 niche,
             } => {
                 let mut result = if let Some(niche) = niche {
-                    self.builder.ins().icmp_imm_s(
-                        if *tag == niche.empty_tag {
-                            IntCC::Equal
-                        } else {
-                            IntCC::NotEqual
-                        },
-                        values[0],
-                        niche.sentinel,
-                    )
+                    let (cc, constant) = decoder_test(niche.decoder(*tag));
+                    self.builder.ins().icmp_imm_s(cc, values[0], constant)
                 } else if *tagged {
                     self.builder
                         .ins()

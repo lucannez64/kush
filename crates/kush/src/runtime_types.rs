@@ -194,29 +194,11 @@ impl Enum {
         let payload = self.variants[niche.payload_tag].fields[0];
         payload.is_ref().then_some(payload)
     }
+    /// The niche layout, if a checked representation certificate exists
+    /// (docs/unboxing-certificates.md). The chooser is untrusted; only a
+    /// certificate accepted by `layout_cert::check` removes the tag word.
     pub(crate) fn niche(&self) -> Option<Niche> {
-        if self.record || self.foreign.is_some() || self.variants.len() != 2 {
-            return None;
-        }
-        let empty_tag = self
-            .variants
-            .iter()
-            .position(|variant| variant.fields.is_empty())?;
-        let payload_tag = 1 - empty_tag;
-        let [payload] = self.variants[payload_tag].fields.as_slice() else {
-            return None;
-        };
-        let sentinel = match payload {
-            Type::Box(_) | Type::Ref(_) | Type::RefMut(_) => 0,
-            Type::Bool => 2,
-            Type::Char => 0x110000,
-            _ => return None,
-        };
-        Some(Niche {
-            payload_tag,
-            empty_tag,
-            sentinel,
-        })
+        crate::layout_cert::certified_niche(self)
     }
     /// Physical prefix for this layout. Nonempty nominal structs have exactly
     /// one constructor and need no discriminator. Empty structs keep their

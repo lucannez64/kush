@@ -220,3 +220,38 @@ fn main() -> i64 ! {alloc, panic} {
         "escape",
     );
 }
+
+/// UNBOX-CERT-CHECKER: the certificate decoders agree with the evaluator at
+/// every value-set boundary, in both variant orders, and drop owners once.
+#[test]
+fn certificate_decoders_agree_at_every_value_set_boundary() {
+    agrees(
+        r#"
+enum Option<T> { None, Some(T) }
+enum Rev<T> { Some(T), None }
+fn some(code: u32) -> i64 ! {} {
+    match Char.from_code(code) { Option.Some(c) => 1, Option.None => 0 }
+}
+fn flip(x: Option<Bool>) -> Rev<Bool> ! {} {
+    match x { Option.Some(b) => Rev.Some(b), Option.None => Rev.None }
+}
+fn score(x: Rev<Bool>) -> i64 ! {} {
+    match x { Rev.Some(true) => 4, Rev.Some(false) => 2, Rev.None => 1 }
+}
+fn main() -> i64 ! {alloc, panic} {
+    // Inside: 0xD7FF, 0xE000, 0x10FFFF, 0; outside: 0xD800, 0xDFFF, 0x110000.
+    let chars = some(55295) + some(57344) + some(1114111) + some(0)
+        + some(55296) + some(57343) + some(1114112);
+    let n = 3;
+    let bools = score(flip(Option.Some(n < 4))) + score(flip(Option.Some(n > 4)))
+        + score(flip(Option.None));
+    let boxed: Rev<Box<i64>> = Rev.Some(Box.new(30));
+    let empty: Rev<Box<i64>> = Rev.None;
+    let boxes = match boxed { Rev.Some(b) => Box.take(b), Rev.None => 0 }
+        + match empty { Rev.Some(b) => Box.take(b), Rev.None => 1 };
+    chars + bools + boxes
+}
+"#,
+        4 + 7 + 31,
+    );
+}

@@ -135,6 +135,26 @@ before instantiation (layouts are per instantiation already).
 - Parity: evaluator and native (default and release) agree, allocations
   balanced.
 
+### Certificate checker (UNBOX-CERT-CHECKER, implemented)
+
+`crates/kush/src/layout_cert.rs` holds the value-set domain (at most 8
+intervals plus a power-of-two alignment; exact intersection, superset union),
+the untrusted chooser, the independent checker and the decoders.
+`Enum::niche()` now returns a niche only for a certificate the checker
+accepts, and the three native sites (construction, pattern tests, drop-glue
+dispatch) use the decoder generated from it (`Equal(k)` for the empty
+variant, `NotEqual(k)` for the payload). The chooser picks the smallest word
+above the payload set, otherwise the smallest word outside it, which
+reproduces `0` for boxes and references, `2` for `Bool` and `0x110000` for
+`Char` bit for bit; layouts and word counts are unchanged (unit test
+`the_three_existing_niches_are_reproduced_bit_for_bit` and the existing
+`niche_layout` suites in the evaluator and native default/release builds).
+The checker refuses forged certificates: a constant inside the payload set,
+a payload set claimed smaller than its type's (recomputed, never believed),
+float payloads, word 1, wrong shapes or arity, and records, `Result` and
+foreign layouts. The payload set of a pointer is `[1, 2^64-1]` aligned to 8
+(the asserted contract below); the chosen constant is still 0.
+
 ### Alignment contract (UNBOX-ALIGN-CONTRACT, asserted)
 
 Every `Box`, `&T` and `&mut T` the native backend produces is nonzero and a
