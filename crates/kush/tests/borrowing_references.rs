@@ -736,14 +736,12 @@ fn place_reference_hostile_forms_are_rejected() {
         fn main() -> Unit ! {panic} {}"#,
         "cannot replace a linear payload",
     );
-    // Text views are immutable; a `&mut str` parameter is rejected at its
-    // declaration rather than pretending arbitrary byte mutation preserves
-    // UTF-8. A sound `&mut str` needs a replacement operation that validates
-    // every write as one Unicode scalar with an unchanged encoded length.
+    // A `&mut str` is not a byte slice: raw byte writes could break UTF-8,
+    // so only the checked text writes accept it (see tests/mutable_text.rs).
     rejects(
-        r#"fn read(text: &mut str) -> i64 ! {panic} { Str.len(text) }
+        r#"fn poke(text: &mut str) -> Unit ! {panic} { Slice.set(text, 0, 255); }
         fn main() -> i64 ! {panic} { 0 }"#,
-        "mutable borrowed text '&mut str' is not supported",
+        "Slice.set",
     );
 }
 

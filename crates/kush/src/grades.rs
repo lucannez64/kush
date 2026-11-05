@@ -1538,7 +1538,7 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
-            ExprKind::PlaceIndex { base, index } => {
+            ExprKind::PlaceIndex { base, index, .. } => {
                 if !self.expr(base, multiplier)? {
                     return Ok(false);
                 }

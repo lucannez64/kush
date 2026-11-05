@@ -867,7 +867,9 @@ impl WitnessCheck<'_, '_> {
             });
         }
         match (source, target) {
-            (Type::Str, Type::Str) => self.pair(source_own, target_own, position, path, fields),
+            (Type::Str, Type::Str) | (Type::StrMut, Type::StrMut) => {
+                self.pair(source_own, target_own, position, path, fields)
+            }
             (Type::Ref(a), Type::Ref(b)) => {
                 self.pair(source_own, target_own, SignSet::POSITIVE, path, fields)?;
                 self.types(

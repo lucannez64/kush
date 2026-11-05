@@ -262,7 +262,19 @@ pub(crate) struct Facts {
     /// reference is not an assignment the checker can see, so such a local
     /// is never a linear term from that point on.
     opaque: BTreeSet<usize>,
+    /// Established disequalities `expr != 0` (from `a != b` conditions). They
+    /// are not convex, so they never enter the Fourier–Motzkin system; they
+    /// only answer [`Facts::prove_distinct`].
+    distinct: Vec<Linear>,
+    /// Index places of the current body: `(identity, root binding, index)`.
+    /// They are records, not facts, so `reset` keeps them.
+    index_places: Vec<(usize, usize, Linear)>,
 }
+
+/// A restore point for [`Facts::reset`]: the lengths of the inequality and
+/// disequality lists when it was taken.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FactsMark(usize, usize);
 
 /// Bounds for the Fourier–Motzkin search. These are work limits, not a claim of
 /// completeness: a system beyond them is reported as not established.
@@ -318,11 +330,12 @@ impl Facts {
         result
     }
 
-    pub fn mark(&self) -> usize {
-        self.known.len()
+    pub(crate) fn mark(&self) -> FactsMark {
+        FactsMark(self.known.len(), self.distinct.len())
     }
-    pub fn reset(&mut self, mark: usize) {
-        self.known.truncate(mark);
+    pub(crate) fn reset(&mut self, mark: FactsMark) {
+        self.known.truncate(mark.0);
+        self.distinct.truncate(mark.1);
     }
     pub fn version(&self, slot: usize) -> u32 {
         self.versions.get(&slot).copied().unwrap_or(0)
@@ -339,6 +352,106 @@ impl Facts {
     }
     pub fn add(&mut self, constraints: impl IntoIterator<Item = Constraint>) {
         self.known.extend(constraints);
+    }
+    /// Assume `condition` evaluates to `truth`: add its inequalities and its
+    /// disequalities.
+    pub fn assume(&mut self, condition: &Expr, truth: bool) {
+        let facts = self.condition(condition, truth);
+        self.known.extend(facts);
+        if fact_safe(condition) {
+            let mut distinct = Vec::new();
+            self.collect_distinct(condition, truth, &mut distinct);
+            self.distinct.extend(distinct);
+        }
+    }
+    fn collect_distinct(&self, expr: &Expr, truth: bool, out: &mut Vec<Linear>) {
+        match &expr.kind {
+            ExprKind::Unary(Kind::Bang, inner) => self.collect_distinct(inner, !truth, out),
+            ExprKind::Binary(Kind::AmpAmp, l, r) if truth => {
+                self.collect_distinct(l, true, out);
+                self.collect_distinct(r, true, out);
+            }
+            ExprKind::Binary(Kind::PipePipe, l, r) if !truth => {
+                self.collect_distinct(l, false, out);
+                self.collect_distinct(r, false, out);
+            }
+            ExprKind::Binary(op @ (Kind::Ne | Kind::EqEq), l, r) if (*op == Kind::Ne) == truth => {
+                if let (Some(l), Some(r)) = (self.linear(l), self.linear(r))
+                    && let Some(difference) = l.sub(&r)
+                {
+                    out.push(difference);
+                }
+            }
+            ExprKind::Block(block) if block.statements.is_empty() => {
+                if let Some(tail) = &block.tail {
+                    self.collect_distinct(tail, truth, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    /// Remember an index place so later places of the same root can be
+    /// related to it.
+    pub(crate) fn record_index_place(&mut self, id: usize, root: usize, index: Linear) {
+        self.index_places.push((id, root, index));
+    }
+    /// Identities of earlier index places of `root` whose index provably
+    /// differs from `index` under the current facts. Only the most recent
+    /// places are tried, which bounds the proof work per place.
+    pub(crate) fn distinct_index_places(&self, root: usize, index: &Linear) -> Vec<usize> {
+        const MAX_RELATED_PLACES: usize = 32;
+        self.index_places
+            .iter()
+            .rev()
+            .filter(|(_, other, _)| *other == root)
+            .take(MAX_RELATED_PLACES)
+            .filter(|(_, _, earlier)| self.prove_distinct(earlier, index))
+            .map(|(id, _, _)| *id)
+            .collect()
+    }
+    /// Whether `left != right` holds for every integer assignment satisfying
+    /// the known facts: either one strict order is proved, or the difference
+    /// is provably equal (up to sign) to an established nonzero difference.
+    /// Never assumes; a budget overflow means "not established".
+    pub(crate) fn prove_distinct(&self, left: &Linear, right: &Linear) -> bool {
+        let Some(difference) = left.clone().sub(right) else {
+            return false;
+        };
+        if difference.is_constant() {
+            return difference.constant != 0;
+        }
+        // `difference <= bound` as a goal constraint.
+        let at_most = |linear: &Linear, bound: i128| -> Option<Constraint> {
+            Some(Constraint {
+                coefficients: linear.coefficients.clone(),
+                bound: bound.checked_sub(linear.constant)?,
+            })
+        };
+        let proves =
+            |goal: Option<Constraint>| goal.is_some_and(|goal| self.prove(&goal).is_some());
+        if proves(at_most(&difference, -1))
+            || difference
+                .clone()
+                .negate()
+                .is_some_and(|negated| proves(at_most(&negated, -1)))
+        {
+            return true;
+        }
+        let zero = |linear: Option<Linear>| {
+            linear.is_some_and(|linear| {
+                if linear.is_constant() {
+                    return linear.constant == 0;
+                }
+                proves(at_most(&linear, 0))
+                    && linear
+                        .clone()
+                        .negate()
+                        .is_some_and(|negated| proves(at_most(&negated, 0)))
+            })
+        };
+        self.distinct
+            .iter()
+            .any(|known| zero(difference.clone().sub(known)) || zero(difference.clone().add(known)))
     }
     /// Facts implied by `condition` evaluating to `truth`.
     pub fn condition(&self, condition: &Expr, truth: bool) -> Vec<Constraint> {

@@ -303,6 +303,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             view_fields: vec![None; function.locals.len()],
             in_field_subview: false,
             place_borrow: false,
+            slice_place_root: None,
             field_target: None,
             record_sources: vec![None; function.locals.len()],
             call_views: BTreeMap::new(),
@@ -312,6 +313,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             call_origins: BTreeMap::new(),
             call_splits: BTreeMap::new(),
             live: &liveness[function_index],
+            index_relations: function.index_relations.clone(),
             capture_site: None,
             callee_site: None,
             borrowed_values: BTreeMap::new(),
@@ -449,22 +451,94 @@ struct FieldBorrow {
     path: Vec<usize>,
 }
 impl FieldBorrow {
-    /// Two field places are disjoint when neither path is a prefix of the
-    /// other. Paths under different roots are never considered disjoint here;
-    /// ordinary root-intersection rules decide those.
-    fn disjoint(&self, other: &Self) -> bool {
+    /// Two places under one root are disjoint when some position of their
+    /// paths is provably different: two record fields, two distinct constant
+    /// indices, or two index places whose values the checker's facts proved
+    /// distinct (`relations`). Until a field step differs both paths address
+    /// the same type, so one provable difference at any position separates
+    /// the storage. Everything else (a prefix, an unproved index pair, an
+    /// index whose identity was stripped) conflicts. Paths under different
+    /// roots are never considered disjoint here; ordinary root-intersection
+    /// rules decide those.
+    fn disjoint(&self, other: &Self, relations: &BTreeSet<(usize, usize)>) -> bool {
         self.root == other.root
-            && !path_prefix(&self.path, &other.path)
-            && !path_prefix(&other.path, &self.path)
+            && self
+                .path
+                .iter()
+                .zip(&other.path)
+                .any(|(left, right)| steps_distinct(*left, *right, relations))
+    }
+    /// Forget the index-place identities so no proved relation applies. A
+    /// relation is proved for the values of one evaluation of each place; a
+    /// loan stored outside a direct reference binding (in a record, a
+    /// container, or a task region) can outlive a loop iteration, where the
+    /// same place denotes another value.
+    fn strip_index_ids(&mut self) {
+        for step in &mut self.path {
+            if *step & RUNTIME_INDEX_MARK != 0 {
+                *step = RUNTIME_INDEX_MARK;
+            } else if *step & INDEX_PATH_MARK != 0 {
+                *step = INDEX_PATH_MARK | (*step & INDEX_VALUE_MASK);
+            }
+        }
     }
 }
-/// Marker bit that distinguishes an element-index step from a record-field
-/// index in a structural place path. Constant indices therefore prove
-/// disjointness of distinct array/vector elements; a runtime index uses the
-/// all-ones payload, so all dynamic indices of one base conflict.
+/// Marker bit that distinguishes a constant element-index step from a
+/// record-field index in a structural place path. The low 32 bits hold the
+/// index value and bits 32..56 the index place's checker identity.
 const INDEX_PATH_MARK: usize = 1 << (usize::BITS - 8);
-fn path_prefix(prefix: &[usize], path: &[usize]) -> bool {
-    path.len() >= prefix.len() && path[..prefix.len()] == *prefix
+/// Marker bit of a runtime element-index step; the low bits hold the index
+/// place's checker identity (zero when unknown or stripped).
+const RUNTIME_INDEX_MARK: usize = 1 << (usize::BITS - 7);
+const INDEX_VALUE_MASK: usize = (1 << 32) - 1;
+const INDEX_ID_LIMIT: usize = 1 << 24;
+/// Path step of an index place with checker identity `id`.
+fn index_step(id: usize, constant: Option<i64>) -> usize {
+    let id = if id < INDEX_ID_LIMIT { id } else { 0 };
+    match constant.and_then(|value| usize::try_from(value).ok()) {
+        Some(value) if value <= INDEX_VALUE_MASK => INDEX_PATH_MARK | (id << 32) | value,
+        _ => RUNTIME_INDEX_MARK | id,
+    }
+}
+/// The checker identity of an index step, if it has one.
+fn index_step_id(step: usize) -> Option<usize> {
+    let id = if step & RUNTIME_INDEX_MARK != 0 {
+        step & !RUNTIME_INDEX_MARK
+    } else if step & INDEX_PATH_MARK != 0 {
+        (step & !INDEX_PATH_MARK) >> 32
+    } else {
+        return None;
+    };
+    (id != 0).then_some(id)
+}
+fn steps_distinct(left: usize, right: usize, relations: &BTreeSet<(usize, usize)>) -> bool {
+    let index = |step: usize| step & (INDEX_PATH_MARK | RUNTIME_INDEX_MARK) != 0;
+    match (index(left), index(right)) {
+        (false, false) => left != right,
+        (true, true) => {
+            let constant = |step: usize| step & RUNTIME_INDEX_MARK == 0;
+            if constant(left) && constant(right) {
+                return left & INDEX_VALUE_MASK != right & INDEX_VALUE_MASK;
+            }
+            match (index_step_id(left), index_step_id(right)) {
+                (Some(a), Some(b)) if a != b => relations.contains(&(a.min(b), a.max(b))),
+                _ => false,
+            }
+        }
+        // A field and an index step never meet at one position of two paths
+        // under one root; treat the impossible case as a conflict.
+        _ => false,
+    }
+}
+/// A container's or record's stored provenance without index-place
+/// identities: see [`FieldBorrow::strip_index_ids`].
+fn stripped_provenance(mut provenance: RecordProvenance) -> RecordProvenance {
+    for loan in provenance.leaves.values_mut() {
+        if let Some(field) = &mut loan.field {
+            field.strip_index_ids();
+        }
+    }
+    provenance
 }
 /// The referent of a shared or exclusive reference type, through annotations.
 fn referent_of(pointees: &[Type], ty: Type) -> Option<Type> {
@@ -721,6 +795,12 @@ fn leaves_of(
                     mutable: false,
                     variance: position,
                 }),
+                Type::StrMut => out.push(crate::runtime_types::BorrowLeaf {
+                    path: path.clone(),
+                    lifetime: hint,
+                    mutable: true,
+                    variance: position,
+                }),
                 Type::Ref(_) => out.push(crate::runtime_types::BorrowLeaf {
                     path: path.clone(),
                     lifetime: hint,
@@ -870,7 +950,7 @@ fn collect_borrow_lifetimes_in(
             Type::Slice(p) | Type::SliceMut(p) | Type::Ref(p) | Type::RefMut(p) | Type::Task(p) => {
                 go(enums, pointees, labels, pointees[p], out, seen)
             }
-            Type::Str => {}
+            Type::Str | Type::StrMut => {}
             Type::Annotated(_, label) => {
                 if let Some(name) = labels.get(label as usize).filter(|label| !label.is_empty()) {
                     out.insert(name.clone());
@@ -1155,6 +1235,8 @@ struct Checker<'a> {
     /// are permitted here; `check_view_creation` rejects an overlapping field
     /// or whole-owner capability with a place-specific diagnostic.
     place_borrow: bool,
+    /// The view binding under the slice element place being borrowed.
+    slice_place_root: Option<usize>,
     /// The record field currently being projected. Reading the record to
     /// reach this place is allowed while every live child view of that record
     /// is a structurally disjoint field.
@@ -1177,6 +1259,9 @@ struct Checker<'a> {
     call_splits: BTreeMap<usize, SplitLabels>,
     /// Backward liveness of slice-view locals before each expression node.
     live: &'a BTreeMap<usize, BTreeSet<usize>>,
+    /// Pairs of index-place identities `(low, high)` whose index values the
+    /// type checker's facts proved distinct at the later place.
+    index_relations: BTreeSet<(usize, usize)>,
     /// The one `FnValue` expression allowed to capture borrowed slice views in
     /// its enclosing statement/callee position. Borrowed captures are a scoped,
     /// lexical feature: they cannot be constructed in a value-storing or
@@ -1356,13 +1441,13 @@ impl Checker<'_> {
                 path.push(self.field_index(base.ty, *offset)?);
                 Some((root, path))
             }
-            ExprKind::PlaceIndex { base, index } => {
+            ExprKind::PlaceIndex { base, index, id } => {
                 let (root, mut path) = self.place_ident(base)?;
-                let position = match &index.kind {
-                    ExprKind::Constant(position) => *position as usize,
-                    _ => usize::MAX,
+                let constant = match &index.kind {
+                    ExprKind::Constant(position) => Some(*position),
+                    _ => None,
                 };
-                path.push(INDEX_PATH_MARK | position);
+                path.push(index_step(*id, constant));
                 Some((root, path))
             }
             ExprKind::Coerce { value, .. } => self.place_ident(value),
@@ -1384,13 +1469,24 @@ impl Checker<'_> {
             // subview: it roots at the view's owners, keeps its split side, and
             // inherits its lifetime, so the owners stay loaned after the view
             // binding's own last use and split_at_mut sides stay disjoint.
+            //
+            // A view binding is the root of its element places, so two
+            // element references into one view coexist exactly when their
+            // paths are provably disjoint (distinct constants, or indices the
+            // checker's facts proved distinct).
             let parent = self.view_loan(view);
+            let field = match &view.kind {
+                ExprKind::Local(_) | ExprKind::Peek(_) | ExprKind::Move(_) => self
+                    .place_ident(place)
+                    .map(|(root, path)| FieldBorrow { root, path }),
+                _ => None,
+            };
             return Loan {
                 origins: self.view_origins(view),
                 mutable: false,
                 splits: parent.splits,
                 lifetime: parent.lifetime,
-                field: None,
+                field,
                 ancestor: None,
             };
         }
@@ -1907,7 +2003,7 @@ impl Checker<'_> {
             self.merge_loans(existing.into_iter().chain([loan.clone()]))
         };
         provenance.leaves.insert(Vec::new(), merged);
-        self.record_sources[slot] = Some(provenance);
+        self.record_sources[slot] = Some(stripped_provenance(provenance));
         let mut origins = self.view_sources[slot].clone().unwrap_or_default();
         origins.extend(loan.origins.iter().copied());
         self.view_sources[slot] = Some(origins);
@@ -2014,7 +2110,7 @@ impl Checker<'_> {
             }
             merged.alternatives.insert(path, alternatives);
         }
-        self.record_sources[slot] = Some(merged);
+        self.record_sources[slot] = Some(stripped_provenance(merged));
         let mut origins = if replace {
             BTreeSet::new()
         } else {
@@ -3103,6 +3199,12 @@ impl Checker<'_> {
         if self.locals[slot].ty.is_view()
             || (slot >= self.parameter_count && self.locals[slot].ty.is_ref())
         {
+            if self.place_borrow && self.slice_place_root == Some(slot) {
+                // Reaching one element of this view: `check_view_creation`
+                // compares the element place with every live child of the
+                // view, so references to provably distinct elements coexist.
+                return Ok(());
+            }
             if self.capability_suspended(slot, ptr) {
                 return Err(Diagnostic::new(
                     span,
@@ -3164,7 +3266,7 @@ impl Checker<'_> {
                 && !retained
                     .field
                     .as_ref()
-                    .is_some_and(|field| field.disjoint(target))
+                    .is_some_and(|field| field.disjoint(target, &self.index_relations))
             {
                 return false;
             }
@@ -3174,7 +3276,7 @@ impl Checker<'_> {
                 || !self.derives_from(*view, record)
                 || self.view_fields[*view]
                     .as_ref()
-                    .is_some_and(|field| field.disjoint(target))
+                    .is_some_and(|field| field.disjoint(target, &self.index_relations))
         })
     }
     /// Owners behind one loan for a return check. An ancestor record root that
@@ -3452,7 +3554,7 @@ impl Checker<'_> {
                 || roots.iter().any(|root| retained.roots.contains(root));
             let fields_disjoint = field
                 .zip(retained.field.as_ref())
-                .is_some_and(|(new, old)| new.disjoint(old));
+                .is_some_and(|(new, old)| new.disjoint(old, &self.index_relations));
             if !overlaps || splits.disjoint(&retained.splits) || fields_disjoint {
                 continue;
             }
@@ -3488,6 +3590,27 @@ impl Checker<'_> {
                 // path being narrowed; they are suspended, not aliases.
                 continue;
             }
+            // A live record or container holds its leaves' loans: a stored
+            // `&mut` element (or a mutable slice field) keeps its owner
+            // exclusively borrowed, and a stored shared leaf excludes a new
+            // exclusive borrow. The holder's own root is only its binding.
+            if let Some(provenance) = &self.record_sources[*view] {
+                for leaf in provenance.leaves.values() {
+                    if leaf.origins.is_empty()
+                        || self.origins_roots(&leaf.origins).is_disjoint(&roots)
+                        || splits.disjoint(&leaf.splits)
+                    {
+                        continue;
+                    }
+                    if mutable || leaf.mutable {
+                        return Err(Diagnostic::new(
+                            span,
+                            "cannot borrow storage that a live record or container still holds a conflicting reference to; use or drop that value first",
+                        )
+                        .with_note(self.locals[*view].span, "holder declared here"));
+                    }
+                }
+            }
             let view_roots = self.roots_of(*view);
             if view_roots.is_disjoint(&roots) {
                 continue;
@@ -3499,7 +3622,7 @@ impl Checker<'_> {
             }
             if field
                 .zip(self.view_fields[*view].as_ref())
-                .is_some_and(|(new, old)| new.disjoint(old))
+                .is_some_and(|(new, old)| new.disjoint(old, &self.index_relations))
             {
                 // Structurally disjoint fields of one local record are
                 // separate loan capabilities. Neither can reach the other's
@@ -4232,7 +4355,8 @@ impl Checker<'_> {
                 self.is_carrier_type(referent)
                     || container_carries_borrow(self.enums, self.pointees, referent)
             }) {
-                self.record_sources[slot] = Some(self.container_provenance(expr));
+                self.record_sources[slot] =
+                    Some(stripped_provenance(self.container_provenance(expr)));
             }
         } else if let Some(provenance) = self.task_results.get(&site_pointer).cloned() {
             // A child task's borrowed-record result is still loaned to the
@@ -4415,7 +4539,7 @@ impl Checker<'_> {
             let fields_disjoint = field
                 .as_ref()
                 .zip(retained.field.as_ref())
-                .is_some_and(|(new, old)| new.disjoint(old));
+                .is_some_and(|(new, old)| new.disjoint(old, &self.index_relations));
             if !overlaps || splits.disjoint(&retained.splits) || fields_disjoint {
                 continue;
             }
@@ -4863,8 +4987,18 @@ impl Checker<'_> {
             ExprKind::BorrowPlace(place) => {
                 let old_place_borrow = self.place_borrow;
                 self.place_borrow = true;
+                let old_root = std::mem::replace(
+                    &mut self.slice_place_root,
+                    slice_place_view(place).and_then(|view| match &view.kind {
+                        ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => {
+                            Some(*slot)
+                        }
+                        _ => None,
+                    }),
+                );
                 let checked = self.expr(place);
                 self.place_borrow = old_place_borrow;
+                self.slice_place_root = old_root;
                 checked?;
                 let mutable = matches!(expr.ty, Type::RefMut(_));
                 let loan = self.place_loan(place);
@@ -4924,9 +5058,16 @@ impl Checker<'_> {
                 }
                 self.loans.extend(loan.origins.iter().copied());
             }
-            ExprKind::PlaceIndex { base, index } => {
+            ExprKind::PlaceIndex { base, index, .. } => {
                 self.expr(base)?;
-                self.expr(index)?;
+                // The index is an ordinary read: it may not touch storage that
+                // a live exclusive borrow of the place's owner still covers.
+                let old_place_borrow = std::mem::replace(&mut self.place_borrow, false);
+                let old_root = self.slice_place_root.take();
+                let checked = self.expr(index);
+                self.place_borrow = old_place_borrow;
+                self.slice_place_root = old_root;
+                checked?;
             }
             ExprKind::DerefWrite(reference, value) => {
                 if !matches!(reference.ty, Type::RefMut(_)) {
@@ -5443,7 +5584,10 @@ impl Checker<'_> {
                     _ => None,
                 };
                 let loans = self.loans.clone();
-                let reborrow = matches!(target, crate::executable::Target::Slice(_, _));
+                let reborrow = matches!(
+                    target,
+                    crate::executable::Target::Slice(_, _) | crate::executable::Target::Str(_)
+                );
                 if reborrow && let Some(first) = args.first_mut() {
                     let old = self.reborrow;
                     self.reborrow = true;
@@ -6006,8 +6150,11 @@ impl Checker<'_> {
                         )
                         .with_note(self.locals[*root].span, "storage owned by the scope body"));
                     }
-                    for (origins, mutable, splits, field) in lent {
+                    for (origins, mutable, splits, mut field) in lent {
                         let roots = self.origins_roots(&origins);
+                        if let Some(field) = &mut field {
+                            field.strip_index_ids();
+                        }
                         self.task_regions.push(RetainedView {
                             origins,
                             roots,
@@ -7219,7 +7366,7 @@ fn expr_live(
         | ExprKind::Coerce { value, .. } => {
             live = expr_live(value, live_after, views, heads, exits, out);
         }
-        ExprKind::PlaceIndex { base, index } => {
+        ExprKind::PlaceIndex { base, index, .. } => {
             live = expr_live(base, &live, views, heads, exits, out);
             live = expr_live(index, &live, views, heads, exits, out);
         }

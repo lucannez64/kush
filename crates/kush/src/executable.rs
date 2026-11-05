@@ -46,6 +46,12 @@ pub(crate) enum Type {
     /// cannot be made mutable, and always covers a contiguous range of a
     /// validated `String` at Unicode scalar boundaries.
     Str,
+    /// An exclusive borrowed UTF-8 text view: `&'a mut str`. Same four-word
+    /// descriptor as `Str`. It is a move-only capability with an exclusive
+    /// loan on its `String` owner; the only writes are the checked
+    /// `Str.make_ascii_*` and `Str.set_scalar` operations, which never change
+    /// the byte length and keep the bytes valid UTF-8.
+    StrMut,
     Stdin,
     Stdout,
     Box(usize),
@@ -183,10 +189,18 @@ impl Type {
     /// Whether this type is any borrowed view with slice-style provenance:
     /// a shared or exclusive `&[T]` view, or a borrowed UTF-8 `&str`.
     pub(crate) fn is_view(self) -> bool {
-        matches!(self, Type::Slice(_) | Type::SliceMut(_) | Type::Str)
+        matches!(
+            self,
+            Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::StrMut
+        )
     }
+    /// Whether this is an exclusive view capability: `&mut [T]` or `&mut str`.
     pub(crate) fn is_mut_slice(self) -> bool {
-        matches!(self, Type::SliceMut(_))
+        matches!(self, Type::SliceMut(_) | Type::StrMut)
+    }
+    /// Whether this is a shared or exclusive UTF-8 text view.
+    pub(crate) fn is_text(self) -> bool {
+        matches!(self, Type::Str | Type::StrMut)
     }
     /// The pointee of a borrowed owner or record reference.
     pub(crate) fn ref_pointee(self) -> Option<usize> {
@@ -314,6 +328,11 @@ pub(crate) struct Function {
     /// destinations for mutable container/record writes; labels that appear
     /// only in an expected instantiation are placeholders, not destinations.
     pub declared_lifetimes: BTreeSet<String>,
+    /// Pairs `(low, high)` of index-place identities (`ExprKind::PlaceIndex`
+    /// ids) whose index values the facts proved distinct where the later
+    /// place was created. The ownership pass uses them to keep two element
+    /// references into one array, vector, or view live together.
+    pub index_relations: BTreeSet<(usize, usize)>,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Local {
@@ -760,6 +779,14 @@ pub(crate) enum StrOp {
     ScalarAt { some_tag: usize, none_tag: usize },
     /// Explicit allocating copy of the view into an owned `String`.
     ToString,
+    /// ASCII letters of an exclusive view to upper case; other bytes
+    /// (including every byte of a multi-byte scalar) are unchanged.
+    AsciiUpper,
+    /// ASCII letters of an exclusive view to lower case.
+    AsciiLower,
+    /// Replace the scalar at a byte offset with a same-width scalar; panics
+    /// on a non-boundary offset or a width mismatch.
+    SetScalar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -896,6 +923,9 @@ pub(crate) enum ExprKind {
     PlaceIndex {
         base: Box<Expr>,
         index: Box<Expr>,
+        /// Checker identity of this place (nonzero, unique per checked
+        /// function body). `Function::index_relations` refers to it.
+        id: usize,
     },
     BoxNew(Box<Expr>),
     BoxTake(Box<Expr>),
@@ -1311,7 +1341,7 @@ impl Expr {
             | ExprKind::InitOwner { value, .. }
             | ExprKind::BorrowInit { value, .. }
             | ExprKind::Break(Some(value), _) => f(value),
-            ExprKind::PlaceIndex { base, index } => {
+            ExprKind::PlaceIndex { base, index, .. } => {
                 f(base);
                 f(index);
             }
@@ -2498,7 +2528,7 @@ fn fuse_expr(
         | ExprKind::InitOwner { value, .. }
         | ExprKind::BorrowInit { value, .. }
         | ExprKind::RefRead(value) => fuse_expr(value, types, signatures, safety, fusions),
-        ExprKind::PlaceIndex { base, index } => {
+        ExprKind::PlaceIndex { base, index, .. } => {
             fuse_expr(base, types, signatures, safety, fusions);
             fuse_expr(index, types, signatures, safety, fusions);
         }
@@ -4850,6 +4880,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             row_bound: BTreeSet::new(),
             continuation_depth: 0,
             hoisted: Vec::new(),
+            next_index_place: 0,
+            index_relations: BTreeSet::new(),
             pending_lengths: BTreeMap::new(),
         };
         let body = (|| {
@@ -4957,6 +4989,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 .iter()
                 .map(|lifetime| lifetime.name.clone())
                 .collect(),
+            index_relations: checker.index_relations.clone(),
         });
     }
     // Re-check every proof certificate without the search that produced it.
@@ -6357,6 +6390,7 @@ fn collect_methods<'a>(
                 | Type::Slice(_)
                 | Type::SliceMut(_)
                 | Type::Str
+                | Type::StrMut
                 | Type::Task(_)
                 | Type::Stdin
                 | Type::Stdout
@@ -10018,7 +10052,7 @@ impl<'a> Functions<'a> {
                     f.result.span,
                     if result.is_mut_slice() {
                         "a borrowed '&mut [T]' result cannot be returned without an explicit lifetime, as in '-> &'a mut [T]'"
-                    } else if result == Type::Str {
+                    } else if result.is_text() {
                         "a borrowed '&str' result cannot be returned without an explicit lifetime, as in '-> &'a str'"
                     } else {
                         "a borrowed slice result cannot be returned without an explicit lifetime, as in '-> &'a [T]'"
@@ -10425,6 +10459,7 @@ impl<'a> Functions<'a> {
                     .iter()
                     .map(|lifetime| lifetime.name.clone())
                     .collect(),
+                index_relations: BTreeSet::new(),
             }));
         } else {
             self.bodies.push(None);
@@ -11316,6 +11351,10 @@ struct Checker<'a, 't> {
     /// list drains the entries created while checking it; the local's resource
     /// drops at that block's end, after every checked reference's last use.
     hoisted: Vec<Statement>,
+    /// Last index-place identity handed out (see `index_place_id`).
+    next_index_place: usize,
+    /// Proved-distinct index-place pairs of the bodies checked so far.
+    index_relations: BTreeSet<(usize, usize)>,
     /// Runtime-length binder renaming for the call whose `infer` is about to
     /// run: callee `i64` parameter -> caller binding passed for it.
     pending_lengths: BTreeMap<BindingId, BindingId>,
@@ -11613,6 +11652,10 @@ impl Checker<'_, '_> {
                 | "set"
                 | "as_bytes"
                 | "as_str"
+                | "as_mut_str"
+                | "make_ascii_uppercase"
+                | "make_ascii_lowercase"
+                | "set_scalar"
                 | "bytes"
                 | "substr"
                 | "to_string"
@@ -11882,6 +11925,21 @@ impl Checker<'_, '_> {
             return self.vec_call_with(&format!("Vec.{method}"), first, arguments, expected, span);
         }
         if matches!(base, Some(Type::String)) {
+            if name == "as_mut_str" {
+                // `s.as_mut_str()` auto-borrows a direct `let mut` String
+                // local exclusively, exactly as `&mut s`.
+                let first = match first.kind {
+                    ExprKind::Local(slot) => self.borrow_local(slot, true, first.span)?,
+                    _ => first,
+                };
+                return self.string_call_with(
+                    "String.as_mut_str",
+                    first,
+                    arguments,
+                    expected,
+                    span,
+                );
+            }
             let (method, borrow) = match name {
                 "len" | "scalar_len" | "byte_at" | "scalar_at" | "as_bytes" | "as_str"
                 | "substr" => (name, true),
@@ -11901,9 +11959,17 @@ impl Checker<'_, '_> {
                 span,
             );
         }
-        if matches!(base, Some(Type::Str)) {
+        if matches!(base, Some(Type::Str | Type::StrMut)) {
             let method = match name {
-                "len" | "scalar_len" | "byte_at" | "scalar_at" | "to_string" | "substr" => name,
+                "len"
+                | "scalar_len"
+                | "byte_at"
+                | "scalar_at"
+                | "to_string"
+                | "substr"
+                | "make_ascii_uppercase"
+                | "make_ascii_lowercase"
+                | "set_scalar" => name,
                 _ => return Err(unsupported(self)),
             };
             return self.str_call_with(&format!("Str.{method}"), first, arguments, expected, span);
@@ -11953,7 +12019,7 @@ impl Checker<'_, '_> {
                 "nested references are not supported; pass the reference binding itself, or use '&*p' / '&mut *p' to reborrow",
             ));
         }
-        if ty.is_view() || ty == Type::Str {
+        if ty.is_view() {
             return Err(Diagnostic::new(
                 span,
                 "a borrowed view is already a reference-like capability; pass it directly, or derive a subview with '&name[start..end]'",
@@ -12079,7 +12145,7 @@ impl Checker<'_, '_> {
             }
             ast::ExprKind::Index { value, index } => {
                 let base = self.checked_place(value, mutable)?;
-                if base.ty == Type::Str {
+                if base.ty.is_text() {
                     return Err(Diagnostic::new(
                         expr.span,
                         "a &str view is not indexed by a single index; use Str.byte_at or Str.scalar_at",
@@ -12112,10 +12178,12 @@ impl Checker<'_, '_> {
                             "an index reference would alias an owning or linear element; move the element out with Vec.pop/Box.take or borrow a non-owning element",
                         ));
                     }
+                    let id = self.index_place_id(&base, &index);
                     return Ok(Expr {
                         kind: ExprKind::PlaceIndex {
                             base: Box::new(base),
                             index: Box::new(index),
+                            id,
                         },
                         ty: element,
                         span: expr.span,
@@ -12161,10 +12229,12 @@ impl Checker<'_, '_> {
                 }
                 let index = self.expr_expected(index, Some(Type::I64))?;
                 self.expect(index.ty, Type::I64, index.span)?;
+                let id = self.index_place_id(&base, &index);
                 Ok(Expr {
                     kind: ExprKind::PlaceIndex {
                         base: Box::new(base),
                         index: Box::new(index),
+                        id,
                     },
                     ty: element,
                     span: expr.span,
@@ -12195,6 +12265,30 @@ impl Checker<'_, '_> {
                 })
             }
         }
+    }
+    /// Give a new index place its identity and record which earlier index
+    /// places of the same root binding provably hold a different index here.
+    /// The facts are those at this (the later) place; the earlier index is a
+    /// versioned term, so a relation never depends on a stale value. Only a
+    /// proved disequality is recorded; nothing is assumed.
+    fn index_place_id(&mut self, base: &Expr, index: &Expr) -> usize {
+        fn root(place: &Expr) -> Option<usize> {
+            match &place.kind {
+                ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => Some(*slot),
+                ExprKind::Project(base, _) | ExprKind::PlaceIndex { base, .. } => root(base),
+                ExprKind::Coerce { value, .. } => root(value),
+                _ => None,
+            }
+        }
+        self.next_index_place += 1;
+        let id = self.next_index_place;
+        if let (Some(root), Some(linear)) = (root(base), self.facts.linear(index)) {
+            for earlier in self.facts.distinct_index_places(root, &linear) {
+                self.index_relations.insert((earlier, id));
+            }
+            self.facts.record_index_place(id, root, linear);
+        }
+        id
     }
     /// The mutability of the capability that owns a checked place.
     fn place_mutable(&self, place: &Expr) -> bool {
@@ -13366,7 +13460,7 @@ impl Checker<'_, '_> {
         }
         if member.is_ref()
             || member.is_slice()
-            || member == Type::Str
+            || member.is_text()
             || crate::runtime_types::has_borrow(self.types, member)
             || crate::runtime_types::contains_task(self.types, member)
         {
@@ -14718,6 +14812,7 @@ impl Checker<'_, '_> {
             result_lifetime: witness_result_lifetime.clone(),
             lifetime_bounds: witness_bounds.clone(),
             declared_lifetimes: BTreeSet::new(),
+            index_relations: BTreeSet::new(),
         };
         let signature = Signature {
             call_contract: None,
@@ -15723,6 +15818,7 @@ impl Checker<'_, '_> {
                 | "String.scalar_at"
                 | "String.as_bytes"
                 | "String.as_str"
+                | "String.as_mut_str"
                 | "String.substr"
         );
         let first = if first.ty == Type::Never {
@@ -15769,10 +15865,24 @@ impl Checker<'_, '_> {
             ));
         };
         match name {
-            "String.as_str" => self.text_view_from_expr(first, None, None, span, expected),
-            "String.substr" => {
-                self.text_view_from_expr(first, Some(&rest[0]), Some(&rest[1]), span, expected)
+            "String.as_str" => self.text_view_from_expr(first, None, None, false, span, expected),
+            "String.as_mut_str" => {
+                if !matches!(first.ty, Type::RefMut(_)) {
+                    return Err(Diagnostic::new(
+                        first.span,
+                        "String.as_mut_str needs an exclusive '&mut String'; borrow a 'let mut' String local with &mut name",
+                    ));
+                }
+                self.text_view_from_expr(first, None, None, true, span, expected)
             }
+            "String.substr" => self.text_view_from_expr(
+                first,
+                Some(&rest[0]),
+                Some(&rest[1]),
+                false,
+                span,
+                expected,
+            ),
             "String.len" | "String.scalar_len" => {
                 let op = if name == "String.len" {
                     StringOp::Len
@@ -15918,9 +16028,13 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Expr> {
         let wanted = match name {
-            "Str.len" | "Str.scalar_len" | "Str.to_string" => 0,
+            "Str.len"
+            | "Str.scalar_len"
+            | "Str.to_string"
+            | "Str.make_ascii_uppercase"
+            | "Str.make_ascii_lowercase" => 0,
             "Str.byte_at" | "Str.scalar_at" => 1,
-            "Str.substr" => 2,
+            "Str.substr" | "Str.set_scalar" => 2,
             _ => {
                 return Err(Diagnostic::new(
                     span,
@@ -15940,7 +16054,7 @@ impl Checker<'_, '_> {
         if first.ty == Type::Never {
             return Ok(first);
         }
-        if first.ty != Type::Str {
+        if !first.ty.is_text() {
             return Err(Diagnostic::new(
                 first.span,
                 format!(
@@ -15950,7 +16064,54 @@ impl Checker<'_, '_> {
             ));
         }
         if name == "Str.substr" {
-            return self.text_view_from_expr(first, Some(&rest[0]), Some(&rest[1]), span, expected);
+            return self.text_view_from_expr(
+                first,
+                Some(&rest[0]),
+                Some(&rest[1]),
+                false,
+                span,
+                expected,
+            );
+        }
+        if matches!(
+            name,
+            "Str.make_ascii_uppercase" | "Str.make_ascii_lowercase" | "Str.set_scalar"
+        ) {
+            if first.ty != Type::StrMut {
+                return Err(Diagnostic::new(
+                    first.span,
+                    format!(
+                        "{name} writes through an exclusive '&mut str' view, found {}; create one with String.as_mut_str(&mut s) or &mut view[start..end]",
+                        self.types.name(first.ty)
+                    ),
+                ));
+            }
+            let (op, arguments) = if name == "Str.set_scalar" {
+                // The scalar at byte offset `index` is replaced by `scalar`
+                // only when both encode to the same number of UTF-8 bytes and
+                // `index` is a scalar boundary; anything else panics, so the
+                // view stays valid UTF-8 and keeps its length.
+                self.require(PANIC, span)?;
+                let index = self.expr_expected(&rest[0], Some(Type::I64))?;
+                self.expect(index.ty, Type::I64, index.span)?;
+                let scalar = self.expr_expected(&rest[1], Some(Type::Char))?;
+                self.expect(scalar.ty, Type::Char, scalar.span)?;
+                (StrOp::SetScalar, vec![first, index, scalar])
+            } else if name == "Str.make_ascii_uppercase" {
+                (StrOp::AsciiUpper, vec![first])
+            } else {
+                (StrOp::AsciiLower, vec![first])
+            };
+            let value = Expr {
+                kind: ExprKind::Call(Target::Str(op), arguments),
+                ty: Type::Unit,
+                span,
+                resource: None,
+            };
+            return match expected {
+                Some(expected) => self.coerce(value, expected, span),
+                None => Ok(value),
+            };
         }
         if name == "Str.to_string" {
             self.require(ALLOC | PANIC, span)?;
@@ -18088,6 +18249,7 @@ impl Checker<'_, '_> {
             result_lifetime: signature.borrows.result.clone(),
             lifetime_bounds: signature.borrows.bounds.clone(),
             declared_lifetimes: BTreeSet::new(),
+            index_relations: BTreeSet::new(),
         };
         let synthetic = Signature {
             call_contract: None,
@@ -19665,11 +19827,9 @@ impl Checker<'_, '_> {
                         && self.facts.same_versions(&before)
                     {
                         if yes.ty == Type::Never && no.ty != Type::Never {
-                            let facts = self.facts.condition(condition, false);
-                            self.facts.add(facts);
+                            self.facts.assume(condition, false);
                         } else if no.ty == Type::Never && yes.ty != Type::Never {
-                            let facts = self.facts.condition(condition, true);
-                            self.facts.add(facts);
+                            self.facts.assume(condition, true);
                         }
                     }
                     checked.push(Statement::Expr(expr));
@@ -20617,7 +20777,7 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::Index { value, index } => {
                     let base = c.place(value)?;
-                    if base.ty == Type::Str {
+                    if base.ty.is_text() {
                         return Err(Diagnostic::new(
                             span,
                             "a &str view is not indexed by a single index; use Str.byte_at or Str.scalar_at, or take a checked byte-range subview with view[start..end]",
@@ -20747,8 +20907,7 @@ impl Checker<'_, '_> {
                     let condition = c.expr(condition)?;
                     c.expect(condition.ty, Type::Bool, condition.span)?;
                     let mark = c.facts.mark();
-                    let facts = c.facts.condition(&condition, true);
-                    c.facts.add(facts);
+                    c.facts.assume(&condition, true);
                     let scalar_baseline = c.scalar_values.clone();
                     let scalar_live = c.kernel_locals.len();
                     c.loops.push(Loop { value: None, is_while: true, expected: None });
@@ -21251,8 +21410,7 @@ impl Checker<'_, '_> {
                         // The right operand of && / || runs only when the left is true / false.
                         let mark = c.facts.mark();
                         if matches!(op, Kind::AmpAmp | Kind::PipePipe) {
-                            let facts = c.facts.condition(&left, *op == Kind::AmpAmp);
-                            c.facts.add(facts);
+                            c.facts.assume(&left, *op == Kind::AmpAmp);
                         }
                         let right_hint = if arithmetic || compares {
                             left.ty
@@ -21964,8 +22122,7 @@ impl Checker<'_, '_> {
                     let baseline = c.facts.clone();
                     let scalar_baseline = c.scalar_values.clone();
                     let scalar_live = c.kernel_locals.len();
-                    let facts = c.facts.condition(&condition, true);
-                    c.facts.add(facts);
+                    c.facts.assume(&condition, true);
                     let has_else = otherwise.is_some();
                     let then_expected = if has_else { expected } else { Some(Type::Unit) };
                     let then = c.block(then, then_expected);
@@ -21975,8 +22132,7 @@ impl Checker<'_, '_> {
                     let then_scalars = c.scalar_values.clone();
                     c.scalar_values = scalar_baseline.clone();
                     let otherwise = if let Some(otherwise) = otherwise {
-                        let facts = c.facts.condition(&condition, false);
-                        c.facts.add(facts);
+                        c.facts.assume(&condition, false);
                         // With the call-argument expectation deferred above,
                         // no fallback context may erase the arm's actual
                         // labels either.
@@ -22128,8 +22284,7 @@ impl Checker<'_, '_> {
                         let guard = arm.guard.as_ref().map(|guard| c.expr(guard)).transpose()?;
                         if let Some(guard) = &guard {
                             c.expect(guard.ty, Type::Bool, guard.span)?;
-                            let facts = c.facts.condition(guard, true);
-                            c.facts.add(facts);
+                            c.facts.assume(guard, true);
                         }
                         let context = match expected {
                             Some(expected) => Some(expected),
@@ -22476,7 +22631,7 @@ impl Checker<'_, '_> {
         let mut capture_linear = false;
         if let Some(slot) = captures
             .iter()
-            .find(|slot| self.locals[**slot].ty == Type::Str)
+            .find(|slot| self.locals[**slot].ty.is_text())
         {
             return Err(Diagnostic::new(
                 span,
@@ -23220,6 +23375,7 @@ impl Checker<'_, '_> {
             result_lifetime: lambda_result_lifetime,
             lifetime_bounds: BTreeSet::new(),
             declared_lifetimes: BTreeSet::new(),
+            index_relations: self.index_relations.clone(),
         };
         let index = self.functions.add_synthetic(signature, function)?;
         let ty = if once {
@@ -29491,14 +29647,8 @@ impl Checker<'_, '_> {
                 value.span,
                 None,
             )?;
-            if base.ty == Type::Str {
-                if mutable {
-                    return Err(Diagnostic::new(
-                        value.span,
-                        "mutable borrowed text '&mut str' is not supported; text views are immutable",
-                    ));
-                }
-                return self.text_view_from_expr(base, start, end, span, expected);
+            if base.ty.is_text() {
+                return self.text_view_from_expr(base, start, end, mutable, span, expected);
             }
             let Some(pointer) = base.ty.slice_element() else {
                 unreachable!("slice construction has slice type")
@@ -29570,20 +29720,21 @@ impl Checker<'_, '_> {
                 )
             })?;
             let ty = self.locals[slot].ty;
-            if ty == Type::Str {
-                if mutable {
+            if ty.is_text() {
+                if mutable && ty == Type::Str {
                     return Err(Diagnostic::new(
                         value.span,
-                        "mutable borrowed text '&mut str' is not supported; text views are immutable",
-                    ));
+                        "cannot create an exclusive '&mut str' view from a shared '&str'; shared text cannot be upgraded",
+                    )
+                    .with_note(self.locals[slot].span, "shared text view declared here"));
                 }
                 let base = Expr {
                     kind: ExprKind::Local(slot),
-                    ty: Type::Str,
+                    ty,
                     span: value.span,
                     resource: None,
                 };
-                return self.text_view_from_expr(base, start, end, span, expected);
+                return self.text_view_from_expr(base, start, end, mutable, span, expected);
             }
             if mutable && !self.locals[slot].mutable && !ty.is_slice() {
                 return Err(Diagnostic::new(
@@ -29821,14 +29972,24 @@ impl Checker<'_, '_> {
     /// `&String` borrow or another `&str` view. Any supplied bound adds a
     /// runtime `0 <= start <= end <= byte length` check plus UTF-8 scalar
     /// boundary checks at both endpoints; these are enforced in both backends.
+    /// A checked text view over `base` (a `&String`/`&mut String` owner
+    /// reference or a text view). `mutable` makes an exclusive `&mut str`,
+    /// which needs an exclusive base.
     fn text_view_from_expr(
         &mut self,
         base: Expr,
         start: Option<&ast::Expr>,
         end: Option<&ast::Expr>,
+        mutable: bool,
         span: Span,
         expected: Option<Type>,
     ) -> Result<Expr> {
+        if mutable && !matches!(base.ty, Type::StrMut | Type::RefMut(_)) {
+            return Err(Diagnostic::new(
+                base.span,
+                "an exclusive '&mut str' view needs an exclusive '&mut String' or '&mut str' source; shared text cannot be upgraded",
+            ));
+        }
         let check = start.is_some() || end.is_some();
         if check {
             self.require(PANIC, span)?;
@@ -29860,7 +30021,7 @@ impl Checker<'_, '_> {
                 text: true,
                 field: None,
             },
-            ty: Type::Str,
+            ty: if mutable { Type::StrMut } else { Type::Str },
             span,
             resource: None,
         };
@@ -30577,7 +30738,7 @@ impl Checker<'_, '_> {
             let ty = local.ty;
             if ty.is_view()
                 || ty.is_ref()
-                || ty == Type::Str
+                || ty.is_text()
                 || crate::runtime_types::has_borrow(self.types, ty)
                 || crate::runtime_types::contains_task(self.types, ty)
             {

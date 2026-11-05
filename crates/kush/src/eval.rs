@@ -1980,7 +1980,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
                 Ok(PlaceFlow::Place(resolved))
             }
-            ExprKind::PlaceIndex { base, index } if base.ty.is_slice() => {
+            ExprKind::PlaceIndex { base, index, .. } if base.ty.is_slice() => {
                 // One element of a slice view: the view is evaluated (not
                 // moved), then the index is checked against its length. A
                 // byte-backed view has no word-sized element to address.
@@ -2018,7 +2018,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ty: element,
                 }))
             }
-            ExprKind::PlaceIndex { base, index } => {
+            ExprKind::PlaceIndex { base, index, .. } => {
                 // Resolve the base before evaluating the index, matching checking.
                 let (base_value, base_place) = if matches!(base.ty, Type::Vec(_)) {
                     let value = match self.expr(base, frame)? {
@@ -2277,7 +2277,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     /// One vector element reference used by explicit `PlaceIndex` evaluation
     /// (only produced as a borrow operand).
     fn place_index_reference(&mut self, place: &Expr, frame: &mut Frame) -> Result<PlaceFlow> {
-        let ExprKind::PlaceIndex { base, index } = &place.kind else {
+        let ExprKind::PlaceIndex { base, index, .. } = &place.kind else {
             return Err(Diagnostic::new(
                 place.span,
                 "internal error: expected a place index",
@@ -2597,7 +2597,80 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let capacity = data.len();
                 Ok(self.allocate(Value::Buffer { data, capacity }))
             }
+            StrOp::AsciiUpper | StrOp::AsciiLower => {
+                let mut data = data;
+                if op == StrOp::AsciiUpper {
+                    data.make_ascii_uppercase();
+                } else {
+                    data.make_ascii_lowercase();
+                }
+                self.write_str_data(&args[0], &data, span)?;
+                Ok(Value::Scalar(0))
+            }
+            StrOp::SetScalar => {
+                let index = usize::try_from(args[1].scalar())
+                    .ok()
+                    .filter(|index| *index < data.len() && (data[*index] & 0xC0) != 0x80);
+                let Some(index) = index else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "panic: Str.set_scalar offset is not a scalar boundary inside the view",
+                    ));
+                };
+                let scalar = u32::try_from(args[2].scalar())
+                    .ok()
+                    .and_then(char::from_u32)
+                    .ok_or_else(|| Diagnostic::new(span, "internal error: invalid Char"))?;
+                let old = std::str::from_utf8(&data[index..])
+                    .ok()
+                    .and_then(|text| text.chars().next())
+                    .ok_or_else(|| Diagnostic::new(span, "internal error: invalid text view"))?;
+                if old.len_utf8() != scalar.len_utf8() {
+                    return Err(Diagnostic::new(
+                        span,
+                        "panic: Str.set_scalar needs a scalar with the same UTF-8 width as the one it replaces",
+                    ));
+                }
+                let mut data = data;
+                scalar.encode_utf8(&mut data[index..index + scalar.len_utf8()]);
+                self.write_str_data(&args[0], &data, span)?;
+                Ok(Value::Scalar(0))
+            }
         }
+    }
+    /// Store `bytes` back over the range an exclusive text view covers. The
+    /// caller keeps the length, so the owner's buffer never grows or shrinks.
+    fn write_str_data(&mut self, value: &Value, bytes: &[u8], span: Span) -> Result<()> {
+        let Value::Slice(view) = value else {
+            return Err(Diagnostic::new(
+                span,
+                "internal error: expected a &mut str view",
+            ));
+        };
+        let SliceValue {
+            base, start, len, ..
+        } = &**view;
+        let Value::Borrowed(id) = base.as_ref() else {
+            return Err(Diagnostic::new(
+                span,
+                "internal error: invalid &mut str view backing storage",
+            ));
+        };
+        let Some(Value::Buffer { mut data, capacity }) = self.heap.get(*id) else {
+            return Err(Diagnostic::new(
+                span,
+                "internal ownership error: dangling text view",
+            ));
+        };
+        if bytes.len() != *len || data.len() < start + len {
+            return Err(Diagnostic::new(
+                span,
+                "internal error: text write changed the length",
+            ));
+        }
+        data[*start..start + len].copy_from_slice(bytes);
+        self.heap.insert(*id, Value::Buffer { data, capacity });
+        Ok(())
     }
     /// Evaluate one slice construction. Kept out of the recursive expression
     /// match so the evaluator's frame stays small enough for deep user

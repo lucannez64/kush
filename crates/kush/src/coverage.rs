@@ -261,6 +261,7 @@ fn useful(
             | Type::Slice(_)
             | Type::SliceMut(_)
             | Type::Str
+            | Type::StrMut
             | Type::Fn(_)
             | Type::Once(_)
             | Type::DynObj(_)

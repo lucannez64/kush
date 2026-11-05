@@ -760,18 +760,35 @@ fn slice_element_loans_root_at_the_views_owners() {
         }"#,
         "cannot move an owner while it is borrowed",
     );
-    // Two exclusive references to one view, or using the view while an
-    // exclusive element reference is live, are aliasing errors.
+    // Two exclusive references to one element of a view, or using the view
+    // while an exclusive element reference is live, are aliasing errors.
+    // Distinct constant indices are disjoint places.
     rejects(
         r#"
         fn main() -> i64 ! {panic} {
             let mut xs: [i64; 3] = [1, 2, 3];
             let view: &mut [i64] = &mut xs[..];
             let p = &mut view[1];
-            let q = &mut view[2];
+            let q = &mut view[1];
             *p + *q
         }"#,
-        "child view derived from it is live",
+        "cannot create an exclusive place borrow while an overlapping borrow",
+    );
+    agrees(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            {
+                let view: &mut [i64] = &mut xs[..];
+                let p = &mut view[1];
+                let q = &mut view[2];
+                *p = *p + *q;
+                *q = 30;
+            }
+            xs[1] * 100 + xs[2]
+        }"#,
+        530,
+        "",
     );
     rejects(
         r#"
@@ -836,7 +853,7 @@ fn slice_element_references_into_split_sides_stay_disjoint() {
             let q = &mut left[0];
             *p + *q
         }"#,
-        "child view derived from it is live",
+        "cannot create an exclusive place borrow while an overlapping borrow",
     );
 }
 
@@ -888,4 +905,279 @@ fn slice_element_places_check_the_bound_and_byte_backing_at_runtime() {
         native_aborts(out_of_bounds);
         native_aborts(bytes);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Slice-element references: hostile cases (aliasing, escapes, owner moves,
+// lifetimes, loops, tasks and closures, native/reference parity)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn slice_element_references_reject_aliasing_through_the_view_and_owner() {
+    // Growing the owner, reading it directly, or reading through the parent
+    // view (including inside the index of a second element place) while an
+    // exclusive element reference is live are aliasing errors.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let mut v: Vec<i64> = [1, 2, 3];
+            let s: &mut [i64] = &mut v[..];
+            let p = &mut s[0];
+            Vec.push(&mut v, 4);
+            *p
+        }"#,
+        "cannot borrow an owner while an exclusive '&mut [T]' view of it is live",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            let s: &mut [i64] = &mut xs[..];
+            let p = &mut s[0];
+            let z = xs[1];
+            *p = z;
+            *p
+        }"#,
+        "cannot read an owner while an exclusive '&mut [T]' view of it is live",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 4] = [1, 2, 3, 4];
+            let s: &mut [i64] = &mut xs[..];
+            let p = &mut s[0];
+            let q = &mut s[Slice.get(s, 1)];
+            *p + *q
+        }"#,
+        "cannot use a slice view while a child view derived from it is live",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 4] = [1, 2, 3, 4];
+            let p = &mut xs[0];
+            let q = &mut xs[xs[1]];
+            *p + *q
+        }"#,
+        "cannot read an owner while an exclusive '&mut [T]' view of it is live",
+    );
+    // A subview and the parent view cannot both reach one element.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 4] = [1, 2, 3, 4];
+            let s: &mut [i64] = &mut xs[..];
+            let t: &mut [i64] = &mut s[1..];
+            let p = &mut t[0];
+            let q = &mut s[1];
+            *q = 7;
+            *p
+        }"#,
+        "cannot create an exclusive place borrow while an overlapping borrow",
+    );
+    // Writing through a reference while a reborrow of it is live.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            let s: &mut [i64] = &mut xs[..];
+            let p = &mut s[0];
+            let q = &*p;
+            *p = 4;
+            *q
+        }"#,
+        "cannot write through a reference while a view, element reference, or pattern binding derived from it is live",
+    );
+    // The parent split view is suspended while an element of one side lives.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 4] = [1, 2, 3, 4];
+            let s: &mut [i64] = &mut xs[..];
+            let (l, r) = Slice.split_at_mut(s, 2);
+            let p = &mut l[0];
+            Slice.set(r, 0, 30);
+            Slice.set(l, 1, 20);
+            *p
+        }"#,
+        "cannot use a slice view while a child view derived from it is live",
+    );
+}
+
+#[test]
+fn slice_element_references_cannot_escape_their_storage() {
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let p = {
+                let xs: [i64; 3] = [1, 2, 3];
+                let s = &xs[..];
+                &s[1]
+            };
+            *p
+        }"#,
+        "reference escapes the lexical scope of the storage it borrows",
+    );
+    // A lambda cannot capture an element reference, and an exclusive view
+    // passed twice to a helper is moved by the first call.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let v: Vec<i64> = [1, 2, 3];
+            let s: &[i64] = &v[..];
+            let p = &s[1];
+            let f = fn() -> i64 ! {} { *p };
+            let w = v;
+            f() + Vec.len(&w)
+        }"#,
+        "a lambda cannot capture a borrowed owner reference",
+    );
+    rejects(
+        r#"
+        fn pick<'a>(s: &'a mut [i64], i: i64) -> &'a mut i64 ! {panic} { &mut s[i] }
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            let s: &mut [i64] = &mut xs[..];
+            let a = pick(s, 0);
+            let b = pick(s, 0);
+            *a = 5;
+            *b
+        }"#,
+        "use after move",
+    );
+    // The owner stays loaned through a returned element even after the
+    // view binding is gone.
+    rejects(
+        r#"
+        fn pick<'a>(s: &'a [i64], i: i64) -> &'a i64 ! {panic} { &s[i] }
+        fn main() -> i64 ! {alloc, panic} {
+            let v: Vec<i64> = [1, 2, 3];
+            let p = pick(&v[..], 2);
+            let moved = v;
+            *p + Vec.len(&moved)
+        }"#,
+        "cannot move an owner while it is borrowed",
+    );
+}
+
+#[test]
+fn slice_element_references_work_in_loops_tasks_and_closures() {
+    // A fresh element reference per loop iteration.
+    agrees(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 4] = [1, 2, 3, 4];
+            let mut i = 0;
+            let mut sum = 0;
+            {
+                let s: &mut [i64] = &mut xs[..];
+                while i < 4 {
+                    let p = &mut s[i];
+                    *p = *p * 10;
+                    sum = sum + *p;
+                    i = i + 1;
+                }
+            }
+            sum + xs[3]
+        }"#,
+        140,
+        "",
+    );
+    // Shared element references are returned and coexist with view reads.
+    agrees(
+        r#"
+        fn pick<'a>(s: &'a [i64], i: i64) -> &'a i64 ! {panic} { &s[i] }
+        fn main() -> i64 ! {panic} {
+            let xs: [i64; 3] = [1, 2, 3];
+            let s = &xs[..];
+            let a = pick(s, 0);
+            let b = pick(s, 2);
+            let c = &s[0];
+            *a + *b + *c + Slice.get(s, 1)
+        }"#,
+        7,
+        "",
+    );
+    // A lambda parameter may take an element reference and be called twice.
+    agrees(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            let s: &mut [i64] = &mut xs[..];
+            let p = &mut s[0];
+            let f = fn(r: &mut i64) -> Unit ! {panic} { *r = *r + 5; };
+            f(p);
+            f(p);
+            *p
+        }"#,
+        11,
+        "",
+    );
+    // Children write through elements of opposite split sides; the owner is
+    // read only after the scope joins them.
+    agrees(
+        r#"
+        use std.task.TaskExit;
+        fn main() -> i64 ! {alloc, panic, suspend} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            let s: &mut [i64] = &mut xs[..];
+            let (l, r) = Slice.split_at_mut(s, 1);
+            let got = Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+                let t = Task.spawn(fn() -> i64 ! {panic, suspend} {
+                    let p = &mut l[0];
+                    Task.yield();
+                    *p = 9;
+                    0
+                });
+                let u = Task.spawn(fn() -> i64 ! {panic, suspend} {
+                    let q = &mut r[1];
+                    Task.yield();
+                    *q = 40;
+                    0
+                });
+                let a = match Task.join(t) { TaskExit.Completed(x) => x, TaskExit.Cancelled => 1 };
+                let b = match Task.join(u) { TaskExit.Completed(x) => x, TaskExit.Cancelled => 1 };
+                a + b
+            });
+            got + xs[0] + xs[2]
+        }"#,
+        49,
+        "",
+    );
+    // A child cannot capture an element reference of the scope body.
+    rejects(
+        r#"
+        use std.task.TaskExit;
+        fn main() -> i64 ! {alloc, panic, suspend} {
+            let mut xs: [i64; 3] = [1, 2, 3];
+            let s: &mut [i64] = &mut xs[..];
+            Task.scope(fn() -> i64 ! {alloc, panic, suspend} {
+                let p = &mut s[1];
+                let t = Task.spawn(fn() -> i64 ! {panic, suspend} { Task.yield(); *p = 9; 0 });
+                match Task.join(t) { TaskExit.Completed(x) => x, TaskExit.Cancelled => 1 }
+            })
+        }"#,
+        "a lambda cannot capture a borrowed owner reference",
+    );
+    // Vec-backed element writes through a record field, and a temporary
+    // owner whose element reference ends before the owner grows again.
+    agrees(
+        r#"
+        struct Point { x: i64, y: i64 }
+        fn bump(s: &mut [Point], i: i64) -> Unit ! {panic} { let p = &mut s[i].x; *p = *p + 100; }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut v: Vec<Point> = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+            bump(&mut v[..], 1);
+            bump(&mut v[1..], 0);
+            let r = {
+                let s: &[Point] = &v[..];
+                &s[1]
+            };
+            let k = r.x;
+            Vec.push(&mut v, Point { x: k, y: 0 });
+            Vec.len(&v) * 1000 + Vec.get(&v, 2).x
+        }"#,
+        3203,
+        "",
+    );
 }

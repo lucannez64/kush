@@ -592,8 +592,10 @@ fn borrowed_text_escape_positions_are_rejected() {
         "",
     );
     rejects(
-        "fn take(text: &mut str) -> Unit ! {} { }",
-        "mutable borrowed text",
+        "struct Holder<'a> { text: &'a mut str }
+        fn take<'a>(holder: Holder<'a>) -> Unit ! {} { }
+        fn main() -> Unit ! {} { }",
+        "a record cannot store an exclusive '&mut str' text view",
     );
     rejects("fn take(text: str) -> Unit ! {} { }", "'str' is unsized");
     rejects(
@@ -806,7 +808,7 @@ fn borrowed_text_task_and_generic_positions_are_rejected() {
             let view = text.as_str();
             let mut part = &mut view[0..1];
         }",
-        "mutable borrowed text",
+        "cannot create an exclusive '&mut str' view from a shared '&str'",
     );
 }
 

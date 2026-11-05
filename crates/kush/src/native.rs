@@ -1196,6 +1196,46 @@ int64_t kush_str_scalar_at(const unsigned char *data, int64_t length, int64_t in
 uint64_t kush_str_to_string(const unsigned char *data, int64_t length) {
     return kush_bytes_from(data, length);
 }
+/* Writes through an exclusive &mut str view. ASCII case changes touch only
+   bytes below 0x80, and set_scalar replaces one scalar by another of the same
+   UTF-8 width at a checked boundary, so the owner stays valid UTF-8 and keeps
+   its length. */
+int64_t kush_str_ascii_upper(unsigned char *data, int64_t length) {
+    for (int64_t i = 0; i < length; ++i) {
+        if (data[i] >= 'a' && data[i] <= 'z') data[i] = (unsigned char)(data[i] - 32);
+    }
+    return 0;
+}
+int64_t kush_str_ascii_lower(unsigned char *data, int64_t length) {
+    for (int64_t i = 0; i < length; ++i) {
+        if (data[i] >= 'A' && data[i] <= 'Z') data[i] = (unsigned char)(data[i] + 32);
+    }
+    return 0;
+}
+int64_t kush_str_set_scalar(unsigned char *data, int64_t length, int64_t index, int64_t code) {
+    if (index < 0 || index >= length || (data[index] & 0xC0) == 0x80) kush_panic();
+    unsigned char lead = data[index];
+    int64_t width = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : 4;
+    int64_t wanted = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+    if (width != wanted || index + width > length) kush_panic();
+    uint32_t c = (uint32_t)code;
+    if (width == 1) {
+        data[index] = (unsigned char)c;
+    } else if (width == 2) {
+        data[index] = (unsigned char)(0xC0 | (c >> 6));
+        data[index + 1] = (unsigned char)(0x80 | (c & 0x3F));
+    } else if (width == 3) {
+        data[index] = (unsigned char)(0xE0 | (c >> 12));
+        data[index + 1] = (unsigned char)(0x80 | ((c >> 6) & 0x3F));
+        data[index + 2] = (unsigned char)(0x80 | (c & 0x3F));
+    } else {
+        data[index] = (unsigned char)(0xF0 | (c >> 18));
+        data[index + 1] = (unsigned char)(0x80 | ((c >> 12) & 0x3F));
+        data[index + 2] = (unsigned char)(0x80 | ((c >> 6) & 0x3F));
+        data[index + 3] = (unsigned char)(0x80 | (c & 0x3F));
+    }
+    return 0;
+}
 /* These operations never grow storage. On read failure, ownership is consumed. */
 int64_t kush_io_read_all(int64_t stream, uint64_t handle) {
     KushBytes *b = (KushBytes *)(uintptr_t)handle;
@@ -3025,6 +3065,23 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
     let str_to_string = module
         .declare_function("kush_str_to_string", Linkage::Import, &str_range_sig)
         .map_err(error)?;
+    let str_ascii_upper = module
+        .declare_function("kush_str_ascii_upper", Linkage::Import, &str_range_sig)
+        .map_err(error)?;
+    let str_ascii_lower = module
+        .declare_function("kush_str_ascii_lower", Linkage::Import, &str_range_sig)
+        .map_err(error)?;
+    let mut str_set_sig = module.make_signature();
+    str_set_sig.params.extend([
+        AbiParam::new(I64),
+        AbiParam::new(I64),
+        AbiParam::new(I64),
+        AbiParam::new(I64),
+    ]);
+    str_set_sig.returns.push(AbiParam::new(I64));
+    let str_set_scalar = module
+        .declare_function("kush_str_set_scalar", Linkage::Import, &str_set_sig)
+        .map_err(error)?;
     let mut str_index_sig = module.make_signature();
     str_index_sig
         .params
@@ -3374,6 +3431,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
             str_byte_at,
             str_scalar_at,
             str_to_string,
+            str_writes: [str_ascii_upper, str_ascii_lower, str_set_scalar],
             vec_ops: &vec_ops,
             vec_element,
             literal_data: &literal_data,
@@ -4494,6 +4552,8 @@ struct Generator<'a, 'b> {
     str_byte_at: FuncId,
     str_scalar_at: FuncId,
     str_to_string: FuncId,
+    /// `&mut str` writes: ASCII upper case, ASCII lower case, set_scalar.
+    str_writes: [FuncId; 3],
     vec_ops: &'b BTreeMap<VecOp, FuncId>,
     vec_element: FuncId,
     /// (continue target, break target, break carries a value, handler depth at
@@ -6700,7 +6760,7 @@ impl Generator<'_, '_> {
                 if *text {
                     let base_values = lower!(self.expr(base));
                     let (pointer, length) = match base.ty {
-                        Type::Ref(p) => match self.program.pointees[p] {
+                        Type::Ref(p) | Type::RefMut(p) => match self.program.pointees[p] {
                             Type::String => {
                                 let handle = self.builder.ins().load(
                                     I64,
@@ -6719,7 +6779,7 @@ impl Generator<'_, '_> {
                             }
                             _ => unreachable!("checked text view source"),
                         },
-                        Type::Str => (base_values[0], base_values[1]),
+                        Type::Str | Type::StrMut => (base_values[0], base_values[1]),
                         _ => unreachable!("checked text view source"),
                     };
                     let start = match start {
@@ -7870,7 +7930,7 @@ impl Generator<'_, '_> {
                         .iadd_imm_s(base_pointer, (*offset * 8) as i64),
                 )
             }
-            ExprKind::PlaceIndex { base, index } if base.ty.is_slice() => {
+            ExprKind::PlaceIndex { base, index, .. } if base.ty.is_slice() => {
                 // A slice view is a `(data, length, stride, byte)` descriptor.
                 // The element address is `data + index * stride` after the
                 // bound check; a byte-backed view has no word-sized element
@@ -7895,7 +7955,7 @@ impl Generator<'_, '_> {
                 let offset = self.builder.ins().imul(index, descriptor[2]);
                 Some(self.builder.ins().iadd(descriptor[0], offset))
             }
-            ExprKind::PlaceIndex { base, index } => {
+            ExprKind::PlaceIndex { base, index, .. } => {
                 let location = lower!(self.place_address(base));
                 let index = lower!(self.scalar(index));
                 if let Type::Vec(element) = base.ty {
@@ -8035,6 +8095,18 @@ impl Generator<'_, '_> {
             }
             StrOp::ToString => {
                 vec![self.runtime_call(self.str_to_string, &[pointer, length])]
+            }
+            StrOp::AsciiUpper => {
+                self.runtime_call(self.str_writes[0], &[pointer, length]);
+                vec![]
+            }
+            StrOp::AsciiLower => {
+                self.runtime_call(self.str_writes[1], &[pointer, length]);
+                vec![]
+            }
+            StrOp::SetScalar => {
+                self.runtime_call(self.str_writes[2], &[pointer, length, values[4], values[5]]);
+                vec![]
             }
         }
     }

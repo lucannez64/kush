@@ -122,8 +122,64 @@ splitting are not implemented for text views.
 - call results and later arguments preserve the same loans: an earlier text
   argument keeps its owner loaned through later argument evaluation.
 
-`&str` is immutable. `&mut str`, `&mut view[..]`, and mutating a text view are
-rejected.
+`&str` is immutable: `&mut view[..]` of a shared view is rejected, because
+shared text is never upgraded. Exclusive text is a separate type, described
+next.
+
+## Exclusive text views
+
+`&mut str` is an exclusive view of a range of a `let mut` String. It has the
+same four-word descriptor as `&str` and the same scalar-boundary checks, and
+it holds an **exclusive** loan on the String (or its parent `&mut str`) until
+its last use.
+
+```kush
+fn shout(text: &mut str) -> Unit ! {} { Str.make_ascii_uppercase(text); }
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let mut s = String.from("héllo wörld");
+    let v = s.as_mut_str();            // or String.as_mut_str(&mut s)
+    shout(&mut v[..]);                 // reborrow: "HéLLO WöRLD"
+    let tail: &mut str = &mut v[7..];  // "WöRLD"
+    Str.make_ascii_lowercase(tail);    // "wörld"
+    Str.set_scalar(tail, 1, 'ō');      // 'ö' and 'ō' are both 2 bytes
+    print_i64(s.len());                // 13: the length never changes
+    0
+}
+```
+
+| Operation | Effects | Meaning |
+| --- | --- | --- |
+| `String.as_mut_str(&mut s)` / `s.as_mut_str()` | none | Whole text as `&mut str`; needs `let mut s`. |
+| `&mut v[start..end]` (and the open forms) | `panic` with a bound | Exclusive subview of a `&mut str` local at checked scalar boundaries. |
+| `&v[start..end]` | `panic` with a bound | Shared `&str` subview of a `&mut str`. |
+| `Str.make_ascii_uppercase(v)` / `v.make_ascii_uppercase()` | none | ASCII `a`–`z` to `A`–`Z`; every other byte is unchanged. |
+| `Str.make_ascii_lowercase(v)` / `v.make_ascii_lowercase()` | none | ASCII `A`–`Z` to `a`–`z`. |
+| `Str.set_scalar(v, i, c)` / `v.set_scalar(i, c)` | `panic` | Replace the scalar starting at byte offset `i` with `c`. |
+
+Every read (`len`, `scalar_len`, `byte_at`, `scalar_at`, `to_string`) accepts a
+`&mut str` by reborrowing it shared for the call.
+
+**UTF-8 by construction or at the boundary.** The case changes touch only
+bytes below `0x80`, so a multi-byte scalar is never split or altered.
+`Str.set_scalar` panics unless `i` is a scalar boundary inside the view and
+`c` encodes to exactly as many UTF-8 bytes as the scalar it replaces. No write
+changes the view's length or the owner's length, and there is no byte-level
+write: a `&mut str` is not a `&mut [T]`, so `Slice.set`, single-index places,
+and byte views are rejected.
+
+**Loans.** While a `&mut str` (or a subview of it) can still be used, the
+String cannot be read, borrowed, moved, dropped, or reassigned, and the parent
+view cannot be used. Two exclusive subviews of one view conflict even when
+their ranges are disjoint; ranges are not inferred to be disjoint. A `&mut str`
+is a move-only capability like `&mut [T]`: passing it to a function moves it,
+so reborrow it with `&mut v[..]` to keep using it.
+
+**Positions.** A `&mut str` lives in a lexical binding and may be passed to or
+returned from a named function (`fn rest<'a>(t: &'a mut str) -> &'a mut str`).
+It cannot be stored in a record field, a container, a tuple, an array, a union,
+a closure capture, a task, or a function arrow, and a view of a local String
+cannot be returned.
 
 ### Conservative boundaries
 
@@ -168,8 +224,9 @@ never dropped.
 
 ## Remaining limits
 
-This is borrowed, immutable text over validated `String` storage, not a string
-library. There is no fallible substring, no `&mut str`, no text equality or
+This is borrowed text over validated `String` storage, not a string library.
+Exclusive text supports only the length-preserving writes above. There is no
+fallible substring, no text equality or
 ordering, no char/byte iteration protocol, no slicing on a `String` value, no
 `Str.as_bytes`, no `&String`-derived returned view, no text view in aggregates,
 closures, tasks, unions, generics, or arrow types, and no general lifetime

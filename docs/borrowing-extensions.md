@@ -222,8 +222,9 @@ let element = &mut values[1];
   Two references to structurally disjoint fields or to distinct constant
   indices of one array/vector may be live in the same expression; the root
   binding stays an ancestor capability and cannot be moved, dropped, replaced,
-  or passed while either loan can still be used. A runtime index is
-  conservative: all dynamic indices of one base conflict.
+  or passed while either loan can still be used. A runtime index is disjoint
+  from another index of the same base only when the linear facts prove the
+  two values distinct (see [runtime index disjointness](#runtime-index-disjointness)).
 - `&mut` requires a mutable root binding or an exclusive reference root. A
   shared root is never upgraded. A record with borrowed fields remains
   read-only for whole-record borrowing; owned metadata of such a record is not
@@ -264,15 +265,74 @@ Owning handles keep their dedicated operations (`Box.set`/`Box.reuse`,
 `Vec.push`/`Vec.set`/`Vec.clear`) rather than reinterpreting a handle word as a
 payload.
 
-### Mutable text boundary
+### Runtime index disjointness
 
-`&mut str` remains rejected at declaration. The exact design issue is that a
-text view is validated UTF-8 and byte positions are not scalar boundaries; an
-unrestricted byte write could create invalid UTF-8. A sound `&mut str` needs an
-operation that replaces one whole Unicode scalar with another whose UTF-8
-encoding has the same byte length (or a validated re-encoding that moves the
-view), not a raw byte store. That operation is not part of the current text
-fragment.
+Each index place (`v[i]`, `a[i][j]`, or `s[i]` of a view) gets a checker
+identity. When the type checker creates an index place, it compares the index
+with every earlier index place of the same root binding in the body. It
+records the pairs whose values the [linear facts](runtime-indices.md) prove
+distinct at that point:
+
+```rust
+fn swap(v: &mut [i64], i: i64, j: i64) -> Unit ! {panic} {
+    if i != j {
+        let p = &mut v[i];
+        let q = &mut v[j];        // i != j is established: disjoint
+        let t = *p;
+        *p = *q;
+        *q = t;
+    }
+}
+
+fn pairs(s: &mut [i64]) -> Unit ! {panic} {
+    let n = Slice.len(s);
+    let mut k = 0;
+    while k + 1 < n {
+        let a = &mut s[k];
+        let b = &mut s[k + 1];    // (k + 1) - k = 1: disjoint
+        *a = *a + *b;
+        k = k + 1;
+    }
+}
+```
+
+- A proof is either a strict order (`i < j` or `j < i`) derived by
+  Fourier–Motzkin, or a difference provably equal (up to sign) to an
+  established disequality. A condition now records `a != b` (and a false
+  `a == b`) as a disequality, which never enters the convex system. Nothing is
+  assumed: an unproved pair, an equal pair, an opaque index (its address was
+  taken by `&mut`), or a budget overflow conflicts.
+- Two places are disjoint when *some* position of their paths is provably
+  different: two record fields, two distinct constants, or a proved index
+  pair. So `m[i][0]` and `m[i][1]` coexist even though the row index is
+  unknown. A constant and a runtime index (`&mut v[1]` with `&mut v[i]`)
+  conflict unless `i != 1` is proved. Earlier versions accepted that pair and
+  aliased one element.
+- Index values are versioned terms, so reassigning an index between the two
+  places never reuses a stale value. A relation describes one evaluation of
+  each place. A loan stored in a record, container, or task region forgets its
+  index identities (constant values are kept), so a reference kept from an
+  earlier loop iteration conflicts with every runtime index of the same base.
+- The index expression is an ordinary read. Reading an exclusively borrowed
+  owner or view inside the index (`&mut xs[xs[0]]` while `&mut xs[0]` is live)
+  is rejected.
+
+A live record or container that holds a reference or slice leaf keeps that
+leaf's owner borrowed against new borrows. A stored `&mut` element excludes
+any new borrow of its owner, and a stored shared element excludes a new
+exclusive one. Earlier versions only blocked moving the owner, so
+`Box.new(&mut xs[0])` followed by `&mut xs[0]` was accepted. The check is per
+owner, not per element: a box holding `&mut xs[3]` also excludes a new
+`&mut xs[0]`.
+
+### Exclusive text views
+
+`&mut str` is an exclusive text view with the same four-word representation as
+`&str`. It is created from a `let mut` String with `String.as_mut_str(&mut s)`
+or `s.as_mut_str()`, or narrowed from another `&mut str` with
+`&mut v[start..end]`. It holds an exclusive loan on the String until its last
+use. Its checked writes never change the byte length and keep the bytes valid
+UTF-8; see [borrowed text](borrowed-text.md#exclusive-text-views).
 
 ## Reference storage, escape, and reborrow
 
@@ -433,8 +493,8 @@ fn add<'a>(v: &mut Vec<&'a Point>, p: &'a Point) -> Unit ! {alloc, panic} {
   merges those loans into the container binding, so replacing, moving, or
   dropping a written owner after the call is rejected. A block-local owner
   written into a longer-lived outer container is rejected at block exit.
-- `Vec.try_reserve` through `&mut`, `&mut str`, and mutable owner borrows of
-  temporaries, fields, or index results remain explicit exclusions.
+- `Vec.try_reserve` through `&mut`, and mutable owner borrows of temporaries,
+  fields, or index results, remain explicit exclusions.
 
 ## Reference-valued callables
 
@@ -585,12 +645,16 @@ let q = &mut right[1];      // the opposite split side: no conflict
   a subview. It roots at the view's owners, not at the view binding, so the
   owner stays loaned until the element reference's checked last use, even
   after the view binding is dead or out of scope. It keeps the view's
-  `split_at_mut` side, so references into opposite sides coexist while two
-  references into one view (or one side) are aliasing errors, as is using the
-  view while an exclusive element reference is live.
+  `split_at_mut` side, so references into opposite sides coexist, while two
+  references to one element of a view (or of one side) are aliasing errors,
+  as is using the view while an exclusive element reference is live.
 - **Mutability.** `&mut s[i]` needs an exclusive `&mut [T]` view; a shared
   view is never upgraded. Owning, linear, view, and reference elements are
   rejected.
+- **Distinct elements.** The view binding is the root of its element places,
+  so `&mut s[0]` and `&mut s[3]`, or `&mut s[k]` and `&mut s[k + 1]`, coexist
+  under the [index disjointness](#runtime-index-disjointness) rule. Two
+  references to one element, or an unproved pair, conflict.
 - **Results.** A `&'a [T]` or `&'a mut [T]` parameter backs a returned `&'a T`
   or `&'a mut T` (or a reference to a field inside the element). A shared view
   cannot back an exclusive result, and a local view's element cannot escape
@@ -609,10 +673,11 @@ let q = &mut right[1];      // the opposite split side: no conflict
 
 ## Remaining deliberate limits
 
-- `&mut str` and `Vec.try_reserve` through `&mut Vec<T>` remain outside the
-  subset; each is an explicit, tested rejection. Two element references into
-  one view conflict even at distinct constant indices. `&mut Bytes`/`&mut String` provide read access but no mutating
-  builtins. Temporary owners, record fields, and array/vector indices are
+- `Vec.try_reserve` through `&mut Vec<T>` remains outside the subset; it is
+  an explicit, tested rejection. `&mut str` supports only the checked
+  length-preserving writes and cannot be stored in records, containers,
+  closures, tasks, or arrows. `&mut Bytes`/`&mut String` provide read access
+  but no mutating builtins. Temporary owners, record fields, and array/vector indices are
   supported through hidden storage or real element addresses as described
   above. A record with borrowed fields is still not mutated as a whole.
 - A child task cannot return a borrowed `TaskExit<T>` (rejected when the

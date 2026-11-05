@@ -841,7 +841,12 @@ impl<'a> Types<'a> {
             || 1 + self.width(element) * length > MAX_WORDS
             || matches!(
                 element,
-                Type::Ref(_) | Type::RefMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::Str
+                Type::Ref(_)
+                    | Type::RefMut(_)
+                    | Type::Slice(_)
+                    | Type::SliceMut(_)
+                    | Type::Str
+                    | Type::StrMut
             )
             || has_borrow(self, element)
         {
@@ -965,6 +970,7 @@ impl<'a> Types<'a> {
                 | Type::Slice(_)
                 | Type::SliceMut(_)
                 | Type::Str
+                | Type::StrMut
                 | Type::Never
         ) || has_borrow(self, element)
         {
@@ -1854,6 +1860,7 @@ impl<'a> Types<'a> {
             Type::Bytes => "Bytes".into(),
             Type::String => "String".into(),
             Type::Str => "&str".into(),
+            Type::StrMut => "&mut str".into(),
             Type::Stdin => "Stdin".into(),
             Type::Stdout => "Stdout".into(),
             Type::Box(p) => format!("Box<{}>", self.name(self.pointees[p])),
@@ -2068,13 +2075,7 @@ impl<'a> Types<'a> {
         }
         if let ast::TypeKind::Borrow { mutable, inner, .. } = &ty.kind {
             if is_str_type(inner) {
-                if *mutable {
-                    return Err(Diagnostic::new(
-                        ty.span,
-                        "mutable borrowed text '&mut str' is not supported; text views are immutable",
-                    ));
-                }
-                return Ok(Type::Str);
+                return Ok(if *mutable { Type::StrMut } else { Type::Str });
             }
             if let ast::TypeKind::Slice(element) = &inner.kind {
                 let element = self.lower(element, substitution, depth + 1)?;
@@ -2907,7 +2908,12 @@ impl<'a> Types<'a> {
                     matches!(b.name.as_str(), "Box" | "Vec") && is_borrowed_record(self, inner);
                 if (matches!(
                     inner,
-                    Type::Ref(_) | Type::RefMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::Str
+                    Type::Ref(_)
+                        | Type::RefMut(_)
+                        | Type::Slice(_)
+                        | Type::SliceMut(_)
+                        | Type::Str
+                        | Type::StrMut
                 ) || has_borrow(self, inner))
                     && !task_borrowed_record
                     && !direct_reference
@@ -3529,12 +3535,15 @@ impl<'a> Types<'a> {
     }
     fn check_union_member(&self, ty: Type, span: Span) -> Result<()> {
         match ty {
-            Type::Ref(_) | Type::RefMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::Str => {
-                Err(Diagnostic::new(
-                    span,
-                    "unions cannot contain borrowed references or slice views (including &str text views); a borrow must not escape its lexical owner through a union",
-                ))
-            }
+            Type::Ref(_)
+            | Type::RefMut(_)
+            | Type::Slice(_)
+            | Type::SliceMut(_)
+            | Type::Str
+            | Type::StrMut => Err(Diagnostic::new(
+                span,
+                "unions cannot contain borrowed references or slice views (including &str text views); a borrow must not escape its lexical owner through a union",
+            )),
             ty if has_borrow(self, ty) => Err(Diagnostic::new(
                 span,
                 "unions cannot contain borrowed records; a borrow must not escape its lexical owner through a union",
@@ -4152,6 +4161,11 @@ impl<'a> Types<'a> {
                             mutable_borrow |= matches!(ty, Type::RefMut(_));
                         } else if ty == Type::Str {
                             borrowed = true;
+                        } else if ty == Type::StrMut {
+                            return Err(Diagnostic::new(
+                                field.span,
+                                "a record cannot store an exclusive '&mut str' text view; pass the view directly to a function, or store a shared '&str'",
+                            ));
                         } else {
                             return Err(Diagnostic::new(
                                 field.span,
@@ -4404,7 +4418,7 @@ impl<'a> Types<'a> {
                     }
                     Ok(1 + largest)
                 }
-                Type::Slice(_) | Type::SliceMut(_) | Type::Str => Ok(4),
+                Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::StrMut => Ok(4),
                 Type::Fn(_) => Ok(1),
                 Type::Once(_) | Type::DynObj(_) => Ok(2),
                 _ => Ok(1),
@@ -5466,7 +5480,12 @@ pub(crate) fn has_borrow(types: &Types<'_>, ty: Type) -> bool {
             return false;
         }
         match ty {
-            Type::Ref(_) | Type::RefMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::Str => true,
+            Type::Ref(_)
+            | Type::RefMut(_)
+            | Type::Slice(_)
+            | Type::SliceMut(_)
+            | Type::Str
+            | Type::StrMut => true,
             Type::Annotated(p, _) => go(types, types.pointees[p], seen),
             Type::Box(p)
             | Type::ArenaBox(p)
@@ -5638,7 +5657,7 @@ fn collect_borrow_lifetimes(types: &Types<'_>, ty: Type, out: &mut BTreeSet<Stri
             Type::Slice(p) | Type::SliceMut(p) | Type::Ref(p) | Type::RefMut(p) | Type::Task(p) => {
                 go(types, types.pointees[p], out, seen)
             }
-            Type::Str => {}
+            Type::Str | Type::StrMut => {}
             Type::Annotated(_, label) => {
                 if let Some(name) = types.reference_label_name(label) {
                     out.insert(name);
@@ -5894,6 +5913,12 @@ pub(crate) fn borrow_leaves(types: &Types<'_>, ty: Type) -> Result<Vec<BorrowLea
                     mutable: false,
                     variance: position,
                 }),
+                Type::StrMut => out.push(BorrowLeaf {
+                    path: path.clone(),
+                    lifetime: hint,
+                    mutable: true,
+                    variance: position,
+                }),
                 Type::Ref(_) => out.push(BorrowLeaf {
                     path: path.clone(),
                     lifetime: hint,
@@ -6080,6 +6105,7 @@ pub(crate) fn type_name_in(
         Type::Bytes => "Bytes".into(),
         Type::String => "String".into(),
         Type::Str => "&str".into(),
+        Type::StrMut => "&mut str".into(),
         Type::Stdin => "Stdin".into(),
         Type::Stdout => "Stdout".into(),
         Type::Box(p) => format!(
@@ -6170,7 +6196,10 @@ pub(crate) fn width(
         // same width as the annotated element (a one-word reference or a
         // four-word text view).
         width(pointees, enums, unions, functions, pointees[p])
-    } else if matches!(ty, Type::Slice(_) | Type::SliceMut(_) | Type::Str) {
+    } else if matches!(
+        ty,
+        Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::StrMut
+    ) {
         // (data pointer, length, stride, byte-elements flag)
         4
     } else if matches!(ty, Type::Allocator) {
