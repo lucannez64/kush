@@ -1790,14 +1790,29 @@
       "deps": [
         "A-PAT-SUFFIX"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "5f8d8b4",
       "log": [
         {
           "time": "2026-11-05 01:04:48",
           "who": "agent",
           "text": "Recursive element patterns already work for copyable elements; tests added in 85f85d9. Borrowed element patterns build on R-SLICE-PLACE element references."
+        },
+        {
+          "time": "2026-11-05 01:37:24",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 01:52:23",
+          "who": "agent",
+          "text": "done 5f8d8b4"
+        },
+        {
+          "time": "2026-11-05 01:52:23",
+          "who": "agent",
+          "text": "Recursive patterns tested in 85f85d9; borrowed patterns in 5f8d8b4. Local gate: 1392 tests, clippy clean."
         }
       ]
     },
