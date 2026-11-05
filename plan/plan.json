@@ -1160,6 +1160,16 @@
           "time": "2026-11-05 15:41:09",
           "who": "agent",
           "text": "Parser accepts dyn A + B; resolver records multi-object traits; lowering canonicalizes components (in progress, uncommitted)."
+        },
+        {
+          "time": "2026-11-05 15:44:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 15:44:32",
+          "who": "agent",
+          "text": "Implemented together in fa13f85 (syntax, per-component tables, dispatch + upcast); dyn_objects.rs multi tests pass locally, clippy clean; Boat gate running."
         }
       ]
     },
@@ -1172,10 +1182,21 @@
       "deps": [
         "D-MULTI-SYNTAX"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 15:44:33",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 15:44:33",
+          "who": "agent",
+          "text": "Implemented together in fa13f85 (syntax, per-component tables, dispatch + upcast); dyn_objects.rs multi tests pass locally, clippy clean; Boat gate running."
+        }
+      ]
     },
     {
       "id": "D-MULTI-DISPATCH",
@@ -1186,10 +1207,21 @@
       "deps": [
         "D-MULTI-LAYOUT"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 15:44:33",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 15:44:34",
+          "who": "agent",
+          "text": "Implemented together in fa13f85 (syntax, per-component tables, dispatch + upcast); dyn_objects.rs multi tests pass locally, clippy clean; Boat gate running."
+        }
+      ]
     },
     {
       "id": "D-REVIEW",
