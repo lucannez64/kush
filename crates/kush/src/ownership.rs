@@ -3254,11 +3254,20 @@ impl Checker<'_> {
     }
     fn argument_leaf_loan(&self, argument: &Expr, path: &[usize]) -> Option<Loan> {
         if let Some(rest) = path.strip_prefix(&[CONTAINER_LEAF]) {
-            return self
-                .container_provenance(argument)
-                .leaves
-                .get(rest)
-                .cloned();
+            if let Some(loan) = self.container_provenance(argument).leaves.get(rest) {
+                return Some(loan.clone());
+            }
+            // Caller storage behind a reference parameter has no per-leaf
+            // provenance here: its leaf is the parameter's declared lifetime,
+            // rooted at the reference itself.
+            let declared = self.declared_referent_provenance(argument.ty).ok()?;
+            let leaf = declared.leaves.get(rest)?;
+            return Some(Loan {
+                origins: self.view_origins(argument),
+                mutable: leaf.mutable,
+                lifetime: leaf.lifetime.clone(),
+                ..Loan::default()
+            });
         }
         if path.is_empty() && (argument.ty.is_view() || argument.ty.is_ref()) {
             return Some(self.view_loan(argument));

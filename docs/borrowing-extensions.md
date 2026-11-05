@@ -716,6 +716,14 @@ captures:
 
 ## Lifetime constraints and decidability
 
+Kush never assumes an outlives bound from a parameter's type (Rust's implied
+bounds). A bound a body needs, such as `'b: 'a` in
+`fn foo<'a, 'b>(u: &'a Anchor<'b>, v: &'b Point) -> &'a Point { v }`, is
+inferred into the signature as `fn<'a, 'b: 'a>`, checked at every direct and
+indirect call, and kept by function values. An arrow type that omits it is a
+type mismatch, so the function-pointer coercion behind Rust issue #25860
+cannot drop it (`tests/implied_bounds.rs`).
+
 Result inference is a finite constraint closure over the lifetimes declared by
 one function:
 

@@ -1909,8 +1909,57 @@ impl<'a> Types<'a> {
         // Show canonical lifetimes `#k` as 'a, 'b, ..., and internal identities
         // as the same anonymous `'_N` spelling used by every type display.
         let named = lifetime_label_text;
+        // A record or container type keeps its source lifetime names; map
+        // them to the arrow's canonical names through the leaf lists, which
+        // are aligned by path, so one binder list describes the whole arrow.
+        let mut renames: BTreeMap<String, String> = BTreeMap::new();
+        let leaves_of = |ty: Type| -> Vec<BorrowLeaf> {
+            if ty.is_ref() {
+                reference_referent_leaves(self, ty).unwrap_or_default()
+            } else {
+                borrow_leaves(self, ty).unwrap_or_default()
+            }
+        };
+        let aligned = signature
+            .parameters
+            .iter()
+            .zip(&borrows.parameter_leaves)
+            .map(|(ty, canonical)| (*ty, canonical.clone()))
+            .chain(std::iter::once((
+                signature.result,
+                borrows.result_leaves.clone(),
+            )));
+        for (ty, canonical) in aligned {
+            for source in leaves_of(ty) {
+                if let (Some(from), Some(to)) = (
+                    &source.lifetime,
+                    canonical
+                        .iter()
+                        .find(|leaf| leaf.path == source.path)
+                        .and_then(|leaf| leaf.lifetime.as_ref()),
+                ) {
+                    renames.insert(named(from), named(to));
+                }
+            }
+        }
+        let rename = |text: String| -> String {
+            if renames.iter().all(|(from, to)| from == to) {
+                return text;
+            }
+            // Two passes through placeholders so swapped names never clash.
+            let mut out = text;
+            for (index, (from, _)) in renames.iter().enumerate() {
+                for end in ['>', ',', ' '] {
+                    out = out.replace(&format!("{from}{end}"), &format!("\u{1}{index}\u{1}{end}"));
+                }
+            }
+            for (index, (_, to)) in renames.iter().enumerate() {
+                out = out.replace(&format!("\u{1}{index}\u{1}"), to);
+            }
+            out
+        };
         let with_lifetime = |ty: Type, lifetime: Option<&String>| -> String {
-            let text = self.name(ty);
+            let text = rename(self.name(ty));
             match lifetime {
                 Some(lifetime) if text.starts_with('&') => {
                     format!("&{} {}", named(lifetime), &text[1..])
@@ -1937,6 +1986,14 @@ impl<'a> Types<'a> {
             .iter()
             .flatten()
             .chain(&borrows.result)
+            .chain(
+                borrows
+                    .parameter_leaves
+                    .iter()
+                    .flatten()
+                    .chain(&borrows.result_leaves)
+                    .filter_map(|leaf| leaf.lifetime.as_ref()),
+            )
             .cloned()
             .collect::<Vec<_>>();
         binders.sort_by_key(|name| name.trim_start_matches('#').parse::<usize>().unwrap_or(0));
