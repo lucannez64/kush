@@ -2488,10 +2488,16 @@
         "RES-INFERENCE-PROTOTYPE",
         "RES-UNBOX-CERT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "3e5e99d",
+      "log": [
+        {
+          "time": "2026-11-05 18:43:58",
+          "who": "agent",
+          "text": "done 3e5e99d"
+        }
+      ]
     },
     {
       "id": "FMT-LAYOUT",
@@ -2982,10 +2988,21 @@
       "deps": [
         "GRADES"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "CSL 2025 mixed logic and ICFP 2023 erasure used as proof-obligation guides; preserve Kush must-use vs owning linear distinction; no transferred soundness claim.",
-      "commit": null,
-      "log": []
+      "commit": "aae3627",
+      "log": [
+        {
+          "time": "2026-11-05 18:21:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 18:43:58",
+          "who": "agent",
+          "text": "done aae3627"
+        }
+      ]
     },
     {
       "id": "RES-EFFECT-CAPABILITY",
@@ -2995,14 +3012,24 @@
       "deps": [
         "ROWS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Use Lexa 2024/2025 as design inputs; preserve current dynamic lookup semantics and separate frequent/resumptive effects from rare exceptional paths.",
-      "commit": null,
+      "commit": "ce0b5fb",
       "log": [
         {
           "time": "2026-11-03 17:29:52",
           "who": "agent",
           "text": "Katsumata POPL2014 supplies semantic proof obligations for composition/subeffecting; no monadic source rewrite or claim that row bitsets alone prove soundness."
+        },
+        {
+          "time": "2026-11-05 18:23:18",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 18:43:58",
+          "who": "agent",
+          "text": "done ce0b5fb"
         }
       ]
     },
@@ -3014,10 +3041,21 @@
       "deps": [
         "I-PRINC-DESIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "SuperF-inspired isolated corpus and annotation escape hatch, termination budget and ownership/grade/effect integration criteria; not a lifetime-solver replacement.",
-      "commit": null,
-      "log": []
+      "commit": "00e52fa",
+      "log": [
+        {
+          "time": "2026-11-05 18:26:29",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 18:43:58",
+          "who": "agent",
+          "text": "done 00e52fa"
+        }
+      ]
     },
     {
       "id": "RES-UNBOX-CERT",
@@ -3027,10 +3065,21 @@
       "deps": [
         "MEM"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "POPL 2024 constructor unboxing informs collision certificates and recursive expansion bounds; preserve current niche tags, drops and FFI layout contracts.",
-      "commit": null,
-      "log": []
+      "commit": "b3758d9",
+      "log": [
+        {
+          "time": "2026-11-05 18:24:31",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 18:43:58",
+          "who": "agent",
+          "text": "done b3758d9"
+        }
+      ]
     },
     {
       "id": "LT-ROWS-DESIGN",
@@ -3352,10 +3401,26 @@
       "deps": [
         "E-MULTI-PERFORM"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Relax rule 2 of docs/effect-state-machines.md: views of storage owned outside the handled body may live across a perform with the handle's extent as region; token classed as a scoped borrowed-capture closure.",
-      "commit": null,
-      "log": []
+      "commit": "aed0390",
+      "log": [
+        {
+          "time": "2026-11-05 18:10:41",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 18:43:58",
+          "who": "agent",
+          "text": "Independent review found a stale-copy hole for places inside borrowed records and shared &mut loans under multishot; fixed with regressions in 3e5e99d. Boat: 1531 tests, fmt, strict clippy."
+        },
+        {
+          "time": "2026-11-05 18:43:58",
+          "who": "agent",
+          "text": "done aed0390"
+        }
+      ]
     },
     {
       "id": "FIX-ANF-BORROW-ORDER",
@@ -3421,9 +3486,9 @@
       "deps": [
         "DYN"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "In a tuple, a closed dyn Trait with one concrete impl is stored as the member type (let t: Text = pair.0 is accepted), so projected dispatch follows static rules. Keeping the object type would reject currently accepted programs; needs a user decision.",
-      "commit": null,
+      "commit": "489f9a0",
       "log": [
         {
           "time": "2026-11-05 18:05:37",
@@ -3434,6 +3499,16 @@
           "time": "2026-11-05 18:05:37",
           "who": "agent",
           "text": "User chose: keep the object type in tuples (let t: Text = pair.0 becomes rejected; pair.0.method() uses object dispatch)."
+        },
+        {
+          "time": "2026-11-05 18:43:58",
+          "who": "agent",
+          "text": "Review fixes in 3e5e99d: if/match joins keep the object; diagnostics name all sharing traits. Generic/mixed joins split to D-SINGLE-JOIN. Boat: 1531 tests, fmt, strict clippy."
+        },
+        {
+          "time": "2026-11-05 18:43:58",
+          "who": "agent",
+          "text": "done 489f9a0"
         }
       ]
     },
@@ -3443,14 +3518,19 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "Reviewer probe: v = pair.0.swapv(&pair.1[..]) with swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64], then pair.0.look() while v is live is accepted; same for concrete records. Not a memory-safety issue (the view aliases the argument), but stricter exclusive-loan rules would reject it. Pre-existing.",
-      "commit": null,
+      "commit": "255204b",
       "log": [
         {
           "time": "2026-11-05 18:05:37",
           "who": "agent",
           "text": "User chose: keep accepting; document and pin with regression tests."
+        },
+        {
+          "time": "2026-11-05 18:43:58",
+          "who": "agent",
+          "text": "done 255204b"
         }
       ]
     },
@@ -3473,6 +3553,201 @@
         }
       ],
       "area": "dynarray"
+    },
+    {
+      "id": "GRADE-OBLIG-TESTS",
+      "title": "Per-obligation hostile tests for the two-zone grade model",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "RES-GRADE-MODEL"
+      ],
+      "status": "todo",
+      "desc": "docs/grade-model.md sections 2-5: name each obligation (per-zone weakening/contraction, scaling at r=0,1,n,many, erasure E1-E6, handler/multishot/task boundaries) and pin a positive and a hostile program for each in both backends with balanced allocations.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GRADE-ARROW-AXES",
+      "title": "Audit arrow subtyping on separate grade and closure-mode axes",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "RES-GRADE-MODEL"
+      ],
+      "status": "todo",
+      "desc": "docs/grade-model.md section 3: check parameter-grade and once/linear-once axes independently; hostile programs try to widen linear once through a grade change or an erased-position adapter.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GRADE-EFFECT-DEMAND",
+      "title": "Design an effect-sensitive demand rule for graded arguments",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "RES-GRADE-MODEL"
+      ],
+      "status": "todo",
+      "desc": "Research: replace the conservative max(1,r) effect demand / high-demand block counting (grade-model.md decision 5) only with a specified effect analysis; design before implementation.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-ROW-LAWS",
+      "title": "Exhaustive tests of effect-row algebra laws",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "RES-EFFECT-CAPABILITY"
+      ],
+      "status": "todo",
+      "desc": "docs/effect-capabilities.md section 4: composition, monotonicity, discharge, subtraction and bounded binders checked over the 16-bit row universe against the checker's row operations.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-CAP-LEXICAL",
+      "title": "Second-class lexical effect capabilities (tail-resumptive)",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "EFF-ROW-LAWS"
+      ],
+      "status": "todo",
+      "desc": "docs/effect-capabilities.md section 3: handle Op as op, cap Op ! {e} parameters, perform op(x) without dynamic lookup; scoped-borrow escape rules; dynamic semantics unchanged; parity/cleanup/rejection tests.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-CAP-RESUME",
+      "title": "Non-tail and multishot handlers through capabilities",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "EFF-CAP-LEXICAL"
+      ],
+      "status": "todo",
+      "desc": "Resumable entries keyed by cap parameters (effect-capabilities.md 3.4).",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EFF-CAP-PERF",
+      "title": "Measure capability performs against the lexical in-place path",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "EFF-CAP-LEXICAL"
+      ],
+      "status": "todo",
+      "desc": "Acceptance gate (effect-capabilities.md decision 4) on the E-PERF harness.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "E-ABORT-DESIGN",
+      "title": "Design non-resuming (abortive) handlers and unwinding",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "RES-EFFECT-CAPABILITY"
+      ],
+      "status": "todo",
+      "desc": "Research: dropping live owned values between perform and handle in both backends; separate from capabilities (effect-capabilities.md 3.5).",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "UNBOX-CERT-CHECKER",
+      "title": "Value-set domain and representation certificate checker",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "RES-UNBOX-CERT"
+      ],
+      "status": "todo",
+      "desc": "docs/unboxing-certificates.md sections 3-4: re-derive the three existing niche layouts through a checked certificate with no layout change; generate decoders from certificates.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "UNBOX-ALIGN-CONTRACT",
+      "title": "Assert pointer alignment for every allocation path",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "RES-UNBOX-CERT"
+      ],
+      "status": "todo",
+      "desc": "unboxing-certificates.md section 6: pooled, headerless, system, arena, user allocator and stack references; prerequisite for alignment niches.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "UNBOX-MULTI-NICHE",
+      "title": "Several empty variants and nested niche propagation",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "UNBOX-CERT-CHECKER"
+      ],
+      "status": "todo",
+      "desc": "unboxing-certificates.md section 5 with the section 6 hostile tests and a measured benefit.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "UNBOX-TAG-NICHE",
+      "title": "Reuse unused tag values of inner tagged enums",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "UNBOX-CERT-CHECKER"
+      ],
+      "status": "todo",
+      "desc": "unboxing-certificates.md section 5.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "I-PROTO-SIMPLIFY",
+      "title": "Variable merging in the inference prototype",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "RES-INFERENCE-PROTOTYPE"
+      ],
+      "status": "todo",
+      "desc": "docs/inference-prototype.md finding 5: co-occurrence simplification in crates/infer-proto; re-run the corpus.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "I-LAMBDA-INFER",
+      "title": "Local inference of unannotated lambda parameter, result and effect types",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "I-PROTO-SIMPLIFY"
+      ],
+      "status": "todo",
+      "desc": "docs/inference-prototype.md decisions 3-4: only Direct Kush types, no implicit union coercion/adapters, no recursive types, ungraded, ownership fixed by use sites, step and depth budgets; otherwise ask for the annotation.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "D-SINGLE-JOIN",
+      "title": "Generic inference and mixed joins of one-impl dyn objects",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "D-SINGLE-TUPLE"
+      ],
+      "status": "todo",
+      "desc": "first<T>(a, b) with two one-impl dyn objects, and match arms mixing an object with a plain member value, still collapse to the member type and are rejected (found by the D-SINGLE-TUPLE review).",
+      "commit": null,
+      "log": []
     }
   ]
 }
