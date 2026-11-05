@@ -1251,14 +1251,19 @@
         "D-ASSOC-EARLY",
         "D-MULTI-DISPATCH"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "",
-      "commit": null,
+      "commit": "61a1a37",
       "log": [
         {
           "time": "2026-11-05 15:52:28",
           "who": "agent",
           "text": "Independent reviewer agent with Boat probe access; scope f8f72c4..fa13f85."
+        },
+        {
+          "time": "2026-11-05 17:15:55",
+          "who": "agent",
+          "text": "Sonnet reviewer, ~100 probes on both backends: no soundness bug. Follow-ups: D-SINGLE-TUPLE, BORROW-EXCL-VIEW-READ (pre-existing). Added generic-component qualification test."
         }
       ]
     },
@@ -1271,10 +1276,16 @@
       "deps": [
         "D-REVIEW"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "",
-      "commit": null,
-      "log": []
+      "commit": "61a1a37",
+      "log": [
+        {
+          "time": "2026-11-05 17:15:55",
+          "who": "agent",
+          "text": "traits.md, core-status.md, completion-backlog.md updated. Final Boat gate at 61a1a37: 1495 tests, fmt, clippy pass."
+        }
+      ]
     },
     {
       "id": "I-IDX-DESIGN",
@@ -3301,6 +3312,30 @@
           "text": "Boat gate on ea8f99b: fmt, clippy, 1476 tests pass."
         }
       ]
+    },
+    {
+      "id": "D-SINGLE-TUPLE",
+      "title": "One-impl closed dyn object inside a tuple collapses to its member type",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "DYN"
+      ],
+      "status": "todo",
+      "desc": "In a tuple, a closed dyn Trait with one concrete impl is stored as the member type (let t: Text = pair.0 is accepted), so projected dispatch follows static rules. Keeping the object type would reject currently accepted programs; needs a user decision.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "BORROW-EXCL-VIEW-READ",
+      "title": "Shared read accepted while a view from an exclusive-receiver call is live",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Reviewer probe: v = pair.0.swapv(&pair.1[..]) with swapv<'a>(self: &'a mut Self, v: &'a [i64]) -> &'a [i64], then pair.0.look() while v is live is accepted; same for concrete records. Not a memory-safety issue (the view aliases the argument), but stricter exclusive-loan rules would reject it. Pre-existing.",
+      "commit": null,
+      "log": []
     }
   ]
 }
