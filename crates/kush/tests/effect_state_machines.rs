@@ -1913,3 +1913,65 @@ fn borrows_that_the_resumption_could_invalidate_stay_rejected() {
         "this call can suspend while it borrows a value",
     );
 }
+
+#[test]
+fn review_places_inside_borrowed_records_have_unknown_owners() {
+    // `&mut r.p.x` points into `q`, not `r`: with `q` copied into the
+    // continuation, the write through `v` would be lost (1002, not 1011).
+    let records = "struct P { x: i64, y: i64 } struct R<'a> { p: &'a mut P }";
+    rejects(
+        &format!(
+            "{records} {}",
+            outer_borrow(
+                "let mut q = P { x: 1, y: 2 }; let mut r = R { p: &mut q };",
+                "let v = &mut r.p.x; let a = perform Ask(1); *v = a; a * 100 + q.x",
+                "",
+            )
+        ),
+        "cannot stay live across a non-tail 'perform'",
+    );
+    // The same through an awaited call.
+    rejects(
+        &format!(
+            "effect Op: i64 -> i64; {records}
+             fn bump(r: &mut i64) -> i64 ! {{Op, panic}} {{ let a = perform Op(1); *r = a; a }}
+             fn main() -> i64 ! {{io, alloc, panic}} {{
+                 let mut q = P {{ x: 1, y: 2 }};
+                 let mut rr = R {{ p: &mut q }};
+                 let res = handle Op: i64 -> i64 with fn(
+                     x: i64, resume: linear once fn(i64) -> i64 ! {{}},
+                 ) -> i64 ! {{}} {{ let r = resume(x ^ 8); r ^ 4096 }} {{
+                     let b = bump(&mut rr.p.x);
+                     b * 100 + q.x
+                 }};
+                 print_i64(res);
+                 0
+             }}"
+        ),
+        "this call can suspend while it borrows a value",
+    );
+}
+
+#[test]
+fn review_exclusive_views_cannot_cross_multishot_performs() {
+    // Each shot would hold the same exclusive loan.
+    rejects(
+        "struct P { x: i64, y: i64 }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut p = P { x: 5, y: 0 };
+            let res = handle Ask: i64 -> i64 with fn(
+                x: i64, resume: fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { let a = resume(1); let b = resume(2); a * 100 + b } {
+                let r = &mut p;
+                let a = perform Ask(0);
+                let old = r.x;
+                r.x = old + a;
+                old
+            };
+            print_i64(res);
+            print_i64(p.x);
+            0
+        }",
+        "cannot stay live across a non-tail 'perform'",
+    );
+}

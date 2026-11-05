@@ -2239,11 +2239,22 @@ impl<'a> Types<'a> {
             }
             Type::Union(id) if self.unions[id].members.len() == 1 => {
                 // A one-member union is a closed-world trait object.
-                match self.dyn_objects.iter().find(|(_, object)| **object == ty) {
-                    Some(((trait_id, _), _)) => {
+                // Traits with the same single impl share one representation,
+                // so name every trait it stands for.
+                let mut names = self
+                    .dyn_objects
+                    .iter()
+                    .filter(|(_, object)| **object == ty)
+                    .map(|((trait_id, _), _)| {
                         format!("dyn {}", self.resolution.bindings[*trait_id].name)
-                    }
-                    None => format!("dyn object of {}", self.name(self.unions[id].members[0])),
+                    })
+                    .collect::<Vec<_>>();
+                names.sort();
+                names.dedup();
+                if names.is_empty() {
+                    format!("dyn object of {}", self.name(self.unions[id].members[0]))
+                } else {
+                    names.join(" or ")
                 }
             }
             Type::Union(id) => self.unions[id]
@@ -3756,6 +3767,15 @@ impl<'a> Types<'a> {
     /// masks of one enum, sort/deduplicate, and reject alternatives whose
     /// representation cannot safely cross a union boundary.
     pub fn union(&mut self, members: Vec<Type>, span: Span) -> Result<Type> {
+        // A join of one closed trait object with itself (a one-member
+        // union) stays that object instead of collapsing to its member.
+        let mut present = members.iter().filter(|member| **member != Type::Never);
+        if let Some(first @ Type::Union(id)) = present.next().copied()
+            && self.unions[id].members.len() == 1
+            && present.all(|member| *member == first)
+        {
+            return Ok(first);
+        }
         let mut atoms = Vec::new();
         let mut work = 0usize;
         for member in members {

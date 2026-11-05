@@ -135,7 +135,8 @@ and remaining limits.
   upcasts or downcasts, no per-field partial moves, no exact-use `@[1]` object
   results (see [traits.md](traits.md#limits)). A closed object whose trait has
   one concrete impl keeps its object type everywhere, including tuples
-  (`D-SINGLE-TUPLE`): it is not a value of its member type. Effect-row trait parameters do not
+  (`D-SINGLE-TUPLE`): it is not a value of its member type. Generic
+  inference from two such objects is still open (`D-SINGLE-JOIN`). Effect-row trait parameters do not
   exist, so `dyn Trait<Effect>` cannot be named. Reviewed independently in
   `D-REVIEW` (about 100 probes, no soundness finding).
 - [x] Specialization with an explicit deterministic coherence contract. Unique

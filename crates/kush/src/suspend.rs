@@ -1196,12 +1196,17 @@ fn place_roots(
     place: &Expr,
     locals: &[Local],
     origins: &BTreeMap<usize, Option<Slots>>,
+    carries: &dyn Fn(Type) -> bool,
 ) -> Option<Slots> {
     let root = place_root(place)?;
     if is_view_local(locals[root].ty) {
         // A slice of a view, or a field of a referenced record: the
         // storage is the view's (or reference's) own referent.
         origins.get(&root).cloned().flatten()
+    } else if carries(locals[root].ty) {
+        // A place inside a value that itself holds a borrow (a borrowed
+        // record field `r.p.x`) may be storage owned elsewhere: unknown.
+        None
     } else {
         Some(Slots::from([root]))
     }
@@ -1216,6 +1221,11 @@ fn roots(
 ) -> Option<Slots> {
     match &expr.kind {
         ExprKind::Coerce { value, .. } => roots(value, locals, origins, carries),
+        ExprKind::Borrow(slot) if !is_view_local(locals[*slot].ty) && carries(locals[*slot].ty) => {
+            // A reference to a value that holds a borrow reaches storage
+            // owned elsewhere.
+            None
+        }
         ExprKind::Borrow(slot) => {
             let mut out = Slots::from([*slot]);
             if is_view_local(locals[*slot].ty) {
@@ -1223,8 +1233,8 @@ fn roots(
             }
             Some(out)
         }
-        ExprKind::BorrowPlace(place) => place_roots(place, locals, origins),
-        ExprKind::Slice { base, .. } => place_roots(base, locals, origins),
+        ExprKind::BorrowPlace(place) => place_roots(place, locals, origins, carries),
+        ExprKind::Slice { base, .. } => place_roots(base, locals, origins, carries),
         ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot)
             if is_view_local(locals[*slot].ty) =>
         {
@@ -1265,10 +1275,13 @@ fn point_borrows(call: &Expr, host: &Host) -> (Slots, bool) {
                 direct.insert(*slot);
             }
             ExprKind::BorrowPlace(place) => {
-                if let Some(slot) = place_root(place) {
-                    direct.insert(slot);
-                } else {
-                    *opaque = true;
+                match place_root(place) {
+                    // A place inside a borrow-holding value may be storage
+                    // owned by another local.
+                    Some(slot) if !host.carries_borrow(host.locals[slot].ty) => {
+                        direct.insert(slot);
+                    }
+                    _ => *opaque = true,
                 }
             }
             ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot)
@@ -1488,6 +1501,11 @@ fn outer_borrow(host: &Host, spec: &Spec, bound: &Slots, captured: &[usize], slo
         return false;
     }
     let exclusive = ty.is_mut_slice() || matches!(ty, Type::RefMut(_));
+    // A multishot token runs the continuation several times; each run
+    // would hold the same exclusive loan.
+    if exclusive && spec.multishot {
+        return false;
+    }
     let Some(Some(owners)) = host.origins.get(&slot) else {
         return false;
     };

@@ -912,9 +912,14 @@ owner exclude each other exactly as for records: a live `&dyn` blocks a later
 `&mut dyn` or mutable dispatch on the owner. A trait with one concrete impl is
 still represented as a one-alternative object rather than collapsing to the
 member type, so stored `&dyn`/`&mut dyn` dispatch works for it too. This
-holds inside tuples and other aggregates as well: `pair.0.method()` dispatches
-on the object, and an object is never implicitly a value of its member type
-(`let t: Text = pair.0;` is a type mismatch, `expected Text, found dyn Show`).
+holds inside tuples and other aggregates and through `if`/`match` joins of
+objects: `pair.0.method()` dispatches on the object, and an object is never
+implicitly a value of its member type (`let t: Text = pair.0;` is a type
+mismatch, `expected Text, found dyn Show`). Traits that share the same single
+impl share one representation, and diagnostics name all of them (`dyn Other
+or dyn Show`). Remaining gap (D-SINGLE-JOIN): inferring a generic parameter
+from two such objects (`first(a, b)`) and a `match` mixing an object arm with
+a plain member arm still collapse to the member type and are rejected.
 
 ## Limits
 

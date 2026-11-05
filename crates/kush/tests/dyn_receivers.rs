@@ -575,3 +575,43 @@ fn single_impl_objects_are_not_their_member_type() {
         "expected Text, found dyn Show",
     );
 }
+
+#[test]
+fn single_impl_objects_stay_objects_through_joins() {
+    for join in ["if n == 5 { a } else { b }", "match n { 5 => a, _ => b }"] {
+        let stats = agrees(
+            &format!(
+                r#"{SINGLE}
+                fn main() -> i64 ! {{io, alloc, panic}} {{
+                    let a: dyn Show = Text {{ tag: 1, name: String.from("a") }};
+                    let b: dyn Show = Text {{ tag: 2, name: String.from("b") }};
+                    let n = 7;
+                    let mut q = {join};
+                    print_i64(q.bump());
+                    print_i64(q.eat());
+                    0
+                }}"#
+            ),
+            0,
+            "3\n30\n",
+        );
+        assert_eq!(stats.allocations, 2, "{stats:?}");
+    }
+}
+
+#[test]
+fn objects_sharing_one_representation_name_every_trait() {
+    rejects(
+        r#"struct Text { tag: i64 }
+        trait Show { fn show(self: &Self) -> i64 ! {panic}; }
+        trait Other { fn other(self: &Self) -> i64 ! {panic}; }
+        impl Show for Text { fn show(self: &Self) -> i64 ! {panic} { self.tag } }
+        impl Other for Text { fn other(self: &Self) -> i64 ! {panic} { self.tag * 2 } }
+        fn main() -> i64 ! {panic} {
+            let b: dyn Other = Text { tag: 1 };
+            let z: i64 = b;
+            z
+        }"#,
+        "found dyn Other or dyn Show",
+    );
+}

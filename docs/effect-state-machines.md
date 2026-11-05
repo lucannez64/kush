@@ -537,8 +537,12 @@ Owners come from a conservative provenance pass over the function
 (`borrow_origins` in `crate::suspend`): `&x`, `&place`, slices of an owner or
 of another view, copies between view locals, and direct calls (the result may
 borrow from any borrow-carrying argument). A view defined any other way
-(branch-selected, from a closure call, a pattern binding, a borrowed record
-field) has unknown owners and stays rejected. The same provenance refines the
+(branch-selected, from a closure call, a pattern binding) has unknown owners
+and stays rejected. So does a place inside a value that itself holds a borrow:
+`&mut r.p.x` with `r: R<'a> { p: &'a mut P }` points into the `P` that `r`
+borrows, not into `r` (found by the independent review: with that `P` copied
+into the continuation, writes through the view were lost). An exclusive view
+cannot cross a multishot point, since every shot would hold the same loan. The same provenance refines the
 "the point's own call borrows a captured value" check: an awaited call given
 `&arr[..]` now conflicts only when `arr` itself is captured.
 
