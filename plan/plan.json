@@ -1057,9 +1057,9 @@
       "deps": [
         "TRAITS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "`pair.0.bump()` via place references, no ownership duplication, writes kept.",
-      "commit": null,
+      "commit": "50abd0e",
       "log": [
         {
           "time": "2026-11-05 14:50:36",
@@ -1070,6 +1070,11 @@
           "time": "2026-11-05 15:17:40",
           "who": "agent",
           "text": "Committed 50abd0e (in-place BorrowPlace dispatch on object fields). Boat gate: 1484 tests pass; clippy collapsible_if fixed in 390e388; re-gate pending."
+        },
+        {
+          "time": "2026-11-05 15:41:08",
+          "who": "agent",
+          "text": "In-place place-reference dispatch on object fields. Boat gate at 4f678e3: 1489 tests, fmt, clippy pass."
         }
       ]
     },
@@ -1082,9 +1087,9 @@
       "deps": [
         "D-PROJ-MUT"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Partial move semantics identical to destructuring.",
-      "commit": null,
+      "commit": "390e388",
       "log": [
         {
           "time": "2026-11-05 15:17:40",
@@ -1095,6 +1100,11 @@
           "time": "2026-11-05 15:17:41",
           "who": "agent",
           "text": "Committed 390e388 (consume root aggregate like destructuring; linear siblings and fields behind references rejected). Gate pending."
+        },
+        {
+          "time": "2026-11-05 15:41:08",
+          "who": "agent",
+          "text": "Consuming field dispatch consumes the root like a destructuring. Boat gate at 4f678e3: 1489 tests, fmt, clippy pass."
         }
       ]
     },
@@ -1107,14 +1117,24 @@
       "deps": [
         "TRAITS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Explicit `dyn Trait<Out = T>` binding, checked against every later member.",
-      "commit": null,
+      "commit": "4f678e3",
       "log": [
         {
           "time": "2026-11-05 15:17:41",
           "who": "agent",
           "text": "Design d6c3db3; dyn Trait<Out = T> binding fixes projection at type lowering; implementing."
+        },
+        {
+          "time": "2026-11-05 15:33:41",
+          "who": "agent",
+          "text": "Committed 4f678e3; dyn_objects.rs tests pass locally, clippy clean; Boat gate running."
+        },
+        {
+          "time": "2026-11-05 15:41:08",
+          "who": "agent",
+          "text": "dyn Trait<Out = T> fixes the projection at type lowering. Boat gate at 4f678e3: 1489 tests, fmt, clippy pass."
         }
       ]
     },
@@ -1127,10 +1147,21 @@
       "deps": [
         "TRAITS"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 15:33:41",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 15:41:09",
+          "who": "agent",
+          "text": "Parser accepts dyn A + B; resolver records multi-object traits; lowering canonicalizes components (in progress, uncommitted)."
+        }
+      ]
     },
     {
       "id": "D-MULTI-LAYOUT",
