@@ -6719,6 +6719,45 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let condition = value!(self.expr(condition, frame)).scalar();
                 return self.block(if condition != 0 { yes } else { no }, frame);
             }
+            ExprKind::Match(input, arms) if input.ty.is_ref() => {
+                // A borrowed DynArray match: test a snapshot of the referent,
+                // bind element references into its live storage, and never
+                // move or drop anything the scrutinee owns.
+                let reference = value!(self.expr(input, frame));
+                let snapshot = self.reference_read(&reference, Type::Unit).ok_or_else(|| {
+                    Diagnostic::new(expr.span, "internal error: dangling borrowed match")
+                })?;
+                for arm in arms {
+                    if !pattern_test(&arm.pattern, &snapshot) {
+                        continue;
+                    }
+                    self.bind_borrowed_dyn(&arm.pattern, &reference, &snapshot, frame);
+                    if let Some(guard) = &arm.guard
+                        && value!(self.expr(guard, frame)).scalar() == 0
+                    {
+                        continue;
+                    }
+                    self.consume(input, frame);
+                    let mut slots = std::collections::BTreeSet::new();
+                    crate::ownership::pattern_bindings(&arm.pattern, &mut slots);
+                    for slot in &slots {
+                        self.local_active(*slot, frame);
+                    }
+                    let result = match self.expr(&arm.body, frame)? {
+                        Flow::Value(v) => v,
+                        other => return Ok(other),
+                    };
+                    self.consume(&arm.body, frame);
+                    for slot in slots.into_iter().rev() {
+                        self.drop_resource(
+                            self.program.functions[frame.function].local_resources[slot],
+                            frame,
+                        )?;
+                    }
+                    return Ok(Flow::Value(result));
+                }
+                unreachable!("exhaustiveness checked")
+            }
             ExprKind::Match(input, arms) => {
                 let value = value!(self.expr(input, frame));
                 for arm in arms {
@@ -6754,6 +6793,97 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
         };
         Ok(Flow::Value(result))
+    }
+    /// Bind a borrowed DynArray pattern. Element names receive references
+    /// into the referent's storage (a handle borrow for an owning element, as
+    /// for any reference to an owner), the rest receives a `&[T]` view, and
+    /// by-value element patterns bind copies of copyable elements.
+    fn bind_borrowed_dyn(
+        &mut self,
+        pattern: &Pattern,
+        reference: &Value,
+        snapshot: &Value,
+        frame: &mut Frame,
+    ) {
+        let Pattern::DynArray {
+            element,
+            prefix,
+            suffix,
+            rest_binding,
+            ..
+        } = pattern
+        else {
+            return;
+        };
+        let Value::DynArray { items, .. } = snapshot else {
+            return;
+        };
+        let view = Value::Slice(Box::new(SliceValue {
+            base: Box::new(Value::Scalar(0)),
+            start: 0,
+            len: items.len(),
+            array: None,
+            field: Some(Vec::new()),
+            reference: Some(Box::new(reference.clone())),
+        }));
+        let owner_like = matches!(
+            element,
+            Type::Box(_)
+                | Type::Arena
+                | Type::ArenaBox(_)
+                | Type::Bytes
+                | Type::String
+                | Type::Vec(_)
+                | Type::AllocatorContext
+                | Type::AllocBox(_)
+                | Type::AllocVec(_)
+        );
+        let element_reference = |index: usize| -> Value {
+            if owner_like {
+                match &items[index] {
+                    Value::Owned(id) => return Value::Borrowed(*id),
+                    Value::Arena { state } => return Value::ArenaRef(state.clone()),
+                    Value::ArenaBox { state, slot } => {
+                        return Value::ArenaBoxRef {
+                            state: state.clone(),
+                            slot: *slot,
+                        };
+                    }
+                    Value::AllocatorContext(state) => {
+                        return Value::AllocatorContextRef(state.clone());
+                    }
+                    _ => {}
+                }
+            }
+            Value::SliceElementRef {
+                view: Box::new(view.clone()),
+                index,
+                steps: Vec::new(),
+            }
+        };
+        let end = items.len() - suffix.len();
+        let positions = prefix
+            .iter()
+            .enumerate()
+            .chain(suffix.iter().enumerate().map(|(j, p)| (end + j, p)));
+        for (index, pattern) in positions {
+            match pattern {
+                Pattern::Bind(slot) => frame.locals[*slot] = element_reference(index),
+                pattern => {
+                    pattern_matches(pattern, &items[index], &mut frame.locals);
+                }
+            }
+        }
+        if let Some(slot) = rest_binding {
+            frame.locals[*slot] = Value::Slice(Box::new(SliceValue {
+                base: Box::new(Value::Scalar(0)),
+                start: prefix.len(),
+                len: end - prefix.len(),
+                array: None,
+                field: Some(Vec::new()),
+                reference: Some(Box::new(reference.clone())),
+            }));
+        }
     }
     fn activate_pattern(
         &mut self,

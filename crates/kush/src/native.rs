@@ -7661,14 +7661,33 @@ impl Generator<'_, '_> {
             ExprKind::Match(value, arms) => {
                 let input = value;
                 let value = lower!(self.expr(input));
+                // A borrowed DynArray scrutinee is a pointer: patterns test the
+                // loaded words, and element names bind slot addresses.
+                let borrowed = match input.ty {
+                    Type::Ref(pointer) => {
+                        let pointee = self.program.pointees[pointer];
+                        let words = self.program.width(pointee);
+                        Some((value[0], self.load_words(value[0], 0, words)))
+                    }
+                    _ => None,
+                };
+                let tested = borrowed
+                    .as_ref()
+                    .map(|(_, words)| words.clone())
+                    .unwrap_or_else(|| value.clone());
                 let join = self.join(expr.ty);
                 for arm in arms {
                     let hit = self.builder.create_block();
                     let next = self.builder.create_block();
-                    let condition = self.pattern(&arm.pattern, &value);
+                    let condition = self.pattern(&arm.pattern, &tested);
                     self.builder.ins().brif(condition, hit, &[], next, &[]);
                     self.builder.switch_to_block(hit);
-                    self.bind_pattern(&arm.pattern, &value);
+                    match &borrowed {
+                        Some((pointer, words)) => {
+                            self.bind_borrowed_dyn(&arm.pattern, *pointer, words)
+                        }
+                        None => self.bind_pattern(&arm.pattern, &value),
+                    }
                     let mut body_reachable = true;
                     if let Some(guard) = &arm.guard {
                         if let Some(guard) = self.scalar(guard) {
@@ -7681,7 +7700,9 @@ impl Generator<'_, '_> {
                     }
                     if body_reachable {
                         self.consume(input);
-                        self.dispose_pattern(&arm.pattern, input.ty, &value);
+                        if borrowed.is_none() {
+                            self.dispose_pattern(&arm.pattern, input.ty, &value);
+                        }
                         if let Some(body) = self.expr(&arm.body) {
                             self.consume(&arm.body);
                             let mut slots = std::collections::BTreeSet::new();
@@ -9358,6 +9379,73 @@ impl Generator<'_, '_> {
                 }
                 result
             }
+        }
+    }
+    /// Bind a borrowed DynArray pattern over the array at `pointer`. Element
+    /// names receive slot addresses, the rest a `&[T]` descriptor, and
+    /// by-value element patterns bind copies from the loaded `words`.
+    fn bind_borrowed_dyn(&mut self, pattern: &Pattern, pointer: Value, words: &[Value]) {
+        let Pattern::DynArray {
+            element,
+            capacity,
+            prefix,
+            suffix,
+            rest_binding,
+            ..
+        } = pattern
+        else {
+            return;
+        };
+        let width = self.program.width(*element);
+        let stride = (width * 8) as i64;
+        let length = words[0];
+        let data = self.builder.ins().iadd_imm_s(pointer, 8);
+        for (index, pattern) in prefix.iter().enumerate() {
+            match pattern {
+                Pattern::Bind(slot) => {
+                    let address = self.builder.ins().iadd_imm_s(data, index as i64 * stride);
+                    self.assign(*slot, &[address]);
+                }
+                pattern => self.bind_pattern(pattern, &words[1 + index * width..]),
+            }
+        }
+        for (index, pattern) in suffix.iter().enumerate() {
+            match pattern {
+                Pattern::Bind(slot) => {
+                    // Slot `length - suffix + index`, computed at run time.
+                    let position = self
+                        .builder
+                        .ins()
+                        .iadd_imm_s(length, index as i64 - suffix.len() as i64);
+                    let offset = self.builder.ins().imul_imm_s(position, stride);
+                    let address = self.builder.ins().iadd(data, offset);
+                    self.assign(*slot, &[address]);
+                }
+                pattern => {
+                    let element_words = self.dyn_suffix_element(
+                        words,
+                        width,
+                        *capacity,
+                        prefix.len(),
+                        suffix.len(),
+                        index,
+                    );
+                    self.bind_pattern(pattern, &element_words);
+                }
+            }
+        }
+        if let Some(slot) = rest_binding {
+            let start = self
+                .builder
+                .ins()
+                .iadd_imm_s(data, prefix.len() as i64 * stride);
+            let middle = self
+                .builder
+                .ins()
+                .iadd_imm_s(length, -((prefix.len() + suffix.len()) as i64));
+            let stride = self.constant(stride);
+            let bytes = self.constant(0);
+            self.assign(*slot, &[start, middle, stride, bytes]);
         }
     }
     /// The words of suffix element `index` of a DynArray pattern: the slot at

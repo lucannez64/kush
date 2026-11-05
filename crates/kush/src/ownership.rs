@@ -6383,6 +6383,45 @@ impl Checker<'_> {
                     if let Some(provenance) = &wrapped {
                         self.bind_task_exit_provenance(&arm.pattern, scrutinee, provenance)?;
                     }
+                    if let Pattern::DynArray {
+                        prefix,
+                        suffix,
+                        rest_binding,
+                        borrowed: true,
+                        ..
+                    } = &arm.pattern
+                    {
+                        // Element references and the `&[T]` rest view borrow
+                        // the scrutinee's storage: they are shared views rooted
+                        // at its owners, live until their own last use.
+                        let origins = self.view_origins(value);
+                        let lifetime = self.view_loan(value).lifetime.or_else(|| {
+                            (!origins.is_empty()).then(|| self.anonymous_lifetime(&origins))
+                        });
+                        let splits = self.split_labels(value);
+                        let slots = prefix
+                            .iter()
+                            .chain(suffix)
+                            .filter_map(|pattern| match pattern {
+                                Pattern::Bind(slot) => Some(*slot),
+                                _ => None,
+                            })
+                            .chain(*rest_binding)
+                            .collect::<Vec<_>>();
+                        for slot in slots {
+                            self.acquire_view(
+                                slot,
+                                false,
+                                origins.clone(),
+                                splits.clone(),
+                                lifetime.clone(),
+                                None,
+                            );
+                            if self.locals[slot].ty.is_ref() {
+                                self.reference_lifetimes[slot] = lifetime.clone();
+                            }
+                        }
+                    }
                     let mut bindings = BTreeSet::new();
                     pattern_bindings(&arm.pattern, &mut bindings);
                     for slot in &bindings {

@@ -169,7 +169,28 @@ prefix plus suffix may not exceed the capacity. Element sub-patterns are
 ordinary patterns, so literals, tuples, fixed arrays, records, enum variants,
 and nested `DynArray` patterns all work elementwise, and guards may fall
 through to a later arm. Elements must be copyable one-word or concrete values,
-so owning, linear, and view elements cannot be matched by value. The runtime length is not a finite variant tag, so a match
+so owning, linear, and view elements cannot be matched by value.
+
+Matching a shared borrow (`match &a { ... }`, or a `&DynArray<T, C>` /
+`&[T; n <= C]` parameter) binds element references instead of copies, so
+owning elements can be matched without moving them:
+
+```rust
+let a: DynArray<Box<i64>, 4> = [Box.new(10), Box.new(20), Box.new(12)];
+match &a {
+    [first, .., last] => Box.read(first) + Box.read(last),   // first: &Box<i64>
+    _ => 0,
+}
+```
+
+An element name binds `&T` into the array's slot, `_` and `..` ignore
+elements, and over copyable elements a `..rest` binds a `&[T]` view of the
+middle while other sub-patterns (literals, tuples, records, variants) test
+copies. Over owning, linear, or view elements only names, `_`, and an unnamed
+`..` are accepted. The bindings are shared views rooted at the array's owners:
+the array cannot be moved, replaced, or mutated while one is live, and they
+cannot outlive the array's scope. Only slice patterns and `_` are accepted for
+a borrowed scrutinee; borrows of other types are still not matchable. The runtime length is not a finite variant tag, so a match
 over `DynArray` must end in an unguarded catch-all; the ordinary exhaustiveness
 check rejects anything else.
 
@@ -300,7 +321,7 @@ container of unbounded length. Runtime-length arrays cannot appear in generic
 function, method, trait, or foreign signatures, in `fn` types, or in lambda
 signatures, and a signature may only use them as a whole parameter/result or
 behind one reference. There is no element-wise owning move beyond
-push/pop of copyable values, and no borrowed element pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow
+push/pop of copyable values, and no `&mut` (exclusive) borrowed pattern. `Vec<T>` remains the growable owning container and `&[T]` the borrow
 for arbitrary lengths.
 
 The implementation is checked by `crates/kush/tests/advanced_types_effects.rs`

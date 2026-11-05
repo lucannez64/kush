@@ -1529,6 +1529,11 @@ pub(crate) enum Pattern {
         suffix: Vec<Pattern>,
         rest: bool,
         rest_binding: Option<usize>,
+        /// A pattern over a shared `&DynArray` scrutinee. A top-level element
+        /// `Bind` then binds `&T` to the element's slot and `rest_binding` a
+        /// `&[T]` view of the middle; other element patterns test copies of
+        /// copyable elements.
+        borrowed: bool,
     },
 }
 #[derive(Clone)]
@@ -16161,6 +16166,102 @@ impl Checker<'_, '_> {
         }
         walk(self, ty, false)
     }
+    /// A slice pattern over a shared `&DynArray<T, C>` (or `&[T; n <= C]`)
+    /// scrutinee. Element names bind `&T` into the array's slots, so owning
+    /// elements are matched without moving or copying them; `..rest` binds a
+    /// `&[T]` view of the middle. Copyable elements may also use ordinary
+    /// by-value sub-patterns, which test copies.
+    fn borrowed_dyn_pattern(
+        &mut self,
+        parts: &[ast::Pattern],
+        element: Type,
+        capacity: usize,
+        span: Span,
+        bindings: &mut BTreeMap<String, (usize, Type)>,
+    ) -> Result<Pattern> {
+        let copyable =
+            !(self.owned_type(element) || self.linear_type(element) || element.is_view());
+        let element_pointer = self.types.pointer(element);
+        let reference = Type::Ref(element_pointer);
+        let view = Type::Slice(element_pointer);
+        let mut prefix = Vec::new();
+        let mut suffix = Vec::new();
+        let mut rest = false;
+        let mut rest_binding = None;
+        let bind = |checker: &mut Self,
+                    name: &str,
+                    ty: Type,
+                    part: &ast::Pattern,
+                    bindings: &mut BTreeMap<String, (usize, Type)>|
+         -> Result<usize> {
+            if let Some((slot, previous)) = bindings.get(name) {
+                checker.expect(ty, *previous, part.span)?;
+                return Ok(*slot);
+            }
+            let slot = checker.bind(part.span, ty, false)?;
+            bindings.insert(name.to_owned(), (slot, ty));
+            Ok(slot)
+        };
+        for part in parts {
+            let checked = match &part.kind {
+                ast::PatternKind::Rest(name) => {
+                    if rest {
+                        return Err(Diagnostic::new(
+                            part.span,
+                            "a DynArray pattern may contain at most one '..'",
+                        ));
+                    }
+                    rest = true;
+                    if let Some(name) = name {
+                        if !copyable {
+                            return Err(Diagnostic::new(
+                                part.span,
+                                "a borrowed DynArray pattern cannot bind '..name' over owning, linear, or view elements: a '&[T]' view of them has no checked operations; use '..' and bind the elements you need",
+                            ));
+                        }
+                        rest_binding = Some(bind(self, name, view, part, bindings)?);
+                    }
+                    continue;
+                }
+                ast::PatternKind::Wildcard => Pattern::Any,
+                ast::PatternKind::Name(path)
+                    if path.len() == 1 && !self.is_constructor_pattern(part) =>
+                {
+                    Pattern::Bind(bind(self, &path[0], reference, part, bindings)?)
+                }
+                _ if copyable => self.pattern(part, element, bindings)?,
+                _ => {
+                    return Err(Diagnostic::new(
+                        part.span,
+                        "a borrowed DynArray pattern over owning, linear, or view elements supports only element names (bound as '&T'), '_', and '..'",
+                    ));
+                }
+            };
+            if rest {
+                suffix.push(checked);
+            } else {
+                prefix.push(checked);
+            }
+        }
+        if prefix.len() + suffix.len() > capacity {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "DynArray pattern has {} element(s) but the capacity is {capacity}",
+                    prefix.len() + suffix.len()
+                ),
+            ));
+        }
+        Ok(Pattern::DynArray {
+            element,
+            capacity,
+            prefix,
+            suffix,
+            rest,
+            rest_binding,
+            borrowed: true,
+        })
+    }
     /// `let v = &a[..]` over a runtime-length array `[T; n <= C]` records
     /// `Slice.len(v) == n`, so `Slice.at(v, i, _)` can be proved from facts
     /// about `n`.
@@ -21936,10 +22037,32 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::Match { value, arms } => {
                     let value = c.expr(value)?;
-                    if matches!(value.ty, Type::Never | Type::Ref(_) | Type::RefMut(_)) || value.ty.is_view() {
+                    // A shared reference to a DynArray is matched by borrowed
+                    // slice patterns; every other borrow is rejected.
+                    let borrowed_array = matches!(value.ty, Type::Ref(pointer)
+                        if c.types.pointees[pointer]
+                            .layout()
+                            .is_some_and(|id| c.types.enums[id].dynamic_array.is_some()));
+                    if !borrowed_array
+                        && (matches!(value.ty, Type::Never | Type::Ref(_) | Type::RefMut(_))
+                            || value.ty.is_view())
+                    {
                         return Err(Diagnostic::new(
                             value.span,
                             "cannot match a divergent, borrowed-reference, or borrowed-view expression (including &str)",
+                        ));
+                    }
+                    if borrowed_array
+                        && let Some(arm) = arms.iter().find(|arm| {
+                            !matches!(
+                                arm.pattern.kind,
+                                ast::PatternKind::Slice(_) | ast::PatternKind::Wildcard
+                            )
+                        })
+                    {
+                        return Err(Diagnostic::new(
+                            arm.pattern.span,
+                            "a match on a '&DynArray' borrow supports slice patterns such as '[x, .., y]' and '_'",
                         ));
                     }
                     let mut coverage = Coverage::new(span);
@@ -32412,6 +32535,14 @@ impl Checker<'_, '_> {
                     fields: checked,
                 });
             }
+            if let ast::PatternKind::Slice(parts) = &pattern.kind
+                && let Type::Ref(pointer) = ty
+                && let Some((element, capacity)) = c.types.pointees[pointer]
+                    .layout()
+                    .and_then(|id| c.types.enums[id].dynamic_array)
+            {
+                return c.borrowed_dyn_pattern(parts, element, capacity, pattern.span, bindings);
+            }
             if let ast::PatternKind::Slice(parts) = &pattern.kind {
                 if let Some((element, capacity)) = ty
                     .layout()
@@ -32485,6 +32616,7 @@ impl Checker<'_, '_> {
                         suffix,
                         rest,
                         rest_binding,
+                        borrowed: false,
                     });
                 }
                 let Some((element, length)) = ty.layout().and_then(|id| c.types.enums[id].array)

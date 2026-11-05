@@ -4275,3 +4275,152 @@ fn dynamic_array_field_views_through_references_and_temporaries() {
         "slice view would outlive the lexical scope of its owner",
     );
 }
+
+#[test]
+fn borrowed_dynamic_array_patterns_bind_element_references() {
+    // Owning elements are matched by reference: nothing moves, and the array
+    // still drops each box exactly once.
+    let owning = r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 4> = [Box.new(10), Box.new(20), Box.new(12)];
+            let x = match &a {
+                [first, .., last] => Box.read(first) + Box.read(last),
+                _ => 0,
+            };
+            let y = match &a {
+                [_, second, ..] => Box.read(second),
+                _ => 0,
+            };
+            x + y + DynArray.len(&a)
+        }"#;
+    let (result, stats) = evaluate(owning);
+    assert_eq!(result, 45);
+    assert_eq!(stats.allocations, 3);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(owning, 45);
+    // Copyable elements mix by-value sub-patterns with references, and a
+    // named rest is a `&[T]` view of the middle.
+    let copyable = r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1, 2, 3, 4];
+            match &a {
+                [9, ..] => 0,
+                [1, second, ..rest] => *second * 100 + Slice.len(rest) * 10 + Slice.get(rest, 1),
+                _ => 0,
+            }
+        }"#;
+    assert_eq!(value(copyable), 224);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(copyable, 224);
+    // A reference parameter to a runtime-length array, with a suffix whose
+    // position depends on the runtime length.
+    let runtime = r#"
+        fn ends(n: i64, a: &[i64; n <= 4]) -> i64 ! {panic} {
+            match a {
+                [x, .., y] => *x + *y,
+                [x] => *x,
+                _ => 0,
+            }
+        }
+        fn main() -> i64 ! {panic} {
+            let k = 3;
+            let one = 1;
+            let a: [i64; k <= 4] = Array.fill(k, 21);
+            let b: [i64; one <= 4] = Array.fill(one, 5);
+            ends(k, &a) + ends(one, &b)
+        }"#;
+    assert_eq!(value(runtime), 47);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(runtime, 47);
+    // A record element is read through its reference.
+    let records = r#"
+        struct Point { x: i64, y: i64 }
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<Point, 3> = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+            match &a { [.., p] => p.x * 10 + p.y, _ => 0 }
+        }"#;
+    assert_eq!(value(records), 34);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    agrees(records, 34);
+}
+
+#[test]
+fn borrowed_dynamic_array_patterns_keep_the_array_loaned() {
+    // An element reference escaping the match keeps the array loaned.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let mut a: DynArray<Box<i64>, 4> = [Box.new(1)];
+            let r = match &a { [first, ..] => first, _ => panic() };
+            a = [Box.new(2)];
+            Box.read(r)
+        }"#,
+        "cannot replace an owner while a slice view or reference borrows it",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 4> = [Box.new(1)];
+            let r = match &a { [first, ..] => first, _ => panic() };
+            let moved = a;
+            Box.read(r)
+        }"#,
+        "cannot move an owner while it is borrowed",
+    );
+    // An element reference cannot outlive the array's scope.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let r = {
+                let a: DynArray<Box<i64>, 4> = [Box.new(1)];
+                match &a { [first, ..] => first, _ => panic() }
+            };
+            Box.read(r)
+        }"#,
+        "reference escapes the lexical scope of the storage it borrows",
+    );
+    // Owning elements cannot be destructured or copied through the borrow.
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<(i64, Box<i64>), 4> = [(1, Box.new(2))];
+            match &a { [(x, b)] => x, _ => 0 }
+        }"#,
+        "supports only element names (bound as '&T'), '_', and '..'",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 4> = [Box.new(1)];
+            match &a { [..rest] => 0, _ => 1 }
+        }"#,
+        "cannot bind '..name' over owning",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let a: DynArray<Box<i64>, 4> = [Box.new(1)];
+            match &a { x => 0 }
+        }"#,
+        "supports slice patterns such as",
+    );
+    // The runtime length is still not exhaustive without a catch-all.
+    rejects(
+        r#"
+        fn main() -> i64 ! {panic} {
+            let a: DynArray<i64, 4> = [1];
+            match &a { [x] => *x, [] => 0 }
+        }"#,
+        "non-exhaustive match",
+    );
+    // Other borrows are still not matchable.
+    rejects(
+        r#"
+        struct P { x: i64 }
+        fn main() -> i64 ! {panic} {
+            let p = P { x: 1 };
+            match &p { _ => 0 }
+        }"#,
+        "cannot match a divergent, borrowed-reference",
+    );
+}
