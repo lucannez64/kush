@@ -194,6 +194,8 @@ struct Live {
     loops: Vec<(Slots, Slots)>,
     /// Live after each enclosing lowered region.
     regions: Vec<Slots>,
+    /// Live when an abort reaches each enclosing `AbortScope`, by label.
+    aborts: Vec<(usize, Slots)>,
     target: Option<*const Suspendable>,
     target_after: Slots,
     points: BTreeMap<usize, Slots>,
@@ -347,6 +349,27 @@ impl Live {
                 }
                 self.expr(value, &live)
             }
+            ExprKind::AbortScope {
+                label,
+                body,
+                handler,
+            } => {
+                let aborted = self.expr(handler, after);
+                self.aborts.push((*label, aborted));
+                let live = self.block(body, after);
+                self.aborts.pop();
+                live
+            }
+            ExprKind::AbortExit { label, value, .. } => {
+                let exit = self
+                    .aborts
+                    .iter()
+                    .rev()
+                    .find(|(target, _)| target == label)
+                    .map(|(_, live)| live.clone())
+                    .unwrap_or_default();
+                self.expr(value, &exit)
+            }
             ExprKind::Suspendable(suspendable) => {
                 if self
                     .target
@@ -460,6 +483,10 @@ fn block_children<'a>(
             if let Some(finish) = finish {
                 on_expr(finish);
             }
+        }
+        ExprKind::AbortScope { body, handler, .. } => {
+            on_block(body);
+            on_expr(handler);
         }
         _ => expr.for_each_child(on_expr),
     }
@@ -583,6 +610,10 @@ fn point_paths(block: &Block) -> Result<BTreeMap<usize, Vec<Step>>> {
                 }
                 Ok(())
             }
+            ExprKind::AbortScope { .. } if contains_point(expr) => Err(Diagnostic::new(
+                expr.span,
+                "a non-tail resumption point inside an abortive 'handle' is not supported; perform the operation or call the function outside that handle",
+            )),
             _ if contains_point(expr) => Err(misplaced(expr.span)),
             _ => Ok(()),
         }
@@ -2521,7 +2552,10 @@ fn mark_entry_points(
         ExprKind::HandlerPush {
             operation: inner, ..
         } if *inner == operation => return Ok(()),
-        ExprKind::HandlerPush { .. } | ExprKind::Region { .. } | ExprKind::Suspendable(_) => true,
+        ExprKind::HandlerPush { .. }
+        | ExprKind::Region { .. }
+        | ExprKind::Suspendable(_)
+        | ExprKind::AbortScope { .. } => true,
         _ => nested,
     };
     let mut result = Ok(());

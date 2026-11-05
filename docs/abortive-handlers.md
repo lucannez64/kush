@@ -1,6 +1,7 @@
 # Non-resuming (abortive) handlers and unwinding
 
-Status: **design, decided** (E-ABORT-DESIGN). Nothing here is implemented.
+Status: **design, decided** (E-ABORT-DESIGN); the lexical part is
+implemented (E-ABORT-LEXICAL, section 3.5).
 It answers how a handler that does not resume can discard the computation
 between a `perform` and its `handle` while dropping every live owned value
 exactly once, in the reference evaluator and natively, and keeps this
@@ -121,6 +122,41 @@ A `cap F` for an abortive `F` would make `perform op(x)` an early exit to a
 statically known activation. That is a strict subset of 3.3 (the abort word
 is the capability's activation id) and stays out of EFF-CAP-*: capabilities
 optimize only the resumptive mainline (decision 3 of effect-capabilities.md).
+
+### 3.5 As built (E-ABORT-LEXICAL)
+
+Surface confirmed with the user (2026-11-05): `-> Never` as in 3.1.
+Tests: `crates/kush/tests/abortive_handlers.rs`.
+
+- `Never` is accepted only as the result of an `effect` declaration or a
+  `handle` signature; it is still not a runtime type elsewhere
+  (`fn f() -> Never` stays rejected).
+- The checker lowers `handle F: P -> Never with h { body }` to
+  `let h' = h; AbortScope { label, body, handler: h' }` and a `perform F(x)`
+  lexically inside it, in the same function, to `AbortExit { label, x }` of
+  type `Never`. The `handle`'s value is the body's value or `h'(x)`; the
+  handler must return exactly the body's type.
+- Ownership checks an `AbortExit` like a `break` to its scope: pending linear
+  temporaries and linear locals bound inside the scope are errors ("linear
+  value is not consumed before this abortive perform"), affine values bound
+  inside are listed in its cleanup, and the scope's exit states are merged
+  with normal completion (an outer linear value consumed on only one path is
+  rejected). Grades require bindings inside the scope to meet their exact
+  grade at the perform, and outer counts to agree on every abort path and on
+  normal completion. The handler expression is checked only on the abort
+  path, so a capturing `once fn` handler is consumed there and dropped
+  otherwise.
+- Both backends leave the scope at the matching label: the evaluator with
+  `Flow::Abort(label, payload)`, native code by jumping to the scope's abort
+  block after the cleanup and after restoring the dynamic handler depth
+  captured at scope entry (so frames pushed by nested declared handles are
+  popped).
+- Restrictions, each rejected with a diagnostic: handlers with a token or a
+  linear handler; a payload or handler result that can hold a borrow;
+  binding an abortive handle `as` a capability or naming one in `cap F`; a
+  dynamic perform (in a called function or a lambda) — that is
+  E-ABORT-PROPAGATE; a non-tail suspension point inside an abortive body and
+  an abort out of a non-tail handler's body — E-ABORT-INTERACT.
 
 ## 4. Decisions
 

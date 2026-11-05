@@ -934,6 +934,10 @@ struct Checker<'a> {
     /// tracked because they have no exact obligation.
     counts: BTreeMap<usize, Grade>,
     loops: Vec<Frame>,
+    /// Abortive scopes by label (E-ABORT-LEXICAL). `breaks` holds the outer
+    /// counts at every abortive perform; they must agree with each other and
+    /// with normal completion, like `break` paths.
+    aborts: Vec<(usize, Frame)>,
     /// A match guard is evaluated a path-dependent number of times.
     guard: bool,
     /// Diagnostic only (GRADE-DEMAND-HINT): the next block expression is a
@@ -967,6 +971,7 @@ impl<'a> Checker<'a> {
             active: Vec::new(),
             counts: BTreeMap::new(),
             loops: Vec::new(),
+            aborts: Vec::new(),
             guard: false,
             hint_next_block: false,
             hint_block: None,
@@ -1416,6 +1421,28 @@ impl<'a> Checker<'a> {
     /// Merge break records from a branch clone. Break paths diverge, but their
     /// counts still determine the surrounding loop's post-state.
     fn merge_breaks(&mut self, other: &Self, span: Span) -> Result<()> {
+        let depth = self.aborts.len().min(other.aborts.len());
+        for index in 0..depth {
+            let Some(other_exits) = other.aborts[index].1.breaks.as_ref() else {
+                continue;
+            };
+            let frame = &mut self.aborts[index].1;
+            let mismatch = match &frame.breaks {
+                Some(previous) => other_exits
+                    .iter()
+                    .find(|(slot, count)| {
+                        previous.get(slot).copied().unwrap_or(Grade::ZERO) != **count
+                    })
+                    .map(|(slot, _)| *slot),
+                None => {
+                    frame.breaks = Some(other_exits.clone());
+                    None
+                }
+            };
+            if let Some(slot) = mismatch {
+                return Err(self.abort_mismatch(slot, span));
+            }
+        }
         let depth = self.loops.len().min(other.loops.len());
         let mut mismatch = None;
         for index in 0..depth {
@@ -1448,6 +1475,40 @@ impl<'a> Checker<'a> {
             ));
         }
         Ok(())
+    }
+    fn abort_mismatch(&self, slot: usize, span: Span) -> Diagnostic {
+        let grade = self.grade(slot).unwrap_or(Grade::ZERO);
+        self.grade_error(
+            slot,
+            span,
+            "is used a different number of times on different paths that leave an abortive 'handle'",
+            &format!(
+                "exact grade @[{grade}] must match on every abortive perform and on normal completion"
+            ),
+        )
+    }
+    /// Record the outer counts at an abortive perform of scope `index`.
+    fn note_abort(&mut self, index: usize, span: Span) -> Result<()> {
+        let slots: Vec<usize> = self.aborts[index].1.entry.keys().copied().collect();
+        let current: BTreeMap<usize, Grade> = slots
+            .iter()
+            .map(|slot| (*slot, self.counts.get(slot).copied().unwrap_or(Grade::ZERO)))
+            .collect();
+        let frame = &mut self.aborts[index].1;
+        let mismatch = match &frame.breaks {
+            Some(previous) => current
+                .iter()
+                .find(|(slot, count)| previous.get(slot).copied().unwrap_or(Grade::ZERO) != **count)
+                .map(|(slot, _)| *slot),
+            None => {
+                frame.breaks = Some(current);
+                None
+            }
+        };
+        match mismatch {
+            Some(slot) => Err(self.abort_mismatch(slot, span)),
+            None => Ok(()),
+        }
     }
     fn join(&mut self, other: &Self, span: Span, what: &str) -> Result<()> {
         for (slot, left) in &self.counts {
@@ -1594,6 +1655,59 @@ impl<'a> Checker<'a> {
                 if !self.expr(call, multiplier)? {
                     return Ok(false);
                 }
+            }
+            ExprKind::AbortScope {
+                label,
+                body,
+                handler,
+            } => {
+                self.aborts.push((
+                    *label,
+                    Frame {
+                        entry: self.counts.clone(),
+                        active_start: self.active.len(),
+                        breaks: None,
+                    },
+                ));
+                let survives = self.block(body, false, multiplier);
+                let (_, frame) = self.aborts.pop().unwrap();
+                let survives = survives?;
+                let Some(aborted) = frame.breaks else {
+                    return Ok(survives);
+                };
+                if survives {
+                    for (slot, count) in &aborted {
+                        if self.counts.get(slot).copied().unwrap_or(Grade::ZERO) != *count {
+                            return Err(self.abort_mismatch(*slot, expr.span));
+                        }
+                    }
+                } else {
+                    for (slot, count) in aborted {
+                        self.counts.insert(slot, count);
+                    }
+                }
+                // The handler call runs once, on the abort path.
+                if !self.expr(handler, multiplier)? {
+                    return Ok(false);
+                }
+            }
+            ExprKind::AbortExit { label, value, .. } => {
+                if !self.expr(value, multiplier)? {
+                    return Ok(false);
+                }
+                let index = self
+                    .aborts
+                    .iter()
+                    .rposition(|(target, _)| target == label)
+                    .expect("an abort exit is inside its scope");
+                let inner = self.active[self.aborts[index].1.active_start..].to_vec();
+                self.check_exact(
+                    &inner,
+                    expr.span,
+                    "this abortive perform leaves its 'handle'",
+                )?;
+                self.note_abort(index, expr.span)?;
+                return Ok(false);
             }
             ExprKind::Region { .. }
             | ExprKind::RegionExit { .. }

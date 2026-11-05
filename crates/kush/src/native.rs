@@ -3537,6 +3537,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
             task_pointer_drops: &task_pointer_drops,
             loops: Vec::new(),
             regions: Vec::new(),
+            aborts: Vec::new(),
             slice_layouts: BTreeMap::new(),
             upper_bounds: Vec::new(),
         };
@@ -4648,6 +4649,9 @@ struct Generator<'a, 'b> {
     /// (exit join, finish block, handler depth at entry) of each enclosing
     /// lowered suspendable region; `RegionExit` leaves the innermost one.
     regions: Vec<(Option<ir::Block>, Option<ir::Block>, Option<Variable>)>,
+    /// Enclosing `AbortScope`s: label, the block receiving the payload, and
+    /// the handler-stack depth at entry.
+    aborts: Vec<(usize, ir::Block, Option<Variable>)>,
     literal_data: &'b BTreeMap<usize, DataId>,
     allocate: FuncId,
     try_allocate: FuncId,
@@ -5731,6 +5735,84 @@ impl Generator<'_, '_> {
                 let exit = exit?;
                 self.builder.switch_to_block(exit);
                 return Some(self.builder.block_params(exit).to_vec());
+            }
+            ExprKind::AbortScope {
+                label,
+                body,
+                handler,
+            } => {
+                let exit = self.join(expr.ty);
+                let Some((id, once)) = (match handler.ty {
+                    Type::Fn(id) => Some((id, false)),
+                    Type::Once(id) => Some((id, true)),
+                    _ => None,
+                }) else {
+                    unreachable!("checked abortive handler callable")
+                };
+                let payload = self.program.function_types[id].parameters[0];
+                let aborted = self.builder.create_block();
+                for _ in 0..self.program.width(payload) {
+                    self.builder.append_block_param(aborted, I64);
+                }
+                let depth = self.capture_handler_depth();
+                self.aborts.push((*label, aborted, depth));
+                let finished = self.block(body);
+                self.aborts.pop();
+                if let (Some(values), Some(exit)) = (finished, exit) {
+                    self.jump(exit, &values);
+                }
+                self.builder.switch_to_block(aborted);
+                let arguments = self.builder.block_params(aborted).to_vec();
+                if let Some(callable) = self.expr(handler) {
+                    self.consume(handler);
+                    let result = self.program.function_types[id].result;
+                    let pointer = aggregate_result(self.program, result).then(|| {
+                        let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
+                            ir::StackSlotKind::ExplicitSlot,
+                            (self.program.width(result) * 8) as u32,
+                            STACK_SLOT_ALIGN_SHIFT,
+                        ));
+                        self.builder.ins().stack_addr(I64, slot, 0)
+                    });
+                    let mut values = Vec::new();
+                    if let Some(pointer) = pointer {
+                        values.push(pointer);
+                    }
+                    if once {
+                        values.push(callable[1]);
+                    }
+                    values.extend(arguments);
+                    let words = self.finish_indirect_call(id, callable[0], pointer, values);
+                    match exit {
+                        Some(exit) => self.jump(exit, &words),
+                        None => {
+                            self.builder.ins().trap(ir::TrapCode::user(1).unwrap());
+                        }
+                    }
+                }
+                let exit = exit?;
+                self.builder.switch_to_block(exit);
+                return Some(self.builder.block_params(exit).to_vec());
+            }
+            ExprKind::AbortExit {
+                label,
+                value,
+                cleanup,
+            } => {
+                let values = lower!(self.expr(value));
+                self.consume(value);
+                for id in cleanup {
+                    self.cleanup(Some(*id));
+                }
+                let (_, aborted, depth) = *self
+                    .aborts
+                    .iter()
+                    .rev()
+                    .find(|(target, _, _)| target == label)
+                    .expect("an abort exit is inside its scope");
+                self.restore_handler_depth(depth);
+                self.jump(aborted, &values);
+                return None;
             }
             ExprKind::RegionExit {
                 value,

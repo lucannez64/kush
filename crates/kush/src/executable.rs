@@ -1211,6 +1211,24 @@ pub(crate) enum ExprKind {
         finish: bool,
         cleanup: Vec<usize>,
     },
+    /// An abortive `handle` (E-ABORT-LEXICAL, docs/abortive-handlers.md):
+    /// run `body`; an `AbortExit` with this `label` leaves it with a payload,
+    /// and the scope's value is then `handler(payload)`. `handler` is a
+    /// callable evaluated only on that path.
+    AbortScope {
+        label: usize,
+        body: Block,
+        handler: Box<Expr>,
+    },
+    /// `perform F(value)` of an abortive operation whose `AbortScope` `label`
+    /// encloses it in the same function: evaluate `value`, drop `cleanup`
+    /// (filled by the ownership pass, like `break`), pop dynamic handler
+    /// frames installed inside the scope, and leave it. Type `Never`.
+    AbortExit {
+        label: usize,
+        value: Box<Expr>,
+        cleanup: Vec<usize>,
+    },
     /// Lowered form only: the current depth of the dynamic handler stack.
     HandlerDepth,
     /// Lowered form only: run `body` with dynamic handler lookups that skip
@@ -1548,7 +1566,13 @@ impl Expr {
                     f(finish);
                 }
             }
-            ExprKind::RegionExit { value, .. } | ExprKind::TryExit { value, .. } => f(value),
+            ExprKind::AbortScope { body, handler, .. } => {
+                block(body, f);
+                f(handler);
+            }
+            ExprKind::RegionExit { value, .. }
+            | ExprKind::TryExit { value, .. }
+            | ExprKind::AbortExit { value, .. } => f(value),
             ExprKind::HandlerRedirect { depth, body } => {
                 f(depth);
                 block(body, f);
@@ -1769,7 +1793,13 @@ impl Expr {
                     f(finish);
                 }
             }
-            ExprKind::RegionExit { value, .. } | ExprKind::TryExit { value, .. } => f(value),
+            ExprKind::AbortScope { body, handler, .. } => {
+                block(body, f);
+                f(handler);
+            }
+            ExprKind::RegionExit { value, .. }
+            | ExprKind::TryExit { value, .. }
+            | ExprKind::AbortExit { value, .. } => f(value),
             ExprKind::HandlerRedirect { depth, body } => {
                 f(depth);
                 block(body, f);
@@ -2782,7 +2812,10 @@ fn fusion_expr_safe(
         | ExprKind::RegionExit { .. }
         | ExprKind::HandlerDepth
         | ExprKind::HandlerRedirect { .. }
-        | ExprKind::TryExit { .. } => false,
+        | ExprKind::TryExit { .. }
+        // An abort leaves code that a fused stage would have to resume.
+        | ExprKind::AbortScope { .. }
+        | ExprKind::AbortExit { .. } => false,
         ExprKind::FnValue { function, captures } => {
             captures
                 .iter()
@@ -3025,8 +3058,12 @@ fn fuse_expr(
                 fuse_expr(finish, types, signatures, safety, fusions);
             }
         }
-        ExprKind::RegionExit { value, .. } | ExprKind::TryExit { value, .. } => {
-            fuse_expr(value, types, signatures, safety, fusions)
+        ExprKind::RegionExit { value, .. }
+        | ExprKind::TryExit { value, .. }
+        | ExprKind::AbortExit { value, .. } => fuse_expr(value, types, signatures, safety, fusions),
+        ExprKind::AbortScope { body, handler, .. } => {
+            fuse_block(body, types, signatures, safety, fusions);
+            fuse_expr(handler, types, signatures, safety, fusions);
         }
         ExprKind::HandlerDepth => {}
         ExprKind::HandlerRedirect { depth, body } => {
@@ -5017,14 +5054,18 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         let subst = crate::runtime_types::Subst::default();
         let parameter_ty = types.ty_in(parameter, &subst)?;
         let parameter_ty = types.full(parameter_ty, parameter.span)?;
-        let result_ty = types.ty_in(result, &subst)?;
-        let result_ty = types.full(result_ty, result.span)?;
+        let result_ty = if types.names_never(result) {
+            Type::Never
+        } else {
+            let result_ty = types.ty_in(result, &subst)?;
+            types.full(result_ty, result.span)?
+        };
         let parameter = parameter_ty;
         let result = result_ty;
-        if matches!(parameter, Type::Never) || matches!(result, Type::Never) {
+        if matches!(parameter, Type::Never) {
             return Err(Diagnostic::new(
                 declaration.item.span,
-                "an effect operation cannot use Never as its payload or result type",
+                "an effect operation cannot use Never as its payload type",
             ));
         }
         if parameter.is_view()
@@ -5322,6 +5363,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             lambda_hint: None,
             required_effects: std::cell::Cell::new(0),
             pending_capability: None,
+            abort_labels: 0,
             capability_slots: BTreeSet::new(),
             capability_passable: BTreeSet::new(),
             capability_argument: false,
@@ -11923,6 +11965,9 @@ struct HandlerScope {
     points: usize,
     /// The handle pushes a dynamic handler frame (declared operation).
     declared: bool,
+    /// Abortive operation (`-> Never`): the label of the `AbortScope` its
+    /// performs leave (E-ABORT-LEXICAL).
+    abort: Option<usize>,
 }
 
 struct Checker<'a, 't> {
@@ -11988,6 +12033,8 @@ struct Checker<'a, 't> {
     required_effects: std::cell::Cell<u16>,
     /// The binder span of `handle Op as op`, consumed by `handle_effect`.
     pending_capability: Option<(String, Span)>,
+    /// Next `AbortScope` label of this checker (unique per function body).
+    abort_labels: usize,
     /// Locals holding a second-class capability (EFF-CAP-LEXICAL).
     capability_slots: BTreeSet<usize>,
     /// Capabilities that may be passed to functions: `cap` parameters and
@@ -20619,7 +20666,7 @@ impl Checker<'_, '_> {
                 _ => None,
             },
             ExprKind::Coerce { value, .. } => self.copyable_result_grade(value),
-            ExprKind::Block(block) => block
+            ExprKind::Block(block) | ExprKind::AbortScope { body: block, .. } => block
                 .tail
                 .as_ref()
                 .and_then(|tail| self.copyable_result_grade(tail)),
@@ -20716,7 +20763,9 @@ impl Checker<'_, '_> {
                 }
                 _ => false,
             },
-            ExprKind::Block(b) => b.tail.as_ref().is_some_and(|e| self.value_moves_linear(e)),
+            ExprKind::Block(b) | ExprKind::AbortScope { body: b, .. } => {
+                b.tail.as_ref().is_some_and(|e| self.value_moves_linear(e))
+            }
             ExprKind::If(_, a, b) => [a, b].iter().any(|b| {
                 b.ty != Type::Never && b.tail.as_ref().is_some_and(|e| self.value_moves_linear(e))
             }),
@@ -20891,6 +20940,10 @@ impl Checker<'_, '_> {
                 ExprKind::HandlerPush { handler, body, .. } => {
                     find(checker, handler).or_else(|| find_in_block(checker, body))
                 }
+                ExprKind::AbortScope { handler, body, .. } => {
+                    find(checker, handler).or_else(|| find_in_block(checker, body))
+                }
+                ExprKind::AbortExit { value, .. } => find(checker, value),
                 ExprKind::DynamicPerform {
                     payload, resume, ..
                 } => find(checker, payload).or_else(|| find(checker, resume)),
@@ -31550,7 +31603,11 @@ impl Checker<'_, '_> {
     ) -> Result<Expr> {
         let capability = self.pending_capability.take();
         let parameter_ty = self.ty(parameter)?;
-        let result_ty = self.ty(result)?;
+        let result_ty = if self.types.names_never(result) {
+            Type::Never
+        } else {
+            self.ty(result)?
+        };
         let declared = self.effect_operations.get(operation).copied();
         if capability.is_some() && declared.is_none() {
             return Err(Diagnostic::new(
@@ -31574,11 +31631,23 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
-        if matches!(parameter_ty, Type::Never) || matches!(result_ty, Type::Never) {
+        if matches!(parameter_ty, Type::Never) {
             return Err(Diagnostic::new(
                 span,
-                "a handled operation cannot use Never as its payload or result type",
+                "a handled operation cannot use Never as its payload type",
             ));
+        }
+        if matches!(result_ty, Type::Never) {
+            return self.abortive_handle(
+                operation,
+                parameter_ty,
+                handler,
+                body,
+                expected,
+                span,
+                capability.is_some(),
+                declared.is_some(),
+            );
         }
         let handler_value = self.expr(handler)?;
         let Some((handler_id, _)) = Self::function_parts(handler_value.ty) else {
@@ -31736,6 +31805,7 @@ impl Checker<'_, '_> {
             region,
             points: 0,
             declared: declared.is_some(),
+            abort: None,
         });
         // A lexical handle discharges the declared operation's row requirement
         // for its body: the body is checked as if `Op` were available, while the
@@ -31811,6 +31881,160 @@ impl Checker<'_, '_> {
             span,
             resource: None,
         })
+    }
+    /// `handle F: P -> Never with h { body }` (E-ABORT-LEXICAL,
+    /// docs/abortive-handlers.md 3.1-3.2). `h` takes only the payload and
+    /// returns the `handle`'s result; a `perform F(x)` lexically inside the
+    /// body leaves it like a labelled `break`, with the cleanup and linear
+    /// checks of an early exit, and the `handle`'s value is `h(x)`.
+    #[allow(clippy::too_many_arguments)]
+    fn abortive_handle(
+        &mut self,
+        operation: &str,
+        parameter_ty: Type,
+        handler: &ast::Expr,
+        body: &ast::Block,
+        expected: Option<Type>,
+        span: Span,
+        capability: bool,
+        declared: bool,
+    ) -> Result<Expr> {
+        if capability {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the abortive operation '{operation}' cannot be bound as a capability; capabilities serve resumptive operations"
+                ),
+            ));
+        }
+        if self.borrowing_type(parameter_ty) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the payload of the abortive operation '{operation}' cannot hold a borrow: it outlives the body it leaves"
+                ),
+            ));
+        }
+        let handler_value = self.expr(handler)?;
+        let Some((handler_id, _)) = Self::function_parts(handler_value.ty) else {
+            return Err(Diagnostic::new(
+                handler.span,
+                "an effect handler must be a first-class fn/once fn value",
+            ));
+        };
+        let signature = self.types.function_types[handler_id].clone();
+        if signature.parameters.len() != 1 {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "a handler for the abortive operation '{operation}' takes only the payload and no resumption token, found {} parameter(s)",
+                    signature.parameters.len()
+                ),
+            ));
+        }
+        if signature.linear || !matches!(handler_value.ty, Type::Fn(_) | Type::Once(_)) {
+            return Err(Diagnostic::new(
+                handler.span,
+                "a handler for an abortive operation runs only when the body aborts, so it must be a 'fn' or 'once fn' value, not a linear one",
+            ));
+        }
+        if !self.subtype(parameter_ty, signature.parameters[0]) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the handler parameter accepts {}, which is not a supertype of the performed payload {}",
+                    self.types.name(signature.parameters[0]),
+                    self.types.name(parameter_ty)
+                ),
+            ));
+        }
+        if signature.result == Type::Never || self.borrowing_type(signature.result) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "a handler for the abortive operation '{operation}' must return a value without borrows, found {}",
+                    self.types.name(signature.result)
+                ),
+            ));
+        }
+        self.require(signature.effects, span)?;
+        let handler_type = handler_value.ty;
+        let slot = self.fresh_local(span, handler_type)?;
+        let label = self.abort_labels;
+        self.abort_labels += 1;
+        self.handlers.push(HandlerScope {
+            operation: operation.to_owned(),
+            parameter: parameter_ty,
+            result: Type::Never,
+            slot,
+            handler_parameter: signature.parameters[0],
+            handler_result: signature.result,
+            effects: signature.effects,
+            multishot: false,
+            region: false,
+            points: 0,
+            declared,
+            abort: Some(label),
+        });
+        let operation_effect = self.operation_effect(operation);
+        let saved_effects = self.effects;
+        self.effects |= operation_effect;
+        let saved_required = self.required_effects.replace(0);
+        let checked = self.block(body, Some(expected.unwrap_or(signature.result)));
+        self.effects = saved_effects;
+        self.required_effects
+            .set(saved_required | (self.required_effects.get() & !operation_effect));
+        self.handlers.pop();
+        let checked = checked?;
+        let ty = if checked.ty == Type::Never {
+            signature.result
+        } else {
+            checked.ty
+        };
+        if signature.result != ty {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the handler of the abortive operation '{operation}' returns {}, but the handled body produces {}; both become the value of the 'handle'",
+                    self.types.name(signature.result),
+                    self.types.name(ty)
+                ),
+            ));
+        }
+        let scope = Expr {
+            kind: ExprKind::AbortScope {
+                label,
+                body: checked,
+                handler: Box::new(Expr {
+                    kind: ExprKind::Local(slot),
+                    ty: handler_type,
+                    span,
+                    resource: None,
+                }),
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        Ok(Expr {
+            kind: ExprKind::Block(Block {
+                statements: vec![Statement::Let(slot, handler_value)],
+                tail: Some(Box::new(scope)),
+                ty,
+            }),
+            ty,
+            span,
+            resource: None,
+        })
+    }
+    /// A type that can hold a borrow (view, reference, text or a record of
+    /// them).
+    fn borrowing_type(&self, ty: Type) -> bool {
+        ty.is_view()
+            || ty.is_ref()
+            || ty.is_text()
+            || crate::runtime_types::has_borrow(self.types, ty)
+            || crate::runtime_types::contains_task(self.types, ty)
     }
     /// Intern a resumption callable type. One-shot resumption is
     /// `linear once fn(R) -> R`; multishot resumption is the copyable
@@ -32097,7 +32321,9 @@ impl Checker<'_, '_> {
             ExprKind::HandlerPush {
                 operation: inner, ..
             } if *inner == operation => return Ok(()),
-            ExprKind::HandlerPush { .. } | ExprKind::Suspendable(_) => true,
+            ExprKind::HandlerPush { .. }
+            | ExprKind::Suspendable(_)
+            | ExprKind::AbortScope { .. } => true,
             _ => nested,
         };
         let mut result = Ok(());
@@ -32261,6 +32487,9 @@ impl Checker<'_, '_> {
         );
         let region = scope.region;
         let handler_ty = self.locals[slot].ty;
+        if let Some(label) = scope.abort {
+            return self.abort_exit(index, label, operation_effect, value, span);
+        }
         if region
             && let Some(inner) = self.handlers[index + 1..]
                 .iter()
@@ -32270,6 +32499,21 @@ impl Checker<'_, '_> {
                 span,
                 format!(
                     "a non-tail 'perform {operation}' inside the body of a nested 'handle {}' is not supported: resuming it would have to reinstate the inner handler; perform it outside the nested handle or make the outer handler tail-resumptive",
+                    inner.operation
+                ),
+            ));
+        }
+        // A suspension inside an abortive scope would move the scope's exits
+        // into a continuation function they cannot leave.
+        if region
+            && let Some(inner) = self.handlers[index + 1..]
+                .iter()
+                .find(|inner| inner.abort.is_some())
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "a non-tail 'perform {operation}' inside the body of the abortive 'handle {}' is not supported; perform it outside that handle or make the handler for '{operation}' tail-resumptive",
                     inner.operation
                 ),
             ));
@@ -32341,6 +32585,47 @@ impl Checker<'_, '_> {
             None => Ok(call),
         }
     }
+    /// An abortive `perform` served by the enclosing abortive scope `index`
+    /// of this function: leave it with the payload.
+    fn abort_exit(
+        &mut self,
+        index: usize,
+        label: usize,
+        operation_effect: u16,
+        value: &ast::Expr,
+        span: Span,
+    ) -> Result<Expr> {
+        let (operation, parameter, handler_parameter) = {
+            let scope = &self.handlers[index];
+            (
+                scope.operation.clone(),
+                scope.parameter,
+                scope.handler_parameter,
+            )
+        };
+        if let Some(inner) = self.handlers[index + 1..].iter().find(|inner| inner.region) {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the abortive 'perform {operation}' cannot leave the body of 'handle {}', whose handler has code after 'resume'; perform it outside that handle",
+                    inner.operation
+                ),
+            ));
+        }
+        self.require(operation_effect, span)?;
+        let payload = self.expr_expected(value, Some(parameter))?;
+        let payload = self.coerce_argument(payload, handler_parameter, span)?;
+        Ok(Expr {
+            kind: ExprKind::AbortExit {
+                label,
+                value: Box::new(payload),
+                cleanup: Vec::new(),
+            },
+            ty: Type::Never,
+            span,
+            resource: None,
+        })
+    }
     fn perform_effect(
         &mut self,
         operation: &str,
@@ -32370,6 +32655,14 @@ impl Checker<'_, '_> {
                 ),
             ));
         };
+        if declared.result == Type::Never {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "the abortive 'perform {operation}' must be lexically inside its 'handle' in the same function"
+                ),
+            ));
+        }
         // No handler may be active at run time, which aborts the program, so
         // a dynamically resolved operation can always panic. A declared
         // operation is a concrete row effect too: the enclosing function must
@@ -35544,6 +35837,10 @@ impl Executable {
                 self.walk_lint_value_expr(function, handler, false, state, out);
                 self.walk_lint_block(function, body, false, state, out);
             }
+            ExprKind::AbortScope { handler, body, .. } => {
+                self.walk_lint_value_expr(function, handler, false, state, out);
+                self.walk_lint_block(function, body, false, state, out);
+            }
             _ => self.walk_lint_value_expr(function, expr, false, state, out),
         }
     }
@@ -35586,6 +35883,10 @@ impl Executable {
                 self.walk_lint_value_expr(function, value, ready, state, out);
             }
             ExprKind::HandlerPush { handler, body, .. } => {
+                self.walk_lint_value_expr(function, handler, false, state, out);
+                self.walk_lint_block(function, body, false, state, out);
+            }
+            ExprKind::AbortScope { handler, body, .. } => {
                 self.walk_lint_value_expr(function, handler, false, state, out);
                 self.walk_lint_block(function, body, false, state, out);
             }

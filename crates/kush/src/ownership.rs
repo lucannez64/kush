@@ -338,6 +338,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             resources: Vec::new(),
             local_resources: vec![None; function.locals.len()],
             loops: Vec::new(),
+            aborts: Vec::new(),
         };
         for (index, local) in function.locals.iter().enumerate() {
             if owns(local.ty, checker.owned, checker.unions, checker.pointees) {
@@ -1308,6 +1309,9 @@ struct Checker<'a> {
     resources: Vec<Type>,
     local_resources: Vec<Option<usize>>,
     loops: Vec<LoopState>,
+    /// Abortive scopes (E-ABORT-LEXICAL) by label: an `AbortExit` is checked
+    /// like a `break` to its scope.
+    aborts: Vec<(usize, LoopState)>,
 }
 impl Checker<'_> {
     /// Values that move instead of being copied.
@@ -4602,10 +4606,8 @@ impl Checker<'_> {
             ExprKind::DynArrayEqual { left, right, .. } => {
                 self.value_moves_linear(left) || self.value_moves_linear(right)
             }
-            ExprKind::HandlerPush { body, .. } => body
-                .tail
-                .as_deref()
-                .is_some_and(|tail| self.value_moves_linear(tail)),
+            ExprKind::HandlerPush { body, .. } => self.block_value_moves_linear(body),
+            ExprKind::AbortScope { body, .. } => self.block_value_moves_linear(body),
             ExprKind::DynamicPerform { .. } => self.moves(expr.ty),
             ExprKind::FnValue { captures, .. } => captures
                 .iter()
@@ -4657,6 +4659,9 @@ impl Checker<'_> {
     }
     fn bound(&mut self, slot: usize) {
         for state in &mut self.loops {
+            state.bound.push(slot);
+        }
+        for (_, state) in &mut self.aborts {
             state.bound.push(slot);
         }
     }
@@ -5245,13 +5250,28 @@ impl Checker<'_> {
         Ok(())
     }
     fn cleanup_list(&self) -> Vec<usize> {
-        let state = self.loops.last().unwrap();
+        self.cleanup_list_for(self.loops.last().unwrap())
+    }
+    fn cleanup_list_for(&self, state: &LoopState) -> Vec<usize> {
         let mut ids = (state.resource_start..self.resources.len()).collect::<Vec<_>>();
         ids.extend(state.bound.iter().filter_map(|s| self.local_resources[*s]));
         ids.sort_unstable();
         ids.dedup();
         ids.reverse();
         ids
+    }
+    fn loop_state(&self) -> LoopState {
+        LoopState {
+            pending_linear_start: self.pending_linear.len(),
+            entry: self.available.clone(),
+            entry_linear: (0..self.locals.len())
+                .map(|slot| self.slot_linear(slot))
+                .collect(),
+            breaks: None,
+            result_provenance: Vec::new(),
+            resource_start: self.resources.len(),
+            bound: Vec::new(),
+        }
     }
     fn enter_loop(&mut self) {
         self.loops.push(LoopState {
@@ -7154,6 +7174,50 @@ impl Checker<'_> {
                 }
                 self.loops.last_mut().unwrap().breaks = Some(self.available.clone());
             }
+            ExprKind::AbortScope {
+                label,
+                body,
+                handler,
+            } => {
+                let state = self.loop_state();
+                self.aborts.push((*label, state));
+                self.block(body)?;
+                let (_, state) = self.aborts.pop().unwrap();
+                let completed = (body.ty != Type::Never).then(|| self.available.clone());
+                match state.breaks {
+                    Some(aborted) => {
+                        // The handler runs only on the abort path.
+                        self.available = aborted;
+                        let loans = self.loans.clone();
+                        self.expr(handler)?;
+                        self.loans = loans;
+                        if let Some(completed) = completed {
+                            self.merge(&completed, expr.span)?;
+                        }
+                    }
+                    None => self.available = completed.unwrap_or(state.entry),
+                }
+            }
+            ExprKind::AbortExit {
+                label,
+                value,
+                cleanup,
+            } => {
+                let index = self
+                    .aborts
+                    .iter()
+                    .rposition(|(target, _)| target == label)
+                    .expect("an abort exit is inside its scope");
+                self.check_pending_linear(self.aborts[index].1.pending_linear_start, expr.span)?;
+                self.expr(value)?;
+                let bound = self.aborts[index].1.bound.clone();
+                self.exit_check(bound, expr.span, "this abortive perform")?;
+                *cleanup = self.cleanup_list_for(&self.aborts[index].1);
+                if let Some(previous) = self.aborts[index].1.breaks.clone() {
+                    self.merge(&previous, expr.span)?;
+                }
+                self.aborts[index].1.breaks = Some(self.available.clone());
+            }
             ExprKind::Continue(cleanup) => {
                 self.check_pending_linear(
                     self.loops.last().unwrap().pending_linear_start,
@@ -7539,6 +7603,11 @@ pub(crate) fn loop_break_values(block: &Block) -> Vec<&Expr> {
                 walk(handler, out);
                 walk_block(body, out);
             }
+            ExprKind::AbortScope { handler, body, .. } => {
+                walk(handler, out);
+                walk_block(body, out);
+            }
+            ExprKind::AbortExit { value, .. } => walk(value, out),
             ExprKind::DynamicPerform {
                 payload, resume, ..
             } => {
@@ -7683,7 +7752,7 @@ fn block_live(
     live_after: &Live,
     views: &BTreeSet<usize>,
     heads: &mut Vec<Live>,
-    exits: &mut Vec<Live>,
+    exits: &mut Vec<(Option<usize>, Live)>,
     out: &mut BTreeMap<usize, Live>,
 ) -> Live {
     let mut live = live_after.clone();
@@ -7714,7 +7783,7 @@ fn expr_live(
     live_after: &Live,
     views: &BTreeSet<usize>,
     heads: &mut Vec<Live>,
-    exits: &mut Vec<Live>,
+    exits: &mut Vec<(Option<usize>, Live)>,
     out: &mut BTreeMap<usize, Live>,
 ) -> Live {
     let mut live = live_after.clone();
@@ -7869,6 +7938,26 @@ fn expr_live(
         ExprKind::RegionExit { value, .. } | ExprKind::TryExit { value, .. } => {
             live = expr_live(value, live_after, views, heads, exits, out);
         }
+        ExprKind::AbortScope {
+            label,
+            body,
+            handler,
+        } => {
+            // An abort continues with the handler call, then after the scope.
+            let aborted = expr_live(handler, live_after, views, heads, exits, out);
+            exits.push((Some(*label), aborted));
+            live = block_live(body, live_after, views, heads, exits, out);
+            exits.pop();
+        }
+        ExprKind::AbortExit { label, value, .. } => {
+            let exit = exits
+                .iter()
+                .rev()
+                .find(|(target, _)| *target == Some(*label))
+                .map(|(_, live)| live.clone())
+                .unwrap_or_default();
+            live = expr_live(value, &exit, views, heads, exits, out);
+        }
         ExprKind::HandlerDepth => {}
         ExprKind::HandlerRedirect { depth, body } => {
             live = block_live(body, live_after, views, heads, exits, out);
@@ -7961,7 +8050,7 @@ fn expr_live(
             live = expr_live(value, &all, views, heads, exits, out);
         }
         ExprKind::While(condition, body) => {
-            exits.push(live_after.clone());
+            exits.push((None, live_after.clone()));
             let mut head = live_after.clone();
             loop {
                 heads.push(head.clone());
@@ -7985,7 +8074,7 @@ fn expr_live(
             live.extend(before_body);
         }
         ExprKind::Loop(body) => {
-            exits.push(live_after.clone());
+            exits.push((None, live_after.clone()));
             let mut head = live_after.clone();
             loop {
                 heads.push(head.clone());
@@ -8010,7 +8099,7 @@ fn expr_live(
             } else {
                 live = Live::new();
             }
-            if let Some(exit) = exits.last() {
+            if let Some((_, exit)) = exits.iter().rev().find(|(label, _)| label.is_none()) {
                 live.extend(exit.iter().copied());
             }
         }

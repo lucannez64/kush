@@ -975,6 +975,7 @@ enum PlaceFlow {
     Break(Value),
     Continue,
     Exit(Value, bool),
+    Abort(usize, Value),
 }
 impl From<Flow> for PlaceFlow {
     fn from(flow: Flow) -> Self {
@@ -984,6 +985,7 @@ impl From<Flow> for PlaceFlow {
             Flow::Break(value) => PlaceFlow::Break(value),
             Flow::Continue => PlaceFlow::Continue,
             Flow::Exit(value, finish) => PlaceFlow::Exit(value, finish),
+            Flow::Abort(label, value) => PlaceFlow::Abort(label, value),
         }
     }
 }
@@ -995,6 +997,8 @@ enum Flow {
     Continue,
     /// Leave the innermost `Region`; the flag applies the region's finish.
     Exit(Value, bool),
+    /// Leave the innermost `AbortScope` with this label, carrying the payload.
+    Abort(usize, Value),
 }
 struct Frame {
     function: usize,
@@ -1218,6 +1222,7 @@ macro_rules! place_value {
             PlaceFlow::Break(v) => return Ok(Flow::Break(v)),
             PlaceFlow::Continue => return Ok(Flow::Continue),
             PlaceFlow::Exit(v, finish) => return Ok(Flow::Exit(v, finish)),
+            PlaceFlow::Abort(label, v) => return Ok(Flow::Abort(label, v)),
             PlaceFlow::Place(_) => unreachable!("a place evaluation has no ordinary place flow"),
         }
     };
@@ -5123,8 +5128,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     v
                 }
             }
-            Flow::Break(_) | Flow::Continue | Flow::Exit(..) => {
-                unreachable!("loop and region exits are checked")
+            Flow::Break(_) | Flow::Continue | Flow::Exit(..) | Flow::Abort(..) => {
+                unreachable!("loop, region and abort exits are checked")
             }
         })
     }
@@ -6462,7 +6467,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 match self.block(body, frame)? {
                     Flow::Value(_) | Flow::Continue => {}
                     Flow::Break(_) => break Value::Scalar(0),
-                    returned @ (Flow::Return(_) | Flow::Exit(..)) => return Ok(returned),
+                    returned @ (Flow::Return(_) | Flow::Exit(..) | Flow::Abort(..)) => {
+                        return Ok(returned);
+                    }
                 }
             },
             ExprKind::Loop(body) => loop {
@@ -6475,7 +6482,9 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 match self.block(body, frame)? {
                     Flow::Value(_) | Flow::Continue => {}
                     Flow::Break(value) => break value,
-                    returned @ (Flow::Return(_) | Flow::Exit(..)) => return Ok(returned),
+                    returned @ (Flow::Return(_) | Flow::Exit(..) | Flow::Abort(..)) => {
+                        return Ok(returned);
+                    }
                 }
             },
             ExprKind::Break(value, cleanup) => {
@@ -6512,6 +6521,31 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     }
                     _ => value,
                 }
+            }
+            ExprKind::AbortScope {
+                label,
+                body,
+                handler,
+            } => match self.block(body, frame)? {
+                Flow::Value(value) => value,
+                Flow::Abort(target, payload) if target == *label => {
+                    let callable = value!(self.expr(handler, frame));
+                    self.consume(handler, frame);
+                    self.call_value(callable, vec![payload])?
+                }
+                other => return Ok(other),
+            },
+            ExprKind::AbortExit {
+                label,
+                value,
+                cleanup,
+            } => {
+                let payload = value!(self.expr(value, frame));
+                self.consume(value, frame);
+                for id in cleanup {
+                    self.drop_resource(Some(*id), frame)?;
+                }
+                return Ok(Flow::Abort(*label, payload));
             }
             ExprKind::RegionExit {
                 value,

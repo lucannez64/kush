@@ -2486,6 +2486,14 @@ impl<'a> Types<'a> {
                     ),
                 ));
             };
+            if result == Type::Never {
+                return Err(Diagnostic::new(
+                    ty.span,
+                    format!(
+                        "'cap {operation}' names an abortive operation; capabilities serve resumptive operations only"
+                    ),
+                ));
+            }
             let bits = effect_bits_with(self.resolution, effects, &substitution.effects)?;
             return Ok(Type::Fn(self.capability_arrow(parameter, result, bits)));
         }
@@ -5076,6 +5084,16 @@ impl<'a> Types<'a> {
             payload,
             result: ty,
         })
+    }
+    /// Whether `ty` is the builtin name `Never`. It is accepted only as the
+    /// result of an effect operation, which makes the operation abortive
+    /// (docs/abortive-handlers.md); elsewhere it is not a runtime type.
+    pub(crate) fn names_never(&self, ty: &ast::Type) -> bool {
+        matches!(&ty.kind, ast::TypeKind::Named { path, arguments } if path.len() == 1 && arguments.is_empty())
+            && self.resolution.reference(ty.span).is_some_and(|id| {
+                let binding = &self.resolution.bindings[id];
+                binding.kind == BindingKind::Builtin && binding.name == "Never"
+            })
     }
     pub fn io_result(&mut self, ok: Type, span: Span) -> Result<Type> {
         let Ok((ty, _)) = self.result_type(ok, Type::I64, span) else {
