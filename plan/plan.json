@@ -3562,10 +3562,26 @@
       "deps": [
         "RES-GRADE-MODEL"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/grade-model.md sections 2-5: name each obligation (per-zone weakening/contraction, scaling at r=0,1,n,many, erasure E1-E6, handler/multishot/task boundaries) and pin a positive and a hostile program for each in both backends with balanced allocations.",
-      "commit": null,
-      "log": []
+      "commit": "4f22de6",
+      "log": [
+        {
+          "time": "2026-11-05 19:08:11",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 19:23:03",
+          "who": "agent",
+          "text": "Boat gate on beb406a: fmt, all cargo tests, clippy passed. tests/grade_obligations.rs: 21 obligation tests, both backends, hostile diagnostics pinned."
+        },
+        {
+          "time": "2026-11-05 19:23:03",
+          "who": "agent",
+          "text": "done 4f22de6"
+        }
+      ]
     },
     {
       "id": "GRADE-ARROW-AXES",
@@ -3575,10 +3591,26 @@
       "deps": [
         "RES-GRADE-MODEL"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/grade-model.md section 3: check parameter-grade and once/linear-once axes independently; hostile programs try to widen linear once through a grade change or an erased-position adapter.",
-      "commit": null,
-      "log": []
+      "commit": "4f22de6",
+      "log": [
+        {
+          "time": "2026-11-05 19:08:11",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 19:23:03",
+          "who": "agent",
+          "text": "Boat gate on beb406a: fmt, all cargo tests, clippy passed. 4 axis tests; no checker change needed (axes already independent in function_subtype)."
+        },
+        {
+          "time": "2026-11-05 19:23:03",
+          "who": "agent",
+          "text": "done 4f22de6"
+        }
+      ]
     },
     {
       "id": "GRADE-EFFECT-DEMAND",
@@ -3588,10 +3620,26 @@
       "deps": [
         "RES-GRADE-MODEL"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Research: replace the conservative max(1,r) effect demand / high-demand block counting (grade-model.md decision 5) only with a specified effect analysis; design before implementation.",
-      "commit": null,
-      "log": []
+      "commit": "beb406a",
+      "log": [
+        {
+          "time": "2026-11-05 19:12:02",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 19:23:03",
+          "who": "agent",
+          "text": "docs/grade-effect-demand.md: precise value-flow rule specified, not adopted (hoisting suffices; would reject accepted x@[2] programs). Added GRADE-DEMAND-HINT."
+        },
+        {
+          "time": "2026-11-05 19:23:04",
+          "who": "agent",
+          "text": "done beb406a"
+        }
+      ]
     },
     {
       "id": "EFF-ROW-LAWS",
@@ -3601,10 +3649,26 @@
       "deps": [
         "RES-EFFECT-CAPABILITY"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/effect-capabilities.md section 4: composition, monotonicity, discharge, subtraction and bounded binders checked over the 16-bit row universe against the checker's row operations.",
-      "commit": null,
-      "log": []
+      "commit": "cce190f",
+      "log": [
+        {
+          "time": "2026-11-05 19:08:06",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 19:23:03",
+          "who": "agent",
+          "text": "Boat gate on beb406a: fmt, all cargo tests, clippy passed. Unit tests (7) over 2^16 rows and solver vs brute force; 9 source-level law tests incl. parity/cleanup. Mutation (OR instead of AND in solver) caught by 3 tests."
+        },
+        {
+          "time": "2026-11-05 19:23:03",
+          "who": "agent",
+          "text": "done cce190f"
+        }
+      ]
     },
     {
       "id": "EFF-CAP-LEXICAL",
@@ -3653,10 +3717,26 @@
       "deps": [
         "RES-EFFECT-CAPABILITY"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Research: dropping live owned values between perform and handle in both backends; separate from capabilities (effect-capabilities.md 3.5).",
-      "commit": null,
-      "log": []
+      "commit": "beb406a",
+      "log": [
+        {
+          "time": "2026-11-05 19:14:21",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-05 19:23:04",
+          "who": "agent",
+          "text": "docs/abortive-handlers.md: return-path propagation reusing ? cleanup; added E-ABORT-LEXICAL/PROPAGATE/INTERACT."
+        },
+        {
+          "time": "2026-11-05 19:23:04",
+          "who": "agent",
+          "text": "done beb406a"
+        }
+      ]
     },
     {
       "id": "UNBOX-CERT-CHECKER",
@@ -3679,10 +3759,16 @@
       "deps": [
         "RES-UNBOX-CERT"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "unboxing-certificates.md section 6: pooled, headerless, system, arena, user allocator and stack references; prerequisite for alignment niches.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-05 19:19:45",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "UNBOX-MULTI-NICHE",
@@ -3744,16 +3830,78 @@
       "deps": [
         "D-SINGLE-TUPLE"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "first<T>(a, b) with two one-impl dyn objects, and match arms mixing an object with a plain member value, still collapse to the member type and are rejected (found by the D-SINGLE-TUPLE review).",
-      "commit": null,
+      "commit": "77848c0",
       "log": [
         {
           "time": "2026-11-05 18:57:10",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-05 19:09:44",
+          "who": "agent",
+          "text": "Boat gate on 77848c0: fmt, cargo test (all suites), clippy passed. Narrow fix chosen: joins whose LUB is a one-impl object's member set keep the object; other joins still flatten (no accepted program changes)."
+        },
+        {
+          "time": "2026-11-05 19:09:44",
+          "who": "agent",
+          "text": "done 77848c0"
         }
       ]
+    },
+    {
+      "id": "GRADE-DEMAND-HINT",
+      "title": "Suggest hoisting for effect-only uses under high demand",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "GRADE-EFFECT-DEMAND"
+      ],
+      "status": "todo",
+      "desc": "docs/grade-effect-demand.md decision 3: diagnostic-only hint when an exact-grade violation comes from statement-position uses in a block argument under demand >= 2; verdicts unchanged.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "E-ABORT-LEXICAL",
+      "title": "Abortive operations handled in the same function",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "E-ABORT-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "docs/abortive-handlers.md 3.1-3.2: Never-result operations, token-free handlers, labelled early exit with ? cleanup; confirm surface syntax with the user first.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "E-ABORT-PROPAGATE",
+      "title": "Abort propagation across calls",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "E-ABORT-LEXICAL"
+      ],
+      "status": "todo",
+      "desc": "docs/abortive-handlers.md 3.3: hidden abort word, call-site checks, dynamic lookup, Flow::Abort, indirect calls, task barrier, mainline measurement (decision 5).",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "E-ABORT-INTERACT",
+      "title": "Aborts through non-tail and multishot resumptions",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "E-ABORT-PROPAGATE"
+      ],
+      "status": "todo",
+      "desc": "docs/abortive-handlers.md 3.3: abort out of resume and resumable entries, dropping a pending continuation; dedicated use-after-free review.",
+      "commit": null,
+      "log": []
     }
   ]
 }
