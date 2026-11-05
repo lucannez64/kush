@@ -852,3 +852,93 @@ fn declared_operations_accept_multishot_handlers() {
         "multishot resumption of 'Choose' through a called function is not supported",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Performance shape (E-PERF)
+// ---------------------------------------------------------------------------
+
+/// A million tail-resumptive performs, lexical and through a called
+/// function, run natively under a 256 KiB stack: they continue in place, so
+/// the stack does not grow with the number of performs.
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn a_million_tail_resumptive_performs_run_in_constant_stack() {
+    use std::process::Command;
+    let lexical = r#"
+        fn main() -> i64 ! {panic} {
+            handle Ask: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {panic} { resume(x + 1) } {
+                let mut i = 0;
+                let mut s = 0;
+                while i < 1000000 { s = (s + perform Ask(i)) & 1023; i = i + 1; }
+                s & 255
+            }
+        }"#;
+    let dynamic = r#"
+        effect Ask: i64 -> i64;
+        fn step(x: i64) -> i64 ! {Ask, panic} { perform Ask(x) }
+        fn main() -> i64 ! {panic} {
+            handle Ask: i64 -> i64 with fn(
+                x: i64,
+                resume: linear once fn(i64) -> i64 ! {},
+            ) -> i64 ! {} { resume(x ^ 1) } {
+                let mut i = 0;
+                let mut s = 0;
+                while i < 1000000 { s = (s + step(i)) & 1023; i = i + 1; }
+                s & 255
+            }
+        }"#;
+    // Expected values: the low byte of the masked running sums.
+    let expected = |shift: fn(i64) -> i64| {
+        let mut s = 0i64;
+        for i in 0..1_000_000i64 {
+            s = (s + shift(i)) & 1023;
+        }
+        s & 255
+    };
+    for (source, value) in [
+        (lexical, expected(|i| i + 1)),
+        (dynamic, expected(|i| i ^ 1)),
+    ] {
+        let program = check(source).unwrap();
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("million-performs");
+        kush::native::build(&program, &binary).unwrap();
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(format!("ulimit -s 256; exec {}", binary.display()))
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(value as i32),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn tail_and_non_tail_loops_agree_in_both_backends() {
+    // The same loop through the identity path and the state machine. The
+    // reference evaluator bounds nesting depth, and every pending non-tail
+    // handler activation nests, so the loop is short.
+    let body = "let mut i = 0;
+                let mut s = 0;
+                while i < 8 { s = (s + perform Ask(i)) & 1023; i = i + 1; }
+                s";
+    let tail = format!(
+        "fn main() -> i64 ! {{alloc, panic}} {{ handle Ask: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{panic}} {{ resume(x + 1) }} {{ {body} }} }}"
+    );
+    let non_tail = format!(
+        "fn main() -> i64 ! {{alloc, panic}} {{ handle Ask: i64 -> i64 with fn(x: i64, resume: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{panic}} {{ let r = resume(x + 1); r }} {{ {body} }} }}"
+    );
+    let mut s = 0i64;
+    for i in 0..8 {
+        s = (s + i + 1) & 1023;
+    }
+    agrees(&tail, s, "");
+    agrees(&non_tail, s, "");
+}

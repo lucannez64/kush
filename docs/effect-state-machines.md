@@ -554,3 +554,29 @@ cannot be done through the token value. Instead the handler is specialized:
   suspendable and a call that may perform the operation, or a task spawned
   to perform it, is rejected. Multishot resumption through a chain of called
   functions (the frame-chain copy of section 10) is not implemented.
+
+### 14.3 Measured overhead (E-PERF)
+
+Native `--release` builds, Linux x86-64 laptop, best of 5-7 runs, process
+start-up (0.7 ms for an empty program) subtracted. Loops keep a masked
+running sum so nothing is optimized away.
+
+| Loop body | Iterations | Per iteration |
+| --- | --- | --- |
+| direct call of a small function (baseline) | 10^6 | ~3.5 ns |
+| lexical perform, tail-resumptive lambda handler | 10^6 | ~5-8 ns |
+| perform in a called function, tail-resumptive handler | 10^6 | ~11 ns |
+| lexical perform, handler with code after `resume` | 5 x 10^4 | ~120 ns |
+| perform in a called function, handler with code after `resume` | 5 x 10^4 | ~210 ns |
+
+The tail-resumptive paths run in place: a test runs 10^6 performs of each
+kind natively under `ulimit -s 256` (256 KiB of stack). Non-tail handlers
+nest one handler activation per perform until the body finishes, so their
+stack use is linear in the number of performs that are resumed before the
+body completes; that is inherent to deep handlers with code after `resume`
+(section 7). The non-tail cost is dominated by one closure environment per
+suspension with live values and the deeper call chain; it was not tuned.
+
+The reference evaluator keeps its fixed nesting budget (128 nested
+evaluations), so it runs only a few dozen pending non-tail handler
+activations (about ten for a loop like the one in the parity test); native code is limited by the machine stack instead.
