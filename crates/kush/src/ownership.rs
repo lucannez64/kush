@@ -2813,68 +2813,153 @@ impl Checker<'_> {
             if element_leaves.is_empty() {
                 continue;
             }
-            let existing = self.container_provenance(argument);
-            let mut merged = existing.clone();
-            for element_leaf in element_leaves {
-                let Some(declared) = element_leaf.lifetime.clone() else {
-                    continue;
+            // A borrowed record behind the argument may be a field or element
+            // of a local owner, or caller storage behind a parameter: resolve
+            // the exact owner and field path, exactly as for `*r = value`.
+            let record_referent = self.referent(argument.ty).is_some_and(|referent| {
+                referent.layout().is_some_and(|id| self.enums[id].borrowed)
+            });
+            let (targets, existings) = if record_referent {
+                let targets = self.record_write_targets(argument, span)?;
+                let existings = if targets.is_empty() {
+                    vec![self.declared_referent_provenance(argument.ty)?]
+                } else {
+                    targets
+                        .iter()
+                        .map(|(owner, prefix, _)| self.owner_leaves_under(*owner, prefix))
+                        .collect()
                 };
-                let relative = element_leaf.path[1..].to_vec();
-                let element_actual = existing
-                    .leaves
-                    .get(&relative)
-                    .and_then(|loan| loan.lifetime.clone());
-                let mut element = existing.leaves.get(&relative).cloned().unwrap_or_default();
-                for (index, (other_leaves, other)) in parameters.iter().zip(args.iter()).enumerate()
-                {
-                    for leaf in other_leaves {
-                        // Another argument's element or record leaves are
-                        // sources too: the callee may copy a leaf out of a
-                        // borrowed record or container it was given. The
-                        // destination's own leaves are already in `existing`.
-                        if index == destination && leaf.path.first() == Some(&CONTAINER_LEAF) {
-                            continue;
-                        }
-                        let Some(other_declared) = &leaf.lifetime else {
-                            continue;
-                        };
-                        if !Self::callee_flows(bounds, other_declared, &declared) {
-                            continue;
-                        }
-                        let Some(loan) = self.argument_leaf_loan(other, &leaf.path) else {
-                            continue;
-                        };
-                        if let Some(actual) = &element_actual
-                            && !is_internal_lifetime(actual)
-                        {
-                            let written = loan.lifetime.clone().or_else(|| {
-                                (!loan.origins.is_empty())
-                                    .then(|| self.anonymous_lifetime(&loan.origins))
-                            });
-                            if !written
-                                .as_deref()
-                                .is_some_and(|written| self.actual_outlives(written, actual))
-                            {
-                                return Err(Diagnostic::new(
-                                    span,
-                                    format!(
-                                        "this call would write {} into a container whose declared element lifetime is {}; the written reference must outlive the container's element lifetime",
-                                        written.as_deref().map(describe_actual).unwrap_or_else(
-                                            || "a temporary or local owner".to_owned()
-                                        ),
-                                        describe_actual(actual)
-                                    ),
-                                ));
+                (Some(targets), existings)
+            } else {
+                (None, vec![self.container_provenance(argument)])
+            };
+            let mut written = Vec::new();
+            for existing in &existings {
+                let mut merged = existing.clone();
+                for element_leaf in &element_leaves {
+                    let Some(declared) = element_leaf.lifetime.clone() else {
+                        continue;
+                    };
+                    let relative = element_leaf.path[1..].to_vec();
+                    let element_actual = existing
+                        .leaves
+                        .get(&relative)
+                        .and_then(|loan| loan.lifetime.clone());
+                    let mut element = existing.leaves.get(&relative).cloned().unwrap_or_default();
+                    for (index, (other_leaves, other)) in
+                        parameters.iter().zip(args.iter()).enumerate()
+                    {
+                        for leaf in other_leaves {
+                            // Another argument's element or record leaves are
+                            // sources too: the callee may copy a leaf out of
+                            // a borrowed record or container it was given.
+                            // The destination's own leaves are in `existing`.
+                            if index == destination && leaf.path.first() == Some(&CONTAINER_LEAF) {
+                                continue;
                             }
+                            let Some(other_declared) = &leaf.lifetime else {
+                                continue;
+                            };
+                            if !Self::callee_flows(bounds, other_declared, &declared) {
+                                continue;
+                            }
+                            let Some(loan) = self.argument_leaf_loan(other, &leaf.path) else {
+                                continue;
+                            };
+                            if let Some(actual) = &element_actual
+                                && !is_internal_lifetime(actual)
+                            {
+                                let written = loan.lifetime.clone().or_else(|| {
+                                    (!loan.origins.is_empty())
+                                        .then(|| self.anonymous_lifetime(&loan.origins))
+                                });
+                                if !written
+                                    .as_deref()
+                                    .is_some_and(|written| self.actual_outlives(written, actual))
+                                {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        format!(
+                                            "this call would write {} into a container whose declared element lifetime is {}; the written reference must outlive the container's element lifetime",
+                                            written.as_deref().map(describe_actual).unwrap_or_else(
+                                                || "a temporary or local owner".to_owned()
+                                            ),
+                                            describe_actual(actual)
+                                        ),
+                                    ));
+                                }
+                            }
+                            element = self.merge_loans([element, loan]);
                         }
-                        element = self.merge_loans([element, loan]);
+                    }
+                    merged.leaves.insert(relative, element);
+                }
+                written.push(merged);
+            }
+            match targets {
+                None => {
+                    let merged = written.pop().unwrap_or_default();
+                    self.merge_container_provenance(argument, merged, false);
+                }
+                Some(targets) => {
+                    for ((owner, prefix, _), merged) in targets.iter().zip(&written) {
+                        let mut placed = RecordProvenance::default();
+                        for (path, loan) in &merged.leaves {
+                            let mut full = prefix.clone();
+                            full.extend(path.iter().copied());
+                            placed.leaves.insert(full, loan.clone());
+                        }
+                        self.merge_container_provenance_slot(*owner, placed, false);
+                    }
+                    // A stored reference argument also carries the new leaves.
+                    let base = through_coerce(argument);
+                    if let ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) =
+                        &base.kind
+                        && !targets.is_empty()
+                        && let Some(merged) = written.first().cloned()
+                    {
+                        self.merge_container_provenance_slot(*slot, merged, false);
                     }
                 }
-                merged.leaves.insert(relative, element);
             }
-            self.merge_container_provenance(argument, merged, false);
         }
         Ok(())
+    }
+    /// The leaves of a local owner under `prefix`, relative to that prefix.
+    fn owner_leaves_under(&self, owner: usize, prefix: &[usize]) -> RecordProvenance {
+        let mut existing = RecordProvenance::default();
+        if let Some(provenance) = &self.record_sources[owner] {
+            for (path, loan) in &provenance.leaves {
+                if let Some(rest) = path.strip_prefix(prefix) {
+                    existing.leaves.insert(rest.to_vec(), loan.clone());
+                }
+            }
+        }
+        existing
+    }
+    /// The declared leaf lifetimes of the record a reference type points at.
+    /// For caller storage behind a parameter they are the only destination.
+    fn declared_referent_provenance(&self, reference: Type) -> Result<RecordProvenance> {
+        let mut provenance = RecordProvenance::default();
+        if let Some(referent) = self.referent(reference) {
+            for leaf in leaves_of(
+                self.enums,
+                self.pointees,
+                self.reference_labels,
+                self.variance,
+                referent,
+            )? {
+                provenance.leaves.insert(
+                    leaf.path,
+                    Loan {
+                        lifetime: leaf.lifetime,
+                        mutable: leaf.mutable,
+                        ..Loan::default()
+                    },
+                );
+            }
+        }
+        Ok(provenance)
     }
     /// `*reference = value` for a record with borrowed fields. Every written
     /// leaf must outlive the destination's lifetime: a lifetime declared by
@@ -2906,20 +2991,10 @@ impl Checker<'_> {
         // the destination and the caller merges the written leaves.
         let mut destinations = targets
             .iter()
-            .map(|(owner, prefix, _)| {
-                let mut existing = RecordProvenance::default();
-                if let Some(provenance) = &self.record_sources[*owner] {
-                    for (path, loan) in &provenance.leaves {
-                        if let Some(rest) = path.strip_prefix(prefix.as_slice()) {
-                            existing.leaves.insert(rest.to_vec(), loan.clone());
-                        }
-                    }
-                }
-                existing
-            })
+            .map(|(owner, prefix, _)| self.owner_leaves_under(*owner, prefix))
             .collect::<Vec<_>>();
         if targets.is_empty() {
-            destinations.push(self.container_provenance(reference));
+            destinations.push(self.declared_referent_provenance(reference.ty)?);
         }
         for existing in &destinations {
             for leaf in &expected {
@@ -3051,11 +3126,17 @@ impl Checker<'_> {
                     .filter(|owner| self.is_carrier_type(self.locals[*owner].ty))
                     .collect::<Vec<_>>();
                 let referent = self.referent(base.ty);
+                // The same nominal record with the same type arguments: a
+                // generic record nested in itself shares the definition, so
+                // the definition alone does not identify the whole owner.
                 let same = |owner: usize| {
-                    let definition = |ty: Type| ty.layout().map(|id| self.enums[id].definition);
+                    let shape = |ty: Type| {
+                        ty.layout()
+                            .map(|id| (self.enums[id].definition, self.enums[id].arguments.clone()))
+                    };
                     referent.is_some_and(|referent| {
-                        definition(self.locals[owner].ty).is_some()
-                            && definition(self.locals[owner].ty) == definition(referent)
+                        shape(self.locals[owner].ty).is_some()
+                            && shape(self.locals[owner].ty) == shape(referent)
                     })
                 };
                 if carriers.is_empty() || !carriers.iter().all(|owner| same(*owner)) {

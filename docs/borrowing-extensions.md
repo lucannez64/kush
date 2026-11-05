@@ -379,9 +379,18 @@ reset(&mut h, &b);    // h now borrows b: b cannot be replaced while h lives
   `&mut Holder` as for any record. Assigning a single borrowed field through
   the reference is rejected; replace the record. Owned metadata of the old
   record (for example a `String` field) is dropped exactly once by the write.
-- **Limit.** Returning a field reference (`h.point`) from a `&mut Holder<'a>`
+- **Calls.** A field or element place passed to a writing callee
+  (`set(&mut o.h, ..)`, `set(&mut v[i], ..)`, or a stored `let r = &mut o.h`)
+  resolves the same owner and field path as a direct write. A place of a
+  `&mut Outer<'a>` parameter is checked against the declared `'a`.
+- **Limits.** Returning a field reference (`h.point`) from a `&mut Holder<'a>`
   parameter infers an extra bound that the outer reference outlives `'a`, so
-  callers usually cannot satisfy it. Take `&Holder<'a>` for such readers.
+  callers usually cannot satisfy it; take `&Holder<'a>` for such readers. A
+  `&mut` borrowed-record argument conflicts with another argument of the same
+  call whose leaves share a source. Writes through a moved or reborrowed
+  reference (`let s = r;`, `&mut *r`), a branch-selected field reference, or a
+  reference returned by a function are rejected because the written field path
+  cannot be identified.
 
 ## Reference storage, escape, and reborrow
 
