@@ -24507,6 +24507,9 @@ impl Checker<'_, '_> {
         } else {
             None
         };
+        if reason.is_none() {
+            self.reject_lambda_runtime_length(ty, span)?;
+        }
         match reason {
             Some(reason) => Err(Diagnostic::new(
                 span,
@@ -31646,7 +31649,11 @@ impl Checker<'_, '_> {
             ExprKind::FnValue { captures, .. } if captures.is_empty()
         ) && matches!(handler_value.ty, Type::Fn(_))
             && !multishot
-            && tail_resumptive_handler(self.resolution, handler);
+            && tail_resumptive_handler(self.resolution, handler)
+            // A handler that performs declared operations would run in place
+            // inside the callee, where the callee's own handlers could
+            // intercept them; only builtin effects may travel with it.
+            && signature.effects & !EFFECT_BITS == 0;
         if declared.is_some() && !capability_only {
             if !matches!(handler_value.ty, Type::Fn(_) | Type::Once(_)) {
                 return Err(Diagnostic::new(
@@ -31734,7 +31741,14 @@ impl Checker<'_, '_> {
         // for its body: the body is checked as if `Op` were available, while the
         // enclosing function row is untouched. Calls to other functions that
         // declare `{Op}` are therefore satisfied here.
-        let operation_effect = self.operation_effect(operation);
+        // Only a handler on the dynamic stack (or an undeclared lexical
+        // operation, whose bit is 0) discharges the operation's row bit: a
+        // capability-only handler must not hide a called function's `Op`.
+        let operation_effect = if declared.is_some() || capability.is_none() {
+            self.operation_effect(operation)
+        } else {
+            0
+        };
         let saved_effects = self.effects;
         self.effects |= operation_effect;
         // The discharged operation never reaches an inferred lambda row.
@@ -32228,6 +32242,13 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
+        // A scope that is not on the dynamic stack never discharged the
+        // operation's bit, so a lexical perform through it does not need it.
+        let operation_effect = if self.handlers[index].declared {
+            operation_effect
+        } else {
+            0
+        };
         let scope = &self.handlers[index];
         let (parameter, result, slot, handler_parameter, handler_result, effects, multishot) = (
             scope.parameter,

@@ -143,28 +143,20 @@ fn only_pure_capability_handlers_are_dynamically_visible() {
         66 + 65,
         "",
     );
-    // A handler with effects is capability-only: a called function
-    // performing Ask by name finds no handler and the program aborts in both
-    // backends, so the handler's effects are never hidden from a row.
-    let source = "effect Ask: i64 -> i64;
+    // A handler with effects is capability-only: it is not on the dynamic
+    // stack and does not discharge `Ask`, so a called function's `Ask` must
+    // appear in the enclosing row instead of aborting at run time.
+    rejects(
+        "effect Ask: i64 -> i64;
          fn via_name() -> i64 ! {Ask, panic} { perform Ask(2) }
          fn main() -> i64 ! {io, panic} {
              handle Ask: i64 -> i64 as ask with fn(
                  x: i64,
                  resume: linear once fn(i64) -> i64 ! {},
              ) -> i64 ! {io, panic} { print_i64(x); resume(x) } { perform ask(1) + via_name() }
-         }";
-    let program = check(source).unwrap();
-    assert!(program.evaluate(&mut Vec::new()).is_err());
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
-        let binary = scratch.path().join("effect-capabilities-abort");
-        kush::native::build(&program, &binary).unwrap();
-        let native = std::process::Command::new(&binary).output().unwrap();
-        assert!(!native.status.success());
-        assert_eq!(String::from_utf8_lossy(&native.stdout), "1\n");
-    }
+         }",
+        "operation requires effects {Ask}",
+    );
 }
 
 #[test]
@@ -402,4 +394,78 @@ fn capability_performs_clean_up_owned_values() {
         "",
     );
     assert_eq!(stats.allocations, 3);
+}
+
+// Review regressions.
+
+#[test]
+fn a_capability_only_handler_does_not_discharge_called_performs() {
+    // The handler has effects, so it is not on the dynamic stack; a called
+    // function's `Ask` must stay in the enclosing row.
+    rejects(
+        "effect Ask: i64 -> i64;
+         fn g() -> i64 ! {Ask, panic} { perform Ask(1) }
+         fn h() -> i64 ! {panic} {
+             handle Ask: i64 -> i64 as ask with fn(
+                 x: i64,
+                 resume: linear once fn(i64) -> i64 ! {},
+             ) -> i64 ! {panic} { resume(x + 100) } { g() }
+         }
+         fn main() -> i64 ! {panic} { h() }",
+        "operation requires effects {Ask}",
+    );
+    // With the outer handler in scope the row is honest and the outer
+    // handler serves the call.
+    agrees(
+        "effect Ask: i64 -> i64;
+         fn g() -> i64 ! {Ask, panic} { perform Ask(1) }
+         fn main() -> i64 ! {panic} {
+             handle Ask: i64 -> i64 with fn(
+                 x: i64,
+                 resume: linear once fn(i64) -> i64 ! {},
+             ) -> i64 ! {} { resume(7) } {
+                 handle Ask: i64 -> i64 as ask with fn(
+                     x: i64,
+                     resume: linear once fn(i64) -> i64 ! {},
+                 ) -> i64 ! {panic} { resume(x + 100) } { g() + perform ask(1) }
+             }
+         }",
+        108,
+        "",
+    );
+}
+
+#[test]
+fn a_capability_whose_handler_performs_declared_operations_stays_local() {
+    // In a callee its `Log` would be caught by the callee's own handlers.
+    rejects(
+        "effect Ask: i64 -> i64;
+         effect Log: i64 -> i64;
+         fn f(op: cap Ask ! {Log, panic}) -> i64 ! {Log, panic} { perform op(1) }
+         fn main() -> i64 ! {panic} {
+             handle Log: i64 -> i64 with fn(
+                 x: i64,
+                 resume: linear once fn(i64) -> i64 ! {},
+             ) -> i64 ! {} { resume(9) } {
+                 handle Ask: i64 -> i64 as ask with fn(
+                     x: i64,
+                     resume: linear once fn(i64) -> i64 ! {},
+                 ) -> i64 ! {Log, panic} { resume(perform Log(x)) } { f(ask) }
+             }
+         }",
+        "EFF-CAP-RESUME-CALLS",
+    );
+    // Builtin effects travel with a passed capability.
+    agrees(
+        "effect Ask: i64 -> i64;
+         fn f(op: cap Ask ! {io, panic}) -> i64 ! {io, panic} { perform op(2) }
+         fn main() -> i64 ! {io, panic} {
+             handle Ask: i64 -> i64 as ask with fn(
+                 x: i64,
+                 resume: linear once fn(i64) -> i64 ! {},
+             ) -> i64 ! {io, panic} { print_i64(x); resume(x) } { f(ask) }
+         }",
+        2,
+        "2\n",
+    );
 }

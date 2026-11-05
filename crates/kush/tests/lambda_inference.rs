@@ -288,3 +288,16 @@ fn annotated_lambdas_are_unchanged() {
         "operation requires effects {panic}",
     );
 }
+
+#[test]
+fn an_inferred_result_never_carries_a_runtime_length_array() {
+    rejects(
+        "fn main() -> i64 ! {alloc, panic} {
+             let n = 2;
+             let a: [i64; n <= 4] = [1, 2];
+             let f = fn() { a };
+             0
+         }",
+        "runtime-length array",
+    );
+}

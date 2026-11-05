@@ -160,12 +160,17 @@ handle Ask: i64 -> i64 as ask with fn(x: i64, resume: linear once fn(i64) -> i64
   `cap` types are allowed only as the whole type of a named function
   parameter; functions with a `cap` parameter cannot become function values.
 - **Dynamic visibility (refinement of 3.1).** A pure handler bound `as op`
-  also pushes the dynamic frame, as written above. A handler with effects
-  cannot be dynamically visible (callers' rows would hide its effects), so it
-  is capability-only: performs of `Op` by name inside the body's called
-  functions reach an outer handler or abort with `panic`, exactly like a
-  missing handler (tested in both backends). No existing program is affected:
-  the `as` form is new.
+  also pushes the dynamic frame and discharges `Op` for its body, as written
+  above. A handler with effects cannot be dynamically visible (callers' rows
+  would hide its effects), so it is capability-only: it is not pushed and
+  does **not** discharge `Op`, so a called function that performs `Op` by
+  name still needs `Op` in the enclosing row and reaches an outer handler
+  (tested). No existing program is affected: the `as` form is new.
+- **What may cross calls.** Only noncapturing, one-shot, tail-resumptive
+  handlers whose row has no declared-operation bits are passed to `cap`
+  parameters: such a handler runs in place inside the callee, where the
+  callee's own handlers would otherwise intercept its declared performs.
+  Builtin effects (`io`, `alloc`, `panic`, `suspend`) travel with it.
 - **Non-tail, multishot and capturing handlers (EFF-CAP-RESUME, scoped with
   the user).** Any handler may be bound `as op`. A perform through the
   capability in its own `handle` body uses the lexical machinery of that
