@@ -924,6 +924,16 @@ impl<'a> Types<'a> {
         span: Span,
     ) -> Result<Type> {
         let rebound = self.rebind_lengths_inner(ty, map, span)?;
+        // No callee binder may survive into the caller's type.
+        if runtime_length_binders(self, rebound)
+            .iter()
+            .any(|binder| map.contains_key(binder))
+        {
+            return Err(Diagnostic::new(
+                span,
+                "this call's signature mentions a runtime-length array in a position its length binder cannot be substituted in",
+            ));
+        }
         if rebound != ty && !self.rebinding_isomorphic(ty, rebound, map, &mut BTreeSet::new()) {
             return Err(Diagnostic::new(
                 span,
@@ -1092,11 +1102,12 @@ impl<'a> Types<'a> {
             Type::AllocVec(p) => Ok(Type::AllocVec(pointer(self, p)?)),
             Type::Task(p) => Ok(Type::Task(pointer(self, p)?)),
             Type::Annotated(p, label) => Ok(Type::Annotated(pointer(self, p)?, label)),
-            // Callable and object types cannot carry a signature binder: the
-            // signature validator rejects them, so nothing is left to rebind.
+            // Nothing substitutes a binder inside a callable or trait object
+            // type. The signature validator rejects one written directly; this
+            // also catches one reached through a type alias.
             _ => Err(Diagnostic::new(
                 span,
-                "internal error: a runtime-length binder in a callable or object type cannot be substituted",
+                "this call's signature mentions a runtime-length array inside a fn or dyn type (possibly through a type alias); its length binder cannot be substituted",
             )),
         }
     }
@@ -5702,6 +5713,13 @@ pub(crate) fn runtime_length_binders(types: &Types<'_>, ty: Type) -> BTreeSet<Bi
                         go(types, *parameter, seen, out);
                     }
                     go(types, function.result, seen, out);
+                }
+            }
+            Type::DynObj(id) => {
+                if let Some(object) = types.objects.get(id) {
+                    for argument in &object.arguments.types {
+                        go(types, *argument, seen, out);
+                    }
                 }
             }
             _ => {}

@@ -849,3 +849,68 @@ fn main() -> i64 ! {} {
         "would change the layout of the callee's signature type",
     );
 }
+
+#[test]
+fn binders_inside_trait_objects_are_seen() {
+    // Review regressions (round 4): binder walks did not look inside `dyn`
+    // trait arguments. A recursive instance could capture its own binder
+    // through `dyn Get<[i64; n <= 4]>`, and a type alias to `dyn` hid a
+    // signature binder from call-site substitution; both let a proved read
+    // run out of bounds.
+    rejects(
+        r#"
+trait Get<X> { fn fetch(self: &Self) -> X ! {}; }
+struct Holder<X> { v: X }
+impl<X> Get<X> for Holder<X> { fn fetch(self: &Self) -> X ! {} { self.v } }
+struct W<X> { o: X }
+fn go<T>(n: i64, x: T, depth: i64, erased ok: { 0 <= n && n <= 4 }) -> i64 ! {alloc} {
+    let a: [i64; n <= 4] = Array.fill(n, 5);
+    if depth == 0 {
+        let o: dyn Get<[i64; n <= 4]> = Holder { v: a };
+        let w = W { o: o };
+        let four: i64 = 4;
+        go::<W<dyn Get<[i64; n <= 4]>>>(four, w, 1, _)
+    } else {
+        let u: T | W<dyn Get<[i64; n <= 4]>> | Bool = x;
+        match u {
+            W<dyn Get<[i64; n <= 4]>> @ w => {
+                let W { o: obj } = w;
+                let y = obj.fetch();
+                if n == 4 { y[3] } else { 0 }
+            },
+            _ => 77,
+        }
+    }
+}
+fn main() -> i64 ! {alloc} { let z: i64 = 1; go::<i64>(z, 0, 0, _) }"#,
+        "a type argument of 'go' mentions its own length binder 'n'",
+    );
+    rejects(
+        r#"
+trait Get<X> { fn fetch(self: &Self) -> X ! {}; }
+struct Holder<X> { v: X }
+impl<X> Get<X> for Holder<X> { fn fetch(self: &Self) -> X ! {} { self.v } }
+type D<X> = dyn Get<X>;
+fn mk(n: i64, depth: i64, erased ok: { 0 <= n && n <= 4 }) -> D<[i64; n <= 4]> ! {alloc} {
+    if depth == 0 {
+        let one: i64 = 1;
+        let inner = mk(one, 1, _);
+        let y: [i64; n <= 4] = inner.fetch();
+        let r: i64 = if n == 4 { y[3] } else { 0 };
+        let b: [i64; n <= 4] = Array.fill(n, r);
+        let o: dyn Get<[i64; n <= 4]> = Holder { v: b };
+        o
+    } else {
+        let a: [i64; n <= 4] = Array.fill(n, 5);
+        let o: dyn Get<[i64; n <= 4]> = Holder { v: a };
+        o
+    }
+}
+fn main() -> i64 ! {alloc} {
+    let k: i64 = 4;
+    let o = mk(k, 0, _);
+    0
+}"#,
+        "inside a fn or dyn type (possibly through a type alias)",
+    );
+}

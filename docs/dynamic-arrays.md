@@ -378,7 +378,8 @@ word. A runtime array length without a capacity, such as `[i64; n]`, remains
 an explicit diagnostic that suggests `[T; n <= C]`; use `Vec<T>` for an owned
 container of unbounded length. Runtime-length arrays cannot appear in foreign
 signatures, `fn` types, lambda signatures, or methods of a trait used as a
-`dyn` object, or inside a `dyn` type in any signature. There is no element-wise owning move beyond
+`dyn` object, or inside a `dyn` or `fn` type in any signature (also when a
+type alias expands to one; such a call is rejected). There is no element-wise owning move beyond
 push/pop of copyable values, and an exclusive (`&mut`) borrowed pattern
 cannot bind owning, linear, or view elements. `Vec<T>` remains the growable owning container and `&[T]` the borrow
 for arbitrary lengths.
