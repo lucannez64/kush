@@ -4118,7 +4118,7 @@
     },
     {
       "id": "E-ABORT-ENTRIES",
-      "title": "",
+      "title": "Aborts through resumable entries, declared and multishot handlers",
       "size": "L",
       "hard": false,
       "deps": [
