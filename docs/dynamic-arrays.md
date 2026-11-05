@@ -300,10 +300,15 @@ Semantics:
   arrays, generic records and enums, structural rows, and unions (for
   example `v: &Vec<[i64; n <= 4]>` or `-> Pair<[i64; n <= 4]>`). Each binder
   must be an earlier `i64` parameter of the same function (any `i64`
-  parameter for the result). A call whose binders would make two members of a
-  union in the signature the same type (`[i64; n <= 4] | [i64; m <= 4]`
-  called as `f(k, k, ...)`, or `T | [i64; n <= 4]` with `T = [i64; k <= 4]`)
-  is rejected: the callee's union has two members and a fixed layout. At each call the actual argument for
+  parameter for the result). The callee is compiled once, so the
+  rebuilt signature type must keep its exact layout. A call is rejected when
+  the caller's binders would change a union in it: two members becoming one
+  type (`[i64; n <= 4] | [i64; m <= 4]` called as `f(k, k, ...)`, or
+  `T | [i64; n <= 4]` with `T = [i64; k <= 4]`), one member absorbing another
+  as a width subtype, a union inside a generic record or enum merging, or
+  members swapping positions (union member order follows internal type
+  identities, so this last case can reject a call with distinct binders;
+  avoid unions of runtime-length arrays in signatures when it does). At each call the actual argument for
   that parameter must be the name of an immutable `i64` binding; the callee's
   binder is replaced by the caller's, so `fn f(n: i64, a: [i64; n <= 8])`
   called as `f(k, b)` requires `b: [i64; k <= 8]`, and the result of

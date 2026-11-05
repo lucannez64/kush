@@ -907,11 +907,114 @@ impl<'a> Types<'a> {
     pub fn dynamic_array(&mut self, element: Type, capacity: usize, span: Span) -> Result<Type> {
         self.inline_array(element, capacity, None, span)
     }
+    /// Rebuild a signature type with the caller's binders: whole arrays,
+    /// references, containers, tuples, fixed and inline arrays, records,
+    /// structural rows, and unions. `rebind_lengths` checks the layout.
     /// Replace runtime-length binders at a call boundary, anywhere inside a
-    /// signature type: whole arrays, references, containers, tuples, fixed
-    /// and inline arrays, records, structural rows, and unions. Only erased
-    /// type identity changes; every rebuilt layout has the same words.
+    /// signature type. The callee was compiled once with its own binders, so
+    /// the rebuilt type must keep the callee's exact layout. Rebuilding
+    /// re-normalizes unions (member order follows interned type ids, equal
+    /// members merge, and width subtypes absorb each other), so the result is
+    /// checked to be isomorphic to the original, position by position, with
+    /// every binder mapped. A call that would change a layout is rejected.
     pub fn rebind_lengths(
+        &mut self,
+        ty: Type,
+        map: &BTreeMap<BindingId, BindingId>,
+        span: Span,
+    ) -> Result<Type> {
+        let rebound = self.rebind_lengths_inner(ty, map, span)?;
+        if rebound != ty && !self.rebinding_isomorphic(ty, rebound, map, &mut BTreeSet::new()) {
+            return Err(Diagnostic::new(
+                span,
+                "this call's length bindings would change the layout of the callee's signature type: two union members would merge, absorb each other, or swap positions; pass distinct length bindings or avoid unions of runtime-length arrays in the signature",
+            ));
+        }
+        Ok(rebound)
+    }
+    /// Whether `rebound` has exactly `original`'s layout once each binder in
+    /// `original` is replaced through `map`.
+    fn rebinding_isomorphic(
+        &self,
+        original: Type,
+        rebound: Type,
+        map: &BTreeMap<BindingId, BindingId>,
+        seen: &mut BTreeSet<(Type, Type)>,
+    ) -> bool {
+        if !seen.insert((original, rebound)) {
+            return true;
+        }
+        if self.width(original) != self.width(rebound) {
+            return false;
+        }
+        let pointee = |ty: Type| match ty {
+            Type::Ref(p)
+            | Type::RefMut(p)
+            | Type::Slice(p)
+            | Type::SliceMut(p)
+            | Type::Box(p)
+            | Type::Vec(p)
+            | Type::ArenaBox(p)
+            | Type::AllocBox(p)
+            | Type::AllocVec(p)
+            | Type::Task(p)
+            | Type::Annotated(p, _) => Some(p),
+            _ => None,
+        };
+        match (original, rebound) {
+            (Type::Variants(a, left), Type::Variants(b, right)) => {
+                left == right && self.rebinding_isomorphic(Type::Enum(a), Type::Enum(b), map, seen)
+            }
+            (Type::Enum(a), Type::Enum(b)) => {
+                let (left, right) = (&self.enums[a], &self.enums[b]);
+                let binder = left
+                    .runtime_length
+                    .map(|binder| map.get(&binder).copied().unwrap_or(binder));
+                if binder != right.runtime_length
+                    || left.definition != right.definition
+                    || left.consts != right.consts
+                    || left.words != right.words
+                    || left.record != right.record
+                    || left.tuple != right.tuple
+                    || left.structural != right.structural
+                    || left.dynamic_array.map(|(_, capacity)| capacity)
+                        != right.dynamic_array.map(|(_, capacity)| capacity)
+                    || left.array.map(|(_, length)| length) != right.array.map(|(_, length)| length)
+                    || left.variants.len() != right.variants.len()
+                {
+                    return false;
+                }
+                let mut pairs = Vec::new();
+                for (l, r) in left.variants.iter().zip(&right.variants) {
+                    if l.names != r.names || l.fields.len() != r.fields.len() {
+                        return false;
+                    }
+                    pairs.extend(l.fields.iter().copied().zip(r.fields.iter().copied()));
+                }
+                pairs
+                    .into_iter()
+                    .all(|(l, r)| self.rebinding_isomorphic(l, r, map, seen))
+            }
+            (Type::Union(a), Type::Union(b)) => {
+                let left = self.unions[a].members.clone();
+                let right = self.unions[b].members.clone();
+                left.len() == right.len()
+                    && left
+                        .into_iter()
+                        .zip(right)
+                        .all(|(l, r)| self.rebinding_isomorphic(l, r, map, seen))
+            }
+            (left, right) => match (pointee(left), pointee(right)) {
+                (Some(p), Some(q))
+                    if std::mem::discriminant(&left) == std::mem::discriminant(&right) =>
+                {
+                    self.rebinding_isomorphic(self.pointees[p], self.pointees[q], map, seen)
+                }
+                _ => left == right,
+            },
+        }
+    }
+    fn rebind_lengths_inner(
         &mut self,
         ty: Type,
         map: &BTreeMap<BindingId, BindingId>,
@@ -923,7 +1026,7 @@ impl<'a> Types<'a> {
             return Ok(ty);
         }
         let pointer = |types: &mut Self, p: usize| -> Result<usize> {
-            let inner = types.rebind_lengths(types.pointees[p], map, span)?;
+            let inner = types.rebind_lengths_inner(types.pointees[p], map, span)?;
             Ok(types.pointer(inner))
         };
         match ty {
@@ -932,25 +1035,25 @@ impl<'a> Types<'a> {
                     .runtime_length
                     .map(|binder| map.get(&binder).copied().unwrap_or(binder));
                 let (element, capacity) = self.enums[id].dynamic_array.expect("inline array");
-                let element = self.rebind_lengths(element, map, span)?;
+                let element = self.rebind_lengths_inner(element, map, span)?;
                 self.inline_array(element, capacity, binder, span)
             }
             Type::Enum(id) if self.enums[id].array.is_some() => {
                 let (element, length) = self.enums[id].array.expect("fixed array");
-                let element = self.rebind_lengths(element, map, span)?;
+                let element = self.rebind_lengths_inner(element, map, span)?;
                 self.array(element, length, span)
             }
             Type::Enum(id) if self.enums[id].tuple => {
                 let mut items = Vec::new();
                 for item in self.enums[id].arguments.clone() {
-                    items.push(self.rebind_lengths(item, map, span)?);
+                    items.push(self.rebind_lengths_inner(item, map, span)?);
                 }
                 self.tuple(items, span)
             }
             Type::Enum(id) if self.enums[id].structural => {
                 let mut fields = self.structural_row_fields(ty).expect("structural row");
                 for field in &mut fields {
-                    field.ty = self.rebind_lengths(field.ty, map, span)?;
+                    field.ty = self.rebind_lengths_inner(field.ty, map, span)?;
                 }
                 self.structural_fields(fields, span)
             }
@@ -960,29 +1063,21 @@ impl<'a> Types<'a> {
                 let lifetimes = self.enums[id].lifetimes.clone();
                 let mut arguments = Vec::new();
                 for argument in self.enums[id].arguments.clone() {
-                    arguments.push(self.rebind_lengths(argument, map, span)?);
+                    arguments.push(self.rebind_lengths_inner(argument, map, span)?);
                 }
                 self.instantiate(definition, arguments, consts, lifetimes, span)
                     .map(Type::Enum)
             }
-            Type::Variants(id, mask) => match self.rebind_lengths(Type::Enum(id), map, span)? {
-                Type::Enum(new_id) => Ok(refine(&self.enums, new_id, mask)),
-                other => Ok(other),
-            },
+            Type::Variants(id, mask) => {
+                match self.rebind_lengths_inner(Type::Enum(id), map, span)? {
+                    Type::Enum(new_id) => Ok(refine(&self.enums, new_id, mask)),
+                    other => Ok(other),
+                }
+            }
             Type::Union(id) => {
                 let mut members = Vec::new();
                 for member in self.unions[id].members.clone() {
-                    members.push(self.rebind_lengths(member, map, span)?);
-                }
-                // The callee was compiled with distinct members. If the
-                // caller's binders make two of them equal, the union would
-                // normalize to a different layout than the callee's.
-                let distinct = members.iter().collect::<BTreeSet<_>>().len();
-                if distinct != members.len() {
-                    return Err(Diagnostic::new(
-                        span,
-                        "this call makes two members of a union in the callee's signature the same runtime-length type; pass distinct length bindings",
-                    ));
+                    members.push(self.rebind_lengths_inner(member, map, span)?);
                 }
                 self.union(members, span)
             }

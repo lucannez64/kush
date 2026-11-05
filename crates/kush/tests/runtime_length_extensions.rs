@@ -753,7 +753,7 @@ fn rebinding_never_merges_union_members() {
     ] {
         rejects(
             program,
-            "makes two members of a union in the callee's signature the same",
+            "would change the layout of the callee's signature type",
         );
     }
     // Distinct caller binders keep the union and its members.
@@ -774,5 +774,78 @@ fn rebinding_never_merges_union_members() {
             }
         }"#,
         27,
+    );
+}
+
+#[test]
+fn rebinding_never_changes_a_signature_layout() {
+    // Review regressions (round 3): rebuilding a signature type with the
+    // caller's binders re-normalizes unions. Members could swap positions
+    // (r3, r4: union order follows interned type ids), a width subtype could
+    // absorb another member (p5), or a union inside a generic definition
+    // could merge (p1). Each made the caller read the callee's union tag
+    // against the wrong member. Such calls are rejected.
+    rejects(
+        r#"
+fn f(n: i64, m: i64, a: [i64; n <= 4], b: [i64; m <= 4], pick: Bool) -> [i64; n <= 4] | [i64; m <= 4] ! {} {
+    if pick { a } else { b }
+}
+fn main() -> i64 ! {} {
+    let k: i64 = 4;
+    let j: i64 = 2;
+    let y: [i64; k <= 4] = Array.fill(k, 5);
+    let x: [i64; j <= 4] = Array.fill(j, 7);
+    let r = f(j, k, x, y, true);
+    match r {
+        [i64; k <= 4] @ a => a[3],
+        [i64; j <= 4] @ b => b[1],
+    }
+}"#,
+        "would change the layout of the callee's signature type",
+    );
+    rejects(
+        r#"
+struct W<T> { v: T, w: T, z: T, q: T, r: T }
+fn f(n: i64, u: [i64; n <= 4] | W<i64>, erased ok: { n == 4 }) -> i64 ! {} {
+    match u { [i64; n <= 4] @ a => a[3], W<i64> @ b => b.v }
+}
+fn main() -> i64 ! {} {
+    let k: i64 = 4;
+    let x: [i64; k <= 4] = Array.fill(k, 5);
+    let w = W { v: 1, w: 2, z: 3, q: 4, r: 6 };
+    let p = f(k, x, _); let q = f(k, w, _); if p == 5 { if q == 1 { 51 } else { q } } else { p }
+}"#,
+        "would change the layout of the callee's signature type",
+    );
+    rejects(
+        r#"
+struct P<A, B> { u: A | B, tag: i64 }
+fn f(n: i64, m: i64, a: [i64; n <= 4], b: [i64; m <= 4], pick: Bool) -> P<[i64; n <= 4], [i64; m <= 4]> ! {} {
+    if pick { P { u: a, tag: 1 } } else { P { u: b, tag: 2 } }
+}
+fn main() -> i64 ! {} {
+    let k: i64 = 4;
+    let x: [i64; k <= 4] = Array.fill(k, 5);
+    let y: [i64; k <= 4] = Array.fill(k, 7);
+    let r = f(k, k, x, y, false);
+    let z: [i64; k <= 4] = r.u;
+    z[3]
+}"#,
+        "would change the layout of the callee's signature type",
+    );
+    rejects(
+        r#"
+fn f(n: i64, m: i64, u: struct { xs: [i64; n <= 4] } | struct { xs: [i64; m <= 4], tag: i64 }, erased ok: { n == 4 && m == 4 }) -> i64 ! {} {
+    match u {
+        struct { xs: [i64; n <= 4] } @ a => { let v = a.xs; v[3] },
+        struct { xs: [i64; m <= 4], tag: i64 } @ b => { let w = b.xs; w[2] },
+    }
+}
+fn main() -> i64 ! {} {
+    let k: i64 = 4;
+    let x: [i64; k <= 4] = Array.fill(k, 5);
+    f(k, k, struct { xs: x, tag: 30 }, _)
+}"#,
+        "would change the layout of the callee's signature type",
     );
 }
