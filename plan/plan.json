@@ -4156,10 +4156,26 @@
       "deps": [
         "E-ABORT-INTERACT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/abortive-handlers.md 3.7: aborts out of resumable entries (dropping the caller's pending continuation k), through declared-operation non-tail handlers and through multishot resumptions; abort token calls inside a handle for the same operation; UAF review.",
-      "commit": null,
-      "log": []
+      "commit": "ae65569",
+      "log": [
+        {
+          "time": "2026-11-06 17:50:23",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 18:15:36",
+          "who": "agent",
+          "text": "Declared-op one-shot tokens and multishot tokens may name abortive ops; aborts leave resumable entries dropping the pending k once (UAF review in abortive-handlers.md 3.8). Boat check passed."
+        },
+        {
+          "time": "2026-11-06 18:15:36",
+          "who": "agent",
+          "text": "done ae65569"
+        }
+      ]
     },
     {
       "id": "EFF-CAP-RESUME-CAPTURING",
@@ -4169,10 +4185,26 @@
       "deps": [
         "EFF-CAP-RESUME-CALLS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "docs/effect-capabilities.md (As built EFF-CAP-RESUME-CALLS): capturing (once) handlers across calls via a handler-cell capability (code, environment, runtime consumed flag) in the handle frame; one perform across all callees; changes how cap values are passed; UAF review.",
-      "commit": null,
-      "log": []
+      "commit": "72173a9",
+      "log": [
+        {
+          "time": "2026-11-06 17:59:35",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 18:15:36",
+          "who": "agent",
+          "text": "Capturing one-shot handlers of declared ops (dynamic frame = handler cell) cross calls via a synthesized trampoline; second perform of a once handler panics, so params are cap Op ! {panic}. Lexical-op and effectful capturing handlers still rejected (no frame). UAF review in effect-capabilities.md. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 18:15:36",
+          "who": "agent",
+          "text": "done 72173a9"
+        }
+      ]
     },
     {
       "id": "EFF-CAP-RESUME-MULTISHOT",
@@ -4185,7 +4217,13 @@
       "status": "todo",
       "desc": "Multishot capabilities across calls: needs new cap syntax for a copyable token (confirm spelling with the user, e.g. cap multi Op) and continuation-chain copying across calls, which does not exist for declared operations either.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-06 18:15:36",
+          "who": "agent",
+          "text": "BLOCKED (2026-11-06): Kush has no copyable closure with an environment (fn = bare code pointer, capturing closures are once). Multishot resumption across calls needs a copyable token carrying the callee's live values and the caller's continuation: a new callable representation (shared refcounted or copied environments, drop glue, two-word copyable ABI) in both backends and the evaluator, plus 'cap multi Op' (spelling approved). Needs a design decision on that representation before implementation."
+        }
+      ]
     },
     {
       "id": "PROVE-CONST",
@@ -4742,6 +4780,19 @@
       ],
       "status": "todo",
       "desc": "After inlining, each predicate still copies its by-value record through a stack slot (Cranelift has no SROA/dead-store elimination); the VELA predicate policy stays at 14.2 ns vs 9.0 written out.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "CAP-CAPTURING-LEXICAL",
+      "title": "Capturing capabilities of lexical and effectful handlers across calls",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "EFF-CAP-RESUME-CAPTURING"
+      ],
+      "status": "todo",
+      "desc": "EFF-CAP-RESUME-CAPTURING covers capturing handlers of declared, dynamically visible operations; lexical operations and handlers with effects have no dynamic frame (could push a private-id frame).",
       "commit": null,
       "log": []
     }
