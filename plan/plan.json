@@ -4859,6 +4859,54 @@
           "text": "done 81a0c68"
         }
       ]
+    },
+    {
+      "id": "THREAD-SCOPE",
+      "title": "Parallel threads: Thread.scope / spawn / join",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "User-approved 2026-11-06: new Thread.scope(fn) / Thread.spawn(fn) / Thread.join(h) on real OS threads, structured like tasks (handles cannot escape). Children get moved values and shared borrows (exclusive loans stay exclusive, as ownership already enforces until join). Thread-safe runtime: atomic allocation counters, per-thread allocator pool, handler stack and abort word. v1: thread bodies have no suspend and no declared operations from outside. Evaluator runs threads cooperatively (one valid schedule).",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "THREAD-ATOMICS",
+      "title": "Atomic integers shared between threads",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "THREAD-SCOPE"
+      ],
+      "status": "todo",
+      "desc": "User-approved: Atomic i64/Bool cells shared through &: load, store, fetch_add, swap, compare_exchange (sequentially consistent); Cranelift atomic instructions natively.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "THREAD-CHANNELS",
+      "title": "Bounded channels between threads",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "THREAD-SCOPE"
+      ],
+      "status": "todo",
+      "desc": "User-approved: Channel<T> with capacity, shared through &: send (blocks when full), recv (blocks when empty, None after close), close. Owned values move across threads.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SIMD",
+      "title": "SIMD: native CPU features and vector types",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Deferred by the user (2026-11-06): let Cranelift use host CPU features behind a flag, then explicit vector types/intrinsics.",
+      "commit": null,
+      "log": []
     }
   ]
 }
