@@ -4752,10 +4752,26 @@
       "deps": [
         "ENSURES-METHODS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "A &T parameter (including self: &Self) cannot be mentioned in an ensures clause; shared references could denote the referent's value for the call.",
-      "commit": null,
-      "log": []
+      "commit": "040a344",
+      "log": [
+        {
+          "time": "2026-11-06 19:19:02",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 20:00:10",
+          "who": "agent",
+          "text": "Shared references are symbolic roots for their referents; &mut stays unstatable/opaque. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 20:00:10",
+          "who": "agent",
+          "text": "done 040a344"
+        }
+      ]
     },
     {
       "id": "EXPORT-RECORDS",
@@ -4765,10 +4781,26 @@
       "deps": [
         "KUSH-RUST-EXPORT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "KUSH-RUST-EXPORT v1 crosses scalars only; VELA's ShareAdmissionFacts needs a #[repr(C)] record or per-field wrapper. Also: thread-local runtime state would allow Sync.",
-      "commit": null,
-      "log": []
+      "commit": "1b9c139",
+      "log": [
+        {
+          "time": "2026-11-06 19:36:25",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 20:00:10",
+          "who": "agent",
+          "text": "User-approved ABI: scalar records by pointer to #[repr(C)] struct, record results via out pointer, &Bytes as ptr+len; exported record fields must be pub. Thread-local runtime state for Sync not done. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 20:00:10",
+          "who": "agent",
+          "text": "done 1b9c139"
+        }
+      ]
     },
     {
       "id": "INLINE-RECORD-PARAMS",
@@ -4778,10 +4810,26 @@
       "deps": [
         "NATIVE-INLINE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "After inlining, each predicate still copies its by-value record through a stack slot (Cranelift has no SROA/dead-store elimination); the VELA predicate policy stays at 14.2 ns vs 9.0 written out.",
-      "commit": null,
-      "log": []
+      "commit": "6b9cabd",
+      "log": [
+        {
+          "time": "2026-11-06 19:31:05",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 20:00:10",
+          "who": "agent",
+          "text": "Unaddressed scalar records in SSA variables: predicate policy 14.2 -> 5.9 ns/decision, written-out 9.0 -> 5.7 (Rust 3.3); other benchmarks within noise. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 20:00:10",
+          "who": "agent",
+          "text": "done 6b9cabd"
+        }
+      ]
     },
     {
       "id": "CAP-CAPTURING-LEXICAL",
@@ -4791,10 +4839,26 @@
       "deps": [
         "EFF-CAP-RESUME-CAPTURING"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "EFF-CAP-RESUME-CAPTURING covers capturing handlers of declared, dynamically visible operations; lexical operations and handlers with effects have no dynamic frame (could push a private-id frame).",
-      "commit": null,
-      "log": []
+      "commit": "81a0c68",
+      "log": [
+        {
+          "time": "2026-11-06 19:40:14",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 20:00:10",
+          "who": "agent",
+          "text": "Capability-only capturing handlers get a private-id frame when the capability is passed to a call. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 20:00:10",
+          "who": "agent",
+          "text": "done 81a0c68"
+        }
+      ]
     }
   ]
 }
