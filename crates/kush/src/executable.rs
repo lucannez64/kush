@@ -11269,7 +11269,13 @@ pub(crate) fn proposition_of(
                 text(callee),
                 arguments.iter().map(text).collect::<Vec<_>>().join(", ")
             ),
+            ast::ExprKind::Unary {
+                op: Kind::Bang,
+                operand,
+                ..
+            } => format!("!({})", text(operand)),
             ast::ExprKind::Unary { operand, .. } => format!("-{}", text(operand)),
+            ast::ExprKind::Bool(value) => value.to_string(),
             ast::ExprKind::Binary { op, left, right } => {
                 let op = match op {
                     Kind::Lt => "<",
@@ -11281,6 +11287,8 @@ pub(crate) fn proposition_of(
                     Kind::Minus => "-",
                     Kind::Star => "*",
                     Kind::AmpAmp => "&&",
+                    Kind::PipePipe => "||",
+                    Kind::Ne => "!=",
                     _ => "?",
                 };
                 format!("{} {op} {}", text(left), text(right))
@@ -11375,55 +11383,146 @@ pub(crate) fn proposition_of(
         }
         go(e, resolution, &runtime_before, &unsupported)
     };
-    let mut atoms = Vec::new();
+    type Atom = (crate::facts::ParamLinear, Kind, crate::facts::ParamLinear);
+    type Formula = Vec<Vec<Atom>>;
+    const MAX_DISJUNCTS: usize = 32;
+    let too_large = |span| {
+        Diagnostic::new(
+            span,
+            "this proposition expands to more than 32 cases; split it into several erased parameters",
+        )
+    };
+    let and = |a: Formula, b: Formula, span| -> Result<Formula> {
+        if a.len() * b.len() > MAX_DISJUNCTS {
+            return Err(too_large(span));
+        }
+        let mut out = Vec::new();
+        for left in &a {
+            for right in &b {
+                let mut both = left.clone();
+                both.extend(right.iter().cloned());
+                out.push(both);
+            }
+        }
+        Ok(out)
+    };
+    let or = |mut a: Formula, b: Formula, span| -> Result<Formula> {
+        a.extend(b);
+        if a.len() > MAX_DISJUNCTS {
+            return Err(too_large(span));
+        }
+        Ok(a)
+    };
+    let negated = |op: &Kind| match op {
+        Kind::Lt => Kind::Ge,
+        Kind::Le => Kind::Gt,
+        Kind::Gt => Kind::Le,
+        Kind::Ge => Kind::Lt,
+        Kind::EqEq => Kind::Ne,
+        _ => Kind::EqEq,
+    };
     let mut booleans = Vec::new();
-    let mut pending = vec![body.as_ref()];
-    while let Some(e) = pending.pop() {
-        // A bare `Bool` parameter `b` is `b == 1`; `!b` is `b == 0`.
-        let boolean = match &e.kind {
-            ast::ExprKind::Name(_) => Some((e, 1)),
+    // Negation is pushed to the atoms (PROVE-DISJ).
+    #[allow(clippy::too_many_arguments)]
+    fn formula(
+        e: &ast::Expr,
+        positive: bool,
+        linear: &dyn Fn(&ast::Expr) -> Result<crate::facts::ParamLinear>,
+        and: &dyn Fn(Formula, Formula, Span) -> Result<Formula>,
+        or: &dyn Fn(Formula, Formula, Span) -> Result<Formula>,
+        negated: &dyn Fn(&Kind) -> Kind,
+        booleans: &mut Vec<usize>,
+        unsupported: &dyn Fn(Span) -> Diagnostic,
+    ) -> Result<Formula> {
+        use crate::facts::{ParamLinear, ParamTerm};
+        match &e.kind {
+            ast::ExprKind::Binary {
+                op: op @ (Kind::AmpAmp | Kind::PipePipe),
+                left,
+                right,
+            } => {
+                let l = formula(
+                    left,
+                    positive,
+                    linear,
+                    and,
+                    or,
+                    negated,
+                    booleans,
+                    unsupported,
+                )?;
+                let r = formula(
+                    right,
+                    positive,
+                    linear,
+                    and,
+                    or,
+                    negated,
+                    booleans,
+                    unsupported,
+                )?;
+                if (*op == Kind::AmpAmp) == positive {
+                    and(l, r, e.span)
+                } else {
+                    or(l, r, e.span)
+                }
+            }
             ast::ExprKind::Unary {
                 op: Kind::Bang,
                 operand,
                 ..
-            } if matches!(operand.kind, ast::ExprKind::Name(_)) => Some((operand.as_ref(), 0)),
-            _ => None,
-        };
-        if let Some((name, value)) = boolean {
-            let term = linear(name)?;
-            let Some(crate::facts::ParamTerm::Param(index)) =
-                term.coefficients.keys().next().copied()
-            else {
-                return Err(unsupported(e.span));
-            };
-            booleans.push(index);
-            atoms.push((term, Kind::EqEq, crate::facts::ParamLinear::constant(value)));
-            continue;
-        }
-        match &e.kind {
+            } => formula(
+                operand,
+                !positive,
+                linear,
+                and,
+                or,
+                negated,
+                booleans,
+                unsupported,
+            ),
             ast::ExprKind::Binary {
-                op: Kind::AmpAmp,
+                op: op @ (Kind::Lt | Kind::Le | Kind::Gt | Kind::Ge | Kind::EqEq | Kind::Ne),
                 left,
                 right,
             } => {
-                pending.push(right);
-                pending.push(left);
+                let op = if positive { op.clone() } else { negated(op) };
+                Ok(vec![vec![(linear(left)?, op, linear(right)?)]])
             }
-            ast::ExprKind::Binary {
-                op: op @ (Kind::Lt | Kind::Le | Kind::Gt | Kind::Ge | Kind::EqEq),
-                left,
-                right,
-            } => {
-                let l = linear(left)?;
-                let r = linear(right)?;
-                atoms.push((l, op.clone(), r));
+            ast::ExprKind::Bool(value) => Ok(if *value == positive {
+                vec![Vec::new()]
+            } else {
+                Vec::new()
+            }),
+            // A bare `Bool` parameter `b` is `b == 1`.
+            ast::ExprKind::Name(_) => {
+                let term = linear(e)?;
+                let Some(ParamTerm::Param(index)) = term.coefficients.keys().next().copied() else {
+                    return Err(unsupported(e.span));
+                };
+                booleans.push(index);
+                Ok(vec![vec![(
+                    term,
+                    Kind::EqEq,
+                    ParamLinear::constant(i128::from(positive)),
+                )]])
             }
-            _ => return Err(unsupported(e.span)),
+            _ => Err(unsupported(e.span)),
         }
     }
+    let disjuncts = formula(
+        body,
+        true,
+        &linear,
+        &and,
+        &or,
+        &negated,
+        &mut booleans,
+        &unsupported,
+    )?;
     let _ = indices;
     Ok(crate::facts::Proposition {
-        atoms,
+        disjuncts,
         booleans,
         text: text(body),
     })
@@ -17385,23 +17484,10 @@ impl Checker<'_, '_> {
         if goals.len() != wanted {
             return false;
         }
-        let mut proofs = Vec::with_capacity(goals.len());
-        for goal in goals {
-            let Some(proof) = self.facts.prove(&goal) else {
-                return false;
-            };
-            proofs.push((goal, proof));
-        }
-        for (goal, proof) in proofs {
-            let hypotheses = self.facts.snapshot(&goal);
-            self.functions.certificates.push(crate::facts::Certificate {
-                span,
-                obligation: text.to_owned(),
-                goal,
-                proof,
-                hypotheses,
-            });
-        }
+        let Some(certificates) = self.facts.certify(&vec![goals], span, text) else {
+            return false;
+        };
+        self.functions.certificates.extend(certificates);
         true
     }
     /// The caller binding for each callee `i64` parameter that sizes a
@@ -19463,7 +19549,6 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         let proposition = self.functions.proposition(self.resolution, parameter)?;
-        let mut constraints = Vec::new();
         let params = self.parameter_slots();
         for index in &proposition.booleans {
             if self.locals[params[*index]].ty != Type::Bool {
@@ -19476,26 +19561,41 @@ impl Checker<'_, '_> {
         for slot in &params {
             self.facts.note_type(*slot, self.locals[*slot].ty);
         }
-        for (l, op, r) in &proposition.atoms {
-            let term = |linear: &crate::facts::ParamLinear| -> Option<crate::facts::Linear> {
-                use crate::facts::{Linear, ParamTerm, Term};
-                let mut expression = Linear::constant(linear.constant);
-                for (base, coefficient) in &linear.coefficients {
-                    let part = match base {
-                        ParamTerm::Zero => Linear::constant(1),
-                        ParamTerm::Param(i) => Linear::variable(Term::Var(params[*i], 0)),
-                        ParamTerm::Len(i) => Linear::variable(Term::Len(params[*i], 0)),
-                    };
-                    expression = expression.add_scaled(&part, *coefficient)?;
+        let term = |linear: &crate::facts::ParamLinear| -> Option<crate::facts::Linear> {
+            use crate::facts::{Linear, ParamTerm, Term};
+            let mut expression = Linear::constant(linear.constant);
+            for (base, coefficient) in &linear.coefficients {
+                let part = match base {
+                    ParamTerm::Zero => Linear::constant(1),
+                    ParamTerm::Param(i) => Linear::variable(Term::Var(params[*i], 0)),
+                    ParamTerm::Len(i) => Linear::variable(Term::Len(params[*i], 0)),
+                };
+                expression = expression.add_scaled(&part, *coefficient)?;
+            }
+            Some(expression)
+        };
+        // The precondition as a hypothesis. An untranslatable atom is
+        // dropped from its conjunction, which only weakens it.
+        let mut hypothesis: crate::facts::Dnf = Vec::new();
+        for disjunct in &proposition.disjuncts {
+            let mut part: crate::facts::Dnf = vec![Vec::new()];
+            for (l, op, r) in disjunct {
+                let atom = match (term(l), term(r)) {
+                    (Some(left), Some(right)) => crate::facts::compare_dnf(left, op, right),
+                    _ => None,
+                };
+                if let Some(atom) = atom {
+                    match crate::facts::dnf_and(&part, &atom) {
+                        Some(next) => part = next,
+                        None => continue,
+                    }
                 }
-                Some(expression)
-            };
-            let (Some(left), Some(right)) = (term(l), term(r)) else {
-                continue;
-            };
-            crate::facts::compare(left, op, right, &mut constraints);
+            }
+            hypothesis.extend(part);
         }
-        self.facts.add(constraints);
+        if hypothesis.len() <= 32 {
+            self.facts.add_formula(hypothesis);
+        }
         self.proofs.insert(id, proposition);
         Ok(())
     }
@@ -19511,7 +19611,7 @@ impl Checker<'_, '_> {
         evidence: &ast::Expr,
         span: Span,
     ) -> Result<()> {
-        use crate::facts::{Constraint, Linear, ParamLinear, ParamTerm, Term};
+        use crate::facts::{Linear, ParamLinear, ParamTerm, Term};
         match &evidence.kind {
             ast::ExprKind::Name(name) if name == "_" => {}
             ast::ExprKind::Name(_)
@@ -19534,12 +19634,20 @@ impl Checker<'_, '_> {
                 ));
             }
         }
-        let mut goals: Vec<Constraint> = Vec::new();
-        for (l, op, r) in &proposition.atoms {
-            let term = |linear: &ParamLinear| -> Result<Linear> {
-                let mut expression = Linear::constant(linear.constant);
-                for (base, coefficient) in &linear.coefficients {
-                    let part = match base {
+        let overflow = || {
+            Diagnostic::new(
+                span,
+                "proof obligation coefficients overflow the bounded linear solver",
+            )
+        };
+        let mut goal: crate::facts::Dnf = Vec::new();
+        for disjunct in &proposition.disjuncts {
+            let mut part: crate::facts::Dnf = vec![Vec::new()];
+            for (l, op, r) in disjunct {
+                let term = |linear: &ParamLinear| -> Result<Linear> {
+                    let mut expression = Linear::constant(linear.constant);
+                    for (base, coefficient) in &linear.coefficients {
+                        let part = match base {
                         ParamTerm::Zero => Linear::constant(1),
                         ParamTerm::Param(i) => {
                             self.facts.linear(&arguments[*i]).ok_or_else(|| {
@@ -19560,39 +19668,34 @@ impl Checker<'_, '_> {
                             Linear::variable(Term::Len(slot, self.facts.version(slot)))
                         }
                     };
-                    expression = expression.add_scaled(&part, *coefficient).ok_or_else(|| {
+                        expression = expression.add_scaled(&part, *coefficient).ok_or_else(|| {
                         Diagnostic::new(
                             span,
                             "proof obligation coefficients overflow the bounded linear solver",
                         )
                     })?;
-                }
-                Ok(expression)
-            };
-            crate::facts::compare(term(l)?, op, term(r)?, &mut goals);
+                    }
+                    Ok(expression)
+                };
+                let atom =
+                    crate::facts::compare_dnf(term(l)?, op, term(r)?).ok_or_else(overflow)?;
+                part = crate::facts::dnf_and(&part, &atom).ok_or_else(overflow)?;
+            }
+            goal = crate::facts::dnf_or(goal, part).ok_or_else(overflow)?;
         }
-        for goal in goals {
-            let Some(proof) = self.facts.prove(&goal) else {
-                let known = self.facts.snapshot(&goal);
-                let names = (0..self.locals.len())
-                    .map(|s| self.local_name(s))
-                    .collect::<Vec<_>>();
-                return Err(crate::facts::failure(
-                    span,
-                    &proposition.text,
-                    &known,
-                    &|slot| names[slot].clone(),
-                ));
-            };
-            let hypotheses = self.facts.snapshot(&goal);
-            self.functions.certificates.push(crate::facts::Certificate {
+        let Some(certificates) = self.facts.certify(&goal, span, &proposition.text) else {
+            let known = self.facts.snapshot_formula(&goal);
+            let names = (0..self.locals.len())
+                .map(|s| self.local_name(s))
+                .collect::<Vec<_>>();
+            return Err(crate::facts::failure(
                 span,
-                obligation: proposition.text.clone(),
-                goal,
-                proof,
-                hypotheses,
-            });
-        }
+                &proposition.text,
+                &known,
+                &|slot| names[slot].clone(),
+            ));
+        };
+        self.functions.certificates.extend(certificates);
         Ok(())
     }
     /// All kernel binders in scope order, each paired with its hypothesis type.
@@ -31674,7 +31777,7 @@ impl Checker<'_, '_> {
         } else {
             use crate::facts::{ParamLinear, ParamTerm, Proposition};
             let proposition = Proposition {
-                atoms: vec![
+                disjuncts: vec![vec![
                     (
                         ParamLinear::constant(0),
                         Kind::Le,
@@ -31685,7 +31788,7 @@ impl Checker<'_, '_> {
                         Kind::Lt,
                         ParamLinear::variable(ParamTerm::Len(0), 1),
                     ),
-                ],
+                ]],
                 booleans: Vec::new(),
                 text: "0 <= index && index < Slice.len(slice)".to_owned(),
             };
@@ -33746,7 +33849,7 @@ impl Checker<'_, '_> {
         if op == VecOp::At {
             use crate::facts::{ParamLinear, ParamTerm, Proposition};
             let proposition = Proposition {
-                atoms: vec![
+                disjuncts: vec![vec![
                     (
                         ParamLinear::constant(0),
                         Kind::Le,
@@ -33757,7 +33860,7 @@ impl Checker<'_, '_> {
                         Kind::Lt,
                         ParamLinear::variable(ParamTerm::Len(0), 1),
                     ),
-                ],
+                ]],
                 booleans: Vec::new(),
                 text: format!(
                     "0 <= index && index < {}.len(buffer)",

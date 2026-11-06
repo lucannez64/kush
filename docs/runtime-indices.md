@@ -245,6 +245,18 @@ word of `18446744073709551615` is never mistaken for `-1`. A constant goal
 such as `{ 0 >= 1 }` is proved where the facts are contradictory (PROVE-CONST).
 Tests: `crates/kush/tests/scalar_proofs.rs`.
 
+**Disjunctions (PROVE-DISJ).** Propositions may use `||`, `!=` and `!( .. )`
+(negation is pushed to the comparisons). Branch conditions with `||` or `!=`
+become disjunctive facts too. A proposition is kept in disjunctive normal
+form of at most 32 cases (a larger one is rejected, never truncated). An
+obligation over disjunctive facts or a disjunctive goal is proved by case
+splitting (smallest clause first, at most 512 nodes); each leaf is the
+rational or bounded integer refutation above. The certificate records the
+disjunctive hypotheses and the goal formula; the verifier recomputes the
+goal's negation itself and checks that every split uses an available clause
+with exactly one refutation per disjunct. Tests:
+`crates/kush/tests/disjunctive_proofs.rs` and the `facts.rs` tamper tests.
+
 The fragment is still deliberately bounded and is not a full Presburger
 decision procedure:
 

@@ -190,8 +190,9 @@ impl ParamLinear {
 /// A comparison between symbolic linear expressions over a callee's parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Proposition {
-    /// Each atom: left linear expression, comparison, right linear expression.
-    pub atoms: Vec<(ParamLinear, Kind, ParamLinear)>,
+    /// Disjunctive normal form (PROVE-DISJ): each disjunct is a conjunction
+    /// of atoms `left op right` (`op` may be `!=`).
+    pub disjuncts: Vec<Vec<(ParamLinear, Kind, ParamLinear)>>,
     /// Parameters used as bare `Bool` atoms (`b`, `!b`); they must have type
     /// `Bool` where the proposition is used.
     pub booleans: Vec<usize>,
@@ -235,6 +236,80 @@ pub(crate) enum Refutation {
         left: Box<Refutation>,
         right: Box<Refutation>,
     },
+    /// A case split on an available disjunctive clause (PROVE-DISJ): one
+    /// refutation per disjunct, each in the context extended by that
+    /// disjunct's constraints. An empty clause is itself false.
+    Cases {
+        clause: Dnf,
+        branches: Vec<Refutation>,
+    },
+}
+
+/// A disjunction of conjunctions of constraints. `vec![vec![]]` is true and
+/// `vec![]` is false.
+pub(crate) type Dnf = Vec<Vec<Constraint>>;
+
+/// Most disjuncts a hypothesis or goal may expand to; a larger formula is
+/// not used as a hypothesis (sound: weaker) and not accepted as a goal.
+const MAX_DNF: usize = 32;
+/// Most case-split nodes per obligation.
+const MAX_CASE_NODES: usize = 512;
+
+/// `a && b` in disjunctive normal form.
+pub(crate) fn dnf_and(a: &Dnf, b: &Dnf) -> Option<Dnf> {
+    if a.len().checked_mul(b.len())? > MAX_DNF {
+        return None;
+    }
+    let mut out = Vec::new();
+    for left in a {
+        for right in b {
+            let mut both = left.clone();
+            both.extend(right.iter().cloned());
+            out.push(both);
+        }
+    }
+    Some(out)
+}
+
+/// `a || b` in disjunctive normal form.
+pub(crate) fn dnf_or(mut a: Dnf, b: Dnf) -> Option<Dnf> {
+    a.extend(b);
+    (a.len() <= MAX_DNF).then_some(a)
+}
+
+/// `l op r` exactly, as a formula: `!=` is two disjuncts. `None` when a
+/// translation overflows, so a goal is never silently weakened.
+pub(crate) fn compare_dnf(l: Linear, op: &Kind, r: Linear) -> Option<Dnf> {
+    let exact = |l: Linear, op: Kind, r: Linear| {
+        let mut out = Vec::new();
+        compare(l, &op, r, &mut out);
+        let wanted = if op == Kind::EqEq { 2 } else { 1 };
+        (out.len() == wanted).then_some(out)
+    };
+    match op {
+        Kind::Ne => Some(vec![
+            exact(l.clone(), Kind::Lt, r.clone())?,
+            exact(l, Kind::Gt, r)?,
+        ]),
+        Kind::Lt | Kind::Le | Kind::Gt | Kind::Ge | Kind::EqEq => {
+            Some(vec![exact(l, op.clone(), r)?])
+        }
+        _ => None,
+    }
+}
+
+/// The negation of a goal formula, as clauses that must all hold: for each
+/// disjunct `c1 && c2 && ..`, the clause `!c1 || !c2 || ..` (integer
+/// negations). The verifier recomputes this itself.
+fn negated_goal(goal: &Dnf) -> Option<Vec<Dnf>> {
+    goal.iter()
+        .map(|disjunct| {
+            disjunct
+                .iter()
+                .map(|constraint| Some(vec![negation(constraint)?]))
+                .collect::<Option<Dnf>>()
+        })
+        .collect()
 }
 
 /// A discharged obligation and the facts that justify it.
@@ -245,6 +320,11 @@ pub struct Certificate {
     pub(crate) goal: Constraint,
     pub(crate) proof: Refutation,
     pub(crate) hypotheses: Vec<Constraint>,
+    /// Disjunctive hypotheses available to `Cases` steps.
+    pub(crate) clauses: Vec<Dnf>,
+    /// A formula goal (PROVE-DISJ). When set, `goal` is unused and the
+    /// verifier adds the negation of this formula as clauses itself.
+    pub(crate) goal_formula: Option<Dnf>,
 }
 
 impl Certificate {
@@ -276,6 +356,8 @@ pub(crate) struct Facts {
     /// integer term (PROVE-SCALARS). Recorded when the term is first built,
     /// added as implicit hypotheses. `i64` locals need none.
     ranges: std::cell::RefCell<BTreeMap<usize, (i128, i128)>>,
+    /// Disjunctive facts (PROVE-DISJ), e.g. from `if a || b` or `a != b`.
+    clauses: Vec<Dnf>,
 }
 
 /// The mathematical range of a scalar type admitted as a linear term, or
@@ -302,7 +384,7 @@ fn constant_value(n: i64, ty: crate::executable::Type) -> i128 {
 /// A restore point for [`Facts::reset`]: the lengths of the inequality and
 /// disequality lists when it was taken.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FactsMark(usize, usize);
+pub(crate) struct FactsMark(usize, usize, usize);
 
 /// Bounds for the Fourier–Motzkin search. These are work limits, not a claim of
 /// completeness: a system beyond them is reported as not established.
@@ -359,11 +441,12 @@ impl Facts {
     }
 
     pub(crate) fn mark(&self) -> FactsMark {
-        FactsMark(self.known.len(), self.distinct.len())
+        FactsMark(self.known.len(), self.distinct.len(), self.clauses.len())
     }
     pub(crate) fn reset(&mut self, mark: FactsMark) {
         self.known.truncate(mark.0);
         self.distinct.truncate(mark.1);
+        self.clauses.truncate(mark.2);
     }
     pub fn version(&self, slot: usize) -> u32 {
         self.versions.get(&slot).copied().unwrap_or(0)
@@ -386,6 +469,13 @@ impl Facts {
     pub fn assume(&mut self, condition: &Expr, truth: bool) {
         let facts = self.condition(condition, truth);
         self.known.extend(facts);
+        // A disjunctive condition is kept as one clause for case splits.
+        if fact_safe(condition)
+            && let Some(formula) = self.formula(condition, truth)
+            && formula.len() != 1
+        {
+            self.clauses.push(formula);
+        }
         if fact_safe(condition) {
             let mut distinct = Vec::new();
             self.collect_distinct(condition, truth, &mut distinct);
@@ -524,6 +614,107 @@ impl Facts {
             }
             _ => {}
         }
+    }
+    /// Add a disjunctive hypothesis (a single disjunct is added as facts).
+    pub(crate) fn add_formula(&mut self, formula: Dnf) {
+        match formula.len() {
+            1 => self.known.extend(formula.into_iter().next().unwrap()),
+            _ => self.clauses.push(formula),
+        }
+    }
+    /// The condition `expr == truth` as a formula, or `None` when its shape is
+    /// unknown (then it says nothing). Unknown parts of a conjunction are
+    /// dropped, which only weakens the hypothesis.
+    pub(crate) fn formula(&self, expr: &Expr, truth: bool) -> Option<Dnf> {
+        let known = |formula: Option<Dnf>| formula.unwrap_or_else(|| vec![Vec::new()]);
+        match &expr.kind {
+            ExprKind::Unary(Kind::Bang, inner) => self.formula(inner, !truth),
+            ExprKind::Binary(op @ (Kind::AmpAmp | Kind::PipePipe), l, r) => {
+                // `a && b` true or `a || b` false is a conjunction.
+                if (*op == Kind::AmpAmp) == truth {
+                    dnf_and(
+                        &known(self.formula(l, truth)),
+                        &known(self.formula(r, truth)),
+                    )
+                } else {
+                    dnf_or(self.formula(l, truth)?, self.formula(r, truth)?)
+                }
+            }
+            ExprKind::Binary(op, l, r) => {
+                let (l, r) = (self.linear(l)?, self.linear(r)?);
+                let op = if truth { op.clone() } else { negate(op)? };
+                compare_dnf(l, &op, r)
+            }
+            ExprKind::Block(block) if block.statements.is_empty() => {
+                self.formula(block.tail.as_ref()?, truth)
+            }
+            _ if expr.ty == crate::executable::Type::Bool => {
+                let term = self.linear(expr)?;
+                compare_dnf(term, &Kind::EqEq, Linear::constant(i128::from(truth)))
+            }
+            _ => None,
+        }
+    }
+    /// Prove a goal formula from the facts, including disjunctive ones, and
+    /// return its certificate. A conjunctive goal without disjunctive facts
+    /// uses the direct search per constraint.
+    pub(crate) fn certify(
+        &self,
+        goal: &Dnf,
+        span: Span,
+        obligation: &str,
+    ) -> Option<Vec<Certificate>> {
+        if goal.len() == 1 && self.clauses.is_empty() {
+            let mut out = Vec::new();
+            for constraint in &goal[0] {
+                let proof = self.prove(constraint)?;
+                out.push(Certificate {
+                    span,
+                    obligation: obligation.to_owned(),
+                    goal: constraint.clone(),
+                    proof,
+                    hypotheses: self.snapshot(constraint),
+                    clauses: Vec::new(),
+                    goal_formula: None,
+                });
+            }
+            return Some(out);
+        }
+        let hypotheses = self.snapshot_formula(goal);
+        let mut available = self.clauses.clone();
+        available.extend(negated_goal(goal)?);
+        let mut budget = MAX_CASE_NODES;
+        let proof = search_cases(&hypotheses, &available, &mut budget)?;
+        Some(vec![Certificate {
+            span,
+            obligation: obligation.to_owned(),
+            goal: Constraint {
+                coefficients: BTreeMap::new(),
+                bound: -1,
+            },
+            proof,
+            hypotheses,
+            clauses: self.clauses.clone(),
+            goal_formula: Some(goal.clone()),
+        }])
+    }
+    /// Facts plus implicit ranges for every term of `goal` and of the
+    /// disjunctive facts.
+    pub(crate) fn snapshot_formula(&self, goal: &Dnf) -> Vec<Constraint> {
+        let mut probe = Constraint {
+            coefficients: BTreeMap::new(),
+            bound: 0,
+        };
+        for constraint in goal
+            .iter()
+            .flatten()
+            .chain(self.clauses.iter().flatten().flatten())
+        {
+            for term in constraint.coefficients.keys() {
+                probe.coefficients.insert(*term, 1);
+            }
+        }
+        self.snapshot(&probe)
     }
     /// A checked i64 expression as a linear term, when it has that shape.
     /// Integer constants, locals, lengths, unary negation, `+`/`-`, and
@@ -1546,8 +1737,68 @@ fn verify_branch(
     verify_refutation(&left_context, left) && verify_refutation(&right_context, right)
 }
 
+/// Refute `units` together with every clause, splitting on clauses
+/// (smallest first). Each leaf is a rational refutation or the bounded
+/// integer fallback.
+fn search_cases(units: &[Constraint], clauses: &[Dnf], budget: &mut usize) -> Option<Refutation> {
+    if *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    if let Some(farkas) = refute_rational(units) {
+        return Some(Refutation::Farkas(farkas));
+    }
+    let Some((index, clause)) = clauses
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, clause)| clause.len())
+    else {
+        if units.len() > MAX_INTEGER_CONSTRAINTS {
+            return None;
+        }
+        return solve_integer(units, MAX_INTEGER_DEPTH, &mut IntegerBudget::standard());
+    };
+    let rest = clauses
+        .iter()
+        .enumerate()
+        .filter(|(other, _)| *other != index)
+        .map(|(_, clause)| clause.clone())
+        .collect::<Vec<_>>();
+    let mut branches = Vec::with_capacity(clause.len());
+    for disjunct in clause {
+        let mut extended = units.to_vec();
+        extended.extend(disjunct.iter().cloned());
+        branches.push(search_cases(&extended, &rest, budget)?);
+    }
+    Some(Refutation::Cases {
+        clause: clause.clone(),
+        branches,
+    })
+}
+
 fn verify_refutation(context: &[Constraint], proof: &Refutation) -> bool {
+    verify_with_clauses(context, &[], proof)
+}
+
+/// Like [`verify_refutation`], with disjunctive clauses available to `Cases`.
+fn verify_with_clauses(context: &[Constraint], clauses: &[Dnf], proof: &Refutation) -> bool {
     match proof {
+        Refutation::Cases { clause, branches } => {
+            clauses.contains(clause)
+                && clause.len() == branches.len()
+                && clause.iter().zip(branches).all(|(disjunct, branch)| {
+                    let mut extended = context.to_vec();
+                    extended.extend(disjunct.iter().cloned());
+                    verify_with_clauses(&extended, clauses, branch)
+                })
+        }
+        _ => verify_refutation_leaf(context, proof),
+    }
+}
+
+fn verify_refutation_leaf(context: &[Constraint], proof: &Refutation) -> bool {
+    match proof {
+        Refutation::Cases { .. } => false,
         Refutation::Trivial => false,
         Refutation::Farkas(farkas) => verify_farkas(context, farkas),
         Refutation::Cut {
@@ -1573,6 +1824,18 @@ fn verify_refutation(context: &[Constraint], proof: &Refutation) -> bool {
 /// combination whose coefficients have exactly the recorded gcd and whose bound
 /// is the recorded floor; each branch must refute both integer halves.
 pub fn verify(certificate: &Certificate) -> bool {
+    if let Some(goal) = &certificate.goal_formula {
+        // The verifier negates the formula goal itself.
+        let Some(negated) = negated_goal(goal) else {
+            return false;
+        };
+        let mut clauses = certificate.clauses.clone();
+        clauses.extend(negated);
+        return verify_with_clauses(&certificate.hypotheses, &clauses, &certificate.proof);
+    }
+    if !certificate.clauses.is_empty() {
+        return false;
+    }
     match &certificate.proof {
         Refutation::Trivial => {
             certificate.goal.coefficients.is_empty() && certificate.goal.bound >= 0
@@ -1663,6 +1926,8 @@ mod tests {
             goal,
             proof: Refutation::Farkas(proof),
             hypotheses,
+            clauses: Vec::new(),
+            goal_formula: None,
         }
     }
 
@@ -1678,7 +1943,47 @@ mod tests {
             goal,
             proof,
             hypotheses,
+            clauses: Vec::new(),
+            goal_formula: None,
         })
+    }
+
+    #[test]
+    fn case_split_certificates_are_checked_against_their_clauses() {
+        // x <= 0 || x >= 10, together with 1 <= x <= 9, is contradictory.
+        let x = Term::Var(0, 0);
+        let mut facts = Facts::default();
+        facts.add(vec![inequality(&[(x, -1)], -1), inequality(&[(x, 1)], 9)]);
+        facts.add_formula(vec![
+            vec![inequality(&[(x, 1)], 0)],
+            vec![inequality(&[(x, -1)], -10)],
+        ]);
+        let goal = vec![vec![Constraint {
+            coefficients: BTreeMap::new(),
+            bound: -1,
+        }]];
+        let mut certificates = facts.certify(&goal, Span::default(), "false").unwrap();
+        let mut certificate = certificates.remove(0);
+        assert!(verify(&certificate));
+        // A clause that is not available is rejected.
+        let Refutation::Cases { clause, .. } = &mut certificate.proof else {
+            panic!("expected a case split");
+        };
+        clause.pop();
+        assert!(!verify(&certificate));
+        // A missing branch is rejected.
+        let mut certificates = facts.certify(&goal, Span::default(), "false").unwrap();
+        let mut certificate = certificates.remove(0);
+        let Refutation::Cases { branches, .. } = &mut certificate.proof else {
+            panic!("expected a case split");
+        };
+        branches.pop();
+        assert!(!verify(&certificate));
+        // Dropping the clause from the hypotheses is rejected.
+        let mut certificates = facts.certify(&goal, Span::default(), "false").unwrap();
+        let mut certificate = certificates.remove(0);
+        certificate.clauses.clear();
+        assert!(!verify(&certificate));
     }
 
     #[test]
