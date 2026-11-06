@@ -4217,10 +4217,16 @@
       "deps": [
         "PROVE-CONST"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Bool, unsigned and fixed-width integer terms in the {..} fragment, with their ranges; Bool atoms (b, !b, b == c); unsigned constants read by type.",
-      "commit": null,
-      "log": []
+      "commit": "b1d1d4e",
+      "log": [
+        {
+          "time": "2026-11-06 01:35:17",
+          "who": "agent",
+          "text": "done b1d1d4e"
+        }
+      ]
     },
     {
       "id": "PROVE-DISJ",
