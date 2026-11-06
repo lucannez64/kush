@@ -220,7 +220,13 @@ return_expr = "return" expression? ;
 
 The grammar above summarizes block placement; a final unterminated expression
 is the tail, while an `if`, `match`, or block expression preceding another
-statement may omit its semicolon. Match arms currently require commas between
+statement may omit its semicolon. A statement that starts with a block-like
+expression (`if`, `match`, `while`, `loop`, `handle` or a block) ends at its
+`}` when the next token starts a new line and is `(`, `[`, `-` or `*`: that
+line is a new statement, so `if c { .. }` followed by a `(a, b)` line is not a
+call. On the same line (`if c { 1 } else { 2 } - 1`), and inside a `let` value
+or other expression, the operator or call still applies. A block-like
+expression followed by `&` or `|` always ends there. Match arms currently require commas between
 arms, including block-bodied arms. `return` without a value must be followed by
 `;` or `}`. `return` with a value extends through the following expression.
 

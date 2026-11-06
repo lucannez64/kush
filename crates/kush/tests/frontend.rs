@@ -411,3 +411,123 @@ fn prop_declarations_and_logical_constructor_telescopes_parse() {
     // `prop` is contextual and remains a valid function name.
     assert!(matches!(&module.items[2].item.kind, ItemKind::Function(f) if f.name == "prop"));
 }
+
+// PARSE-BLOCK-CALL: a statement that starts with a block-like expression ends
+// at its `}` when the next line starts with `(`, `[`, `-` or `*`.
+fn block_statement_runs(source: &str, expected: i64) {
+    let program = kush::executable::check(source).unwrap_or_else(|e| panic!("{e:?}\n{source}"));
+    let (value, stats) = program
+        .evaluate_with_stats(&mut Vec::new())
+        .unwrap_or_else(|e| panic!("{e:?}\n{source}"));
+    assert_eq!(value, expected, "{source}");
+    assert_eq!(stats.allocations, stats.deallocations, "{source}");
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("block-statement");
+        kush::native::build(&program, &binary).unwrap();
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert_eq!(output.status.code(), Some((expected as u64 & 255) as i32), "{source}");
+    }
+}
+
+#[test]
+fn block_statement_ends_before_a_new_line_starting_with_paren_or_minus() {
+    // `if` then a tuple on the next line.
+    block_statement_runs(
+        "fn main() -> i64 ! {panic} {
+            let mut a = 1;
+            if a > 0 { a = a + 1; }
+            (a, 7).1 + a
+        }",
+        9,
+    );
+    // `while` then a negative tail.
+    block_statement_runs(
+        "fn main() -> i64 ! {panic} {
+            let mut i = 0;
+            while i < 3 { i = i + 1; }
+            -1 + i * 10
+        }",
+        29,
+    );
+    // `match` then a negative tail.
+    block_statement_runs(
+        "fn main() -> i64 ! {panic} {
+            let n = 2;
+            match n { 2 => {}, _ => {} }
+            -(n - 7)
+        }",
+        5,
+    );
+    // A plain block then a parenthesized expression.
+    block_statement_runs(
+        "fn main() -> i64 ! {panic} {
+            { let x = 1; }
+            (40 + 2)
+        }",
+        42,
+    );
+    // Same line: still an operator, as before.
+    block_statement_runs(
+        "fn main() -> i64 ! {panic} {
+            let c = true;
+            if c { 10 } else { 20 } - 3
+        }",
+        7,
+    );
+    // Not at statement start (a let value): the next line still continues it.
+    block_statement_runs(
+        "fn main() -> i64 ! {panic} {
+            let c = false;
+            let v = if c { 10 } else { 20 }
+                - 3;
+            v
+        }",
+        17,
+    );
+    // A method call on the next line still continues the expression.
+    block_statement_runs(
+        "struct P { x: i64 }
+        impl P { fn value(self: Self) -> i64 ! {} { self.x } }
+        fn main() -> i64 ! {panic} {
+            let c = true;
+            if c { P { x: 4 } } else { P { x: 5 } }
+                .value()
+        }",
+        4,
+    );
+}
+
+#[test]
+fn block_statement_parse_shape_and_rejections() {
+    let tail = expression("if true { 1; }\n(2, 3)");
+    assert!(matches!(tail.kind, ExprKind::Tuple(_)), "{tail:?}");
+    let tail = expression("while false { }\n-1");
+    assert!(matches!(tail.kind, ExprKind::Unary { .. } | ExprKind::Integer(_)), "{tail:?}");
+    let tail = expression("match x { _ => {} }\n[1, 2]");
+    assert!(matches!(tail.kind, ExprKind::Array(_)), "{tail:?}");
+    let tail = expression("loop { break; }\n*r");
+    assert!(matches!(tail.kind, ExprKind::Unary { .. } | ExprKind::Integer(_)), "{tail:?}");
+    // A let value continues onto the next line: calling an integer is rejected.
+    let error = kush::executable::check(
+        "fn main() -> i64 ! {panic} {
+            let v = if true { 1 } else { 2 }
+                (3);
+            v
+        }",
+    )
+    .err()
+    .expect("calling an integer must be rejected");
+    assert!(!error.message.is_empty());
+    // A statement `if` with a non-unit value followed by `(..)` is two statements.
+    let error = kush::executable::check(
+        "fn main() -> i64 ! {panic} {
+            if true { 1 } else { 2 }
+            (true)
+        }",
+    )
+    .err()
+    .expect("a Bool tail of an i64 function must be rejected");
+    assert!(!error.message.is_empty());
+}

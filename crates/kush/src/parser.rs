@@ -8,6 +8,19 @@ use std::mem::discriminant;
 type Result<T> = std::result::Result<T, Diagnostic>;
 const LIMIT: usize = 128;
 
+/// `if`, `match`, `while`, `loop`, `handle` and plain blocks end in `}`.
+fn is_block_like(expr: &Expr) -> bool {
+    matches!(
+        expr.kind,
+        ExprKind::If { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Block(_)
+            | ExprKind::Handle { .. }
+            | ExprKind::While { .. }
+            | ExprKind::Loop(_)
+    )
+}
+
 /// Parse syntax only. This does not resolve names, check types, or verify proofs.
 pub fn parse(source: &str) -> Result<Module> {
     parse_at(source, 0)
@@ -21,24 +34,40 @@ pub fn parse_at(source: &str, base: usize) -> Result<Module> {
         d
     };
     let mut tokens = lexer::lex(source).map_err(shift)?;
+    let mut line_start = Vec::with_capacity(tokens.len());
+    let mut previous_end = 0;
+    for token in &tokens {
+        line_start.push(
+            source
+                .get(previous_end..token.span.start)
+                .is_some_and(|gap| gap.contains('\n')),
+        );
+        previous_end = token.span.end;
+    }
     for token in &mut tokens {
         token.span = Span::new(token.span.start + base, token.span.end + base);
     }
     Parser {
         tokens,
+        line_start,
         pos: 0,
         depth: 0,
         in_ensures: false,
+        statement_expr: false,
     }
     .module()
 }
 
 struct Parser {
     tokens: Vec<Token>,
+    /// Whether a line break separates each token from the one before it.
+    line_start: Vec<bool>,
     pos: usize,
     depth: usize,
     /// Inside an `ensures` proposition, where `value is Variant` is allowed.
     in_ensures: bool,
+    /// The next expression starts a statement (see `expr_inner`).
+    statement_expr: bool,
 }
 impl Parser {
     fn current(&self) -> &Token {
@@ -1516,21 +1545,14 @@ impl Parser {
                     span: self.since(start),
                 });
             } else {
+                self.statement_expr = true;
                 let expr = self.expr()?;
                 if self.eat(&Kind::Semi) {
                     statements.push(Statement::Expr(expr));
                 } else if self.at(&Kind::RBrace) {
                     tail = Some(Box::new(expr));
                     break;
-                } else if matches!(
-                    expr.kind,
-                    ExprKind::If { .. }
-                        | ExprKind::Match { .. }
-                        | ExprKind::Block(_)
-                        | ExprKind::Handle { .. }
-                        | ExprKind::While { .. }
-                        | ExprKind::Loop(_)
-                ) {
+                } else if is_block_like(&expr) {
                     statements.push(Statement::Expr(expr));
                 } else {
                     return Err(self.error("expected ';' or '}' after expression"));
@@ -1551,6 +1573,7 @@ impl Parser {
         self.nested(|p| p.expr_inner(min))
     }
     fn expr_inner(&mut self, min: u8) -> Result<Expr> {
+        let statement = std::mem::take(&mut self.statement_expr);
         let start = self.current().span;
         let mut left = self.prefix()?;
         let mut compared = false;
@@ -1560,6 +1583,19 @@ impl Parser {
                 return Err(self.error("expression chain exceeds limit (128)"));
             }
             steps += 1;
+            // A statement that starts with a block-like expression ends at its
+            // `}` when the next line starts with `(`, `[`, `-` or `*`: that
+            // line is a new statement, not a call, index or operator.
+            if statement
+                && is_block_like(&left)
+                && self.line_start.get(self.pos).copied().unwrap_or(false)
+                && matches!(
+                    self.current().kind,
+                    Kind::LParen | Kind::LBracket | Kind::Minus | Kind::Star
+                )
+            {
+                break;
+            }
             if 12 >= min {
                 if self.eat(&Kind::LParen) {
                     let arguments = self.separated(Kind::RParen, |p| p.expr())?;
@@ -1690,14 +1726,7 @@ impl Parser {
             // A block-like expression (`if`, `match`, `while`, `loop`, block)
             // followed by `&` or `|` ends there: the next token starts a new
             // statement such as `&mut view[..]`. Parenthesize to combine.
-            let block_like = matches!(
-                left.kind,
-                ExprKind::If { .. }
-                    | ExprKind::Match { .. }
-                    | ExprKind::Block(_)
-                    | ExprKind::While { .. }
-                    | ExprKind::Loop(_)
-            );
+            let block_like = is_block_like(&left) && !matches!(left.kind, ExprKind::Handle { .. });
             if block_like && matches!(self.current().kind, Kind::Amp | Kind::Pipe) {
                 break;
             }
