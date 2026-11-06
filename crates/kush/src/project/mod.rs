@@ -407,6 +407,8 @@ pub struct BuildOptions {
     pub output: Option<PathBuf>,
     pub stats: bool,
     pub locked: bool,
+    /// `--lib`: build `lib<name>.a` plus Rust bindings (KUSH-RUST-EXPORT).
+    pub library: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -423,11 +425,12 @@ pub fn build(project: &Project, options: &BuildOptions) -> Result<BuildOutcome, 
     let checked = crate::executable::check_program(&program)
         .map_err(|error| Failure::new(program.sources.render(&error)))?;
     let output = options.output.clone().unwrap_or_else(|| {
-        project
-            .root
-            .join("target")
-            .join("kush")
-            .join(&project.package.name)
+        let directory = project.root.join("target").join("kush");
+        if options.library {
+            directory.join(format!("lib{}.a", project.package.name))
+        } else {
+            directory.join(&project.package.name)
+        }
     });
     if fs::canonicalize(&entry).ok() == fs::canonicalize(&output).ok() {
         return Err(Failure::new(format!(
@@ -446,9 +449,20 @@ pub fn build(project: &Project, options: &BuildOptions) -> Result<BuildOutcome, 
             ))
         })?;
     }
-    let links = project.native_links()?;
-    crate::native::build_with_codegen(&checked, &output, options.stats, &links, options.codegen)
+    if options.library {
+        crate::native::build_library_and_bindings(&checked, &output, options.codegen)
+            .map_err(|error| Failure::new(program.sources.render(&error)))?;
+    } else {
+        let links = project.native_links()?;
+        crate::native::build_with_codegen(
+            &checked,
+            &output,
+            options.stats,
+            &links,
+            options.codegen,
+        )
         .map_err(|error| Failure::new(program.sources.render(&error)))?;
+    }
     Ok(BuildOutcome {
         output,
         entry,
@@ -553,6 +567,7 @@ pub fn run(project: &Project, options: &RunOptions) -> Result<u8, Failure> {
             output: options.output.clone(),
             stats: options.stats,
             locked: options.locked,
+            library: false,
         },
     )?;
     runtime::run_artifact(&built.output, &options.arguments)

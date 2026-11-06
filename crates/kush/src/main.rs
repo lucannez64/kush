@@ -19,12 +19,13 @@ Single files:\n\
   kush resolve <file.kush>\n\
   kush check <file.kush>\n\
   kush build <file.kush> -o <executable> [--stats] [--link <archive>] [--link-lib <name>]\n\
+  kush build <file.kush> --lib lib<name>.a [--release]   (static library + Rust bindings)\n\
   kush run <file.kush> [--stats] [-- <program args>...]\n\
   kush eval <file.kush> [--stats] [--fuel N] [-- <program args>...]\n\n\
 Projects (Kush.toml):\n\
   kush new <directory> [--name <name>]\n\
   kush check [--manifest-path <Kush.toml>] [--locked]\n\
-  kush build [--manifest-path <Kush.toml>] [-o <executable>] [--stats] [--locked]\n\
+  kush build [--manifest-path <Kush.toml>] [-o <executable>] [--stats] [--locked] [--lib]\n\
   kush run [--manifest-path <Kush.toml>] [--stats] [--locked] [-- <program args>...]\n\
   kush test [--manifest-path <Kush.toml>] [FILTER] [--exact] [--list] [--nocapture] [--locked]\n\
   kush fmt [--check] [--manifest-path <Kush.toml>] [FILE...]\n\n\
@@ -73,11 +74,46 @@ fn run(args: Vec<OsString>, out: &mut impl Write) -> Result<u8, (u8, String)> {
         "fmt" => format_command(rest, out),
         "lint" => lint_command(rest, out),
         "test" => test_command(rest, out),
+        "build" if rest.len() >= 3 && rest[1] == "--lib" => library_command(rest, out),
         "check" | "build" | "run" if is_project_invocation(rest) => {
             project_command(name.as_ref(), rest, out)
         }
         _ => single_file_command(&args, out),
     }
+}
+
+/// `kush build <file.kush> --lib lib<name>.a [codegen flags]` (KUSH-RUST-EXPORT).
+fn library_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u8, String)> {
+    let path = Path::new(&args[0]);
+    let output = PathBuf::from(&args[2]);
+    let mut codegen = kush::native::CodegenOptions::default();
+    let mut index = 3;
+    while index < args.len() {
+        if !codegen_argument(args, &mut index, &mut codegen, "build")? {
+            return Err(usage_error("build", &args[index].to_string_lossy()));
+        }
+        index += 1;
+    }
+    let name = path.to_string_lossy();
+    let source = fs::read_to_string(path).map_err(|e| (1, format!("cannot read {name}: {e}")))?;
+    let program = kush::program::load_path(path).map_err(|(sources, e)| {
+        (
+            1,
+            sources.map_or_else(|| e.render(&name, &source), |s| s.render(&e)),
+        )
+    })?;
+    let checked =
+        kush::executable::check_program(&program).map_err(|e| (1, program.sources.render(&e)))?;
+    let bindings = kush::native::build_library_and_bindings(&checked, &output, codegen)
+        .map_err(|e| (1, e.render(&name, &source)))?;
+    writeln!(
+        out,
+        "Built library {} and Rust bindings {}.",
+        output.display(),
+        bindings.display()
+    )
+    .map_err(output_error)?;
+    Ok(0)
 }
 
 fn is_project_invocation(rest: &[OsString]) -> bool {
@@ -123,6 +159,7 @@ fn project_command(
             let mut manifest = None;
             let mut output = None;
             let mut stats = false;
+            let mut library = false;
             let mut codegen = kush::native::CodegenOptions::default();
             let mut locked = false;
             let mut index = 0;
@@ -136,6 +173,7 @@ fn project_command(
                     }
                     "--stats" => stats = true,
                     "--locked" => locked = true,
+                    "--lib" => library = true,
                     other => {
                         if !codegen_argument(args, &mut index, &mut codegen, command)? {
                             return Err(usage_error(command, other));
@@ -152,11 +190,22 @@ fn project_command(
                     output,
                     stats,
                     locked,
+                    library,
                 },
             )
             .map_err(project_error)?;
-            writeln!(out, "Built {} with Cranelift.", built.output.display())
+            if library {
+                writeln!(
+                    out,
+                    "Built library {} and Rust bindings {}.",
+                    built.output.display(),
+                    built.output.with_extension("rs").display()
+                )
                 .map_err(output_error)?;
+            } else {
+                writeln!(out, "Built {} with Cranelift.", built.output.display())
+                    .map_err(output_error)?;
+            }
             Ok(0)
         }
         "run" => {

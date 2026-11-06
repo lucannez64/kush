@@ -277,6 +277,7 @@ fn bindgen_project_build_run_and_tests_reuse_safe_rust() {
             output: Some(binary.clone()),
             stats: false,
             locked: false,
+            library: false,
         },
     )
     .unwrap();

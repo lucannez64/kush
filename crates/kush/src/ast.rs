@@ -316,6 +316,9 @@ pub struct Function {
     /// linked static libraries/objects. Foreign declarations have no body and
     /// may only be called directly, never used as first-class values.
     pub foreign: Option<String>,
+    /// `export "symbol" fn ... { .. }` (KUSH-RUST-EXPORT): also callable from
+    /// C and Rust under this exact symbol when built with `--lib`.
+    pub export: Option<String>,
     /// `ensures` postconditions (ENSURES), checked at every return and
     /// available to callers as facts.
     pub ensures: Vec<Ensures>,

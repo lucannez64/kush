@@ -325,3 +325,52 @@ fallible result slots. Cargo artifacts are selected by the requested manifest
 and staticlib target, not dependency emission order. Link input paths starting
 with `-` or `@` are rejected, and package-native library paths cannot escape
 their package through absolute paths or `..`.
+
+## Exporting Kush functions (KUSH-RUST-EXPORT)
+
+Status: implemented 2026-11-06 (design approved by the user). Tests:
+`crates/kush/tests/rust_export.rs`.
+
+```kush
+export "policy_decide" fn decide(authenticated: Bool, revision: u64) -> i64 ! {} {
+    if authenticated && revision >= 1 { 1 } else { 0 }
+}
+```
+
+`export "symbol" fn` is an ordinary Kush function that is also given a C ABI
+entry point under the exact `symbol` when the program is built as a library:
+
+```sh
+kush build policy.kush --lib libpolicy.a --release   # single file
+kush build --lib --release                            # project: target/kush/lib<package>.a
+```
+
+The output must be named `lib<name>.a`; next to it the compiler writes
+`lib<name>.rs`, a Rust module with the raw `extern "C"` declarations (`ffi`)
+and safe wrappers on a `Library` token:
+
+```rust
+mod libpolicy;
+let lib = libpolicy::Library::take().unwrap();   // one per process
+let decision = lib.decide(true, 3);
+```
+
+Rules (v1), each a diagnostic: parameters are integers, floats or `Bool`; the
+result is one of those or `Unit`; the effect row is `{}` or `{panic}`; no
+generics, lifetimes, erased parameters or usage grades; the symbol is a C
+identifier, not `main`, not starting with `kush_`, and unique. A library
+needs at least one export and cannot import foreign functions yet.
+
+ABI: the bridge table above (`Bool` as `int32_t`, any non-zero is `true`;
+narrow integers at their width; `float`/`double`). A panic inside an export
+prints `panic: ...` and aborts the process. The archive holds the program
+object and the runtime compiled without `main`; it needs `-lm` (the Rust
+bindings link it).
+
+The runtime keeps process-global state (handler stack, abort word), so calls
+must not overlap. The Rust `Library` token is the only safe way in: exactly
+one exists per process, it is `Send` (it can move to another thread) but not
+`Sync` (it cannot be used from two threads at once). The raw `ffi` functions
+are `unsafe` for the same reason. Two Kush libraries (or a Kush library and a
+Kush executable's objects) in one link would define the runtime's symbols
+twice; that is not supported.

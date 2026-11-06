@@ -275,6 +275,8 @@ pub struct Executable {
     /// Checked foreign imports aligned with `functions`; `Some` marks an
     /// imported host function whose body is inert and never executed.
     pub(crate) foreign_functions: Vec<Option<ForeignFunction>>,
+    /// KUSH-RUST-EXPORT: `export "symbol" fn` instances, in declaration order.
+    pub(crate) exports: Vec<ExportedFunction>,
     pub(crate) certificates: Vec<crate::facts::Certificate>,
     /// Total logical definitions checked by the kernel and erased from the IR.
     pub(crate) logical_definitions: Vec<String>,
@@ -2084,6 +2086,23 @@ impl Signature {
 /// from `parameters`/`result`; `fallible` is `Some` exactly when the declared
 /// result is the conventional `Result<T, i64>`, in which case the C symbol
 /// returns a status and writes `T` through a trailing out-pointer.
+#[derive(Debug, Clone)]
+pub(crate) struct ExportedFunction {
+    pub symbol: String,
+    pub index: usize,
+    pub parameters: Vec<(String, Type)>,
+    pub result: Type,
+}
+/// Public description of one `export "symbol" fn` (KUSH-RUST-EXPORT).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportInfo {
+    pub symbol: String,
+    pub name: String,
+    /// Parameter names and Kush scalar type names (`i64`, `u8`, `Bool`, ...).
+    pub parameters: Vec<(String, String)>,
+    /// `Unit` or a scalar type name.
+    pub result: String,
+}
 #[derive(Debug, Clone)]
 pub(crate) struct ForeignFunction {
     pub symbol: String,
@@ -5082,6 +5101,117 @@ fn inject_allocator_protocol(program: &crate::program::Program) -> Result<crate:
     Ok(injected)
 }
 /// Check a loaded multi-module program. Only the root module may define `main`.
+/// KUSH-RUST-EXPORT: validate every `export "symbol" fn`. v1 crosses the
+/// C ABI with scalars only: integers, floats and `Bool` parameters, a scalar
+/// or `Unit` result, an effect row within `{panic}` (a panic aborts the
+/// process), no generics, lifetimes, erased parameters or usage grades.
+fn checked_exports(
+    signatures: &[Signature],
+    declared: &BTreeMap<BindingId, Declared<'_>>,
+    resolution: &Resolution,
+) -> Result<Vec<ExportedFunction>> {
+    let scalar = |ty: Type| matches!(ty, Type::Bool | Type::I64 | Type::Int(_) | Type::Float(_));
+    let mut exports: Vec<ExportedFunction> = Vec::new();
+    // Generic functions have no instance until called, so check them here.
+    for info in declared.values() {
+        let f = info.ast;
+        if f.export.is_some()
+            && (!f.generics.is_empty() || !f.lifetimes.is_empty() || info.impl_template.is_some())
+        {
+            return Err(Diagnostic::new(
+                info.span,
+                format!(
+                    "exported function '{}' cannot be generic or take lifetime parameters",
+                    f.name
+                ),
+            ));
+        }
+    }
+    for (index, sig) in signatures.iter().enumerate() {
+        let Some(info) = declared.get(&sig.binding) else {
+            continue;
+        };
+        let f = info.ast;
+        let Some(symbol) = &f.export else {
+            continue;
+        };
+        let fail = |message: String| Err(Diagnostic::new(sig.span, message));
+        let valid_symbol = !symbol.is_empty()
+            && symbol.len() <= 128
+            && symbol.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && symbol
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid_symbol {
+            return fail(format!(
+                "export symbol '{symbol}' must be a C identifier of at most 128 characters"
+            ));
+        }
+        if symbol.starts_with("kush_") || symbol == "main" {
+            return fail(format!(
+                "export symbol '{symbol}' is reserved for the Kush runtime"
+            ));
+        }
+        if exports.iter().any(|e| e.symbol == *symbol) {
+            return fail(format!("export symbol '{symbol}' is declared twice"));
+        }
+        if !f.generics.is_empty() || !f.lifetimes.is_empty() || info.impl_template.is_some() {
+            return fail(format!(
+                "exported function '{}' cannot be generic or take lifetime parameters",
+                f.name
+            ));
+        }
+        if f.parameters.iter().any(|p| p.erased)
+            || sig.parameter_grades.iter().any(Option::is_some)
+            || sig.result_grade.is_some()
+        {
+            return fail(format!(
+                "exported function '{}' cannot take erased parameters or usage grades",
+                f.name
+            ));
+        }
+        if let Some(ty) = sig.parameters.iter().copied().find(|ty| !scalar(*ty)) {
+            let _ = ty;
+            return fail(format!(
+                "exported function '{}' takes only integers, floats and Bool across the C ABI",
+                f.name
+            ));
+        }
+        if !(scalar(sig.result) || sig.result == Type::Unit) {
+            return fail(format!(
+                "exported function '{}' returns an integer, float, Bool or Unit across the C ABI",
+                f.name
+            ));
+        }
+        if sig.effects & !PANIC != 0 || !sig.effect_arguments.is_empty() {
+            return fail(format!(
+                "exported function '{}' may only have the effect row {{}} or {{panic}}; a panic aborts the process",
+                f.name
+            ));
+        }
+        let names = f
+            .parameters
+            .iter()
+            .map(|p| {
+                resolution
+                    .binder(p.span)
+                    .map(|id| resolution.bindings[id].name.clone())
+                    .unwrap_or_else(|| "arg".to_owned())
+            })
+            .collect::<Vec<_>>();
+        exports.push(ExportedFunction {
+            symbol: symbol.clone(),
+            index,
+            parameters: names
+                .into_iter()
+                .zip(sig.parameters.iter().copied())
+                .collect(),
+            result: sig.result,
+        });
+    }
+    Ok(exports)
+}
+
 pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     let injected = inject_allocator_protocol(program)?;
     let program = &injected;
@@ -5697,6 +5827,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     for (index, foreign) in functions.foreign_functions {
         foreign_functions[index] = Some(foreign);
     }
+    let exports = checked_exports(&functions.signatures, &functions.declared, resolution)?;
     let mut executable = Executable {
         eval_fuel: crate::eval::DEFAULT_EVAL_FUEL,
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
@@ -5731,6 +5862,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         owned_enums: vec![],
         linear_enums: vec![],
         foreign_functions,
+        exports,
         logical_definitions: logical.definitions.clone(),
     };
     crate::suspend::mark_abort_calls(&mut executable)?;
@@ -36533,6 +36665,31 @@ impl Executable {
     /// Checked nested in-place map fusions. Diagnostics-only observation.
     pub fn fusion_count(&self) -> usize {
         self.fusions
+    }
+    /// `export "symbol" fn` declarations (KUSH-RUST-EXPORT).
+    pub fn exports(&self) -> Vec<ExportInfo> {
+        let name = |ty: Type| {
+            crate::runtime_types::type_name_in(
+                ty,
+                &self.pointees,
+                &self.enums,
+                &self.unions,
+                &self.function_types,
+            )
+        };
+        self.exports
+            .iter()
+            .map(|export| ExportInfo {
+                symbol: export.symbol.clone(),
+                name: self.functions[export.index].name.clone(),
+                parameters: export
+                    .parameters
+                    .iter()
+                    .map(|(n, ty)| (n.clone(), name(*ty)))
+                    .collect(),
+                result: name(export.result),
+            })
+            .collect()
     }
     /// Checked foreign declarations in instance order. This reports the
     /// Kush-side contract only; the foreign library remains trusted code that

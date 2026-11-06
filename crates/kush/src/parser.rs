@@ -219,6 +219,35 @@ impl Parser {
                 }
                 function.foreign = Some(symbol);
                 ItemKind::Function(function)
+            } else if self.word_keyword("export")
+                && self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|token| matches!(token.kind, Kind::String(_)))
+            {
+                // `export "symbol" fn name(...) -> T ! {..} { .. }`
+                // (KUSH-RUST-EXPORT): contextual like `foreign`.
+                if total {
+                    return Err(self.error("'total' applies only to fn and enum declarations"));
+                }
+                self.bump();
+                let symbol = match self.current().kind.clone() {
+                    Kind::String(symbol) => {
+                        self.bump();
+                        symbol
+                    }
+                    _ => unreachable!("checked above"),
+                };
+                self.expect(&Kind::Fn, "'fn' after an export symbol")?;
+                let mut function = self.function(false)?;
+                if function.body.is_none() {
+                    return Err(Diagnostic::new(
+                        self.since(start),
+                        "an exported function needs a body",
+                    ));
+                }
+                function.export = Some(symbol);
+                ItemKind::Function(function)
             } else if self.eat(&Kind::Fn) {
                 ItemKind::Function(self.function(total)?)
             } else if self.eat(&Kind::Module) {
@@ -808,6 +837,7 @@ impl Parser {
             effects,
             body,
             foreign: None,
+            export: None,
             ensures,
         })
     }

@@ -2521,6 +2521,7 @@ static void kush_task_finish(void) {
     kush_current = NULL;
     kush_task_count = 0;
 }
+#ifndef KUSH_NO_MAIN
 int main(int argc, char **argv) {
     kush_host_init(argc, argv);
     /* Broken pipes become recoverable EPIPE results instead of process signals. */
@@ -2565,6 +2566,7 @@ int main(int argc, char **argv) {
     }
     return (int)((uint64_t)result & UINT64_C(255));
 }
+#endif
 "#;
 
 /// Extra inputs for the native link step. Every path is passed to `cc` as one
@@ -3082,12 +3084,22 @@ fn block_installs_handler(block: &ex::Block) -> bool {
 }
 
 fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
+    object_for(program, codegen, false)
+}
+/// The Cranelift object for an executable, or (`library`) for a static
+/// library: then `main` is optional and every `export "symbol" fn` gets a C
+/// ABI entry point (KUSH-RUST-EXPORT).
+fn object_for(program: &Executable, codegen: CodegenOptions, library: bool) -> Result<Vec<u8>> {
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         return Err(error(
             "the first native backend supports Linux x86-64 hosts only",
         ));
     }
-    let entry = program.entry()?;
+    let entry = if library {
+        program.entry.unwrap_or(usize::MAX)
+    } else {
+        program.entry()?
+    };
     let mut flags = settings::builder();
     flags.set("is_pic", "true").map_err(error)?;
     flags
@@ -4031,7 +4043,297 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
             .define_function(ids[index], &mut context)
             .map_err(|e| failed(&e))?;
     }
+    if library {
+        define_exports(&mut module, program, &ids)?;
+    }
     module.finish().emit().map_err(error)
+}
+
+/// KUSH-RUST-EXPORT: one exported C ABI function per `export "symbol" fn`,
+/// converting C scalars to Kush words and back around a call of the Kush
+/// function. `Bool` crosses as `int32_t` (any non-zero is `true`), narrow
+/// integers at their width, floats as `float`/`double`.
+fn define_exports(module: &mut ObjectModule, program: &Executable, ids: &[FuncId]) -> Result<()> {
+    for export in &program.exports {
+        let mut sig = module.make_signature();
+        for (_, ty) in &export.parameters {
+            sig.params.push(AbiParam::new(abi_value_type(*ty)));
+        }
+        if export.result != Type::Unit {
+            sig.returns
+                .push(AbiParam::new(abi_value_type(export.result)));
+        }
+        let id = module
+            .declare_function(&export.symbol, Linkage::Export, &sig)
+            .map_err(error)?;
+        let inner_sig = module
+            .declarations()
+            .get_function_decl(ids[export.index])
+            .signature
+            .clone();
+        if inner_sig.params.len() != export.parameters.len()
+            || inner_sig.params.iter().any(|p| p.value_type != I64)
+        {
+            return Err(error(format!(
+                "internal error: export '{}' does not have a one-word-per-parameter body",
+                export.symbol
+            )));
+        }
+        let mut context = module.make_context();
+        context.func.signature = sig;
+        let mut fc = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut context.func, &mut fc);
+        let block = b.create_block();
+        b.append_block_params_for_function_params(block);
+        b.switch_to_block(block);
+        let params = b.block_params(block).to_vec();
+        let mut words = Vec::new();
+        for (value, (_, ty)) in params.into_iter().zip(&export.parameters) {
+            let word = match ty {
+                Type::Bool => {
+                    let set = b.ins().icmp_imm_u(IntCC::NotEqual, value, 0);
+                    b.ins().uextend(I64, set)
+                }
+                Type::Int(kind) if !matches!(kind, IntKind::I64 | IntKind::U64) => {
+                    if kind.signed() {
+                        b.ins().sextend(I64, value)
+                    } else {
+                        b.ins().uextend(I64, value)
+                    }
+                }
+                Type::Float(FloatKind::F64) => b.ins().bitcast(I64, ir::MemFlagsData::new(), value),
+                Type::Float(FloatKind::F32) => {
+                    let bits = b
+                        .ins()
+                        .bitcast(ir::types::I32, ir::MemFlagsData::new(), value);
+                    b.ins().uextend(I64, bits)
+                }
+                _ => value,
+            };
+            words.push(word);
+        }
+        let callee = module.declare_func_in_func(ids[export.index], b.func);
+        let call = b.ins().call(callee, &words);
+        let returned = b.inst_results(call).to_vec();
+        if export.result == Type::Unit {
+            b.ins().return_(&[]);
+        } else {
+            let word = returned[0];
+            let value = match export.result {
+                Type::Bool => b.ins().ireduce(ir::types::I32, word),
+                Type::Int(kind) if !matches!(kind, IntKind::I64 | IntKind::U64) => {
+                    b.ins().ireduce(abi_value_type(export.result), word)
+                }
+                Type::Float(FloatKind::F64) => {
+                    b.ins()
+                        .bitcast(ir::types::F64, ir::MemFlagsData::new(), word)
+                }
+                Type::Float(FloatKind::F32) => {
+                    let bits = b.ins().ireduce(ir::types::I32, word);
+                    b.ins()
+                        .bitcast(ir::types::F32, ir::MemFlagsData::new(), bits)
+                }
+                _ => word,
+            };
+            b.ins().return_(&[value]);
+        }
+        b.seal_all_blocks();
+        b.finalize(module.target_config());
+        module
+            .define_function(id, &mut context)
+            .map_err(|e| error(format!("export '{}': {e:?}", export.symbol)))?;
+    }
+    Ok(())
+}
+
+/// KUSH-RUST-EXPORT: build a static library (`.a`) holding the program's
+/// code, the runtime (without `main`) and one C ABI entry point per
+/// `export "symbol" fn`. Link it into a C or Rust program; see
+/// [`rust_bindings`] for the Rust side.
+pub fn build_library(program: &Executable, output: &Path, codegen: CodegenOptions) -> Result<()> {
+    if program.exports.is_empty() {
+        return Err(error(
+            "a library needs at least one 'export \"symbol\" fn' declaration",
+        ));
+    }
+    if program.foreign_functions.iter().any(Option::is_some) {
+        return Err(error(
+            "a library cannot import foreign functions yet; link them into the final program instead",
+        ));
+    }
+    let object = object_for(program, codegen, true)?;
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let scratch = Scratch::new(parent)?;
+    let object_path = scratch.path.join("program.o");
+    fs::write(&object_path, object).map_err(error)?;
+    let mut defines = vec!["-DKUSH_NO_MAIN=1".to_owned()];
+    if program.uses_tasks {
+        defines.push("-DKUSH_HAS_TASKS=1".to_owned());
+    }
+    let runtime_object = runtime_cache::compile(RUNTIME, &defines, &scratch)?;
+    let archive = scratch.path.join("library.a");
+    let result = Command::new("ar")
+        .arg("rcs")
+        .arg(&archive)
+        .arg(&object_path)
+        .arg(&runtime_object)
+        .output()
+        .map_err(|e| error(format!("could not start the archiver 'ar': {e}")))?;
+    if !result.status.success() {
+        return Err(error(format!(
+            "archiving the library failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        )));
+    }
+    fs::rename(&archive, output).map_err(|e| {
+        error(format!(
+            "cannot install library '{}': {e}",
+            output.display()
+        ))
+    })
+}
+
+/// KUSH-RUST-EXPORT: `kush build --lib lib<name>.a`: the static library and,
+/// next to it, `lib<name>.rs` with its Rust bindings. Returns the bindings path.
+pub fn build_library_and_bindings(
+    program: &Executable,
+    output: &Path,
+    codegen: CodegenOptions,
+) -> Result<PathBuf> {
+    let file = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let Some(name) = file
+        .strip_prefix("lib")
+        .and_then(|rest| rest.strip_suffix(".a"))
+        .filter(|name| {
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    else {
+        return Err(error(format!(
+            "a library output must be named lib<name>.a with a name of letters, digits and '_', found '{}'",
+            output.display()
+        )));
+    };
+    build_library(program, output, codegen)?;
+    let bindings = output.with_extension("rs");
+    fs::write(&bindings, rust_bindings(program, name)).map_err(|e| {
+        error(format!(
+            "cannot write Rust bindings '{}': {e}",
+            bindings.display()
+        ))
+    })?;
+    Ok(bindings)
+}
+
+/// KUSH-RUST-EXPORT: a Rust module declaring the library's exports. The raw
+/// `extern "C"` items are in `ffi`; the safe wrappers are methods of
+/// `Library`, a token of which exactly one exists per process
+/// (`Library::take`). The Kush runtime keeps global state (handler stack,
+/// abort word), so calls must not overlap: the token is `Send` but not
+/// `Sync`, which lets one thread at a time use it without a lock.
+pub fn rust_bindings(program: &Executable, library_name: &str) -> String {
+    let rust = |ty: &str| match ty {
+        "Bool" => "bool",
+        "i8" => "i8",
+        "i16" => "i16",
+        "i32" => "i32",
+        "i64" => "i64",
+        "u8" => "u8",
+        "u16" => "u16",
+        "u32" => "u32",
+        "u64" => "u64",
+        "f32" => "f32",
+        "f64" => "f64",
+        "Unit" => "()",
+        _ => "i64",
+    };
+    let ffi_ty = |ty: &str| if ty == "Bool" { "i32" } else { rust(ty) };
+    // Kush names that are Rust keywords become raw identifiers.
+    let ident = |name: &str| {
+        const KEYWORDS: &[&str] = &[
+            "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+            "extern", "false", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "match",
+            "mod", "move", "mut", "pub", "ref", "return", "static", "struct", "trait", "true",
+            "type", "unsafe", "use", "where", "while", "abstract", "become", "box", "do", "final",
+            "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+        ];
+        if KEYWORDS.contains(&name) {
+            format!("r#{name}")
+        } else {
+            name.to_owned()
+        }
+    };
+    let mut out = String::new();
+    out.push_str(&format!(
+        "// Generated by `kush build --lib`: Rust bindings for the Kush library `{library_name}`.\n\
+         // Link with `-l static={library_name}` (and `-lm`). Do not edit.\n\n\
+         #![allow(dead_code)]\n\n\
+         pub mod ffi {{\n    // The Kush runtime uses libm.\n    #[link(name = \"m\")]\n    unsafe extern \"C\" {{}}\n\n    #[link(name = \"{library_name}\", kind = \"static\")]\n    unsafe extern \"C\" {{\n"
+    ));
+    let exports = program.exports();
+    for export in &exports {
+        let params = export
+            .parameters
+            .iter()
+            .map(|(n, t)| format!("{}: {}", ident(n), ffi_ty(t)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let result = if export.result == "Unit" {
+            String::new()
+        } else {
+            format!(" -> {}", ffi_ty(&export.result))
+        };
+        out.push_str(&format!(
+            "        /// Kush `{}`. Calls must not overlap (see `super::Library`).\n        pub fn {}({params}){result};\n",
+            export.name, export.symbol
+        ));
+    }
+    out.push_str("    }\n}\n\n");
+    out.push_str(
+        "/// The right to call into the Kush library: one per process, `Send` but\n\
+         /// not `Sync`, so calls never overlap.\n\
+         pub struct Library(core::marker::PhantomData<core::cell::Cell<()>>);\n\n\
+         static TAKEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);\n\n\
+         impl Library {\n    /// The process's only token; `None` after the first call.\n    pub fn take() -> Option<Library> {\n        (!TAKEN.swap(true, core::sync::atomic::Ordering::AcqRel))\n            .then(|| Library(core::marker::PhantomData))\n    }\n",
+    );
+    for export in &exports {
+        let params = export
+            .parameters
+            .iter()
+            .map(|(n, t)| format!(", {}: {}", ident(n), rust(t)))
+            .collect::<String>();
+        let args = export
+            .parameters
+            .iter()
+            .map(|(n, t)| {
+                if t == "Bool" {
+                    format!("i32::from({})", ident(n))
+                } else {
+                    ident(n)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let call = format!("unsafe {{ ffi::{}({args}) }}", export.symbol);
+        let (result, body) = match export.result.as_str() {
+            "Unit" => (String::new(), call),
+            "Bool" => (" -> bool".to_owned(), format!("({call}) != 0")),
+            other => (format!(" -> {}", rust(other)), call),
+        };
+        out.push_str(&format!(
+            "    /// Kush `{}` (`{}`).\n    pub fn {}(&self{params}){result} {{\n        {body}\n    }}\n",
+            export.name,
+            export.symbol,
+            ident(&export.name)
+        ));
+    }
+    out.push_str("}\n");
+    out
 }
 fn aggregate_result(program: &Executable, ty: Type) -> bool {
     ty.layout().is_some() || program.width(ty) > 1
