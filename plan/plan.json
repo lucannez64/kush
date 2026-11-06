@@ -4260,10 +4260,21 @@
       "deps": [
         "PROVE-SCALARS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Integer + - * proved in range by the facts (including literal arithmetic such as 0 - 1) need no runtime check and no panic effect (lowered to the wrapping operation).",
-      "commit": null,
-      "log": []
+      "commit": "288239d",
+      "log": [
+        {
+          "time": "2026-11-06 01:46:20",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 02:11:31",
+          "who": "agent",
+          "text": "done 288239d"
+        }
+      ]
     },
     {
       "id": "FIELD-PRIVACY",
