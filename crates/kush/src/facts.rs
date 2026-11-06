@@ -759,8 +759,57 @@ impl Facts {
             ExprKind::Block(block) if block.statements.is_empty() => {
                 self.linear(block.tail.as_ref()?)
             }
+            // Proved in range, so its value is the exact result.
+            ExprKind::Call(Target::Int(crate::int::IntOp::Unchecked(arith), _, _), arguments) => {
+                let (l, r) = (self.linear(&arguments[0])?, self.linear(&arguments[1])?);
+                match arith {
+                    crate::int::ArithOp::Add => l.add(&r),
+                    crate::int::ArithOp::Sub => l.sub(&r),
+                    crate::int::ArithOp::Mul if l.is_constant() => r.scale(l.constant),
+                    crate::int::ArithOp::Mul if r.is_constant() => l.scale(r.constant),
+                    crate::int::ArithOp::Mul => None,
+                }
+            }
             _ => None,
         }
+    }
+    /// OVERFLOW-ELIDE: certificates that `left op right` stays within the
+    /// range of `ty` under the current facts, or `None`.
+    pub(crate) fn in_range(
+        &self,
+        op: &Kind,
+        left: &Expr,
+        right: &Expr,
+        ty: crate::executable::Type,
+        span: Span,
+    ) -> Option<Vec<Certificate>> {
+        let (low, high) = scalar_range(ty)?;
+        let (l, r) = (self.linear(left)?, self.linear(right)?);
+        let value = match op {
+            Kind::Plus => l.add(&r)?,
+            Kind::Minus => l.sub(&r)?,
+            Kind::Star if l.is_constant() => r.scale(l.constant)?,
+            Kind::Star if r.is_constant() => l.scale(r.constant)?,
+            _ => return None,
+        };
+        let terms = value.coefficients.keys().copied().collect::<Vec<_>>();
+        let goal = compare_dnf(Linear::constant(low), &Kind::Le, value.clone())?;
+        let upper = compare_dnf(value, &Kind::Le, Linear::constant(high))?;
+        let goal = dnf_and(&goal, &upper)?;
+        // `i64` operands carry no implicit range elsewhere (their huge bounds
+        // only slow other proofs down); a range proof needs them.
+        let with_ranges = self.clone();
+        for term in &terms {
+            if let Term::Var(slot, _) = term
+                && !with_ranges.ranges.borrow().contains_key(slot)
+            {
+                with_ranges
+                    .ranges
+                    .borrow_mut()
+                    .insert(*slot, (i128::from(i64::MIN), i128::from(i64::MAX)));
+            }
+        }
+        with_ranges.certify(&goal, span, "the result stays in range")
     }
     /// `slot = value`: the right side is read at the old version, then the
     /// slot moves to a new version equal to it.

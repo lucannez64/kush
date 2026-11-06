@@ -22445,6 +22445,7 @@ impl Checker<'_, '_> {
                             resource: None,
                         });
                     }
+                    let mut unchecked = false;
                     let ty = match op {
                         Kind::Plus | Kind::Minus | Kind::Star | Kind::Slash | Kind::Percent
                         | Kind::Amp | Kind::Pipe | Kind::Caret => {
@@ -22466,7 +22467,22 @@ impl Checker<'_, '_> {
                             } else {
                                 let ty = c.same_int(left.ty, right.ty, span)?;
                                 if !matches!(op, Kind::Amp | Kind::Pipe | Kind::Caret) {
-                                    c.require(PANIC, span)?;
+                                    // OVERFLOW-ELIDE: a result the facts keep
+                                    // in range needs no runtime check.
+                                    let proved = if matches!(op, Kind::Plus | Kind::Minus | Kind::Star)
+                                        && ty != Type::Never
+                                    {
+                                        c.facts.in_range(op, &left, &right, ty, span)
+                                    } else {
+                                        None
+                                    };
+                                    match proved {
+                                        Some(certificates) => {
+                                            c.functions.certificates.extend(certificates);
+                                            unchecked = true;
+                                        }
+                                        None => c.require(PANIC, span)?,
+                                    }
                                 }
                                 ty
                             }
@@ -22581,10 +22597,26 @@ impl Checker<'_, '_> {
                     } else {
                         ty
                     };
-                    (
-                        ExprKind::Binary(op.clone(), Box::new(left), Box::new(right)),
-                        ty,
-                    )
+                    if unchecked && ty != Type::Never {
+                        let kind = ty.int_kind().unwrap_or(crate::int::IntKind::I64);
+                        let arith = match op {
+                            Kind::Plus => crate::int::ArithOp::Add,
+                            Kind::Minus => crate::int::ArithOp::Sub,
+                            _ => crate::int::ArithOp::Mul,
+                        };
+                        (
+                            ExprKind::Call(
+                                Target::Int(crate::int::IntOp::Unchecked(arith), kind, kind),
+                                vec![left, right],
+                            ),
+                            ty,
+                        )
+                    } else {
+                        (
+                            ExprKind::Binary(op.clone(), Box::new(left), Box::new(right)),
+                            ty,
+                        )
+                    }
                 }
                 ast::ExprKind::Call { callee, arguments } => {
                     if c.constructor_target(callee).is_some() {

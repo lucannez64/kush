@@ -53,9 +53,11 @@ fn scalar_types_are_not_coerced_and_function_signatures_are_checked() {
 #[test]
 fn arithmetic_io_and_callee_effects_are_enforced() {
     rejects(
-        "fn main() -> i64 ! {} { 1 + 2 }",
+        "fn add(x: i64) -> i64 ! {} { x + 2 } fn main() -> i64 ! {} { 0 }",
         "requires effects {panic}",
     );
+    // Literal arithmetic is proved in range (OVERFLOW-ELIDE).
+    check("fn main() -> i64 ! {} { 1 + 2 }").unwrap();
     rejects(
         "fn main() -> Unit ! {} { print_i64(1); }",
         "requires effects {io, panic}",

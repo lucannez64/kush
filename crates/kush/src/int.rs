@@ -188,6 +188,9 @@ pub(crate) enum IntOp {
     Truncate,
     Wrapping(ArithOp),
     Saturating(ArithOp),
+    /// `+`, `-` or `*` whose result the checker proved in range
+    /// (OVERFLOW-ELIDE): a plain machine operation, no runtime check.
+    Unchecked(ArithOp),
     Checked(ArithOp, usize, usize),
     /// `Char.from_code`: a `u32` code point to `Option<Char>`.
     CharFromCode {
@@ -225,6 +228,12 @@ pub(crate) fn builtin(op: IntOp, source: IntKind, target: IntKind, args: &[i64])
             None => (false, 0),
         },
         IntOp::Truncate => (true, target.wrap(a)),
+        IntOp::Unchecked(arith) => {
+            let b = source.decode(args[1]);
+            // Proved in range by the checker; never wraps.
+            let exact = arith.apply(a, b).expect("proved in range");
+            (true, target.encode(exact).expect("proved in range"))
+        }
         IntOp::Wrapping(arith) | IntOp::Saturating(arith) | IntOp::Checked(arith, _, _) => {
             let b = source.decode(args[1]);
             // i128 overflow is only possible for u64 * u64, which saturates high.

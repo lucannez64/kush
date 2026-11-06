@@ -9775,6 +9775,16 @@ impl Generator<'_, '_> {
                 let ok = self.builder.ins().band(max, not_surrogate);
                 option(self, ok, a, some_tag, none_tag)
             }
+            // Proved in range: the exact result is the machine result and is
+            // already in canonical (sign- or zero-extended) form.
+            IntOp::Unchecked(arith) => {
+                let b = values[1];
+                vec![match arith {
+                    ArithOp::Add => self.builder.ins().iadd(a, b),
+                    ArithOp::Sub => self.builder.ins().isub(a, b),
+                    ArithOp::Mul => self.builder.ins().imul(a, b),
+                }]
+            }
             IntOp::Wrapping(arith) | IntOp::Saturating(arith) | IntOp::Checked(arith, _, _) => {
                 let b = values[1];
                 let kind = source;
