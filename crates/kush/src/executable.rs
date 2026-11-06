@@ -4911,6 +4911,8 @@ struct Functions<'a> {
     object_traits: BTreeMap<Type, Vec<(BindingId, TraitArguments)>>,
     /// Checked dynamic-dispatch functions, one per `(trait, arguments, method)`.
     dynamic_dispatch: BTreeMap<(BindingId, TraitArguments, String), (usize, Type)>,
+    /// EFF-CAP-RESUME-CAPTURING trampolines by (operation, handler arrow).
+    capability_thunks: BTreeMap<(usize, usize), (usize, Type)>,
     /// Registered members of each dynamically dispatched object specialization.
     /// Indexed by `Type::DynObj`. A member identifier is its position here.
     dyn_members: Vec<Vec<DynMember>>,
@@ -5263,6 +5265,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         impl_instantiation_cache: BTreeMap::new(),
         object_traits: BTreeMap::new(),
         dynamic_dispatch: BTreeMap::new(),
+        capability_thunks: BTreeMap::new(),
         dyn_members: Vec::new(),
         dyn_methods: BTreeMap::new(),
         dyn_upcasts: BTreeSet::new(),
@@ -5606,6 +5609,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             capability_slots: BTreeSet::new(),
             capability_passable: BTreeSet::new(),
             capability_resumable: BTreeSet::new(),
+            capability_framed: BTreeMap::new(),
             capability_parameter_slots: BTreeSet::new(),
             capability_argument: false,
             resolution,
@@ -12530,6 +12534,9 @@ struct Checker<'a, 't> {
     /// may be passed to `cap` parameters, and such calls become await
     /// points of the handled body (EFF-CAP-RESUME-CALLS).
     capability_resumable: BTreeSet<usize>,
+    /// EFF-CAP-RESUME-CAPTURING: capability slots of capturing handlers kept
+    /// in their dynamic frame: declared operation id and handler arrow type.
+    capability_framed: BTreeMap<usize, (usize, usize)>,
     /// `cap` parameters of this function: they may be bound to a handler
     /// with code after `resume`, so a lambda cannot capture them.
     capability_parameter_slots: BTreeSet<usize>,
@@ -24701,6 +24708,7 @@ impl Checker<'_, '_> {
         let saved_capabilities = std::mem::take(&mut self.capability_slots);
         let saved_passable = std::mem::take(&mut self.capability_passable);
         let saved_resumable = std::mem::take(&mut self.capability_resumable);
+        let saved_framed = std::mem::take(&mut self.capability_framed);
         let saved_cap_parameters = std::mem::take(&mut self.capability_parameter_slots);
         let saved_slots = std::mem::take(&mut self.slots);
         let saved_result = self.result;
@@ -24821,6 +24829,7 @@ impl Checker<'_, '_> {
         self.capability_slots = saved_capabilities;
         self.capability_passable = saved_passable;
         self.capability_resumable = saved_resumable;
+        self.capability_framed = saved_framed;
         self.capability_parameter_slots = saved_cap_parameters;
         self.slots = saved_slots;
         self.result = saved_result;
@@ -30057,6 +30066,33 @@ impl Checker<'_, '_> {
                         "a 'cap' parameter takes a capability bound by 'handle Op as op' or a 'cap' parameter, passed by name",
                     ));
                 };
+                // A capturing handler stays in its dynamic frame; the callee
+                // gets a trampoline that performs the operation there. The
+                // argument is a placeholder (the capability local at the
+                // parameter's type) until the body's await points are marked.
+                if let Some((operation, arrow)) = self.capability_framed.get(&slot).copied() {
+                    let (_, ty) = self.capability_thunk(operation, arrow, value.span)?;
+                    let Some(wanted) = wanted else {
+                        return Err(Diagnostic::new(
+                            value.span,
+                            "a capturing capability needs a concrete 'cap' parameter",
+                        ));
+                    };
+                    if !self.subtype(ty, wanted) {
+                        return Err(Diagnostic::new(
+                            value.span,
+                            "this capability's handler is capturing, so a second perform through it panics: pass it to a 'cap Op ! {panic}' parameter",
+                        ));
+                    }
+                    constraints.push((declared, wanted));
+                    values.push(Expr {
+                        kind: ExprKind::Local(slot),
+                        ty: wanted,
+                        span: value.span,
+                        resource: None,
+                    });
+                    continue;
+                }
                 if !self.capability_passable.contains(&slot)
                     && !self.capability_resumable.contains(&slot)
                 {
@@ -32861,25 +32897,35 @@ impl Checker<'_, '_> {
                 .binder(*binder)
                 .is_some_and(|id| refs.contains(&id))
         });
+        // EFF-CAP-RESUME-CAPTURING: a capturing one-shot handler of a declared
+        // operation lives in its dynamic frame; callees given its capability
+        // reach that frame through a trampoline, under resumable entries only.
+        let noncapturing = matches!(
+            &handler_value.kind,
+            ExprKind::FnValue { captures, .. } if captures.is_empty()
+        ) && matches!(handler_value.ty, Type::Fn(_));
+        let framed = capability.is_some() && declared.is_some() && !multishot && !noncapturing;
         let region = ((!tail_resumptive_handler(self.resolution, handler)
             || shadows_handler_effects)
             && (lexical || declared.is_some() || capability_awaits))
-            || (declared.is_some() && multishot);
+            || (declared.is_some() && multishot)
+            || (framed && capability_awaits);
         if capability.is_some() && passable && !region {
             self.capability_passable.insert(slot);
         }
         // A noncapturing one-shot handler with code after `resume`: calls
         // given its capability become await points.
-        let capability_resumable = capability.is_some()
-            && region
-            && !multishot
-            && matches!(
-                &handler_value.kind,
-                ExprKind::FnValue { captures, .. } if captures.is_empty()
-            )
-            && matches!(handler_value.ty, Type::Fn(_));
+        let capability_resumable =
+            capability.is_some() && region && !multishot && (noncapturing || framed);
         if capability_resumable {
             self.capability_resumable.insert(slot);
+        }
+        if framed && region {
+            let operation_id = declared
+                .expect("a framed capability has a declared operation")
+                .id;
+            self.capability_framed
+                .insert(slot, (operation_id, handler_id));
         }
         let handler_function = match &handler_value.kind {
             ExprKind::FnValue { function, captures } if captures.is_empty() => Some(*function),
@@ -32984,6 +33030,121 @@ impl Checker<'_, '_> {
             span,
             resource: None,
         })
+    }
+    /// EFF-CAP-RESUME-CAPTURING: a noncapturing function
+    /// `fn(P, token) -> R ! {panic}` that performs the declared operation
+    /// through the dynamic stack. Passed in place of a capturing capability,
+    /// it reaches the capability's own frame: callees perform through it only
+    /// in resumable entries, which never run under a nested handler for the
+    /// operation, and resumed continuations hide frames the handler pushed.
+    /// The frame's consumed flag makes a second perform panic.
+    fn capability_thunk(
+        &mut self,
+        operation: usize,
+        arrow: usize,
+        span: Span,
+    ) -> Result<(usize, Type)> {
+        if let Some(found) = self.functions.capability_thunks.get(&(operation, arrow)) {
+            return Ok(*found);
+        }
+        let handler = self.types.function_types[arrow].clone();
+        let parameters = handler.parameters.clone();
+        let result = handler.result;
+        let id = self.types.function_type_with(
+            parameters.clone(),
+            result,
+            PANIC,
+            vec![None; parameters.len()],
+            None,
+            false,
+            false,
+            crate::runtime_types::BorrowSig::default(),
+        );
+        let ty = Type::Fn(id);
+        let locals = parameters
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| Local {
+                ty: *ty,
+                mutable: false,
+                linear: index == 1,
+                pinned: false,
+                grade: None,
+                span,
+            })
+            .collect();
+        let local = |slot: usize| Expr {
+            kind: ExprKind::Local(slot),
+            ty: parameters[slot],
+            span,
+            resource: None,
+        };
+        let body = Block {
+            statements: vec![],
+            tail: Some(Box::new(Expr {
+                kind: ExprKind::DynamicPerform {
+                    operation,
+                    payload: Box::new(local(0)),
+                    resume: Box::new(local(1)),
+                    handler: arrow,
+                },
+                ty: result,
+                span,
+                resource: None,
+            })),
+            ty: result,
+        };
+        let function = Function {
+            name: "<capability trampoline>".to_owned(),
+            parameters: parameters.len(),
+            closure: None,
+            capture_refs: vec![],
+            capture_writes: vec![],
+            locals,
+            result,
+            body,
+            span,
+            resources: vec![],
+            local_resources: vec![],
+            parameter_grades: vec![None; parameters.len()],
+            result_grade: None,
+            parameter_lifetimes: vec![None; parameters.len()],
+            result_lifetime: None,
+            lifetime_bounds: BTreeSet::new(),
+            declared_lifetimes: BTreeSet::new(),
+            index_relations: BTreeSet::new(),
+            parameter_slots: None,
+            local_borrowed: vec![],
+            local_copyable: vec![],
+            capability_parameters: vec![],
+        };
+        let signature = Signature {
+            call_contract: None,
+            binding: usize::MAX,
+            name: function.name.clone(),
+            parameters: parameters.clone(),
+            result,
+            effects: PANIC,
+            span,
+            substitution: BTreeMap::new(),
+            consts: BTreeMap::new(),
+            grades: BTreeMap::new(),
+            effect_arguments: BTreeMap::new(),
+            origin: None,
+            parameter_grades: vec![None; parameters.len()],
+            result_grade: None,
+            parameter_lifetimes: vec![None; parameters.len()],
+            result_lifetime: None,
+            lifetime_bounds: BTreeSet::new(),
+            self_type: None,
+            default_trait: None,
+            associated_consts: BTreeMap::new(),
+        };
+        let index = self.functions.add_synthetic(signature, function)?;
+        self.functions
+            .capability_thunks
+            .insert((operation, arrow), (index, ty));
+        Ok((index, ty))
     }
     /// `handle F: P -> Never with h { body }` (E-ABORT-LEXICAL,
     /// docs/abortive-handlers.md 3.1-3.2). `h` takes only the payload and
@@ -33962,6 +34123,16 @@ impl Checker<'_, '_> {
         }
         if let Some(slot) = site.capability_slot {
             self.mark_capability_awaits_in_block(&mut block, slot)?;
+            if let Some((operation, arrow)) = self.capability_framed.get(&slot).copied() {
+                for statement in &mut block.statements {
+                    if let Statement::Let(_, value) | Statement::Expr(value) = statement {
+                        self.replace_framed_arguments(value, slot, operation, arrow)?;
+                    }
+                }
+                if let Some(tail) = block.tail.as_deref_mut() {
+                    self.replace_framed_arguments(tail, slot, operation, arrow)?;
+                }
+            }
         }
         if self.handlers.last().is_none_or(|scope| scope.points == 0) {
             if site.operation.is_none() {
@@ -34126,6 +34297,40 @@ impl Checker<'_, '_> {
         call.for_each_child_mut(&mut |child| {
             if result.is_ok() {
                 result = self.mark_capability_awaits(child, slot, nested);
+            }
+        });
+        result
+    }
+    /// EFF-CAP-RESUME-CAPTURING: replace the placeholders of a framed
+    /// capability passed to `cap` parameters (the local at the parameter's
+    /// type) by the trampoline.
+    fn replace_framed_arguments(
+        &mut self,
+        expr: &mut Expr,
+        slot: usize,
+        operation: usize,
+        arrow: usize,
+    ) -> Result<()> {
+        if matches!(expr.kind, ExprKind::Local(local) if local == slot)
+            && expr.ty != self.locals[slot].ty
+        {
+            let (function, ty) = self.capability_thunk(operation, arrow, expr.span)?;
+            let thunk = Expr {
+                kind: ExprKind::FnValue {
+                    function,
+                    captures: vec![],
+                },
+                ty,
+                span: expr.span,
+                resource: None,
+            };
+            *expr = self.coerce(thunk, expr.ty, expr.span)?;
+            return Ok(());
+        }
+        let mut result = Ok(());
+        expr.for_each_child_mut(&mut |child| {
+            if result.is_ok() {
+                result = self.replace_framed_arguments(child, slot, operation, arrow);
             }
         });
         result

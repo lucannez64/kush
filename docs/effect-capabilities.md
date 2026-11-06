@@ -217,8 +217,8 @@ perform it with the identity token). Tests:
 ### As built (EFF-CAP-RESUME-CALLS, scoped with the user)
 
 Scoped on 2026-11-06 to **non-tail, one-shot, noncapturing** handlers;
-capturing (`once`) handlers across calls (EFF-CAP-RESUME-CAPTURING) and
-multishot handlers across calls (EFF-CAP-RESUME-MULTISHOT, which needs new
+capturing (`once`) handlers across calls (EFF-CAP-RESUME-CAPTURING, done
+below for declared operations) and multishot handlers across calls (EFF-CAP-RESUME-MULTISHOT, which needs new
 `cap` syntax for a copyable token) stay rejected with "this capability's
 handler is capturing or multishot ...". Tests:
 `crates/kush/tests/effect_capabilities.rs`
@@ -255,6 +255,45 @@ handler is capturing or multishot ...". Tests:
   no environment, and every continuation runs nested inside the handler
   call made from the activation's own region (E-CPS-BORROW argument).
 
+
+### As built (EFF-CAP-RESUME-CAPTURING)
+
+Implemented 2026-11-06 for **capturing one-shot handlers of declared
+operations** that are dynamically visible (pure, or aborting only through
+their token). Tests: `capturing_capabilit*` in
+`crates/kush/tests/effect_capabilities.rs`.
+
+- Such a handler already lives in its dynamic frame (code, environment, a
+  consumed flag; `kush_handler_push`), which is the handler cell of the
+  design note below. Passing its capability to a call passes a synthesized
+  noncapturing **trampoline** `fn(P, token) -> R ! {panic}` that performs the
+  operation through the dynamic stack (`capability_thunk`). The capability
+  representation (a code pointer) and the callees' resumable entries are
+  unchanged.
+- The trampoline reaches exactly this activation's frame because callees
+  perform through it only in resumable entries: the handle's body is made
+  suspendable whenever it passes such a capability (also for a
+  tail-resumptive handler), entries never run under a nested handler for the
+  operation (performs and awaits inside nested handles are rejected), and
+  resumed continuations hide frames the handler pushed. Calls whose callee
+  never performs through the parameter stay plain calls; such a callee never
+  calls the trampoline.
+- **One perform.** An owning `once` handler serves one perform across all
+  callees: the frame's consumed flag makes a second one find no handler and
+  panic, in both backends. So the callee's parameter must allow it:
+  `cap Op ! {panic}` (otherwise "pass it to a 'cap Op ! {panic}'
+  parameter"). A copyable capturing `fn` handler is never consumed.
+- Still rejected: capturing handlers of lexical (undeclared) operations and
+  capturing handlers with effects (no dynamic frame), and multishot ones.
+
+**Use-after-free review.** The environment is owned by the frame from the
+push until a perform takes it (the frame then holds nothing) or the pop
+drops it, including the pop on an abort path, so it is released once. The
+frame outlives every call of the trampoline: it is popped only after the
+handled body's region, and every entry and continuation runs nested inside
+that region (the E-CPS-BORROW argument). The trampoline captures nothing,
+so a continuation or an entry that holds it holds no stale copy of the
+environment.
 
 ### EFF-CAP-RESUME-CALLS design note
 

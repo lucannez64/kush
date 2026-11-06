@@ -311,7 +311,8 @@ fn capturing_and_multishot_capabilities_stay_in_their_body() {
                  ) -> i64 ! {{}} {{ resume(x | k) }} {{ step(ask, 1) }}
              }}"
         ),
-        "capturing or multishot",
+        // EFF-CAP-RESUME-CAPTURING: it may cross calls, to `cap Ask ! {panic}`.
+        "pass it to a 'cap Op ! {panic}' parameter",
     );
 }
 
@@ -782,5 +783,109 @@ fn review_regressions_for_capability_resumption() {
              }
          }",
         "can only be performed in its own 'handle' body",
+    );
+}
+
+/// EFF-CAP-RESUME-CAPTURING: a capturing one-shot handler of a declared
+/// operation stays in its dynamic frame; a callee given its capability
+/// performs through a trampoline that reaches exactly that frame. The frame
+/// serves one perform (by name, by capability in the body, or in any callee);
+/// a second one panics, so the callee's parameter is `cap Op ! {panic}`.
+fn capturing(body: &str, handler: &str) -> String {
+    format!(
+        "effect Ask: i64 -> i64;
+         fn step(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ perform op(x) + 1 }}
+         fn twice(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ let a = perform op(x); let b = perform op(a); b }}
+         fn forward(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{alloc, panic}} {{
+             let mine = Box.new(5);
+             let r = step(op, x);
+             r + Box.take(mine)
+         }}
+         fn skip(op: cap Ask ! {{panic}}, x: i64) -> i64 ! {{panic}} {{ if x > 100 {{ perform op(x) }} else {{ x }} }}
+         fn main() -> i64 ! {{io, alloc, panic}} {{
+             let base = Box.new(41);
+             let r = handle Ask: i64 -> i64 as ask with fn(x: i64, k: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{
+                 {handler}
+             }} {{
+                 let held = Box.new(7);
+                 let t = {body};
+                 t + Box.take(held)
+             }};
+             r
+         }}"
+    )
+}
+
+#[test]
+fn capturing_capabilities_cross_calls() {
+    let non_tail = "let r = k(x ^ Box.take(base)); r ^ 8";
+    let tail = "k(x ^ Box.take(base))";
+    // step(ask, 2): the handler resumes with 2 ^ 41 = 43; the rest of the
+    // body gives 43 + 1 + 7 = 51, and the deep handler returns 51 ^ 8 = 59
+    // (a shallow, in-place call would give (43 ^ 8) + 8 = 43).
+    agrees(&capturing("step(ask, 2)", non_tail), 59, "");
+    // A tail-resumptive capturing handler suspends when its capability is
+    // passed.
+    agrees(&capturing("step(ask, 2)", tail), 51, "");
+    // Forwarded through another function holding an owned value.
+    agrees(
+        &capturing("forward(ask, 2)", non_tail),
+        (43 + 1 + 5 + 7) ^ 8,
+        "",
+    );
+    // Never performed: the frame drops the handler's environment.
+    agrees(&capturing("skip(ask, 2)", non_tail), 2 + 7, "");
+}
+
+#[test]
+fn a_capturing_capability_serves_one_perform() {
+    for body in ["twice(ask, 2)", "{ let a = step(ask, 1); step(ask, a) }"] {
+        let source = capturing(body, "k(x ^ Box.take(base))");
+        let program = check(&source).unwrap_or_else(|error| panic!("{error:?}"));
+        // The consumed frame still discharges the operation: no handler.
+        let error = program.evaluate(&mut Vec::new()).unwrap_err();
+        assert!(
+            error.message.contains("no dynamically active handler"),
+            "{error:?}"
+        );
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+            let binary = scratch.path().join("capturing-twice");
+            kush::native::build(&program, &binary).unwrap();
+            let native = std::process::Command::new(&binary).output().unwrap();
+            assert!(!native.status.success(), "{source}");
+            assert!(String::from_utf8_lossy(&native.stderr).contains("panic"));
+        }
+    }
+}
+
+#[test]
+fn capturing_capabilities_stay_checked() {
+    let handler = "k(x ^ Box.take(base))";
+    // Without `panic` in the parameter's row.
+    rejects(
+        &capturing("step(ask, 2)", handler)
+            .replace("fn step(op: cap Ask ! {panic}", "fn step(op: cap Ask ! {}"),
+        "cap Op ! {panic}",
+    );
+    // A handler with effects is not dynamically visible, so it has no frame.
+    rejects(
+        &capturing("step(ask, 2)", "print_i64(x); k(x ^ Box.take(base))").replace(
+            "k: linear once fn(i64) -> i64 ! {}) -> i64 ! {}",
+            "k: linear once fn(i64) -> i64 ! {}) -> i64 ! {io, panic}",
+        ),
+        "capturing or multishot",
+    );
+    // A perform through it inside a nested handle of the callee.
+    rejects(
+        &capturing("nested(ask, 2)", handler).replace(
+            "fn main()",
+            "fn nested(op: cap Ask ! {panic}, x: i64) -> i64 ! {panic} {
+                 handle Ask: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { r(y) } { perform op(x) }
+             }
+             fn main()",
+        ),
+        "nested",
     );
 }
