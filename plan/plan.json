@@ -4866,10 +4866,16 @@
       "size": "L",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "User-approved 2026-11-06: new Thread.scope(fn) / Thread.spawn(fn) / Thread.join(h) on real OS threads, structured like tasks (handles cannot escape). Children get moved values and shared borrows (exclusive loans stay exclusive, as ownership already enforces until join). Thread-safe runtime: atomic allocation counters, per-thread allocator pool, handler stack and abort word. v1: thread bodies have no suspend and no declared operations from outside. Evaluator runs threads cooperatively (one valid schedule).",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-06 20:48:06",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "THREAD-ATOMICS",
@@ -4879,10 +4885,16 @@
       "deps": [
         "THREAD-SCOPE"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "User-approved: Atomic i64/Bool cells shared through &: load, store, fetch_add, swap, compare_exchange (sequentially consistent); Cranelift atomic instructions natively.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-06 20:54:08",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "THREAD-CHANNELS",
@@ -4892,10 +4904,16 @@
       "deps": [
         "THREAD-SCOPE"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "User-approved: Channel<T> with capacity, shared through &: send (blocks when full), recv (blocks when empty, None after close), close. Owned values move across threads.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-06 21:03:40",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "SIMD",
@@ -4905,6 +4923,32 @@
       "deps": [],
       "status": "todo",
       "desc": "Deferred by the user (2026-11-06): let Cranelift use host CPU features behind a flag, then explicit vector types/intrinsics.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "CHANNEL-OWNED",
+      "title": "Channels of owned messages",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "THREAD-CHANNELS"
+      ],
+      "status": "todo",
+      "desc": "THREAD-CHANNELS v1 carries plain data only; owned messages (Bytes, Box, Vec) need element drop glue in the channel and transfer across threads.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "THREAD-TASKS",
+      "title": "Cooperative tasks inside threads",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "THREAD-SCOPE"
+      ],
+      "status": "todo",
+      "desc": "Thread bodies cannot suspend in v1: the task scheduler state is per process; make it per thread so a thread can run Task.scope.",
       "commit": null,
       "log": []
     }
