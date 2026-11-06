@@ -3852,7 +3852,11 @@ fn object_for(program: &Executable, codegen: CodegenOptions, library: bool) -> R
                 .collect();
             g.variables.push(variables);
         }
-        for local in &f.locals {
+        // INLINE-RECORD-PARAMS: a record of scalars whose address is never
+        // taken stays in SSA variables, so copies of by-value records (for
+        // example after inlining) cost no stack traffic.
+        let addressed = addressed_slots(&f.body);
+        for (slot, local) in f.locals.iter().enumerate() {
             let array = local
                 .ty
                 .layout()
@@ -3861,7 +3865,8 @@ fn object_for(program: &Executable, codegen: CodegenOptions, library: bool) -> R
             // call-scoped `&Record`/`&mut Record` can point at the same storage
             // the local reads and writes. Inline arrays keep their existing
             // pinning rule.
-            let record = local.ty.layout().is_some_and(|id| program.enums[id].record);
+            let record = local.ty.layout().is_some_and(|id| program.enums[id].record)
+                && !(scalar_record(program, local.ty, 0) && !addressed.contains(&slot));
             let object = matches!(local.ty, Type::Union(_) | Type::DynObj(_));
             // Owning handles are pinned too so an exclusive `&mut Box`/`&mut
             // Vec` can update the caller's slot in place, including after a
@@ -4334,6 +4339,66 @@ pub fn rust_bindings(program: &Executable, library_name: &str) -> String {
     }
     out.push_str("}\n");
     out
+}
+/// Locals whose storage address an expression may take: `&local`, a
+/// borrowed temporary owner, and the root of a field or element place.
+fn addressed_slots(body: &crate::executable::Block) -> std::collections::BTreeSet<usize> {
+    fn root(expr: &Expr) -> Option<usize> {
+        match &expr.kind {
+            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) => Some(*slot),
+            ExprKind::Project(base, _)
+            | ExprKind::PlaceIndex { base, .. }
+            | ExprKind::Coerce { value: base, .. } => root(base),
+            _ => None,
+        }
+    }
+    fn walk(expr: &Expr, out: &mut std::collections::BTreeSet<usize>) {
+        match &expr.kind {
+            ExprKind::Borrow(slot) | ExprKind::BorrowInit { slot, .. } => {
+                out.insert(*slot);
+            }
+            ExprKind::BorrowPlace(place) | ExprKind::PlaceIndex { base: place, .. } => {
+                if let Some(slot) = root(place) {
+                    out.insert(slot);
+                }
+            }
+            _ => {}
+        }
+        expr.for_each_child(&mut |child| walk(child, out));
+    }
+    let mut out = std::collections::BTreeSet::new();
+    for statement in &body.statements {
+        match statement {
+            crate::executable::Statement::Let(_, value)
+            | crate::executable::Statement::Expr(value) => walk(value, &mut out),
+            crate::executable::Statement::Declare(slot) => {
+                out.insert(*slot);
+            }
+        }
+    }
+    if let Some(tail) = &body.tail {
+        walk(tail, &mut out);
+    }
+    out
+}
+/// A record whose fields are scalars or such records (no arrays, owned
+/// storage, borrows or unions).
+fn scalar_record(program: &Executable, ty: Type, depth: usize) -> bool {
+    let Some(id) = ty.layout() else {
+        return false;
+    };
+    let layout = &program.enums[id];
+    depth < 8
+        && layout.record
+        && layout.array.is_none()
+        && layout.dynamic_array.is_none()
+        && layout.variants.len() == 1
+        && layout.variants[0].fields.iter().all(|field| match field {
+            Type::Bool | Type::I64 | Type::Int(_) | Type::Float(_) | Type::Char | Type::Unit => {
+                true
+            }
+            other => scalar_record(program, *other, depth + 1),
+        })
 }
 fn aggregate_result(program: &Executable, ty: Type) -> bool {
     ty.layout().is_some() || program.width(ty) > 1

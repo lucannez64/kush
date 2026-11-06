@@ -279,6 +279,25 @@ The JSON rows are within run-to-run noise. In `multi-niche-tagged` only the
 cold construction loop changes; the hot loop's machine code is identical and
 moved by 4 bytes, so its difference is code alignment, not the inlined call.
 A limit of 48 instructions gave 18.5 ns on the policy (callers such as `plan`
-were then too large to absorb). The remaining gap to the written-out policy
-is the record parameter: each inlined predicate still copies its by-value
-`Facts` record through a stack slot, which Cranelift does not remove.
+were then too large to absorb). 
+## Records in registers (INLINE-RECORD-PARAMS)
+
+Record locals used to be pinned to a stack slot for the whole function so a
+`&Record`/`&mut Record` could point at them; every by-value record parameter
+was stored there and every field read was a load, and Cranelift removes
+neither. Now a record whose fields are scalars (or such records) stays in
+SSA variables unless the function takes its address (`&local`, a borrowed
+temporary owner, or the root of a field or element place;
+`addressed_slots`). Records with arrays, owned or borrowed fields keep the
+old rule.
+
+Same machine and method, release builds with inlining:
+
+| Benchmark | pinned | in registers |
+| --- | --- | --- |
+| `policy-predicates`, ns/decision | 14.2 | 5.9 |
+| `policy-written-out`, ns/decision | 9.0 | 5.7 |
+| effects, unboxing, JSON (rebuild / reuse) | | within noise (JSON 572 / 399 vs 567 / 398 ms) |
+
+The Rust crate measured 3.3 ns/decision for the same policy. The whole test
+suite passed with this change (107 test binaries).

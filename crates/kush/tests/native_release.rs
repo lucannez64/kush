@@ -367,3 +367,32 @@ fn inlined_calls_agree_in_all_modes() {
         }"#,
     );
 }
+
+/// INLINE-RECORD-PARAMS: records of scalars whose address is never taken
+/// stay in registers; borrowed ones stay pinned. Both agree in all modes.
+#[test]
+fn scalar_records_in_registers_and_pinned_agree() {
+    agrees(
+        r#"
+        struct P { x: i64, ok: Bool, inner: Q }
+        struct Q { a: u8, b: i64 }
+        fn sum(p: P) -> i64 ! {panic} { let Q { a, b } = p.inner; p.x + b + (if p.ok { Int.convert(a) } else { 0 }) }
+        fn bump(p: &mut P) -> Unit ! {panic} { p.x = p.x + 1; }
+        fn read(p: &P) -> i64 ! {} { p.x }
+        fn main() -> Unit ! {io, panic} {
+            let mut acc = 0;
+            let mut i = 0;
+            let mut p = P { x: 1, ok: true, inner: Q { a: 7, b: 3 } };
+            while i < 10 {
+                p = P { x: p.x + i, ok: i % 2 == 0, inner: Q { a: 2, b: i } };
+                acc = acc + sum(p);
+                i = i + 1;
+            }
+            print_i64(acc);
+            let mut m = P { x: 5, ok: false, inner: Q { a: 1, b: 1 } };
+            bump(&mut m);
+            bump(&mut m);
+            print_i64(read(&m) + sum(m));
+        }"#,
+    );
+}
