@@ -6943,16 +6943,20 @@ impl Checker<'_> {
                 // discharges it, and each part keeps the obligation of its
                 // own type (a `File` field stays linear, a `Bytes` field is
                 // ordinary owned data).
+                // No part of a linear value may be ignored (`_` or an omitted
+                // field): that would discard it unseen, and outside the
+                // type's module it could discard a private linear part.
                 let entry_scrutinee_loans = self.loans.clone();
-                let scrutinee_linear = self.value_moves_linear(value)
-                    && !is_linear(
-                        value.ty,
-                        self.linear,
-                        self.unions,
-                        self.pointees,
-                        self.functions,
-                        self.dyn_linear,
-                    );
+                let type_linear = is_linear(
+                    value.ty,
+                    self.linear,
+                    self.unions,
+                    self.pointees,
+                    self.functions,
+                    self.dyn_linear,
+                );
+                let whole_linear = self.value_moves_linear(value) || type_linear;
+                let scrutinee_linear = self.value_moves_linear(value) && !type_linear;
                 let wrapped_site = through_coerce(value) as *const Expr as usize;
                 let wrapped_slot = match &through_coerce(value).kind {
                     ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot) => {
@@ -7015,7 +7019,7 @@ impl Checker<'_> {
                     self.temporary_regions = temporary_regions.clone();
                     self.available = before.clone();
                     self.loans = loans.clone();
-                    self.ignored_linear(&arm.pattern, scrutinee, expr.span, scrutinee_linear)?;
+                    self.ignored_linear(&arm.pattern, scrutinee, expr.span, whole_linear)?;
                     if let Some(provenance) = &scrutinee_provenance {
                         self.bind_pattern_provenance(&arm.pattern, scrutinee, provenance)?;
                     }

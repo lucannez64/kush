@@ -160,7 +160,9 @@ Taking apart a value whose *type* is linear (a `#[linear]` record, or a
 record with a linear field such as `std.file.File`) discharges its
 obligation; each part then carries only the obligation of its own type. A
 `File` part must still be consumed, while a `Bytes` part is ordinary owned
-data that may be dropped or ignored with `_`. Parts of a value that is linear
+data that may be dropped once bound. No part of a linear value may be ignored
+(`_` or an omitted field), so a type with a private linear part, such as
+`File`, cannot be taken apart outside its module. Parts of a value that is linear
 only through a `@[1]` grade keep inheriting that obligation. (Before
 2026-11-06 every owned part of a linear-typed record inherited it, which made
 a record holding a file and a buffer impossible to dispose of.)

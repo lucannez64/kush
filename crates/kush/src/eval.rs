@@ -4390,9 +4390,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
                 let path = path_from_bytes(&path);
                 if op == HostOp::FsSyncDir {
-                    let status = match fs::File::open(&path).and_then(|dir| dir.sync_all()) {
-                        Ok(()) => 0,
-                        Err(error) => io_error_code(&error),
+                    // Like the native `O_DIRECTORY` open: not a directory is ENOTDIR.
+                    let status = match fs::metadata(&path) {
+                        Ok(metadata) if !metadata.is_dir() => 20,
+                        _ => match fs::File::open(&path).and_then(|dir| dir.sync_all()) {
+                            Ok(()) => 0,
+                            Err(error) => io_error_code(&error),
+                        },
                     };
                     return Ok(self.host_result(shape, status, Value::Scalar(0)));
                 }

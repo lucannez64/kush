@@ -84,3 +84,23 @@ fn unproved_arithmetic_still_needs_the_check() {
     .unwrap();
     assert!(program.evaluate(&mut Vec::new()).is_err());
 }
+
+/// Review finding: a `u64` local bound by `let` (never read through the
+/// facts yet) must not get an `i64` bound in a range proof, or this add
+/// would lose its overflow check and wrap to 0.
+#[test]
+fn unsigned_locals_never_get_i64_bounds() {
+    let source = "fn g(x: u64) -> u64 ! {panic} {
+            let y: u64 = x;
+            let r: u64 = x + 9223372036854775808;
+            if y == 0 { r } else { r }
+        }
+        fn main() -> i64 ! {panic} {
+            let big: u64 = 9223372036854775808;
+            let r = g(big);
+            if r == 0 { 1 } else { 2 }
+        }";
+    let program = kush::executable::check(source).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(error.message.contains("panic"), "{error:?}");
+}

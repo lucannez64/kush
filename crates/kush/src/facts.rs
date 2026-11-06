@@ -424,6 +424,9 @@ pub(crate) struct Facts {
     ranges: std::cell::RefCell<BTreeMap<usize, (i128, i128)>>,
     /// Disjunctive facts (PROVE-DISJ), e.g. from `if a || b` or `a != b`.
     clauses: Vec<Dnf>,
+    /// Locals recorded as `i64` (their range is not added to every proof,
+    /// only to range proofs; a local not recorded here gets no bound).
+    wide: std::cell::RefCell<BTreeSet<usize>>,
     /// Ranges of path terms (ENSURES): a `Bool` result, a tag, a field.
     term_ranges: std::cell::RefCell<BTreeMap<Term, (i128, i128)>>,
     /// A local that denotes a symbolic value: a call result or an enum
@@ -997,7 +1000,9 @@ impl Facts {
             _ => return None,
         };
         // The operands' terms and those of the facts that may bound them
-        // (`x <= limit` needs `limit <= i64::MAX`).
+        // (`x <= limit` needs `limit <= i64::MAX`). Only locals recorded as
+        // `i64` get that bound; an unrecorded one gets none (a u64 local
+        // above i64::MAX must never be assumed below it).
         let mut terms = value.coefficients.keys().copied().collect::<Vec<_>>();
         for constraint in self
             .known
@@ -1015,6 +1020,7 @@ impl Facts {
         for term in &terms {
             if let Term::Var(slot, _) = term
                 && !with_ranges.ranges.borrow().contains_key(slot)
+                && self.wide.borrow().contains(slot)
             {
                 with_ranges
                     .ranges
@@ -1027,6 +1033,9 @@ impl Facts {
     /// `slot = value`: the right side is read at the old version, then the
     /// slot moves to a new version equal to it.
     pub fn assign(&mut self, slot: usize, value: &Expr) {
+        // The slot has the value's type; record its range before any fact
+        // mentions it (`in_range` treats an unrecorded slot as `i64`).
+        self.note_type(slot, value.ty);
         let value = self.linear(value);
         self.bump(slot);
         if let Some(value) = value.filter(|_| !self.opaque.contains(&slot)) {
@@ -1041,6 +1050,7 @@ impl Facts {
         if self.opaque.contains(&slot) {
             return;
         }
+        self.note_type(slot, value.ty);
         if let Some(value) = self.linear(value) {
             let var = Linear::variable(Term::Var(slot, self.version(slot)));
             let mut out = Vec::new();
@@ -1191,9 +1201,9 @@ impl Facts {
     /// Remember the value range of `slot`'s type, so proofs may use it
     /// (`0 <= b <= 1` for a `Bool`, `0 <= x <= 255` for a `u8`, ...).
     pub(crate) fn note_type(&self, slot: usize, ty: crate::executable::Type) {
-        if ty != crate::executable::Type::I64
-            && let Some(range) = scalar_range(ty)
-        {
+        if ty == crate::executable::Type::I64 {
+            self.wide.borrow_mut().insert(slot);
+        } else if let Some(range) = scalar_range(ty) {
             self.ranges.borrow_mut().insert(slot, range);
         }
     }

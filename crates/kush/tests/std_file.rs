@@ -124,10 +124,14 @@ fn positioned_io_sync_truncate_and_size() {
             show(code(file.size(&f)));
             show(unit(file.close(f)));
             show(unit(file.sync_dir(&Bytes.from(\"@DIR@\"))));
+            show(unit(file.sync_dir(&path)));           // a file: ENOTDIR
             0
         }}"
     ));
-    assert_eq!(output, "10\n2\n0\n14\n6\n56\n0\n121\n1\n0\n0\n4\n0\n0\n");
+    assert_eq!(
+        output,
+        "10\n2\n0\n14\n6\n56\n0\n121\n1\n0\n0\n4\n0\n0\n-20\n"
+    );
     assert_eq!(fs::read(dir.join("data")).unwrap(), b"0123");
 }
 
@@ -213,7 +217,8 @@ fn a_record_holding_a_file_can_be_taken_apart() {
             match s {{ Store {{ log, name, size }} => {{ drop(name); unit(file.close(log)) + size }} }}
         }}
         fn finish_let(s: Store) -> i64 ! {{io, panic}} {{
-            let Store {{ log, name: _, size }} = s;
+            let Store {{ log, name, size }} = s;
+            drop(name);
             unit(file.close(log)) + size
         }}
         fn main() -> i64 ! {{io, alloc, panic}} {{
@@ -230,6 +235,13 @@ fn a_record_holding_a_file_can_be_taken_apart() {
         "match s { Store { log, name, size } => { drop(name); size } }",
         "match s { Store { log: _, name, size } => size }",
         "let Store { log, name, size } = s; drop(log); size",
+        // Ignoring any part of a linear value is refused, so a `File` cannot
+        // be discarded unclosed through a pattern that never names its
+        // private field (review finding).
+        "match s { Store { log: file.File {}, name, size } => size }",
+        "match s { Store { log, name: _, size } => { let _ = file.close(log); size } }",
+        "match s { Store { log, name, size } => match log { file.File { .. } => size } }",
+        "let struct { log, .. } = s; match log { file.File {} => 0 }",
     ] {
         let source = format!(
             "{PRELUDE}
@@ -240,6 +252,9 @@ fn a_record_holding_a_file_can_be_taken_apart() {
         let error = checked(&source)
             .err()
             .unwrap_or_else(|| panic!("accepted: {body}"));
-        assert!(error.contains("linear"), "{error}");
+        assert!(
+            error.contains("linear") || error.contains("private"),
+            "{error}"
+        );
     }
 }
