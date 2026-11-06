@@ -4236,10 +4236,21 @@
       "deps": [
         "PROVE-SCALARS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Disjunctive hypotheses and goals (||, !=, !(..)) proved by bounded case splitting with independently verified certificates.",
-      "commit": null,
-      "log": []
+      "commit": "f041160",
+      "log": [
+        {
+          "time": "2026-11-06 01:35:17",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 01:46:20",
+          "who": "agent",
+          "text": "done f041160"
+        }
+      ]
     },
     {
       "id": "OVERFLOW-ELIDE",
