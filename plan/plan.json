@@ -4186,6 +4186,106 @@
       "desc": "Multishot capabilities across calls: needs new cap syntax for a copyable token (confirm spelling with the user, e.g. cap multi Op) and continuation-chain copying across calls, which does not exist for declared operations either.",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "PROVE-CONST",
+      "title": "Constant goals and literal folding",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Arithmetic proofs: a constant goal such as {0 >= 1} is proved from contradictory facts (ex falso).",
+      "commit": "a36e782",
+      "log": [
+        {
+          "time": "2026-11-06 01:16:40",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 01:18:34",
+          "who": "agent",
+          "text": "done a36e782"
+        }
+      ]
+    },
+    {
+      "id": "PROVE-SCALARS",
+      "title": "Bool and fixed-width integers in proofs",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PROVE-CONST"
+      ],
+      "status": "todo",
+      "desc": "Bool, unsigned and fixed-width integer terms in the {..} fragment, with their ranges; Bool atoms (b, !b, b == c); unsigned constants read by type.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PROVE-DISJ",
+      "title": "Disjunctions in proofs",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PROVE-SCALARS"
+      ],
+      "status": "todo",
+      "desc": "Disjunctive hypotheses and goals (||, !=, !(..)) proved by bounded case splitting with independently verified certificates.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "OVERFLOW-ELIDE",
+      "title": "Remove overflow checks proved unnecessary",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PROVE-SCALARS"
+      ],
+      "status": "todo",
+      "desc": "Integer + - * proved in range by the facts (including literal arithmetic such as 0 - 1) need no runtime check and no panic effect (lowered to the wrapping operation).",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FIELD-PRIVACY",
+      "title": "Private struct fields",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Struct fields private by default outside their module (pub fields); user-approved breaking change 2026-11-06.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "ENSURES",
+      "title": "Postconditions",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "PROVE-DISJ",
+        "OVERFLOW-ELIDE"
+      ],
+      "status": "todo",
+      "desc": "ensures postconditions (user-approved syntax): ensures {P}, result => {P}, !result => {P}, Variant(x) => {P}; field, tag and call-result terms; callers get the facts in branches and match arms.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "VELA-KUSH-PORT-V2",
+      "title": "VELA share policy port, second version",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "ENSURES",
+        "FIELD-PRIVACY"
+      ],
+      "status": "todo",
+      "desc": "Rewrite the VELA client share policy port (branch t3/kush-share-policy) with Bool/u64 facts, ensures negative theorems about plan_share_admission, and a private permit field.",
+      "commit": null,
+      "log": []
     }
   ]
 }
