@@ -4555,6 +4555,23 @@
       "desc": "FS.open/read_at/... take raw handles; natively a closed descriptor number can be reused (the evaluator never reuses), so raw use can hit another file. std.file.File is the safe interface; consider restricting the raw builtins to std.",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "EDITOR-SYNTAX-V2",
+      "title": "Editor highlighting for proof syntax",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Grammar, semantic tokens, Vim and VS Code syntaxes know ensures/is/algebra/dyn/const/effect row.",
+      "commit": "b2538f1",
+      "log": [
+        {
+          "time": "2026-11-06 16:22:34",
+          "who": "agent",
+          "text": "done b2538f1"
+        }
+      ]
     }
   ]
 }
