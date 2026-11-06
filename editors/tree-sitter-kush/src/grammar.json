@@ -125,48 +125,82 @@
       }
     },
     "type_item": {
-      "type": "SEQ",
+      "type": "CHOICE",
       "members": [
         {
-          "type": "FIELD",
-          "name": "kind",
-          "content": {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "STRING",
-                "value": "struct"
-              },
-              {
-                "type": "STRING",
-                "value": "enum"
-              },
-              {
-                "type": "STRING",
-                "value": "trait"
-              },
-              {
-                "type": "STRING",
-                "value": "type"
-              },
-              {
-                "type": "STRING",
-                "value": "effect"
-              },
-              {
-                "type": "STRING",
-                "value": "prop"
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "kind",
+              "content": {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "STRING",
+                    "value": "struct"
+                  },
+                  {
+                    "type": "STRING",
+                    "value": "enum"
+                  },
+                  {
+                    "type": "STRING",
+                    "value": "trait"
+                  },
+                  {
+                    "type": "STRING",
+                    "value": "type"
+                  },
+                  {
+                    "type": "STRING",
+                    "value": "effect"
+                  },
+                  {
+                    "type": "STRING",
+                    "value": "prop"
+                  },
+                  {
+                    "type": "STRING",
+                    "value": "algebra"
+                  }
+                ]
               }
-            ]
-          }
+            },
+            {
+              "type": "FIELD",
+              "name": "name",
+              "content": {
+                "type": "SYMBOL",
+                "name": "identifier"
+              }
+            }
+          ]
         },
         {
-          "type": "FIELD",
-          "name": "name",
-          "content": {
-            "type": "SYMBOL",
-            "name": "identifier"
-          }
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "kind",
+              "content": {
+                "type": "STRING",
+                "value": "effect"
+              }
+            },
+            {
+              "type": "STRING",
+              "value": "row"
+            },
+            {
+              "type": "FIELD",
+              "name": "name",
+              "content": {
+                "type": "SYMBOL",
+                "name": "identifier"
+              }
+            }
+          ]
         }
       ]
     },
@@ -420,6 +454,26 @@
         {
           "type": "STRING",
           "value": "once"
+        },
+        {
+          "type": "STRING",
+          "value": "ensures"
+        },
+        {
+          "type": "STRING",
+          "value": "is"
+        },
+        {
+          "type": "STRING",
+          "value": "const"
+        },
+        {
+          "type": "STRING",
+          "value": "dyn"
+        },
+        {
+          "type": "STRING",
+          "value": "for"
         }
       ]
     },
@@ -737,6 +791,10 @@
           {
             "type": "PATTERN",
             "value": "0[bB][01_]+([iu](8|16|32|64))?"
+          },
+          {
+            "type": "PATTERN",
+            "value": "0[oO][0-7_]+([iu](8|16|32|64))?"
           },
           {
             "type": "PATTERN",

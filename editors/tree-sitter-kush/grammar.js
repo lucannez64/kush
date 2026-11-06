@@ -20,7 +20,11 @@ module.exports = grammar({
     ),
     // `fn name` declares a function; a bare `fn(` is a function type or lambda.
     function_item: $ => prec.right(seq('fn', optional(field('name', $.identifier)))),
-    type_item: $ => seq(field('kind', choice('struct', 'enum', 'trait', 'type', 'effect', 'prop')), field('name', $.identifier)),
+    type_item: $ => choice(
+      seq(field('kind', choice('struct', 'enum', 'trait', 'type', 'effect', 'prop', 'algebra')), field('name', $.identifier)),
+      // `effect row Name = { .. };`: `row` is a keyword only here.
+      seq(field('kind', 'effect'), 'row', field('name', $.identifier)),
+    ),
     impl_item: $ => 'impl',
     use_item: $ => seq(choice('use', 'module'), field('path', $.path)),
     path: $ => seq($.identifier, repeat(seq('.', $.identifier))),
@@ -29,7 +33,8 @@ module.exports = grammar({
     parenthesized: $ => seq('(', repeat($._element), ')'),
     bracketed: $ => seq('[', repeat($._element), ']'),
     keyword: $ => choice('pub', 'total', 'foreign', 'let', 'mut', 'return', 'if', 'else', 'match', 'while', 'loop', 'break',
-      'continue', 'handle', 'perform', 'with', 'erased', 'as', 'from', 'in', 'where', 'linear', 'once'),
+      'continue', 'handle', 'perform', 'with', 'erased', 'as', 'from', 'in', 'where', 'linear', 'once',
+      'ensures', 'is', 'const', 'dyn', 'for'),
     boolean: $ => choice('true', 'false'),
     primitive_type: $ => choice('i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64',
       'Bool', 'Unit', 'Char', 'Nat', 'Prop', 'Grade', 'Effects', 'str'),
@@ -44,6 +49,7 @@ module.exports = grammar({
     number: $ => token(choice(
       /0[xX][0-9a-fA-F_]+([iu](8|16|32|64))?/,
       /0[bB][01_]+([iu](8|16|32|64))?/,
+      /0[oO][0-7_]+([iu](8|16|32|64))?/,
       /[0-9][0-9_]*(\.[0-9][0-9_]*)?([eE][+-]?[0-9]+)?([iu](8|16|32|64)|f32|f64)?/,
     )),
     operator: $ => token(choice('->', '=>', '::', '==', '!=', '<=', '>=', '&&', '||', '<<', '>>', '..',

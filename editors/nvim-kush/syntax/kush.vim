@@ -3,7 +3,9 @@
 " Reserved words (Kind variants and contextual identifiers).
 syntax keyword kushKeyword use let mut return if else while loop break continue match enum
 syntax keyword kushKeyword struct type module erased handle perform with total
-syntax keyword kushKeyword pub trait impl prop effect row foreign test
+syntax keyword kushKeyword pub trait impl prop effect row foreign test ensures algebra dyn const
+" Contextual words, keywords only before a name (`x is Some`, `y as i64`).
+syntax match kushKeyword "\<\(is\|as\|for\)\ze\s\+\h"
 syntax keyword kushBoolean true false
 
 " Strings, characters, and numbers.

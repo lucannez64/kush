@@ -1338,7 +1338,14 @@ const SEMANTIC_TOKEN_TYPES: &[&str] = &[
     "variable",
 ];
 
-const KEYWORD_WORDS: &[&str] = &["trait", "impl", "prop", "test", "effect", "row", "foreign"];
+const KEYWORD_WORDS: &[&str] = &[
+    "trait", "impl", "prop", "test", "effect", "row", "foreign", "ensures",
+];
+
+/// Contextual words that are keywords only when a name follows (`x is Some`,
+/// `algebra Usage`, `dyn Show`, `const N`, `impl A for B`, `x as i64`), so
+/// bindings and functions with these names keep their own color.
+const KEYWORD_BEFORE_NAME: &[&str] = &["is", "algebra", "dyn", "const", "for", "as"];
 
 const PRIMITIVE_TYPE_WORDS: &[&str] = &[
     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f64", "bool", "char", "String", "Bytes",
@@ -1429,6 +1436,17 @@ fn semantic_token_data(text: &str) -> Value {
             {
                 events.push((start, end, KEYWORD));
             }
+            Kind::Ident(name)
+                if KEYWORD_BEFORE_NAME.contains(&name.as_str())
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|next| matches!(next.kind, Kind::Ident(_))) =>
+            {
+                events.push((start, end, KEYWORD));
+                if name == "algebra" {
+                    expected = Expected::Type;
+                }
+            }
             Kind::Ident(_) if expected == Expected::Function => {
                 events.push((start, end, FUNCTION_TOKEN));
                 expected = Expected::None;
@@ -1468,6 +1486,7 @@ fn semantic_token_data(text: &str) -> Value {
                 events.push((start, end, KEYWORD));
             }
             Kind::Return
+            | Kind::Total
             | Kind::If
             | Kind::Else
             | Kind::Match
@@ -1977,6 +1996,45 @@ mod tests {
             read_frame(&mut reader).unwrap(),
             Frame::InvalidHeader(_)
         ));
+    }
+
+    /// The words `semantic_token_data` colors as keywords, in order.
+    fn keyword_words(text: &str) -> Vec<String> {
+        let data = semantic_token_data(text)["data"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let lines: Vec<&str> = text.lines().collect();
+        let (mut line, mut column) = (0usize, 0usize);
+        let mut words = Vec::new();
+        for chunk in data.chunks(5) {
+            let delta_line = chunk[0].as_u64().unwrap() as usize;
+            let delta_column = chunk[1].as_u64().unwrap() as usize;
+            column = if delta_line == 0 {
+                column + delta_column
+            } else {
+                delta_column
+            };
+            line += delta_line;
+            let length = chunk[2].as_u64().unwrap() as usize;
+            if chunk[3].as_u64() == Some(KEYWORD) {
+                words.push(lines[line][column..column + length].to_owned());
+            }
+        }
+        words
+    }
+
+    #[test]
+    fn proof_and_contextual_words_are_keywords_only_before_a_name() {
+        let text = "total fn f(x: Option<i64>) -> Bool ! {} ensures result => { x is Some } {\n\
+                    let is = 1;\n\
+                    let r: dyn Show = y as i64;\n\
+                    as(is)\n\
+                    }\n";
+        assert_eq!(
+            keyword_words(text),
+            ["total", "fn", "ensures", "is", "let", "let", "dyn", "as"],
+        );
     }
 
     #[test]

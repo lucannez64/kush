@@ -475,6 +475,10 @@
         "required": true,
         "types": [
           {
+            "type": "algebra",
+            "named": false
+          },
+          {
             "type": "effect",
             "named": false
           },
@@ -665,6 +669,10 @@
     "named": false
   },
   {
+    "type": "algebra",
+    "named": false
+  },
+  {
     "type": "as",
     "named": false
   },
@@ -682,6 +690,10 @@
     "named": true
   },
   {
+    "type": "const",
+    "named": false
+  },
+  {
     "type": "continue",
     "named": false
   },
@@ -690,11 +702,19 @@
     "named": false
   },
   {
+    "type": "dyn",
+    "named": false
+  },
+  {
     "type": "effect",
     "named": false
   },
   {
     "type": "else",
+    "named": false
+  },
+  {
+    "type": "ensures",
     "named": false
   },
   {
@@ -723,6 +743,10 @@
   },
   {
     "type": "fn",
+    "named": false
+  },
+  {
+    "type": "for",
     "named": false
   },
   {
@@ -767,6 +791,10 @@
   },
   {
     "type": "in",
+    "named": false
+  },
+  {
+    "type": "is",
     "named": false
   },
   {
@@ -844,6 +872,10 @@
   },
   {
     "type": "return",
+    "named": false
+  },
+  {
+    "type": "row",
     "named": false
   },
   {
