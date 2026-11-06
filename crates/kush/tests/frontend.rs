@@ -528,7 +528,7 @@ fn block_statement_parse_shape_and_rejections() {
         }",
     )
     .err()
-    .expect("calling an integer must be rejected");
+    .unwrap_or_else(|| panic!("calling an integer must be rejected"));
     assert!(!error.message.is_empty());
     // A statement `if` with a non-unit value followed by `(..)` is two statements.
     let error = kush::executable::check(
@@ -538,6 +538,6 @@ fn block_statement_parse_shape_and_rejections() {
         }",
     )
     .err()
-    .expect("a Bool tail of an i64 function must be rejected");
+    .unwrap_or_else(|| panic!("a Bool tail of an i64 function must be rejected"));
     assert!(!error.message.is_empty());
 }

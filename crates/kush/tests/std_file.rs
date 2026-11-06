@@ -214,7 +214,9 @@ fn a_root_module_named_std_cannot_call_raw_handles() {
         fn main() -> i64 ! {io, alloc, panic} {
             match FS.file_size(0) { Result.Ok(n) => n, Result.Err(e) => e }
         }";
-    let error = checked(source).err().expect("accepted a root std module");
+    let Err(error) = checked(source) else {
+        panic!("accepted a root std module")
+    };
     assert!(error.contains("reserved for std"), "{error}");
 }
 
