@@ -4866,14 +4866,24 @@
       "size": "L",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "User-approved 2026-11-06: new Thread.scope(fn) / Thread.spawn(fn) / Thread.join(h) on real OS threads, structured like tasks (handles cannot escape). Children get moved values and shared borrows (exclusive loans stay exclusive, as ownership already enforces until join). Thread-safe runtime: atomic allocation counters, per-thread allocator pool, handler stack and abort word. v1: thread bodies have no suspend and no declared operations from outside. Evaluator runs threads cooperatively (one valid schedule).",
-      "commit": null,
+      "commit": "4462498",
       "log": [
         {
           "time": "2026-11-06 20:48:06",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-06 21:21:58",
+          "who": "agent",
+          "text": "Thread.scope/spawn/join on pthreads, task ownership rules, thread-safe runtime under KUSH_HAS_THREADS; 4 threads 3.8x. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 21:21:58",
+          "who": "agent",
+          "text": "done 4462498"
         }
       ]
     },
@@ -4885,14 +4895,24 @@
       "deps": [
         "THREAD-SCOPE"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "User-approved: Atomic i64/Bool cells shared through &: load, store, fetch_add, swap, compare_exchange (sequentially consistent); Cranelift atomic instructions natively.",
-      "commit": null,
+      "commit": "3841201",
       "log": [
         {
           "time": "2026-11-06 20:54:08",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-06 21:21:58",
+          "who": "agent",
+          "text": "Affine Atomic cells shared through views; SC load/store/fetch_add/swap/compare_exchange. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 21:21:58",
+          "who": "agent",
+          "text": "done 3841201"
         }
       ]
     },
@@ -4904,14 +4924,24 @@
       "deps": [
         "THREAD-SCOPE"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "User-approved: Channel<T> with capacity, shared through &: send (blocks when full), recv (blocks when empty, None after close), close. Owned values move across threads.",
-      "commit": null,
+      "commit": "174c694",
       "log": [
         {
           "time": "2026-11-06 21:03:40",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-06 21:21:58",
+          "who": "agent",
+          "text": "Channel<T> of plain data shared through views; blocking send/recv, close; evaluator stdin buffering only when read. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 21:21:58",
+          "who": "agent",
+          "text": "done 174c694"
         }
       ]
     },
