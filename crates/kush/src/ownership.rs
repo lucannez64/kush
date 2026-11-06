@@ -1336,7 +1336,7 @@ impl Checker<'_> {
     /// Values that move instead of being copied.
     fn moves(&self, ty: Type) -> bool {
         ty.is_mut_slice()
-            || matches!(ty, Type::RefMut(_))
+            || matches!(ty, Type::RefMut(_) | Type::Atomic)
             || owns(ty, self.owned, self.unions, self.pointees)
             || is_linear(
                 ty,

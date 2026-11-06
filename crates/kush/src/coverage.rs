@@ -269,6 +269,7 @@ fn useful(
             | Type::String
             | Type::Stdin
             | Type::Stdout
+            | Type::Atomic
             | Type::I64
             | Type::Int(_)
             | Type::Float(_)

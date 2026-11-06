@@ -3431,6 +3431,33 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.slice_set(&args[0], index, args[2].clone(), span)?;
                 Ok(Value::Scalar(0))
             }
+            // THREAD-ATOMICS: the evaluator runs one thread at a time, so the
+            // operations are plain reads and writes of the element.
+            SliceOp::AtomicLoad
+            | SliceOp::AtomicStore
+            | SliceOp::AtomicFetchAdd
+            | SliceOp::AtomicSwap
+            | SliceOp::AtomicCompareExchange => {
+                let index = usize::try_from(args[1].scalar())
+                    .ok()
+                    .filter(|index| *index < self.slice_len(&args[0], span).unwrap_or(0))
+                    .ok_or_else(|| Diagnostic::new(span, "panic: slice index out of bounds"))?;
+                let old = self.slice_element(&args[0], index, span)?.scalar();
+                let (new, result) = match op {
+                    SliceOp::AtomicLoad => (None, old),
+                    SliceOp::AtomicStore => (Some(args[2].scalar()), 0),
+                    SliceOp::AtomicFetchAdd => (Some(old.wrapping_add(args[2].scalar())), old),
+                    SliceOp::AtomicSwap => (Some(args[2].scalar()), old),
+                    _ => {
+                        let hit = old == args[2].scalar();
+                        (hit.then(|| args[3].scalar()), i64::from(hit))
+                    }
+                };
+                if let Some(new) = new {
+                    self.slice_set(&args[0], index, Value::Scalar(new), span)?;
+                }
+                Ok(Value::Scalar(result))
+            }
         }
     }
     /// Checked allocator-backed vector operations. Element storage always

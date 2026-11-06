@@ -2212,6 +2212,7 @@ impl<'a> Types<'a> {
             Type::Str => "&str".into(),
             Type::StrMut => "&mut str".into(),
             Type::Stdin => "Stdin".into(),
+            Type::Atomic => "Atomic".into(),
             Type::Stdout => "Stdout".into(),
             Type::Box(p) => format!("Box<{}>", self.name(self.pointees[p])),
             Type::Arena => "Arena".into(),
@@ -3503,6 +3504,7 @@ impl<'a> Types<'a> {
                             ));
                         }
                         "Stdin" => return Ok(Type::Stdin),
+                        "Atomic" => return Ok(Type::Atomic),
                         "Stdout" => return Ok(Type::Stdout),
                         _ => {}
                     }
@@ -6790,6 +6792,7 @@ pub(crate) fn type_name_in(
         Type::Str => "&str".into(),
         Type::StrMut => "&mut str".into(),
         Type::Stdin => "Stdin".into(),
+        Type::Atomic => "Atomic".into(),
         Type::Stdout => "Stdout".into(),
         Type::Box(p) => format!(
             "Box<{}>",

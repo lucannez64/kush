@@ -95,6 +95,11 @@ pub(crate) enum Type {
     /// An opaque, affine structured-task handle. One word. Handles are created
     /// only inside a `Task.scope` and may not escape it through data or results.
     Task(usize),
+    /// THREAD-ATOMICS: an atomic i64 cell. One word, affine (never copied,
+    /// so it is never read with a plain load) and owning nothing. Shared
+    /// between threads through a borrowed view `&[Atomic]` and used only by
+    /// the `Atomic.*` operations.
+    Atomic,
     /// THREAD-SCOPE: an opaque, affine handle of a parallel child thread
     /// (`Thread.spawn`). One word. Same structured rules as `Task`.
     Thread(usize),
@@ -918,6 +923,14 @@ pub(crate) enum SliceOp {
     At,
     /// Checked write through an exclusive mutable view; panics out of bounds.
     Set,
+    /// THREAD-ATOMICS: sequentially consistent operations on an element of a
+    /// `&[Atomic]` view (shared or exclusive); each panics out of bounds.
+    AtomicLoad,
+    AtomicStore,
+    AtomicFetchAdd,
+    AtomicSwap,
+    /// `(view, index, expected, new)`: true when the element was `expected`.
+    AtomicCompareExchange,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum AllocVecOp {
@@ -23356,6 +23369,9 @@ impl Checker<'_, '_> {
                             )),
                         };
                     }
+                    if binding.kind == BindingKind::Builtin && binding.name.starts_with("Atomic.") {
+                        return c.atomic_call(&binding.name.clone(), explicit, arguments, expected, span);
+                    }
                     if binding.kind == BindingKind::Builtin && (binding.name.starts_with("Task.") || binding.name.starts_with("Thread.")) {
                         return c.task_call(&binding.name.clone(), explicit, arguments, expected, span);
                     }
@@ -27648,6 +27664,9 @@ impl Checker<'_, '_> {
                 | Type::Task(_)
                 | Type::Thread(_)
                 | Type::DynObj(_) => true,
+                // Never copied: reads go through `Atomic.*` (it owns nothing
+                // to drop; the ownership pass only tracks its moves).
+                Type::Atomic => true,
                 Type::Enum(id) | Type::Variants(id, _) if depth < 64 => {
                     types.enums[id].linear
                         || types.enums[id]
@@ -30922,6 +30941,124 @@ impl Checker<'_, '_> {
             )),
         }
     }
+    /// THREAD-ATOMICS: `Atomic.new(v)`, `Atomic.value(a)` and the view
+    /// operations `load/store/fetch_add/swap/compare_exchange(view, i, ..)`.
+    fn atomic_call(
+        &mut self,
+        name: &str,
+        explicit: Option<&[ast::Type]>,
+        arguments: &[ast::Expr],
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        if explicit.is_some() {
+            return Err(Diagnostic::new(
+                span,
+                format!("{name} takes no type arguments"),
+            ));
+        }
+        let arity = match name {
+            "Atomic.new" | "Atomic.value" => 1,
+            "Atomic.load" => 2,
+            "Atomic.compare_exchange" => 4,
+            _ => 3,
+        };
+        if arguments.len() != arity {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "{name} expects {arity} arguments, found {}",
+                    arguments.len()
+                ),
+            ));
+        }
+        let value = |kind, ty| Expr {
+            kind,
+            ty,
+            span,
+            resource: None,
+        };
+        let result = match name {
+            // The cell holds the integer word: construction and consumption
+            // reinterpret it.
+            "Atomic.new" => {
+                let initial = self.expr_expected(&arguments[0], Some(Type::I64))?;
+                self.expect(initial.ty, Type::I64, initial.span)?;
+                value(
+                    ExprKind::Call(
+                        Target::Int(
+                            crate::int::IntOp::Truncate,
+                            crate::int::IntKind::I64,
+                            crate::int::IntKind::I64,
+                        ),
+                        vec![initial],
+                    ),
+                    Type::Atomic,
+                )
+            }
+            "Atomic.value" => {
+                let cell = self.expr_expected(&arguments[0], Some(Type::Atomic))?;
+                self.expect(cell.ty, Type::Atomic, cell.span)?;
+                value(
+                    ExprKind::Call(
+                        Target::Int(
+                            crate::int::IntOp::Truncate,
+                            crate::int::IntKind::I64,
+                            crate::int::IntKind::I64,
+                        ),
+                        vec![cell],
+                    ),
+                    Type::I64,
+                )
+            }
+            _ => {
+                let view = self.expr(&arguments[0])?;
+                let Some(pointer) = view.ty.slice_element() else {
+                    return Err(Diagnostic::new(
+                        view.span,
+                        format!(
+                            "{name} expects a view of atomics '&[Atomic]', found {}",
+                            self.types.name(view.ty)
+                        ),
+                    ));
+                };
+                if self.types.pointees[pointer] != Type::Atomic {
+                    return Err(Diagnostic::new(
+                        view.span,
+                        format!(
+                            "{name} expects a view of atomics '&[Atomic]', found {}",
+                            self.types.name(view.ty)
+                        ),
+                    ));
+                }
+                let mut values = vec![view];
+                for argument in &arguments[1..] {
+                    let checked = self.expr_expected(argument, Some(Type::I64))?;
+                    self.expect(checked.ty, Type::I64, checked.span)?;
+                    values.push(checked);
+                }
+                self.require(PANIC, span)?;
+                let (op, ty) = match name {
+                    "Atomic.load" => (SliceOp::AtomicLoad, Type::I64),
+                    "Atomic.store" => (SliceOp::AtomicStore, Type::Unit),
+                    "Atomic.fetch_add" => (SliceOp::AtomicFetchAdd, Type::I64),
+                    "Atomic.swap" => (SliceOp::AtomicSwap, Type::I64),
+                    "Atomic.compare_exchange" => (SliceOp::AtomicCompareExchange, Type::Bool),
+                    _ => {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!("unsupported atomic operation '{name}'"),
+                        ));
+                    }
+                };
+                value(ExprKind::Call(Target::Slice(op, Type::Atomic), values), ty)
+            }
+        };
+        match expected {
+            Some(expected) => self.coerce(result, expected, span),
+            None => Ok(result),
+        }
+    }
     /// THREAD-SCOPE: types a thread may not receive, because they can reach
     /// allocator or environment state that is not thread-safe.
     fn thread_unshareable(&self, ty: Type) -> bool {
@@ -32510,7 +32647,9 @@ impl Checker<'_, '_> {
                 ));
             }
         };
-        if self.owned_type(element) {
+        // THREAD-ATOMICS: atomics are shared through views; only the
+        // `Atomic.*` operations read or write their elements.
+        if self.owned_type(element) && element != Type::Atomic {
             return Err(Diagnostic::new(
                 span,
                 format!(

@@ -293,3 +293,113 @@ fn aborts_inside_threads_are_per_thread() {
         "",
     );
 }
+
+/// THREAD-ATOMICS (user-approved): `Atomic` cells live in arrays or vectors
+/// and are shared through views; `Atomic.load/store/fetch_add/swap/
+/// compare_exchange(view, index, ..)` are sequentially consistent. An
+/// `Atomic` is never copied, so it is never read with a plain load.
+const COUNTER: &str = "
+fn bump(c: &[Atomic], n: i64) -> Unit ! {panic} {
+    let mut i = 0;
+    while i < n { Atomic.fetch_add(c, 0, 1); Atomic.fetch_add(c, 1, i); i = i + 1; }
+}
+fn run(n: i64) -> i64 ! {io, alloc, panic} {
+    let mut cells: Vec<Atomic> = Vec.with_capacity(2);
+    cells = Vec.push(cells, Atomic.new(0));
+    cells = Vec.push(cells, Atomic.new(0));
+    let c: &[Atomic] = &cells[..];
+    Thread.scope(fn() -> Unit ! {alloc, panic} {
+        Thread.spawn(fn() -> Unit ! {panic} { bump(c, n); });
+        Thread.spawn(fn() -> Unit ! {panic} { bump(c, n); });
+        Thread.spawn(fn() -> Unit ! {panic} { bump(c, n); });
+        Thread.spawn(fn() -> Unit ! {panic} { bump(c, n); });
+    });
+    print_i64(Atomic.load(c, 0));
+    print_i64(Atomic.load(c, 1));
+    print_i64(Atomic.swap(c, 0, 5));
+    print_i64(if Atomic.compare_exchange(c, 0, 5, 9) { 1 } else { 0 });
+    print_i64(if Atomic.compare_exchange(c, 0, 5, 11) { 1 } else { 0 });
+    Atomic.store(c, 1, 3);
+    let both = Atomic.load(c, 0) + Atomic.load(c, 1);
+    drop(cells);
+    both
+}
+";
+
+#[test]
+fn atomics_count_across_threads() {
+    agrees(
+        &format!("{COUNTER} fn main() -> i64 ! {{io, alloc, panic}} {{ run(500) }}"),
+        12,
+        &format!("2000\n{}\n2000\n1\n0\n", 4 * (499 * 500 / 2)),
+    );
+    // Natively with real contention: no update is lost.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let program = check(&format!(
+            "{COUNTER} fn main() -> i64 ! {{io, alloc, panic}} {{ run(200000) }}"
+        ))
+        .unwrap();
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("atomics");
+        kush::native::build_with_codegen(
+            &program,
+            &binary,
+            false,
+            &kush::native::LinkSpec::default(),
+            kush::native::CodegenOptions::release(),
+        )
+        .unwrap();
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("800000\n{}\n800000\n1\n0\n", 4 * (199_999i64 * 200_000 / 2))
+        );
+    }
+}
+
+#[test]
+fn atomics_are_never_copied() {
+    for (body, fragment) in [
+        (
+            "let cells: [Atomic; 1] = [Atomic.new(1)]; let c: &[Atomic] = &cells[..]; Slice.get(c, 0); 0",
+            "copies the element",
+        ),
+        (
+            "let mut v: Vec<Atomic> = Vec.new(); v = Vec.push(v, Atomic.new(1)); let x = Vec.get(&v, 0); 0",
+            "copies the element",
+        ),
+        (
+            "let cells: [Atomic; 1] = [Atomic.new(1)]; let x = cells[0]; 0",
+            "cannot copy",
+        ),
+        (
+            "let a = Atomic.new(1); let b = a; Atomic.value(a)",
+            "use after move",
+        ),
+        (
+            "let v: [i64; 1] = [1]; let s: &[i64] = &v[..]; Atomic.load(s, 0)",
+            "view of atomics",
+        ),
+    ] {
+        rejects(
+            &format!("fn main() -> i64 ! {{alloc, panic}} {{ {body} }}"),
+            fragment,
+        );
+    }
+    // A record holding an atomic is consumed or dropped normally.
+    agrees(
+        "struct Stats { hits: Atomic, name: Bytes }
+         fn make() -> Stats ! {alloc, panic} { Stats { hits: Atomic.new(3), name: Bytes.from(\"x\") } }
+         fn main() -> i64 ! {alloc, panic} {
+             let s = make();
+             let t = make();
+             drop(t);
+             let Stats { hits, name } = s;
+             drop(name);
+             Atomic.value(hits)
+         }",
+        3,
+        "",
+    );
+}

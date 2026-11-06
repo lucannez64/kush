@@ -1,7 +1,7 @@
 # Parallel threads
 
-Status: THREAD-SCOPE implemented 2026-11-06 (design approved by the user).
-Atomics (THREAD-ATOMICS) and channels (THREAD-CHANNELS) follow. Tests:
+Status: THREAD-SCOPE and THREAD-ATOMICS implemented 2026-11-06 (design
+approved by the user); channels (THREAD-CHANNELS) follow. Tests:
 `crates/kush/tests/threads.rs`.
 
 ```kush
@@ -38,12 +38,49 @@ unchanged.
   ownership rules of scoped tasks keep every loan until the child is joined:
   the parent cannot write what a thread reads, an exclusive view goes to one
   thread only, and disjoint halves from `Slice.split_at_mut` may go to
-  different threads. There is no other shared mutable state (atomics and
-  channels are the next nodes), so a program's result does not depend on
-  the schedule.
+  different threads. Without atomics or channels there is no other shared
+  mutable state, so a program's result does not depend on the schedule.
 - **Not shareable.** A thread body cannot capture arenas, user allocator
   contexts and their boxes or vectors, closures or trait objects: they can
   reach allocator or environment state that is not thread-safe.
+
+## Atomics (THREAD-ATOMICS)
+
+```kush
+fn bump(c: &[Atomic]) -> Unit ! {panic} { Atomic.fetch_add(c, 0, 1); }
+
+let mut cells: Vec<Atomic> = Vec.with_capacity(1);
+cells = Vec.push(cells, Atomic.new(0));
+let c: &[Atomic] = &cells[..];
+Thread.scope(fn() -> Unit ! {alloc, panic} {
+    Thread.spawn(fn() -> Unit ! {panic} { bump(c); });
+    Thread.spawn(fn() -> Unit ! {panic} { bump(c); });
+});
+Atomic.load(c, 0) // 2
+```
+
+`Atomic` is a one-word integer cell. Atomics live in arrays, vectors or
+records and are shared the way threads share any data: through a borrowed
+view `&[Atomic]` (a shared view is enough, since every operation is atomic).
+
+| Operation | Result |
+| --- | --- |
+| `Atomic.new(v: i64)` | a new cell |
+| `Atomic.value(a: Atomic)` | consumes a cell, giving its value |
+| `Atomic.load(view, i)` | the element's value |
+| `Atomic.store(view, i, v)` | `Unit` |
+| `Atomic.fetch_add(view, i, v)` | the previous value (wrapping add) |
+| `Atomic.swap(view, i, v)` | the previous value |
+| `Atomic.compare_exchange(view, i, expected, new)` | `true` if the element was `expected` and is now `new` |
+
+Every operation is sequentially consistent (Cranelift `atomic_load`,
+`atomic_store`, `atomic_rmw`, `atomic_cas`) and bounds-checked like
+`Slice.get` (it needs `panic`). An `Atomic` is affine and never copied:
+`Slice.get`, `Vec.get`, indexing and copies are rejected, so a cell is never
+read with a plain load that could race with an atomic write; it owns nothing,
+so dropping one is free. The prover never treats an atomic's value as known.
+With atomics, results may depend on the schedule; the reference evaluator
+explores one schedule (threads run one at a time).
 
 ## Runtime
 

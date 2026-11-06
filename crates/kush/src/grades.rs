@@ -1009,6 +1009,7 @@ impl<'a> Checker<'a> {
             | Type::Once(_)
             | Type::Task(_)
             | Type::Thread(_)
+            | Type::Atomic
             | Type::DynObj(_) => true,
             Type::Enum(id) | Type::Variants(id, _) => {
                 self.program.owned_enums.get(id).copied().unwrap_or(false)

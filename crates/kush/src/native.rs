@@ -10251,6 +10251,52 @@ impl Generator<'_, '_> {
             return vec![length];
         }
         let index = values[4];
+        // THREAD-ATOMICS: sequentially consistent operations on one word of a
+        // view of atomics (never byte-backed).
+        if matches!(
+            op,
+            SliceOp::AtomicLoad
+                | SliceOp::AtomicStore
+                | SliceOp::AtomicFetchAdd
+                | SliceOp::AtomicSwap
+                | SliceOp::AtomicCompareExchange
+        ) {
+            let _ = bytes;
+            let invalid = self.slice_out_of_bounds(index, length);
+            self.guard(invalid);
+            let offset = self.builder.ins().imul(index, stride);
+            let address = self.builder.ins().iadd(pointer, offset);
+            let flags = ir::MemFlagsData::trusted();
+            return vec![match op {
+                SliceOp::AtomicLoad => self.builder.ins().atomic_load(I64, flags, address),
+                SliceOp::AtomicStore => {
+                    self.builder.ins().atomic_store(flags, values[5], address);
+                    self.constant(0)
+                }
+                SliceOp::AtomicFetchAdd => self.builder.ins().atomic_rmw(
+                    I64,
+                    flags,
+                    ir::AtomicRmwOp::Add,
+                    address,
+                    values[5],
+                ),
+                SliceOp::AtomicSwap => self.builder.ins().atomic_rmw(
+                    I64,
+                    flags,
+                    ir::AtomicRmwOp::Xchg,
+                    address,
+                    values[5],
+                ),
+                _ => {
+                    let old = self
+                        .builder
+                        .ins()
+                        .atomic_cas(flags, address, values[5], values[6]);
+                    let hit = self.builder.ins().icmp(IntCC::Equal, old, values[5]);
+                    self.builder.ins().uextend(I64, hit)
+                }
+            }];
+        }
         if op == SliceOp::Set {
             let invalid = self.slice_out_of_bounds(index, length);
             self.guard(invalid);
