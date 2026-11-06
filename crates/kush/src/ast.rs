@@ -568,9 +568,12 @@ pub enum ExprKind {
         arms: Vec<Arm>,
     },
     /// `Path { field: value, ... }`. `ty` is the path (or specialized path) expression.
+    /// `Path { field: value, ..base }` (STRUCT-UPDATE) takes the other fields
+    /// from `base`.
     Record {
         ty: Box<Expr>,
         fields: Vec<(String, Expr)>,
+        base: Option<Box<Expr>>,
     },
     While {
         condition: Box<Expr>,

@@ -1693,15 +1693,30 @@ impl Parser {
                 }
                 if self.record_literal_ahead(&left) {
                     self.bump();
-                    let fields = self.separated(Kind::RBrace, |p| {
-                        let name = p.ident()?;
-                        p.expect(&Kind::Colon, "':' after record field name")?;
-                        Ok((name, p.expr()?))
-                    })?;
+                    let mut fields = Vec::new();
+                    let mut base = None;
+                    while !self.at(&Kind::RBrace) {
+                        if self.eat(&Kind::DotDot) {
+                            base = Some(Box::new(self.expr()?));
+                            if self.at(&Kind::Comma) {
+                                return Err(self
+                                    .error("'..base' must be the last part of a record literal"));
+                            }
+                            break;
+                        }
+                        let name = self.ident()?;
+                        self.expect(&Kind::Colon, "':' after record field name")?;
+                        fields.push((name, self.expr()?));
+                        if !self.eat(&Kind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&Kind::RBrace, "'}' to close the record literal")?;
                     left = Node::new(
                         ExprKind::Record {
                             ty: Box::new(left),
                             fields,
+                            base,
                         },
                         self.since(start),
                     );
@@ -1794,14 +1809,18 @@ impl Parser {
         };
         last.starts_with(|c: char| c.is_ascii_uppercase())
             && self.at(&Kind::LBrace)
-            && matches!(
+            && (matches!(
                 self.tokens.get(self.pos + 1).map(|t| &t.kind),
                 Some(Kind::Ident(_))
-            )
-            && self
+            ) && self
                 .tokens
                 .get(self.pos + 2)
                 .is_some_and(|t| t.kind == Kind::Colon)
+                // `S { ..base }`: a struct update without overrides.
+                || self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.kind == Kind::DotDot))
     }
     fn prefix(&mut self) -> Result<Expr> {
         let start = self.current().span;

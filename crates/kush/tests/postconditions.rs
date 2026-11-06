@@ -534,7 +534,7 @@ fn method_postconditions_do_not_prove_more_than_they_say() {
         &format!(
             "{LIMITS}
             fn main() -> i64 ! {{panic}} {{
-                let m = Limit {{ max: 10 }};
+                let m = Limit {{ max: 5 }};
                 if m.allows(9) {{ 0 }} else {{ at_most_ten(11, _) }}
             }}"
         ),

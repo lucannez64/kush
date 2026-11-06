@@ -508,9 +508,12 @@ fn alias_refs_in_expr(resolution: &Resolution, expr: &Expr, out: &mut BTreeSet<B
             alias_refs_in_expr(resolution, condition, out);
             alias_refs_in_block(resolution, body, out);
         }
-        ExprKind::Record { fields, .. } => {
+        ExprKind::Record { fields, base, .. } => {
             for (_, value) in fields {
                 alias_refs_in_expr(resolution, value, out);
+            }
+            if let Some(base) = base {
+                alias_refs_in_expr(resolution, base, out);
             }
         }
         _ => {}

@@ -230,7 +230,8 @@ expression followed by `&` or `|` always ends there. Match arms currently requir
 arms, including block-bodied arms. `return` without a value must be followed by
 `;` or `}`. `return` with a value extends through the following expression.
 
-Record construction, typed closures and loops are parsed. Structured tasks use
+Record construction (including `S { f: v, ..base }`, see
+[struct-update.md](struct-update.md)), typed closures and loops are parsed. Structured tasks use
 ordinary `Task.scope` and `Task.spawn` calls; their checked behavior is described
 in [async.md](async.md). Tuple-number field access such as `pair.0` is parsed as
 an ordinary named field whose name is the digit string; the executable checker

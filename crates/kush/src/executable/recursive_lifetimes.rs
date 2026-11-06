@@ -720,6 +720,12 @@ impl<'a, 'r> Solver<'a, 'r> {
                 for (_, value) in fields {
                     self.collect_expr_type_names(value);
                 }
+                if let K::Record {
+                    base: Some(base), ..
+                } = &expr.kind
+                {
+                    self.collect_expr_type_names(base);
+                }
             }
             _ => {}
         }
@@ -953,6 +959,14 @@ impl<'a, 'r> Solver<'a, 'r> {
                         self.expr_flow(value, locals)?
                             .extend(std::slice::from_ref(name)),
                     );
+                }
+                // `..base` supplies the other fields: keep all of its flow
+                // (overridden fields included, which only over-approximates).
+                if let K::Record {
+                    base: Some(base), ..
+                } = &expr.kind
+                {
+                    flow.merge(self.expr_flow(base, locals)?);
                 }
                 Ok(flow)
             }
@@ -1258,6 +1272,12 @@ impl<'a, 'r> Solver<'a, 'r> {
                 for (_, value) in fields {
                     self.walk_expr(value, locals)?;
                 }
+                if let K::Record {
+                    base: Some(base), ..
+                } = &expr.kind
+                {
+                    self.walk_expr(base, locals)?;
+                }
                 Ok(())
             }
             K::Tuple(values) | K::Array(values) => {
@@ -1416,6 +1436,12 @@ impl<'a, 'r> Solver<'a, 'r> {
                 for (_, value) in fields {
                     self.collect_calls_in_expr(value, out);
                 }
+                if let K::Record {
+                    base: Some(base), ..
+                } = &expr.kind
+                {
+                    self.collect_calls_in_expr(base, out);
+                }
             }
             K::Tuple(values) | K::Array(values) => {
                 for value in values {
@@ -1503,6 +1529,12 @@ impl<'a, 'r> Solver<'a, 'r> {
             K::Record { fields, .. } | K::StructuralLiteral(fields) => {
                 for (_, value) in fields {
                     self.requirements_in_expr(value, locals, out)?;
+                }
+                if let K::Record {
+                    base: Some(base), ..
+                } = &expr.kind
+                {
+                    self.requirements_in_expr(base, locals, out)?;
                 }
             }
             K::Tuple(values) | K::Array(values) => {
@@ -2197,6 +2229,12 @@ fn expr_returns<'e>(expr: &'e ast::Expr, out: &mut Vec<&'e ast::Expr>) {
         K::Record { fields, .. } | K::StructuralLiteral(fields) => {
             for (_, value) in fields {
                 expr_returns(value, out);
+            }
+            if let K::Record {
+                base: Some(base), ..
+            } = &expr.kind
+            {
+                expr_returns(base, out);
             }
         }
         K::Tuple(values) | K::Array(values) => {

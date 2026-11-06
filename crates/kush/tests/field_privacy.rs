@@ -20,6 +20,7 @@ const MODULE: &str = r#"module demo.permit;
 pub struct Permit { pub label: i64, revision: i64 }
 pub fn mint(revision: i64) -> Permit ! {} { Permit { label: 7, revision: revision } }
 pub fn revision(permit: &Permit) -> i64 ! {} { permit.revision }
+pub fn relabel(permit: Permit, label: i64) -> Permit ! {} { Permit { label: label, ..permit } }
 pub fn bump(permit: Permit) -> Permit ! {panic} {
     let Permit { label, revision } = permit;
     Permit { label: label, revision: revision + 1 }
@@ -93,4 +94,27 @@ fn private_fields_are_rejected_outside_their_module() {
             "{what}: {error}"
         );
     }
+}
+
+/// STRUCT-UPDATE: an update needs every field visible, like a full literal;
+/// inside the module it is fine.
+#[test]
+fn struct_update_needs_visible_fields() {
+    let (value, _) = run(r#"use demo.permit;
+        fn main() -> i64 ! {panic} {
+            let p = permit.relabel(permit.mint(3), 9);
+            p.label * 10 + permit.revision(&p)
+        }
+        "#)
+    .unwrap();
+    assert_eq!(value, 93);
+    let error = run(r#"use demo.permit;
+        use demo.permit.Permit;
+        fn main() -> i64 ! {panic} {
+            let p = Permit { label: 1, ..permit.mint(3) };
+            p.label
+        }
+        "#)
+    .unwrap_err();
+    assert!(error.contains("private"), "{error}");
 }

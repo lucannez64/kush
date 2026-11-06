@@ -575,6 +575,15 @@ impl Facts {
             .cloned()
             .unwrap_or((Root::Var(slot, self.version(slot)), Vec::new()))
     }
+    /// Record `a == b` (STRUCT-UPDATE field facts).
+    pub(crate) fn equate(&mut self, a: Linear, b: Linear) {
+        let mut out = Vec::new();
+        compare(a, &Kind::EqEq, b, &mut out);
+        self.known.extend(out);
+    }
+    pub(crate) fn is_opaque(&self, slot: usize) -> bool {
+        self.opaque.contains(&slot)
+    }
     pub(crate) fn alias(&mut self, slot: usize, root: Root, steps: Vec<Step>) {
         if !self.opaque.contains(&slot) {
             self.aliases.insert(slot, (root, steps));

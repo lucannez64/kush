@@ -2594,10 +2594,13 @@ fn collect_body_returns<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
                 collect_body_returns(&arm.body, out);
             }
         }
-        ast::ExprKind::Record { ty, fields } => {
+        ast::ExprKind::Record { ty, fields, base } => {
             collect_body_returns(ty, out);
             for (_, field) in fields {
                 collect_body_returns(field, out);
+            }
+            if let Some(base) = base {
+                collect_body_returns(base, out);
             }
         }
         ast::ExprKind::While { condition, body } => {
@@ -20952,6 +20955,8 @@ impl Checker<'_, '_> {
                         self.alias_scalar_index(id, source);
                     }
                     self.facts.define(slot, &value);
+                    // `let x = S { .. }` knows each scalar field (STRUCT-UPDATE).
+                    self.record_literal_facts(slot, &value);
                     // A whole value bound by `let` keeps the symbolic identity
                     // its postcondition facts talk about (ENSURES).
                     if crate::facts::scalar_range(value.ty).is_none()
@@ -21868,8 +21873,11 @@ impl Checker<'_, '_> {
                 {
                     return c.field(value, name, span, expected);
                 }
-                ast::ExprKind::Record { ty, fields } => {
-                    return c.record(ty, fields, span, expected);
+                ast::ExprKind::Record { ty, fields, base } => {
+                    return match base {
+                        Some(base) => c.record_update(ty, fields, base, span, expected),
+                        None => c.record(ty, fields, span, expected),
+                    };
                 }
                 ast::ExprKind::StructuralLiteral(fields) => {
                     return c.structural_literal(fields, expected, span);
@@ -31136,6 +31144,7 @@ impl Checker<'_, '_> {
                 let slot = self.temp(variant.fields[*index], value.span)?;
                 self.locals[slot].linear = self.value_moves_linear(&value);
                 slots[*index] = slot;
+                self.define_temp_facts(slot, &value);
                 statements.push(Statement::Let(slot, value));
             }
             let fields = slots
@@ -31172,6 +31181,271 @@ impl Checker<'_, '_> {
         match expected {
             Some(expected) => self.coerce(construct, expected, span),
             None => Ok(construct),
+        }
+    }
+    /// STRUCT-UPDATE: `S { f: v, ..base }` (user-approved Rust semantics).
+    /// `base` is checked first and, unless it is a local, evaluated into a
+    /// temporary; the field values follow in source order; then `base` is
+    /// consumed by a one-arm match that moves its other fields into the new
+    /// record and drops the replaced ones (a linear one is rejected). Every
+    /// field must be visible, as for a full literal.
+    fn record_update(
+        &mut self,
+        path: &ast::Expr,
+        fields: &[(String, ast::Expr)],
+        base_ast: &ast::Expr,
+        span: Span,
+        expected: Option<Type>,
+    ) -> Result<Expr> {
+        if matches!(path.kind, ast::ExprKind::Specialize { .. }) {
+            return Err(Diagnostic::new(
+                path.span,
+                "a struct update takes its type arguments from its base; remove them",
+            ));
+        }
+        let id = self
+            .resolution
+            .reference(path.span)
+            .filter(|id| self.types.is_record(*id))
+            .ok_or_else(|| Diagnostic::new(path.span, "expected a record (struct) type name"))?;
+        let declared = self
+            .types
+            .record_fields(id)
+            .1
+            .iter()
+            .map(|field| field.name.clone())
+            .collect::<Vec<_>>();
+        for name in &declared {
+            self.check_field_visible(id, name, span)?;
+        }
+        for (name, value) in fields {
+            if !declared.contains(name) {
+                return Err(Diagnostic::new(
+                    value.span,
+                    format!("record has no field '{name}'"),
+                ));
+            }
+        }
+        let base_expected = expected.filter(|ty| {
+            ty.layout().is_some_and(|layout| {
+                self.types.enums[layout].record && self.types.enums[layout].definition == id
+            })
+        });
+        let mut base = self.expr_expected(base_ast, base_expected)?;
+        if base.ty == Type::Never {
+            return Ok(base);
+        }
+        let Some(layout) = base.ty.layout().filter(|layout| {
+            self.types.enums[*layout].record && self.types.enums[*layout].definition == id
+        }) else {
+            return Err(Diagnostic::new(
+                base_ast.span,
+                format!(
+                    "the base of this struct update must have type {}, found {}",
+                    self.resolution.bindings[id].name,
+                    self.types.name(base.ty)
+                ),
+            ));
+        };
+        let ty = base.ty;
+        if let ExprKind::Peek(slot) = base.kind {
+            base.kind = ExprKind::Local(slot);
+        }
+        let variant = self.types.enums[layout].variants[0].clone();
+        let mut statements = Vec::new();
+        let base_value = if matches!(base.kind, ExprKind::Local(_) | ExprKind::Move(_)) {
+            base
+        } else {
+            let slot = self.temp(ty, base.span)?;
+            self.locals[slot].linear = self.value_moves_linear(&base);
+            self.define_temp_facts(slot, &base);
+            let base_span = base.span;
+            statements.push(Statement::Let(slot, base));
+            Expr {
+                kind: ExprKind::Local(slot),
+                ty,
+                span: base_span,
+                resource: None,
+            }
+        };
+        let mut overrides = BTreeMap::new();
+        for (name, value_ast) in fields {
+            let index = variant.names.iter().position(|n| n == name).unwrap();
+            let field_ty = variant.fields[index];
+            if self.linear_type(field_ty) {
+                return Err(Diagnostic::new(
+                    value_ast.span,
+                    format!(
+                        "field '{name}' is linear: a struct update would drop the base's value; destructure the base and consume it"
+                    ),
+                ));
+            }
+            let value = self.expr_expected(value_ast, Some(field_ty))?;
+            if value.ty == Type::Never {
+                statements.push(Statement::Expr(value));
+                return Ok(Expr {
+                    kind: ExprKind::Block(Block {
+                        statements,
+                        tail: None,
+                        ty: Type::Never,
+                    }),
+                    ty: Type::Never,
+                    span,
+                    resource: None,
+                });
+            }
+            self.expect(value.ty, field_ty, value.span)?;
+            let slot = self.temp(field_ty, value.span)?;
+            self.locals[slot].linear = self.value_moves_linear(&value);
+            self.define_temp_facts(slot, &value);
+            statements.push(Statement::Let(slot, value));
+            overrides.insert(
+                index,
+                Expr {
+                    kind: ExprKind::Local(slot),
+                    ty: field_ty,
+                    span,
+                    resource: None,
+                },
+            );
+        }
+        // The base is read after the field values (which may read it).
+        let base_root = self.facts.root_of(&base_value);
+        let mut pattern_fields = Vec::new();
+        let mut construct_fields = Vec::new();
+        let mut offset = self.types.enums[layout].tag_words();
+        for (index, field_ty) in variant.fields.iter().enumerate() {
+            if let Some(value) = overrides.remove(&index) {
+                // The replaced value is bound and dropped at the end of the
+                // arm (a wildcard would be rejected inside a linear record).
+                let slot = self.temp(*field_ty, span)?;
+                pattern_fields.push((offset, Pattern::Bind(slot)));
+                construct_fields.push(value);
+            } else {
+                let slot = self.temp(*field_ty, span)?;
+                if let Some((root, steps)) = &base_root {
+                    let mut steps = steps.clone();
+                    steps.push(crate::facts::Step::Field(
+                        u32::try_from(offset).expect("record field offset"),
+                    ));
+                    self.facts.alias(slot, *root, steps);
+                }
+                pattern_fields.push((offset, Pattern::Bind(slot)));
+                construct_fields.push(Expr {
+                    kind: ExprKind::Local(slot),
+                    ty: *field_ty,
+                    span,
+                    resource: None,
+                });
+            }
+            offset += self.types.width(*field_ty);
+        }
+        let pattern = Pattern::Variant {
+            tag: 0,
+            tagged: self.types.enums[layout].tag_words() != 0,
+            niche: self.types.enums[layout].niche(),
+            fields: pattern_fields,
+        };
+        self.linear_pattern(
+            &pattern,
+            self.value_moves_linear(&base_value) && !self.linear_type(ty),
+        );
+        let construct = Expr {
+            kind: ExprKind::Construct {
+                enum_id: layout,
+                tag: 0,
+                fields: construct_fields,
+            },
+            ty,
+            span,
+            resource: None,
+        };
+        let matched = Expr {
+            kind: ExprKind::Match(
+                Box::new(base_value),
+                vec![Arm {
+                    pattern,
+                    guard: None,
+                    body: construct,
+                }],
+            ),
+            ty,
+            span,
+            resource: None,
+        };
+        let value = Expr {
+            kind: ExprKind::Block(Block {
+                statements,
+                tail: Some(Box::new(matched)),
+                ty,
+            }),
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(value, expected, span),
+            None => Ok(value),
+        }
+    }
+    /// Facts for a compiler temporary bound to `value`: its scalar value, or
+    /// the symbolic identity of a whole value.
+    fn define_temp_facts(&mut self, slot: usize, value: &Expr) {
+        self.facts.define(slot, value);
+        if crate::facts::scalar_range(value.ty).is_none()
+            && let Some((root, steps)) = self.facts.root_of(value)
+        {
+            self.facts.alias(slot, root, steps);
+        }
+    }
+    /// `let x = S { .. }`: each scalar field of the literal (also of nested
+    /// literals) is known as `x.f == value` (STRUCT-UPDATE).
+    fn record_literal_facts(&mut self, slot: usize, value: &Expr) {
+        if self.facts.is_opaque(slot) || self.facts.root_of(value).is_some() {
+            return;
+        }
+        let (root, steps) = self.facts.local_root(slot);
+        self.construct_facts(root, steps, value, 0);
+    }
+    fn construct_facts(
+        &mut self,
+        root: crate::facts::Root,
+        steps: Vec<crate::facts::Step>,
+        value: &Expr,
+        depth: usize,
+    ) {
+        if depth > 8 {
+            return;
+        }
+        // A literal, or a block or one-arm match whose value is one (the
+        // forms record literals and struct updates lower to).
+        let construct = Self::literal_of(value);
+        let ExprKind::Construct {
+            enum_id, fields, ..
+        } = &construct.kind
+        else {
+            return;
+        };
+        if !self.types.enums[*enum_id].record {
+            return;
+        }
+        let types = self.types.enums[*enum_id].variants[0].fields.clone();
+        let mut offset = self.types.enums[*enum_id].tag_words();
+        for (field, ty) in fields.iter().zip(types) {
+            let Ok(word) = u32::try_from(offset) else {
+                return;
+            };
+            let mut path = steps.clone();
+            path.push(crate::facts::Step::Field(word));
+            if let Some(range) = crate::facts::scalar_range(ty) {
+                if let Some(known) = self.facts.linear(field) {
+                    let term = self.path_linear(root, &path, range, ty);
+                    self.facts.equate(term, known);
+                }
+            } else {
+                self.construct_facts(root, path, field, depth + 1);
+            }
+            offset += self.types.width(ty);
         }
     }
     /// Check an anonymous structural record literal. Fields are evaluated in
@@ -32757,6 +33031,22 @@ impl Checker<'_, '_> {
     }
     // ── ENSURES: postconditions ─────────────────────────────────────────────
 
+    /// The record or enum literal an expression evaluates to, through the
+    /// blocks and one-arm matches that literals and struct updates lower to.
+    fn literal_of(expr: &Expr) -> &Expr {
+        let mut current = expr;
+        loop {
+            match &current.kind {
+                ExprKind::Block(block) if block.tail.is_some() => {
+                    current = block.tail.as_deref().unwrap();
+                }
+                ExprKind::Match(_, arms) if arms.len() == 1 && arms[0].guard.is_none() => {
+                    current = &arms[0].body;
+                }
+                _ => return current,
+            }
+        }
+    }
     /// The symbolic value of a checked expression.
     fn sym_of(&self, expr: &Expr) -> Sym {
         match self.facts.root_of(expr) {
@@ -32809,7 +33099,7 @@ impl Checker<'_, '_> {
                 steps.push(crate::facts::Step::Field(u32::try_from(offset).ok()?));
                 Sym::Path(*root, steps)
             }
-            Sym::Value(expr) => match &expr.kind {
+            Sym::Value(expr) => match &Self::literal_of(expr).kind {
                 ExprKind::Construct { fields, .. } => self.sym_of(&fields[index]),
                 _ => Sym::Unknown,
             },
@@ -32836,7 +33126,7 @@ impl Checker<'_, '_> {
                     .note_term(term, (0, i128::try_from(count).ok()? - 1));
                 Some(crate::facts::Linear::variable(term))
             }
-            Sym::Value(expr) => match &expr.kind {
+            Sym::Value(expr) => match &Self::literal_of(expr).kind {
                 ExprKind::Construct { tag, .. } => {
                     Some(crate::facts::Linear::constant(i128::try_from(*tag).ok()?))
                 }
@@ -32873,7 +33163,7 @@ impl Checker<'_, '_> {
                 ));
                 Sym::Path(*root, steps)
             }
-            Sym::Value(expr) => match &expr.kind {
+            Sym::Value(expr) => match &Self::literal_of(expr).kind {
                 ExprKind::Construct { tag, fields, .. } if *tag == variant => {
                     self.sym_of(&fields[index])
                 }
@@ -35253,9 +35543,17 @@ impl Checker<'_, '_> {
                         invoke(value, out, calls);
                     }
                 }
-                ast::ExprKind::StructuralLiteral(fields) | ast::ExprKind::Record { fields, .. } => {
+                ast::ExprKind::StructuralLiteral(fields) => {
                     for (_, value) in fields {
                         invoke(value, out, calls);
+                    }
+                }
+                ast::ExprKind::Record { fields, base, .. } => {
+                    for (_, value) in fields {
+                        invoke(value, out, calls);
+                    }
+                    if let Some(base) = base {
+                        invoke(base, out, calls);
                     }
                 }
                 ast::ExprKind::Field { value: base, .. }
@@ -35412,7 +35710,13 @@ impl Checker<'_, '_> {
                         expr(&arm.body, out, calls);
                     }
                 }
-                K::Record { fields, .. } | K::StructuralLiteral(fields) => {
+                K::Record { fields, base, .. } => {
+                    fields.iter().for_each(|(_, v)| expr(v, out, calls));
+                    if let Some(base) = base {
+                        expr(base, out, calls);
+                    }
+                }
+                K::StructuralLiteral(fields) => {
                     fields.iter().for_each(|(_, v)| expr(v, out, calls))
                 }
                 K::Name(_)
@@ -36439,9 +36743,12 @@ pub(crate) fn ast_children<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::E
         | E::Break(None) => {}
         E::Tuple(values) | E::Array(values) => values.iter().for_each(f),
         E::StructuralLiteral(fields) => fields.iter().for_each(|(_, value)| f(value)),
-        E::Record { ty, fields } => {
+        E::Record { ty, fields, base } => {
             f(ty);
             fields.iter().for_each(|(_, value)| f(value));
+            if let Some(base) = base {
+                f(base);
+            }
         }
         E::Block(inner) | E::Loop(inner) => block(inner, f),
         E::Unary { operand, .. }
@@ -36561,7 +36868,8 @@ fn exits_early(expr: &ast::Expr) -> bool {
         E::Tuple(values) | E::Array(values) => values.iter().any(exits_early),
         E::StructuralLiteral(fields) | E::Record { fields, .. } => {
             fields.iter().any(|(_, value)| exits_early(value))
-                || matches!(&expr.kind, E::Record { ty, .. } if exits_early(ty))
+                || matches!(&expr.kind, E::Record { ty, base, .. }
+                    if exits_early(ty) || base.as_deref().is_some_and(exits_early))
         }
         E::Block(inner) | E::Loop(inner) => block(inner),
         E::Unary { operand, .. }
@@ -36689,9 +36997,14 @@ fn contains_lexical_perform(expr: &ast::Expr, operation: &str) -> bool {
                         || contains_lexical_perform(&arm.body, operation)
                 })
         }
-        ast::ExprKind::Record { fields, .. } => fields
-            .iter()
-            .any(|(_, value)| contains_lexical_perform(value, operation)),
+        ast::ExprKind::Record { fields, base, .. } => {
+            fields
+                .iter()
+                .any(|(_, value)| contains_lexical_perform(value, operation))
+                || base
+                    .as_deref()
+                    .is_some_and(|base| contains_lexical_perform(base, operation))
+        }
         ast::ExprKind::While { condition, body } => {
             contains_lexical_perform(condition, operation)
                 || block_contains_lexical_perform(body, operation)
@@ -36819,10 +37132,13 @@ fn collect_expr_refs(resolution: &Resolution, expr: &ast::Expr, out: &mut BTreeS
                 collect_expr_refs(resolution, &arm.body, out);
             }
         }
-        ast::ExprKind::Record { ty, fields } => {
+        ast::ExprKind::Record { ty, fields, base } => {
             collect_expr_refs(resolution, ty, out);
             for (_, value) in fields {
                 collect_expr_refs(resolution, value, out);
+            }
+            if let Some(base) = base {
+                collect_expr_refs(resolution, base, out);
             }
         }
         ast::ExprKind::While { condition, body } => {

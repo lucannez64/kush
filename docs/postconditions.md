@@ -132,6 +132,4 @@ rejected and has a regression test (`review_regressions_for_postconditions`):
   in a postcondition; methods taking `self: Self` can.
 - `match` on a `Bool` with `true`/`false` arms does not record the condition;
   use `if`.
-- A struct literal whose fields are written out of declaration order is
-  checked through temporaries that the facts do not see.
 - Hypotheses wider than 32 cases are dropped (sound, weaker).
