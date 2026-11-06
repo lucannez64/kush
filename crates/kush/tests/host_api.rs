@@ -158,14 +158,14 @@ fn main() -> i64 ! {io, alloc, panic} {
     show(&read);
     drop(read);
     print_i64(match FS.size(&file) { Ok(size) => size, Err(code) => -code });
-    print_i64(match FS.is_file(&file) { Ok(flag) => flag, Err(code) => -code });
-    print_i64(match FS.is_dir(&file) { Ok(flag) => flag, Err(code) => -code });
-    print_i64(match FS.exists(&missing) { Ok(flag) => flag, Err(code) => -code });
+    print_i64(match FS.is_file(&file) { Ok(flag) => if flag { 1 } else { 0 }, Err(code) => -code });
+    print_i64(match FS.is_dir(&file) { Ok(flag) => if flag { 1 } else { 0 }, Err(code) => -code });
+    print_i64(match FS.exists(&missing) { Ok(flag) => if flag { 1 } else { 0 }, Err(code) => -code });
     print_i64(match FS.read(&missing, Bytes.with_capacity(8)) { Ok(_) => -1, Err(code) => code });
     print_i64(match FS.write(&sub, &hello) { Ok(_) => -1, Err(code) => code });
     print_i64(match FS.read(&file, Bytes.with_capacity(4)) { Ok(_) => -1, Err(code) => code });
     print_i64(match FS.mkdir(&sub) { Ok(_) => 0, Err(code) => -code });
-    print_i64(match FS.is_dir(&sub) { Ok(flag) => flag, Err(code) => -code });
+    print_i64(match FS.is_dir(&sub) { Ok(flag) => if flag { 1 } else { 0 }, Err(code) => -code });
     let listing = match FS.list(&root, Bytes.with_capacity(512)) {
         Ok(value) => value,
         Err(code) => { print_i64(-code); return 0; },
@@ -178,8 +178,8 @@ fn main() -> i64 ! {io, alloc, panic} {
     print_i64(if has_sub { 1 } else { 0 });
     drop(listing);
     print_i64(match FS.rename(&file, &moved) { Ok(_) => 0, Err(code) => -code });
-    print_i64(match FS.exists(&file) { Ok(flag) => flag, Err(code) => -code });
-    print_i64(match FS.exists(&moved) { Ok(flag) => flag, Err(code) => -code });
+    print_i64(match FS.exists(&file) { Ok(flag) => if flag { 1 } else { 0 }, Err(code) => -code });
+    print_i64(match FS.exists(&moved) { Ok(flag) => if flag { 1 } else { 0 }, Err(code) => -code });
     print_i64(match FS.remove(&moved) { Ok(_) => 0, Err(code) => -code });
     print_i64(match FS.remove_dir(&sub) { Ok(_) => 0, Err(code) => -code });
     print_i64(match FS.remove(&missing) { Ok(_) => 0, Err(code) => code });
@@ -715,5 +715,84 @@ fn http_response_boundaries_preserve_zero_one_and_multiple_headers() {
         assert_eq!(observed.status, 0);
         assert_eq!(observed.output, expected.as_bytes());
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+// FS-EXISTS-BOOL: the metadata predicates return Result<Bool, i64>.
+const FS_PREDICATES_BOOL: &str = r#"
+use std.result.Result;
+use std.path;
+
+fn flag(r: Result<Bool, i64>) -> i64 ! {panic} {
+    match r { Ok(b) => if b { 1 } else { 0 }, Err(code) => -code }
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let root = match ENV.arg(1, Bytes.with_capacity(4096)) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let file = path.join(&root, &Bytes.from("f.txt"));
+    let missing = path.join(&root, &Bytes.from("nope"));
+    let data = Bytes.from("x");
+    match FS.write(&file, &data) { Ok(_) => {}, Err(code) => return code };
+    let both = match (FS.exists(&file), FS.is_dir(&root)) {
+        (Ok(a), Ok(b)) => a && b,
+        _ => false,
+    };
+    print_i64(if both { 1 } else { 0 });
+    print_i64(flag(FS.is_file(&file)));
+    print_i64(flag(FS.is_file(&root)));
+    print_i64(flag(FS.is_dir(&file)));
+    print_i64(flag(FS.exists(&missing)));
+    print_i64(flag(FS.is_file(&missing)));
+    let nul = Bytes.push(Bytes.from("a"), 0);
+    print_i64(flag(FS.exists(&nul)));
+    drop(nul);
+    match FS.exists(&missing) {
+        Ok(true) => print_i64(7),
+        Ok(false) => print_i64(8),
+        Err(_) => print_i64(9),
+    }
+    match FS.remove(&file) { Ok(_) => {}, Err(code) => return code };
+    drop(data);
+    drop(root);
+    0
+}
+"#;
+
+#[test]
+fn filesystem_predicates_return_bool_in_both_backends() {
+    let root = unique_directory("bool-check");
+    let observed = reference(FS_PREDICATES_BOOL, &[root.display().to_string()], &[]);
+    let _ = fs::remove_dir_all(&root);
+    let lines: Vec<&str> = std::str::from_utf8(&observed.output).unwrap().lines().collect();
+    assert_eq!(lines, ["1", "1", "0", "0", "0", "0", "-22", "8"]);
+    assert_eq!(observed.status, 0);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    compare(FS_PREDICATES_BOOL, |root| vec![root.display().to_string()], &[]);
+}
+
+#[test]
+fn filesystem_predicates_are_not_integers() {
+    for call in ["FS.exists(&p)", "FS.is_file(&p)", "FS.is_dir(&p)"] {
+        let source = format!(
+            "use std.result.Result;
+            fn main() -> i64 ! {{io, alloc, panic}} {{
+                let p = Bytes.from(\"x\");
+                let n: i64 = match {call} {{ Ok(v) => v, Err(code) => code }};
+                drop(p);
+                n
+            }}"
+        );
+        let program = kush::program::load_source("<fs-bool>", &source).unwrap();
+        let error = executable::check_program(&program)
+            .err()
+            .unwrap_or_else(|| panic!("an i64 use of {call} must be rejected"));
+        assert!(
+            error.message.contains("Bool") || error.message.contains("mismatch"),
+            "{}",
+            error.message
+        );
     }
 }

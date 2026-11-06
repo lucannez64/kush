@@ -548,6 +548,7 @@ impl IoOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostPayload {
     Bytes,
+    Bool,
     I64,
     Unit,
 }
@@ -740,6 +741,7 @@ impl HostOp {
             | Self::FsClose
             | Self::FsSyncDir
             | Self::TimeSleepMs => HostPayload::Unit,
+            Self::FsIsFile | Self::FsIsDir | Self::FsExists => HostPayload::Bool,
             _ => HostPayload::I64,
         }
     }
@@ -23307,6 +23309,7 @@ impl Checker<'_, '_> {
                         };
                         let ok = match op.payload() {
                             HostPayload::Bytes => Type::Bytes,
+                            HostPayload::Bool => Type::Bool,
                             HostPayload::I64 => Type::I64,
                             HostPayload::Unit => Type::Unit,
                         };
