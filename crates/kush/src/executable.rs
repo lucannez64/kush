@@ -11257,7 +11257,7 @@ pub(crate) fn proposition_of(
     let unsupported = |span| {
         Diagnostic::new(
             span,
-            "propositions support linear integer comparisons over earlier parameters, constants, 'x + c', 'c * x', and Bytes.len/Vec.len/Slice.len, joined by '&&'",
+            "propositions support linear integer comparisons over earlier integer and Bool parameters, constants, 'x + c', 'c * x', Bytes.len/Vec.len/Slice.len, and Bool atoms 'b' / '!b', joined by '&&'",
         )
     };
     fn text(e: &ast::Expr) -> String {
@@ -11300,6 +11300,7 @@ pub(crate) fn proposition_of(
                 ast::ExprKind::Integer(n) => Ok(ParamLinear::constant(
                     n.parse().map_err(|_| unsupported(e.span))?,
                 )),
+                ast::ExprKind::Bool(value) => Ok(ParamLinear::constant(i128::from(*value))),
                 ast::ExprKind::Unary {
                     op: Kind::Minus,
                     operand,
@@ -11375,8 +11376,30 @@ pub(crate) fn proposition_of(
         go(e, resolution, &runtime_before, &unsupported)
     };
     let mut atoms = Vec::new();
+    let mut booleans = Vec::new();
     let mut pending = vec![body.as_ref()];
     while let Some(e) = pending.pop() {
+        // A bare `Bool` parameter `b` is `b == 1`; `!b` is `b == 0`.
+        let boolean = match &e.kind {
+            ast::ExprKind::Name(_) => Some((e, 1)),
+            ast::ExprKind::Unary {
+                op: Kind::Bang,
+                operand,
+                ..
+            } if matches!(operand.kind, ast::ExprKind::Name(_)) => Some((operand.as_ref(), 0)),
+            _ => None,
+        };
+        if let Some((name, value)) = boolean {
+            let term = linear(name)?;
+            let Some(crate::facts::ParamTerm::Param(index)) =
+                term.coefficients.keys().next().copied()
+            else {
+                return Err(unsupported(e.span));
+            };
+            booleans.push(index);
+            atoms.push((term, Kind::EqEq, crate::facts::ParamLinear::constant(value)));
+            continue;
+        }
         match &e.kind {
             ast::ExprKind::Binary {
                 op: Kind::AmpAmp,
@@ -11401,6 +11424,7 @@ pub(crate) fn proposition_of(
     let _ = indices;
     Ok(crate::facts::Proposition {
         atoms,
+        booleans,
         text: text(body),
     })
 }
@@ -19441,6 +19465,17 @@ impl Checker<'_, '_> {
         let proposition = self.functions.proposition(self.resolution, parameter)?;
         let mut constraints = Vec::new();
         let params = self.parameter_slots();
+        for index in &proposition.booleans {
+            if self.locals[params[*index]].ty != Type::Bool {
+                return Err(Diagnostic::new(
+                    parameter.ty.span,
+                    "a bare name in a proposition must be a Bool parameter; compare integers explicitly",
+                ));
+            }
+        }
+        for slot in &params {
+            self.facts.note_type(*slot, self.locals[*slot].ty);
+        }
         for (l, op, r) in &proposition.atoms {
             let term = |linear: &crate::facts::ParamLinear| -> Option<crate::facts::Linear> {
                 use crate::facts::{Linear, ParamTerm, Term};
@@ -19488,6 +19523,14 @@ impl Checker<'_, '_> {
                 return Err(Diagnostic::new(
                     evidence.span,
                     "an erased argument must be '_' (prove from context) or the name of an erased proof parameter",
+                ));
+            }
+        }
+        for index in &proposition.booleans {
+            if arguments[*index].ty != Type::Bool {
+                return Err(Diagnostic::new(
+                    arguments[*index].span,
+                    "a bare name in a proposition must be a Bool parameter; compare integers explicitly",
                 ));
             }
         }
@@ -31643,6 +31686,7 @@ impl Checker<'_, '_> {
                         ParamLinear::variable(ParamTerm::Len(0), 1),
                     ),
                 ],
+                booleans: Vec::new(),
                 text: "0 <= index && index < Slice.len(slice)".to_owned(),
             };
             self.discharge(&proposition, &values, &rest[1], span)?;
@@ -33714,6 +33758,7 @@ impl Checker<'_, '_> {
                         ParamLinear::variable(ParamTerm::Len(0), 1),
                     ),
                 ],
+                booleans: Vec::new(),
                 text: format!(
                     "0 <= index && index < {}.len(buffer)",
                     if buffer == Type::Bytes {

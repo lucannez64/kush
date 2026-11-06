@@ -234,6 +234,17 @@ both `x <= t` and `x >= t + 1`. This closes examples such as `2*x == 1`,
 [integer-refutation.md](integer-refutation.md) for the rules, certificate
 format, budgets, and limits.
 
+**Scalar terms (PROVE-SCALARS).** Terms may be `i64`, any fixed-width
+integer, or `Bool` locals and parameters. A `Bool` is the integer 0 or 1:
+a bare `b` in a proposition means `b == 1` and `!b` means `b == 0` (only for
+`Bool` parameters), `true`/`false` are 1 and 0, and a `Bool` branch
+condition adds the same facts. A fixed-width term carries its type's range
+(`0 <= x <= 255` for `u8`, `0 <= x <= 2^64 - 1` for `u64`) as an implicit
+hypothesis, and an unsigned constant is read by its type, so the raw `u64`
+word of `18446744073709551615` is never mistaken for `-1`. A constant goal
+such as `{ 0 >= 1 }` is proved where the facts are contradictory (PROVE-CONST).
+Tests: `crates/kush/tests/scalar_proofs.rs`.
+
 The fragment is still deliberately bounded and is not a full Presburger
 decision procedure:
 

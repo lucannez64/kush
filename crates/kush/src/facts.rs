@@ -192,6 +192,9 @@ impl ParamLinear {
 pub(crate) struct Proposition {
     /// Each atom: left linear expression, comparison, right linear expression.
     pub atoms: Vec<(ParamLinear, Kind, ParamLinear)>,
+    /// Parameters used as bare `Bool` atoms (`b`, `!b`); they must have type
+    /// `Bool` where the proposition is used.
+    pub booleans: Vec<usize>,
     pub text: String,
 }
 
@@ -269,6 +272,31 @@ pub(crate) struct Facts {
     /// Index places of the current body: `(identity, root binding, index)`.
     /// They are records, not facts, so `reset` keeps them.
     index_places: Vec<(usize, usize, Linear)>,
+    /// Value range of each local used as a `Bool` (0..=1) or fixed-width
+    /// integer term (PROVE-SCALARS). Recorded when the term is first built,
+    /// added as implicit hypotheses. `i64` locals need none.
+    ranges: std::cell::RefCell<BTreeMap<usize, (i128, i128)>>,
+}
+
+/// The mathematical range of a scalar type admitted as a linear term, or
+/// `None` for types that are not integer-valued.
+pub(crate) fn scalar_range(ty: crate::executable::Type) -> Option<(i128, i128)> {
+    use crate::executable::Type;
+    match ty {
+        Type::I64 => Some((i128::from(i64::MIN), i128::from(i64::MAX))),
+        Type::Bool => Some((0, 1)),
+        Type::Int(kind) => Some((kind.min(), kind.max())),
+        _ => None,
+    }
+}
+
+/// The value of a constant of scalar type `ty`: unsigned kinds are stored
+/// zero-extended, and `u64` keeps its raw bit pattern in the word.
+fn constant_value(n: i64, ty: crate::executable::Type) -> i128 {
+    match ty {
+        crate::executable::Type::Int(kind) if !kind.signed() => i128::from(n as u64),
+        _ => i128::from(n),
+    }
 }
 
 /// A restore point for [`Facts::reset`]: the lengths of the inequality and
@@ -486,6 +514,14 @@ impl Facts {
                     self.collect(tail, truth, out);
                 }
             }
+            // A `Bool` term used as a condition: `b` is `b == 1`, `!b` is
+            // `b == 0` (PROVE-SCALARS).
+            _ if expr.ty == crate::executable::Type::Bool => {
+                if let Some(term) = self.linear(expr) {
+                    let one = Linear::constant(i128::from(truth));
+                    compare(term, &Kind::EqEq, one, out);
+                }
+            }
             _ => {}
         }
     }
@@ -494,12 +530,11 @@ impl Facts {
     /// multiplication by an integer constant are admitted. Anything else (for
     /// example `x * y` or a float) is not reinterpreted.
     pub fn linear(&self, expr: &Expr) -> Option<Linear> {
-        if expr.ty != crate::executable::Type::I64 {
-            return None;
-        }
+        scalar_range(expr.ty)?;
         match &expr.kind {
-            ExprKind::Constant(n) => Some(Linear::constant(i128::from(*n))),
+            ExprKind::Constant(n) => Some(Linear::constant(constant_value(*n, expr.ty))),
             ExprKind::Local(slot) | ExprKind::Peek(slot) if !self.opaque.contains(slot) => {
+                self.note_type(*slot, expr.ty);
                 Some(Linear::variable(Term::Var(*slot, self.version(*slot))))
             }
             ExprKind::Unary(Kind::Minus, inner) => self.linear(inner)?.negate(),
@@ -675,11 +710,21 @@ impl Facts {
         if goal.coefficients.is_empty() && goal.bound >= 0 {
             return Some(Refutation::Trivial);
         }
-        let hypotheses = self.snapshot_universal();
+        // Implicit facts (lengths, scalar ranges) for the goal's terms too.
+        let hypotheses = self.snapshot(goal);
         if let Some(proof) = prove_with(&hypotheses, goal) {
             return Some(Refutation::Farkas(proof));
         }
         prove_integer(&hypotheses, goal)
+    }
+    /// Remember the value range of `slot`'s type, so proofs may use it
+    /// (`0 <= b <= 1` for a `Bool`, `0 <= x <= 255` for a `u8`, ...).
+    pub(crate) fn note_type(&self, slot: usize, ty: crate::executable::Type) {
+        if ty != crate::executable::Type::I64
+            && let Some(range) = scalar_range(ty)
+        {
+            self.ranges.borrow_mut().insert(slot, range);
+        }
     }
     fn implicit(&self, goal: &Constraint) -> Vec<Constraint> {
         let mut terms = goal.coefficients.keys().copied().collect::<Vec<_>>();
@@ -688,18 +733,30 @@ impl Facts {
         }
         terms.sort();
         terms.dedup();
-        terms
-            .into_iter()
-            .filter(|t| matches!(t, Term::Len(..)))
-            .map(|term| {
-                let mut coefficients = BTreeMap::new();
-                coefficients.insert(term, -1);
-                Constraint {
-                    coefficients,
-                    bound: 0,
-                }
-            })
-            .collect()
+        let ranges = self.ranges.borrow();
+        let mut out = Vec::new();
+        for term in terms {
+            let (low, high) = match term {
+                Term::Len(..) => (0, i128::MAX),
+                Term::Var(slot, _) => match ranges.get(&slot) {
+                    Some(range) => *range,
+                    None => continue,
+                },
+                Term::Zero => continue,
+            };
+            // -term <= -low, and term <= high when bounded.
+            out.push(Constraint {
+                coefficients: BTreeMap::from([(term, -1)]),
+                bound: -low,
+            });
+            if high != i128::MAX {
+                out.push(Constraint {
+                    coefficients: BTreeMap::from([(term, 1)]),
+                    bound: high,
+                });
+            }
+        }
+        out
     }
     pub fn snapshot_universal(&self) -> Vec<Constraint> {
         let mut known = self.known.clone();
