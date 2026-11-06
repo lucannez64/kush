@@ -234,8 +234,11 @@ the host's Linux x86-64 baseline configuration, not an LLVM backend.
 
 The reference evaluator follows the same checked IR with separate execution
 logic. Its default host API uses empty input; explicit I/O evaluation APIs and CLI `eval`
-can supply input streams. It has a 100000-step computation budget (expressions
-and I/O attempts) and a shared 128-level
+can supply input streams. It has a computation budget of 10,000,000 steps per
+task by default (expressions, host calls and I/O attempts), set with
+`kush eval --fuel N` or `Executable::set_eval_fuel`. Element reads and writes
+of vectors and byte buffers work in place, so their cost does not grow with
+the length. It also has a shared 128-level
 call/expression nesting budget. Exhaustion is a diagnostic. These are evaluator
 limits, not native execution limits or language termination claims. Ordinary
 recursive functions are excluded from the proof kernel.

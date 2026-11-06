@@ -22,7 +22,19 @@ type Result<T> = std::result::Result<T, Diagnostic>;
 /// Stack size of a reference-evaluator task thread.
 const TASK_STACK_BYTES: usize = 64 * 1024 * 1024;
 
+/// Default step budget of the reference evaluator: expressions evaluated,
+/// host calls and I/O retries each cost one step.
+pub const DEFAULT_EVAL_FUEL: usize = 10_000_000;
+
 impl Executable {
+    /// Set the reference evaluator's step budget (per task); `kush eval
+    /// --fuel N`. Native execution has no such budget.
+    pub fn set_eval_fuel(&mut self, fuel: usize) {
+        self.eval_fuel = fuel;
+    }
+    pub fn eval_fuel(&self) -> usize {
+        self.eval_fuel
+    }
     /// Bounded reference evaluator; native execution does not have this budget.
     pub fn evaluate(&self, output: &mut dyn Write) -> Result<i64> {
         self.evaluate_with_stats(output).map(|(value, _)| value)
@@ -92,7 +104,7 @@ impl Executable {
             program: self,
             input,
             output,
-            fuel: 100_000,
+            fuel: self.eval_fuel,
             depth: 0,
             heap: heap.clone(),
             stats: stats.clone(),
@@ -306,7 +318,7 @@ impl Executable {
                     program: self,
                     input: source,
                     output: sink,
-                    fuel: 100_000,
+                    fuel: self.eval_fuel,
                     depth: 0,
                     heap,
                     stats,
@@ -362,7 +374,7 @@ impl Executable {
             program: self,
             input: source.clone(),
             output: sink.clone(),
-            fuel: 100_000,
+            fuel: self.eval_fuel,
             depth: 0,
             heap: heap.clone(),
             stats: stats.clone(),
@@ -677,6 +689,23 @@ impl SharedHeap {
     }
     fn get(&self, id: usize) -> Option<Value> {
         self.0.lock().unwrap().map.get(&id).cloned()
+    }
+    /// Read one allocation in place, without cloning it (a vector or buffer
+    /// clone would make every element read cost its length).
+    fn with<R>(&self, id: usize, f: impl FnOnce(&Value) -> R) -> Option<R> {
+        self.0.lock().unwrap().map.get(&id).map(f)
+    }
+    /// Update one allocation in place. `f` must not touch the heap.
+    fn with_mut<R>(&self, id: usize, f: impl FnOnce(&mut Value) -> R) -> Option<R> {
+        self.0.lock().unwrap().map.get_mut(&id).map(f)
+    }
+    /// Length of a live vector allocation.
+    fn vector_len(&self, id: usize) -> Option<usize> {
+        self.with(id, |value| match value {
+            Value::Vector { items, .. } => Some(items.len()),
+            _ => None,
+        })
+        .flatten()
     }
     fn len(&self) -> usize {
         self.0.lock().unwrap().map.len()
@@ -1843,10 +1872,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
     }
     /// Snapshot of one vector element.
     fn element_value(&self, owner: usize, index: usize) -> Option<Value> {
-        let Value::Vector { items, .. } = self.heap.get(owner)? else {
-            return None;
-        };
-        items.get(index).cloned()
+        self.heap
+            .with(owner, |value| match value {
+                Value::Vector { items, .. } => items.get(index).cloned(),
+                _ => None,
+            })
+            .flatten()
     }
     /// Replace the value behind a checked reference, destroying the old affine
     /// payload exactly once. Linear referents are rejected by the checker.
@@ -1915,17 +1946,28 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         "internal error: element replacement has no target",
                     ));
                 }
-                let mut vector = self.heap.get(*owner).ok_or_else(|| {
-                    Diagnostic::new(Span::default(), "internal error: vector owner is missing")
-                })?;
-                let Value::Vector { items, .. } = &mut vector else {
-                    return Err(Diagnostic::new(
-                        Span::default(),
-                        "internal error: element reference owner is not a vector",
-                    ));
-                };
-                items[*index] = element;
-                self.heap.insert(*owner, vector);
+                let stored = self.heap.with_mut(*owner, |vector| match vector {
+                    Value::Vector { items, .. } => {
+                        items[*index] = element;
+                        true
+                    }
+                    _ => false,
+                });
+                match stored {
+                    None => {
+                        return Err(Diagnostic::new(
+                            Span::default(),
+                            "internal error: vector owner is missing",
+                        ));
+                    }
+                    Some(false) => {
+                        return Err(Diagnostic::new(
+                            Span::default(),
+                            "internal error: element reference owner is not a vector",
+                        ));
+                    }
+                    Some(true) => {}
+                }
                 old
             }
             _ => {
@@ -2059,7 +2101,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 if let Value::Slice(inner) = &view
                     && inner.array.is_none()
                     && let Value::Borrowed(id) | Value::Owned(id) = inner.base.as_ref()
-                    && matches!(self.heap.get(*id), Some(Value::Buffer { .. }))
+                    && self.heap.with(*id, |value| matches!(value, Value::Buffer { .. })) == Some(true)
                 {
                     return Err(Diagnostic::new(
                         place.span,
@@ -2104,7 +2146,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                             "internal error: checked vector place has no owned handle",
                         ));
                     };
-                    let Some(Value::Vector { items, .. }) = self.heap.get(owner) else {
+                    let Some(length) = self.heap.vector_len(owner) else {
                         return Err(Diagnostic::new(
                             place.span,
                             "internal ownership error: dangling vector place",
@@ -2114,7 +2156,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         Type::Vec(pointer) => self.program.pointees[pointer],
                         _ => unreachable!(),
                     };
-                    if index >= items.len() {
+                    if index >= length {
                         return Err(Diagnostic::new(place.span, "panic: index out of bounds"));
                     }
                     return Ok(PlaceFlow::Place(ResolvedPlace::Element {
@@ -2354,13 +2396,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     "internal error: checked vector place has no owned handle",
                 ));
             };
-            let Some(Value::Vector { items, .. }) = self.heap.get(owner) else {
+            let Some(length) = self.heap.vector_len(owner) else {
                 return Err(Diagnostic::new(
                     place.span,
                     "internal ownership error: dangling vector place",
                 ));
             };
-            if index < 0 || index as usize >= items.len() {
+            if index < 0 || index as usize >= length {
                 return Err(Diagnostic::new(place.span, "panic: index out of bounds"));
             }
             return Ok(PlaceFlow::Value(Value::ElementRef {
@@ -2402,6 +2444,24 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         };
         Ok((*id, data, capacity))
     }
+    /// Read a borrowed byte buffer in place, without cloning its bytes.
+    fn with_buffer<T>(
+        &self,
+        reference: &Value,
+        span: Span,
+        f: impl FnOnce(&[u8], usize) -> T,
+    ) -> Result<T> {
+        let Value::Borrowed(id) = reference else {
+            unreachable!()
+        };
+        self.heap
+            .with(*id, |value| match value {
+                Value::Buffer { data, capacity } => Some(f(data, *capacity)),
+                _ => None,
+            })
+            .flatten()
+            .ok_or_else(|| Diagnostic::new(span, "internal ownership error: dangling byte buffer"))
+    }
     fn bytes_call(&mut self, op: BytesOp, args: Vec<Value>, span: Span) -> Result<Value> {
         // The reference evaluator bounds host storage separately from native allocation.
         const LIMIT: usize = 16 * 1024 * 1024;
@@ -2431,24 +2491,24 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     .map_err(|_| failure("panic: byte buffer allocation failed"))?;
                 Ok(self.allocate(Value::Buffer { data, capacity }))
             }
-            BytesOp::Len | BytesOp::Capacity | BytesOp::Get | BytesOp::Copy => {
-                let (_, data, capacity) = self.buffer(&args[0], span)?;
-                match op {
-                    BytesOp::Len => Ok(Value::Scalar(data.len() as i64)),
-                    BytesOp::Capacity => Ok(Value::Scalar(capacity as i64)),
-                    BytesOp::Get => {
-                        let index = usize::try_from(args[1].scalar())
+            BytesOp::Len | BytesOp::Capacity | BytesOp::Get => {
+                let index = (op == BytesOp::Get).then(|| args[1].scalar());
+                self.with_buffer(&args[0], span, |data, capacity| match index {
+                    None if op == BytesOp::Len => Ok(Value::Scalar(data.len() as i64)),
+                    None => Ok(Value::Scalar(capacity as i64)),
+                    Some(index) => {
+                        let index = usize::try_from(index)
                             .map_err(|_| failure("panic: byte buffer index out of bounds"))?;
                         Ok(Value::Scalar(i64::from(*data.get(index).ok_or_else(
                             || failure("panic: byte buffer index out of bounds"),
                         )?)))
                     }
-                    _ => {
-                        let data = data.clone();
-                        let capacity = data.len();
-                        Ok(self.allocate(Value::Buffer { data, capacity }))
-                    }
-                }
+                })?
+            }
+            BytesOp::Copy => {
+                let (_, data, _) = self.buffer(&args[0], span)?;
+                let capacity = data.len();
+                Ok(self.allocate(Value::Buffer { data, capacity }))
             }
             BytesOp::Push | BytesOp::PushReserved => {
                 let Value::Owned(id) = args[0] else {
@@ -2905,14 +2965,17 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     "internal error: invalid record slice source",
                 )),
             },
-            Value::Borrowed(id) => match self.heap.get(*id) {
-                Some(Value::Buffer { data, .. }) => Ok(data.len()),
-                Some(Value::Vector { items, .. }) => Ok(items.len()),
-                _ => Err(Diagnostic::new(
-                    span,
-                    "internal ownership error: dangling slice source",
-                )),
-            },
+            Value::Borrowed(id) => self
+                .heap
+                .with(*id, |value| match value {
+                    Value::Buffer { data, .. } => Some(data.len()),
+                    Value::Vector { items, .. } => Some(items.len()),
+                    _ => None,
+                })
+                .flatten()
+                .ok_or_else(|| {
+                    Diagnostic::new(span, "internal ownership error: dangling slice source")
+                }),
             _ => Err(Diagnostic::new(
                 span,
                 "internal error: invalid slice source",
@@ -2977,20 +3040,28 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             Value::Enum { fields, .. } => fields.get(position).cloned().ok_or_else(|| {
                 Diagnostic::new(span, "internal error: slice array index out of bounds")
             }),
-            Value::Borrowed(id) => match self.heap.get(*id) {
-                Some(Value::Buffer { data, .. }) => data
-                    .get(position)
-                    .map(|byte| Value::Scalar(i64::from(*byte)))
-                    .ok_or_else(|| Diagnostic::new(span, "panic: slice index out of bounds")),
-                Some(Value::Vector { items, .. }) => items
-                    .get(position)
-                    .cloned()
-                    .ok_or_else(|| Diagnostic::new(span, "panic: slice index out of bounds")),
-                _ => Err(Diagnostic::new(
-                    span,
-                    "internal ownership error: dangling slice source",
-                )),
-            },
+            Value::Borrowed(id) => self
+                .heap
+                .with(*id, |value| match value {
+                    Value::Buffer { data, .. } => Some(
+                        data.get(position)
+                            .map(|byte| Value::Scalar(i64::from(*byte)))
+                            .ok_or_else(|| {
+                                Diagnostic::new(span, "panic: slice index out of bounds")
+                            }),
+                    ),
+                    Value::Vector { items, .. } => Some(items.get(position).cloned().ok_or_else(
+                        || Diagnostic::new(span, "panic: slice index out of bounds"),
+                    )),
+                    _ => None,
+                })
+                .flatten()
+                .unwrap_or_else(|| {
+                    Err(Diagnostic::new(
+                        span,
+                        "internal ownership error: dangling slice source",
+                    ))
+                }),
             _ => Err(Diagnostic::new(
                 span,
                 "internal error: invalid slice source",
@@ -3076,13 +3147,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         }
         match base.as_ref() {
             Value::Borrowed(id) => {
-                let Some(mut current) = self.heap.get(*id) else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "internal ownership error: dangling slice source",
-                    ));
-                };
-                match &mut current {
+                let id = *id;
+                self.heap
+                    .with_mut(id, |current| -> Result<()> {
+                match current {
                     Value::Buffer { data, .. } => {
                         let byte = u8::try_from(value.scalar())
                             .map_err(|_| Diagnostic::new(span, "panic: byte value out of range"))?;
@@ -3104,8 +3172,14 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         ));
                     }
                 }
-                self.heap.insert(*id, current);
                 Ok(())
+                    })
+                    .unwrap_or_else(|| {
+                        Err(Diagnostic::new(
+                            span,
+                            "internal ownership error: dangling slice source",
+                        ))
+                    })
             }
             _ => Err(Diagnostic::new(
                 span,
@@ -3787,19 +3861,23 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let Value::Borrowed(id) = args[0] else {
                     unreachable!()
                 };
-                let Some(Value::Vector { items, .. }) = self.heap.get(id) else {
-                    return Err(failure("internal ownership error: dangling vector"));
-                };
-                match op {
-                    VecOp::Len => Ok(Value::Scalar(items.len() as i64)),
-                    VecOp::Get => Ok(items[index_of(&args[1], items.len())?].clone()),
-                    _ => items
-                        .get(usize::try_from(args[1].scalar()).unwrap_or(usize::MAX))
-                        .cloned()
-                        .ok_or_else(|| {
-                            failure("internal error: proved vector index out of bounds")
-                        }),
-                }
+                self.heap
+                    .with(id, |value| {
+                        let Value::Vector { items, .. } = value else {
+                            return Err(failure("internal ownership error: dangling vector"));
+                        };
+                        match op {
+                            VecOp::Len => Ok(Value::Scalar(items.len() as i64)),
+                            VecOp::Get => Ok(items[index_of(&args[1], items.len())?].clone()),
+                            _ => items
+                                .get(usize::try_from(args[1].scalar()).unwrap_or(usize::MAX))
+                                .cloned()
+                                .ok_or_else(|| {
+                                    failure("internal error: proved vector index out of bounds")
+                                }),
+                        }
+                    })
+                    .unwrap_or_else(|| Err(failure("internal ownership error: dangling vector")))
             }
             VecOp::PushBorrowed | VecOp::SetBorrowed => {
                 let Value::Borrowed(id) = args[0] else {
@@ -6636,17 +6714,18 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             ExprKind::BytesAt(bytes, index) => {
                 let reference = value!(self.expr(bytes, frame));
                 let index = value!(self.expr(index, frame)).scalar();
-                let (_, data, _) = self.buffer(&reference, expr.span)?;
                 // The bound was proved statically; a failure here is a compiler bug.
-                let byte = data
-                    .get(usize::try_from(index).unwrap_or(usize::MAX))
+                let byte = self
+                    .with_buffer(&reference, expr.span, |data, _| {
+                        data.get(usize::try_from(index).unwrap_or(usize::MAX)).copied()
+                    })?
                     .ok_or_else(|| {
                         Diagnostic::new(
                             expr.span,
                             "internal error: proved byte index out of bounds",
                         )
                     })?;
-                Value::Scalar(i64::from(*byte))
+                Value::Scalar(i64::from(byte))
             }
             ExprKind::While(condition, body) => loop {
                 let test = value!(self.expr(condition, frame)).scalar();
@@ -7102,20 +7181,19 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                                 "internal ownership error: record field write has no matching field",
                             ));
                         }
-                        let mut vector = self.heap.get(owner).ok_or_else(|| {
-                            Diagnostic::new(
-                                expr.span,
-                                "internal ownership error: dangling element vector",
-                            )
-                        })?;
-                        let Value::Vector { items, .. } = &mut vector else {
+                        let stored = self.heap.with_mut(owner, |vector| match vector {
+                            Value::Vector { items, .. } => {
+                                items[index] = element;
+                                true
+                            }
+                            _ => false,
+                        });
+                        if stored != Some(true) {
                             return Err(Diagnostic::new(
                                 expr.span,
-                                "internal ownership error: element owner is not a vector",
+                                "internal ownership error: dangling element vector",
                             ));
-                        };
-                        items[index] = element;
-                        self.heap.insert(owner, vector);
+                        }
                     }
                     Value::SliceElementRef { view, index, steps } => {
                         let mut element = self.slice_element(&view, index, expr.span)?;

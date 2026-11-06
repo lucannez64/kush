@@ -294,3 +294,36 @@ fn lint_keeps_commented_and_linear_drops() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+/// EVAL-VEC-COST: `kush eval --fuel N` sets the reference evaluator's budget.
+#[test]
+fn eval_fuel_flag_sets_the_budget() {
+    let dir = std::env::temp_dir().join(format!("kush-cli-fuel-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("count.kush");
+    std::fs::write(
+        &file,
+        "fn main() -> i64 ! {panic} { let mut i = 0; while i < 5000 { i = i + 1; } i % 256 }",
+    )
+    .unwrap();
+    let run = |extra: &[&str]| {
+        command()
+            .arg("eval")
+            .arg(&file)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    assert_eq!(run(&[]).status.code(), Some(5000 % 256));
+    assert_eq!(run(&["--fuel", "1000000"]).status.code(), Some(5000 % 256));
+    let starved = run(&["--fuel", "100"]);
+    assert_eq!(starved.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&starved.stderr).contains("budget exhausted"));
+    for bad in [&["--fuel"][..], &["--fuel", "0"], &["--fuel", "many"]] {
+        assert_eq!(run(bad).status.code(), Some(2), "{bad:?}");
+    }
+    // `run` builds natively and has no evaluator budget.
+    let output = command().arg("run").arg(&file).args(["--fuel", "5"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}

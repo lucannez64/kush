@@ -244,6 +244,8 @@ pub(crate) struct AllocatorContextSpec {
 #[derive(Debug)]
 pub struct Executable {
     pub(crate) functions: Vec<Function>,
+    /// Step budget of the reference evaluator (per task); see `set_eval_fuel`.
+    pub(crate) eval_fuel: usize,
     /// Checked allocator-context shapes, referenced by `AllocatorContextNew`.
     pub(crate) allocator_contexts: Vec<AllocatorContextSpec>,
     pub(crate) entry: Option<usize>,
@@ -5689,6 +5691,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         foreign_functions[index] = Some(foreign);
     }
     let mut executable = Executable {
+        eval_fuel: crate::eval::DEFAULT_EVAL_FUEL,
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,
         uses_tasks: functions.uses_tasks,

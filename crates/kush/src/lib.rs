@@ -5,6 +5,7 @@ pub mod bindgen;
 pub mod check;
 mod coverage;
 mod eval;
+pub use eval::DEFAULT_EVAL_FUEL;
 pub use eval::Host;
 pub mod executable;
 mod facts;

@@ -20,7 +20,7 @@ Single files:\n\
   kush check <file.kush>\n\
   kush build <file.kush> -o <executable> [--stats] [--link <archive>] [--link-lib <name>]\n\
   kush run <file.kush> [--stats] [-- <program args>...]\n\
-  kush eval <file.kush> [--stats] [-- <program args>...]\n\n\
+  kush eval <file.kush> [--stats] [--fuel N] [-- <program args>...]\n\n\
 Projects (Kush.toml):\n\
   kush new <directory> [--name <name>]\n\
   kush check [--manifest-path <Kush.toml>] [--locked]\n\
@@ -650,6 +650,7 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
     let mut stats = (run_like && args.len() == 3 && args[2] == "--stats")
         || (command == "build" && build_stats);
     let mut program_arguments = Vec::new();
+    let mut fuel = None;
     let mut run_file_valid = false;
     if run_like {
         let mut index = 2;
@@ -660,6 +661,17 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
                 break;
             } else if args[index] == "--stats" {
                 stats = true;
+            } else if command == "eval" && args[index] == "--fuel" {
+                let Some(steps) = args
+                    .get(index + 1)
+                    .and_then(|value| value.to_str())
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|steps| *steps > 0)
+                else {
+                    return Err((2, "--fuel needs a positive step count".into()));
+                };
+                fuel = Some(steps);
+                index += 1;
             } else if command != "run" || !codegen_argument(args, &mut index, &mut codegen, "run")?
             {
                 run_file_valid = false;
@@ -744,8 +756,11 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
         }
     } else if command == "build" || command == "run" || command == "eval" {
         let program = load()?;
-        let checked = kush::executable::check_program(&program)
+        let mut checked = kush::executable::check_program(&program)
             .map_err(|e| (1, program.sources.render(&e)))?;
+        if let Some(fuel) = fuel {
+            checked.set_eval_fuel(fuel);
+        }
         if command == "eval" {
             let argv = std::iter::once(&args[1])
                 .chain(program_arguments.iter())

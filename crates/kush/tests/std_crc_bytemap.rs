@@ -32,8 +32,9 @@ fn native(source: &str) -> String {
     String::from_utf8(native.stdout).unwrap()
 }
 
-/// The reference evaluator has a fixed step budget, so it runs a small
-/// workload; native builds run a large one. Each must match `expected`.
+/// The reference evaluator has a step budget (10M by default) and is slower,
+/// so it runs a smaller workload; native builds run a large one. Each must
+/// match `expected`.
 fn agrees_scaled(source: &str, small: i64, large: i64, expected: impl Fn(i64) -> String) {
     assert_eq!(
         reference(&source.replace("@N@", &small.to_string())),
@@ -189,7 +190,7 @@ fn bytemap_agrees_with_a_hash_map() {
              drop(map);
              0
          }",
-        100,
+        3000,
         20000,
         model,
     );
@@ -250,4 +251,63 @@ fn bytemap_holds_records_and_reclaims_removed_keys() {
             format!("{}\n{sum}\n14695981039346656037\n", survivors.count())
         },
     );
+}
+
+/// EVAL-VEC-COST: element reads and writes do not copy the vector or byte
+/// buffer, so the evaluator's cost per step does not grow with the length.
+/// The budget is configurable and reported when exhausted.
+#[test]
+fn evaluator_vector_steps_do_not_scale_with_length() {
+    let source = |length: i64| {
+        format!(
+            "fn main() -> i64 ! {{io, alloc, panic}} {{
+                let mut v: Vec<i64> = Vec.with_capacity({length});
+                let mut b = Bytes.with_capacity({length});
+                let mut i = 0;
+                while i < {length} {{ v = Vec.push(v, i); b = Bytes.push(b, i % 256); i = i + 1; }}
+                let mut sum = 0;
+                let mut k = 0;
+                while k < 20000 {{
+                    let j = k % {length};
+                    let old = Vec.get(&v, j);
+                    v = Vec.set(v, j, old + 1);
+                    sum = sum + Vec.len(&v) + Bytes.get(&b, j) + Bytes.len(&b);
+                    k = k + 1;
+                }}
+                print_i64(sum % 1000003);
+                print_i64(Vec.get(&v, 0));
+                drop(v);
+                drop(b);
+                0
+            }}"
+        )
+    };
+    let expected = |length: i64| {
+        let mut sum: i64 = 0;
+        for k in 0..20000i64 {
+            let j = k % length;
+            sum += length + (j % 256) + length;
+        }
+        let first = 20000 / length + i64::from(20000 % length > 0);
+        format!("{}\n{first}\n", sum % 1000003)
+    };
+    let short = std::time::Instant::now();
+    assert_eq!(agrees(&source(10)), expected(10));
+    let short = short.elapsed();
+    let long = std::time::Instant::now();
+    assert_eq!(agrees(&source(20000)), expected(20000));
+    let long = long.elapsed();
+    // Copying a 20000-element vector per read would take hundreds of times
+    // longer; allow wide noise (native build time dominates both runs).
+    assert!(long < short * 20 + std::time::Duration::from_secs(5), "{short:?} vs {long:?}");
+
+    // A small budget is exhausted with a clear error; a larger one runs.
+    let mut program = check(&source(10)).unwrap();
+    program.set_eval_fuel(1000);
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(error.message.contains("budget exhausted"), "{error:?}");
+    program.set_eval_fuel(kush::DEFAULT_EVAL_FUEL);
+    assert_eq!(program.eval_fuel(), 10_000_000);
+    let mut output = Vec::new();
+    assert_eq!(program.evaluate(&mut output).unwrap(), 0);
 }
