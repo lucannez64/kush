@@ -869,14 +869,6 @@ fn capturing_capabilities_stay_checked() {
             .replace("fn step(op: cap Ask ! {panic}", "fn step(op: cap Ask ! {}"),
         "cap Op ! {panic}",
     );
-    // A handler with effects is not dynamically visible, so it has no frame.
-    rejects(
-        &capturing("step(ask, 2)", "print_i64(x); k(x ^ Box.take(base))").replace(
-            "k: linear once fn(i64) -> i64 ! {}) -> i64 ! {}",
-            "k: linear once fn(i64) -> i64 ! {}) -> i64 ! {io, panic}",
-        ),
-        "capturing or multishot",
-    );
     // A perform through it inside a nested handle of the callee.
     rejects(
         &capturing("nested(ask, 2)", handler).replace(
@@ -887,5 +879,60 @@ fn capturing_capabilities_stay_checked() {
              fn main()",
         ),
         "nested",
+    );
+}
+
+/// CAP-CAPTURING-LEXICAL: a capturing handler with effects is not
+/// dynamically visible; it gets a frame under a private operation id that
+/// only its trampoline looks up. By-name performs still reach outer handlers.
+fn effectful(body: &str) -> String {
+    format!(
+        "effect Ask: i64 -> i64;
+         fn step(op: cap Ask ! {{io, panic}}, x: i64) -> i64 ! {{io, panic}} {{ perform op(x) + 1 }}
+         fn skip(op: cap Ask ! {{io, panic}}, x: i64) -> i64 ! {{io, panic}} {{ if x > 100 {{ perform op(x) }} else {{ x }} }}
+         fn by_name(x: i64) -> i64 ! {{Ask, panic}} {{ perform Ask(x) }}
+         fn main() -> i64 ! {{io, alloc, panic}} {{
+             handle Ask: i64 -> i64 with fn(y: i64, r: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{}} {{ r(y ^ 100) }} {{
+                 let base = Box.new(41);
+                 let r = handle Ask: i64 -> i64 as ask with fn(x: i64, k: linear once fn(i64) -> i64 ! {{}}) -> i64 ! {{io, panic}} {{
+                     print_i64(x);
+                     let r = k(x ^ Box.take(base));
+                     print_i64(r);
+                     r ^ 8
+                 }} {{ let held = Box.new(7); let t = {body}; t + Box.take(held) }};
+                 r
+             }}
+         }}"
+    )
+}
+
+#[test]
+fn effectful_capturing_capabilities_cross_calls() {
+    // step(ask, 2): the handler prints 2, resumes with 2 ^ 41 = 43; the rest
+    // gives 43 + 1 + 7 = 51 (printed), and the handler returns 51 ^ 8.
+    agrees(&effectful("step(ask, 2)"), 59, "2\n51\n");
+    // Never performed: the private frame drops the handler's environment.
+    agrees(&effectful("skip(ask, 2)"), 9, "");
+    // A by-name perform reaches the outer handler, not the private frame.
+    agrees(
+        &effectful("by_name(5) + skip(ask, 1)"),
+        (5 ^ 100) + 1 + 7,
+        "",
+    );
+    // The parameter's row must hold the handler's effects and `panic`.
+    rejects(
+        &effectful("step(ask, 2)").replace(
+            "fn step(op: cap Ask ! {io, panic}",
+            "fn step(op: cap Ask ! {panic}",
+        ),
+        "handler's own effects",
+    );
+    // A second perform through the consumed frame panics.
+    let source = effectful("step(ask, step(ask, 1))");
+    let program = check(&source).unwrap_or_else(|error| panic!("{error:?}"));
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(
+        error.message.contains("no dynamically active handler"),
+        "{error:?}"
     );
 }

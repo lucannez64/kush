@@ -18,6 +18,9 @@ mod recursive_lifetimes;
 
 type Result<T> = std::result::Result<T, Diagnostic>;
 pub(crate) const PANIC: u16 = 1;
+/// CAP-CAPTURING-LEXICAL: operation ids above this name private frames of
+/// capability-only capturing handlers; no declared operation reaches them.
+pub(crate) const PRIVATE_OPERATION_BASE: usize = 1 << 20;
 pub(crate) const IO: u16 = 2;
 pub(crate) const ALLOC: u16 = 4;
 pub(crate) const SUSPEND: u16 = 8;
@@ -4913,6 +4916,8 @@ struct Functions<'a> {
     dynamic_dispatch: BTreeMap<(BindingId, TraitArguments, String), (usize, Type)>,
     /// EFF-CAP-RESUME-CAPTURING trampolines by (operation, handler arrow).
     capability_thunks: BTreeMap<(usize, usize), (usize, Type)>,
+    /// CAP-CAPTURING-LEXICAL: private operation ids handed out so far.
+    private_operations: usize,
     /// Registered members of each dynamically dispatched object specialization.
     /// Indexed by `Type::DynObj`. A member identifier is its position here.
     dyn_members: Vec<Vec<DynMember>>,
@@ -5323,6 +5328,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         object_traits: BTreeMap::new(),
         dynamic_dispatch: BTreeMap::new(),
         capability_thunks: BTreeMap::new(),
+        private_operations: 0,
         dyn_members: Vec::new(),
         dyn_methods: BTreeMap::new(),
         dyn_upcasts: BTreeSet::new(),
@@ -12598,7 +12604,7 @@ struct Checker<'a, 't> {
     capability_resumable: BTreeSet<usize>,
     /// EFF-CAP-RESUME-CAPTURING: capability slots of capturing handlers kept
     /// in their dynamic frame: declared operation id and handler arrow type.
-    capability_framed: BTreeMap<usize, (usize, usize)>,
+    capability_framed: BTreeMap<usize, (usize, usize, u16)>,
     /// `cap` parameters of this function: they may be bound to a handler
     /// with code after `resume`, so a lambda cannot capture them.
     capability_parameter_slots: BTreeSet<usize>,
@@ -30132,8 +30138,10 @@ impl Checker<'_, '_> {
                 // gets a trampoline that performs the operation there. The
                 // argument is a placeholder (the capability local at the
                 // parameter's type) until the body's await points are marked.
-                if let Some((operation, arrow)) = self.capability_framed.get(&slot).copied() {
-                    let (_, ty) = self.capability_thunk(operation, arrow, value.span)?;
+                if let Some((operation, arrow, effects)) =
+                    self.capability_framed.get(&slot).copied()
+                {
+                    let (_, ty) = self.capability_thunk(operation, arrow, effects, value.span)?;
                     let Some(wanted) = wanted else {
                         return Err(Diagnostic::new(
                             value.span,
@@ -30143,7 +30151,7 @@ impl Checker<'_, '_> {
                     if !self.subtype(ty, wanted) {
                         return Err(Diagnostic::new(
                             value.span,
-                            "this capability's handler is capturing, so a second perform through it panics: pass it to a 'cap Op ! {panic}' parameter",
+                            "this capability's handler is capturing, so a second perform through it panics: pass it to a 'cap Op ! {panic}' parameter (whose row also holds the handler's own effects)",
                         ));
                     }
                     constraints.push((declared, wanted));
@@ -32966,7 +32974,14 @@ impl Checker<'_, '_> {
             &handler_value.kind,
             ExprKind::FnValue { captures, .. } if captures.is_empty()
         ) && matches!(handler_value.ty, Type::Fn(_));
-        let framed = capability.is_some() && declared.is_some() && !multishot && !noncapturing;
+        // CAP-CAPTURING-LEXICAL: a capturing handler with effects is not
+        // dynamically visible; it gets a frame under a private operation id
+        // that only its trampoline looks up.
+        let private_frame = capability_only && !multishot && !noncapturing;
+        let framed = capability.is_some()
+            && (declared.is_some() || private_frame)
+            && !multishot
+            && !noncapturing;
         let region = ((!tail_resumptive_handler(self.resolution, handler)
             || shadows_handler_effects)
             && (lexical || declared.is_some() || capability_awaits))
@@ -32982,12 +32997,24 @@ impl Checker<'_, '_> {
         if capability_resumable {
             self.capability_resumable.insert(slot);
         }
-        if framed && region {
-            let operation_id = declared
-                .expect("a framed capability has a declared operation")
-                .id;
+        // Only when the capability is passed to a call: in its own body the
+        // handler is performed through its local.
+        let passes_capability = capability.as_ref().is_some_and(|(_, binder)| {
+            self.resolution
+                .binder(*binder)
+                .is_some_and(|id| block_passes_binding(self.resolution, body, id))
+        });
+        let private_operation =
+            (framed && region && passes_capability && declared.is_none()).then(|| {
+                self.functions.private_operations += 1;
+                PRIVATE_OPERATION_BASE + self.functions.private_operations
+            });
+        if framed
+            && region
+            && let Some(operation_id) = declared.map(|declared| declared.id).or(private_operation)
+        {
             self.capability_framed
-                .insert(slot, (operation_id, handler_id));
+                .insert(slot, (operation_id, handler_id, signature.effects));
         }
         let handler_function = match &handler_value.kind {
             ExprKind::FnValue { function, captures } if captures.is_empty() => Some(*function),
@@ -33059,10 +33086,14 @@ impl Checker<'_, '_> {
         self.handlers.pop();
         let inner = checked?;
         let ty = inner.ty;
-        let tail = match declared.filter(|_| !multishot) {
-            Some(declared) => Expr {
+        let pushed = declared
+            .filter(|_| !multishot)
+            .map(|declared| declared.id)
+            .or(private_operation);
+        let tail = match pushed {
+            Some(operation) => Expr {
                 kind: ExprKind::HandlerPush {
-                    operation: declared.id,
+                    operation,
                     handler: Box::new(Expr {
                         kind: ExprKind::Local(slot),
                         ty: handler_type,
@@ -33104,6 +33135,7 @@ impl Checker<'_, '_> {
         &mut self,
         operation: usize,
         arrow: usize,
+        effects: u16,
         span: Span,
     ) -> Result<(usize, Type)> {
         if let Some(found) = self.functions.capability_thunks.get(&(operation, arrow)) {
@@ -33112,10 +33144,12 @@ impl Checker<'_, '_> {
         let handler = self.types.function_types[arrow].clone();
         let parameters = handler.parameters.clone();
         let result = handler.result;
+        // The trampoline has the handler's effects (a capability-only
+        // handler may have some) and `panic` for a consumed frame.
         let id = self.types.function_type_with(
             parameters.clone(),
             result,
-            PANIC,
+            PANIC | effects,
             vec![None; parameters.len()],
             None,
             false,
@@ -33186,7 +33220,7 @@ impl Checker<'_, '_> {
             name: function.name.clone(),
             parameters: parameters.clone(),
             result,
-            effects: PANIC,
+            effects: PANIC | effects,
             span,
             substitution: BTreeMap::new(),
             consts: BTreeMap::new(),
@@ -34195,14 +34229,14 @@ impl Checker<'_, '_> {
         }
         if let Some(slot) = site.capability_slot {
             self.mark_capability_awaits_in_block(&mut block, slot)?;
-            if let Some((operation, arrow)) = self.capability_framed.get(&slot).copied() {
+            if let Some((operation, arrow, effects)) = self.capability_framed.get(&slot).copied() {
                 for statement in &mut block.statements {
                     if let Statement::Let(_, value) | Statement::Expr(value) = statement {
-                        self.replace_framed_arguments(value, slot, operation, arrow)?;
+                        self.replace_framed_arguments(value, slot, operation, arrow, effects)?;
                     }
                 }
                 if let Some(tail) = block.tail.as_deref_mut() {
-                    self.replace_framed_arguments(tail, slot, operation, arrow)?;
+                    self.replace_framed_arguments(tail, slot, operation, arrow, effects)?;
                 }
             }
         }
@@ -34382,11 +34416,12 @@ impl Checker<'_, '_> {
         slot: usize,
         operation: usize,
         arrow: usize,
+        effects: u16,
     ) -> Result<()> {
         if matches!(expr.kind, ExprKind::Local(local) if local == slot)
             && expr.ty != self.locals[slot].ty
         {
-            let (function, ty) = self.capability_thunk(operation, arrow, expr.span)?;
+            let (function, ty) = self.capability_thunk(operation, arrow, effects, expr.span)?;
             let thunk = Expr {
                 kind: ExprKind::FnValue {
                     function,
@@ -34402,7 +34437,7 @@ impl Checker<'_, '_> {
         let mut result = Ok(());
         expr.for_each_child_mut(&mut |child| {
             if result.is_ok() {
-                result = self.replace_framed_arguments(child, slot, operation, arrow);
+                result = self.replace_framed_arguments(child, slot, operation, arrow, effects);
             }
         });
         result
@@ -37366,6 +37401,32 @@ fn tail_resumptive_handler(resolution: &Resolution, handler: &ast::Expr) -> bool
 /// Visit the direct child expressions of an AST expression; blocks are
 /// expanded into their statement values and tail. Lambda bodies are
 /// children too; callers that must not enter them check for lambdas first.
+/// Whether a call in `block` passes the binding by name as an argument
+/// (CAP-CAPTURING-LEXICAL: a capability given to a callee).
+fn block_passes_binding(resolution: &Resolution, block: &ast::Block, id: BindingId) -> bool {
+    fn expr(resolution: &Resolution, e: &ast::Expr, id: BindingId) -> bool {
+        if let ast::ExprKind::Call { arguments, .. } = &e.kind
+            && arguments.iter().any(|argument| {
+                matches!(argument.kind, ast::ExprKind::Name(_))
+                    && resolution.reference(argument.span) == Some(id)
+            })
+        {
+            return true;
+        }
+        let mut found = false;
+        ast_children(e, &mut |child| found = found || expr(resolution, child, id));
+        found
+    }
+    block.statements.iter().any(|statement| match statement {
+        ast::Statement::Let { value, .. } | ast::Statement::Expr(value) => {
+            expr(resolution, value, id)
+        }
+    }) || block
+        .tail
+        .as_deref()
+        .is_some_and(|tail| expr(resolution, tail, id))
+}
+
 pub(crate) fn ast_children<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::Expr)) {
     fn block<'a>(block: &'a ast::Block, f: &mut dyn FnMut(&'a ast::Expr)) {
         for statement in &block.statements {

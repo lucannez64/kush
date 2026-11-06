@@ -283,8 +283,16 @@ their token). Tests: `capturing_capabilit*` in
   panic, in both backends. So the callee's parameter must allow it:
   `cap Op ! {panic}` (otherwise "pass it to a 'cap Op ! {panic}'
   parameter"). A copyable capturing `fn` handler is never consumed.
-- Still rejected: capturing handlers of lexical (undeclared) operations and
-  capturing handlers with effects (no dynamic frame), and multishot ones.
+- **Handlers with effects (CAP-CAPTURING-LEXICAL).** A capturing handler
+  with effects is capability-only: it is not dynamically visible, since a
+  perform by name would hide its effects. When its body passes the
+  capability to a call, the handler is pushed as a frame under a private
+  operation id (above `PRIVATE_OPERATION_BASE`) that no declared operation
+  uses; only its trampoline looks that id up, so performs by name still
+  reach outer handlers (tested). The trampoline's row is the handler's row
+  plus `panic`, so the parameter must be `cap Op ! {e, panic}`.
+- Still rejected: multishot capturing handlers, and performing a `once`
+  handler both in its own body and through a callee (the frame owns it).
 
 **Use-after-free review.** The environment is owned by the frame from the
 push until a perform takes it (the frame then holds nothing) or the pop
