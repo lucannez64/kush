@@ -81,6 +81,9 @@ actual arguments, as `!guard || P`:
 - `if is_accepted(d) { .. }` adds the `result => ..` fact in the branch;
 - a call nested as an argument (`is_accepted(decide(x, 50))`) passes its
   identity on.
+- a method call `value.method(args)` is a call with the receiver as its
+  first argument (ENSURES-METHODS): `match l.decide(7) { .. }` and
+  `if l.allows(x) { .. }` know the method's clauses about `self` and `x`.
 
 - a call in the right operand of `&&` or `||` keeps its facts after the
   expression, guarded by the condition under which it ran:
@@ -125,8 +128,8 @@ rejected and has a regression test (`review_regressions_for_postconditions`):
 
 ## Limits
 
-- Method calls (`value.method()`) do not yet receive postcondition facts;
-  only direct calls of named functions do.
+- A reference parameter (`&T`, including `self: &Self`) cannot be mentioned
+  in a postcondition; methods taking `self: Self` can.
 - `match` on a `Bool` with `true`/`false` arms does not record the condition;
   use `if`.
 - A struct literal whose fields are written out of declaration order is

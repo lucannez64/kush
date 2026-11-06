@@ -432,3 +432,112 @@ fn range_proofs_use_bounds_of_other_terms() {
         7,
     );
 }
+
+// ENSURES-METHODS: `value.method()` receives the method's postconditions,
+// with the receiver as the first argument.
+const LIMITS: &str = "
+enum Decision { Accept(i64), Reject }
+struct Limit { max: i64 }
+impl Limit {
+    fn decide(self: Self, x: i64) -> Decision ! {}
+        ensures Accept(v) => { v == x && x <= self.max }
+        ensures Reject => { x > self.max }
+    {
+        if x <= self.max { Decision.Accept(x) } else { Decision.Reject }
+    }
+    fn allows(self: Self, x: i64) -> Bool ! {}
+        ensures result => { x <= self.max }
+        ensures !result => { x > self.max }
+    {
+        x <= self.max
+    }
+}
+fn at_most_ten(v: i64, erased p: { v <= 10 }) -> i64 ! {} { v }
+";
+
+#[test]
+fn method_calls_receive_postconditions() {
+    // A match arm knows the variant's clause; a Bool method guards a branch.
+    agrees(
+        &format!(
+            "{LIMITS}
+            fn main() -> i64 ! {{panic}} {{
+                let l = Limit {{ max: 10 }};
+                let a = match l.decide(7) {{
+                    Decision.Accept(v) => at_most_ten(v, _),
+                    Decision.Reject => 0,
+                }};
+                let m = Limit {{ max: 10 }};
+                let b = if m.allows(9) {{ at_most_ten(9, _) }} else {{ 0 }};
+                a + b
+            }}"
+        ),
+        16,
+    );
+    // A theorem about a method call, proved, not tested.
+    agrees(
+        &format!(
+            "{LIMITS}
+            fn never_over(x: i64) -> Bool ! {{}} ensures {{ !result }} {{
+                if x > 100 {{ Limit {{ max: 50 }}.allows(x) }} else {{ false }}
+            }}
+            fn main() -> i64 ! {{panic}} {{ if never_over(150) {{ 1 }} else {{ 2 }} }}"
+        ),
+        2,
+    );
+    // The receiver is a field path of the caller's parameter.
+    agrees(
+        &format!(
+            "{LIMITS}
+            struct Policy {{ limit: Limit, slack: i64 }}
+            fn admits(p: Policy, x: i64) -> Bool ! {{}}
+                ensures result => {{ x <= p.limit.max }}
+            {{
+                let Policy {{ limit, slack }} = p;
+                limit.allows(x)
+            }}
+            fn main() -> i64 ! {{panic}} {{
+                if admits(Policy {{ limit: Limit {{ max: 3 }}, slack: 0 }}, 2) {{ 5 }} else {{ 6 }}
+            }}"
+        ),
+        5,
+    );
+}
+
+#[test]
+fn method_postconditions_do_not_prove_more_than_they_say() {
+    rejects(
+        &format!(
+            "{LIMITS}
+            fn main() -> i64 ! {{panic}} {{
+                let l = Limit {{ max: 11 }};
+                match l.decide(7) {{
+                    Decision.Accept(v) => at_most_ten(v + 4, _),
+                    Decision.Reject => 0,
+                }}
+            }}"
+        ),
+        "cannot prove",
+    );
+    rejects(
+        &format!(
+            "{LIMITS}
+            fn wrong(x: i64) -> Bool ! {{}} ensures {{ !result }} {{
+                if x > 40 {{ Limit {{ max: 50 }}.allows(x) }} else {{ false }}
+            }}
+            fn main() -> i64 ! {{panic}} {{ 0 }}"
+        ),
+        "cannot prove",
+    );
+    // The negative branch only knows the !result clause.
+    rejects(
+        &format!(
+            "{LIMITS}
+            fn main() -> i64 ! {{panic}} {{
+                let m = Limit {{ max: 10 }};
+                if m.allows(9) {{ 0 }} else {{ at_most_ten(11, _) }}
+            }}"
+        ),
+        "cannot prove",
+    );
+}

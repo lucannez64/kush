@@ -16085,6 +16085,14 @@ impl Checker<'_, '_> {
             span,
             resource: None,
         };
+        // ENSURES-METHODS: a method call gets its postconditions like a
+        // direct call; the receiver is the first argument.
+        if !f.ensures.is_empty()
+            && ty != Type::Never
+            && let ExprKind::Call(_, arguments) = &value.kind
+        {
+            self.assume_postconditions(f, arguments, span, ty);
+        }
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
