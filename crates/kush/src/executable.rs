@@ -6079,6 +6079,7 @@ impl ContractNames {
                         source: field.source.clone(),
                         ty: self.ty(&field.ty),
                         span: field.span,
+                        public: field.public,
                     })
                     .collect(),
                 open: *open,
@@ -13081,6 +13082,7 @@ impl Checker<'_, '_> {
                             "field access requires a nominal record",
                         ));
                     };
+                    self.check_layout_field_visible(id, name, expr.span)?;
                     let variant = &self.types.enums[id].variants[0];
                     let Some(index) = variant.names.iter().position(|field| field == name) else {
                         return Err(Diagnostic::new(
@@ -18593,6 +18595,7 @@ impl Checker<'_, '_> {
                 source: None,
                 ty: field.ty.clone(),
                 span: field.span,
+                public: true,
             });
         }
         let mut seen_sources = BTreeSet::new();
@@ -18686,6 +18689,7 @@ impl Checker<'_, '_> {
                 .and_then(|rename| rename.get(name))
                 .map(String::as_str)
                 .unwrap_or(name);
+            self.check_layout_field_visible(source_layout, source_name, span)?;
             let Some(source_index) = source_variant
                 .names
                 .iter()
@@ -27264,6 +27268,24 @@ impl Checker<'_, '_> {
             }
         }
     }
+    /// FIELD-PRIVACY: a field without `pub` is visible only inside the module
+    /// that declares its struct.
+    fn check_field_visible(&self, definition: BindingId, name: &str, span: Span) -> Result<()> {
+        let unit = self.resolution.unit_of.get(&definition);
+        if unit.is_none_or(|unit| *unit == self.unit) || self.types.field_public(definition, name) {
+            return Ok(());
+        }
+        Err(Diagnostic::new(
+            span,
+            format!(
+                "field '{name}' of '{}' is private to its module; mark it 'pub' or use the module's functions",
+                self.resolution.bindings[definition].name
+            ),
+        ))
+    }
+    fn check_layout_field_visible(&self, layout: usize, name: &str, span: Span) -> Result<()> {
+        self.check_field_visible(self.types.enums[layout].definition, name, span)
+    }
     fn record_offset(&self, ty: Type, name: &str, span: Span) -> Result<(usize, Type)> {
         let Some(id) = ty.layout().filter(|id| self.types.enums[*id].record) else {
             return Err(Diagnostic::new(
@@ -27274,6 +27296,7 @@ impl Checker<'_, '_> {
                 ),
             ));
         };
+        self.check_layout_field_visible(id, name, span)?;
         let variant = &self.types.enums[id].variants[0];
         let Some(index) = variant.names.iter().position(|n| n == name) else {
             return if self.types.enums[id].tuple {
@@ -30538,6 +30561,10 @@ impl Checker<'_, '_> {
             .filter(|id| self.types.is_record(*id))
             .ok_or_else(|| Diagnostic::new(base.span, "expected a record (struct) type name"))?;
         let (generics, declared) = self.types.record_fields(id);
+        // Building a record needs every field, so every one must be visible.
+        for field in declared {
+            self.check_field_visible(id, &field.name, span)?;
+        }
         for (name, value) in fields {
             if !declared.iter().any(|f| f.name == *name) {
                 return Err(Diagnostic::new(
@@ -30997,6 +31024,9 @@ impl Checker<'_, '_> {
         let mut offset = self.types.enums[layout].tag_words();
         for (index, field_ty) in variant.fields.iter().enumerate() {
             let sub = fields.iter().find(|(n, _)| *n == variant.names[index]);
+            if let Some((name, p)) = sub {
+                self.check_layout_field_visible(layout, name, p.span)?;
+            }
             let p = match sub {
                 Some((_, p)) => self.pattern(p, *field_ty, bindings)?,
                 None => Pattern::Any,
@@ -34777,6 +34807,9 @@ impl Checker<'_, '_> {
                 let mut offset = c.types.enums[layout].tag_words();
                 for (index, field_ty) in variant.fields.iter().enumerate() {
                     let sub = fields.iter().find(|(n, _)| *n == variant.names[index]);
+                    if let Some((name, p)) = sub {
+                        c.check_layout_field_visible(layout, name, p.span)?;
+                    }
                     let p = match sub {
                         Some((_, p)) => c.pattern(p, *field_ty, bindings)?,
                         None => Pattern::Any,
@@ -35335,6 +35368,7 @@ pub(crate) fn substitute_alias_type(
                     source: field.source.clone(),
                     ty: substitute_alias_type(resolution, &field.ty, map),
                     span: field.span,
+                    public: field.public,
                 })
                 .collect(),
             open: *open,

@@ -365,6 +365,7 @@ impl Parser {
     fn field_list(&mut self, end: Kind) -> Result<Vec<Field>> {
         self.separated(end, |p| {
             let start = p.current().span;
+            let public = p.eat(&Kind::Pub);
             let name = p.ident()?;
             p.expect(&Kind::Colon, "':' after field name")?;
             let ty = p.ty()?;
@@ -373,6 +374,7 @@ impl Parser {
                 source: None,
                 ty,
                 span: p.since(start),
+                public,
             })
         })
     }
@@ -1101,6 +1103,7 @@ impl Parser {
                     source,
                     ty,
                     span: self.since(field_start),
+                    public: true,
                 });
                 if !self.eat(&Kind::Comma) {
                     break;

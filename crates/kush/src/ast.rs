@@ -277,6 +277,9 @@ pub struct Field {
     pub source: Option<String>,
     pub ty: Type,
     pub span: Span,
+    /// `pub` on a struct field: visible outside the struct's module
+    /// (FIELD-PRIVACY). Ignored for enum payloads and structural rows.
+    pub public: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Variant {

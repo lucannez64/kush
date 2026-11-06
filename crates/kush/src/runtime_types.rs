@@ -1699,6 +1699,15 @@ impl<'a> Types<'a> {
         let d = self.definitions[&id];
         (d.generics, d.fields.unwrap())
     }
+    /// Whether field `name` of the record definition `id` is `pub`. Fields of
+    /// anything but a declared struct (tuples, structural rows) are public.
+    pub fn field_public(&self, id: BindingId, name: &str) -> bool {
+        self.definitions
+            .get(&id)
+            .and_then(|d| d.fields)
+            .and_then(|fields| fields.iter().find(|field| field.name == name))
+            .is_none_or(|field| field.public)
+    }
     pub fn record_lifetimes(&self, id: BindingId) -> &'a [ast::Lifetime] {
         self.definitions[&id].lifetimes
     }

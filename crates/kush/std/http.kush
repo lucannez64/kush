@@ -9,9 +9,9 @@ use std.text;
 /// chunk framing when the server sends `Transfer-Encoding: chunked`.
 
 pub struct Response {
-    status: i64,
-    headers: Bytes,
-    body: Bytes,
+    pub status: i64,
+    pub headers: Bytes,
+    pub body: Bytes,
 }
 
 pub fn response_status(response: &Response) -> i64 ! {} {

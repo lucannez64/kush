@@ -416,7 +416,7 @@ fn cross_module_methods_require_public_visibility() {
     std::fs::write(
         root.join("demo").join("point.kush"),
         r#"module demo.point;
-        pub struct Point { x: i64, y: i64 }
+        pub struct Point { pub x: i64, pub y: i64 }
         pub trait Describe { fn describe(self: Self) -> i64 ! {panic}; }
         impl Point {
             pub fn sum(self: Point) -> i64 ! {panic} { self.x + self.y }

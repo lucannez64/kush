@@ -106,6 +106,17 @@ The root project imports its own modules with `use hello.util;`, and dependency
 packages with `use words;` or `use words.plural;`. The entry file is registered
 as the package root module, so it is not also available as `hello.main`.
 
+Items are private to their module unless marked `pub`. Struct fields are
+private too (FIELD-PRIVACY, 2026-11-06): outside the module that declares a
+struct, only its `pub` fields can be read, written, matched, converted, or
+supplied in a struct literal, so a struct with a private field can only be
+built by its module's functions.
+
+```kush
+pub struct Permit { pub label: i64, revision: i64 }
+pub fn mint(revision: i64) -> Permit ! {} { Permit { label: 7, revision: revision } }
+```
+
 Files under `src/` and `tests/` are indexed. File and directory names must be
 ASCII identifiers so a module path can be derived without ambiguity. Symlinked
 directories are not followed, hidden directories and `target/` are skipped, and

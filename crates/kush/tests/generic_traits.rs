@@ -585,7 +585,7 @@ fn cross_module_generic_traits_and_methods_require_visibility() {
     std::fs::write(
         root.join("demo").join("generic.kush"),
         r#"module demo.generic;
-        pub struct Point { x: i64 }
+        pub struct Point { pub x: i64 }
         pub trait Convert<T> { fn render(self: Self) -> T ! {panic}; }
         impl Convert<i64> for Point {
             pub fn render(self: Self) -> i64 ! {panic} { self.x }

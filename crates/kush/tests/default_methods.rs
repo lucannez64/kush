@@ -422,7 +422,7 @@ fn cross_module_defaults_inherit_the_trait_visibility() {
     std::fs::write(
         root.join("demo").join("show.kush"),
         r#"module demo.show;
-        pub struct Marker { x: i64 }
+        pub struct Marker { pub x: i64 }
         fn bias() -> i64 ! {} { 40 }
         pub trait Show {
             fn show(self: Self) -> i64 ! {panic} { bias() + 2 }
@@ -475,7 +475,7 @@ fn cross_module_defaults_inherit_the_trait_visibility() {
     std::fs::write(
         root.join("demo").join("show.kush"),
         r#"module demo.show;
-        pub struct Marker { x: i64 }
+        pub struct Marker { pub x: i64 }
         trait Show {
             fn show(self: Self) -> i64 ! {} { 42 }
         }
