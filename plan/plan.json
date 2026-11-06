@@ -4359,10 +4359,26 @@
       "size": "L",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "Cranelift does not inline: the VELA policy written like Rust (predicate calls) takes 23.5 ns/decision vs 11.9 ns with the conditions written out, Rust 3.3 ns. Inline small non-recursive direct calls, measured on that benchmark.",
-      "commit": null,
-      "log": []
+      "commit": "6897e55",
+      "log": [
+        {
+          "time": "2026-11-06 17:28:45",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 17:43:15",
+          "who": "agent",
+          "text": "Cranelift library inliner, callee <= 96 CLIF insts, non-recursive, release builds. Measured: policy predicates 20.5 -> 14.2 ns/decision, written-out 9.6 -> 9.0, effects direct-call 19.9 -> 7.6 ms, JSON/unboxing within noise or alignment. Workaround for Cranelift 0.135 not remapping data symbols. Whole suite passed with inlining forced on. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 17:43:15",
+          "who": "agent",
+          "text": "done 6897e55"
+        }
+      ]
     },
     {
       "id": "ENSURES-PREDICATES",
@@ -4457,10 +4473,26 @@
       "size": "L",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "VELA cannot call the Kush policy: Kush builds executables and calls Rust, but cannot produce a static library with a C ABI for Rust callers.",
-      "commit": null,
-      "log": []
+      "commit": "c207faa",
+      "log": [
+        {
+          "time": "2026-11-06 17:34:29",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 17:43:15",
+          "who": "agent",
+          "text": "export \"symbol\" fn + kush build --lib lib<name>.a + generated Rust bindings with a Send/!Sync Library token (user-approved). v1: scalars, {} or {panic}. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 17:43:15",
+          "who": "agent",
+          "text": "done c207faa"
+        }
+      ]
     },
     {
       "id": "STD-FILE",
@@ -4684,6 +4716,32 @@
       ],
       "status": "todo",
       "desc": "A &T parameter (including self: &Self) cannot be mentioned in an ensures clause; shared references could denote the referent's value for the call.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EXPORT-RECORDS",
+      "title": "Exports with records and Bytes",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "KUSH-RUST-EXPORT"
+      ],
+      "status": "todo",
+      "desc": "KUSH-RUST-EXPORT v1 crosses scalars only; VELA's ShareAdmissionFacts needs a #[repr(C)] record or per-field wrapper. Also: thread-local runtime state would allow Sync.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "INLINE-RECORD-PARAMS",
+      "title": "Keep by-value record parameters in registers",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "NATIVE-INLINE"
+      ],
+      "status": "todo",
+      "desc": "After inlining, each predicate still copies its by-value record through a stack slot (Cranelift has no SROA/dead-store elimination); the VELA predicate policy stays at 14.2 ns vs 9.0 written out.",
       "commit": null,
       "log": []
     }
