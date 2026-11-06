@@ -4307,10 +4307,21 @@
         "PROVE-DISJ",
         "OVERFLOW-ELIDE"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "ensures postconditions (user-approved syntax): ensures {P}, result => {P}, !result => {P}, Variant(x) => {P}; field, tag and call-result terms; callers get the facts in branches and match arms.",
-      "commit": null,
-      "log": []
+      "commit": "f5c4626",
+      "log": [
+        {
+          "time": "2026-11-06 02:28:30",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 03:16:24",
+          "who": "agent",
+          "text": "done f5c4626"
+        }
+      ]
     },
     {
       "id": "VELA-KUSH-PORT-V2",
