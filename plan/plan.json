@@ -4354,17 +4354,6 @@
       ]
     },
     {
-      "id": "x",
-      "title": "",
-      "size": "M",
-      "hard": false,
-      "deps": [],
-      "status": "todo",
-      "desc": "",
-      "commit": null,
-      "log": []
-    },
-    {
       "id": "NATIVE-INLINE",
       "title": "Inline small direct calls in the native backend",
       "size": "L",
