@@ -4491,14 +4491,24 @@
         "STD-CRC32",
         "STD-BYTEMAP"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Bitcask-style log store (~1500 lines) in ~/Projects/kush-kv: proved record framing, recovery state machine, compaction and generation rules; crash tests at every byte; benchmark.",
-      "commit": null,
+      "commit": "f4214ac",
       "log": [
         {
           "time": "2026-11-06 05:15:23",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-06 06:12:17",
+          "who": "agent",
+          "text": "kush-kv at ~/Projects/kush-kv commit 5f18e4b (local repo, not pushed): 1520 lines of Kush, 26 ensures, 13 erased preconditions, 6 negative theorems; 5 tests (model, crash at every byte, corruption at every byte, compaction, limits); 13 injected bugs rejected. Speed vs Rust baseline: put 1.86 vs 1.25 us, get 1.24 vs 0.98 us, compaction 417 vs 390 ms (200k keys, tmpfs)."
+        },
+        {
+          "time": "2026-11-06 06:12:18",
+          "who": "agent",
+          "text": "done f4214ac"
         }
       ]
     },
@@ -4510,6 +4520,39 @@
       "deps": [],
       "status": "todo",
       "desc": "They return Result<i64, i64> (0/1) while docs/host-api.md says Result<Bool, i64>. Found by kush-kv tests.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PARSE-BLOCK-CALL",
+      "title": "Statement-position if/while followed by ( or - parses as a call or subtraction",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "'if c { .. }' then '(a, b)' on the next line is parsed as calling the if; 'while .. { }' then '-1' as subtraction. Hit four times in kush-kv. Treat a block-ended expression statement as a statement (as Rust does), or diagnose.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EVAL-VEC-COST",
+      "title": "Reference evaluator: Vec.set and big loops exhaust the fixed budget",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "The evaluator's 100k-expression budget and per-element Vec rebuilds limit std.bytemap tests to ~100 operations; kush-kv tests run natively only. Consider a configurable budget and O(1) Vec.set.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "RAW-FS-HANDLES",
+      "title": "Raw FS.* handle builtins are public",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "FS.open/read_at/... take raw handles; natively a closed descriptor number can be reused (the evaluator never reuses), so raw use can hit another file. std.file.File is the safe interface; consider restricting the raw builtins to std.",
       "commit": null,
       "log": []
     }
