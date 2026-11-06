@@ -669,8 +669,11 @@ impl Facts {
     /// search runs first; only if it fails does the bounded integer fallback
     /// try rounding cuts and case splits.
     pub fn prove(&self, goal: &Constraint) -> Option<Refutation> {
-        if goal.coefficients.is_empty() {
-            return (goal.bound >= 0).then_some(Refutation::Trivial);
+        // A true constant goal needs no hypotheses. A false one still holds
+        // where the facts are contradictory (dead code, ex falso lemmas), so
+        // it falls through to a refutation of the hypotheses.
+        if goal.coefficients.is_empty() && goal.bound >= 0 {
+            return Some(Refutation::Trivial);
         }
         let hypotheses = self.snapshot_universal();
         if let Some(proof) = prove_with(&hypotheses, goal) {

@@ -143,3 +143,32 @@ fn false_or_nonlinear_obligations_stay_rejected() {
         "cannot prove",
     );
 }
+
+/// PROVE-CONST: a constant goal holds where the facts are contradictory
+/// (dead branches, ex falso lemmas); it is never proved from consistent facts.
+#[test]
+fn a_constant_goal_is_proved_only_from_contradictory_facts() {
+    let source = r#"
+        fn absurd(erased impossible: { 0 >= 1 }) -> i64 ! {} { 7 }
+        fn lemma(a: i64, erased zero: { a == 0 }, erased one: { a == 1 }) -> i64 ! {} { absurd(_) }
+        fn dead(x: i64) -> i64 ! {} { if x > 5 && x < 3 { absurd(_) } else { x } }
+        fn main() -> i64 ! {panic} { dead(4) }
+    "#;
+    assert_eq!(value(source), 4);
+    native_agrees(source, 4);
+    rejects(
+        r#"
+        fn absurd(erased impossible: { 0 >= 1 }) -> i64 ! {} { 7 }
+        fn bad(a: i64, erased some: { a >= 0 }) -> i64 ! {} { absurd(_) }
+        fn main() -> i64 ! {} { 0 }
+        "#,
+        "cannot prove '0 >= 1'",
+    );
+    rejects(
+        r#"
+        fn absurd(erased impossible: { 0 >= 1 }) -> i64 ! {} { 7 }
+        fn main() -> i64 ! {} { absurd(_) }
+        "#,
+        "cannot prove '0 >= 1'",
+    );
+}
