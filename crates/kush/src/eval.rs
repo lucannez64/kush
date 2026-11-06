@@ -27,6 +27,35 @@ const TASK_STACK_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_EVAL_FUEL: usize = 10_000_000;
 
 impl Executable {
+    /// Whether any function obtains the standard input handle.
+    fn reads_stdin(&self) -> bool {
+        fn walk(expr: &Expr) -> bool {
+            if matches!(
+                expr.kind,
+                ExprKind::Call(
+                    crate::executable::Target::Io(crate::executable::IoOp::Stdin, _),
+                    _
+                )
+            ) {
+                return true;
+            }
+            let mut found = false;
+            expr.for_each_child(&mut |child| found = found || walk(child));
+            found
+        }
+        self.functions.iter().any(|function| {
+            function
+                .body
+                .statements
+                .iter()
+                .any(|statement| match statement {
+                    crate::executable::Statement::Let(_, value)
+                    | crate::executable::Statement::Expr(value) => walk(value),
+                    crate::executable::Statement::Declare(_) => false,
+                })
+                || function.body.tail.as_deref().is_some_and(walk)
+        })
+    }
     /// Set the reference evaluator's step budget (per task); `kush eval
     /// --fuel N`. Native execution has no such budget.
     pub fn set_eval_fuel(&mut self, fuel: usize) {
@@ -136,10 +165,14 @@ impl Executable {
         host: &Host,
     ) -> Result<(i64, MemoryStats)> {
         let entry = self.entry()?;
+        // Standard input is buffered before the scheduler starts, so only a
+        // program that can read it waits for the end of input.
         let mut bytes = Vec::new();
-        input
-            .read_to_end(&mut bytes)
-            .map_err(|e| Diagnostic::new(Span::default(), format!("input failed: {e}")))?;
+        if self.reads_stdin() {
+            input
+                .read_to_end(&mut bytes)
+                .map_err(|e| Diagnostic::new(Span::default(), format!("input failed: {e}")))?;
+        }
         let heap = SharedHeap::new();
         let stats = StatsHandle::new(self.fusions);
         let source = SharedInput(Arc::new(Mutex::new(Cursor::new(bytes))));
@@ -3431,6 +3464,82 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.slice_set(&args[0], index, args[2].clone(), span)?;
                 Ok(Value::Scalar(0))
             }
+            // THREAD-CHANNELS: threads run one at a time; a blocked operation
+            // yields to the others and retries (the step budget ends a
+            // deadlock).
+            SliceOp::ChannelSend | SliceOp::ChannelRecv { .. } | SliceOp::ChannelClose => {
+                let index = usize::try_from(args[1].scalar())
+                    .ok()
+                    .filter(|index| *index < self.slice_len(&args[0], span).unwrap_or(0))
+                    .ok_or_else(|| Diagnostic::new(span, "panic: slice index out of bounds"))?;
+                let Value::Owned(id) = self.slice_element(&args[0], index, span)? else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "internal error: a channel element is not a channel",
+                    ));
+                };
+                let message = args.get(2).cloned();
+                loop {
+                    self.fuel = self.fuel.checked_sub(1).ok_or_else(|| {
+                        Diagnostic::new(
+                            span,
+                            "reference evaluator computation budget exhausted (a channel operation may be deadlocked)",
+                        )
+                    })?;
+                    // Some(result) when the operation completes now.
+                    let done = self
+                        .heap
+                        .with_mut(id, |value| {
+                            let Value::Vector {
+                                items,
+                                capacity,
+                                usable,
+                            } = value
+                            else {
+                                return Err("internal error: dangling channel");
+                            };
+                            Ok(match op {
+                                SliceOp::ChannelClose => {
+                                    *usable = 1;
+                                    Some(Value::Scalar(0))
+                                }
+                                SliceOp::ChannelSend if *usable != 0 => {
+                                    return Err("panic: send on a closed channel");
+                                }
+                                SliceOp::ChannelSend if items.len() < *capacity => {
+                                    items.push(message.clone().expect("message"));
+                                    Some(Value::Scalar(0))
+                                }
+                                SliceOp::ChannelRecv {
+                                    some_tag, none_tag, ..
+                                } => {
+                                    if !items.is_empty() {
+                                        Some(Value::Enum {
+                                            tag: some_tag,
+                                            fields: vec![items.remove(0)],
+                                        })
+                                    } else if *usable != 0 {
+                                        Some(Value::Enum {
+                                            tag: none_tag,
+                                            fields: vec![],
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or(Err("internal error: dangling channel"))
+                        .map_err(|message| Diagnostic::new(span, message))?;
+                    match done {
+                        Some(value) => return Ok(value),
+                        None => {
+                            self.task_comm()?.yield_now()?;
+                        }
+                    }
+                }
+            }
             // THREAD-ATOMICS: the evaluator runs one thread at a time, so the
             // operations are plain reads and writes of the element.
             SliceOp::AtomicLoad
@@ -6034,6 +6143,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     self.consume(arg, frame);
                 }
                 match target {
+                    // THREAD-CHANNELS: a channel is a heap queue (`items`),
+                    // its capacity, and the closed flag kept in `usable`.
+                    Target::ChannelNew => {
+                        let capacity = values[0].scalar();
+                        if !(1..=(1 << 24)).contains(&capacity) {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                "panic: channel capacity must be between 1 and 2^24",
+                            ));
+                        }
+                        self.allocate(Value::Vector {
+                            items: Vec::new(),
+                            capacity: capacity as usize,
+                            usable: 0,
+                        })
+                    }
                     Target::Io(op, shape) => self.io_call(*op, *shape, values, expr.span)?,
                     Target::Host(op, shape) => self.host_call(*op, *shape, values, expr.span)?,
                     Target::Bytes(op) => self.bytes_call(*op, values, expr.span)?,

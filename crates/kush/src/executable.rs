@@ -95,6 +95,10 @@ pub(crate) enum Type {
     /// An opaque, affine structured-task handle. One word. Handles are created
     /// only inside a `Task.scope` and may not escape it through data or results.
     Task(usize),
+    /// THREAD-CHANNELS: an owned bounded channel of plain-data messages
+    /// (scalars and records of scalars). One word: the runtime channel.
+    /// Shared between threads through a view `&[Channel<T>]`.
+    Channel(usize),
     /// THREAD-ATOMICS: an atomic i64 cell. One word, affine (never copied,
     /// so it is never read with a plain load) and owning nothing. Shared
     /// between threads through a borrowed view `&[Atomic]` and used only by
@@ -532,6 +536,9 @@ pub(crate) enum Target {
     PrintFloat(crate::float::FloatKind),
     /// Explicit integer builtin: operation, source kind, target kind.
     Int(crate::int::IntOp, crate::int::IntKind, crate::int::IntKind),
+    /// THREAD-CHANNELS: `Channel.new(capacity)`; the call's type
+    /// `Channel<T>` gives the message width.
+    ChannelNew,
     /// Explicit float builtin or conversion.
     Float(crate::float::FloatOp),
     Panic,
@@ -931,6 +938,17 @@ pub(crate) enum SliceOp {
     AtomicSwap,
     /// `(view, index, expected, new)`: true when the element was `expected`.
     AtomicCompareExchange,
+    /// THREAD-CHANNELS on an element of a `&[Channel<T>]` view: send blocks
+    /// while the channel is full (panics once closed); receive blocks while
+    /// it is empty and open, and yields `Option<T>` (`None` once closed and
+    /// drained); close wakes every waiter.
+    ChannelSend,
+    ChannelRecv {
+        some_tag: usize,
+        none_tag: usize,
+        option: usize,
+    },
+    ChannelClose,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum AllocVecOp {
@@ -5934,7 +5952,15 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,
         uses_tasks: functions.uses_tasks,
-        uses_threads: functions.uses_threads,
+        // A channel type anywhere needs the threaded runtime (its drop glue).
+        uses_threads: functions.uses_threads
+            || types.pointees.iter().any(|ty| matches!(ty, Type::Channel(_)))
+            || types.enums.iter().any(|layout| {
+                layout
+                    .variants
+                    .iter()
+                    .any(|variant| variant.fields.iter().any(|f| matches!(f, Type::Channel(_))))
+            }),
         effect_bits,
         abortive_operations,
         certificates: functions.certificates,
@@ -23369,6 +23395,9 @@ impl Checker<'_, '_> {
                             )),
                         };
                     }
+                    if binding.kind == BindingKind::Builtin && binding.name.starts_with("Channel.") {
+                        return c.channel_call(&binding.name.clone(), explicit, arguments, expected, span);
+                    }
                     if binding.kind == BindingKind::Builtin && binding.name.starts_with("Atomic.") {
                         return c.atomic_call(&binding.name.clone(), explicit, arguments, expected, span);
                     }
@@ -27666,7 +27695,7 @@ impl Checker<'_, '_> {
                 | Type::DynObj(_) => true,
                 // Never copied: reads go through `Atomic.*` (it owns nothing
                 // to drop; the ownership pass only tracks its moves).
-                Type::Atomic => true,
+                Type::Atomic | Type::Channel(_) => true,
                 Type::Enum(id) | Type::Variants(id, _) if depth < 64 => {
                     types.enums[id].linear
                         || types.enums[id]
@@ -30941,6 +30970,137 @@ impl Checker<'_, '_> {
             )),
         }
     }
+    /// THREAD-CHANNELS: `Channel.new(capacity)` (the message type comes from
+    /// the expected `Channel<T>`) and `send/recv/close(view, i, ..)`.
+    fn channel_call(
+        &mut self,
+        name: &str,
+        explicit: Option<&[ast::Type]>,
+        arguments: &[ast::Expr],
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        self.functions.uses_tasks = true;
+        self.functions.uses_threads = true;
+        let arity = match name {
+            "Channel.new" => 1,
+            "Channel.send" => 3,
+            _ => 2,
+        };
+        if arguments.len() != arity {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "{name} expects {arity} arguments, found {}",
+                    arguments.len()
+                ),
+            ));
+        }
+        if name == "Channel.new" {
+            let ty = match (explicit, expected) {
+                (Some([message]), _) => {
+                    let message = self.ty(message)?;
+                    let message = self.types.full(message, span)?;
+                    if !crate::runtime_types::plain_data(self.types, message, 0) {
+                        return Err(Diagnostic::new(
+                            span,
+                            "a channel carries plain data (integers, floats, Bool, Char, or records of those)",
+                        ));
+                    }
+                    Type::Channel(self.types.pointer(message))
+                }
+                (None, Some(Type::Channel(p))) => Type::Channel(p),
+                _ => {
+                    return Err(Diagnostic::new(
+                        span,
+                        "Channel.new needs its message type: write Channel.new.<T>(capacity) or give the expected type Channel<T>",
+                    ));
+                }
+            };
+            let capacity = self.expr_expected(&arguments[0], Some(Type::I64))?;
+            self.expect(capacity.ty, Type::I64, capacity.span)?;
+            self.require(ALLOC | PANIC, span)?;
+            return Ok(Expr {
+                kind: ExprKind::Call(Target::ChannelNew, vec![capacity]),
+                ty,
+                span,
+                resource: None,
+            });
+        }
+        if explicit.is_some() {
+            return Err(Diagnostic::new(
+                span,
+                format!("{name} takes no type arguments"),
+            ));
+        }
+        let view = self.expr(&arguments[0])?;
+        let Some(Type::Channel(pointer)) = view
+            .ty
+            .slice_element()
+            .map(|element| self.types.pointees[element])
+        else {
+            return Err(Diagnostic::new(
+                view.span,
+                format!(
+                    "{name} expects a view of channels '&[Channel<T>]', found {}",
+                    self.types.name(view.ty)
+                ),
+            ));
+        };
+        let message = self.types.pointees[pointer];
+        let channel = Type::Channel(pointer);
+        let index = self.expr_expected(&arguments[1], Some(Type::I64))?;
+        self.expect(index.ty, Type::I64, index.span)?;
+        self.require(PANIC, span)?;
+        let mut values = vec![view, index];
+        let (op, ty) = match name {
+            "Channel.send" => {
+                let value = self.expr_expected(&arguments[2], Some(message))?;
+                self.expect(value.ty, message, value.span)?;
+                values.push(value);
+                (SliceOp::ChannelSend, Type::Unit)
+            }
+            "Channel.close" => (SliceOp::ChannelClose, Type::Unit),
+            "Channel.recv" => {
+                let option = self
+                    .resolution
+                    .slice_options
+                    .get(&(span.start, span.end))
+                    .copied()
+                    .ok_or_else(|| {
+                        Diagnostic::new(span, "Channel.recv requires Option<T> in scope")
+                    })?;
+                let shape = self.types.option(option, message, span)?;
+                (
+                    SliceOp::ChannelRecv {
+                        some_tag: shape.some_tag,
+                        none_tag: shape.none_tag,
+                        option: shape
+                            .result
+                            .layout()
+                            .expect("the conventional Option is an enum layout"),
+                    },
+                    shape.result,
+                )
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    span,
+                    format!("unsupported channel operation '{name}'"),
+                ));
+            }
+        };
+        let value = Expr {
+            kind: ExprKind::Call(Target::Slice(op, channel), values),
+            ty,
+            span,
+            resource: None,
+        };
+        match expected {
+            Some(expected) => self.coerce(value, expected, span),
+            None => Ok(value),
+        }
+    }
     /// THREAD-ATOMICS: `Atomic.new(v)`, `Atomic.value(a)` and the view
     /// operations `load/store/fetch_add/swap/compare_exchange(view, i, ..)`.
     fn atomic_call(
@@ -32649,7 +32809,7 @@ impl Checker<'_, '_> {
         };
         // THREAD-ATOMICS: atomics are shared through views; only the
         // `Atomic.*` operations read or write their elements.
-        if self.owned_type(element) && element != Type::Atomic {
+        if self.owned_type(element) && !matches!(element, Type::Atomic | Type::Channel(_)) {
             return Err(Diagnostic::new(
                 span,
                 format!(
@@ -37383,6 +37543,7 @@ impl Executable {
             | Type::Once(_)
             | Type::Task(_)
             | Type::Thread(_)
+            | Type::Channel(_)
             | Type::DynObj(_) => true,
             Type::Enum(id) | Type::Variants(id, _) => self.owned_enums[id],
             Type::Union(id) => self.unions[id]

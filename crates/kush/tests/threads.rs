@@ -403,3 +403,117 @@ fn atomics_are_never_copied() {
         "",
     );
 }
+
+/// THREAD-CHANNELS (user-approved; plain-data messages in this version):
+/// `Channel<T>` lives in a vector or array and is shared through views.
+/// `send` waits while full, `recv` waits while empty and gives `None` once
+/// the channel is closed and drained.
+const PIPELINE: &str = "
+use std.option.Option;
+struct Item { id: i64, square: i64 }
+fn produce(c: &[Channel<Item>], from: i64, to: i64) -> Unit ! {panic} {
+    let mut i = from;
+    while i <= to { Channel.send(c, 0, Item { id: i, square: i * i }); i = i + 1; }
+}
+fn consume(c: &[Channel<Item>]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut count = 0;
+    loop {
+        match Channel.recv(c, 0) {
+            Option.Some(item) => { acc = acc + item.square - item.id; count = count + 1; },
+            Option.None => { break; },
+        }
+    }
+    acc * 1000 + count
+}
+";
+
+#[test]
+fn channels_carry_messages_between_threads() {
+    let expected = (1..=120i64).map(|i| i * i - i).sum::<i64>() * 1000 + 120;
+    agrees(
+        &format!(
+            "{PIPELINE}
+            fn main() -> i64 ! {{io, alloc, panic}} {{
+                let mut chans: Vec<Channel<Item>> = Vec.with_capacity(1);
+                chans = Vec.push(chans, Channel.new(4));
+                let c: &[Channel<Item>] = &chans[..];
+                let got = Thread.scope(fn() -> i64 ! {{alloc, panic}} {{
+                    let consumer = Thread.spawn(fn() -> i64 ! {{panic}} {{ consume(c) }});
+                    // Two producers; the channel closes once both are joined.
+                    let a = Thread.spawn(fn() -> Unit ! {{panic}} {{ produce(c, 1, 60); }});
+                    let b = Thread.spawn(fn() -> Unit ! {{panic}} {{ produce(c, 61, 120); }});
+                    Thread.join(a);
+                    Thread.join(b);
+                    Channel.close(c, 0);
+                    Thread.join(consumer)
+                }});
+                print_i64(got);
+                drop(chans);
+                0
+            }}"
+        ),
+        0,
+        &format!("{expected}\n"),
+    );
+}
+
+#[test]
+fn channel_rules() {
+    // Sending on a closed channel panics in both backends.
+    let source = format!(
+        "{PIPELINE}
+        fn main() -> i64 ! {{io, alloc, panic}} {{
+            let mut chans: Vec<Channel<Item>> = Vec.with_capacity(1);
+            chans = Vec.push(chans, Channel.new(2));
+            let c: &[Channel<Item>] = &chans[..];
+            Channel.close(c, 0);
+            produce(c, 1, 1);
+            drop(chans);
+            0
+        }}"
+    );
+    let program = check(&source).unwrap();
+    let error = program.evaluate(&mut Vec::new()).unwrap_err();
+    assert!(error.message.contains("closed channel"), "{error:?}");
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("closed");
+        kush::native::build(&program, &binary).unwrap();
+        let native = std::process::Command::new(&binary).output().unwrap();
+        assert!(!native.status.success());
+    }
+    for (source, fragment) in [
+        (
+            "fn main() -> i64 ! {alloc, panic} { let v: Vec<Channel<Bytes>> = Vec.new(); 0 }",
+            "plain data",
+        ),
+        (
+            "fn main() -> i64 ! {alloc, panic} { let mut v: Vec<Channel<i64>> = Vec.new(); v = Vec.push(v, Channel.new(0)); drop(v); 0 }",
+            "",
+        ),
+        (
+            "fn main() -> i64 ! {alloc, panic} { let c = Channel.new(2); 0 }",
+            "needs its message type",
+        ),
+        (
+            "fn main() -> i64 ! {alloc, panic} { let mut v: Vec<Channel<i64>> = Vec.new(); v = Vec.push(v, Channel.new(2)); let c: &[Channel<i64>] = &v[..]; let x = Slice.get(c, 0); 0 }",
+            "copies the element",
+        ),
+        (
+            "fn main() -> i64 ! {alloc, panic} { let mut v: Vec<Channel<i64>> = Vec.new(); v = Vec.push(v, Channel.new(2)); let c: &[Channel<i64>] = &v[..]; match Channel.recv(c, 0) { _ => 0 } }",
+            "Option",
+        ),
+    ] {
+        match check(source) {
+            Err(error) => assert!(error.message.contains(fragment), "{fragment}: {error:?}"),
+            // A zero capacity is a run-time panic.
+            Ok(program) if fragment.is_empty() => {
+                let error = program.evaluate(&mut Vec::new()).unwrap_err();
+                assert!(error.message.contains("capacity"), "{error:?}");
+            }
+            Ok(_) => panic!("accepted: {source}"),
+        }
+    }
+}

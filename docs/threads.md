@@ -1,7 +1,7 @@
 # Parallel threads
 
-Status: THREAD-SCOPE and THREAD-ATOMICS implemented 2026-11-06 (design
-approved by the user); channels (THREAD-CHANNELS) follow. Tests:
+Status: THREAD-SCOPE, THREAD-ATOMICS and THREAD-CHANNELS implemented
+2026-11-06 (design approved by the user). Tests:
 `crates/kush/tests/threads.rs`.
 
 ```kush
@@ -33,6 +33,10 @@ unchanged.
   cooperative tasks inside threads in this version) and must handle any
   declared operation inside itself, since a thread starts with an empty
   handler stack. A panic in a thread ends the process.
+- **Standard input.** The reference evaluator buffers standard input before
+  running a program with tasks or threads, and now only when the program can
+  read it, so `kush eval` of a thread program no longer waits for the end of
+  input.
 - **Sharing (moves and borrows).** A thread body captures values by move
   and borrowed views (`&[T]`, `&mut [T]`, `&str`) of its parent's data. The
   ownership rules of scoped tasks keep every loan until the child is joined:
@@ -81,6 +85,51 @@ read with a plain load that could race with an atomic write; it owns nothing,
 so dropping one is free. The prover never treats an atomic's value as known.
 With atomics, results may depend on the schedule; the reference evaluator
 explores one schedule (threads run one at a time).
+
+## Channels (THREAD-CHANNELS)
+
+```kush
+use std.option.Option;
+
+let mut chans: Vec<Channel<i64>> = Vec.with_capacity(1);
+chans = Vec.push(chans, Channel.new(16));
+let c: &[Channel<i64>] = &chans[..];
+let total = Thread.scope(fn() -> i64 ! {alloc, panic} {
+    let consumer = Thread.spawn(fn() -> i64 ! {panic} {
+        let mut acc = 0;
+        loop {
+            match Channel.recv(c, 0) {
+                Option.Some(v) => { acc = acc + v; },
+                Option.None => { break; },
+            }
+        }
+        acc
+    });
+    let mut i = 0;
+    while i < 100 { Channel.send(c, 0, i); i = i + 1; }
+    Channel.close(c, 0);
+    Thread.join(consumer)
+});
+```
+
+`Channel<T>` is a bounded queue owned like a `Box` (dropping it frees it).
+Channels live in vectors, arrays or records and are shared through views,
+like atomics.
+
+| Operation | Behaviour |
+| --- | --- |
+| `Channel.new(capacity)` | a new channel; the message type comes from the expected `Channel<T>` (or `Channel.new.<T>`); capacity 1 to 2^24, else a panic |
+| `Channel.send(view, i, message)` | waits while the channel is full; panics once it is closed |
+| `Channel.recv(view, i)` | waits while it is empty and open; `Option.Some(message)`, or `Option.None` once closed and drained (needs `Option` in scope) |
+| `Channel.close(view, i)` | closes it and wakes every waiting thread |
+
+In this version messages are **plain data**: integers, floats, `Bool`,
+`Char` and records of those (copied word by word). Owned messages (`Bytes`,
+boxes, vectors) are a follow-up. A program waits forever if every thread
+waits on a channel nobody will serve, as in other languages; the reference
+evaluator reports the exhausted step budget instead. Natively a channel is
+one counted allocation (header and ring) with a mutex and two condition
+variables; in the evaluator a blocked operation yields to the other threads.
 
 ## Runtime
 

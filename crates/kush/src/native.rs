@@ -2637,6 +2637,68 @@ uint64_t kush_thread_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
     kush_thread_scopes[kush_thread_scope_depth - 1] = t;
     return (uint64_t)(uintptr_t)t;
 }
+/* ---- THREAD-CHANNELS: bounded channels of plain-data messages ----------
+   One counted allocation holds the header and a ring of `capacity` messages
+   of `width` words. Send waits while full and panics once closed; receive
+   waits while empty and open and reports a closed, drained channel. */
+typedef struct {
+    pthread_mutex_t lock;
+    pthread_cond_t readable, writable;
+    int64_t capacity, width, head, count;
+    int closed;
+    uint64_t words[];
+} KushChannel;
+uint64_t kush_channel_new(int64_t capacity, int64_t width) {
+    if (capacity < 1 || capacity > ((int64_t)1 << 24) || width < 0 || width > 64) kush_panic();
+    int64_t stride = width == 0 ? 1 : width;
+    KushChannel *c = (KushChannel *)(uintptr_t)kush_alloc(
+        sizeof(KushChannel) + (size_t)capacity * (size_t)stride * sizeof(uint64_t));
+    memset(c, 0, sizeof(KushChannel));
+    if (pthread_mutex_init(&c->lock, NULL) != 0) kush_panic();
+    if (pthread_cond_init(&c->readable, NULL) != 0) kush_panic();
+    if (pthread_cond_init(&c->writable, NULL) != 0) kush_panic();
+    c->capacity = capacity; c->width = stride;
+    return (uint64_t)(uintptr_t)c;
+}
+void kush_channel_free(uint64_t handle) {
+    KushChannel *c = (KushChannel *)(uintptr_t)handle;
+    if (c == NULL) return;
+    pthread_cond_destroy(&c->readable);
+    pthread_cond_destroy(&c->writable);
+    pthread_mutex_destroy(&c->lock);
+    kush_free(handle);
+}
+void kush_channel_send(uint64_t handle, const uint64_t *message) {
+    KushChannel *c = (KushChannel *)(uintptr_t)handle;
+    if (c == NULL || pthread_mutex_lock(&c->lock) != 0) kush_panic();
+    while (c->count == c->capacity && !c->closed) pthread_cond_wait(&c->writable, &c->lock);
+    if (c->closed) { pthread_mutex_unlock(&c->lock); kush_panic(); }
+    int64_t slot = (c->head + c->count) % c->capacity;
+    memcpy(&c->words[slot * c->width], message, (size_t)c->width * sizeof(uint64_t));
+    c->count += 1;
+    pthread_cond_signal(&c->readable);
+    pthread_mutex_unlock(&c->lock);
+}
+int64_t kush_channel_recv(uint64_t handle, uint64_t *out) {
+    KushChannel *c = (KushChannel *)(uintptr_t)handle;
+    if (c == NULL || pthread_mutex_lock(&c->lock) != 0) kush_panic();
+    while (c->count == 0 && !c->closed) pthread_cond_wait(&c->readable, &c->lock);
+    if (c->count == 0) { pthread_mutex_unlock(&c->lock); return 0; }
+    memcpy(out, &c->words[c->head * c->width], (size_t)c->width * sizeof(uint64_t));
+    c->head = (c->head + 1) % c->capacity;
+    c->count -= 1;
+    pthread_cond_signal(&c->writable);
+    pthread_mutex_unlock(&c->lock);
+    return 1;
+}
+void kush_channel_close(uint64_t handle) {
+    KushChannel *c = (KushChannel *)(uintptr_t)handle;
+    if (c == NULL || pthread_mutex_lock(&c->lock) != 0) kush_panic();
+    c->closed = 1;
+    pthread_cond_broadcast(&c->readable);
+    pthread_cond_broadcast(&c->writable);
+    pthread_mutex_unlock(&c->lock);
+}
 uint64_t kush_thread_join(uint64_t handle, void *out) {
     KushThread *t = (KushThread *)(uintptr_t)handle;
     if (t == NULL || t->joined) kush_panic();
@@ -3738,6 +3800,30 @@ fn object_for(program: &Executable, codegen: CodegenOptions, library: bool) -> R
     let abort_word_local = module
         .declare_function("kush_abort_word_address", Linkage::Import, &task_unary_sig)
         .map_err(error)?;
+    // THREAD-CHANNELS runtime entry points.
+    let mut channel_two_sig = module.make_signature();
+    channel_two_sig
+        .params
+        .extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    channel_two_sig.returns.push(AbiParam::new(I64));
+    let channel_new = module
+        .declare_function("kush_channel_new", Linkage::Import, &channel_two_sig)
+        .map_err(error)?;
+    let channel_recv = module
+        .declare_function("kush_channel_recv", Linkage::Import, &channel_two_sig)
+        .map_err(error)?;
+    let mut channel_void_sig = module.make_signature();
+    channel_void_sig
+        .params
+        .extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    let channel_send = module
+        .declare_function("kush_channel_send", Linkage::Import, &channel_void_sig)
+        .map_err(error)?;
+    let mut channel_one_sig = module.make_signature();
+    channel_one_sig.params.push(AbiParam::new(I64));
+    let channel_close = module
+        .declare_function("kush_channel_close", Linkage::Import, &channel_one_sig)
+        .map_err(error)?;
     let mut handler_depth_sig = module.make_signature();
     handler_depth_sig.returns.push(AbiParam::new(I64));
     let handler_depth = module
@@ -3976,6 +4062,10 @@ fn object_for(program: &Executable, codegen: CodegenOptions, library: bool) -> R
             thread_scope_begin,
             thread_scope_end,
             abort_word_local,
+            channel_new,
+            channel_send,
+            channel_recv,
+            channel_close,
             handler_depth,
             handler_restore,
             handler_push,
@@ -5101,6 +5191,12 @@ fn synthesize_drops(
         .chain((0..program.pointees.len()).map(Type::Vec))
         .chain((0..program.pointees.len()).map(Type::Task))
         .chain((0..program.pointees.len()).map(Type::Thread))
+        // Channel drop glue needs the threaded runtime.
+        .chain(
+            (0..program.pointees.len())
+                .map(Type::Channel)
+                .filter(|_| program.uses_threads),
+        )
         .chain([Type::Arena, Type::AllocatorContext])
         .chain((0..program.enums.len()).map(Type::Enum))
         .chain((0..program.unions.len()).map(Type::Union))
@@ -5164,6 +5260,16 @@ fn synthesize_drops(
         match ty {
             Type::Bytes | Type::String => {
                 emit_drop(&mut builder, module, bytes_free, &args);
+                builder.ins().return_(&[]);
+            }
+            Type::Channel(_) => {
+                // THREAD-CHANNELS: messages are plain data; free the channel.
+                let mut signature = module.make_signature();
+                signature.params.push(AbiParam::new(I64));
+                let channel_free = module
+                    .declare_function("kush_channel_free", Linkage::Import, &signature)
+                    .map_err(error)?;
+                emit_drop(&mut builder, module, channel_free, &args);
                 builder.ins().return_(&[]);
             }
             Type::Box(index) | Type::ArenaBox(index) => {
@@ -5813,6 +5919,10 @@ struct Generator<'a, 'b> {
     thread_scope_end: FuncId,
     /// `kush_abort_word_address`: the calling thread's abort word.
     abort_word_local: FuncId,
+    channel_new: FuncId,
+    channel_send: FuncId,
+    channel_recv: FuncId,
+    channel_close: FuncId,
     handler_depth: FuncId,
     handler_restore: FuncId,
     handler_push: FuncId,
@@ -9290,6 +9400,14 @@ impl Generator<'_, '_> {
                     Target::Slice(op, element) => {
                         return Some(self.slice_call(*op, *element, values));
                     }
+                    Target::ChannelNew => {
+                        let Type::Channel(pointer) = expr.ty else {
+                            unreachable!("checked Channel.new has a channel type")
+                        };
+                        let width = self.program.width(self.program.pointees[pointer]);
+                        let width = self.constant(width as i64);
+                        self.runtime_call(self.channel_new, &[values[0], width])
+                    }
                     Target::DynArray(op, element) => {
                         return Some(self.dyn_array_call(*op, *element, values));
                     }
@@ -10251,6 +10369,69 @@ impl Generator<'_, '_> {
             return vec![length];
         }
         let index = values[4];
+        // THREAD-CHANNELS: the element is the channel handle.
+        if matches!(
+            op,
+            SliceOp::ChannelSend | SliceOp::ChannelRecv { .. } | SliceOp::ChannelClose
+        ) {
+            let invalid = self.slice_out_of_bounds(index, length);
+            self.guard(invalid);
+            let offset = self.builder.ins().imul(index, stride);
+            let address = self.builder.ins().iadd(pointer, offset);
+            let handle = self
+                .builder
+                .ins()
+                .load(I64, ir::MemFlagsData::new(), address, 0);
+            let Type::Channel(message) = element else {
+                unreachable!("checked channel view")
+            };
+            let message = self.program.pointees[message];
+            let width = self.program.width(message);
+            match op {
+                SliceOp::ChannelSend => {
+                    let slot = self.stack_words(width.max(1));
+                    for (word, value) in values[5..5 + width].iter().enumerate() {
+                        self.builder.ins().store(
+                            ir::MemFlagsData::new(),
+                            *value,
+                            slot,
+                            (word * 8) as i32,
+                        );
+                    }
+                    self.runtime_void(self.channel_send, &[handle, slot]);
+                    return vec![self.constant(0)];
+                }
+                SliceOp::ChannelClose => {
+                    self.runtime_void(self.channel_close, &[handle]);
+                    return vec![self.constant(0)];
+                }
+                SliceOp::ChannelRecv {
+                    some_tag,
+                    none_tag,
+                    option,
+                } => {
+                    let slot = self.stack_words(width.max(1));
+                    let got = self.runtime_call(self.channel_recv, &[handle, slot]);
+                    let some = self.builder.create_block();
+                    let none = self.builder.create_block();
+                    let join = self.builder.create_block();
+                    for _ in 0..self.program.enums[option].words {
+                        self.builder.append_block_param(join, I64);
+                    }
+                    self.builder.ins().brif(got, some, &[], none, &[]);
+                    self.builder.switch_to_block(some);
+                    let payload = self.load_words(slot, 0, width);
+                    let some_values = self.encode_variant(Type::Enum(option), some_tag, &payload);
+                    self.jump(join, &some_values);
+                    self.builder.switch_to_block(none);
+                    let none_values = self.encode_variant(Type::Enum(option), none_tag, &[]);
+                    self.jump(join, &none_values);
+                    self.builder.switch_to_block(join);
+                    return self.builder.block_params(join).to_vec();
+                }
+                _ => unreachable!(),
+            }
+        }
         // THREAD-ATOMICS: sequentially consistent operations on one word of a
         // view of atomics (never byte-backed).
         if matches!(

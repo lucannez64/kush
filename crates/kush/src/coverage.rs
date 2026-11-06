@@ -270,6 +270,7 @@ fn useful(
             | Type::Stdin
             | Type::Stdout
             | Type::Atomic
+            | Type::Channel(_)
             | Type::I64
             | Type::Int(_)
             | Type::Float(_)

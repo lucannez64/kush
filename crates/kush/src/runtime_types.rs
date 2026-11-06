@@ -1452,6 +1452,7 @@ impl<'a> Types<'a> {
                 | Type::Once(_)
                 | Type::Task(_)
                 | Type::Thread(_)
+                | Type::Channel(_)
                 | Type::DynObj(_) => true,
                 Type::Enum(id) | Type::Variants(id, _) if depth < 64 => {
                     types.enums[id].linear
@@ -2213,6 +2214,7 @@ impl<'a> Types<'a> {
             Type::StrMut => "&mut str".into(),
             Type::Stdin => "Stdin".into(),
             Type::Atomic => "Atomic".into(),
+            Type::Channel(p) => format!("Channel<{}>", self.name(self.pointees[p])),
             Type::Stdout => "Stdout".into(),
             Type::Box(p) => format!("Box<{}>", self.name(self.pointees[p])),
             Type::Arena => "Arena".into(),
@@ -3323,6 +3325,25 @@ impl<'a> Types<'a> {
                     arguments[1],
                 )?;
                 return self.dynamic_array(element, capacity, ty.span);
+            }
+            // THREAD-CHANNELS: `Channel<T>` of plain data (scalars and
+            // records of scalars), which crosses threads by copying words.
+            if b.kind == BindingKind::Builtin && b.name == "Channel" {
+                if !lifetime_arguments.is_empty() || arguments.len() != 1 {
+                    return Err(Diagnostic::new(ty.span, "Channel expects one message type"));
+                }
+                let inner = self.lower(arguments[0], substitution, depth + 1)?;
+                let inner = self.full(inner, ty.span)?;
+                if !plain_data(self, inner, 0) {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        format!(
+                            "a channel carries plain data (integers, floats, Bool, Char, or records of those), found {}",
+                            self.name(inner)
+                        ),
+                    ));
+                }
+                return Ok(Type::Channel(self.pointer(inner)));
             }
             if b.kind == BindingKind::Builtin
                 && matches!(
@@ -6793,6 +6814,10 @@ pub(crate) fn type_name_in(
         Type::StrMut => "&mut str".into(),
         Type::Stdin => "Stdin".into(),
         Type::Atomic => "Atomic".into(),
+        Type::Channel(p) => format!(
+            "Channel<{}>",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
         Type::Stdout => "Stdout".into(),
         Type::Box(p) => format!(
             "Box<{}>",
@@ -7018,6 +7043,27 @@ pub(crate) fn reject_optional_reference_boundary(
         ))
     } else {
         Ok(())
+    }
+}
+
+/// THREAD-CHANNELS: scalars and records of scalars (no owned storage,
+/// borrows, unions, functions or handles).
+pub(crate) fn plain_data(types: &Types<'_>, ty: Type, depth: usize) -> bool {
+    match ty {
+        Type::I64 | Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char | Type::Unit => true,
+        Type::Enum(id) if depth < 8 => {
+            let layout = &types.enums[id];
+            layout.record
+                && layout.array.is_none()
+                && layout.dynamic_array.is_none()
+                && !layout.linear
+                && layout.variants.len() == 1
+                && layout.variants[0]
+                    .fields
+                    .iter()
+                    .all(|field| plain_data(types, *field, depth + 1))
+        }
+        _ => false,
     }
 }
 

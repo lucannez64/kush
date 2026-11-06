@@ -1077,6 +1077,7 @@ fn owns(
         | Type::Once(_)
         | Type::Task(_)
         | Type::Thread(_)
+        | Type::Channel(_)
         | Type::DynObj(_) => true,
         Type::Enum(id) | Type::Variants(id, _) => enums[id],
         Type::Union(id) => unions[id]

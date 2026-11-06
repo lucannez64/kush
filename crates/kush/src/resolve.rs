@@ -420,6 +420,11 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "Task.check_cancel",
     "Thread",
     "Atomic",
+    "Channel",
+    "Channel.new",
+    "Channel.send",
+    "Channel.recv",
+    "Channel.close",
     "Atomic.new",
     "Atomic.value",
     "Atomic.load",
@@ -1550,6 +1555,7 @@ impl Resolver {
                             && matches!(
                                 binding.name.as_str(),
                                 "Slice.try_get"
+                                    | "Channel.recv"
                                     | "String.scalar_at"
                                     | "Str.scalar_at"
                                     | "Int.try_convert"
