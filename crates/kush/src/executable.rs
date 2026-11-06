@@ -5111,8 +5111,32 @@ fn checked_exports(
     signatures: &[Signature],
     declared: &BTreeMap<BindingId, Declared<'_>>,
     resolution: &Resolution,
+    types: &Types<'_>,
 ) -> Result<Vec<ExportedFunction>> {
-    let scalar = |ty: Type| matches!(ty, Type::Bool | Type::I64 | Type::Int(_) | Type::Float(_));
+    let primitive = |ty: Type| matches!(ty, Type::Bool | Type::I64 | Type::Int(_) | Type::Float(_));
+    // EXPORT-RECORDS: records of scalars (or such records) cross as C
+    // structs; `&Bytes` parameters as a pointer and a length.
+    fn scalar_record(types: &Types<'_>, ty: Type, depth: usize) -> bool {
+        let Some(id) = ty.layout() else {
+            return false;
+        };
+        let layout = &types.enums[id];
+        depth < 8
+            && layout.record
+            && !layout.tuple
+            && layout.array.is_none()
+            && layout.dynamic_array.is_none()
+            && layout.variants.len() == 1
+            && !layout.variants[0].fields.is_empty()
+            && layout.variants[0].fields.iter().all(|field| {
+                matches!(
+                    field,
+                    Type::Bool | Type::I64 | Type::Int(_) | Type::Float(_)
+                ) || scalar_record(types, *field, depth + 1)
+            })
+    }
+    let scalar = |ty: Type| primitive(ty) || scalar_record(types, ty, 0);
+    let bytes_ref = |ty: Type| matches!(ty, Type::Ref(p) if types.pointees[p] == Type::Bytes);
     let mut exports: Vec<ExportedFunction> = Vec::new();
     // Generic functions have no instance until called, so check them here.
     for info in declared.values() {
@@ -5172,16 +5196,49 @@ fn checked_exports(
                 f.name
             ));
         }
-        if let Some(ty) = sig.parameters.iter().copied().find(|ty| !scalar(*ty)) {
-            let _ = ty;
+        // Every field of an exported record must be `pub`: a C or Rust
+        // caller builds and reads the whole struct, which would bypass the
+        // module's private fields.
+        fn private_field(types: &Types<'_>, ty: Type, depth: usize) -> Option<String> {
+            let id = ty.layout()?;
+            let layout = &types.enums[id];
+            if !layout.record || depth > 8 {
+                return None;
+            }
+            let variant = layout.variants.first()?;
+            for (name, field) in variant.names.iter().zip(&variant.fields) {
+                if !types.field_public(layout.definition, name) {
+                    return Some(name.clone());
+                }
+                if let Some(inner) = private_field(types, *field, depth + 1) {
+                    return Some(inner);
+                }
+            }
+            None
+        }
+        for ty in sig.parameters.iter().chain([&sig.result]) {
+            if scalar_record(types, *ty, 0)
+                && let Some(field) = private_field(types, *ty, 0)
+            {
+                return fail(format!(
+                    "exported function '{}' passes a record whose field '{field}' is private; a C or Rust caller sees the whole struct, so mark every field 'pub'",
+                    f.name
+                ));
+            }
+        }
+        if sig
+            .parameters
+            .iter()
+            .any(|ty| !scalar(*ty) && !bytes_ref(*ty))
+        {
             return fail(format!(
-                "exported function '{}' takes only integers, floats and Bool across the C ABI",
+                "exported function '{}' takes only integers, floats, Bool, records of those, and &Bytes across the C ABI",
                 f.name
             ));
         }
         if !(scalar(sig.result) || sig.result == Type::Unit) {
             return fail(format!(
-                "exported function '{}' returns an integer, float, Bool or Unit across the C ABI",
+                "exported function '{}' returns an integer, float, Bool, a record of those, or Unit across the C ABI",
                 f.name
             ));
         }
@@ -5831,7 +5888,12 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     for (index, foreign) in functions.foreign_functions {
         foreign_functions[index] = Some(foreign);
     }
-    let exports = checked_exports(&functions.signatures, &functions.declared, resolution)?;
+    let exports = checked_exports(
+        &functions.signatures,
+        &functions.declared,
+        resolution,
+        &types,
+    )?;
     let mut executable = Executable {
         eval_fuel: crate::eval::DEFAULT_EVAL_FUEL,
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
@@ -36887,6 +36949,16 @@ impl Executable {
     /// Checked nested in-place map fusions. Diagnostics-only observation.
     pub fn fusion_count(&self) -> usize {
         self.fusions
+    }
+    /// The source spelling of a checked type.
+    pub(crate) fn type_name(&self, ty: Type) -> String {
+        crate::runtime_types::type_name_in(
+            ty,
+            &self.pointees,
+            &self.enums,
+            &self.unions,
+            &self.function_types,
+        )
     }
     /// `export "symbol" fn` declarations (KUSH-RUST-EXPORT).
     pub fn exports(&self) -> Vec<ExportInfo> {

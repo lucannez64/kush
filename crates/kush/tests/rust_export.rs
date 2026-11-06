@@ -191,15 +191,33 @@ fn export_rejections() {
         ("export \"f\" fn f<T>(x: T) -> T ! {} { x }", "generic"),
         (
             "export \"f\" fn f(x: Bytes) -> i64 ! {} { drop(x); 0 }",
-            "integers, floats and Bool",
+            "integers, floats",
         ),
         (
             "struct P { a: i64 } export \"f\" fn f(p: P) -> i64 ! {} { p.a }",
-            "integers, floats and Bool",
+            "is private",
         ),
         (
             "struct P { a: i64 } export \"f\" fn f(a: i64) -> P ! {} { P { a: a } }",
-            "returns an integer",
+            "is private",
+        ),
+        // EXPORT-RECORDS: owned or borrowed fields, enums, tuples and
+        // exclusive buffers do not cross.
+        (
+            "struct P { pub a: Bytes } export \"f\" fn f(p: P) -> i64 ! {} { let P { a } = p; drop(a); 0 }",
+            "integers, floats",
+        ),
+        (
+            "enum E { A, B } export \"f\" fn f(e: E) -> i64 ! {} { 0 }",
+            "integers, floats",
+        ),
+        (
+            "export \"f\" fn f(t: (i64, i64)) -> i64 ! {} { t.0 }",
+            "integers, floats",
+        ),
+        (
+            "export \"f\" fn f(b: &mut Bytes) -> i64 ! {} { 0 }",
+            "integers, floats",
         ),
         (
             "export \"f\" fn f(a: i64) -> i64 ! {io, panic} { print_i64(a); a }",
@@ -306,5 +324,144 @@ fn the_cli_builds_a_library() {
     );
     assert!(dir.join("proj/target/kush/libshare_policy.a").exists());
     assert!(dir.join("proj/target/kush/libshare_policy.rs").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// EXPORT-RECORDS (user-approved): records of scalars cross as a pointer to a
+/// C struct (`#[repr(C)]` in Rust, `bool` as one byte), record results
+/// through an out pointer, `&Bytes` as a pointer and a length (copied into a
+/// temporary Kush buffer for the call).
+const RECORDS: &str = r#"
+struct Revisions { pub pinned: u64, pub candidate: u64 }
+struct Facts { pub authenticated: Bool, pub has_pin: Bool, pub small: i8, pub revisions: Revisions, pub weight: f32 }
+struct Decision { pub code: i64, pub revision: u64, pub admitted: Bool }
+export "rec_plan" fn plan(facts: Facts) -> Decision ! {} {
+    let r = facts.revisions;
+    if facts.authenticated && !facts.has_pin && r.candidate >= 1 {
+        Decision { code: 1, revision: r.candidate, admitted: true }
+    } else if facts.authenticated && facts.has_pin && r.candidate > r.pinned {
+        Decision { code: 2, revision: r.candidate, admitted: true }
+    } else {
+        Decision { code: 0, revision: 0, admitted: false }
+    }
+}
+export "rec_small" fn small(facts: Facts) -> i64 ! {} { let n: i64 = Int.convert(facts.small); n }
+export "rec_sum" fn sum(data: &Bytes, scale: i64) -> i64 ! {panic} {
+    let mut i = 0;
+    let mut acc = 0;
+    while i < Bytes.len(data) { acc = acc + Bytes.get(data, i) * scale; i = i + 1; }
+    acc
+}
+"#;
+
+const RECORDS_MAIN: &str = r#"
+fn show(d: Decision) -> Unit ! {io, panic} {
+    print_i64(d.code); print_int(d.revision); print_i64(if d.admitted { 1 } else { 0 });
+}
+fn main() -> i64 ! {io, alloc, panic} {
+    let f = Facts { authenticated: true, has_pin: false, small: -5, revisions: Revisions { pinned: 0, candidate: 3 }, weight: 1.5 };
+    show(plan(f));
+    show(plan(Facts { has_pin: true, revisions: Revisions { pinned: 4, candidate: 9 }, ..f }));
+    show(plan(Facts { authenticated: false, ..f }));
+    print_i64(small(f));
+    let b = Bytes.from("abc");
+    print_i64(sum(&b, 2));
+    drop(b);
+    let e = Bytes.with_capacity(0);
+    print_i64(sum(&e, 2));
+    drop(e);
+    0
+}
+"#;
+
+#[test]
+fn records_and_byte_slices_cross_the_export_boundary() {
+    let program = check(&format!("{RECORDS}{RECORDS_MAIN}")).unwrap();
+    let mut expected = Vec::new();
+    let (status, stats) = program.evaluate_with_stats(&mut expected).unwrap();
+    assert_eq!(status, 0);
+    assert_eq!(stats.allocations, stats.deallocations);
+    let expected = String::from_utf8(expected).unwrap();
+    let dir = scratch("records");
+    build(&dir, RECORDS, true);
+    // From C: the struct layout the bindings describe.
+    std::fs::write(
+        dir.join("main.c"),
+        r#"#include <stdint.h>
+#include <stdio.h>
+typedef struct { uint64_t pinned, candidate; } Revisions;
+typedef struct { uint8_t authenticated, has_pin; int8_t small; Revisions revisions; float weight; } Facts;
+typedef struct { int64_t code; uint64_t revision; uint8_t admitted; } Decision;
+void rec_plan(const Facts *, Decision *);
+int64_t rec_small(const Facts *);
+int64_t rec_sum(const uint8_t *, int64_t, int64_t);
+static void show(Decision d) { printf("%ld\n%lu\n%d\n", (long)d.code, (unsigned long)d.revision, d.admitted); }
+int main(void) {
+    Facts f = {1, 0, -5, {0, 3}, 1.5f};
+    Decision d;
+    rec_plan(&f, &d); show(d);
+    Facts g = f; g.has_pin = 1; g.revisions.pinned = 4; g.revisions.candidate = 9;
+    rec_plan(&g, &d); show(d);
+    Facts h = f; h.authenticated = 0;
+    rec_plan(&h, &d); show(d);
+    printf("%ld\n", (long)rec_small(&f));
+    printf("%ld\n", (long)rec_sum((const uint8_t *)"abc", 3, 2));
+    printf("%ld\n", (long)rec_sum((const uint8_t *)"", 0, 2));
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let status = Command::new("cc")
+        .current_dir(&dir)
+        .args(["main.c", "-L.", "-lpolicy", "-lm", "-o", "main"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let output = Command::new(dir.join("main")).output().unwrap();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    // From Rust through the generated structs.
+    let bindings = std::fs::read_to_string(dir.join("libpolicy.rs")).unwrap();
+    assert!(bindings.contains("#[repr(C)]") && bindings.contains("pub struct Facts"));
+    if Command::new("rustc").arg("--version").output().is_ok() {
+        std::fs::write(
+            dir.join("main.rs"),
+            r#"mod libpolicy;
+            use libpolicy::*;
+            fn show(d: Decision) { println!("{}\n{}\n{}", d.code, d.revision, i32::from(d.admitted)); }
+            fn main() {
+                let lib = Library::take().unwrap();
+                let f = Facts { authenticated: true, has_pin: false, small: -5, revisions: Revisions { pinned: 0, candidate: 3 }, weight: 1.5 };
+                show(lib.plan(f));
+                show(lib.plan(Facts { has_pin: true, revisions: Revisions { pinned: 4, candidate: 9 }, ..f }));
+                show(lib.plan(Facts { authenticated: false, ..f }));
+                println!("{}", lib.small(f));
+                println!("{}", lib.sum(b"abc", 2));
+                println!("{}", lib.sum(&[], 2));
+            }"#,
+        )
+        .unwrap();
+        let output = Command::new("rustc")
+            .current_dir(&dir)
+            .args([
+                "--edition",
+                "2024",
+                "-O",
+                "main.rs",
+                "-L",
+                ".",
+                "-o",
+                "rmain",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(dir.join("rmain")).output().unwrap();
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

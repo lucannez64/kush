@@ -4059,12 +4059,34 @@ fn object_for(program: &Executable, codegen: CodegenOptions, library: bool) -> R
 /// function. `Bool` crosses as `int32_t` (any non-zero is `true`), narrow
 /// integers at their width, floats as `float`/`double`.
 fn define_exports(module: &mut ObjectModule, program: &Executable, ids: &[FuncId]) -> Result<()> {
+    let mut word_sig = module.make_signature();
+    word_sig.params.push(AbiParam::new(I64));
+    let bytes_free = module
+        .declare_function("kush_bytes_free", Linkage::Import, &word_sig)
+        .map_err(error)?;
+    let mut from_sig = module.make_signature();
+    from_sig
+        .params
+        .extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    from_sig.returns.push(AbiParam::new(I64));
+    let bytes_from = module
+        .declare_function("kush_bytes_from", Linkage::Import, &from_sig)
+        .map_err(error)?;
     for export in &program.exports {
+        let record_result = c_record(program, export.result).is_some();
         let mut sig = module.make_signature();
         for (_, ty) in &export.parameters {
-            sig.params.push(AbiParam::new(abi_value_type(*ty)));
+            if is_bytes_ref(program, *ty) {
+                sig.params.extend([AbiParam::new(I64), AbiParam::new(I64)]);
+            } else if c_record(program, *ty).is_some() {
+                sig.params.push(AbiParam::new(I64));
+            } else {
+                sig.params.push(AbiParam::new(abi_value_type(*ty)));
+            }
         }
-        if export.result != Type::Unit {
+        if record_result {
+            sig.params.push(AbiParam::new(I64));
+        } else if export.result != Type::Unit {
             sig.returns
                 .push(AbiParam::new(abi_value_type(export.result)));
         }
@@ -4076,11 +4098,23 @@ fn define_exports(module: &mut ObjectModule, program: &Executable, ids: &[FuncId
             .get_function_decl(ids[export.index])
             .signature
             .clone();
-        if inner_sig.params.len() != export.parameters.len()
+        let expected_words = usize::from(record_result)
+            + export
+                .parameters
+                .iter()
+                .map(|(_, ty)| {
+                    if is_bytes_ref(program, *ty) {
+                        1
+                    } else {
+                        program.width(*ty)
+                    }
+                })
+                .sum::<usize>();
+        if inner_sig.params.len() != expected_words
             || inner_sig.params.iter().any(|p| p.value_type != I64)
         {
             return Err(error(format!(
-                "internal error: export '{}' does not have a one-word-per-parameter body",
+                "internal error: export '{}' does not have a word-per-field body",
                 export.symbol
             )));
         }
@@ -4091,36 +4125,74 @@ fn define_exports(module: &mut ObjectModule, program: &Executable, ids: &[FuncId
         let block = b.create_block();
         b.append_block_params_for_function_params(block);
         b.switch_to_block(block);
-        let params = b.block_params(block).to_vec();
+        let mut params = b.block_params(block).to_vec().into_iter();
         let mut words = Vec::new();
-        for (value, (_, ty)) in params.into_iter().zip(&export.parameters) {
-            let word = match ty {
-                Type::Bool => {
-                    let set = b.ins().icmp_imm_u(IntCC::NotEqual, value, 0);
-                    b.ins().uextend(I64, set)
-                }
-                Type::Int(kind) if !matches!(kind, IntKind::I64 | IntKind::U64) => {
-                    if kind.signed() {
-                        b.ins().sextend(I64, value)
-                    } else {
-                        b.ins().uextend(I64, value)
-                    }
-                }
-                Type::Float(FloatKind::F64) => b.ins().bitcast(I64, ir::MemFlagsData::new(), value),
-                Type::Float(FloatKind::F32) => {
-                    let bits = b
-                        .ins()
-                        .bitcast(ir::types::I32, ir::MemFlagsData::new(), value);
-                    b.ins().uextend(I64, bits)
-                }
-                _ => value,
-            };
-            words.push(word);
+        let result_slot = record_result.then(|| {
+            let slot = b.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                (program.width(export.result) * 8) as u32,
+                STACK_SLOT_ALIGN_SHIFT,
+            ));
+            b.ins().stack_addr(I64, slot, 0)
+        });
+        if let Some(pointer) = result_slot {
+            words.push(pointer);
         }
+        let mut temporaries = Vec::new();
+        for (_, ty) in &export.parameters {
+            if is_bytes_ref(program, *ty) {
+                // A borrowed buffer: copy the bytes into a temporary Kush
+                // buffer for the call and free it after.
+                let data = params.next().expect("data pointer");
+                let length = params.next().expect("length");
+                let from = module.declare_func_in_func(bytes_from, b.func);
+                let call = b.ins().call(from, &[data, length]);
+                let handle = b.inst_results(call)[0];
+                let slot = b.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    8,
+                    STACK_SLOT_ALIGN_SHIFT,
+                ));
+                let address = b.ins().stack_addr(I64, slot, 0);
+                b.ins().store(ir::MemFlagsData::new(), handle, address, 0);
+                temporaries.push(handle);
+                words.push(address);
+            } else if let Some(layout) = c_record(program, *ty) {
+                let pointer = params.next().expect("record pointer");
+                for (leaf, offset) in layout.leaves {
+                    let value = b.ins().load(
+                        c_scalar_type(leaf),
+                        ir::MemFlagsData::new(),
+                        pointer,
+                        offset as i32,
+                    );
+                    words.push(c_to_word(&mut b, leaf, value));
+                }
+            } else {
+                let value = params.next().expect("scalar parameter");
+                words.push(abi_to_word(&mut b, *ty, value));
+            }
+        }
+        let out = record_result.then(|| params.next().expect("result pointer"));
         let callee = module.declare_func_in_func(ids[export.index], b.func);
         let call = b.ins().call(callee, &words);
         let returned = b.inst_results(call).to_vec();
-        if export.result == Type::Unit {
+        for handle in temporaries {
+            let free = module.declare_func_in_func(bytes_free, b.func);
+            b.ins().call(free, &[handle]);
+        }
+        if let (Some(source), Some(out)) = (result_slot, out) {
+            let layout = c_record(program, export.result).expect("record result");
+            for (index, (leaf, offset)) in layout.leaves.into_iter().enumerate() {
+                let word = b
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), source, (index * 8) as i32);
+                let value = word_to_c(&mut b, leaf, word);
+                b.ins()
+                    .store(ir::MemFlagsData::new(), value, out, offset as i32);
+            }
+            b.ins().return_(&[]);
+        } else if export.result == Type::Unit {
             b.ins().return_(&[]);
         } else {
             let word = returned[0];
@@ -4149,6 +4221,119 @@ fn define_exports(module: &mut ObjectModule, program: &Executable, ids: &[FuncId
             .map_err(|e| error(format!("export '{}': {e:?}", export.symbol)))?;
     }
     Ok(())
+}
+
+/// EXPORT-RECORDS: whether `ty` is `&Bytes`.
+fn is_bytes_ref(program: &Executable, ty: Type) -> bool {
+    matches!(ty, Type::Ref(pointer) if program.pointees[pointer] == Type::Bytes)
+}
+/// C layout of an exported record of scalars: its leaves in Kush word order
+/// with their byte offsets, and the struct's size and alignment. Nested
+/// records are nested C structs (`#[repr(C)]` in the Rust bindings).
+struct CRecord {
+    leaves: Vec<(Type, u32)>,
+    size: u32,
+    align: u32,
+}
+fn c_record(program: &Executable, ty: Type) -> Option<CRecord> {
+    let id = ty.layout()?;
+    let layout = &program.enums[id];
+    if !layout.record || layout.variants.len() != 1 {
+        return None;
+    }
+    let mut leaves = Vec::new();
+    let (mut offset, mut align) = (0u32, 1u32);
+    for field in &layout.variants[0].fields {
+        let (size, field_align, inner) = match field {
+            Type::Bool | Type::I64 | Type::Int(_) | Type::Float(_) => {
+                let size = c_scalar_size(*field);
+                (size, size, vec![(*field, 0)])
+            }
+            other => {
+                let nested = c_record(program, *other)?;
+                (nested.size, nested.align, nested.leaves)
+            }
+        };
+        offset = offset.div_ceil(field_align) * field_align;
+        leaves.extend(inner.into_iter().map(|(leaf, at)| (leaf, offset + at)));
+        offset += size;
+        align = align.max(field_align);
+    }
+    Some(CRecord {
+        leaves,
+        size: offset.div_ceil(align) * align,
+        align,
+    })
+}
+fn c_scalar_size(ty: Type) -> u32 {
+    match ty {
+        Type::Bool => 1,
+        Type::Int(kind) => match kind {
+            IntKind::I8 | IntKind::U8 => 1,
+            IntKind::I16 | IntKind::U16 => 2,
+            IntKind::I32 | IntKind::U32 => 4,
+            IntKind::I64 | IntKind::U64 => 8,
+        },
+        Type::Float(FloatKind::F32) => 4,
+        _ => 8,
+    }
+}
+/// A record field's C type: `bool` is one byte (`u8`) inside structs.
+fn c_scalar_type(ty: Type) -> ir::Type {
+    match ty {
+        Type::Bool => ir::types::I8,
+        other => abi_value_type(other),
+    }
+}
+fn c_to_word(b: &mut FunctionBuilder, ty: Type, value: Value) -> Value {
+    match ty {
+        Type::Bool => {
+            let set = b.ins().icmp_imm_u(IntCC::NotEqual, value, 0);
+            b.ins().uextend(I64, set)
+        }
+        other => abi_to_word(b, other, value),
+    }
+}
+fn abi_to_word(b: &mut FunctionBuilder, ty: Type, value: Value) -> Value {
+    match ty {
+        Type::Bool => {
+            let set = b.ins().icmp_imm_u(IntCC::NotEqual, value, 0);
+            b.ins().uextend(I64, set)
+        }
+        Type::Int(kind) if !matches!(kind, IntKind::I64 | IntKind::U64) => {
+            if kind.signed() {
+                b.ins().sextend(I64, value)
+            } else {
+                b.ins().uextend(I64, value)
+            }
+        }
+        Type::Float(FloatKind::F64) => b.ins().bitcast(I64, ir::MemFlagsData::new(), value),
+        Type::Float(FloatKind::F32) => {
+            let bits = b
+                .ins()
+                .bitcast(ir::types::I32, ir::MemFlagsData::new(), value);
+            b.ins().uextend(I64, bits)
+        }
+        _ => value,
+    }
+}
+fn word_to_c(b: &mut FunctionBuilder, ty: Type, word: Value) -> Value {
+    match ty {
+        Type::Bool => b.ins().ireduce(ir::types::I8, word),
+        Type::Int(kind) if !matches!(kind, IntKind::I64 | IntKind::U64) => {
+            b.ins().ireduce(abi_value_type(ty), word)
+        }
+        Type::Float(FloatKind::F64) => {
+            b.ins()
+                .bitcast(ir::types::F64, ir::MemFlagsData::new(), word)
+        }
+        Type::Float(FloatKind::F32) => {
+            let bits = b.ins().ireduce(ir::types::I32, word);
+            b.ins()
+                .bitcast(ir::types::F32, ir::MemFlagsData::new(), bits)
+        }
+        _ => word,
+    }
 }
 
 /// KUSH-RUST-EXPORT: build a static library (`.a`) holding the program's
@@ -4242,22 +4427,6 @@ pub fn build_library_and_bindings(
 /// abort word), so calls must not overlap: the token is `Send` but not
 /// `Sync`, which lets one thread at a time use it without a lock.
 pub fn rust_bindings(program: &Executable, library_name: &str) -> String {
-    let rust = |ty: &str| match ty {
-        "Bool" => "bool",
-        "i8" => "i8",
-        "i16" => "i16",
-        "i32" => "i32",
-        "i64" => "i64",
-        "u8" => "u8",
-        "u16" => "u16",
-        "u32" => "u32",
-        "u64" => "u64",
-        "f32" => "f32",
-        "f64" => "f64",
-        "Unit" => "()",
-        _ => "i64",
-    };
-    let ffi_ty = |ty: &str| if ty == "Bool" { "i32" } else { rust(ty) };
     // Kush names that are Rust keywords become raw identifiers.
     let ident = |name: &str| {
         const KEYWORDS: &[&str] = &[
@@ -4265,7 +4434,8 @@ pub fn rust_bindings(program: &Executable, library_name: &str) -> String {
             "extern", "false", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "match",
             "mod", "move", "mut", "pub", "ref", "return", "static", "struct", "trait", "true",
             "type", "unsafe", "use", "where", "while", "abstract", "become", "box", "do", "final",
-            "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+            "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield", "self",
+            "Self", "super",
         ];
         if KEYWORDS.contains(&name) {
             format!("r#{name}")
@@ -4273,29 +4443,126 @@ pub fn rust_bindings(program: &Executable, library_name: &str) -> String {
             name.to_owned()
         }
     };
+    // EXPORT-RECORDS: one `#[repr(C)]` struct per exported record type.
+    let mut structs: Vec<(usize, String)> = Vec::new();
+    fn collect(program: &Executable, ty: Type, structs: &mut Vec<(usize, String)>) {
+        let Some(id) = ty.layout() else { return };
+        if c_record(program, ty).is_none() || structs.iter().any(|(seen, _)| *seen == id) {
+            return;
+        }
+        for field in &program.enums[id].variants[0].fields {
+            collect(program, *field, structs);
+        }
+        let full = program.type_name(ty);
+        let base: String = full
+            .rsplit('.')
+            .next()
+            .unwrap_or(&full)
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let mut name = base.clone();
+        let mut counter = 2;
+        while structs.iter().any(|(_, existing)| *existing == name) {
+            name = format!("{base}{counter}");
+            counter += 1;
+        }
+        structs.push((id, name));
+    }
+    for export in &program.exports {
+        for (_, ty) in &export.parameters {
+            collect(program, *ty, &mut structs);
+        }
+        collect(program, export.result, &mut structs);
+    }
+    let struct_name = |ty: Type| {
+        ty.layout()
+            .and_then(|id| structs.iter().find(|(seen, _)| *seen == id))
+            .map(|(_, name)| name.clone())
+    };
+    let scalar = |ty: Type| -> String {
+        match ty {
+            Type::Bool => "bool".into(),
+            Type::I64 => "i64".into(),
+            Type::Int(kind) => match kind {
+                IntKind::I8 => "i8",
+                IntKind::I16 => "i16",
+                IntKind::I32 => "i32",
+                IntKind::I64 => "i64",
+                IntKind::U8 => "u8",
+                IntKind::U16 => "u16",
+                IntKind::U32 => "u32",
+                IntKind::U64 => "u64",
+            }
+            .into(),
+            Type::Float(FloatKind::F32) => "f32".into(),
+            Type::Float(FloatKind::F64) => "f64".into(),
+            Type::Unit => "()".into(),
+            other => struct_name(other).unwrap_or_else(|| "i64".into()),
+        }
+    };
+    let ffi_scalar = |ty: Type| {
+        if ty == Type::Bool {
+            "i32".to_owned()
+        } else {
+            scalar(ty)
+        }
+    };
     let mut out = String::new();
     out.push_str(&format!(
         "// Generated by `kush build --lib`: Rust bindings for the Kush library `{library_name}`.\n\
          // Link with `-l static={library_name}` (and `-lm`). Do not edit.\n\n\
-         #![allow(dead_code)]\n\n\
-         pub mod ffi {{\n    // The Kush runtime uses libm.\n    #[link(name = \"m\")]\n    unsafe extern \"C\" {{}}\n\n    #[link(name = \"{library_name}\", kind = \"static\")]\n    unsafe extern \"C\" {{\n"
+         #![allow(dead_code)]\n\n"
     ));
-    let exports = program.exports();
-    for export in &exports {
-        let params = export
-            .parameters
+    for (id, name) in &structs {
+        let layout = &program.enums[*id];
+        out.push_str(&format!(
+            "/// Kush `{}` (C layout).\n#[repr(C)]\n#[derive(Clone, Copy, Debug, PartialEq)]\npub struct {name} {{\n",
+            program.type_name(Type::Enum(*id))
+        ));
+        for (field, ty) in layout.variants[0]
+            .names
             .iter()
-            .map(|(n, t)| format!("{}: {}", ident(n), ffi_ty(t)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let result = if export.result == "Unit" {
+            .zip(&layout.variants[0].fields)
+        {
+            out.push_str(&format!("    pub {}: {},\n", ident(field), scalar(*ty)));
+        }
+        out.push_str("}\n\n");
+    }
+    out.push_str(&format!(
+        "pub mod ffi {{\n    #![allow(unused_imports)]\n    use super::*;\n\n    // The Kush runtime uses libm.\n    #[link(name = \"m\")]\n    unsafe extern \"C\" {{}}\n\n    #[link(name = \"{library_name}\", kind = \"static\")]\n    unsafe extern \"C\" {{\n"
+    ));
+    for export in &program.exports {
+        let name = &program.functions[export.index].name;
+        let mut params = Vec::new();
+        for (n, ty) in &export.parameters {
+            if is_bytes_ref(program, *ty) {
+                params.push(format!("{}: *const u8", ident(n)));
+                params.push(format!("{n}_len: i64"));
+            } else if struct_name(*ty).is_some() {
+                params.push(format!("{}: *const {}", ident(n), scalar(*ty)));
+            } else {
+                params.push(format!("{}: {}", ident(n), ffi_scalar(*ty)));
+            }
+        }
+        let result = if struct_name(export.result).is_some() {
+            params.push(format!("out: *mut {}", scalar(export.result)));
+            String::new()
+        } else if export.result == Type::Unit {
             String::new()
         } else {
-            format!(" -> {}", ffi_ty(&export.result))
+            format!(" -> {}", ffi_scalar(export.result))
         };
         out.push_str(&format!(
-            "        /// Kush `{}`. Calls must not overlap (see `super::Library`).\n        pub fn {}({params}){result};\n",
-            export.name, export.symbol
+            "        /// Kush `{name}`. Calls must not overlap (see `super::Library`).\n        pub fn {}({}){result};\n",
+            export.symbol,
+            params.join(", ")
         ));
     }
     out.push_str("    }\n}\n\n");
@@ -4306,35 +4573,49 @@ pub fn rust_bindings(program: &Executable, library_name: &str) -> String {
          static TAKEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);\n\n\
          impl Library {\n    /// The process's only token; `None` after the first call.\n    pub fn take() -> Option<Library> {\n        (!TAKEN.swap(true, core::sync::atomic::Ordering::AcqRel))\n            .then(|| Library(core::marker::PhantomData))\n    }\n",
     );
-    for export in &exports {
-        let params = export
-            .parameters
-            .iter()
-            .map(|(n, t)| format!(", {}: {}", ident(n), rust(t)))
-            .collect::<String>();
-        let args = export
-            .parameters
-            .iter()
-            .map(|(n, t)| {
-                if t == "Bool" {
-                    format!("i32::from({})", ident(n))
-                } else {
-                    ident(n)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let call = format!("unsafe {{ ffi::{}({args}) }}", export.symbol);
-        let (result, body) = match export.result.as_str() {
-            "Unit" => (String::new(), call),
-            "Bool" => (" -> bool".to_owned(), format!("({call}) != 0")),
-            other => (format!(" -> {}", rust(other)), call),
+    for export in &program.exports {
+        let name = &program.functions[export.index].name;
+        let mut params = String::new();
+        let mut args = Vec::new();
+        for (n, ty) in &export.parameters {
+            let id = ident(n);
+            if is_bytes_ref(program, *ty) {
+                params.push_str(&format!(", {id}: &[u8]"));
+                args.push(format!("{id}.as_ptr()"));
+                args.push(format!("{id}.len() as i64"));
+            } else if struct_name(*ty).is_some() {
+                params.push_str(&format!(", {id}: {}", scalar(*ty)));
+                args.push(format!("&{id}"));
+            } else if *ty == Type::Bool {
+                params.push_str(&format!(", {id}: bool"));
+                args.push(format!("i32::from({id})"));
+            } else {
+                params.push_str(&format!(", {id}: {}", scalar(*ty)));
+                args.push(id);
+            }
+        }
+        let (result, body) = if let Some(record) = struct_name(export.result) {
+            args.push("out.as_mut_ptr()".into());
+            (
+                format!(" -> {record}"),
+                format!(
+                    "let mut out = core::mem::MaybeUninit::<{record}>::uninit();\n        unsafe {{\n            ffi::{}({});\n            out.assume_init()\n        }}",
+                    export.symbol,
+                    args.join(", ")
+                ),
+            )
+        } else {
+            let call = format!("unsafe {{ ffi::{}({}) }}", export.symbol, args.join(", "));
+            match export.result {
+                Type::Unit => (String::new(), call),
+                Type::Bool => (" -> bool".to_owned(), format!("({call}) != 0")),
+                other => (format!(" -> {}", scalar(other)), call),
+            }
         };
         out.push_str(&format!(
-            "    /// Kush `{}` (`{}`).\n    pub fn {}(&self{params}){result} {{\n        {body}\n    }}\n",
-            export.name,
+            "    /// Kush `{name}` (`{}`).\n    pub fn {}(&self{params}){result} {{\n        {body}\n    }}\n",
             export.symbol,
-            ident(&export.name)
+            ident(name)
         ));
     }
     out.push_str("}\n");

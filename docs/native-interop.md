@@ -355,8 +355,29 @@ let lib = libpolicy::Library::take().unwrap();   // one per process
 let decision = lib.decide(true, 3);
 ```
 
-Rules (v1), each a diagnostic: parameters are integers, floats or `Bool`; the
-result is one of those or `Unit`; the effect row is `{}` or `{panic}`; no
+Records and byte slices (EXPORT-RECORDS, user-approved): a record whose
+fields are scalars or such records crosses as a pointer to a C struct; the
+bindings declare a matching `#[repr(C)]` struct (`bool` fields are one byte,
+`u8` in C), and the safe wrapper takes the struct by value. A record result
+is written through a trailing `out` pointer (the Rust wrapper returns the
+struct). A `&Bytes` parameter is `(const uint8_t *data, int64_t data_len)`
+in C and `&[u8]` in Rust; the bytes are copied into a temporary Kush buffer
+for the call. Every field of an exported record must be `pub`, since the
+caller sees the whole struct. Owned `Bytes`, enums, tuples, records with
+owned or borrowed fields and `&mut` buffers do not cross.
+
+```kush
+struct Facts { pub authenticated: Bool, pub revision: u64 }
+struct Decision { pub code: i64, pub admitted: Bool }
+export "policy_plan" fn plan(facts: Facts) -> Decision ! {} { .. }
+```
+
+```rust
+let decision: Decision = lib.plan(Facts { authenticated: true, revision: 3 });
+```
+
+Rules, each a diagnostic: parameters are integers, floats, `Bool`, records of
+those, or `&Bytes`; the result is a scalar, a record of scalars or `Unit`; the effect row is `{}` or `{panic}`; no
 generics, lifetimes, erased parameters or usage grades; the symbol is a C
 identifier, not `main`, not starting with `kush_`, and unique. A library
 needs at least one export and cannot import foreign functions yet.
