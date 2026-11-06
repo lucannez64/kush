@@ -724,6 +724,19 @@ impl HostOp {
             | Self::TimeSleepMs => &[],
         }
     }
+    /// Builtins over raw descriptor numbers, callable only from std.
+    pub fn raw_handle(self) -> bool {
+        matches!(
+            self,
+            Self::FsOpen
+                | Self::FsReadAt
+                | Self::FsWriteAt
+                | Self::FsSync
+                | Self::FsTruncate
+                | Self::FsFileSize
+                | Self::FsClose
+        )
+    }
     pub fn payload(self) -> HostPayload {
         match self {
             Self::FsRead
@@ -23264,6 +23277,23 @@ impl Checker<'_, '_> {
                             }
                         }
                     } else if let Some(op) = host_op {
+                        // RAW-FS-HANDLES: descriptor numbers can be reused once
+                        // closed, so only std (std.file's linear File) may
+                        // call the raw handle builtins. A std module is never
+                        // the root unit (0), which may name itself `std.x`.
+                        if op.raw_handle()
+                            && (c.unit == 0
+                                || c
+                                    .resolution
+                                    .units
+                                    .get(c.unit)
+                                    .is_none_or(|path| path.first().is_none_or(|p| p != "std")))
+                        {
+                            return Err(Diagnostic::new(
+                                callee.span,
+                                "raw file handle builtins are reserved for std; use std.file (open_read, read_at, write_at, sync, truncate, size, close)",
+                            ));
+                        }
                         let bytes = Type::Bytes;
                         let borrowed = Type::Ref(c.types.pointer(Type::Bytes));
                         let parameters = match op {

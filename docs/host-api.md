@@ -88,6 +88,13 @@ missing, keep contents), `open_existing`, `create_new` (`O_EXCL`, mode
 `0600`), `read_at`, `write_at`, `sync` (`fsync`), `truncate`, `size`, `close`
 and `sync_dir` (`fsync` on a directory, to make a rename or creation durable).
 
+The raw handle builtins (`FS.open`, `read_at`, `write_at`, `sync`,
+`truncate`, `file_size`, `close`) can only be called from std modules; any
+other module gets a diagnostic pointing to `std.file`. Natively a closed
+descriptor number can be reused, so a raw number could reach another file;
+the linear `File` rules that out. The path builtins, including `sync_dir`,
+stay public.
+
 The raw `FS.open` modes are 0 read-only, 1 read-write creating, 2 read-write
 existing and 3 read-write exclusive creation; others are `EINVAL`. The handle
 calls accept only handles that `FS.open` returned and that are not closed: any

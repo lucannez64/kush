@@ -166,17 +166,12 @@ fn open_modes_and_errors() {
                 }},
                 Result.Err(e) => show(-e),
             }}
-            // Raw handles that the runtime did not open are refused.
-            show(code(FS.file_size(0)));
-            show(code(FS.file_size(1)));
-            show(unit(FS.close(2)));
-            show(unit(FS.sync(-4)));
             0
         }}"
     ));
     assert_eq!(
         output,
-        "-2\n-2\n0\n-17\n0\n-22\n-9\n-27\n-22\n0\n-9\n-9\n-9\n-9\n"
+        "-2\n-2\n0\n-17\n0\n-22\n-9\n-27\n-22\n0\n"
     );
 }
 
@@ -198,11 +193,32 @@ fn a_file_must_be_closed_and_cannot_be_forged() {
             "moved",
         ),
         ("let f = file.File { fd: 1 }; unit(file.close(f))", "private"),
+        // RAW-FS-HANDLES: the descriptor builtins are reserved for std.
+        ("code(FS.open(&Bytes.from(\"x\"), 0))", "reserved for std"),
+        ("match FS.read_at(3, 0, 1, Bytes.with_capacity(1)) { Result.Ok(b) => { drop(b); 0 }, Result.Err(e) => e }", "reserved for std"),
+        ("code(FS.write_at(3, 0, &Bytes.from(\"x\")))", "reserved for std"),
+        ("unit(FS.sync(3))", "reserved for std"),
+        ("unit(FS.truncate(3, 0))", "reserved for std"),
+        ("code(FS.file_size(0))", "reserved for std"),
+        ("unit(FS.close(2))", "reserved for std"),
+        ("let f = FS.close; 0", ""),
     ] {
         let source = format!("{PRELUDE} fn main() -> i64 ! {{io, alloc, panic}} {{ {body} }}");
         let error = checked(&source).err().unwrap_or_else(|| panic!("accepted: {body}"));
         assert!(error.contains(message), "expected {message:?} in:\n{error}");
     }
+}
+
+/// A root file cannot claim the std namespace to reach the raw builtins.
+#[test]
+fn a_root_module_named_std_cannot_call_raw_handles() {
+    let source = "module std.evil;
+        use std.result.Result;
+        fn main() -> i64 ! {io, alloc, panic} {
+            match FS.file_size(0) { Result.Ok(n) => n, Result.Err(e) => e }
+        }";
+    let error = checked(source).err().expect("accepted a root std module");
+    assert!(error.contains("reserved for std"), "{error}");
 }
 
 /// A record holding a `File` and ordinary data (kush-kv's store): taking it
