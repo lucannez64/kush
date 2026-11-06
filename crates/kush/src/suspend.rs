@@ -1630,7 +1630,8 @@ impl Host {
             | Type::Once(_)
             | Type::DynObj(_)
             | Type::Union(_)
-            | Type::Task(_) => true,
+            | Type::Task(_)
+            | Type::Thread(_) => true,
             Type::Enum(id) | Type::Variants(id, _) => self.carrying_layouts[id],
             Type::Box(p) | Type::Vec(p) | Type::Annotated(p, _) => {
                 carries_in(self.pointees[p], &self.carrying_layouts, &self.pointees, 0)
@@ -1659,7 +1660,8 @@ fn carries_in(ty: Type, layouts: &[bool], pointees: &[Type], depth: usize) -> bo
         | Type::Once(_)
         | Type::DynObj(_)
         | Type::Union(_)
-        | Type::Task(_) => true,
+        | Type::Task(_)
+        | Type::Thread(_) => true,
         _ => false,
     }
 }
@@ -3766,7 +3768,9 @@ fn check_task_tokens(program: &Executable) -> Result<()> {
                 return true;
             }
             match ty {
-                Type::DynObj(_) | Type::Task(_) | Type::AllocatorContext => return true,
+                Type::DynObj(_) | Type::Task(_) | Type::Thread(_) | Type::AllocatorContext => {
+                    return true;
+                }
                 Type::Box(p)
                 | Type::Vec(p)
                 | Type::ArenaBox(p)

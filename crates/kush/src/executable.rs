@@ -95,6 +95,9 @@ pub(crate) enum Type {
     /// An opaque, affine structured-task handle. One word. Handles are created
     /// only inside a `Task.scope` and may not escape it through data or results.
     Task(usize),
+    /// THREAD-SCOPE: an opaque, affine handle of a parallel child thread
+    /// (`Thread.spawn`). One word. Same structured rules as `Task`.
+    Thread(usize),
     /// Owning bump-allocator region handle, one word. Values allocated through
     /// `Arena.alloc` retain the region, so the arena value may be dropped while
     /// its boxes remain live.
@@ -289,6 +292,8 @@ pub struct Executable {
     /// Whether any checked body contains a structured-task operation. Task
     /// programs use the cooperative reference scheduler and buffered host I/O.
     pub(crate) uses_tasks: bool,
+    /// THREAD-SCOPE: the program runs OS threads (thread-safe runtime paths).
+    pub(crate) uses_threads: bool,
     /// Effect-row bit of each declared operation, by operation id.
     pub(crate) effect_bits: Vec<u16>,
     /// Whether each declared operation is abortive (`-> Never`).
@@ -1177,6 +1182,8 @@ pub(crate) enum ExprKind {
         /// explicitly) and a cancellation-requested completion transfers the
         /// payload as `Completed` instead of discarding it.
         obligation: bool,
+        /// THREAD-SCOPE: `Thread.spawn`, run on its own OS thread.
+        parallel: bool,
     },
     /// Run a once callable in the current task with a fresh structured scope
     /// frame. The epilogue joins every unjoined child before returning.
@@ -1189,6 +1196,8 @@ pub(crate) enum ExprKind {
         /// `Err` result requests cancellation of every unjoined child before
         /// the scope epilogue joins them.
         failure: Option<crate::runtime_types::ResultShape>,
+        /// THREAD-SCOPE: `Thread.scope`, whose epilogue joins child threads.
+        parallel: bool,
     },
     /// Cooperative suspension point. The boolean result reports whether
     /// cancellation has been requested.
@@ -1206,6 +1215,9 @@ pub(crate) enum ExprKind {
         /// The joined task's payload carries an owning/linear obligation, so
         /// the resulting `TaskExit<T>` transfers it to the caller.
         obligation: bool,
+        /// THREAD-SCOPE: `Thread.join`, whose value is the payload itself (a
+        /// thread is never cancelled); `exit` still describes the payload.
+        parallel: bool,
     },
     /// In-place vector transform. `callbacks` are applied left-to-right to
     /// every element; their signatures determine the intermediate layouts.
@@ -4870,6 +4882,7 @@ struct Functions<'a> {
     allocator_contexts: Vec<AllocatorContextSpec>,
     /// Set when any body uses a structured-task operation.
     uses_tasks: bool,
+    uses_threads: bool,
     /// Task body functions whose binding-based linear result must be rejected
     /// once their body has been checked.
     /// Monotonic counter for compiler-internal elided input lifetimes. The
@@ -5312,6 +5325,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         fusions: 0,
         allocator_contexts: Vec::new(),
         uses_tasks: false,
+        uses_threads: false,
         elided_lifetimes: 0,
         traits: BTreeMap::new(),
         inherent: BTreeMap::new(),
@@ -5708,6 +5722,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             kernel_types: BTreeMap::new(),
             kernel_proofs: BTreeMap::new(),
             scope_depth: 0,
+            scope_parallel: false,
+            next_scope_parallel: false,
             next_split: 0,
             self_type: sig.self_type,
             default_trait: sig.default_trait.clone(),
@@ -5905,6 +5921,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,
         uses_tasks: functions.uses_tasks,
+        uses_threads: functions.uses_threads,
         effect_bits,
         abortive_operations,
         certificates: functions.certificates,
@@ -7367,6 +7384,7 @@ fn collect_methods<'a>(
                 | Type::Str
                 | Type::StrMut
                 | Type::Task(_)
+                | Type::Thread(_)
                 | Type::Stdin
                 | Type::Stdout
                 | Type::Never
@@ -12629,6 +12647,10 @@ struct Checker<'a, 't> {
     /// Nested function values reset this to zero so spawn cannot be smuggled
     /// into a callback that outlives its scope.
     scope_depth: usize,
+    /// THREAD-SCOPE: the immediate scope lambda is a `Thread.scope`.
+    scope_parallel: bool,
+    /// Kind of the scope lambda about to be checked by `task_callable`.
+    next_scope_parallel: bool,
     /// Monotonic id for checked `Slice.split_at_mut` pairs in this body.
     next_split: usize,
     /// Concrete `Self` target when checking an impl method body.
@@ -13074,7 +13096,12 @@ impl Checker<'_, '_> {
         }
         if !matches!(
             first.ty,
-            Type::Box(_) | Type::Bytes | Type::String | Type::Vec(_) | Type::Task(_)
+            Type::Box(_)
+                | Type::Bytes
+                | Type::String
+                | Type::Vec(_)
+                | Type::Task(_)
+                | Type::Thread(_)
         ) {
             return Err(Diagnostic::new(
                 first.span,
@@ -13405,7 +13432,10 @@ impl Checker<'_, '_> {
                 "a borrowed view is already a reference-like capability; pass it directly, or derive a subview with '&name[start..end]'",
             ));
         }
-        if matches!(ty, Type::Task(_) | Type::Fn(_) | Type::Once(_)) {
+        if matches!(
+            ty,
+            Type::Task(_) | Type::Thread(_) | Type::Fn(_) | Type::Once(_)
+        ) {
             return Err(Diagnostic::new(
                 span,
                 "this value has no checked reference form; task handles, function pointers, and closures are passed or consumed directly",
@@ -13705,6 +13735,7 @@ impl Checker<'_, '_> {
                 | Type::ArenaBox(_)
                 | Type::Allocator
                 | Type::Task(_)
+                | Type::Thread(_)
                 | Type::DynObj(_)
                 | Type::Union(_)
                 | Type::Fn(_)
@@ -18380,7 +18411,8 @@ impl Checker<'_, '_> {
             (Type::ArenaBox(callee_pointee), Type::ArenaBox(actual_pointee))
             | (Type::AllocBox(callee_pointee), Type::AllocBox(actual_pointee))
             | (Type::AllocVec(callee_pointee), Type::AllocVec(actual_pointee))
-            | (Type::Task(callee_pointee), Type::Task(actual_pointee)) => {
+            | (Type::Task(callee_pointee), Type::Task(actual_pointee))
+            | (Type::Thread(callee_pointee), Type::Thread(actual_pointee)) => {
                 let callee_inner = self.types.pointees[callee_pointee];
                 let actual_inner = self.types.pointees[actual_pointee];
                 self.collect_call_lifetime_occurrences(
@@ -23074,7 +23106,7 @@ impl Checker<'_, '_> {
                                             | Type::Vec(_)
                                             | Type::Slice(_)
                                             | Type::SliceMut(_)
-                                            | Type::Task(_)
+                                            | Type::Task(_) | Type::Thread(_)
                                     )
                             };
                             if opaque(left.ty) || opaque(right.ty)
@@ -23324,7 +23356,7 @@ impl Checker<'_, '_> {
                             )),
                         };
                     }
-                    if binding.kind == BindingKind::Builtin && binding.name.starts_with("Task.") {
+                    if binding.kind == BindingKind::Builtin && (binding.name.starts_with("Task.") || binding.name.starts_with("Thread.")) {
                         return c.task_call(&binding.name.clone(), explicit, arguments, expected, span);
                     }
                     if binding.kind == BindingKind::Builtin
@@ -24241,7 +24273,7 @@ impl Checker<'_, '_> {
                 )
                 .with_note(self.locals[*slot].span, "captured borrow declared here"));
             }
-            if matches!(ty, Type::Task(_)) {
+            if matches!(ty, Type::Task(_) | Type::Thread(_)) {
                 return Err(Diagnostic::new(
                     span,
                     "a lambda cannot capture a task handle; join it in the scope that owns it",
@@ -24800,6 +24832,7 @@ impl Checker<'_, '_> {
             .collect::<Vec<_>>();
         let kernel_mark = self.kernel_locals.len();
         let saved_scope_depth = self.scope_depth;
+        let saved_scope_parallel = self.scope_parallel;
         // A handler is lexical to direct performs in the enclosing function
         // body, never to indirect calls. A lambda is a separate callable, so it
         // cannot capture the hidden handler local by name.
@@ -24812,6 +24845,7 @@ impl Checker<'_, '_> {
         let saved_required = self.required_effects.replace(0);
         let checked = (|| {
             self.scope_depth = if scope_root { saved_scope_depth + 1 } else { 0 };
+            self.scope_parallel = scope_root && self.next_scope_parallel;
             self.parameter_lifetimes = child_parameter_lifetimes.clone();
             for ((ty, (grade, linear)), mutable) in capture_types
                 .iter()
@@ -24888,6 +24922,7 @@ impl Checker<'_, '_> {
         })();
         self.truncate_kernel(kernel_mark);
         self.scope_depth = saved_scope_depth;
+        self.scope_parallel = saved_scope_parallel;
         self.handlers = saved_handlers;
         self.ensures_context = saved_ensures;
         self.ensures_tail = saved_ensures_tail;
@@ -25504,6 +25539,7 @@ impl Checker<'_, '_> {
                 | Type::Once(_)
                 | Type::DynObj(_)
                 | Type::Task(_)
+                | Type::Thread(_)
                 | Type::AllocatorContext => return true,
                 Type::Box(p)
                 | Type::Vec(p)
@@ -27610,6 +27646,7 @@ impl Checker<'_, '_> {
                 | Type::Vec(_)
                 | Type::Once(_)
                 | Type::Task(_)
+                | Type::Thread(_)
                 | Type::DynObj(_) => true,
                 Type::Enum(id) | Type::Variants(id, _) if depth < 64 => {
                     types.enums[id].linear
@@ -30553,6 +30590,18 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Expr> {
         self.functions.uses_tasks = true;
+        // THREAD-SCOPE: `Thread.scope/spawn/join` share the structured task
+        // checks; `parallel` selects OS threads and their extra rules.
+        let parallel = name.starts_with("Thread.");
+        let name = match name {
+            "Thread.scope" => "Task.scope",
+            "Thread.spawn" => "Task.spawn",
+            "Thread.join" => "Task.join",
+            other => other,
+        };
+        if parallel {
+            self.functions.uses_threads = true;
+        }
         match name {
             "Task.scope" => {
                 if explicit.is_some() {
@@ -30570,8 +30619,11 @@ impl Checker<'_, '_> {
                         ),
                     ));
                 }
-                let (body, result, effects, result_grade) =
-                    self.task_callable(&arguments[0], true, false, "Task.scope", span)?;
+                self.next_scope_parallel = parallel;
+                let checked =
+                    self.task_callable(&arguments[0], true, false, "Task.scope", parallel, span);
+                self.next_scope_parallel = false;
+                let (body, result, effects, result_grade) = checked?;
                 if crate::runtime_types::is_reference_container(self.types, result) {
                     return Err(Diagnostic::new(
                         span,
@@ -30594,13 +30646,20 @@ impl Checker<'_, '_> {
                 self.apply_effect_writes(effects);
                 let obligation =
                     self.linear_type(result) || result_grade.is_some_and(Grade::is_one);
-                let failure = self.types.result(result, span).ok();
+                // A failed thread scope still joins its children: threads are
+                // never cancelled.
+                let failure = if parallel {
+                    None
+                } else {
+                    self.types.result(result, span).ok()
+                };
                 let value = Expr {
                     kind: ExprKind::TaskScope {
                         body: Box::new(body),
                         result,
                         obligation,
                         failure,
+                        parallel,
                     },
                     ty: result,
                     span,
@@ -30627,8 +30686,18 @@ impl Checker<'_, '_> {
                         "Task.spawn requires an enclosing Task.scope; detached tasks are not supported",
                     ));
                 }
+                if self.scope_parallel != parallel {
+                    return Err(Diagnostic::new(
+                        span,
+                        if parallel {
+                            "Thread.spawn requires an enclosing Thread.scope lambda"
+                        } else {
+                            "Task.spawn requires an enclosing Task.scope lambda, not a Thread.scope"
+                        },
+                    ));
+                }
                 let (mut body, result, _, result_grade) =
-                    self.task_callable(&arguments[0], false, true, "Task.spawn", span)?;
+                    self.task_callable(&arguments[0], false, true, "Task.spawn", parallel, span)?;
                 if crate::runtime_types::contains_task_exit_borrow(self.types, result)
                     && !crate::runtime_types::is_child_task_exit(self.types, result)
                 {
@@ -30666,7 +30735,7 @@ impl Checker<'_, '_> {
                             "Task.spawn accepts at most one result type argument",
                         ));
                     }
-                    (None, Some(Type::Task(p))) => Some(self.types.pointees[p]),
+                    (None, Some(Type::Task(p) | Type::Thread(p))) => Some(self.types.pointees[p]),
                     (None, Some(other)) => {
                         return Err(Diagnostic::new(
                             span,
@@ -30702,12 +30771,17 @@ impl Checker<'_, '_> {
                 };
                 let obligation =
                     self.linear_type(result) || result_grade.is_some_and(Grade::is_one);
-                let handle = Type::Task(self.types.pointer(result));
+                let handle = if parallel {
+                    Type::Thread(self.types.pointer(result))
+                } else {
+                    Type::Task(self.types.pointer(result))
+                };
                 let value = Expr {
                     kind: ExprKind::TaskSpawn {
                         body: Box::new(body),
                         result,
                         obligation,
+                        parallel,
                     },
                     ty: handle,
                     span,
@@ -30794,25 +30868,44 @@ impl Checker<'_, '_> {
                     ));
                 }
                 let task = self.expr(&arguments[0])?;
-                let Type::Task(p) = task.ty else {
-                    return Err(Diagnostic::new(
-                        task.span,
-                        format!(
-                            "Task.join expects Task<T>, found {}",
-                            self.types.name(task.ty)
-                        ),
-                    ));
+                let p = match (task.ty, parallel) {
+                    (Type::Task(p), false) | (Type::Thread(p), true) => p,
+                    _ => {
+                        return Err(Diagnostic::new(
+                            task.span,
+                            format!(
+                                "{} expects {}<T>, found {}",
+                                if parallel { "Thread.join" } else { "Task.join" },
+                                if parallel { "Thread" } else { "Task" },
+                                self.types.name(task.ty)
+                            ),
+                        ));
+                    }
                 };
                 let payload = self.types.pointees[p];
-                self.require(SUSPEND, span)?;
-                let exit = self.types.task_exit(payload, span)?;
-                let ty = exit.result;
+                if !parallel {
+                    self.require(SUSPEND, span)?;
+                }
+                // A thread is never cancelled: its join yields the payload,
+                // so it needs no `TaskExit` declaration.
+                let exit = if parallel {
+                    TaskExitShape {
+                        completed_tag: 0,
+                        cancelled_tag: 0,
+                        payload,
+                        result: payload,
+                    }
+                } else {
+                    self.types.task_exit(payload, span)?
+                };
+                let ty = if parallel { payload } else { exit.result };
                 let obligation = self.linear_type(payload) || self.value_moves_linear(&task);
                 let value = Expr {
                     kind: ExprKind::TaskJoin {
                         task: Box::new(task),
                         exit,
                         obligation,
+                        parallel,
                     },
                     ty,
                     span,
@@ -30829,6 +30922,41 @@ impl Checker<'_, '_> {
             )),
         }
     }
+    /// THREAD-SCOPE: types a thread may not receive, because they can reach
+    /// allocator or environment state that is not thread-safe.
+    fn thread_unshareable(&self, ty: Type) -> bool {
+        let mut pending = vec![ty];
+        let mut seen = BTreeSet::new();
+        while let Some(ty) = pending.pop() {
+            if !seen.insert(ty) {
+                continue;
+            }
+            match ty {
+                Type::Arena
+                | Type::ArenaBox(_)
+                | Type::AllocatorContext
+                | Type::AllocBox(_)
+                | Type::AllocVec(_)
+                | Type::Once(_)
+                | Type::DynObj(_) => return true,
+                Type::Box(p)
+                | Type::Vec(p)
+                | Type::Ref(p)
+                | Type::RefMut(p)
+                | Type::Slice(p)
+                | Type::SliceMut(p)
+                | Type::Annotated(p, _) => pending.push(self.types.pointees[p]),
+                Type::Enum(id) | Type::Variants(id, _) => {
+                    for variant in &self.types.enums[id].variants {
+                        pending.extend(variant.fields.iter().copied());
+                    }
+                }
+                Type::Union(id) => pending.extend(self.types.unions[id].members.iter().copied()),
+                _ => {}
+            }
+        }
+        false
+    }
     /// Check a task/scope body as an owned once callable with no parameters.
     /// `scope_root` marks the immediate `Task.scope` lambda, whose body may
     /// spawn. Every other function value resets lexical scope depth.
@@ -30838,6 +30966,7 @@ impl Checker<'_, '_> {
         scope_root: bool,
         static_body: bool,
         what: &str,
+        parallel: bool,
         span: Span,
     ) -> Result<(Expr, Type, u16, Option<Grade>)> {
         let value = if scope_root {
@@ -30874,7 +31003,35 @@ impl Checker<'_, '_> {
             ));
         }
         let result = signature.result;
-        let effects = signature.effects | ALLOC | PANIC | SUSPEND;
+        // THREAD-SCOPE: a thread body runs on its own OS thread with an empty
+        // handler stack and no task scheduler, so it may only use builtin
+        // effects other than `suspend` (declared operations must be handled
+        // inside it), and it may not hold values whose allocators or
+        // environments other threads could reach.
+        let effects = if parallel && !scope_root {
+            if signature.effects & !(IO | ALLOC | PANIC) != 0 {
+                return Err(Diagnostic::new(
+                    value.span,
+                    "a thread body may only have the effects {io, alloc, panic}: it cannot suspend, and a declared operation must be handled inside the thread",
+                ));
+            }
+            if let Some(types) = self.closure_capture_types(&value)
+                && let Some(ty) = types.into_iter().find(|ty| self.thread_unshareable(*ty))
+            {
+                return Err(Diagnostic::new(
+                    value.span,
+                    format!(
+                        "a thread body cannot capture {}: arenas, user allocators, closures and trait objects may reach state another thread uses",
+                        self.types.name(ty)
+                    ),
+                ));
+            }
+            signature.effects | ALLOC | PANIC
+        } else if parallel {
+            signature.effects | ALLOC | PANIC
+        } else {
+            signature.effects | ALLOC | PANIC | SUSPEND
+        };
         self.require(effects, span)?;
         let static_function = Self::callable_function(&value);
         if static_body && static_function.is_none() {
@@ -37086,6 +37243,7 @@ impl Executable {
             | Type::Vec(_)
             | Type::Once(_)
             | Type::Task(_)
+            | Type::Thread(_)
             | Type::DynObj(_) => true,
             Type::Enum(id) | Type::Variants(id, _) => self.owned_enums[id],
             Type::Union(id) => self.unions[id]
@@ -38390,6 +38548,7 @@ impl Executable {
                 | Type::Arena
                 | Type::Once(_)
                 | Type::Task(_)
+                | Type::Thread(_)
                 | Type::DynObj(_) => true,
                 Type::Box(pointee) | Type::Vec(pointee) => {
                     go(executable, executable.pointees[pointee], depth + 1, seen)
@@ -38435,6 +38594,7 @@ impl Executable {
                 | Type::Vec(_)
                 | Type::Once(_)
                 | Type::Task(_)
+                | Type::Thread(_)
                 | Type::DynObj(_) => true,
                 Type::Enum(id) | Type::Variants(id, _) => {
                     executable.enums[id].linear

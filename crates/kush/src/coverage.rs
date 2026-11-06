@@ -282,7 +282,7 @@ fn useful(
                 span,
             ),
             Type::Never => Ok(false),
-            Type::Task(_) => Ok(false),
+            Type::Task(_) | Type::Thread(_) => Ok(false),
         },
         Pat::Or(_) => unreachable!(),
     }

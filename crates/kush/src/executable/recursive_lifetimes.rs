@@ -507,6 +507,7 @@ impl<'a, 'r> Solver<'a, 'r> {
                 | "Bytes"
                 | "String"
                 | "Task"
+                | "Thread"
                 | "TaskExit"
                 | "Arena"
                 | "ArenaBox"

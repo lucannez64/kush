@@ -75,6 +75,20 @@ const RUNTIME: &str = r#"
 #include <sys/wait.h>
 extern char **environ;
 extern int64_t kush_entry(void);
+/* THREAD-SCOPE: a program that runs OS threads is built with
+   KUSH_HAS_THREADS: shared counters become atomic, and allocator pools,
+   handler stacks, the current task and the abort word become per thread.
+   Single-threaded programs keep the plain paths. */
+#ifdef KUSH_HAS_THREADS
+#include <pthread.h>
+#define KUSH_TLS _Thread_local
+#define KUSH_ADD(x, n) __atomic_add_fetch(&(x), (n), __ATOMIC_RELAXED)
+#define KUSH_SUB(x, n) __atomic_sub_fetch(&(x), (n), __ATOMIC_RELAXED)
+#else
+#define KUSH_TLS
+#define KUSH_ADD(x, n) ((x) += (n))
+#define KUSH_SUB(x, n) ((x) -= (n))
+#endif
 /* Diagnostic/error-path writes intentionally do not retry or alter control
    flow on failure. Assign the result so fortified libc headers also accept
    the explicit best-effort policy under -Werror. */
@@ -261,12 +275,26 @@ static uint64_t kush_peak_live = 0;
 static uint64_t kush_buffer_growths = 0;
 static uint64_t kush_reuses = 0;
 static void kush_note_allocation(void) {
-    ++kush_live_allocations; ++kush_allocations;
-    if (kush_live_allocations > kush_peak_live) kush_peak_live = kush_live_allocations;
+    uint64_t live = KUSH_ADD(kush_live_allocations, 1);
+    KUSH_ADD(kush_allocations, 1);
+#ifdef KUSH_HAS_THREADS
+    uint64_t peak = __atomic_load_n(&kush_peak_live, __ATOMIC_RELAXED);
+    while (live > peak
+           && !__atomic_compare_exchange_n(&kush_peak_live, &peak, live, 1,
+                                           __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+    }
+#else
+    if (live > kush_peak_live) kush_peak_live = live;
+#endif
 }
 static void kush_note_deallocation(void) {
+#ifdef KUSH_HAS_THREADS
+    if (__atomic_fetch_sub(&kush_live_allocations, 1, __ATOMIC_RELAXED) == 0) kush_panic();
+#else
     if (kush_live_allocations == 0) kush_panic();
-    --kush_live_allocations; ++kush_deallocations;
+    --kush_live_allocations;
+#endif
+    KUSH_ADD(kush_deallocations, 1);
 }
 /* ---- Bounded size-class pool for small native allocations ----------------
    Every native allocation carries a 16-byte header in front of its payload.
@@ -313,18 +341,18 @@ _Static_assert(sizeof(KushAllocHeader) == 16,
 static int kush_block_live(const KushAllocHeader *header) {
     return header->magic == KUSH_ALLOC_MAGIC || header->magic == KUSH_ALLOC_UNPOOLED;
 }
-static KushAllocHeader *kush_pool_lists[KUSH_POOL_CLASSES];
+static KUSH_TLS KushAllocHeader *kush_pool_lists[KUSH_POOL_CLASSES];
 /* Headerless ordinary buffers have their own intrusive lists. Both families
    share the existing per-class count and global physical-byte budget. */
-static uint64_t *kush_buffer_lists[KUSH_POOL_CLASSES];
-static size_t kush_pool_counts[KUSH_POOL_CLASSES];
-static uint64_t kush_pool_retained = 0;
-static uint64_t kush_pool_peak_retained = 0;
-static uint64_t kush_pool_hits = 0;
-static uint64_t kush_pool_misses = 0;
-static uint64_t kush_pool_retains = 0;
-static uint64_t kush_pool_releases = 0;
-static uint64_t kush_pool_drains = 0;
+static KUSH_TLS uint64_t *kush_buffer_lists[KUSH_POOL_CLASSES];
+static KUSH_TLS size_t kush_pool_counts[KUSH_POOL_CLASSES];
+static KUSH_TLS uint64_t kush_pool_retained = 0;
+static KUSH_TLS uint64_t kush_pool_peak_retained = 0;
+static KUSH_TLS uint64_t kush_pool_hits = 0;
+static KUSH_TLS uint64_t kush_pool_misses = 0;
+static KUSH_TLS uint64_t kush_pool_retains = 0;
+static KUSH_TLS uint64_t kush_pool_releases = 0;
+static KUSH_TLS uint64_t kush_pool_drains = 0;
 static size_t kush_pool_class(uint64_t usable) {
     return (size_t)(usable / KUSH_ALLOC_ALIGN) - 1;
 }
@@ -463,10 +491,10 @@ static int kush_try_refuses(void) {
         kush_try_probe_initialized = 1;
     }
     if (kush_try_attempts >= kush_try_fail_after) {
-        ++kush_try_attempts;
+        KUSH_ADD(kush_try_attempts, 1);
         return 1;
     }
-    ++kush_try_attempts;
+    KUSH_ADD(kush_try_attempts, 1);
     return 0;
 }
 uint64_t kush_try_alloc(uint64_t bytes) {
@@ -639,7 +667,7 @@ static void *kush_buffer_try_grow(void *payload, uint64_t bytes) {
     kush_buffer_release(payload);
     return replacement;
 }
-int64_t kush_note_reuse(void) { ++kush_reuses; return 0; }
+int64_t kush_note_reuse(void) { KUSH_ADD(kush_reuses, 1); return 0; }
 /* ---- Scoped bump-allocator regions ---------------------------------------
    `Arena.new()` is one logical allocation (the region descriptor). Chunks are
    physical storage obtained directly from the system allocator and are not
@@ -1024,7 +1052,7 @@ static void kush_alloc_vec_grow(KushAllocVec *v, uint64_t next) {
         }
         kush_alloc_block_release(v->release, v->context, v->block);
     }
-    v->block = block; v->capacity = next; ++kush_buffer_growths;
+    v->block = block; v->capacity = next; KUSH_ADD(kush_buffer_growths, 1);
 }
 static int kush_alloc_vec_try_grow(KushAllocVec *v, uint64_t next) {
     uint64_t bytes = kush_alloc_vec_block_bytes(next, v->width);
@@ -1038,7 +1066,7 @@ static int kush_alloc_vec_try_grow(KushAllocVec *v, uint64_t next) {
                (size_t)(v->length * v->width * 8));
     }
     kush_alloc_block_release(v->release, v->context, v->block);
-    v->block = block; v->capacity = next; ++kush_buffer_growths;
+    v->block = block; v->capacity = next; KUSH_ADD(kush_buffer_growths, 1);
     return 1;
 }
 uint64_t kush_alloc_vec_try_push(uint64_t handle, const uint64_t *item) {
@@ -1123,7 +1151,7 @@ static uint64_t kush_bytes_push_impl(uint64_t handle, int64_t value, int grow) {
         if (next <= b->capacity || next > KUSH_MAX_CAPACITY) kush_panic();
         kush_bytes_encode(b);
         b = (KushBytes *)kush_buffer_grow(b, sizeof(KushBytes) + next);
-        b->capacity = next; ++kush_buffer_growths;
+        b->capacity = next; KUSH_ADD(kush_buffer_growths, 1);
     }
     b->data[b->length++] = (unsigned char)value; return (uint64_t)(uintptr_t)b;
 }
@@ -1459,7 +1487,8 @@ static int64_t kush_host_unary_path(uint64_t path_handle, int operation, uint64_
 #define KUSH_MAX_FILES 65536
 static unsigned char kush_open_files[KUSH_MAX_FILES / 8];
 static int kush_file_known(int64_t fd) {
-    return fd >= 0 && fd < KUSH_MAX_FILES && (kush_open_files[fd / 8] >> (fd % 8)) & 1;
+    return fd >= 0 && fd < KUSH_MAX_FILES
+        && (__atomic_load_n(&kush_open_files[fd / 8], __ATOMIC_SEQ_CST) >> (fd % 8)) & 1;
 }
 int64_t kush_fs_open(uint64_t path_handle, uint64_t mode, uint64_t *out) {
     int flags;
@@ -1478,7 +1507,7 @@ int64_t kush_fs_open(uint64_t path_handle, uint64_t mode, uint64_t *out) {
     free(path);
     if (fd < 0) return errno;
     if (fd >= KUSH_MAX_FILES) { (void)close(fd); return EMFILE; }
-    kush_open_files[fd / 8] |= (unsigned char)(1u << (fd % 8));
+    __atomic_fetch_or(&kush_open_files[fd / 8], (unsigned char)(1u << (fd % 8)), __ATOMIC_SEQ_CST);
     *out = (uint64_t)fd;
     return 0;
 }
@@ -1544,7 +1573,7 @@ int64_t kush_fs_file_size(uint64_t fd, uint64_t *out) {
 }
 int64_t kush_fs_close(uint64_t fd, uint64_t *out) {
     if (!kush_file_known((int64_t)fd)) return EBADF;
-    kush_open_files[fd / 8] &= (unsigned char)~(1u << (fd % 8));
+    __atomic_fetch_and(&kush_open_files[fd / 8], (unsigned char)~(1u << (fd % 8)), __ATOMIC_SEQ_CST);
     /* Linux releases the descriptor even when close reports EINTR. */
     if (close((int)fd) != 0 && errno != EINTR) return errno;
     *out = 0;
@@ -2062,7 +2091,7 @@ uint64_t kush_vec_push(uint64_t handle, const uint64_t *item, uint64_t width) {
         if (next <= kush_buffer_capacity(v)) kush_panic();
         uint64_t bytes = kush_vec_bytes(next, width);
         v = (KushVec *)kush_buffer_grow(v, bytes);
-        kush_buffer_set_capacity(v, next); ++kush_buffer_growths;
+        kush_buffer_set_capacity(v, next); KUSH_ADD(kush_buffer_growths, 1);
     }
     memcpy(v->data + v->length * width, item, (size_t)(width * 8));
     v->length++;
@@ -2095,7 +2124,7 @@ uint64_t kush_vec_reserve(uint64_t handle, int64_t additional, uint64_t width) {
     if (needed <= kush_buffer_capacity(v)) return handle;
     KushVec *replacement = (KushVec *)kush_buffer_grow(v, kush_vec_bytes(needed, width));
     kush_buffer_set_capacity(replacement, needed);
-    ++kush_buffer_growths;
+    KUSH_ADD(kush_buffer_growths, 1);
     return (uint64_t)(uintptr_t)replacement;
 }
 /* On refusal or invalid capacity, the original allocation/header/elements
@@ -2111,7 +2140,7 @@ uint64_t kush_vec_try_reserve(uint64_t handle, int64_t additional, uint64_t widt
     KushVec *replacement = (KushVec *)kush_buffer_try_grow(v, bytes);
     if (replacement == NULL) return 0;
     kush_buffer_set_capacity(replacement, needed);
-    ++kush_buffer_growths;
+    KUSH_ADD(kush_buffer_growths, 1);
     return (uint64_t)(uintptr_t)replacement;
 }
 /* Widen or compact a vector's element stride while preserving the allocation
@@ -2127,7 +2156,7 @@ uint64_t kush_vec_restride(uint64_t handle, int64_t source_width, int64_t target
     if (source_width <= 0 || target_width <= 0) kush_panic();
     uint64_t bytes = kush_vec_bytes(kush_buffer_capacity(v), (uint64_t)target_width);
     KushVec *replacement = (KushVec *)kush_buffer_grow(v, bytes);
-    if (replacement != v) ++kush_buffer_growths;
+    if (replacement != v) KUSH_ADD(kush_buffer_growths, 1);
     v = replacement;
     uint64_t source = (uint64_t)source_width * 8;
     uint64_t target = (uint64_t)target_width * 8;
@@ -2172,7 +2201,7 @@ struct KushTask {
 };
 static KushTask *kush_tasks[KUSH_MAX_TASKS];
 static int kush_task_count = 0;
-static KushTask *kush_current = NULL;
+static KUSH_TLS KushTask *kush_current = NULL;
 static ucontext_t kush_scheduler_context;
 static void *kush_scheduler_stack = NULL;
 static size_t kush_scheduler_stack_total = 0;
@@ -2198,7 +2227,14 @@ typedef struct {
     int64_t depth;
 } kush_handler_context;
 static kush_handler_context kush_handler_contexts[KUSH_MAX_TASKS];
+#ifdef KUSH_HAS_THREADS
+/* A child OS thread has its own handler stack (it inherits no frames). */
+static KUSH_TLS kush_handler_context *kush_thread_handlers = NULL;
+#endif
 static kush_handler_context *kush_handlers(void) {
+#ifdef KUSH_HAS_THREADS
+    if (kush_thread_handlers != NULL) return kush_thread_handlers;
+#endif
     int64_t id = kush_current == NULL ? 0 : (int64_t)kush_current->id;
     if (id < 0 || id >= KUSH_MAX_TASKS) id = 0;
     return &kush_handler_contexts[id];
@@ -2219,6 +2255,12 @@ static void kush_handler_drop_frame(kush_handler_frame *frame) {
    is the payload buffer of the addressed abortive handle activation. Tasks
    share one OS thread and an abort never yields or crosses a task. */
 int64_t kush_abort_word = 0;
+/* With threads, generated code reaches the calling thread's abort word
+   through this function instead of the shared symbol. */
+static KUSH_TLS int64_t kush_abort_word_local = 0;
+int64_t kush_abort_word_address(void) {
+    return (int64_t)(uintptr_t)&kush_abort_word_local;
+}
 int64_t kush_handler_depth(void) {
     return kush_handlers()->depth;
 }
@@ -2521,6 +2563,89 @@ static void kush_task_finish(void) {
     kush_current = NULL;
     kush_task_count = 0;
 }
+#ifdef KUSH_HAS_THREADS
+/* ---- THREAD-SCOPE: structured OS threads ---------------------------------
+   A Thread.scope frame lists the threads spawned in it; Thread.join waits for
+   one, and the scope epilogue joins every one not joined yet and drops its
+   result. Threads run the same task wrapper (code, environment, result
+   buffer) as cooperative tasks. A thread has its own handler stack and
+   allocator pool; its pool is drained when it finishes. */
+typedef struct KushThread {
+    pthread_t thread;
+    uint64_t wrapper, code, env;
+    void *result;
+    size_t result_size;
+    void (*drop)(void *);
+    int preserve, joined;
+    struct KushThread *next;
+} KushThread;
+#define KUSH_THREAD_SCOPES 64
+static KUSH_TLS KushThread *kush_thread_scopes[KUSH_THREAD_SCOPES];
+static KUSH_TLS int kush_thread_scope_depth = 0;
+static void *kush_thread_main(void *argument) {
+    KushThread *t = (KushThread *)argument;
+    kush_handler_context *handlers = (kush_handler_context *)calloc(1, sizeof(kush_handler_context));
+    if (handlers == NULL) kush_panic();
+    kush_thread_handlers = handlers;
+    ((void (*)(uint64_t, uint64_t, uint64_t))(uintptr_t)t->wrapper)(
+        t->code, t->env, (uint64_t)(uintptr_t)t->result);
+    kush_handler_restore(0);
+    kush_thread_handlers = NULL;
+    free(handlers);
+    kush_pool_drain();
+    return NULL;
+}
+void kush_thread_scope_begin(void) {
+    if (kush_thread_scope_depth >= KUSH_THREAD_SCOPES) kush_panic();
+    kush_thread_scopes[kush_thread_scope_depth++] = NULL;
+}
+static void kush_thread_wait(KushThread *t) {
+    if (pthread_join(t->thread, NULL) != 0) kush_panic();
+    t->joined = 1;
+}
+void kush_thread_scope_end(void) {
+    if (kush_thread_scope_depth == 0) kush_panic();
+    KushThread *t = kush_thread_scopes[--kush_thread_scope_depth];
+    while (t != NULL) {
+        KushThread *next = t->next;
+        if (!t->joined) {
+            kush_thread_wait(t);
+            if (t->preserve) kush_panic();
+            if (t->drop != NULL) t->drop(t->result);
+            kush_free((uint64_t)(uintptr_t)t->result);
+        }
+        kush_free((uint64_t)(uintptr_t)t);
+        t = next;
+    }
+}
+uint64_t kush_thread_spawn(uint64_t wrapper, uint64_t code, uint64_t env,
+                           uint64_t result_size, uint64_t drop, uint64_t preserve) {
+    if (kush_thread_scope_depth == 0) kush_panic();
+    KushThread *t = (KushThread *)(uintptr_t)kush_alloc(sizeof(KushThread));
+    memset(t, 0, sizeof(*t));
+    t->wrapper = wrapper; t->code = code; t->env = env;
+    t->result_size = result_size == 0 ? 8 : (size_t)result_size;
+    t->drop = (void (*)(void *))(uintptr_t)drop;
+    t->preserve = preserve != 0;
+    t->result = (void *)(uintptr_t)kush_alloc(t->result_size);
+    pthread_attr_t attributes;
+    if (pthread_attr_init(&attributes) != 0) kush_panic();
+    if (pthread_attr_setstacksize(&attributes, (size_t)64 << 20) != 0) kush_panic();
+    if (pthread_create(&t->thread, &attributes, kush_thread_main, t) != 0) kush_panic();
+    pthread_attr_destroy(&attributes);
+    t->next = kush_thread_scopes[kush_thread_scope_depth - 1];
+    kush_thread_scopes[kush_thread_scope_depth - 1] = t;
+    return (uint64_t)(uintptr_t)t;
+}
+uint64_t kush_thread_join(uint64_t handle, void *out) {
+    KushThread *t = (KushThread *)(uintptr_t)handle;
+    if (t == NULL || t->joined) kush_panic();
+    kush_thread_wait(t);
+    memcpy(out, t->result, t->result_size);
+    kush_free((uint64_t)(uintptr_t)t->result);
+    return 0;
+}
+#endif
 #ifndef KUSH_NO_MAIN
 int main(int argc, char **argv) {
     kush_host_init(argc, argv);
@@ -2976,6 +3101,9 @@ pub fn build_with_codegen(
     if program.uses_tasks {
         defines.push("-DKUSH_HAS_TASKS=1".to_owned());
     }
+    if program.uses_threads {
+        defines.push("-DKUSH_HAS_THREADS=1".to_owned());
+    }
     if stats {
         defines.push("-DKUSH_STATS=1".to_owned());
         defines.push(format!("-DKUSH_FUSION_COUNT={}", program.fusion_count()));
@@ -3002,6 +3130,9 @@ pub fn build_with_codegen(
         command.arg(format!("-l{name}"));
     }
     command.arg("-o").arg(&binary_path).arg("-lm");
+    if program.uses_threads {
+        command.arg("-pthread");
+    }
     let result = command
         .output()
         .map_err(|e| error(format!("could not start the native linker 'cc': {e}")))?;
@@ -3589,6 +3720,24 @@ fn object_for(program: &Executable, codegen: CodegenOptions, library: bool) -> R
     let task_scope_end = module
         .declare_function("kush_task_scope_end", Linkage::Import, &task_unary_sig)
         .map_err(error)?;
+    // THREAD-SCOPE runtime entry points (defined when built with threads).
+    let thread_spawn = module
+        .declare_function("kush_thread_spawn", Linkage::Import, &task_spawn_sig)
+        .map_err(error)?;
+    let thread_join = module
+        .declare_function("kush_thread_join", Linkage::Import, &task_join_sig)
+        .map_err(error)?;
+    let mut thread_void_sig = module.make_signature();
+    thread_void_sig.params.clear();
+    let thread_scope_begin = module
+        .declare_function("kush_thread_scope_begin", Linkage::Import, &thread_void_sig)
+        .map_err(error)?;
+    let thread_scope_end = module
+        .declare_function("kush_thread_scope_end", Linkage::Import, &thread_void_sig)
+        .map_err(error)?;
+    let abort_word_local = module
+        .declare_function("kush_abort_word_address", Linkage::Import, &task_unary_sig)
+        .map_err(error)?;
     let mut handler_depth_sig = module.make_signature();
     handler_depth_sig.returns.push(AbiParam::new(I64));
     let handler_depth = module
@@ -3822,6 +3971,11 @@ fn object_for(program: &Executable, codegen: CodegenOptions, library: bool) -> R
             task_scope_begin,
             task_cancel_scope,
             task_scope_end,
+            thread_spawn,
+            thread_join,
+            thread_scope_begin,
+            thread_scope_end,
+            abort_word_local,
             handler_depth,
             handler_restore,
             handler_push,
@@ -4946,6 +5100,7 @@ fn synthesize_drops(
         .chain((0..program.pointees.len()).map(Type::AllocVec))
         .chain((0..program.pointees.len()).map(Type::Vec))
         .chain((0..program.pointees.len()).map(Type::Task))
+        .chain((0..program.pointees.len()).map(Type::Thread))
         .chain([Type::Arena, Type::AllocatorContext])
         .chain((0..program.enums.len()).map(Type::Enum))
         .chain((0..program.unions.len()).map(Type::Union))
@@ -5292,7 +5447,7 @@ fn synthesize_drops(
                 builder.switch_to_block(done);
                 builder.ins().return_(&[]);
             }
-            Type::Task(_) => {
+            Type::Task(_) | Type::Thread(_) => {
                 // A task handle owns no heap cell. Scope completion joins it.
                 builder.ins().return_(&[]);
             }
@@ -5652,6 +5807,12 @@ struct Generator<'a, 'b> {
     task_scope_begin: FuncId,
     task_cancel_scope: FuncId,
     task_scope_end: FuncId,
+    thread_spawn: FuncId,
+    thread_join: FuncId,
+    thread_scope_begin: FuncId,
+    thread_scope_end: FuncId,
+    /// `kush_abort_word_address`: the calling thread's abort word.
+    abort_word_local: FuncId,
     handler_depth: FuncId,
     handler_restore: FuncId,
     handler_push: FuncId,
@@ -5773,6 +5934,9 @@ impl Generator<'_, '_> {
             .expect("an abort exit is inside its scope")
     }
     fn abort_word_address(&mut self) -> Value {
+        if self.program.uses_threads {
+            return self.runtime_call(self.abort_word_local, &[]);
+        }
         let data = self
             .module
             .declare_data_in_func(self.abort_word, self.builder.func);
@@ -8798,6 +8962,7 @@ impl Generator<'_, '_> {
                 body,
                 result,
                 obligation,
+                parallel,
             } => {
                 let values = lower!(self.expr(body));
                 let Type::Once(id) = body.ty else {
@@ -8816,8 +8981,13 @@ impl Generator<'_, '_> {
                     self.constant(0)
                 };
                 let preserve = self.constant(i64::from(*obligation));
+                let spawn = if *parallel {
+                    self.thread_spawn
+                } else {
+                    self.task_spawn
+                };
                 self.runtime_call(
-                    self.task_spawn,
+                    spawn,
                     &[wrapper, values[0], values[1], bytes, drop, preserve],
                 )
             }
@@ -8825,8 +8995,14 @@ impl Generator<'_, '_> {
                 body,
                 result,
                 failure,
+                parallel,
                 ..
             } => {
+                let (scope_begin, scope_end) = if *parallel {
+                    (self.thread_scope_begin, self.thread_scope_end)
+                } else {
+                    (self.task_scope_begin, self.task_scope_end)
+                };
                 let values = lower!(self.expr(body));
                 let Type::Once(id) = body.ty else {
                     unreachable!("checked scope body is once")
@@ -8844,7 +9020,7 @@ impl Generator<'_, '_> {
                 } else {
                     None
                 };
-                self.runtime_void(self.task_scope_begin, &[]);
+                self.runtime_void(scope_begin, &[]);
                 let mut arguments = Vec::new();
                 if let Some(pointer) = pointer {
                     arguments.push(pointer);
@@ -8862,7 +9038,7 @@ impl Generator<'_, '_> {
                     self.builder.inst_results(call).to_vec()
                 };
                 if result_ty == Type::Never {
-                    self.runtime_void(self.task_scope_end, &[]);
+                    self.runtime_void(scope_end, &[]);
                     return None;
                 }
                 if let Some(shape) = *failure {
@@ -8884,7 +9060,7 @@ impl Generator<'_, '_> {
                     self.jump(done, &[]);
                     self.builder.switch_to_block(done);
                 }
-                self.runtime_void(self.task_scope_end, &[]);
+                self.runtime_void(scope_end, &[]);
                 let _ = result;
                 return Some(result_values);
             }
@@ -8894,6 +9070,20 @@ impl Generator<'_, '_> {
                 let pointer = lower!(self.scalar(reference));
                 self.runtime_void(self.task_cancel, &[pointer]);
                 self.constant(0)
+            }
+            ExprKind::TaskJoin {
+                task,
+                exit,
+                parallel: true,
+                ..
+            } => {
+                // A thread always completes: its join yields the payload.
+                let handle = lower!(self.scalar(task));
+                self.consume(task);
+                let width = self.program.width(exit.payload).max(1);
+                let out = self.stack_words(width);
+                self.runtime_call(self.thread_join, &[handle, out]);
+                return Some(self.load_words(out, 0, self.program.width(exit.payload)));
             }
             ExprKind::TaskJoin { task, exit, .. } => {
                 let handle = lower!(self.scalar(task));

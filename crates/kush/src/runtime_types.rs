@@ -973,6 +973,7 @@ impl<'a> Types<'a> {
             | Type::AllocBox(p)
             | Type::AllocVec(p)
             | Type::Task(p)
+            | Type::Thread(p)
             | Type::Annotated(p, _) => Some(p),
             _ => None,
         };
@@ -1106,6 +1107,7 @@ impl<'a> Types<'a> {
             Type::AllocBox(p) => Ok(Type::AllocBox(pointer(self, p)?)),
             Type::AllocVec(p) => Ok(Type::AllocVec(pointer(self, p)?)),
             Type::Task(p) => Ok(Type::Task(pointer(self, p)?)),
+            Type::Thread(p) => Ok(Type::Thread(pointer(self, p)?)),
             Type::Annotated(p, label) => Ok(Type::Annotated(pointer(self, p)?, label)),
             // Nothing substitutes a binder inside a callable or trait object
             // type. The signature validator rejects one written directly; this
@@ -1449,6 +1451,7 @@ impl<'a> Types<'a> {
                 | Type::Vec(_)
                 | Type::Once(_)
                 | Type::Task(_)
+                | Type::Thread(_)
                 | Type::DynObj(_) => true,
                 Type::Enum(id) | Type::Variants(id, _) if depth < 64 => {
                     types.enums[id].linear
@@ -1923,11 +1926,13 @@ impl<'a> Types<'a> {
                     Type::Vec(self.pointer(inner))
                 })
             }
-            Type::Task(pointer) => {
+            Type::Task(pointer) | Type::Thread(pointer) => {
                 let pointee = self.pointees[pointer];
                 let inner = self.freshen_borrows_with(pointee, binders, map, span)?;
                 Ok(if inner == self.pointees[pointer] {
                     ty
+                } else if matches!(ty, Type::Thread(_)) {
+                    Type::Thread(self.pointer(inner))
                 } else {
                     Type::Task(self.pointer(inner))
                 })
@@ -2142,10 +2147,12 @@ impl<'a> Types<'a> {
                     Ok(Type::SliceMut(self.pointer(inner)))
                 }
             }
-            Type::Task(p) => {
+            Type::Task(p) | Type::Thread(p) => {
                 let inner = self.relabel_lifetimes(self.pointees[p], map, span)?;
                 if inner == self.pointees[p] {
                     Ok(ty)
+                } else if matches!(ty, Type::Thread(_)) {
+                    Ok(Type::Thread(self.pointer(inner)))
                 } else {
                     Ok(Type::Task(self.pointer(inner)))
                 }
@@ -2259,6 +2266,7 @@ impl<'a> Types<'a> {
             Type::Fn(id) => self.callable_name(id),
             Type::Once(id) => self.callable_name(id),
             Type::Task(p) => format!("Task<{}>", self.name(self.pointees[p])),
+            Type::Thread(p) => format!("Thread<{}>", self.name(self.pointees[p])),
             Type::DynObj(id) => self
                 .objects
                 .get(id)
@@ -3318,7 +3326,7 @@ impl<'a> Types<'a> {
             if b.kind == BindingKind::Builtin
                 && matches!(
                     b.name.as_str(),
-                    "Box" | "Vec" | "Task" | "ArenaBox" | "AllocBox" | "AllocVec"
+                    "Box" | "Vec" | "Task" | "Thread" | "ArenaBox" | "AllocBox" | "AllocVec"
                 )
             {
                 if !lifetime_arguments.is_empty() {
@@ -3337,9 +3345,9 @@ impl<'a> Types<'a> {
                 let inner = self.full(inner, ty.span)?;
                 let direct_reference = matches!(inner, Type::Ref(_) | Type::RefMut(_) | Type::Str)
                     && matches!(arguments[0].kind, ast::TypeKind::Borrow { .. });
-                let task_borrowed_record = b.name == "Task"
+                let task_borrowed_record = matches!(b.name.as_str(), "Task" | "Thread")
                     && (is_borrowed_record(self, inner) || is_child_task_exit(self, inner));
-                if b.name == "Task"
+                if matches!(b.name.as_str(), "Task" | "Thread")
                     && is_borrowed_task_exit(self, inner)
                     && !is_child_task_exit(self, inner)
                 {
@@ -3368,7 +3376,7 @@ impl<'a> Types<'a> {
                         "containers cannot store borrowed references or slice views (including &str text views, or borrowed records); keep the borrow in a lexical record",
                     ));
                 }
-                if b.name == "Task" {
+                if matches!(b.name.as_str(), "Task" | "Thread") {
                     if matches!(inner, Type::Never) {
                         return Err(Diagnostic::new(
                             ty.span,
@@ -3382,7 +3390,11 @@ impl<'a> Types<'a> {
                         ));
                     }
                     let pointer = self.pointer(inner);
-                    return Ok(Type::Task(pointer));
+                    return Ok(if b.name == "Thread" {
+                        Type::Thread(pointer)
+                    } else {
+                        Type::Task(pointer)
+                    });
                 }
                 if contains_task(self, inner) {
                     return Err(Diagnostic::new(
@@ -4035,7 +4047,7 @@ impl<'a> Types<'a> {
                 span,
                 "opaque standard-stream handles cannot be union members; pass the capability directly",
             )),
-            Type::Task(_) => Err(Diagnostic::new(
+            Type::Task(_) | Type::Thread(_) => Err(Diagnostic::new(
                 span,
                 "task handles cannot be union members; a child handle must not escape its scope",
             )),
@@ -5893,9 +5905,9 @@ fn validate_record_declaration(
     }
     fn syntactic_unsupported_owned(ty: &ast::Type) -> bool {
         match &ty.kind {
-            ast::TypeKind::Named { path, .. } => path
-                .last()
-                .is_some_and(|name| matches!(name.as_str(), "Stdin" | "Stdout" | "Task")),
+            ast::TypeKind::Named { path, .. } => path.last().is_some_and(|name| {
+                matches!(name.as_str(), "Stdin" | "Stdout" | "Task" | "Thread")
+            }),
             ast::TypeKind::Function { .. } => true,
             ast::TypeKind::Binary { op, .. } => matches!(op, crate::lexer::Kind::Pipe),
             _ => false,
@@ -6050,7 +6062,8 @@ pub(crate) fn runtime_length_binders(types: &Types<'_>, ty: Type) -> BTreeSet<Bi
             | Type::Vec(p)
             | Type::AllocBox(p)
             | Type::AllocVec(p)
-            | Type::Task(p) => go(types, types.pointees[p], seen, out),
+            | Type::Task(p)
+            | Type::Thread(p) => go(types, types.pointees[p], seen, out),
             Type::Enum(id) | Type::Variants(id, _) => {
                 let layout = &types.enums[id];
                 out.extend(layout.runtime_length);
@@ -6145,7 +6158,8 @@ fn has_forbidden_record_metadata(types: &Types<'_>, ty: Type) -> bool {
             | Type::Union(_)
             | Type::Fn(_)
             | Type::Once(_)
-            | Type::Task(_) => return true,
+            | Type::Task(_)
+            | Type::Thread(_) => return true,
             Type::Box(p)
             | Type::ArenaBox(p)
             | Type::Vec(p)
@@ -6274,9 +6288,12 @@ fn collect_borrow_lifetimes(types: &Types<'_>, ty: Type, out: &mut BTreeSet<Stri
             return;
         }
         match ty {
-            Type::Slice(p) | Type::SliceMut(p) | Type::Ref(p) | Type::RefMut(p) | Type::Task(p) => {
-                go(types, types.pointees[p], out, seen)
-            }
+            Type::Slice(p)
+            | Type::SliceMut(p)
+            | Type::Ref(p)
+            | Type::RefMut(p)
+            | Type::Task(p)
+            | Type::Thread(p) => go(types, types.pointees[p], out, seen),
             Type::Str | Type::StrMut => {}
             Type::Annotated(_, label) => {
                 if let Some(name) = types.reference_label_name(label) {
@@ -6432,7 +6449,8 @@ pub(crate) fn contains_task_exit_borrow(types: &Types<'_>, ty: Type) -> bool {
             | Type::Vec(p)
             | Type::AllocBox(p)
             | Type::AllocVec(p)
-            | Type::Task(p) => go(types, types.pointees[p], seen),
+            | Type::Task(p)
+            | Type::Thread(p) => go(types, types.pointees[p], seen),
             Type::Union(id) => types.unions[id]
                 .members
                 .iter()
@@ -6704,6 +6722,7 @@ pub(crate) fn type_owns(enums: &[Enum], unions: &[UnionType], ty: Type, depth: u
         | Type::Vec(_)
         | Type::Once(_)
         | Type::Task(_)
+        | Type::Thread(_)
         | Type::DynObj(_) => true,
         Type::Enum(id) | Type::Variants(id, _) => {
             enums[id].linear
@@ -6727,7 +6746,7 @@ pub(crate) fn contains_task(types: &Types<'_>, ty: Type) -> bool {
             return false;
         }
         match ty {
-            Type::Task(_) => true,
+            Type::Task(_) | Type::Thread(_) => true,
             Type::Annotated(p, _) => go(types, types.pointees[p], seen),
             Type::Box(p)
             | Type::ArenaBox(p)
@@ -6832,6 +6851,10 @@ pub(crate) fn type_name_in(
         ),
         Type::Task(p) => format!(
             "Task<{}>",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::Thread(p) => format!(
+            "Thread<{}>",
             type_name_in(pointees[p], pointees, enums, unions, functions)
         ),
         Type::DynObj(_) => "dyn".into(),
@@ -6969,6 +6992,7 @@ pub(crate) fn reject_optional_reference_boundary(
             | Type::Slice(p)
             | Type::SliceMut(p)
             | Type::Task(p)
+            | Type::Thread(p)
             | Type::Annotated(p, _) => contains(types, types.pointees[p], seen),
             Type::Union(id) => types.unions[id]
                 .members

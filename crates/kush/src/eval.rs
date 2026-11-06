@@ -2284,6 +2284,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 | Type::AllocBox(_)
                 | Type::AllocVec(_)
                 | Type::Task(_)
+                | Type::Thread(_)
         );
         if !owner_like {
             // Any addressable inline value (record, array, scalar, or enum) is
@@ -6394,7 +6395,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.task_comm()?.cancel(id)?;
                 Value::Scalar(0)
             }
-            ExprKind::TaskJoin { task, exit, .. } => {
+            ExprKind::TaskJoin {
+                task,
+                exit,
+                parallel,
+                ..
+            } => {
                 let handle = value!(self.expr(task, frame));
                 self.consume(task, frame);
                 let Value::Task(id) = handle else {
@@ -6404,6 +6410,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ));
                 };
                 match self.task_comm()?.join(id)? {
+                    // THREAD-SCOPE: the reference evaluator runs threads as
+                    // cooperative tasks (one valid schedule); a thread's join
+                    // yields its payload.
+                    TaskOutcome::Completed(value, _) if *parallel => value,
                     TaskOutcome::Completed(value, _) => Value::Enum {
                         tag: exit.completed_tag,
                         fields: vec![value],

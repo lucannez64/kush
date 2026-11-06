@@ -981,9 +981,12 @@ fn collect_borrow_lifetimes_in(
             return;
         }
         match ty {
-            Type::Slice(p) | Type::SliceMut(p) | Type::Ref(p) | Type::RefMut(p) | Type::Task(p) => {
-                go(enums, pointees, labels, pointees[p], out, seen)
-            }
+            Type::Slice(p)
+            | Type::SliceMut(p)
+            | Type::Ref(p)
+            | Type::RefMut(p)
+            | Type::Task(p)
+            | Type::Thread(p) => go(enums, pointees, labels, pointees[p], out, seen),
             Type::Str | Type::StrMut => {}
             Type::Annotated(_, label) => {
                 if let Some(name) = labels.get(label as usize).filter(|label| !label.is_empty()) {
@@ -1073,6 +1076,7 @@ fn owns(
         | Type::Vec(_)
         | Type::Once(_)
         | Type::Task(_)
+        | Type::Thread(_)
         | Type::DynObj(_) => true,
         Type::Enum(id) | Type::Variants(id, _) => enums[id],
         Type::Union(id) => unions[id]
@@ -2425,7 +2429,8 @@ impl Checker<'_> {
                 | Type::SliceMut(_)
                 | Type::Fn(_)
                 | Type::Once(_)
-                | Type::Task(_) => true,
+                | Type::Task(_)
+                | Type::Thread(_) => true,
                 Type::Box(p) | Type::Vec(p) => go(c, c.pointees[p], seen),
                 Type::Enum(id) | Type::Variants(id, _) => {
                     c.enums[id].borrowed
