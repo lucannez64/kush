@@ -48,6 +48,72 @@ pub(crate) enum Term {
     Var(usize, u32),
     /// The length of the Bytes/Vec owned by (or borrowed through) a local.
     Len(usize, u32),
+    /// A scalar reached from a root value through field, tag and payload
+    /// steps (ENSURES); the path is interned, see [`path_of`].
+    Path(u32),
+}
+
+/// The root of a [`Term::Path`]: a local at a version, or the result of one
+/// call occurrence (a fresh identity per checked call).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Root {
+    Var(usize, u32),
+    Value(u32),
+}
+
+/// One step of a [`Term::Path`]. Offsets are word offsets in the record or
+/// in the variant's payload, as in the IR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Step {
+    Field(u32),
+    /// The variant index of an enum value.
+    Tag,
+    /// Payload word offset of the given variant.
+    Payload(u32, u32),
+}
+
+type PathKey = (Root, Vec<Step>);
+type PathTable = std::sync::Mutex<(Vec<PathKey>, std::collections::HashMap<PathKey, u32>)>;
+
+fn path_table() -> &'static PathTable {
+    static TABLE: std::sync::OnceLock<PathTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(Default::default)
+}
+
+/// The term for a scalar at `root` followed by `steps`. A bare local is its
+/// ordinary variable term.
+pub(crate) fn path_term(root: Root, steps: &[Step]) -> Term {
+    if steps.is_empty()
+        && let Root::Var(slot, version) = root
+    {
+        return Term::Var(slot, version);
+    }
+    let mut table = path_table()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = (root, steps.to_vec());
+    if let Some(id) = table.1.get(&key) {
+        return Term::Path(*id);
+    }
+    let id = u32::try_from(table.0.len()).expect("path table overflow");
+    table.0.push(key.clone());
+    table.1.insert(key, id);
+    Term::Path(id)
+}
+
+/// The root and steps of an interned path.
+pub(crate) fn path_of(id: u32) -> PathKey {
+    path_table()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .0[id as usize]
+        .clone()
+}
+
+/// A fresh identity for one call's result.
+pub(crate) fn fresh_value() -> u32 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// One integer linear expression: `sum coefficients[term] * term + constant`.
@@ -358,6 +424,14 @@ pub(crate) struct Facts {
     ranges: std::cell::RefCell<BTreeMap<usize, (i128, i128)>>,
     /// Disjunctive facts (PROVE-DISJ), e.g. from `if a || b` or `a != b`.
     clauses: Vec<Dnf>,
+    /// Ranges of path terms (ENSURES): a `Bool` result, a tag, a field.
+    term_ranges: std::cell::RefCell<BTreeMap<Term, (i128, i128)>>,
+    /// A local that denotes a symbolic value: a call result or an enum
+    /// payload bound by a match (ENSURES). Cleared by assignment.
+    aliases: BTreeMap<usize, (Root, Vec<Step>)>,
+    /// Call occurrences with postconditions, by call span, and the identity
+    /// of their results.
+    call_values: BTreeMap<(usize, usize), u32>,
 }
 
 /// The mathematical range of a scalar type admitted as a linear term, or
@@ -435,6 +509,8 @@ impl Facts {
             let version = left.version(*slot).max(right.version(*slot));
             if version != base.version(*slot) {
                 result.versions.insert(*slot, version + 1);
+                // A value replaced on either path no longer has its alias.
+                result.aliases.remove(slot);
             }
         }
         result
@@ -460,6 +536,54 @@ impl Facts {
     /// Assignment invalidates every fact about the old value.
     pub fn bump(&mut self, slot: usize) {
         *self.versions.entry(slot).or_default() += 1;
+        self.aliases.remove(&slot);
+    }
+    /// The symbolic root of a local: its alias or the local at its version.
+    pub(crate) fn local_root(&self, slot: usize) -> (Root, Vec<Step>) {
+        self.aliases
+            .get(&slot)
+            .cloned()
+            .unwrap_or((Root::Var(slot, self.version(slot)), Vec::new()))
+    }
+    pub(crate) fn alias(&mut self, slot: usize, root: Root, steps: Vec<Step>) {
+        if !self.opaque.contains(&slot) {
+            self.aliases.insert(slot, (root, steps));
+        }
+    }
+    /// Give the call at `span` a fresh result identity.
+    pub(crate) fn register_call(&mut self, span: Span) -> u32 {
+        let id = fresh_value();
+        self.call_values.insert((span.start, span.end), id);
+        id
+    }
+    pub(crate) fn call_value(&self, span: Span) -> Option<u32> {
+        self.call_values.get(&(span.start, span.end)).copied()
+    }
+    /// Record the value range of a path term.
+    pub(crate) fn note_term(&self, term: Term, range: (i128, i128)) {
+        self.term_ranges.borrow_mut().insert(term, range);
+    }
+    /// The symbolic root of an expression, when it denotes a whole value:
+    /// a local (or its alias), a field of one, or a registered call.
+    pub(crate) fn root_of(&self, expr: &Expr) -> Option<(Root, Vec<Step>)> {
+        match &expr.kind {
+            // A reference is not a value root: writes through it are not
+            // assignments the facts see.
+            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot)
+                if !self.opaque.contains(slot) && !expr.ty.is_ref() =>
+            {
+                Some(self.local_root(*slot))
+            }
+            ExprKind::Project(base, offset) => {
+                let (root, mut steps) = self.root_of(base)?;
+                steps.push(Step::Field(u32::try_from(*offset).ok()?));
+                Some((root, steps))
+            }
+            ExprKind::Call(..) => self
+                .call_value(expr.span)
+                .map(|id| (Root::Value(id), Vec::new())),
+            _ => None,
+        }
     }
     pub fn add(&mut self, constraints: impl IntoIterator<Item = Constraint>) {
         self.known.extend(constraints);
@@ -626,18 +750,35 @@ impl Facts {
     /// unknown (then it says nothing). Unknown parts of a conjunction are
     /// dropped, which only weakens the hypothesis.
     pub(crate) fn formula(&self, expr: &Expr, truth: bool) -> Option<Dnf> {
-        let known = |formula: Option<Dnf>| formula.unwrap_or_else(|| vec![Vec::new()]);
+        self.formula_with(expr, truth, true)
+    }
+    /// The condition exactly, or `None` if any part is unknown: for goals,
+    /// where weakening would be unsound.
+    pub(crate) fn formula_exact(&self, expr: &Expr, truth: bool) -> Option<Dnf> {
+        self.formula_with(expr, truth, false)
+    }
+    fn formula_with(&self, expr: &Expr, truth: bool, lenient: bool) -> Option<Dnf> {
+        let known = |formula: Option<Dnf>| {
+            if lenient {
+                Some(formula.unwrap_or_else(|| vec![Vec::new()]))
+            } else {
+                formula
+            }
+        };
         match &expr.kind {
-            ExprKind::Unary(Kind::Bang, inner) => self.formula(inner, !truth),
+            ExprKind::Unary(Kind::Bang, inner) => self.formula_with(inner, !truth, lenient),
             ExprKind::Binary(op @ (Kind::AmpAmp | Kind::PipePipe), l, r) => {
                 // `a && b` true or `a || b` false is a conjunction.
                 if (*op == Kind::AmpAmp) == truth {
                     dnf_and(
-                        &known(self.formula(l, truth)),
-                        &known(self.formula(r, truth)),
+                        &known(self.formula_with(l, truth, lenient))?,
+                        &known(self.formula_with(r, truth, lenient))?,
                     )
                 } else {
-                    dnf_or(self.formula(l, truth)?, self.formula(r, truth)?)
+                    dnf_or(
+                        self.formula_with(l, truth, lenient)?,
+                        self.formula_with(r, truth, lenient)?,
+                    )
                 }
             }
             ExprKind::Binary(op, l, r) => {
@@ -646,7 +787,7 @@ impl Facts {
                 compare_dnf(l, &op, r)
             }
             ExprKind::Block(block) if block.statements.is_empty() => {
-                self.formula(block.tail.as_ref()?, truth)
+                self.formula_with(block.tail.as_ref()?, truth, lenient)
             }
             _ if expr.ty == crate::executable::Type::Bool => {
                 let term = self.linear(expr)?;
@@ -725,8 +866,25 @@ impl Facts {
         match &expr.kind {
             ExprKind::Constant(n) => Some(Linear::constant(constant_value(*n, expr.ty))),
             ExprKind::Local(slot) | ExprKind::Peek(slot) if !self.opaque.contains(slot) => {
+                if let Some((root, steps)) = self.aliases.get(slot) {
+                    let term = path_term(*root, steps);
+                    if let Some(range) = scalar_range(expr.ty) {
+                        self.note_term(term, range);
+                    }
+                    return Some(Linear::variable(term));
+                }
                 self.note_type(*slot, expr.ty);
                 Some(Linear::variable(Term::Var(*slot, self.version(*slot))))
+            }
+            // A scalar field of a symbolic value, or a registered call's
+            // scalar result (ENSURES).
+            ExprKind::Project(..) | ExprKind::Call(..) if self.root_of(expr).is_some() => {
+                let (root, steps) = self.root_of(expr)?;
+                let term = path_term(root, &steps);
+                if let Some(range) = scalar_range(expr.ty) {
+                    self.note_term(term, range);
+                }
+                Some(Linear::variable(term))
             }
             ExprKind::Unary(Kind::Minus, inner) => self.linear(inner)?.negate(),
             ExprKind::Binary(op @ (Kind::Plus | Kind::Minus), l, r) => {
@@ -979,6 +1137,10 @@ impl Facts {
             let (low, high) = match term {
                 Term::Len(..) => (0, i128::MAX),
                 Term::Var(slot, _) => match ranges.get(&slot) {
+                    Some(range) => *range,
+                    None => continue,
+                },
+                Term::Path(_) => match self.term_ranges.borrow().get(&term) {
                     Some(range) => *range,
                     None => continue,
                 },
@@ -1905,6 +2067,21 @@ pub(crate) fn describe(term: Term, names: &dyn Fn(usize) -> String) -> String {
         Term::Zero => "0".into(),
         Term::Var(slot, _) => names(slot),
         Term::Len(slot, _) => format!("len({})", names(slot)),
+        Term::Path(id) => {
+            let (root, steps) = path_of(id);
+            let mut text = match root {
+                Root::Var(slot, _) => names(slot),
+                Root::Value(value) => format!("call#{value}"),
+            };
+            for step in steps {
+                text.push_str(&match step {
+                    Step::Field(offset) => format!(".field@{offset}"),
+                    Step::Tag => ".tag".to_owned(),
+                    Step::Payload(variant, offset) => format!(".payload{variant}@{offset}"),
+                });
+            }
+            text
+        }
     }
 }
 

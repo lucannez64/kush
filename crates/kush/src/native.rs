@@ -5413,7 +5413,12 @@ impl Generator<'_, '_> {
                         .bitcast(ir::types::I32, ir::MemFlagsData::new(), value);
                 self.builder.ins().uextend(I64, low)
             }
-            Type::Bool => self.builder.ins().uextend(I64, value),
+            // A foreign `int32_t` Bool may be any nonzero value; the proof
+            // fragment relies on 0 or 1.
+            Type::Bool => {
+                let truth = self.builder.ins().icmp_imm_s(IntCC::NotEqual, value, 0);
+                self.builder.ins().uextend(I64, truth)
+            }
             Type::Int(IntKind::I64 | IntKind::U64) => value,
             Type::Int(kind) if kind.signed() => self.builder.ins().sextend(I64, value),
             Type::Int(_) => self.builder.ins().uextend(I64, value),

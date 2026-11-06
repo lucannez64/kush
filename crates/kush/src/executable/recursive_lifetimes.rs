@@ -927,7 +927,8 @@ impl<'a, 'r> Solver<'a, 'r> {
             | K::Index { value, .. }
             | K::Unary { operand: value, .. }
             | K::Try(value)
-            | K::Cast { value, .. } => self.expr_flow(value, locals),
+            | K::Cast { value, .. }
+            | K::Is { value, .. } => self.expr_flow(value, locals),
             K::Block(block) => self.block_flow(block, locals),
             K::If {
                 then, otherwise, ..
@@ -2181,7 +2182,8 @@ fn expr_returns<'e>(expr: &'e ast::Expr, out: &mut Vec<&'e ast::Expr>) {
         | K::Index { value, .. }
         | K::Unary { operand: value, .. }
         | K::Try(value)
-        | K::Cast { value, .. } => expr_returns(value, out),
+        | K::Cast { value, .. }
+        | K::Is { value, .. } => expr_returns(value, out),
         K::Binary { left, right, .. } => {
             expr_returns(left, out);
             expr_returns(right, out);

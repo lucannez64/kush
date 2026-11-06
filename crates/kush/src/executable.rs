@@ -2482,6 +2482,7 @@ fn collect_body_returns<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
         | ast::ExprKind::Try(operand)
         | ast::ExprKind::Field { value: operand, .. }
         | ast::ExprKind::Cast { value: operand, .. }
+        | ast::ExprKind::Is { value: operand, .. }
         | ast::ExprKind::Specialize {
             callee: operand, ..
         } => {
@@ -5473,15 +5474,20 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             next_index_place: 0,
             index_relations: BTreeSet::new(),
             pending_lengths: BTreeMap::new(),
+            ensures_context: None,
+            ensures_tail: false,
+            branch_tail: false,
         };
         let body = (|| {
             let mut runtime = sig.parameters.iter().zip(&sig.parameter_grades);
+            let mut ensures_params = Vec::new();
             for p in &f.parameters {
                 if p.erased {
                     checker.assume_parameter(p)?;
                 } else {
                     let (ty, grade) = runtime.next().unwrap();
                     let slot = checker.bind(p.span, *ty, false)?;
+                    ensures_params.push((resolution.binder(p.span).unwrap(), slot));
                     if matches!(split_grade(&p.ty).0.kind, ast::TypeKind::Capability { .. }) {
                         checker.capability_slots.insert(slot);
                         checker.capability_passable.insert(slot);
@@ -5494,6 +5500,14 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     let id = resolution.binder(p.span).unwrap();
                     checker.admit_scalar_index(id, *ty, p.span)?;
                 }
+            }
+            if !f.ensures.is_empty() {
+                checker.ensures_context = Some(EnsuresContext {
+                    clauses: f.ensures.clone(),
+                    params: ensures_params,
+                    result: sig.result,
+                });
+                checker.ensures_tail = true;
             }
             let body = checker.block(f.body.as_ref().unwrap(), Some(sig.result))?;
             if body.ty != Type::Never
@@ -5703,6 +5717,7 @@ fn expr_key(expr: &ast::Expr) -> String {
         ),
         E::Field { value, name } => format!("{}.{name}", expr_key(value)),
         E::Cast { value, ty } => format!("({} as {})", expr_key(value), type_key(ty)),
+        E::Is { value, variant } => format!("({} is {variant})", expr_key(value)),
         E::Index { value, index } => format!("{}[{}]", expr_key(value), expr_key(index)),
         E::Slice { value, start, end } => format!(
             "{}[{}..{}]",
@@ -11528,6 +11543,71 @@ pub(crate) fn proposition_of(
         text: text(body),
     })
 }
+/// The local whose storage a checked place lives in.
+fn place_root_slot(expr: &Expr) -> Option<usize> {
+    match &expr.kind {
+        ExprKind::Local(slot)
+        | ExprKind::Peek(slot)
+        | ExprKind::Move(slot)
+        | ExprKind::Borrow(slot) => Some(*slot),
+        ExprKind::Project(base, _) | ExprKind::PlaceIndex { base, .. } => place_root_slot(base),
+        ExprKind::BorrowPlace(base) | ExprKind::Coerce { value: base, .. } => place_root_slot(base),
+        ExprKind::Slice { base, .. } => place_root_slot(base),
+        _ => None,
+    }
+}
+/// Source-like text of a postcondition clause, for diagnostics.
+fn ensures_text(clause: &ast::Ensures) -> String {
+    fn text(e: &ast::Expr) -> String {
+        match &e.kind {
+            ast::ExprKind::Name(n) | ast::ExprKind::Integer(n) => n.clone(),
+            ast::ExprKind::Bool(value) => value.to_string(),
+            ast::ExprKind::Field { value, name } => format!("{}.{name}", text(value)),
+            ast::ExprKind::Is { value, variant } => format!("{} is {variant}", text(value)),
+            ast::ExprKind::Unary {
+                op: Kind::Bang,
+                operand,
+                ..
+            } => format!("!({})", text(operand)),
+            ast::ExprKind::Unary { operand, .. } => format!("-{}", text(operand)),
+            ast::ExprKind::Binary { op, left, right } => {
+                let op = match op {
+                    Kind::Lt => "<",
+                    Kind::Le => "<=",
+                    Kind::Gt => ">",
+                    Kind::Ge => ">=",
+                    Kind::EqEq => "==",
+                    Kind::Ne => "!=",
+                    Kind::Plus => "+",
+                    Kind::Minus => "-",
+                    Kind::Star => "*",
+                    Kind::AmpAmp => "&&",
+                    Kind::PipePipe => "||",
+                    _ => "?",
+                };
+                format!("{} {op} {}", text(left), text(right))
+            }
+            _ => "?".into(),
+        }
+    }
+    let guard = match &clause.guard {
+        ast::EnsuresGuard::Always => String::new(),
+        ast::EnsuresGuard::Result(true) => "result => ".into(),
+        ast::EnsuresGuard::Result(false) => "!result => ".into(),
+        ast::EnsuresGuard::Variant { name, binders, .. } if binders.is_empty() => {
+            format!("{name} => ")
+        }
+        ast::EnsuresGuard::Variant { name, binders, .. } => format!(
+            "{name}({}) => ",
+            binders
+                .iter()
+                .map(|(binder, _)| binder.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    format!("{guard}{{ {} }}", text(&clause.body))
+}
 /// Validate every erased logical parameter of a function signature, in order.
 /// A parameter type is an open kernel type: it may mention checked logical
 /// definitions, *earlier erased kernel binders*, and earlier immutable runtime
@@ -12336,6 +12416,29 @@ struct Checker<'a, 't> {
     /// Runtime-length binder renaming for the call whose `infer` is about to
     /// run: callee `i64` parameter -> caller binding passed for it.
     pending_lengths: BTreeMap<BindingId, BindingId>,
+    /// ENSURES: the current function's postconditions, if any.
+    ensures_context: Option<EnsuresContext>,
+    /// The expression being checked is a value the function returns.
+    ensures_tail: bool,
+    /// The `if`/`match`/block being checked is in return position, so its
+    /// branch tails are too.
+    branch_tail: bool,
+}
+/// The postconditions of the function being checked (ENSURES).
+#[derive(Clone)]
+struct EnsuresContext {
+    clauses: Vec<ast::Ensures>,
+    /// Runtime parameters: binder and slot.
+    params: Vec<(BindingId, usize)>,
+    result: Type,
+}
+/// A symbolic value in a postcondition: a path from a root, or a checked
+/// expression (a construction or a scalar expression).
+#[derive(Clone)]
+enum Sym {
+    Path(crate::facts::Root, Vec<crate::facts::Step>),
+    Value(Box<Expr>),
+    Unknown,
 }
 /// One actual lifetime supplied for a callee-declared binder at a parameter
 /// occurrence. The polarity decides whether the actual identity must equal the
@@ -12990,6 +13093,10 @@ impl Checker<'_, '_> {
     /// borrow their stack storage directly. Any borrowed local is pinned so
     /// the native backend gives the reference a stable address.
     fn borrow_local(&mut self, slot: usize, mutable: bool, span: Span) -> Result<Expr> {
+        // Writes through an exclusive borrow are invisible to the facts.
+        if mutable {
+            self.facts.make_opaque(slot);
+        }
         let ty = self.locals[slot].ty;
         if ty.is_ref() {
             return Err(Diagnostic::new(
@@ -13287,6 +13394,9 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Expr> {
         let place = self.checked_place(operand, mutable)?;
+        if mutable && let Some(root) = place_root_slot(&place) {
+            self.facts.make_opaque(root);
+        }
         let ty = place.ty;
         if ty.is_view() || ty == Type::Str || ty.is_ref() {
             return Err(Diagnostic::new(
@@ -20599,6 +20709,8 @@ impl Checker<'_, '_> {
         span: Span,
         expected: Option<Type>,
     ) -> Result<Block> {
+        // Only the tail of a block in return position is returned.
+        let tail_ensures = std::mem::take(&mut self.ensures_tail);
         let mut checked = Vec::new();
         let mut diverges = false;
         // Hidden temporary owners created while checking this statement list
@@ -20753,6 +20865,13 @@ impl Checker<'_, '_> {
                         self.alias_scalar_index(id, source);
                     }
                     self.facts.define(slot, &value);
+                    // A whole value bound by `let` keeps the symbolic identity
+                    // its postcondition facts talk about (ENSURES).
+                    if crate::facts::scalar_range(value.ty).is_none()
+                        && let Some((root, steps)) = self.facts.root_of(&value)
+                    {
+                        self.facts.alias(slot, root, steps);
+                    }
                     self.define_view_length(slot, &value);
                     let must_use = self.copyable_result_grade(&value);
                     if let Some(required) = must_use
@@ -20805,6 +20924,16 @@ impl Checker<'_, '_> {
                 tail.span,
                 "unreachable expression after return/panic/break",
             ));
+        }
+        self.ensures_tail = tail_ensures && tail.is_some();
+        if tail_ensures && tail.is_none() && !diverges {
+            let unit = Expr {
+                kind: ExprKind::Constant(0),
+                ty: Type::Unit,
+                span,
+                resource: None,
+            };
+            self.check_postconditions(&unit)?;
         }
         let tail = tail
             .map(|tail| self.expr_expected_result(tail, expected).map(Box::new))
@@ -21327,7 +21456,62 @@ impl Checker<'_, '_> {
         block.ty = Type::Unit;
         block
     }
+    /// Check an expression; when it is a value the function returns, also
+    /// prove the function's postconditions for it (ENSURES).
     fn expr_expected(&mut self, expr: &ast::Expr, expected: Option<Type>) -> Result<Expr> {
+        let tail = std::mem::take(&mut self.ensures_tail);
+        if !tail {
+            let value = self.expr_expected_unchecked(expr, expected)?;
+            self.forget_mutable_borrows(&value);
+            return Ok(value);
+        }
+        if matches!(
+            expr.kind,
+            ast::ExprKind::If { .. } | ast::ExprKind::Match { .. } | ast::ExprKind::Block(_)
+        ) {
+            self.branch_tail = true;
+            let result = self.expr_expected_unchecked(expr, expected);
+            self.branch_tail = false;
+            // An `if` without `else` returns unit when its condition fails.
+            if let (
+                Ok(value),
+                ast::ExprKind::If {
+                    otherwise: None, ..
+                },
+            ) = (&result, &expr.kind)
+            {
+                self.check_postconditions(value)?;
+            }
+            return result;
+        }
+        let value = self.expr_expected_unchecked(expr, expected)?;
+        self.forget_mutable_borrows(&value);
+        self.check_postconditions(&value)?;
+        Ok(value)
+    }
+    /// Writes through an exclusive borrow are invisible to the facts, so a
+    /// local borrowed `&mut` (also as a method receiver or a field place)
+    /// leaves the fact system for the rest of the function.
+    fn forget_mutable_borrows(&mut self, value: &Expr) {
+        let mut roots = Vec::new();
+        let mut visit = |e: &Expr| {
+            if (matches!(e.ty, Type::RefMut(_)) || e.ty.is_mut_slice())
+                && let Some(root) = place_root_slot(e)
+            {
+                roots.push(root);
+            }
+        };
+        visit(value);
+        value.for_each_child(&mut visit);
+        for root in roots {
+            self.facts.make_opaque(root);
+        }
+    }
+    fn expr_expected_unchecked(
+        &mut self,
+        expr: &ast::Expr,
+        expected: Option<Type>,
+    ) -> Result<Expr> {
         self.nested(expr.span, |c| {
             let span = expr.span;
             if let Some(id) = c.logical_data_root(expr)
@@ -21971,6 +22155,7 @@ impl Checker<'_, '_> {
                     (ExprKind::Continue(vec![]), Type::Never)
                 }
                 ast::ExprKind::Block(block) => {
+                    c.ensures_tail = std::mem::take(&mut c.branch_tail);
                     let block = c.block(block, expected)?;
                     let ty = block.ty;
                     (ExprKind::Block(block), ty)
@@ -23108,6 +23293,7 @@ impl Checker<'_, '_> {
                             "this returns a copyable result with the must-use `@[1]` contract through an ungraded result; annotate the function result as '@[1]' so every caller inherits exactly one observation, or observe the value here",
                         ));
                     }
+                    c.check_postconditions(&value)?;
                     (ExprKind::Return(Box::new(value)), Type::Never)
                 }
                 ast::ExprKind::If {
@@ -23124,6 +23310,7 @@ impl Checker<'_, '_> {
                             .iter()
                             .any(|label| label.starts_with("<argument "))
                     });
+                    let branch_tail = std::mem::take(&mut c.branch_tail);
                     let condition = c.expr(condition)?;
                     c.expect(condition.ty, Type::Bool, condition.span)?;
                     let baseline = c.facts.clone();
@@ -23132,6 +23319,7 @@ impl Checker<'_, '_> {
                     c.facts.assume(&condition, true);
                     let has_else = otherwise.is_some();
                     let then_expected = if has_else { expected } else { Some(Type::Unit) };
+                    c.ensures_tail = branch_tail && has_else;
                     let then = c.block(then, then_expected);
                     let then_facts = c.facts.clone();
                     c.facts = baseline.clone();
@@ -23144,6 +23332,7 @@ impl Checker<'_, '_> {
                         // no fallback context may erase the arm's actual
                         // labels either.
                         let context = expected;
+                        c.ensures_tail = branch_tail;
                         let tail = c.expr_expected_result(otherwise, context);
 
                         let tail = tail?;
@@ -23198,6 +23387,12 @@ impl Checker<'_, '_> {
                     (ExprKind::If(Box::new(condition), then, otherwise), ty)
                 }
                 ast::ExprKind::Try(value) => {
+                    if c.ensures_context.is_some() {
+                        return Err(Diagnostic::new(
+                            span,
+                            "'?' cannot leave a function with postconditions; match the result and return explicitly",
+                        ));
+                    }
                     let value = c.expr(value)?;
                     let input = c.types.result(value.ty, span)?;
                     let output = c.types.result(c.result, span)?;
@@ -23219,6 +23414,7 @@ impl Checker<'_, '_> {
                     )
                 }
                 ast::ExprKind::Match { value, arms } => {
+                    let branch_tail = std::mem::take(&mut c.branch_tail);
                     let value = c.expr(value)?;
                     // A shared or exclusive reference to a DynArray is matched
                     // by borrowed slice patterns; every other borrow is
@@ -23283,6 +23479,7 @@ impl Checker<'_, '_> {
                             return Err(Diagnostic::new(arm.span, "unreachable match arm/pattern"));
                         }
                         let mark = c.facts.mark();
+                        c.assume_pattern(&value, &pattern);
                         let guard = arm.guard.as_ref().map(|guard| c.expr(guard)).transpose()?;
                         if let Some(guard) = &guard {
                             c.expect(guard.ty, Type::Bool, guard.span)?;
@@ -23295,6 +23492,7 @@ impl Checker<'_, '_> {
                             }
                             None => None,
                         };
+                        c.ensures_tail = branch_tail;
                         let body = c.expr_expected_result(&arm.body, context);
                         c.facts.reset(mark);
                         let body = body?;
@@ -24249,6 +24447,9 @@ impl Checker<'_, '_> {
         // body, never to indirect calls. A lambda is a separate callable, so it
         // cannot capture the hidden handler local by name.
         let saved_handlers = std::mem::take(&mut self.handlers);
+        let saved_ensures = self.ensures_context.take();
+        let saved_ensures_tail = std::mem::take(&mut self.ensures_tail);
+        let saved_branch_tail = std::mem::take(&mut self.branch_tail);
         let mut child_parameter_lifetimes = capture_lifetimes.clone();
         child_parameter_lifetimes.extend(lambda_lifetimes.clone());
         let saved_required = self.required_effects.replace(0);
@@ -24331,6 +24532,9 @@ impl Checker<'_, '_> {
         self.truncate_kernel(kernel_mark);
         self.scope_depth = saved_scope_depth;
         self.handlers = saved_handlers;
+        self.ensures_context = saved_ensures;
+        self.ensures_tail = saved_ensures_tail;
+        self.branch_tail = saved_branch_tail;
         let locals = std::mem::take(&mut self.locals);
         self.locals = saved_locals;
         self.capability_slots = saved_capabilities;
@@ -30485,6 +30689,12 @@ impl Checker<'_, '_> {
             span,
             resource: None,
         };
+        if !f.ensures.is_empty()
+            && ty != Type::Never
+            && let ExprKind::Call(_, arguments) = &value.kind
+        {
+            self.assume_postconditions(f, arguments, span, ty);
+        }
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
@@ -32409,6 +32619,456 @@ impl Checker<'_, '_> {
             || ty.is_text()
             || crate::runtime_types::has_borrow(self.types, ty)
             || crate::runtime_types::contains_task(self.types, ty)
+    }
+    // ── ENSURES: postconditions ─────────────────────────────────────────────
+
+    /// The symbolic value of a checked expression.
+    fn sym_of(&self, expr: &Expr) -> Sym {
+        match self.facts.root_of(expr) {
+            Some((root, steps)) => Sym::Path(root, steps),
+            None => Sym::Value(Box::new(expr.clone())),
+        }
+    }
+    fn path_linear(
+        &self,
+        root: crate::facts::Root,
+        steps: &[crate::facts::Step],
+        range: (i128, i128),
+        ty: Type,
+    ) -> crate::facts::Linear {
+        let term = crate::facts::path_term(root, steps);
+        match term {
+            crate::facts::Term::Var(slot, _) => self.facts.note_type(slot, ty),
+            _ => self.facts.note_term(term, range),
+        }
+        crate::facts::Linear::variable(term)
+    }
+    fn sym_linear(&self, sym: &Sym, ty: Type) -> Option<crate::facts::Linear> {
+        match sym {
+            Sym::Path(root, steps) => {
+                let range = crate::facts::scalar_range(ty)?;
+                Some(self.path_linear(*root, steps, range, ty))
+            }
+            Sym::Value(expr) => self.facts.linear(expr),
+            Sym::Unknown => None,
+        }
+    }
+    /// Word offset and type of a record field, without visibility checks
+    /// (a postcondition may mention private fields).
+    fn record_field_raw(&self, ty: Type, name: &str) -> Option<(usize, usize, Type)> {
+        let layout = ty.layout().filter(|id| self.types.enums[*id].record)?;
+        let variant = &self.types.enums[layout].variants[0];
+        let index = variant.names.iter().position(|n| n == name)?;
+        let offset = self.types.enums[layout].tag_words()
+            + variant.fields[..index]
+                .iter()
+                .map(|field| self.types.width(*field))
+                .sum::<usize>();
+        Some((index, offset, variant.fields[index]))
+    }
+    fn sym_field(&self, sym: &Sym, ty: Type, name: &str) -> Option<(Sym, Type)> {
+        let (index, offset, field_ty) = self.record_field_raw(ty, name)?;
+        let sym = match sym {
+            Sym::Path(root, steps) => {
+                let mut steps = steps.clone();
+                steps.push(crate::facts::Step::Field(u32::try_from(offset).ok()?));
+                Sym::Path(*root, steps)
+            }
+            Sym::Value(expr) => match &expr.kind {
+                ExprKind::Construct { fields, .. } => self.sym_of(&fields[index]),
+                _ => Sym::Unknown,
+            },
+            Sym::Unknown => Sym::Unknown,
+        };
+        Some((sym, field_ty))
+    }
+    fn variant_index(&self, ty: Type, name: &str) -> Option<usize> {
+        let layout = ty.layout().filter(|id| !self.types.enums[*id].record)?;
+        self.types.enums[layout]
+            .variants
+            .iter()
+            .position(|variant| variant.name == name)
+    }
+    fn sym_tag(&self, sym: &Sym, ty: Type) -> Option<crate::facts::Linear> {
+        let layout = ty.layout().filter(|id| !self.types.enums[*id].record)?;
+        let count = self.types.enums[layout].variants.len();
+        match sym {
+            Sym::Path(root, steps) => {
+                let mut steps = steps.clone();
+                steps.push(crate::facts::Step::Tag);
+                let term = crate::facts::path_term(*root, &steps);
+                self.facts
+                    .note_term(term, (0, i128::try_from(count).ok()? - 1));
+                Some(crate::facts::Linear::variable(term))
+            }
+            Sym::Value(expr) => match &expr.kind {
+                ExprKind::Construct { tag, .. } => {
+                    Some(crate::facts::Linear::constant(i128::try_from(*tag).ok()?))
+                }
+                _ => None,
+            },
+            Sym::Unknown => None,
+        }
+    }
+    fn sym_payload(
+        &self,
+        sym: &Sym,
+        ty: Type,
+        variant: usize,
+        index: usize,
+    ) -> Option<(Sym, Type)> {
+        let layout = ty.layout().filter(|id| !self.types.enums[*id].record)?;
+        let fields = self.types.enums[layout]
+            .variants
+            .get(variant)?
+            .fields
+            .clone();
+        let field_ty = *fields.get(index)?;
+        let offset = self.types.enums[layout].tag_words()
+            + fields[..index]
+                .iter()
+                .map(|field| self.types.width(*field))
+                .sum::<usize>();
+        let sym = match sym {
+            Sym::Path(root, steps) => {
+                let mut steps = steps.clone();
+                steps.push(crate::facts::Step::Payload(
+                    u32::try_from(variant).ok()?,
+                    u32::try_from(offset).ok()?,
+                ));
+                Sym::Path(*root, steps)
+            }
+            Sym::Value(expr) => match &expr.kind {
+                ExprKind::Construct { tag, fields, .. } if *tag == variant => {
+                    self.sym_of(&fields[index])
+                }
+                _ => Sym::Unknown,
+            },
+            Sym::Unknown => Sym::Unknown,
+        };
+        Some((sym, field_ty))
+    }
+    /// A name or field path in a postcondition.
+    fn ensures_value(
+        &self,
+        e: &ast::Expr,
+        env: &BTreeMap<BindingId, (Sym, Type)>,
+    ) -> Option<(Sym, Type)> {
+        match &e.kind {
+            ast::ExprKind::Name(_) => env.get(&self.resolution.reference(e.span)?).cloned(),
+            ast::ExprKind::Field { value, name } => {
+                let (sym, ty) = self.ensures_value(value, env)?;
+                self.sym_field(&sym, ty, name)
+            }
+            _ => None,
+        }
+    }
+    fn ensures_linear(
+        &self,
+        e: &ast::Expr,
+        env: &BTreeMap<BindingId, (Sym, Type)>,
+    ) -> Option<crate::facts::Linear> {
+        use crate::facts::Linear;
+        match &e.kind {
+            ast::ExprKind::Integer(n) => Some(Linear::constant(n.parse().ok()?)),
+            ast::ExprKind::Bool(value) => Some(Linear::constant(i128::from(*value))),
+            ast::ExprKind::Unary {
+                op: Kind::Minus,
+                operand,
+                ..
+            } => self.ensures_linear(operand, env)?.negate(),
+            ast::ExprKind::Binary {
+                op: op @ (Kind::Plus | Kind::Minus | Kind::Star),
+                left,
+                right,
+            } => {
+                let (l, r) = (
+                    self.ensures_linear(left, env)?,
+                    self.ensures_linear(right, env)?,
+                );
+                match op {
+                    Kind::Plus => l.add(&r),
+                    Kind::Minus => l.sub(&r),
+                    _ if l.is_constant() => r.scale(l.constant),
+                    _ if r.is_constant() => l.scale(r.constant),
+                    _ => None,
+                }
+            }
+            ast::ExprKind::Name(_) | ast::ExprKind::Field { .. } => {
+                let (sym, ty) = self.ensures_value(e, env)?;
+                self.sym_linear(&sym, ty)
+            }
+            _ => None,
+        }
+    }
+    /// A postcondition proposition as a formula. `lenient` (a hypothesis)
+    /// replaces an atom it cannot state by `true`, which only weakens it; a
+    /// goal returns `None` instead.
+    fn ensures_formula(
+        &self,
+        e: &ast::Expr,
+        env: &BTreeMap<BindingId, (Sym, Type)>,
+        positive: bool,
+        lenient: bool,
+    ) -> Option<crate::facts::Dnf> {
+        use crate::facts::{Linear, compare_dnf, dnf_and, dnf_or};
+        let unknown = || lenient.then(|| vec![Vec::new()]);
+        let negated = |op: &Kind| match op {
+            Kind::Lt => Kind::Ge,
+            Kind::Le => Kind::Gt,
+            Kind::Gt => Kind::Le,
+            Kind::Ge => Kind::Lt,
+            Kind::EqEq => Kind::Ne,
+            _ => Kind::EqEq,
+        };
+        match &e.kind {
+            ast::ExprKind::Binary {
+                op: op @ (Kind::AmpAmp | Kind::PipePipe),
+                left,
+                right,
+            } => {
+                let l = self.ensures_formula(left, env, positive, lenient)?;
+                let r = self.ensures_formula(right, env, positive, lenient)?;
+                if (*op == Kind::AmpAmp) == positive {
+                    dnf_and(&l, &r)
+                } else {
+                    dnf_or(l, r)
+                }
+            }
+            ast::ExprKind::Unary {
+                op: Kind::Bang,
+                operand,
+                ..
+            } => self.ensures_formula(operand, env, !positive, lenient),
+            ast::ExprKind::Binary {
+                op: op @ (Kind::Lt | Kind::Le | Kind::Gt | Kind::Ge | Kind::EqEq | Kind::Ne),
+                left,
+                right,
+            } => {
+                let op = if positive { op.clone() } else { negated(op) };
+                match (
+                    self.ensures_linear(left, env),
+                    self.ensures_linear(right, env),
+                ) {
+                    (Some(l), Some(r)) => compare_dnf(l, &op, r).or_else(unknown),
+                    _ => unknown(),
+                }
+            }
+            ast::ExprKind::Is { value, variant } => {
+                let Some((sym, ty)) = self.ensures_value(value, env) else {
+                    return unknown();
+                };
+                let (Some(tag), Some(index)) =
+                    (self.sym_tag(&sym, ty), self.variant_index(ty, variant))
+                else {
+                    return unknown();
+                };
+                let op = if positive { Kind::EqEq } else { Kind::Ne };
+                compare_dnf(tag, &op, Linear::constant(i128::try_from(index).ok()?))
+                    .or_else(unknown)
+            }
+            ast::ExprKind::Bool(value) => Some(if *value == positive {
+                vec![Vec::new()]
+            } else {
+                Vec::new()
+            }),
+            ast::ExprKind::Name(_) | ast::ExprKind::Field { .. } => {
+                match self.ensures_value(e, env) {
+                    Some((sym, Type::Bool)) => match self.sym_linear(&sym, Type::Bool) {
+                        Some(term) => {
+                            compare_dnf(term, &Kind::EqEq, Linear::constant(i128::from(positive)))
+                                .or_else(unknown)
+                        }
+                        None => match &sym {
+                            Sym::Value(expr) => if lenient {
+                                self.facts.formula(expr, positive)
+                            } else {
+                                self.facts.formula_exact(expr, positive)
+                            }
+                            .or_else(unknown),
+                            _ => unknown(),
+                        },
+                    },
+                    _ => unknown(),
+                }
+            }
+            _ => unknown(),
+        }
+    }
+    /// One clause as `!guard || P`, for the given parameters and result.
+    fn ensures_clause(
+        &self,
+        clause: &ast::Ensures,
+        params: &BTreeMap<BindingId, (Sym, Type)>,
+        result: &(Sym, Type),
+        lenient: bool,
+    ) -> Option<crate::facts::Dnf> {
+        use crate::facts::{Linear, compare_dnf, dnf_or};
+        let mut env = params.clone();
+        env.insert(self.resolution.binder(clause.result_span)?, result.clone());
+        // Where the guard fails (the clause then says nothing).
+        let outside: Option<crate::facts::Dnf> = match &clause.guard {
+            ast::EnsuresGuard::Always => Some(Vec::new()),
+            ast::EnsuresGuard::Result(truth) => match &result.0 {
+                Sym::Value(expr) if expr.ty == Type::Bool => {
+                    if lenient {
+                        self.facts.formula(expr, !truth)
+                    } else {
+                        self.facts.formula_exact(expr, !truth)
+                    }
+                }
+                sym => self.sym_linear(sym, Type::Bool).and_then(|term| {
+                    compare_dnf(term, &Kind::EqEq, Linear::constant(i128::from(!truth)))
+                }),
+            },
+            ast::EnsuresGuard::Variant { name, binders, .. } => {
+                let index = self.variant_index(result.1, name)?;
+                for (position, (_, span)) in binders.iter().enumerate() {
+                    let binding = self.resolution.binder(*span)?;
+                    let payload = self
+                        .sym_payload(&result.0, result.1, index, position)
+                        .unwrap_or((Sym::Unknown, Type::Unit));
+                    env.insert(binding, payload);
+                }
+                match &result.0 {
+                    Sym::Value(expr) => match &expr.kind {
+                        ExprKind::Construct { tag, .. } if *tag == index => Some(Vec::new()),
+                        ExprKind::Construct { .. } => Some(vec![Vec::new()]),
+                        _ => None,
+                    },
+                    sym => self.sym_tag(sym, result.1).and_then(|tag| {
+                        compare_dnf(
+                            tag,
+                            &Kind::Ne,
+                            Linear::constant(i128::try_from(index).ok()?),
+                        )
+                    }),
+                }
+            }
+        };
+        // A clause whose guard cannot be stated is dropped as a hypothesis
+        // and is an error as a goal.
+        let outside = outside?;
+        // The guard is known not to hold: the clause is true.
+        if outside.iter().any(Vec::is_empty) {
+            return Some(vec![Vec::new()]);
+        }
+        let body = self.ensures_formula(&clause.body, &env, true, lenient)?;
+        dnf_or(outside, body)
+    }
+    /// Prove every postcondition for a value the function returns.
+    fn check_postconditions(&mut self, value: &Expr) -> Result<()> {
+        let Some(context) = self.ensures_context.clone() else {
+            return Ok(());
+        };
+        if value.ty == Type::Never {
+            return Ok(());
+        }
+        let params = context
+            .params
+            .iter()
+            .map(|(id, slot)| {
+                (
+                    *id,
+                    (
+                        Sym::Path(crate::facts::Root::Var(*slot, 0), Vec::new()),
+                        self.locals[*slot].ty,
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let result = (self.sym_of(value), context.result);
+        for clause in &context.clauses {
+            let Some(goal) = self.ensures_clause(clause, &params, &result, false) else {
+                return Err(Diagnostic::new(
+                    value.span,
+                    "this postcondition cannot be stated for the returned value: it needs linear terms over parameters, 'result', field paths, and 'is' tests",
+                )
+                .with_note(clause.span, "postcondition declared here"));
+            };
+            let Some(certificates) = self.facts.certify(&goal, value.span, "postcondition") else {
+                let known = self.facts.snapshot_formula(&goal);
+                let names = (0..self.locals.len())
+                    .map(|s| self.local_name(s))
+                    .collect::<Vec<_>>();
+                return Err(crate::facts::failure(
+                    value.span,
+                    &format!("ensures {}", ensures_text(clause)),
+                    &known,
+                    &|slot| names[slot].clone(),
+                )
+                .with_note(clause.span, "postcondition declared here"));
+            };
+            self.functions.certificates.extend(certificates);
+        }
+        Ok(())
+    }
+    /// After a call to a function with postconditions, its clauses hold of
+    /// this call's result (a fresh identity) and the actual arguments.
+    fn assume_postconditions(
+        &mut self,
+        f: &ast::Function,
+        arguments: &[Expr],
+        span: Span,
+        result: Type,
+    ) {
+        let id = self.facts.register_call(span);
+        let params = f
+            .parameters
+            .iter()
+            .filter(|p| !p.erased)
+            .zip(arguments)
+            .filter_map(|(p, argument)| {
+                Some((
+                    self.resolution.binder(p.span)?,
+                    (self.sym_of(argument), argument.ty),
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let result = (Sym::Path(crate::facts::Root::Value(id), Vec::new()), result);
+        for clause in &f.ensures {
+            if let Some(formula) = self.ensures_clause(clause, &params, &result, true)
+                && formula.len() <= 32
+            {
+                self.facts.add_formula(formula);
+            }
+        }
+    }
+    /// In a match arm, the scrutinee has the arm's variant and the pattern's
+    /// payload binders denote its payload fields.
+    fn assume_pattern(&mut self, value: &Expr, pattern: &Pattern) {
+        use crate::facts::Step;
+        let Some((root, steps)) = self.facts.root_of(value) else {
+            return;
+        };
+        let Pattern::Variant { tag, fields, .. } = pattern else {
+            return;
+        };
+        let Some(layout) = value.ty.layout() else {
+            return;
+        };
+        let record = self.types.enums[layout].record;
+        if !record && let Some(tag_term) = self.sym_tag(&Sym::Path(root, steps.clone()), value.ty) {
+            let mut out = Vec::new();
+            crate::facts::compare(
+                tag_term,
+                &Kind::EqEq,
+                crate::facts::Linear::constant(*tag as i128),
+                &mut out,
+            );
+            self.facts.add(out);
+        }
+        for (offset, sub) in fields {
+            if let Pattern::Bind(slot) = sub {
+                let mut path = steps.clone();
+                path.push(if record {
+                    Step::Field(*offset as u32)
+                } else {
+                    Step::Payload(*tag as u32, *offset as u32)
+                });
+                self.facts.alias(*slot, root, path);
+            }
+        }
     }
     /// Intern a resumption callable type. One-shot resumption is
     /// `linear once fn(R) -> R`; multishot resumption is the copyable
@@ -34561,6 +35221,7 @@ impl Checker<'_, '_> {
                 K::Unary { operand, .. }
                 | K::Try(operand)
                 | K::Cast { value: operand, .. }
+                | K::Is { value: operand, .. }
                 | K::Field { value: operand, .. } => expr(operand, out, calls),
                 K::Return(Some(v)) | K::Break(Some(v)) => expr(v, out, calls),
                 K::Tuple(vs) | K::Array(vs) => vs.iter().for_each(|v| expr(v, out, calls)),
@@ -34704,6 +35365,11 @@ impl Checker<'_, '_> {
         }
         for (slot, step) in direction {
             if step == 0 {
+                // A record or enum reassigned in the loop loses its facts and
+                // aliases at the loop head too.
+                if self.locals[slot].ty.scalar_carrier().is_none() {
+                    self.facts.bump(slot);
+                }
                 self.invalidate_scalar_proofs(slot);
             } else {
                 self.facts.bump_monotone(slot, step > 0);
@@ -35643,7 +36309,10 @@ pub(crate) fn ast_children<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::E
             fields.iter().for_each(|(_, value)| f(value));
         }
         E::Block(inner) | E::Loop(inner) => block(inner, f),
-        E::Unary { operand, .. } | E::Cast { value: operand, .. } | E::Try(operand) => f(operand),
+        E::Unary { operand, .. }
+        | E::Cast { value: operand, .. }
+        | E::Is { value: operand, .. }
+        | E::Try(operand) => f(operand),
         E::Return(Some(value)) | E::Break(Some(value)) => f(value),
         E::Binary { left, right, .. } => {
             f(left);
@@ -35760,7 +36429,9 @@ fn exits_early(expr: &ast::Expr) -> bool {
                 || matches!(&expr.kind, E::Record { ty, .. } if exits_early(ty))
         }
         E::Block(inner) | E::Loop(inner) => block(inner),
-        E::Unary { operand, .. } | E::Cast { value: operand, .. } => exits_early(operand),
+        E::Unary { operand, .. }
+        | E::Cast { value: operand, .. }
+        | E::Is { value: operand, .. } => exits_early(operand),
         E::Binary { left, right, .. } => exits_early(left) || exits_early(right),
         E::Call { callee, arguments } => exits_early(callee) || arguments.iter().any(exits_early),
         E::Handle { handler, body, .. } => exits_early(handler) || block(body),
@@ -35834,9 +36505,8 @@ fn contains_lexical_perform(expr: &ast::Expr, operation: &str) -> bool {
         ast::ExprKind::Block(block) => block_contains_lexical_perform(block, operation),
         ast::ExprKind::Unary { operand, .. }
         | ast::ExprKind::Try(operand)
-        | ast::ExprKind::Cast { value: operand, .. } => {
-            contains_lexical_perform(operand, operation)
-        }
+        | ast::ExprKind::Cast { value: operand, .. }
+        | ast::ExprKind::Is { value: operand, .. } => contains_lexical_perform(operand, operation),
         ast::ExprKind::Binary { left, right, .. } => {
             contains_lexical_perform(left, operation) || contains_lexical_perform(right, operation)
         }
@@ -35956,7 +36626,8 @@ fn collect_expr_refs(resolution: &Resolution, expr: &ast::Expr, out: &mut BTreeS
         ast::ExprKind::Block(block) => collect_lambda_refs(resolution, block, out),
         ast::ExprKind::Unary { operand, .. }
         | ast::ExprKind::Try(operand)
-        | ast::ExprKind::Cast { value: operand, .. } => collect_expr_refs(resolution, operand, out),
+        | ast::ExprKind::Cast { value: operand, .. }
+        | ast::ExprKind::Is { value: operand, .. } => collect_expr_refs(resolution, operand, out),
         ast::ExprKind::Binary { left, right, .. } => {
             collect_expr_refs(resolution, left, out);
             collect_expr_refs(resolution, right, out);

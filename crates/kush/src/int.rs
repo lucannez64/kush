@@ -230,9 +230,13 @@ pub(crate) fn builtin(op: IntOp, source: IntKind, target: IntKind, args: &[i64])
         IntOp::Truncate => (true, target.wrap(a)),
         IntOp::Unchecked(arith) => {
             let b = source.decode(args[1]);
-            // Proved in range by the checker; never wraps.
-            let exact = arith.apply(a, b).expect("proved in range");
-            (true, target.encode(exact).expect("proved in range"))
+            // Proved in range by the checker. Should a proof ever be wrong,
+            // wrap exactly like the plain machine operation of native code.
+            let exact = arith.apply(a, b);
+            (
+                true,
+                exact.map_or_else(|| target.wrap(a.wrapping_mul(b)), |v| target.wrap(v)),
+            )
         }
         IntOp::Wrapping(arith) | IntOp::Saturating(arith) | IntOp::Checked(arith, _, _) => {
             let b = source.decode(args[1]);

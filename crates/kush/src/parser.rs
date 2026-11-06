@@ -28,6 +28,7 @@ pub fn parse_at(source: &str, base: usize) -> Result<Module> {
         tokens,
         pos: 0,
         depth: 0,
+        in_ensures: false,
     }
     .module()
 }
@@ -36,6 +37,8 @@ struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     depth: usize,
+    /// Inside an `ensures` proposition, where `value is Variant` is allowed.
+    in_ensures: bool,
 }
 impl Parser {
     fn current(&self) -> &Token {
@@ -750,11 +753,22 @@ impl Parser {
         self.expect(&Kind::Arrow, "'->' and an explicit return type")?;
         let result = self.ty()?;
         let effects = self.effects()?;
+        let ensures = self.ensures_clauses()?;
         let body = if self.eat(&Kind::Semi) {
             None
         } else {
             Some(self.block()?)
         };
+        // A postcondition is proved from a body; a declaration without one
+        // (foreign, trait) or a logical definition cannot promise it.
+        if let Some(clause) = ensures.first()
+            && (body.is_none() || total)
+        {
+            return Err(Diagnostic::new(
+                clause.span,
+                "postconditions need an executable body that proves them; a declaration without a body or a total definition cannot have 'ensures'",
+            ));
+        }
         Ok(Function {
             total,
             name,
@@ -765,7 +779,72 @@ impl Parser {
             effects,
             body,
             foreign: None,
+            ensures,
         })
+    }
+    /// Contextual `ensures` clauses after the effect row:
+    /// `ensures { P }`, `ensures result => { P }`, `ensures !result => { P }`,
+    /// `ensures Variant(a, b) => { P }`.
+    fn ensures_clauses(&mut self) -> Result<Vec<Ensures>> {
+        let mut out = Vec::new();
+        while matches!(&self.current().kind, Kind::Ident(word) if word == "ensures") {
+            let start = self.current().span;
+            self.bump();
+            let guard = if self.current().kind == Kind::LBrace {
+                EnsuresGuard::Always
+            } else if self.eat(&Kind::Bang) {
+                let word = self.ident()?;
+                if word != "result" {
+                    return Err(Diagnostic::new(
+                        self.since(start),
+                        "expected '!result =>' in an ensures clause",
+                    ));
+                }
+                self.expect(&Kind::FatArrow, "'=>' after the ensures guard")?;
+                EnsuresGuard::Result(false)
+            } else {
+                let guard_start = self.current().span;
+                let name = self.ident()?;
+                let guard = if name == "result" {
+                    EnsuresGuard::Result(true)
+                } else {
+                    let mut binders = Vec::new();
+                    if self.eat(&Kind::LParen) {
+                        loop {
+                            if self.eat(&Kind::RParen) {
+                                break;
+                            }
+                            let span = self.current().span;
+                            binders.push((self.ident()?, span));
+                            if !self.eat(&Kind::Comma) {
+                                self.expect(&Kind::RParen, "')' after variant binders")?;
+                                break;
+                            }
+                        }
+                    }
+                    EnsuresGuard::Variant {
+                        name,
+                        binders,
+                        span: self.since(guard_start),
+                    }
+                };
+                self.expect(&Kind::FatArrow, "'=>' after the ensures guard")?;
+                guard
+            };
+            self.expect(&Kind::LBrace, "'{' before the postcondition")?;
+            self.in_ensures = true;
+            let body = self.expr();
+            self.in_ensures = false;
+            let body = body?;
+            self.expect(&Kind::RBrace, "'}' after the postcondition")?;
+            out.push(Ensures {
+                guard,
+                body,
+                result_span: start,
+                span: self.since(start),
+            });
+        }
+        Ok(out)
     }
     /// Function generic binders may mix lifetime parameters with ordinary
     /// type/natural/grade/effect binders: `< 'a, 'b, T >`.
@@ -1548,6 +1627,20 @@ impl Parser {
                 }
                 if self.eat(&Kind::Question) {
                     left = Node::new(ExprKind::Try(Box::new(left)), self.since(start));
+                    continue;
+                }
+                if self.in_ensures
+                    && matches!(&self.current().kind, Kind::Ident(word) if word == "is")
+                {
+                    self.bump();
+                    let variant = self.ident()?;
+                    left = Node::new(
+                        ExprKind::Is {
+                            value: Box::new(left),
+                            variant,
+                        },
+                        self.since(start),
+                    );
                     continue;
                 }
                 if matches!(&self.current().kind, Kind::Ident(word) if word == "as") {

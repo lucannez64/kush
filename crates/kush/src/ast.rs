@@ -316,6 +316,33 @@ pub struct Function {
     /// linked static libraries/objects. Foreign declarations have no body and
     /// may only be called directly, never used as first-class values.
     pub foreign: Option<String>,
+    /// `ensures` postconditions (ENSURES), checked at every return and
+    /// available to callers as facts.
+    pub ensures: Vec<Ensures>,
+}
+/// One `ensures` clause: `ensures [guard =>] { proposition }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ensures {
+    pub guard: EnsuresGuard,
+    /// The `{ .. }` proposition. It may mention parameters, `result`, and the
+    /// guard's binders, with field paths (`p.x`) and `value is Variant`.
+    pub body: Expr,
+    /// Binder span of the implicit `result` name.
+    pub result_span: Span,
+    pub span: Span,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnsuresGuard {
+    /// `ensures { P }`
+    Always,
+    /// `ensures result => { P }` (a `Bool` result) or `!result => { P }`.
+    Result(bool),
+    /// `ensures Variant(x, ..) => { P }` (an enum result).
+    Variant {
+        name: String,
+        binders: Vec<(String, Span)>,
+        span: Span,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
@@ -508,6 +535,11 @@ pub enum ExprKind {
     Cast {
         value: Box<Expr>,
         ty: Type,
+    },
+    /// `value is Variant`: only inside an `ensures` proposition (ENSURES).
+    Is {
+        value: Box<Expr>,
+        variant: String,
     },
     Field {
         value: Box<Expr>,

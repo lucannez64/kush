@@ -1005,6 +1005,18 @@ impl Resolver {
         for effect in &f.effects {
             self.ty(effect)?;
         }
+        // Postconditions see the parameters, `result`, and their binders.
+        for clause in &f.ensures {
+            self.scoped(|r| {
+                r.local("result", BindingKind::Local, clause.result_span, true)?;
+                if let EnsuresGuard::Variant { binders, .. } = &clause.guard {
+                    for (name, span) in binders {
+                        r.local(name, BindingKind::Local, *span, false)?;
+                    }
+                }
+                r.expr(&clause.body)
+            })?;
+        }
         if let Some(body) = &f.body {
             self.block(body)?;
         }
@@ -1420,6 +1432,7 @@ impl Resolver {
                         r.expr(value)?;
                     }
                 }
+                ExprKind::Is { value, .. } => r.expr(value)?,
                 ExprKind::Cast { value, ty } => {
                     r.ty(ty)?;
                     r.expr(value)?;
