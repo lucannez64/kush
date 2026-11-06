@@ -4372,10 +4372,26 @@
       "deps": [
         "ENSURES"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Allow a clause to call a pure Bool function whose own result => / !result => clauses define it (e.g. first_contact_is_admissible(facts)), instead of writing the conjunction out.",
-      "commit": null,
-      "log": []
+      "commit": "864dd02",
+      "log": [
+        {
+          "time": "2026-11-06 17:08:54",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 17:19:19",
+          "who": "agent",
+          "text": "pred(args) in propositions means the predicate's result clause (user-approved); syntactic complement check. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 17:19:19",
+          "who": "agent",
+          "text": "done 864dd02"
+        }
+      ]
     },
     {
       "id": "ENSURES-METHODS",
@@ -4385,10 +4401,26 @@
       "deps": [
         "ENSURES"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "value.method() calls do not receive the method's ensures facts; only direct calls of named functions do.",
-      "commit": null,
-      "log": []
+      "commit": "5a97f4c",
+      "log": [
+        {
+          "time": "2026-11-06 16:57:19",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 17:19:18",
+          "who": "agent",
+          "text": "Method calls get postconditions; reference params (&self) still cannot appear in clauses (ENSURES-REFS). Boat check passed."
+        },
+        {
+          "time": "2026-11-06 17:19:18",
+          "who": "agent",
+          "text": "done 5a97f4c"
+        }
+      ]
     },
     {
       "id": "STRUCT-UPDATE",
@@ -4398,10 +4430,26 @@
       "deps": [
         "FIELD-PRIVACY"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Negative theorems in the VELA port list every field; support ..base, with facts for each field (and for let of a struct literal).",
-      "commit": null,
-      "log": []
+      "commit": "84e0775",
+      "log": [
+        {
+          "time": "2026-11-06 17:06:27",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 17:19:18",
+          "who": "agent",
+          "text": "S { f: v, ..base } with Rust semantics (user-approved), field facts and let-literal facts. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 17:19:19",
+          "who": "agent",
+          "text": "done 84e0775"
+        }
+      ]
     },
     {
       "id": "KUSH-RUST-EXPORT",
@@ -4507,10 +4555,26 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "They return Result<i64, i64> (0/1) while docs/host-api.md says Result<Bool, i64>. Found by kush-kv tests.",
-      "commit": null,
-      "log": []
+      "commit": "26a5e69",
+      "log": [
+        {
+          "time": "2026-11-06 16:49:34",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 17:19:17",
+          "who": "agent",
+          "text": "Result<Bool, i64> (user-approved); kush-kv test updated locally in kush-kv 07aec80 (not pushed). Boat check passed."
+        },
+        {
+          "time": "2026-11-06 17:19:17",
+          "who": "agent",
+          "text": "done 26a5e69"
+        }
+      ]
     },
     {
       "id": "PARSE-BLOCK-CALL",
@@ -4518,10 +4582,26 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "'if c { .. }' then '(a, b)' on the next line is parsed as calling the if; 'while .. { }' then '-1' as subtraction. Hit four times in kush-kv. Treat a block-ended expression statement as a statement (as Rust does), or diagnose.",
-      "commit": null,
-      "log": []
+      "commit": "c7d3a46",
+      "log": [
+        {
+          "time": "2026-11-06 16:48:01",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 17:19:17",
+          "who": "agent",
+          "text": "Newline rule (user-approved): statement-position if/match/while/loop/handle/block ends before a new line starting with ( [ - *; same-line operators unchanged. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 17:19:17",
+          "who": "agent",
+          "text": "done c7d3a46"
+        }
+      ]
     },
     {
       "id": "EVAL-VEC-COST",
@@ -4529,10 +4609,26 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "The evaluator's 100k-expression budget and per-element Vec rebuilds limit std.bytemap tests to ~100 operations; kush-kv tests run natively only. Consider a configurable budget and O(1) Vec.set.",
-      "commit": null,
-      "log": []
+      "commit": "7b9fdef",
+      "log": [
+        {
+          "time": "2026-11-06 16:55:22",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 17:19:18",
+          "who": "agent",
+          "text": "Vec/Bytes/slice element access no longer clones the allocation; default fuel 10M, kush eval --fuel N (user chose both). bytemap differential test now 3000 ops in the evaluator. Boat check passed."
+        },
+        {
+          "time": "2026-11-06 17:19:18",
+          "who": "agent",
+          "text": "done 7b9fdef"
+        }
+      ]
     },
     {
       "id": "RAW-FS-HANDLES",
@@ -4540,10 +4636,26 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "FS.open/read_at/... take raw handles; natively a closed descriptor number can be reused (the evaluator never reuses), so raw use can hit another file. std.file.File is the safe interface; consider restricting the raw builtins to std.",
-      "commit": null,
-      "log": []
+      "commit": "f8549c4",
+      "log": [
+        {
+          "time": "2026-11-06 16:50:53",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 17:19:18",
+          "who": "agent",
+          "text": "Raw descriptor builtins reserved for non-root std units (user-approved). Boat check passed."
+        },
+        {
+          "time": "2026-11-06 17:19:18",
+          "who": "agent",
+          "text": "done f8549c4"
+        }
+      ]
     },
     {
       "id": "EDITOR-SYNTAX-V2",
@@ -4561,6 +4673,19 @@
           "text": "done b2538f1"
         }
       ]
+    },
+    {
+      "id": "ENSURES-REFS",
+      "title": "Reference parameters in postconditions",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "ENSURES-METHODS"
+      ],
+      "status": "todo",
+      "desc": "A &T parameter (including self: &Self) cannot be mentioned in an ensures clause; shared references could denote the referent's value for the call.",
+      "commit": null,
+      "log": []
     }
   ]
 }
