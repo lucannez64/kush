@@ -323,7 +323,12 @@ fn eval_fuel_flag_sets_the_budget() {
         assert_eq!(run(bad).status.code(), Some(2), "{bad:?}");
     }
     // `run` builds natively and has no evaluator budget.
-    let output = command().arg("run").arg(&file).args(["--fuel", "5"]).output().unwrap();
+    let output = command()
+        .arg("run")
+        .arg(&file)
+        .args(["--fuel", "5"])
+        .output()
+        .unwrap();
     assert_eq!(output.status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&dir);
 }

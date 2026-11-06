@@ -169,10 +169,7 @@ fn open_modes_and_errors() {
             0
         }}"
     ));
-    assert_eq!(
-        output,
-        "-2\n-2\n0\n-17\n0\n-22\n-9\n-27\n-22\n0\n"
-    );
+    assert_eq!(output, "-2\n-2\n0\n-17\n0\n-22\n-9\n-27\n-22\n0\n");
 }
 
 #[test]

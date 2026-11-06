@@ -2101,7 +2101,10 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 if let Value::Slice(inner) = &view
                     && inner.array.is_none()
                     && let Value::Borrowed(id) | Value::Owned(id) = inner.base.as_ref()
-                    && self.heap.with(*id, |value| matches!(value, Value::Buffer { .. })) == Some(true)
+                    && self
+                        .heap
+                        .with(*id, |value| matches!(value, Value::Buffer { .. }))
+                        == Some(true)
                 {
                     return Err(Diagnostic::new(
                         place.span,
@@ -3050,9 +3053,11 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                                 Diagnostic::new(span, "panic: slice index out of bounds")
                             }),
                     ),
-                    Value::Vector { items, .. } => Some(items.get(position).cloned().ok_or_else(
-                        || Diagnostic::new(span, "panic: slice index out of bounds"),
-                    )),
+                    Value::Vector { items, .. } => {
+                        Some(items.get(position).cloned().ok_or_else(|| {
+                            Diagnostic::new(span, "panic: slice index out of bounds")
+                        }))
+                    }
                     _ => None,
                 })
                 .flatten()
@@ -3150,29 +3155,36 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 let id = *id;
                 self.heap
                     .with_mut(id, |current| -> Result<()> {
-                match current {
-                    Value::Buffer { data, .. } => {
-                        let byte = u8::try_from(value.scalar())
-                            .map_err(|_| Diagnostic::new(span, "panic: byte value out of range"))?;
-                        let Some(slot) = data.get_mut(position) else {
-                            return Err(Diagnostic::new(span, "panic: slice index out of bounds"));
-                        };
-                        *slot = byte;
-                    }
-                    Value::Vector { items, .. } => {
-                        let Some(slot) = items.get_mut(position) else {
-                            return Err(Diagnostic::new(span, "panic: slice index out of bounds"));
-                        };
-                        *slot = value;
-                    }
-                    _ => {
-                        return Err(Diagnostic::new(
-                            span,
-                            "internal ownership error: dangling slice source",
-                        ));
-                    }
-                }
-                Ok(())
+                        match current {
+                            Value::Buffer { data, .. } => {
+                                let byte = u8::try_from(value.scalar()).map_err(|_| {
+                                    Diagnostic::new(span, "panic: byte value out of range")
+                                })?;
+                                let Some(slot) = data.get_mut(position) else {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        "panic: slice index out of bounds",
+                                    ));
+                                };
+                                *slot = byte;
+                            }
+                            Value::Vector { items, .. } => {
+                                let Some(slot) = items.get_mut(position) else {
+                                    return Err(Diagnostic::new(
+                                        span,
+                                        "panic: slice index out of bounds",
+                                    ));
+                                };
+                                *slot = value;
+                            }
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    span,
+                                    "internal ownership error: dangling slice source",
+                                ));
+                            }
+                        }
+                        Ok(())
                     })
                     .unwrap_or_else(|| {
                         Err(Diagnostic::new(
@@ -6717,7 +6729,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 // The bound was proved statically; a failure here is a compiler bug.
                 let byte = self
                     .with_buffer(&reference, expr.span, |data, _| {
-                        data.get(usize::try_from(index).unwrap_or(usize::MAX)).copied()
+                        data.get(usize::try_from(index).unwrap_or(usize::MAX))
+                            .copied()
                     })?
                     .ok_or_else(|| {
                         Diagnostic::new(

@@ -766,11 +766,18 @@ fn filesystem_predicates_return_bool_in_both_backends() {
     let root = unique_directory("bool-check");
     let observed = reference(FS_PREDICATES_BOOL, &[root.display().to_string()], &[]);
     let _ = fs::remove_dir_all(&root);
-    let lines: Vec<&str> = std::str::from_utf8(&observed.output).unwrap().lines().collect();
+    let lines: Vec<&str> = std::str::from_utf8(&observed.output)
+        .unwrap()
+        .lines()
+        .collect();
     assert_eq!(lines, ["1", "1", "0", "0", "0", "0", "-22", "8"]);
     assert_eq!(observed.status, 0);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    compare(FS_PREDICATES_BOOL, |root| vec![root.display().to_string()], &[]);
+    compare(
+        FS_PREDICATES_BOOL,
+        |root| vec![root.display().to_string()],
+        &[],
+    );
 }
 
 #[test]

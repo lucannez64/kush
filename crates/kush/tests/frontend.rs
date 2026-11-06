@@ -427,7 +427,11 @@ fn block_statement_runs(source: &str, expected: i64) {
         let binary = scratch.path().join("block-statement");
         kush::native::build(&program, &binary).unwrap();
         let output = std::process::Command::new(&binary).output().unwrap();
-        assert_eq!(output.status.code(), Some((expected as u64 & 255) as i32), "{source}");
+        assert_eq!(
+            output.status.code(),
+            Some((expected as u64 & 255) as i32),
+            "{source}"
+        );
     }
 }
 
@@ -504,11 +508,17 @@ fn block_statement_parse_shape_and_rejections() {
     let tail = expression("if true { 1; }\n(2, 3)");
     assert!(matches!(tail.kind, ExprKind::Tuple(_)), "{tail:?}");
     let tail = expression("while false { }\n-1");
-    assert!(matches!(tail.kind, ExprKind::Unary { .. } | ExprKind::Integer(_)), "{tail:?}");
+    assert!(
+        matches!(tail.kind, ExprKind::Unary { .. } | ExprKind::Integer(_)),
+        "{tail:?}"
+    );
     let tail = expression("match x { _ => {} }\n[1, 2]");
     assert!(matches!(tail.kind, ExprKind::Array(_)), "{tail:?}");
     let tail = expression("loop { break; }\n*r");
-    assert!(matches!(tail.kind, ExprKind::Unary { .. } | ExprKind::Integer(_)), "{tail:?}");
+    assert!(
+        matches!(tail.kind, ExprKind::Unary { .. } | ExprKind::Integer(_)),
+        "{tail:?}"
+    );
     // A let value continues onto the next line: calling an integer is rejected.
     let error = kush::executable::check(
         "fn main() -> i64 ! {panic} {

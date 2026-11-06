@@ -299,7 +299,10 @@ fn evaluator_vector_steps_do_not_scale_with_length() {
     let long = long.elapsed();
     // Copying a 20000-element vector per read would take hundreds of times
     // longer; allow wide noise (native build time dominates both runs).
-    assert!(long < short * 20 + std::time::Duration::from_secs(5), "{short:?} vs {long:?}");
+    assert!(
+        long < short * 20 + std::time::Duration::from_secs(5),
+        "{short:?} vs {long:?}"
+    );
 
     // A small budget is exhausted with a clear error; a larger one runs.
     let mut program = check(&source(10)).unwrap();
