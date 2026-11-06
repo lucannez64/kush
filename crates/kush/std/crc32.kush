@@ -7,8 +7,8 @@ module std.crc32;
 //     let t = crc32.table();
 //     let sum = crc32.of(&t, &data, 0, Bytes.len(&data), _);
 //
-// Byte reads use `Bytes.at` with proved bounds, so the loop has no bounds
-// checks.
+// Byte reads and table lookups are proved in bounds (`Bytes.at`, `Vec.at`),
+// so the loop has no bounds checks.
 
 /// The 256-entry lookup table.
 pub struct Table {
@@ -42,12 +42,18 @@ pub fn update(
     end: i64,
     erased range: { 0 <= start && start <= end && end <= Bytes.len(data) },
 ) -> u32 ! {panic} {
+    let entries = &table.entries;
+    // Always true for a table from `table()` (the field is private); it lets
+    // the loop index the table without bounds checks: `x & 255 <= 255`.
+    if Vec.len(entries) != 256 {
+        panic();
+    }
     let mut c = crc ^ 4294967295;
     let mut i = start;
     while i < end {
         let byte: u32 = Int.truncate(Bytes.at(data, i, _));
         let index: i64 = Int.convert((c ^ byte) & 255);
-        c = Vec.get(&table.entries, index) ^ (c >> 8);
+        c = Vec.at(entries, index, _) ^ (c >> 8);
         i = i + 1;
     }
     c ^ 4294967295

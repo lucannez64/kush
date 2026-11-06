@@ -269,7 +269,11 @@ with exactly one refutation per disjunct. Tests:
 The fragment is still deliberately bounded and is not a full Presburger
 decision procedure:
 
-- division, modulo, nonlinear products, floats, and casts are not linear terms;
+- division, modulo, nonlinear products, floats, and narrowing casts are not
+  linear terms. Two shapes are admitted as bounded unknowns (2026-11-06): a
+  lossless `Int.convert` has its argument's value, and `x & mask` with a
+  constant `mask >= 0` is a fresh term in `0 ..= mask` (so
+  `table[(c ^ byte) & 255]` is provably inside a 256-entry table);
 - the integer fallback runs at most 2 cut rounds, 8 cuts, 48 search nodes, and
   depth 4, over systems with at most 16 distinct terms and 128 constraints.
   Exceeding a limit means "not established", never a guessed proof;
@@ -284,6 +288,13 @@ agreement, and the explicit nonlinear and stale-version rejections, and
 bound refutations, independent certificate checking, and budget-limited
 rejection. The `facts.rs` unit tests tamper with cut divisors, rounded results,
 branch thresholds, and Farkas multipliers.
+
+Disjunctive facts are searched by case splits (PROVE-DISJ). Before
+splitting, a clause that the current facts already satisfy is set aside and a
+case that contradicts them is closed by its own refutation, so functions with
+one postcondition per enum variant compose without exhausting the search
+budget. Range proofs for arithmetic (OVERFLOW-ELIDE) give `i64` bounds to
+every term in the facts, so `x <= limit - y` proves `x + y` in range.
 
 ## 5. Erasure, grades, ownership, and `Prop`
 

@@ -9652,12 +9652,26 @@ impl Generator<'_, '_> {
                     .store(ir::MemFlagsData::new(), zero, handle, 0);
                 vec![handle]
             }
+            // Length, checked reads and copyable writes are inline: the header
+            // is `{length, capacity}` followed by the elements (`KushVec`).
+            // With speed optimization the length is an inline load (the header
+            // is `{length, capacity}`, `KushVec`). Checked reads and writes stay
+            // runtime calls: inlining them cost ~5-6% on the JSON benchmark
+            // (2026-11-06). Proved reads (`Vec.at`) are inline loads.
             VecOp::Len => {
                 let handle = self
                     .builder
                     .ins()
                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
-                call(self, op, &[handle])
+                if self.codegen.optimization == Optimization::Speed {
+                    vec![
+                        self.builder
+                            .ins()
+                            .load(I64, ir::MemFlagsData::new(), handle, 0),
+                    ]
+                } else {
+                    call(self, op, &[handle])
+                }
             }
             VecOp::Get => {
                 let handle = self

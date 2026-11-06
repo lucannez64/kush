@@ -260,3 +260,56 @@ fn slice_loop_versions_preserve_byte_views_mutation_and_control_flow() {
     "#,
     );
 }
+
+/// kush-kv: with speed optimization `Vec.len` is an inline header load
+/// (checked `Vec.get`/`Vec.set` stay runtime calls, see
+/// docs/native-optimizations.md). Values, multi-word and owning elements
+/// agree in every mode, and an index outside `0 .. len` (negative or too
+/// large) still panics.
+#[test]
+fn inline_vector_access_keeps_values_and_bounds_checks() {
+    agrees(
+        r#"
+        struct Loc { offset: i64, length: i64, seq: u64, deleted: Bool }
+        fn main() -> Unit ! {io, alloc, panic} {
+            let mut v: Vec<i64> = [5, 6, 7];
+            v = Vec.set(v, 1, 60);
+            let mut locs: Vec<Loc> = Vec.with_capacity(2);
+            locs = Vec.push(locs, Loc { offset: 1, length: 2, seq: 3, deleted: false });
+            locs = Vec.push(locs, Loc { offset: 4, length: 5, seq: 6, deleted: true });
+            locs = Vec.set(locs, 0, Loc { offset: 10, length: 20, seq: 30, deleted: true });
+            let a = Vec.get(&locs, 0);
+            let b = Vec.get(&locs, 1);
+            let mut owned: Vec<Bytes> = Vec.with_capacity(2);
+            owned = Vec.push(owned, Bytes.from("a"));
+            owned = Vec.set(owned, 0, Bytes.from("bc"));
+            print_i64(Vec.len(&v) + Vec.get(&v, 1) + Vec.get(&v, 2));
+            print_i64(a.offset + a.length + Int.truncate(a.seq) + (if a.deleted { 1 } else { 0 }));
+            print_i64(b.offset + (if b.deleted { 100 } else { 0 }));
+            print_i64(Vec.len(&owned));
+            drop(owned);
+        }
+        "#,
+    );
+    for access in [
+        "Vec.get(&v, 3)",
+        "Vec.get(&v, -1)",
+        "Vec.get(&Vec.set(v, 3, 1), 0)",
+        "Vec.get(&Vec.set(v, -1, 1), 0)",
+    ] {
+        let source = format!(
+            "fn main() -> i64 ! {{alloc, panic}} {{ let v: Vec<i64> = [1, 2, 3]; {access} }}"
+        );
+        let program = executable::check(&source).unwrap();
+        assert!(program.evaluate(&mut Vec::new()).is_err());
+        let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+        for (at, options) in OPTIONS.into_iter().enumerate() {
+            let binary = scratch.path().join(format!("vec-panic-{at}"));
+            native::build_with_codegen(&program, &binary, false, &LinkSpec::default(), options)
+                .unwrap();
+            let output = Command::new(binary).output().unwrap();
+            assert!(!output.status.success(), "{access} {options:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("panic:"));
+        }
+    }
+}

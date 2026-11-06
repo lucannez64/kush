@@ -944,6 +944,25 @@ impl Facts {
             ExprKind::Block(block) if block.statements.is_empty() => {
                 self.linear(block.tail.as_ref()?)
             }
+            // `x & mask` with a constant mask `0 <= mask`: an unknown value in
+            // `0 ..= mask` (two's complement, any width). Each occurrence is a
+            // fresh term; `let i = x & 255` ties `i` to it.
+            ExprKind::Binary(Kind::Amp, l, r) => {
+                let mask = [l, r].into_iter().find_map(|side| match side.kind {
+                    ExprKind::Constant(n) => Some(constant_value(n, side.ty)),
+                    _ => None,
+                })?;
+                if mask < 0 {
+                    return None;
+                }
+                let term = path_term(Root::Value(fresh_value()), &[]);
+                self.note_term(term, (0, mask));
+                Some(Linear::variable(term))
+            }
+            // A lossless widening keeps the value.
+            ExprKind::Call(Target::Int(crate::int::IntOp::Convert, _, _), arguments) => {
+                self.linear(&arguments[0])
+            }
             // Proved in range, so its value is the exact result.
             ExprKind::Call(Target::Int(crate::int::IntOp::Unchecked(arith), _, _), arguments) => {
                 let (l, r) = (self.linear(&arguments[0])?, self.linear(&arguments[1])?);

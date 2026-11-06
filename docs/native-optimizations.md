@@ -130,6 +130,18 @@ its snapshot preserved. Logs: `/tmp/kush-boat-native-release-full.log` and
 `/tmp/kush-boat-native-release-retry.log`. Local release regression and
 machine-code tests also passed using mbx with two jobs.
 
+## Vector access (2026-11-06)
+
+With speed optimization, `Vec.len` is an inline load of the vector header.
+Checked `Vec.get` and `Vec.set` stay runtime calls: inlining them (a bounds
+check plus a load or store) made the kush-kv store 17-20% faster but the
+JSON benchmark (`benchmarks/json-memory`, 4096 × 15, 11 repetitions, against
+the previous compiler in the same run) 5-6% slower, as for `Bytes.get`
+earlier. `Vec.len` alone measured neutral (80.6 vs 80.8 ms). Hot loops get
+the same speed from proofs instead: `Vec.at` and `Bytes.at` with a proved
+index are plain loads, and `std.crc32` and `std.bytemap` are written that way
+(see [std-storage.md](std-storage.md)).
+
 ## Runtime object cache and collection fast paths
 
 Native builds cache the compiled C runtime under

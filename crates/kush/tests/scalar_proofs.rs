@@ -107,3 +107,56 @@ fn fixed_width_integers_carry_their_ranges() {
         "cannot prove 'x <= 254'",
     );
 }
+
+/// kush-kv: `x & mask` with a constant mask `>= 0` lies in `0 ..= mask`,
+/// and a lossless `Int.convert` keeps the value, so a CRC table lookup
+/// `table[(c ^ byte) & 255]` is proved in bounds (`Vec.at`, no check).
+#[test]
+fn masks_and_lossless_conversions_bound_indexes() {
+    agrees(
+        "fn lookup(v: &Vec<u32>, c: u32, byte: u32) -> u32 ! {panic} {
+             if Vec.len(v) != 256 { return 0; }
+             let index: i64 = Int.convert((c ^ byte) & 255);
+             Vec.at(v, index, _)
+         }
+         fn small(x: i64) -> i64 ! {} {
+             let low = x & 15;
+             at_most(low, _)
+         }
+         fn at_most(v: i64, erased p: { 0 <= v && v <= 15 }) -> i64 ! {} { v }
+         fn widened(b: u8) -> i64 ! {} {
+             let w: i64 = Int.convert(b);
+             at_most_255(w, _)
+         }
+         fn at_most_255(v: i64, erased p: { 0 <= v && v <= 255 }) -> i64 ! {} { v }
+         fn main() -> i64 ! {alloc, panic} {
+             let mut t: Vec<u32> = Vec.with_capacity(256);
+             let mut i: u32 = 0;
+             while i < 256 { t = Vec.push(t, i * 2); i = i + 1; }
+             let a: i64 = Int.convert(lookup(&t, 7, 1));
+             a + small(-1) + widened(200)
+         }",
+        12 + 15 + 200,
+    );
+    for (body, fragment) in [
+        (
+            "let index: i64 = Int.convert(c & 511); Vec.at(v, index, _)",
+            "cannot prove",
+        ),
+        (
+            "let wide: i64 = Int.convert(c); let index = wide & -1; Vec.at(v, index, _)",
+            "cannot prove",
+        ),
+    ] {
+        rejects(
+            &format!(
+                "fn lookup(v: &Vec<u32>, c: u32) -> u32 ! {{panic}} {{
+                     if Vec.len(v) != 256 {{ return 0; }}
+                     {body}
+                 }}
+                 fn main() -> i64 ! {{}} {{ 0 }}"
+            ),
+            fragment,
+        );
+    }
+}
