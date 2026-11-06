@@ -82,6 +82,12 @@ actual arguments, as `!guard || P`:
 - a call nested as an argument (`is_accepted(decide(x, 50))`) passes its
   identity on.
 
+- a call in the right operand of `&&` or `||` keeps its facts after the
+  expression, guarded by the condition under which it ran:
+  after `a && f(x)`, the caller knows `!a || (facts of f(x))`;
+- `let b = condition` records that `b` holds exactly when the condition
+  does, so `let bound = p && q; if bound { .. }` knows `p` and `q`.
+
 An argument that is not a local, a field path, a call result, a struct literal
 (in declaration order) or a linear expression is unknown to the facts; atoms
 mentioning it are dropped from the caller's hypothesis, which only weakens it.

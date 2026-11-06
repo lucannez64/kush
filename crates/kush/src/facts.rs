@@ -524,6 +524,33 @@ impl Facts {
         self.distinct.truncate(mark.1);
         self.clauses.truncate(mark.2);
     }
+    /// Leave a region that ran only under a condition (the right operand of
+    /// `&&` / `||`). Facts learnt since `inner` (such as a call's
+    /// postconditions) hold only when it ran, so they are kept as
+    /// `not_condition || facts`; the rest since `outer` is dropped. Facts
+    /// that do not fit the case limit are dropped, which only weakens.
+    pub(crate) fn reset_guarded(
+        &mut self,
+        outer: FactsMark,
+        inner: FactsMark,
+        not_condition: Option<Dnf>,
+    ) {
+        let learnt = (inner.0 <= self.known.len() && inner.2 <= self.clauses.len()).then(|| {
+            let mut formula: Dnf = vec![self.known[inner.0..].to_vec()];
+            for clause in &self.clauses[inner.2..] {
+                formula = dnf_and(&formula, clause)?;
+            }
+            Some(formula)
+        });
+        self.reset(outer);
+        if let (Some(Some(learnt)), Some(not_condition)) = (learnt, not_condition)
+            && !(learnt.len() == 1 && learnt[0].is_empty())
+            && !not_condition.iter().any(Vec::is_empty)
+            && let Some(formula) = dnf_or(not_condition, learnt)
+        {
+            self.clauses.push(formula);
+        }
+    }
     pub fn version(&self, slot: usize) -> u32 {
         self.versions.get(&slot).copied().unwrap_or(0)
     }
@@ -983,11 +1010,29 @@ impl Facts {
     }
     /// Facts for a new binding `slot = value` at the slot's current version.
     pub fn define(&mut self, slot: usize, value: &Expr) {
-        if let Some(value) = self.linear(value).filter(|_| !self.opaque.contains(&slot)) {
+        if self.opaque.contains(&slot) {
+            return;
+        }
+        if let Some(value) = self.linear(value) {
             let var = Linear::variable(Term::Var(slot, self.version(slot)));
             let mut out = Vec::new();
             compare(var, &Kind::EqEq, value, &mut out);
             self.known.extend(out);
+        } else if value.ty == crate::executable::Type::Bool && fact_safe(value) {
+            // `let b = condition`: b is true exactly when the condition is.
+            // Each side may be weakened (unknown atoms dropped), which keeps
+            // the clause true.
+            let var = Linear::variable(Term::Var(slot, self.version(slot)));
+            let truth = |t: i128| compare_dnf(var.clone(), &Kind::EqEq, Linear::constant(t));
+            let clause = (|| {
+                let holds = dnf_and(&truth(1)?, &self.formula(value, true)?)?;
+                let fails = dnf_and(&truth(0)?, &self.formula(value, false)?)?;
+                dnf_or(holds, fails)
+            })();
+            if let Some(clause) = clause {
+                self.ranges.borrow_mut().insert(slot, (0, 1));
+                self.clauses.push(clause);
+            }
         }
     }
     /// Tightest proven `to - from <= d`, if any. Used only to preserve a

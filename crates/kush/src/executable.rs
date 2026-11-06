@@ -11585,7 +11585,27 @@ fn ensures_text(clause: &ast::Ensures) -> String {
                     Kind::PipePipe => "||",
                     _ => "?",
                 };
-                format!("{} {op} {}", text(left), text(right))
+                // Parenthesise operands that bind looser than `op`.
+                let level = |e: &ast::Expr| match &e.kind {
+                    ast::ExprKind::Binary { op, .. } => match op {
+                        Kind::PipePipe => 1,
+                        Kind::AmpAmp => 2,
+                        Kind::Lt | Kind::Le | Kind::Gt | Kind::Ge | Kind::EqEq | Kind::Ne => 3,
+                        Kind::Plus | Kind::Minus => 4,
+                        _ => 5,
+                    },
+                    _ => 6,
+                };
+                let own = level(e);
+                let side = |operand: &ast::Expr, right: bool| {
+                    let inner = level(operand);
+                    if inner < own || (right && inner == own && op != "&&" && op != "||") {
+                        format!("({})", text(operand))
+                    } else {
+                        text(operand)
+                    }
+                };
+                format!("{} {op} {}", side(left, false), side(right, true))
             }
             _ => "?".into(),
         }
@@ -22575,9 +22595,15 @@ impl Checker<'_, '_> {
                         let left = c.expr_expected(left_ast, hint)?;
                         // The right operand of && / || runs only when the left is true / false.
                         let mark = c.facts.mark();
-                        if matches!(op, Kind::AmpAmp | Kind::PipePipe) {
+                        let logical = matches!(op, Kind::AmpAmp | Kind::PipePipe);
+                        // Taken before the right operand can bump versions.
+                        let not_ran = logical
+                            .then(|| c.facts.formula(&left, *op != Kind::AmpAmp))
+                            .flatten();
+                        if logical {
                             c.facts.assume(&left, *op == Kind::AmpAmp);
                         }
+                        let inner = c.facts.mark();
                         let right_hint = if arithmetic || compares {
                             left.ty
                                 .int_kind()
@@ -22587,7 +22613,13 @@ impl Checker<'_, '_> {
                             None
                         };
                         let right = c.expr_expected(right_ast, right_hint);
-                        c.facts.reset(mark);
+                        if logical {
+                            // What the right operand taught (a call's
+                            // postconditions) holds whenever it ran.
+                            c.facts.reset_guarded(mark, inner, not_ran);
+                        } else {
+                            c.facts.reset(mark);
+                        }
                         (left, right?)
                     };
                     if matches!(op, Kind::EqEq | Kind::Ne)

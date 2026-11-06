@@ -177,6 +177,12 @@ fn wrong_or_unjustified_postconditions_are_rejected() {
         ),
         "cannot prove 'ensures { !(result) }'",
     );
+    // The message keeps the clause's grouping.
+    rejects(
+        "fn r(a: Bool, b: Bool, c: i64) -> Bool ! {} ensures result => { a && (b || c - (1 - 2) > 0) } { a }
+         fn main() -> i64 ! {} { 0 }",
+        "cannot prove 'ensures result => { a && (b || c - (1 - 2) > 0) }'",
+    );
     // Every return is checked.
     rejects(
         "fn r(x: i64) -> i64 ! {} ensures { result >= 0 } { if x < 0 { return x; } x }
@@ -286,6 +292,84 @@ fn review_regressions_for_postconditions() {
              r.x = 1000;
              let v = r.x;
              at_most_ten(v, _)
+         }
+         fn main() -> i64 ! {} { 0 }",
+        "cannot prove 'v <= 10'",
+    );
+}
+
+/// A call in the right operand of `&&` / `||` (VELA port): its
+/// postconditions are kept for the caller, but only under the condition
+/// that the operand ran.
+#[test]
+fn postconditions_of_calls_in_short_circuit_operands() {
+    agrees(
+        "struct F { a: Bool, b: Bool, c: Bool }
+         fn g(f: F) -> Bool ! {}
+             ensures result => { f.b }
+             ensures !result => { !f.b }
+         { f.b }
+         fn mid(f: F) -> Bool ! {} ensures result => { f.a && f.b && f.c } { f.a && g(f) && f.c }
+         fn alt(f: F) -> Bool ! {} ensures !result => { !f.a && !f.b } { f.a || g(f) }
+         fn main() -> i64 ! {panic} {
+             let f = F { a: true, b: true, c: false };
+             (if mid(f) { 1 } else { 0 }) + (if alt(f) { 2 } else { 0 })
+         }",
+        2,
+    );
+    // `never` returns only when x <= 0. After `x >= 5 && never(x)` the caller
+    // knows `x < 5 || x <= 0`, not `x <= 0`: the call may not have run.
+    rejects(
+        "fn never(x: i64) -> Bool ! {} ensures { x <= 0 } {
+             if x <= 0 { true } else { never(x) }
+         }
+         fn at_most_zero(v: i64, erased p: { v <= 0 }) -> i64 ! {} { v }
+         fn f(x: i64) -> i64 ! {} { let b = x >= 5 && never(x); at_most_zero(x, _) }
+         fn main() -> i64 ! {} { 0 }",
+        "cannot prove 'v <= 0'",
+    );
+    agrees(
+        "fn never(x: i64) -> Bool ! {} ensures { x <= 0 } {
+             if x <= 0 { true } else { never(x) }
+         }
+         fn below_five(v: i64, erased p: { v <= 4 }) -> i64 ! {} { v }
+         fn f(x: i64) -> i64 ! {} { let b = x >= 5 && never(x); below_five(x, _) }
+         fn main() -> i64 ! {} { f(3) }",
+        3,
+    );
+}
+
+/// `let b = condition` records that `b` is true exactly when the condition
+/// holds (VELA port), so later branches on `b` know the condition.
+#[test]
+fn bool_bindings_remember_their_condition() {
+    agrees(
+        "fn at_most_ten(v: i64, erased p: { v <= 10 }) -> i64 ! {} { v }
+         fn pick(x: i64, f: Bool) -> i64 ! {} {
+             let small = x <= 10 && !f;
+             if small { at_most_ten(x, _) } else { 0 }
+         }
+         fn other(x: i64) -> i64 ! {} {
+             let big = x > 10;
+             if !big { at_most_ten(x, _) } else { 0 }
+         }
+         fn main() -> i64 ! {panic} { pick(4, false) + other(3) }",
+        7,
+    );
+    // Only the condition's truth value: reassignment or the other branch
+    // tells nothing.
+    rejects(
+        "fn at_most_ten(v: i64, erased p: { v <= 10 }) -> i64 ! {} { v }
+         fn f(x: i64) -> i64 ! {} { let small = x <= 10; if small { 0 } else { at_most_ten(x, _) } }
+         fn main() -> i64 ! {} { 0 }",
+        "cannot prove 'v <= 10'",
+    );
+    rejects(
+        "fn at_most_ten(v: i64, erased p: { v <= 10 }) -> i64 ! {} { v }
+         fn f(x: i64, y: Bool) -> i64 ! {} {
+             let mut small = x <= 10;
+             small = y;
+             if small { at_most_ten(x, _) } else { 0 }
          }
          fn main() -> i64 ! {} { 0 }",
         "cannot prove 'v <= 10'",
