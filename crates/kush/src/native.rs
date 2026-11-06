@@ -1453,6 +1453,119 @@ static int64_t kush_host_unary_path(uint64_t path_handle, int operation, uint64_
     if (code == 0) *out = 0;
     return code;
 }
+/* File handles (STD-FILE). Only descriptors returned by kush_fs_open are
+ * accepted by the handle operations, so a program cannot reach stdin, stdout
+ * or a runtime descriptor by passing a number. */
+#define KUSH_MAX_FILES 65536
+static unsigned char kush_open_files[KUSH_MAX_FILES / 8];
+static int kush_file_known(int64_t fd) {
+    return fd >= 0 && fd < KUSH_MAX_FILES && (kush_open_files[fd / 8] >> (fd % 8)) & 1;
+}
+int64_t kush_fs_open(uint64_t path_handle, uint64_t mode, uint64_t *out) {
+    int flags;
+    mode_t permissions = 0666;
+    switch ((int64_t)mode) {
+        case 0: flags = O_RDONLY; break;
+        case 1: flags = O_RDWR | O_CREAT; break;
+        case 2: flags = O_RDWR; break;
+        case 3: flags = O_RDWR | O_CREAT | O_EXCL; permissions = 0600; break;
+        default: return EINVAL;
+    }
+    int code = 0;
+    char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
+    if (path == NULL) return code;
+    int fd = kush_host_open(path, flags | O_CLOEXEC, 1, permissions);
+    free(path);
+    if (fd < 0) return errno;
+    if (fd >= KUSH_MAX_FILES) { (void)close(fd); return EMFILE; }
+    kush_open_files[fd / 8] |= (unsigned char)(1u << (fd % 8));
+    *out = (uint64_t)fd;
+    return 0;
+}
+int64_t kush_fs_read_at(uint64_t fd, uint64_t offset, uint64_t length, uint64_t buffer_handle, uint64_t *out) {
+    KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
+    int code = 0;
+    if (!kush_file_known((int64_t)fd)) code = EBADF;
+    else if ((int64_t)offset < 0 || (int64_t)length < 0) code = EINVAL;
+    else if (length > b->capacity - b->length) code = EFBIG;
+    uint64_t done = 0;
+    while (code == 0 && done < length) {
+        ssize_t received = pread((int)fd, b->data + b->length, (size_t)(length - done), (off_t)(offset + done));
+        if (received < 0 && errno == EINTR) continue;
+        if (received < 0) { code = errno; break; }
+        if (received == 0) break;
+        b->length += (uint64_t)received;
+        done += (uint64_t)received;
+    }
+    if (code != 0) { kush_bytes_free(buffer_handle); return code; }
+    *out = buffer_handle;
+    return 0;
+}
+int64_t kush_fs_write_at(uint64_t fd, uint64_t offset, uint64_t data_handle, uint64_t *out) {
+    const KushBytes *data = (const KushBytes *)(uintptr_t)data_handle;
+    if (!kush_file_known((int64_t)fd)) return EBADF;
+    if ((int64_t)offset < 0 || data->length > (uint64_t)INT64_MAX - offset) return EINVAL;
+    uint64_t done = 0;
+    while (done < data->length) {
+        ssize_t written = pwrite((int)fd, data->data + done, (size_t)(data->length - done), (off_t)(offset + done));
+        if (written < 0 && errno == EINTR) continue;
+        if (written < 0) return errno;
+        if (written == 0) return EIO;
+        done += (uint64_t)written;
+    }
+    *out = data->length;
+    return 0;
+}
+int64_t kush_fs_sync(uint64_t fd, uint64_t *out) {
+    if (!kush_file_known((int64_t)fd)) return EBADF;
+    for (;;) {
+        if (fsync((int)fd) == 0) break;
+        if (errno != EINTR) return errno;
+    }
+    *out = 0;
+    return 0;
+}
+int64_t kush_fs_truncate(uint64_t fd, uint64_t length, uint64_t *out) {
+    if (!kush_file_known((int64_t)fd)) return EBADF;
+    if ((int64_t)length < 0) return EINVAL;
+    for (;;) {
+        if (ftruncate((int)fd, (off_t)length) == 0) break;
+        if (errno != EINTR) return errno;
+    }
+    *out = 0;
+    return 0;
+}
+int64_t kush_fs_file_size(uint64_t fd, uint64_t *out) {
+    if (!kush_file_known((int64_t)fd)) return EBADF;
+    struct stat info;
+    if (fstat((int)fd, &info) != 0) return errno;
+    *out = (uint64_t)info.st_size;
+    return 0;
+}
+int64_t kush_fs_close(uint64_t fd, uint64_t *out) {
+    if (!kush_file_known((int64_t)fd)) return EBADF;
+    kush_open_files[fd / 8] &= (unsigned char)~(1u << (fd % 8));
+    /* Linux releases the descriptor even when close reports EINTR. */
+    if (close((int)fd) != 0 && errno != EINTR) return errno;
+    *out = 0;
+    return 0;
+}
+int64_t kush_fs_sync_dir(uint64_t path_handle, uint64_t *out) {
+    int code = 0;
+    char *path = kush_host_c_path((const KushBytes *)(uintptr_t)path_handle, &code);
+    if (path == NULL) return code;
+    int fd = kush_host_open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0, 0);
+    free(path);
+    if (fd < 0) return errno;
+    for (;;) {
+        if (fsync(fd) == 0) break;
+        if (errno != EINTR) { code = errno; break; }
+    }
+    (void)close(fd);
+    if (code != 0) return code;
+    *out = 0;
+    return 0;
+}
 int64_t kush_fs_remove(uint64_t path_handle, uint64_t *out) {
     return kush_host_unary_path(path_handle, 0, out);
 }
@@ -3244,6 +3357,14 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
         HostOp::FsIsDir,
         HostOp::FsSize,
         HostOp::FsExists,
+        HostOp::FsOpen,
+        HostOp::FsReadAt,
+        HostOp::FsWriteAt,
+        HostOp::FsSync,
+        HostOp::FsTruncate,
+        HostOp::FsFileSize,
+        HostOp::FsClose,
+        HostOp::FsSyncDir,
         HostOp::EnvArgCount,
         HostOp::EnvArg,
         HostOp::EnvVarCount,

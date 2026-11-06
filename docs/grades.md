@@ -156,6 +156,15 @@ Annotate the result `@[1]` instead. Intrinsic `#[linear]` data and
 `linear once fn(...)` types already carry their obligation in the type, so an
 ungraded result remains valid for them.
 
+Taking apart a value whose *type* is linear (a `#[linear]` record, or a
+record with a linear field such as `std.file.File`) discharges its
+obligation; each part then carries only the obligation of its own type. A
+`File` part must still be consumed, while a `Bytes` part is ordinary owned
+data that may be dropped or ignored with `_`. Parts of a value that is linear
+only through a `@[1]` grade keep inheriting that obligation. (Before
+2026-11-06 every owned part of a linear-typed record inherited it, which made
+a record holding a file and a buffer impossible to dispose of.)
+
 Transfers are preserved through `let` aliases and assignment, branches and
 match arms, loop back-edge fixed points and loop break results, `?` success
 payloads, tuple/record/enum constructors and destructuring, `Box.new`,

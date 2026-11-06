@@ -375,3 +375,60 @@ fn bool_bindings_remember_their_condition() {
         "cannot prove 'v <= 10'",
     );
 }
+
+/// kush-kv: a decoder with one clause per variant. The case search sets
+/// aside clauses the facts already satisfy and closes contradicted cases
+/// first; it used to exhaust its node budget here.
+#[test]
+fn many_guarded_clauses_compose() {
+    agrees(
+        "enum Scan { Record(i64, i64), End, Torn, Corrupt }
+         fn body(at: i64, len: i64, size: i64, erased p: { 0 <= at && at + 20 <= len && 0 <= size }) -> Scan ! {}
+             ensures Record(end, s) => { at + 20 <= end && end <= len && end == at + 20 + size && s == size }
+             ensures End => { at == len && at < len }
+             ensures Torn => { at < len }
+             ensures Corrupt => { at + 20 <= len }
+         {
+             if size > len - at - 20 { return Scan.Torn; }
+             if size == 7 { return Scan.Corrupt; }
+             Scan.Record(at + 20 + size, size)
+         }
+         fn scan(at: i64, len: i64, size: i64, erased p: { 0 <= at && at <= len && 0 <= size }) -> Scan ! {}
+             ensures Record(end, s) => { at + 20 <= end && end <= len }
+             ensures End => { at == len }
+             ensures Torn => { at < len }
+             ensures Corrupt => { at + 20 <= len }
+         {
+             if at == len { return Scan.End; }
+             if len - at < 20 { return Scan.Torn; }
+             if size > 100 { body(at, len, size - 1, _) } else { body(at, len, size, _) }
+         }
+         fn main() -> i64 ! {} {
+             match scan(0, 100, 30, _) { Scan.Record(end, s) => end, Scan.End => 1, Scan.Torn => 2, Scan.Corrupt => 3 }
+         }",
+        50,
+    );
+    rejects(
+        "enum Scan { Record(i64), End, Torn }
+         fn body(at: i64, len: i64) -> Scan ! {}
+             ensures Record(end) => { end <= len }
+             ensures End => { at == len }
+             ensures Torn => { at < len }
+         { if at < len { Scan.Record(len) } else { Scan.Torn } }
+         fn main() -> i64 ! {} { 0 }",
+        "cannot prove 'ensures Torn => { at < len }'",
+    );
+}
+
+/// A range proof may use a bound on another term: `x <= limit` with
+/// `limit` an `i64` keeps `size + length` in range.
+#[test]
+fn range_proofs_use_bounds_of_other_terms() {
+    agrees(
+        "fn end(size: i64, length: i64, limit: i64, erased b: { 0 <= limit }) -> i64 ! {} {
+             if size < 0 || length <= 0 { 0 } else { if length > limit - size { 0 } else { size + length } }
+         }
+         fn main() -> i64 ! {} { end(3, 4, 10, _) }",
+        7,
+    );
+}

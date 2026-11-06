@@ -26,6 +26,14 @@ FS.is_file(path: &Bytes) -> Result<Bool, i64> ! {io}
 FS.is_dir(path: &Bytes) -> Result<Bool, i64> ! {io}
 FS.size(path: &Bytes) -> Result<i64, i64> ! {io}
 FS.exists(path: &Bytes) -> Result<Bool, i64> ! {io}
+FS.open(path: &Bytes, mode: i64) -> Result<i64, i64> ! {io}
+FS.read_at(file: i64, offset: i64, length: i64, buffer: Bytes) -> Result<Bytes, i64> ! {io}
+FS.write_at(file: i64, offset: i64, data: &Bytes) -> Result<i64, i64> ! {io}
+FS.sync(file: i64) -> Result<Unit, i64> ! {io}
+FS.truncate(file: i64, length: i64) -> Result<Unit, i64> ! {io}
+FS.file_size(file: i64) -> Result<i64, i64> ! {io}
+FS.close(file: i64) -> Result<Unit, i64> ! {io}
+FS.sync_dir(path: &Bytes) -> Result<Unit, i64> ! {io}
 
 ENV.arg_count() -> Result<i64, i64> ! {io}
 ENV.arg(index: i64, buffer: Bytes) -> Result<Bytes, i64> ! {io}
@@ -69,6 +77,31 @@ Byte-level helpers for building and inspecting paths live in
 [`std.path`](../crates/kush/std/path.kush): `basename`, `dirname`, `extension`,
 `is_absolute`, and `join`. They operate on bytes and do not canonicalize,
 resolve symlinks, or collapse `..`.
+
+## Open files (`std.file`)
+
+Programs normally use [`std.file`](../crates/kush/std/file.kush), whose
+`File` is `#[linear]` with a private descriptor: it can only come from a
+successful open, every path must pass it to `file.close`, and it cannot be
+used after closing. Its functions are `open_read`, `open_write` (create if
+missing, keep contents), `open_existing`, `create_new` (`O_EXCL`, mode
+`0600`), `read_at`, `write_at`, `sync` (`fsync`), `truncate`, `size`, `close`
+and `sync_dir` (`fsync` on a directory, to make a rename or creation durable).
+
+The raw `FS.open` modes are 0 read-only, 1 read-write creating, 2 read-write
+existing and 3 read-write exclusive creation; others are `EINVAL`. The handle
+calls accept only handles that `FS.open` returned and that are not closed: any
+other number, such as 0, 1 or 2, is `EBADF` (9), so a program cannot reach
+standard streams or runtime descriptors this way. Natively a closed
+descriptor number can be reused by a later open; the linear `File` is what
+rules out using a stale one.
+
+`read_at` appends up to `length` bytes read at `offset` to the buffer and
+reads fewer only at the end of the file. The buffer must already have room
+for `length` more bytes, otherwise `EFBIG` (27); as with `FS.read`, an error
+frees the buffer. `write_at` writes all bytes or fails. Negative offsets and
+lengths are `EINVAL`. `close` releases the descriptor even when it reports an
+error.
 
 ## Arguments and environment
 

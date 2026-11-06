@@ -977,7 +977,16 @@ impl Facts {
             Kind::Star if r.is_constant() => l.scale(r.constant)?,
             _ => return None,
         };
-        let terms = value.coefficients.keys().copied().collect::<Vec<_>>();
+        // The operands' terms and those of the facts that may bound them
+        // (`x <= limit` needs `limit <= i64::MAX`).
+        let mut terms = value.coefficients.keys().copied().collect::<Vec<_>>();
+        for constraint in self
+            .known
+            .iter()
+            .chain(self.clauses.iter().flatten().flatten())
+        {
+            terms.extend(constraint.coefficients.keys().copied());
+        }
         let goal = compare_dnf(Linear::constant(low), &Kind::Le, value.clone())?;
         let upper = compare_dnf(value, &Kind::Le, Linear::constant(high))?;
         let goal = dnf_and(&goal, &upper)?;
@@ -2004,27 +2013,57 @@ fn search_cases(units: &[Constraint], clauses: &[Dnf], budget: &mut usize) -> Op
     if let Some(farkas) = refute_rational(units) {
         return Some(Refutation::Farkas(farkas));
     }
-    let Some((index, clause)) = clauses
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, clause)| clause.len())
-    else {
+    // Simplify before splitting, as a SAT solver does: a clause with a
+    // disjunct that the units already entail cannot help (that branch is the
+    // units again), so it is set aside; a disjunct that contradicts the units
+    // is closed by its own refutation, so only the live disjuncts branch.
+    let entails = |disjunct: &Vec<Constraint>| {
+        disjunct.iter().all(|constraint| {
+            negation(constraint).is_some_and(|negated| {
+                let mut system = units.to_vec();
+                system.push(negated);
+                refute_rational(&system).is_some()
+            })
+        })
+    };
+    let mut candidates: Vec<(usize, Vec<Option<Refutation>>)> = Vec::new();
+    for (index, clause) in clauses.iter().enumerate() {
+        if clause.iter().any(entails) {
+            continue;
+        }
+        let dead = clause
+            .iter()
+            .map(|disjunct| {
+                let mut system = units.to_vec();
+                system.extend(disjunct.iter().cloned());
+                refute_rational(&system).map(Refutation::Farkas)
+            })
+            .collect::<Vec<_>>();
+        candidates.push((index, dead));
+    }
+    let live = |dead: &Vec<Option<Refutation>>| dead.iter().filter(|d| d.is_none()).count();
+    let Some(position) = (0..candidates.len()).min_by_key(|&i| live(&candidates[i].1)) else {
         if units.len() > MAX_INTEGER_CONSTRAINTS {
             return None;
         }
         return solve_integer(units, MAX_INTEGER_DEPTH, &mut IntegerBudget::standard());
     };
-    let rest = clauses
+    let (index, dead) = candidates.swap_remove(position);
+    let clause = &clauses[index];
+    let rest = candidates
         .iter()
-        .enumerate()
-        .filter(|(other, _)| *other != index)
-        .map(|(_, clause)| clause.clone())
+        .map(|(other, _)| clauses[*other].clone())
         .collect::<Vec<_>>();
     let mut branches = Vec::with_capacity(clause.len());
-    for disjunct in clause {
-        let mut extended = units.to_vec();
-        extended.extend(disjunct.iter().cloned());
-        branches.push(search_cases(&extended, &rest, budget)?);
+    for (disjunct, closed) in clause.iter().zip(dead) {
+        branches.push(match closed {
+            Some(proof) => proof,
+            None => {
+                let mut extended = units.to_vec();
+                extended.extend(disjunct.iter().cloned());
+                search_cases(&extended, &rest, budget)?
+            }
+        });
     }
     Some(Refutation::Cases {
         clause: clause.clone(),

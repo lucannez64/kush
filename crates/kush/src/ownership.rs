@@ -6937,9 +6937,22 @@ impl Checker<'_> {
             }
             ExprKind::Match(value, arms) => {
                 // `@[1]` on an owning value is also a linear obligation, even
-                // though the underlying type is merely affine.
+                // though the underlying type is merely affine: its parts
+                // inherit it. A value whose type is itself linear carries
+                // the obligation in the type instead; destructuring it
+                // discharges it, and each part keeps the obligation of its
+                // own type (a `File` field stays linear, a `Bytes` field is
+                // ordinary owned data).
                 let entry_scrutinee_loans = self.loans.clone();
-                let scrutinee_linear = self.value_moves_linear(value);
+                let scrutinee_linear = self.value_moves_linear(value)
+                    && !is_linear(
+                        value.ty,
+                        self.linear,
+                        self.unions,
+                        self.pointees,
+                        self.functions,
+                        self.dyn_linear,
+                    );
                 let wrapped_site = through_coerce(value) as *const Expr as usize;
                 let wrapped_slot = match &through_coerce(value).kind {
                     ExprKind::Local(slot) | ExprKind::Move(slot) | ExprKind::Peek(slot) => {

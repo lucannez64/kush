@@ -528,6 +528,16 @@ pub struct Host {
     args: Arc<Vec<Vec<u8>>>,
     environment: Arc<BTreeMap<Vec<u8>, Vec<u8>>>,
     monotonic_origin: Instant,
+    /// Files opened by `FS.open`, by handle (STD-FILE). Shared by tasks.
+    files: Arc<std::sync::Mutex<FileTable>>,
+}
+/// The evaluator's open files. Handles are never reused, so a stale handle
+/// is always `EBADF` here (natively the descriptor number may be reused,
+/// which `std.file.File` being linear prevents).
+#[derive(Debug, Default)]
+struct FileTable {
+    open: BTreeMap<i64, fs::File>,
+    next: i64,
 }
 impl Default for Host {
     fn default() -> Self {
@@ -542,6 +552,7 @@ impl Host {
             args: Arc::new(Vec::new()),
             environment: Arc::new(BTreeMap::new()),
             monotonic_origin: Instant::now(),
+            files: Arc::default(),
         }
     }
     /// The current process arguments (including argv[0]) and environment.
@@ -554,6 +565,7 @@ impl Host {
             args: Arc::new(args),
             environment: Arc::new(environment),
             monotonic_origin: Instant::now(),
+            files: Arc::default(),
         }
     }
     /// Replace argv while retaining this host's environment and clock origin.
@@ -568,6 +580,7 @@ impl Host {
             args: Arc::new(args),
             environment: Arc::new(environment.into_iter().collect()),
             monotonic_origin: Instant::now(),
+            files: Arc::default(),
         }
     }
     fn var(&self, name: &[u8]) -> Option<&[u8]> {
@@ -4367,6 +4380,145 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         Ok(self.host_result(shape, io_error_code(&error), Value::Scalar(0)))
                     }
                 }
+            }
+            HostOp::FsOpen | HostOp::FsSyncDir => {
+                let path = self
+                    .borrowed_bytes(&args[0])
+                    .ok_or_else(|| failure("internal error: FS path is not borrowed"))?;
+                if path.contains(&0) {
+                    return Ok(self.host_result(shape, 22, Value::Scalar(0)));
+                }
+                let path = path_from_bytes(&path);
+                if op == HostOp::FsSyncDir {
+                    let status = match fs::File::open(&path).and_then(|dir| dir.sync_all()) {
+                        Ok(()) => 0,
+                        Err(error) => io_error_code(&error),
+                    };
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                let mut options = OpenOptions::new();
+                options.read(true);
+                match args[1].scalar() {
+                    0 => {}
+                    1 => {
+                        options.write(true).create(true);
+                    }
+                    2 => {
+                        options.write(true);
+                    }
+                    3 => {
+                        options.write(true).create_new(true);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::OpenOptionsExt;
+                            options.mode(0o600);
+                        }
+                    }
+                    _ => return Ok(self.host_result(shape, 22, Value::Scalar(0))),
+                }
+                match options.open(path) {
+                    Ok(file) => {
+                        let mut table = self.host.files.lock().unwrap();
+                        table.next = table.next.max(2) + 1;
+                        let handle = table.next;
+                        table.open.insert(handle, file);
+                        drop(table);
+                        Ok(self.host_result(shape, 0, Value::Scalar(handle)))
+                    }
+                    Err(error) => {
+                        Ok(self.host_result(shape, io_error_code(&error), Value::Scalar(0)))
+                    }
+                }
+            }
+            HostOp::FsReadAt => {
+                use std::os::unix::fs::FileExt;
+                let (handle, offset, length) =
+                    (args[0].scalar(), args[1].scalar(), args[2].scalar());
+                let (id, mut data, capacity) = self
+                    .take_buffer(&args[3])
+                    .ok_or_else(|| failure("internal error: FS.read_at buffer is not owned"))?;
+                let table = self.host.files.lock().unwrap();
+                let status = match table.open.get(&handle) {
+                    None => 9, // EBADF
+                    Some(_) if offset < 0 || length < 0 => 22,
+                    Some(_) if length as u64 > (capacity - data.len()) as u64 => 27,
+                    Some(file) => {
+                        let start = data.len();
+                        data.resize(start + length as usize, 0);
+                        let mut done = 0usize;
+                        let status = loop {
+                            if done == length as usize {
+                                break 0;
+                            }
+                            match file
+                                .read_at(&mut data[start + done..], (offset as u64) + done as u64)
+                            {
+                                Ok(0) => break 0,
+                                Ok(count) => done += count,
+                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                                Err(error) => break io_error_code(&error),
+                            }
+                        };
+                        data.truncate(start + done);
+                        status
+                    }
+                };
+                drop(table);
+                if status != 0 {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                Ok(self.host_result(shape, 0, Value::Owned(id)))
+            }
+            HostOp::FsWriteAt => {
+                use std::os::unix::fs::FileExt;
+                let (handle, offset) = (args[0].scalar(), args[1].scalar());
+                let data = self
+                    .borrowed_bytes(&args[2])
+                    .ok_or_else(|| failure("internal error: FS.write_at data is not borrowed"))?;
+                let table = self.host.files.lock().unwrap();
+                let status = match table.open.get(&handle) {
+                    None => 9,
+                    Some(_) if offset < 0 || data.len() as u64 > (i64::MAX - offset) as u64 => 22,
+                    Some(file) => match file.write_all_at(&data, offset as u64) {
+                        Ok(()) => 0,
+                        Err(error) => io_error_code(&error),
+                    },
+                };
+                drop(table);
+                Ok(self.host_result(shape, status, Value::Scalar(data.len() as i64)))
+            }
+            HostOp::FsSync | HostOp::FsTruncate | HostOp::FsFileSize | HostOp::FsClose => {
+                let handle = args[0].scalar();
+                let mut table = self.host.files.lock().unwrap();
+                let (status, value) = match op {
+                    HostOp::FsClose => match table.open.remove(&handle) {
+                        Some(_) => (0, 0),
+                        None => (9, 0),
+                    },
+                    _ => match table.open.get(&handle) {
+                        None => (9, 0),
+                        Some(file) => {
+                            let outcome = match op {
+                                HostOp::FsSync => file.sync_all().map(|()| 0),
+                                HostOp::FsTruncate if args[1].scalar() < 0 => {
+                                    Err(io::Error::from_raw_os_error(22))
+                                }
+                                HostOp::FsTruncate => {
+                                    file.set_len(args[1].scalar() as u64).map(|()| 0)
+                                }
+                                _ => file.metadata().map(|m| m.len().min(i64::MAX as u64) as i64),
+                            };
+                            match outcome {
+                                Ok(value) => (0, value),
+                                Err(error) => (io_error_code(&error), 0),
+                            }
+                        }
+                    },
+                };
+                drop(table);
+                Ok(self.host_result(shape, status, Value::Scalar(value)))
             }
             HostOp::EnvArgCount => {
                 let count = self.host.args.len();

@@ -1,0 +1,65 @@
+module std.crc32;
+
+// CRC-32 (IEEE 802.3, reflected polynomial 0xEDB88320), the checksum of zip,
+// gzip and PNG (STD-CRC32). Build the table once with `table()` and pass it
+// to `update`/`of`:
+//
+//     let t = crc32.table();
+//     let sum = crc32.of(&t, &data, 0, Bytes.len(&data), _);
+//
+// Byte reads use `Bytes.at` with proved bounds, so the loop has no bounds
+// checks.
+
+/// The 256-entry lookup table.
+pub struct Table {
+    entries: Vec<u32>,
+}
+
+pub fn table() -> Table ! {alloc, panic} {
+    let mut entries: Vec<u32> = Vec.with_capacity(256);
+    let mut n: u32 = 0;
+    while n < 256 {
+        let mut c = n;
+        let mut k = 0;
+        while k < 8 {
+            c = if (c & 1) == 1 { 3988292384 ^ (c >> 1) } else { c >> 1 };
+            k = k + 1;
+        }
+        entries = Vec.push(entries, c);
+        n = n + 1;
+    }
+    Table { entries: entries }
+}
+
+/// Continue a running CRC over `data[start..end]`. Start from `0` and pass
+/// the previous result to continue; the result of the last call is the
+/// checksum.
+pub fn update(
+    table: &Table,
+    crc: u32,
+    data: &Bytes,
+    start: i64,
+    end: i64,
+    erased range: { 0 <= start && start <= end && end <= Bytes.len(data) },
+) -> u32 ! {panic} {
+    let mut c = crc ^ 4294967295;
+    let mut i = start;
+    while i < end {
+        let byte: u32 = Int.truncate(Bytes.at(data, i, _));
+        let index: i64 = Int.convert((c ^ byte) & 255);
+        c = Vec.get(&table.entries, index) ^ (c >> 8);
+        i = i + 1;
+    }
+    c ^ 4294967295
+}
+
+/// The CRC-32 of `data[start..end]`.
+pub fn of(
+    table: &Table,
+    data: &Bytes,
+    start: i64,
+    end: i64,
+    erased range: { 0 <= start && start <= end && end <= Bytes.len(data) },
+) -> u32 ! {panic} {
+    update(table, 0, data, start, end, _)
+}

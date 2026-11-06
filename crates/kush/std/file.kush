@@ -1,0 +1,85 @@
+module std.file;
+
+// Open files with positioned reads and writes and explicit durability
+// (STD-FILE). A `File` is linear: every path through the program must pass it
+// to `close`, so a descriptor is never leaked or used after it was closed.
+// Errors are Linux errno values, as for the other `FS` operations.
+
+use std.result.Result;
+
+/// An open file. Only this module can build one, from a successful open.
+#[linear]
+pub struct File {
+    fd: i64,
+}
+
+fn opened(result: Result<i64, i64>) -> Result<File, i64> ! {} {
+    match result {
+        Result.Ok(fd) => Result.Ok(File { fd: fd }),
+        Result.Err(code) => Result.Err(code),
+    }
+}
+
+/// Open an existing file for reading.
+pub fn open_read(path: &Bytes) -> Result<File, i64> ! {io} {
+    opened(FS.open(path, 0))
+}
+
+/// Open a file for reading and writing, creating it (mode 0666 minus the
+/// umask) if it does not exist. Existing contents are kept.
+pub fn open_write(path: &Bytes) -> Result<File, i64> ! {io} {
+    opened(FS.open(path, 1))
+}
+
+/// Open an existing file for reading and writing; a missing file is ENOENT (2).
+pub fn open_existing(path: &Bytes) -> Result<File, i64> ! {io} {
+    opened(FS.open(path, 2))
+}
+
+/// Create a new file (mode 0600) for reading and writing. An existing path,
+/// including a symlink, is EEXIST (17).
+pub fn create_new(path: &Bytes) -> Result<File, i64> ! {io} {
+    opened(FS.open(path, 3))
+}
+
+/// Append up to `length` bytes read at `offset` to `buffer`. Fewer bytes are
+/// read only at the end of the file. The buffer must have room for `length`
+/// more bytes (EFBIG, 27, otherwise); on any error it is freed.
+pub fn read_at(file: &File, offset: i64, length: i64, buffer: Bytes) -> Result<Bytes, i64> ! {io} {
+    FS.read_at(file.fd, offset, length, buffer)
+}
+
+/// Write all of `data` at `offset`, extending the file if needed. Returns the
+/// number of bytes written, always the length of `data`.
+pub fn write_at(file: &File, offset: i64, data: &Bytes) -> Result<i64, i64> ! {io} {
+    FS.write_at(file.fd, offset, data)
+}
+
+/// Flush the file's data and metadata to stable storage (`fsync`).
+pub fn sync(file: &File) -> Result<Unit, i64> ! {io} {
+    FS.sync(file.fd)
+}
+
+/// Set the file's length, cutting or zero-extending it.
+pub fn truncate(file: &File, length: i64) -> Result<Unit, i64> ! {io} {
+    FS.truncate(file.fd, length)
+}
+
+/// The file's current length in bytes.
+pub fn size(file: &File) -> Result<i64, i64> ! {io} {
+    FS.file_size(file.fd)
+}
+
+/// Close the file. The descriptor is released even when an error (such as a
+/// delayed write failure) is reported.
+pub fn close(file: File) -> Result<Unit, i64> ! {io} {
+    match file {
+        File { fd } => FS.close(fd),
+    }
+}
+
+/// Make a rename or creation inside directory `path` durable (`fsync` on the
+/// directory).
+pub fn sync_dir(path: &Bytes) -> Result<Unit, i64> ! {io} {
+    FS.sync_dir(path)
+}

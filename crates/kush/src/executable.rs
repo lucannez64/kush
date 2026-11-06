@@ -571,6 +571,14 @@ pub(crate) enum HostOp {
     FsIsDir,
     FsSize,
     FsExists,
+    FsOpen,
+    FsReadAt,
+    FsWriteAt,
+    FsSync,
+    FsTruncate,
+    FsFileSize,
+    FsClose,
+    FsSyncDir,
     EnvArgCount,
     EnvArg,
     EnvVarCount,
@@ -598,6 +606,14 @@ impl HostOp {
             "FS.is_dir" => Some(Self::FsIsDir),
             "FS.size" => Some(Self::FsSize),
             "FS.exists" => Some(Self::FsExists),
+            "FS.open" => Some(Self::FsOpen),
+            "FS.read_at" => Some(Self::FsReadAt),
+            "FS.write_at" => Some(Self::FsWriteAt),
+            "FS.sync" => Some(Self::FsSync),
+            "FS.truncate" => Some(Self::FsTruncate),
+            "FS.file_size" => Some(Self::FsFileSize),
+            "FS.close" => Some(Self::FsClose),
+            "FS.sync_dir" => Some(Self::FsSyncDir),
             "ENV.arg_count" => Some(Self::EnvArgCount),
             "ENV.arg" => Some(Self::EnvArg),
             "ENV.var_count" => Some(Self::EnvVarCount),
@@ -626,6 +642,14 @@ impl HostOp {
             Self::FsIsDir => "kush_fs_is_dir",
             Self::FsSize => "kush_fs_size",
             Self::FsExists => "kush_fs_exists",
+            Self::FsOpen => "kush_fs_open",
+            Self::FsReadAt => "kush_fs_read_at",
+            Self::FsWriteAt => "kush_fs_write_at",
+            Self::FsSync => "kush_fs_sync",
+            Self::FsTruncate => "kush_fs_truncate",
+            Self::FsFileSize => "kush_fs_file_size",
+            Self::FsClose => "kush_fs_close",
+            Self::FsSyncDir => "kush_fs_sync_dir",
             Self::EnvArgCount => "kush_env_arg_count",
             Self::EnvArg => "kush_env_arg",
             Self::EnvVarCount => "kush_env_var_count",
@@ -648,6 +672,10 @@ impl HostOp {
             Self::OsStrerror => 2,
             Self::ProcRun => 4,
             Self::NetTcpExchange => 5,
+            Self::FsOpen | Self::FsTruncate => 2,
+            Self::FsReadAt => 4,
+            Self::FsWriteAt => 3,
+            Self::FsSync | Self::FsFileSize | Self::FsClose | Self::FsSyncDir => 1,
             Self::EnvArgCount
             | Self::EnvVarCount
             | Self::TimeUnixSeconds
@@ -682,6 +710,12 @@ impl HostOp {
             Self::OsStrerror => &[false, false],
             Self::ProcRun => &[true, true, true, false],
             Self::NetTcpExchange => &[true, false, true, true, false],
+            Self::FsOpen => &[true, false],
+            Self::FsReadAt => &[false, false, false, false],
+            Self::FsWriteAt => &[false, false, true],
+            Self::FsTruncate => &[false, false],
+            Self::FsSync | Self::FsFileSize | Self::FsClose => &[false],
+            Self::FsSyncDir => &[true],
             Self::EnvArgCount
             | Self::EnvVarCount
             | Self::TimeUnixSeconds
@@ -691,13 +725,20 @@ impl HostOp {
     }
     pub fn payload(self) -> HostPayload {
         match self {
-            Self::FsRead | Self::FsList | Self::EnvArg | Self::EnvVar | Self::OsStrerror => {
-                HostPayload::Bytes
-            }
+            Self::FsRead
+            | Self::FsList
+            | Self::FsReadAt
+            | Self::EnvArg
+            | Self::EnvVar
+            | Self::OsStrerror => HostPayload::Bytes,
             Self::FsRemove
             | Self::FsRename
             | Self::FsMkdir
             | Self::FsRemoveDir
+            | Self::FsSync
+            | Self::FsTruncate
+            | Self::FsClose
+            | Self::FsSyncDir
             | Self::TimeSleepMs => HostPayload::Unit,
             _ => HostPayload::I64,
         }
@@ -21352,6 +21393,10 @@ impl Checker<'_, '_> {
             self.value_moves_linear(tail).then_some(tail.span)
         })
     }
+    /// Parts bound by a pattern inherit a graded `@[1]` obligation of the
+    /// value they come from. A value whose type is itself linear carries its
+    /// obligation in the type: destructuring discharges it and each part keeps
+    /// only the obligation of its own type.
     fn linear_pattern(&mut self, pattern: &Pattern, linear: bool) {
         if linear {
             let mut slots = std::collections::BTreeSet::new();
@@ -21381,7 +21426,10 @@ impl Checker<'_, '_> {
                 "a copyable result with the must-use `@[1]` contract must be bound to a simple name or observed directly; destructuring would split off the obligation without a tracked destination",
             ));
         }
-        self.linear_pattern(&pattern_ir, self.value_moves_linear(&value));
+        self.linear_pattern(
+            &pattern_ir,
+            self.value_moves_linear(&value) && !self.linear_type(value.ty),
+        );
         let mut coverage = Coverage::new(pattern.span);
         coverage.add(&pattern_ir);
         if coverage.useful(&Pattern::Any, ty, &self.types.enums, &self.types.unions)? {
@@ -23248,6 +23296,14 @@ impl Checker<'_, '_> {
                                 Type::I64,
                             ],
                             HostOp::OsStrerror => vec![Type::I64, bytes],
+                            HostOp::FsOpen => vec![borrowed, Type::I64],
+                            HostOp::FsReadAt => vec![Type::I64, Type::I64, Type::I64, bytes],
+                            HostOp::FsWriteAt => vec![Type::I64, Type::I64, borrowed],
+                            HostOp::FsTruncate => vec![Type::I64, Type::I64],
+                            HostOp::FsSync | HostOp::FsFileSize | HostOp::FsClose => {
+                                vec![Type::I64]
+                            }
+                            HostOp::FsSyncDir => vec![borrowed],
                         };
                         let ok = match op.payload() {
                             HostPayload::Bytes => Type::Bytes,
@@ -23506,7 +23562,10 @@ impl Checker<'_, '_> {
                     for arm in arms {
                         c.scalar_values = scalar_baseline.clone();
                         let pattern = c.pattern_refined(&arm.pattern, value.ty, remaining)?;
-                        c.linear_pattern(&pattern, c.value_moves_linear(&value));
+                        c.linear_pattern(
+                            &pattern,
+                            c.value_moves_linear(&value) && !c.linear_type(value.ty),
+                        );
                         if !coverage.useful(&pattern, value.ty, &c.types.enums, &c.types.unions)? {
                             return Err(Diagnostic::new(arm.span, "unreachable match arm/pattern"));
                         }
