@@ -5954,7 +5954,10 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         uses_tasks: functions.uses_tasks,
         // A channel type anywhere needs the threaded runtime (its drop glue).
         uses_threads: functions.uses_threads
-            || types.pointees.iter().any(|ty| matches!(ty, Type::Channel(_)))
+            || types
+                .pointees
+                .iter()
+                .any(|ty| matches!(ty, Type::Channel(_)))
             || types.enums.iter().any(|layout| {
                 layout
                     .variants
