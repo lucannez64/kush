@@ -4424,6 +4424,94 @@
       "desc": "VELA cannot call the Kush policy: Kush builds executables and calls Rust, but cannot produce a static library with a C ABI for Rust callers.",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "STD-FILE",
+      "title": "std.file: linear File with positioned I/O and fsync",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Host calls on file descriptors (open, read_at, write_at, sync, truncate, size, close, sync_dir) in checker, evaluator and C runtime, wrapped by a #[linear] std.file.File that must be closed. For the KV store project.",
+      "commit": "f1e8d90",
+      "log": [
+        {
+          "time": "2026-11-06 04:29:29",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 05:15:23",
+          "who": "agent",
+          "text": "done f1e8d90"
+        }
+      ]
+    },
+    {
+      "id": "STD-CRC32",
+      "title": "std.crc32",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "CRC-32 (IEEE) over Bytes ranges in Kush, table-driven, tested against known vectors.",
+      "commit": "f1e8d90",
+      "log": [
+        {
+          "time": "2026-11-06 05:15:23",
+          "who": "agent",
+          "text": "done f1e8d90"
+        }
+      ]
+    },
+    {
+      "id": "STD-BYTEMAP",
+      "title": "std.bytemap: hash map keyed by Bytes",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Open-addressing map from Bytes keys to i64 values (FNV-1a, wrapping u64), with proved slot indexes; insert/get/remove/iterate; allocation balance tests.",
+      "commit": "f1e8d90",
+      "log": [
+        {
+          "time": "2026-11-06 05:15:23",
+          "who": "agent",
+          "text": "done f1e8d90"
+        }
+      ]
+    },
+    {
+      "id": "KV-STORE",
+      "title": "kush-kv: crash-safe key-value store in Kush",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "STD-FILE",
+        "STD-CRC32",
+        "STD-BYTEMAP"
+      ],
+      "status": "in_progress",
+      "desc": "Bitcask-style log store (~1500 lines) in ~/Projects/kush-kv: proved record framing, recovery state machine, compaction and generation rules; crash tests at every byte; benchmark.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-06 05:15:23",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
+    },
+    {
+      "id": "FS-EXISTS-BOOL",
+      "title": "FS.exists/is_file/is_dir return Bool as documented",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "They return Result<i64, i64> (0/1) while docs/host-api.md says Result<Bool, i64>. Found by kush-kv tests.",
+      "commit": null,
+      "log": []
     }
   ]
 }
