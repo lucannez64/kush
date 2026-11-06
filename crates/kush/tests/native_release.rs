@@ -5,20 +5,29 @@ use kush::{
 };
 use std::{fs, process::Command};
 
-const OPTIONS: [CodegenOptions; 4] = [
+const OPTIONS: [CodegenOptions; 5] = [
     CodegenOptions {
         optimization: Optimization::None,
         inline_scalar_callbacks: false,
+        inline_calls: false,
     },
     CodegenOptions {
         optimization: Optimization::Speed,
         inline_scalar_callbacks: false,
+        inline_calls: false,
     },
     CodegenOptions {
         optimization: Optimization::None,
         inline_scalar_callbacks: true,
+        inline_calls: false,
     },
     CodegenOptions::release(),
+    // NATIVE-INLINE without backend optimization.
+    CodegenOptions {
+        optimization: Optimization::None,
+        inline_scalar_callbacks: false,
+        inline_calls: true,
+    },
 ];
 fn agrees(source: &str) {
     let program = executable::check(source).unwrap();
@@ -312,4 +321,49 @@ fn inline_vector_access_keeps_values_and_bounds_checks() {
             assert!(String::from_utf8_lossy(&output.stderr).contains("panic:"));
         }
     }
+}
+
+/// NATIVE-INLINE: small direct calls are inlined; recursion, mutual recursion,
+/// owned values and their cleanup, panics, effects and closures behave the
+/// same in every mode.
+#[test]
+fn inlined_calls_agree_in_all_modes() {
+    agrees(
+        r#"
+        struct Facts { a: Bool, b: Bool, n: u64 }
+        fn bound(f: Facts) -> Bool ! {} { f.a && f.n >= 1 }
+        fn first(f: Facts) -> Bool ! {} { !f.b && bound(f) }
+        fn even(n: i64) -> Bool ! {panic} { if n == 0 { true } else { odd(n - 1) } }
+        fn odd(n: i64) -> Bool ! {panic} { if n == 0 { false } else { even(n - 1) } }
+        fn fact(n: i64) -> i64 ! {panic} { if n <= 1 { 1 } else { n * fact(n - 1) } }
+        fn boxed(x: i64) -> Box<i64> ! {alloc, panic} { Box.new(x + 1) }
+        fn unbox(b: Box<i64>) -> i64 ! {} { Box.take(b) }
+        fn add(x: i64, y: i64) -> i64 ! {panic} { x + y }
+        fn twice(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(f(x)) }
+        fn inc(x: i64) -> i64 ! {panic} { add(x, 1) }
+        fn bytes(n: i64) -> Bytes ! {alloc, panic} {
+            let mut b = Bytes.with_capacity(n);
+            let mut i = 0;
+            while i < n { b = Bytes.push(b, i % 256); i = i + 1; }
+            b
+        }
+        fn main() -> Unit ! {io, alloc, panic} {
+            let mut i = 0;
+            let mut count = 0;
+            while i < 64 {
+                let f = Facts { a: i % 3 != 0, b: i % 5 == 0, n: Int.truncate(i % 4) };
+                if first(f) { count = count + 1; }
+                i = i + 1;
+            }
+            print_i64(count);
+            print_i64(if even(10) { 1 } else { 0 });
+            print_i64(if odd(7) { 1 } else { 0 });
+            print_i64(fact(10));
+            print_i64(unbox(boxed(41)));
+            print_i64(twice(inc, 40));
+            let b = bytes(300);
+            print_i64(Bytes.len(&b));
+            drop(b);
+        }"#,
+    );
 }

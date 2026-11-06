@@ -2774,14 +2774,163 @@ pub enum Optimization {
 pub struct CodegenOptions {
     pub optimization: Optimization,
     pub inline_scalar_callbacks: bool,
+    /// NATIVE-INLINE: inline small, non-recursive direct calls between Kush
+    /// functions (Cranelift's library inliner).
+    pub inline_calls: bool,
 }
 impl CodegenOptions {
     pub const fn release() -> Self {
         Self {
             optimization: Optimization::Speed,
             inline_scalar_callbacks: true,
+            inline_calls: true,
         }
     }
+}
+
+/// Largest callee (in CLIF instructions) that NATIVE-INLINE copies into a
+/// caller, and how many calls one caller may absorb.
+const INLINE_CALLEE_LIMIT: usize = 96;
+const INLINE_CALLS_PER_CALLER: usize = 64;
+
+/// Directs Cranelift's inliner: a direct call to another Kush function whose
+/// body is small and does not call itself is replaced by that body.
+struct Inliner<'a> {
+    /// Cranelift function id (as `u32`) to Kush function index.
+    by_id: &'a std::collections::HashMap<u32, usize>,
+    bodies: &'a [Option<ir::Function>],
+    caller: usize,
+    budget: usize,
+}
+impl cranelift_codegen::inline::Inline for Inliner<'_> {
+    fn inline(
+        &mut self,
+        caller: &ir::Function,
+        _call_inst: ir::Inst,
+        call_opcode: ir::Opcode,
+        callee: ir::FuncRef,
+        _call_args: &[ir::Value],
+    ) -> cranelift_codegen::inline::InlineCommand<'_> {
+        use cranelift_codegen::inline::InlineCommand;
+        if call_opcode != ir::Opcode::Call || self.budget == 0 {
+            return InlineCommand::KeepCall;
+        }
+        let Some(index) = callee_index(caller, callee, self.by_id) else {
+            return InlineCommand::KeepCall;
+        };
+        if index == self.caller {
+            return InlineCommand::KeepCall;
+        }
+        match self.bodies.get(index).and_then(Option::as_ref) {
+            Some(body) => {
+                self.budget -= 1;
+                InlineCommand::Inline {
+                    callee: std::borrow::Cow::Borrowed(body),
+                    visit_callee: true,
+                }
+            }
+            None => InlineCommand::KeepCall,
+        }
+    }
+}
+/// The Kush function a direct call names, if any.
+fn callee_index(
+    function: &ir::Function,
+    callee: ir::FuncRef,
+    by_id: &std::collections::HashMap<u32, usize>,
+) -> Option<usize> {
+    let ir::ExternalName::User(name) = &function.dfg.ext_funcs[callee].name else {
+        return None;
+    };
+    let name = function.params.user_named_funcs().get(*name)?;
+    (name.namespace == 0).then_some(())?;
+    by_id.get(&name.index).copied()
+}
+/// The candidate bodies a caller may absorb (directly or through inlined
+/// callees), with their data symbols renamed into the caller's name table.
+///
+/// Cranelift 0.135's inliner remaps the callee's call targets into the
+/// caller's `user_named_funcs` table but copies `GlobalValueData::Symbol`
+/// names verbatim, so a callee's data reference (such as the abort word)
+/// would name an unrelated entry of the caller. Each symbol is declared in
+/// the caller and the callee copy refers to the caller's entry instead.
+fn inline_bodies_for(
+    caller: &mut ir::Function,
+    caller_index: usize,
+    candidates: &[Option<ir::Function>],
+    by_id: &std::collections::HashMap<u32, usize>,
+) -> Vec<Option<ir::Function>> {
+    let mut bodies = vec![None; candidates.len()];
+    let mut pending = direct_callees(caller, by_id);
+    while let Some(index) = pending.pop() {
+        if index == caller_index || bodies[index].is_some() {
+            continue;
+        }
+        let Some(candidate) = candidates.get(index).and_then(Option::as_ref) else {
+            continue;
+        };
+        let mut body = candidate.clone();
+        let names = body.params.user_named_funcs().clone();
+        for data in body.global_values.values_mut() {
+            if let ir::GlobalValueData::Symbol {
+                name: ir::ExternalName::User(name),
+                ..
+            } = data
+            {
+                *name = caller.declare_imported_user_function(names[*name].clone());
+            }
+        }
+        pending.extend(direct_callees(candidate, by_id));
+        bodies[index] = Some(body);
+    }
+    bodies
+}
+/// The Kush functions a body calls directly.
+fn direct_callees(
+    function: &ir::Function,
+    by_id: &std::collections::HashMap<u32, usize>,
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    for block in function.layout.blocks() {
+        for inst in function.layout.block_insts(block) {
+            if let ir::InstructionData::Call { func_ref, .. } = function.dfg.insts[inst]
+                && let Some(index) = callee_index(function, func_ref, by_id)
+            {
+                out.push(index);
+            }
+        }
+    }
+    out
+}
+/// Whether a finished function body is small enough to inline and never
+/// calls itself directly.
+fn inlinable(
+    function: &ir::Function,
+    index: usize,
+    by_id: &std::collections::HashMap<u32, usize>,
+) -> bool {
+    let mut count = 0;
+    for block in function.layout.blocks() {
+        for inst in function.layout.block_insts(block) {
+            count += 1;
+            if count > INLINE_CALLEE_LIMIT {
+                return false;
+            }
+            match function.dfg.insts[inst] {
+                ir::InstructionData::Call { func_ref, .. } => {
+                    if callee_index(function, func_ref, by_id) == Some(index) {
+                        return false;
+                    }
+                }
+                ir::InstructionData::TryCall { .. }
+                | ir::InstructionData::TryCallIndirect { .. } => {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+    }
+    true
 }
 
 pub fn build(program: &Executable, output: &Path) -> Result<()> {
@@ -3576,6 +3725,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
                 .map_err(error)?,
         );
     }
+    let mut bodies: Vec<Option<ir::Function>> = vec![None; program.functions.len()];
     for (index, f) in program.functions.iter().enumerate() {
         if program
             .foreign_functions
@@ -3829,17 +3979,57 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
         }
         g.builder.seal_all_blocks();
         g.builder.finalize(g.module.target_config());
+        bodies[index] = Some(context.func);
+    }
+    // NATIVE-INLINE: every body is built first, so a caller can absorb any
+    // small callee; then each function is compiled.
+    let by_id = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_u32(), index))
+        .collect::<std::collections::HashMap<_, _>>();
+    let candidates = if codegen.inline_calls {
+        bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                body.as_ref()
+                    .filter(|body| inlinable(body, index, &by_id))
+                    .cloned()
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    for (index, f) in program.functions.iter().enumerate() {
+        let Some(body) = bodies[index].take() else {
+            continue;
+        };
+        let failed = |e: &dyn std::fmt::Debug| {
+            Diagnostic::new(
+                f.span,
+                format!(
+                    "Cranelift verification/code generation failed in {}: {e:?}",
+                    f.name
+                ),
+            )
+        };
+        let mut context = module.make_context();
+        context.func = body;
+        if codegen.inline_calls {
+            let bodies = inline_bodies_for(&mut context.func, index, &candidates, &by_id);
+            context
+                .inline(Inliner {
+                    by_id: &by_id,
+                    bodies: &bodies,
+                    caller: index,
+                    budget: INLINE_CALLS_PER_CALLER,
+                })
+                .map_err(|e| failed(&e))?;
+        }
         module
             .define_function(ids[index], &mut context)
-            .map_err(|e| {
-                Diagnostic::new(
-                    f.span,
-                    format!(
-                        "Cranelift verification/code generation failed in {}: {e:?}",
-                        f.name
-                    ),
-                )
-            })?;
+            .map_err(|e| failed(&e))?;
     }
     module.finish().emit().map_err(error)
 }
@@ -10422,6 +10612,7 @@ mod scalar_inline_codegen_tests {
                     CodegenOptions {
                         optimization: Optimization::None,
                         inline_scalar_callbacks: enabled,
+                        inline_calls: false,
                     },
                 )
                 .unwrap(),

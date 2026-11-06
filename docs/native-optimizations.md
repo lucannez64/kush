@@ -25,6 +25,9 @@ belong to the program. Source-file builds retain their existing
 | `--release` | `speed` | on |
 | `--release --no-inline-scalars` | `speed` | off |
 
+`--release` also inlines small direct calls (below); `--inline-calls` and
+`--no-inline-calls` set that independently.
+
 `--opt-level none` explicitly selects the unoptimized backend. Controls are
 processed in argument order; later flags override earlier choices. Invalid or
 missing option values fail before building. The C runtime still uses `cc -O2`
@@ -236,3 +239,46 @@ The [matched memory comparison](../benchmarks/json-memory/sample-results/compact
 records lower peak requested heap and post-release RSS, plus increased
 rebuild-only allocation traffic. Rust deliberate reuse remains leaner on the
 measured large corpus.
+
+## Direct call inlining (NATIVE-INLINE)
+
+With `--release` (or `--inline-calls`), every Kush function body is built
+first, then each caller absorbs its small direct callees through Cranelift's
+library inliner (`Context::inline`): a callee of at most 96 CLIF instructions
+that does not call itself directly and has no exception-table calls. Inlined
+bodies are visited again, so chains of small predicates flatten; one caller
+absorbs at most 64 calls, which bounds mutual recursion. The callee stays an
+ordinary out-of-line function for other callers.
+
+Cranelift 0.135's inliner remaps call targets into the caller's name table
+but copies data symbols (such as the abort word) verbatim, so each callee copy
+has its symbols re-declared in the caller first (`inline_bodies_for` in
+`native.rs`); without that, abortive effects read an unrelated symbol.
+
+Correctness: `native_release.rs` runs every program in five modes including
+inlining with and without backend optimization; the whole test suite also
+passed with inlining forced on in every native build (2026-11-06).
+
+Measurements, AMD Ryzen 5 PRO 5675U, load average about 2, release builds,
+`benchmarks/inline` and the existing benchmarks (inlining off vs on, best of
+5 or median of 9 runs):
+
+| Benchmark | off | on (limit 96) |
+| --- | --- | --- |
+| VELA-style policy with predicate calls (`policy-predicates`), ns/decision | 20.5 | 14.2 |
+| same policy, conditions written out (`policy-written-out`), ns/decision | 9.6 | 9.0 |
+| `effects/direct-call`, ms | 19.9 | 7.6 |
+| `effects/checked-call`, ms | 19.9 | 12.5 |
+| `effects/capability-perform-in-callee`, ms | 43.5 | 33.2 |
+| `effects/dynamic-perform-in-callee`, ms | 63.8 | 53.9 |
+| JSON memory, 16384 documents, rebuild / reuse, ms | 571 / 392 | 568 / 396 |
+| `unboxing/tag-niche-three-words`, median ms | 398 | 392 |
+| `unboxing/multi-niche-tagged`, median ms | 390 | 405 |
+
+The JSON rows are within run-to-run noise. In `multi-niche-tagged` only the
+cold construction loop changes; the hot loop's machine code is identical and
+moved by 4 bytes, so its difference is code alignment, not the inlined call.
+A limit of 48 instructions gave 18.5 ns on the policy (callers such as `plan`
+were then too large to absorb). The remaining gap to the written-out policy
+is the record parameter: each inlined predicate still copies its by-value
+`Facts` record through a stack slot, which Cranelift does not remove.

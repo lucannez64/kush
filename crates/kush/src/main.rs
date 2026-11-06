@@ -596,6 +596,8 @@ fn codegen_argument(
         Some("--release") => *options = kush::native::CodegenOptions::release(),
         Some("--inline-scalars") => options.inline_scalar_callbacks = true,
         Some("--no-inline-scalars") => options.inline_scalar_callbacks = false,
+        Some("--inline-calls") => options.inline_calls = true,
+        Some("--no-inline-calls") => options.inline_calls = false,
         Some("--opt-level") => {
             options.optimization = match value(args, index, command)?.to_str() {
                 Some("none") => kush::native::Optimization::None,

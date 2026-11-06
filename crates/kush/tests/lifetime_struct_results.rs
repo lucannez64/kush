@@ -39,6 +39,7 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
                 CodegenOptions {
                     optimization: Optimization::None,
                     inline_scalar_callbacks: false,
+                    inline_calls: false,
                 },
             ),
             ("release", CodegenOptions::release()),
