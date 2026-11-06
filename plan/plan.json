@@ -4282,10 +4282,21 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "Struct fields private by default outside their module (pub fields); user-approved breaking change 2026-11-06.",
-      "commit": null,
-      "log": []
+      "commit": "e2dd9b9",
+      "log": [
+        {
+          "time": "2026-11-06 02:11:32",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 02:28:30",
+          "who": "agent",
+          "text": "done e2dd9b9"
+        }
+      ]
     },
     {
       "id": "ENSURES",
