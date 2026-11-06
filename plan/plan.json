@@ -4332,8 +4332,96 @@
         "ENSURES",
         "FIELD-PRIVACY"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Rewrite the VELA client share policy port (branch t3/kush-share-policy) with Bool/u64 facts, ensures negative theorems about plan_share_admission, and a private permit field.",
+      "commit": "d76b546",
+      "log": [
+        {
+          "time": "2026-11-06 03:16:24",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-06 03:44:19",
+          "who": "agent",
+          "text": "VELA branch t3/kush-share-policy commit 380512da (not pushed): 33 ensures clauses, 14 negative theorems, 19 injected bugs rejected, 4/4 differential tests. Kush 11.9 ns/decision vs Rust 3.3 (quiet machine). Compiler fixes in d76b546."
+        },
+        {
+          "time": "2026-11-06 03:44:19",
+          "who": "agent",
+          "text": "done d76b546"
+        }
+      ]
+    },
+    {
+      "id": "x",
+      "title": "",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "NATIVE-INLINE",
+      "title": "Inline small direct calls in the native backend",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Cranelift does not inline: the VELA policy written like Rust (predicate calls) takes 23.5 ns/decision vs 11.9 ns with the conditions written out, Rust 3.3 ns. Inline small non-recursive direct calls, measured on that benchmark.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "ENSURES-PREDICATES",
+      "title": "Named predicates in ensures clauses",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "ENSURES"
+      ],
+      "status": "todo",
+      "desc": "Allow a clause to call a pure Bool function whose own result => / !result => clauses define it (e.g. first_contact_is_admissible(facts)), instead of writing the conjunction out.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "ENSURES-METHODS",
+      "title": "Postcondition facts for method calls",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "ENSURES"
+      ],
+      "status": "todo",
+      "desc": "value.method() calls do not receive the method's ensures facts; only direct calls of named functions do.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STRUCT-UPDATE",
+      "title": "Struct update syntax (S { f: v, ..base })",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "FIELD-PRIVACY"
+      ],
+      "status": "todo",
+      "desc": "Negative theorems in the VELA port list every field; support ..base, with facts for each field (and for let of a struct literal).",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "KUSH-RUST-EXPORT",
+      "title": "Export Kush functions as a library callable from Rust",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "VELA cannot call the Kush policy: Kush builds executables and calls Rust, but cannot produce a static library with a C ABI for Rust callers.",
       "commit": null,
       "log": []
     }
