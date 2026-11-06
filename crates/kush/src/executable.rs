@@ -33387,6 +33387,7 @@ impl Checker<'_, '_> {
     /// Word offset and type of a record field, without visibility checks
     /// (a postcondition may mention private fields).
     fn record_field_raw(&self, ty: Type, name: &str) -> Option<(usize, usize, Type)> {
+        let ty = self.through_shared_ref(ty);
         let layout = ty.layout().filter(|id| self.types.enums[*id].record)?;
         let variant = &self.types.enums[layout].variants[0];
         let index = variant.names.iter().position(|n| n == name)?;
@@ -33413,7 +33414,15 @@ impl Checker<'_, '_> {
         };
         Some((sym, field_ty))
     }
+    /// ENSURES-REFS: a shared reference's paths are its referent's.
+    fn through_shared_ref(&self, ty: Type) -> Type {
+        match ty {
+            Type::Ref(pointer) => self.types.pointees[pointer],
+            other => other,
+        }
+    }
     fn variant_index(&self, ty: Type, name: &str) -> Option<usize> {
+        let ty = self.through_shared_ref(ty);
         let layout = ty.layout().filter(|id| !self.types.enums[*id].record)?;
         self.types.enums[layout]
             .variants
@@ -33421,6 +33430,7 @@ impl Checker<'_, '_> {
             .position(|variant| variant.name == name)
     }
     fn sym_tag(&self, sym: &Sym, ty: Type) -> Option<crate::facts::Linear> {
+        let ty = self.through_shared_ref(ty);
         let layout = ty.layout().filter(|id| !self.types.enums[*id].record)?;
         let count = self.types.enums[layout].variants.len();
         match sym {

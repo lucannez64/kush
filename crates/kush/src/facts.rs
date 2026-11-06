@@ -613,6 +613,21 @@ impl Facts {
             {
                 Some(self.local_root(*slot))
             }
+            // ENSURES-REFS: a shared reference denotes its referent, which
+            // cannot change while the reference is usable; its fields are
+            // paths of the reference's root. `&local` is the local itself.
+            ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot)
+                if !self.opaque.contains(slot)
+                    && matches!(expr.ty, crate::executable::Type::Ref(_)) =>
+            {
+                Some(self.local_root(*slot))
+            }
+            ExprKind::Borrow(slot)
+                if !self.opaque.contains(slot)
+                    && matches!(expr.ty, crate::executable::Type::Ref(_)) =>
+            {
+                Some(self.local_root(*slot))
+            }
             ExprKind::Project(base, offset) => {
                 let (root, mut steps) = self.root_of(base)?;
                 steps.push(Step::Field(u32::try_from(*offset).ok()?));

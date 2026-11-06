@@ -153,8 +153,12 @@ rejected and has a regression test (`review_regressions_for_postconditions`):
 
 ## Limits
 
-- A reference parameter (`&T`, including `self: &Self`) cannot be mentioned
-  in a postcondition; methods taking `self: Self` can.
+- An exclusive reference parameter (`&mut T`) cannot be mentioned in a
+  postcondition. A shared one (`&T`, including `self: &Self`) can
+  (ENSURES-REFS): it denotes its referent, which cannot change while the
+  reference is usable, so `l.max` means the referent's field in the body, in
+  the clause and at the caller, where `&l` stands for `l` itself. An
+  exclusive borrow of the owner still makes it opaque.
 - `match` on a `Bool` with `true`/`false` arms does not record the condition;
   use `if`.
 - Hypotheses wider than 32 cases are dropped (sound, weaker).

@@ -688,3 +688,84 @@ fn predicate_calls_are_checked() {
         "returns Bool",
     );
 }
+
+// ENSURES-REFS: a shared reference parameter (also `self: &Self`) may be
+// mentioned; it denotes its referent, which cannot change during the call.
+// The caller's `&l` stands for `l` itself.
+const REFS: &str = "
+struct Limit { max: i64 }
+impl Limit {
+    fn allows(self: &Self, x: i64) -> Bool ! {}
+        ensures result => { x <= self.max }
+        ensures !result => { x > self.max }
+    {
+        x <= self.max
+    }
+}
+fn within(l: &Limit, x: i64) -> Bool ! {} ensures result => { x <= l.max } { x <= l.max }
+fn le(a: i64, b: i64, erased p: { a <= b }) -> i64 ! {} { a }
+";
+
+#[test]
+fn shared_reference_parameters_in_postconditions() {
+    agrees(
+        &format!(
+            "{REFS}
+            fn main() -> i64 ! {{panic}} {{
+                let l = Limit {{ max: 10 }};
+                let a = if l.allows(9) {{ le(9, l.max, _) }} else {{ 0 }};
+                let b = if within(&l, 7) {{ le(7, l.max, _) }} else {{ 0 }};
+                let r = &l;
+                let c = if within(r, 4) {{ le(4, r.max, _) }} else {{ 0 }};
+                let d = if l.allows(11) {{ 0 }} else {{ le(l.max, 11, _) }};
+                a + b + c + d
+            }}"
+        ),
+        30,
+    );
+}
+
+#[test]
+fn reference_postconditions_stay_sound() {
+    // A wrong claim about the referent.
+    rejects(
+        &format!(
+            "{REFS}
+            fn wrong(l: &Limit, x: i64) -> Bool ! {{}} ensures result => {{ x < l.max }} {{ x <= l.max }}
+            fn main() -> i64 ! {{}} {{ 0 }}"
+        ),
+        "cannot prove",
+    );
+    // After the owner is replaced, the old fact is about the old value.
+    rejects(
+        &format!(
+            "{REFS}
+            fn main() -> i64 ! {{panic}} {{
+                let mut l = Limit {{ max: 20 }};
+                if within(&l, 15) {{ l = Limit {{ max: 3 }}; le(15, l.max, _) }} else {{ 0 }}
+            }}"
+        ),
+        "cannot prove",
+    );
+    // An exclusive reference makes the owner opaque.
+    rejects(
+        &format!(
+            "{REFS}
+            fn shrink(l: &mut Limit) -> Unit ! {{}} {{ l.max = 0; }}
+            fn main() -> i64 ! {{panic}} {{
+                let mut l = Limit {{ max: 20 }};
+                if within(&l, 15) {{ shrink(&mut l); le(15, l.max, _) }} else {{ 0 }}
+            }}"
+        ),
+        "proof obligation",
+    );
+    // An exclusive reference parameter still cannot be mentioned.
+    rejects(
+        &format!(
+            "{REFS}
+            fn grow(l: &mut Limit, x: i64) -> Bool ! {{}} ensures result => {{ x <= l.max }} {{ x <= l.max }}
+            fn main() -> i64 ! {{}} {{ 0 }}"
+        ),
+        "cannot be stated",
+    );
+}
