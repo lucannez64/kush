@@ -5537,6 +5537,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             pending_lengths: BTreeMap::new(),
             ensures_context: None,
             ensures_tail: false,
+            ensures_depth: std::cell::Cell::new(0),
             branch_tail: false,
         };
         let body = (|| {
@@ -5563,6 +5564,9 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 }
             }
             if !f.ensures.is_empty() {
+                for clause in &f.ensures {
+                    checker.validate_ensures_calls(&clause.body)?;
+                }
                 checker.ensures_context = Some(EnsuresContext {
                     clauses: f.ensures.clone(),
                     params: ensures_params,
@@ -12502,6 +12506,8 @@ struct Checker<'a, 't> {
     ensures_context: Option<EnsuresContext>,
     /// The expression being checked is a value the function returns.
     ensures_tail: bool,
+    /// ENSURES-PREDICATES: nesting of predicate expansions in a proposition.
+    ensures_depth: std::cell::Cell<usize>,
     /// The `if`/`match`/block being checked is in return position, so its
     /// branch tails are too.
     branch_tail: bool,
@@ -33297,6 +33303,30 @@ impl Checker<'_, '_> {
             } else {
                 Vec::new()
             }),
+            // ENSURES-PREDICATES: `pred(args)` means the predicate's
+            // `result => { P }` with the arguments for its parameters.
+            ast::ExprKind::Call { callee, arguments } => {
+                let Ok((predicate, definition)) = self.ensures_predicate(callee) else {
+                    return unknown();
+                };
+                if self.ensures_depth.get() >= 16 {
+                    return unknown();
+                }
+                let mut inner = BTreeMap::new();
+                for (parameter, argument) in predicate.parameters.iter().zip(arguments) {
+                    let (Some(binder), Some(value)) = (
+                        self.resolution.binder(parameter.span),
+                        self.ensures_value(argument, env),
+                    ) else {
+                        return unknown();
+                    };
+                    inner.insert(binder, value);
+                }
+                self.ensures_depth.set(self.ensures_depth.get() + 1);
+                let formula = self.ensures_formula(definition, &inner, positive, lenient);
+                self.ensures_depth.set(self.ensures_depth.get() - 1);
+                formula.or_else(unknown)
+            }
             ast::ExprKind::Name(_) | ast::ExprKind::Field { .. } => {
                 match self.ensures_value(e, env) {
                     Some((sym, Type::Bool)) => match self.sym_linear(&sym, Type::Bool) {
@@ -33318,6 +33348,172 @@ impl Checker<'_, '_> {
                 }
             }
             _ => unknown(),
+        }
+    }
+    /// ENSURES-PREDICATES: the function a call in a proposition names, and
+    /// the `P` of its `ensures result => { P }`. It must return `Bool`, take
+    /// only runtime parameters, not be generic, and have
+    /// `ensures !result => { !(P) }` (or `P` = `!(Q)`), so `pred(args)` is
+    /// exactly `P`.
+    fn ensures_predicate(
+        &self,
+        callee: &ast::Expr,
+    ) -> std::result::Result<(&ast::Function, &ast::Expr), String> {
+        let binding = self
+            .resolution
+            .reference(callee.span)
+            .ok_or("a proposition can only call a named predicate function")?;
+        let Some(declared) = self.functions.declared.get(&binding) else {
+            return Err("a proposition can only call a named predicate function".into());
+        };
+        let f: &ast::Function = declared.ast;
+        let name = &f.name;
+        if !f.generics.is_empty() || f.parameters.iter().any(|p| p.erased) {
+            return Err(format!(
+                "'{name}' cannot be used in a proposition: a predicate takes no type or erased parameters"
+            ));
+        }
+        if !matches!(f.result.kind, ast::TypeKind::Named { ref path, ref arguments, .. } if arguments.is_empty() && path.len() == 1 && path[0] == "Bool")
+        {
+            return Err(format!(
+                "'{name}' cannot be used in a proposition: a predicate returns Bool"
+            ));
+        }
+        let clause = |truth: bool| {
+            let mut found = f
+                .ensures
+                .iter()
+                .filter(move |c| c.guard == ast::EnsuresGuard::Result(truth));
+            match (found.next(), found.next()) {
+                (Some(clause), None) => Some(&clause.body),
+                _ => None,
+            }
+        };
+        let (Some(holds), Some(fails)) = (clause(true), clause(false)) else {
+            return Err(format!(
+                "'{name}' cannot be used in a proposition: a predicate needs exactly one 'ensures result => {{ P }}' and one 'ensures !result => {{ !(P) }}'"
+            ));
+        };
+        let negation_of = |negated: &ast::Expr, original: &ast::Expr| {
+            matches!(&negated.kind, ast::ExprKind::Unary { op: Kind::Bang, operand, .. }
+                if self.same_proposition(operand, original))
+        };
+        if !negation_of(fails, holds) && !negation_of(holds, fails) {
+            return Err(format!(
+                "'{name}' cannot be used in a proposition: its '!result' clause must be the negation '!( .. )' of its 'result' clause, so the call means exactly that proposition"
+            ));
+        }
+        Ok((f, holds))
+    }
+    /// Syntactic equality of two propositions (names compared by binding).
+    fn same_proposition(&self, a: &ast::Expr, b: &ast::Expr) -> bool {
+        use ast::ExprKind as E;
+        match (&a.kind, &b.kind) {
+            (E::Name(x), E::Name(y)) => {
+                x == y && self.resolution.reference(a.span) == self.resolution.reference(b.span)
+            }
+            (E::Integer(x), E::Integer(y)) => x == y,
+            (E::Bool(x), E::Bool(y)) => x == y,
+            (E::Field { value: v, name: n }, E::Field { value: w, name: m }) => {
+                n == m && self.same_proposition(v, w)
+            }
+            (
+                E::Unary {
+                    op: o, operand: x, ..
+                },
+                E::Unary {
+                    op: p, operand: y, ..
+                },
+            ) => o == p && self.same_proposition(x, y),
+            (
+                E::Binary {
+                    op: o,
+                    left: l1,
+                    right: r1,
+                },
+                E::Binary {
+                    op: p,
+                    left: l2,
+                    right: r2,
+                },
+            ) => o == p && self.same_proposition(l1, l2) && self.same_proposition(r1, r2),
+            (
+                E::Is {
+                    value: v,
+                    variant: n,
+                },
+                E::Is {
+                    value: w,
+                    variant: m,
+                },
+            ) => n == m && self.same_proposition(v, w),
+            (
+                E::Call {
+                    callee: f,
+                    arguments: x,
+                },
+                E::Call {
+                    callee: g,
+                    arguments: y,
+                },
+            ) => {
+                self.resolution.reference(f.span) == self.resolution.reference(g.span)
+                    && self.resolution.reference(f.span).is_some()
+                    && x.len() == y.len()
+                    && x.iter().zip(y).all(|(x, y)| self.same_proposition(x, y))
+            }
+            _ => false,
+        }
+    }
+    /// Every call in a postcondition must name a predicate (definition-time
+    /// diagnostic); its arguments must be names or field paths.
+    fn validate_ensures_calls(&self, e: &ast::Expr) -> Result<()> {
+        self.validate_ensures_calls_at(e, 0)
+    }
+    fn validate_ensures_calls_at(&self, e: &ast::Expr, depth: usize) -> Result<()> {
+        use ast::ExprKind as E;
+        match &e.kind {
+            E::Call { callee, arguments } => {
+                let (predicate, definition) = self
+                    .ensures_predicate(callee)
+                    .map_err(|message| Diagnostic::new(callee.span, message))?;
+                if predicate.parameters.len() != arguments.len() {
+                    return Err(Diagnostic::new(
+                        e.span,
+                        format!(
+                            "'{}' takes {} argument(s), found {}",
+                            predicate.name,
+                            predicate.parameters.len(),
+                            arguments.len()
+                        ),
+                    ));
+                }
+                for argument in arguments {
+                    let mut path = argument;
+                    while let E::Field { value, .. } = &path.kind {
+                        path = value;
+                    }
+                    if !matches!(path.kind, E::Name(_)) {
+                        return Err(Diagnostic::new(
+                            argument.span,
+                            "a predicate argument in a proposition must be a name or a field path",
+                        ));
+                    }
+                }
+                if depth >= 16 {
+                    return Err(Diagnostic::new(
+                        e.span,
+                        "predicates in propositions nest too deeply (a predicate may not use itself)",
+                    ));
+                }
+                self.validate_ensures_calls_at(definition, depth + 1)
+            }
+            E::Unary { operand, .. } => self.validate_ensures_calls_at(operand, depth),
+            E::Binary { left, right, .. } => {
+                self.validate_ensures_calls_at(left, depth)?;
+                self.validate_ensures_calls_at(right, depth)
+            }
+            _ => Ok(()),
         }
     }
     /// One clause as `!guard || P`, for the given parameters and result.

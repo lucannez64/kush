@@ -47,6 +47,31 @@ Clauses follow the effect row, before the body:
 `result`, guard binders, field paths such as `facts.has_pin` or `p.revision`,
 and `value is Variant`. `is` exists only inside `ensures`.
 
+## Predicates in propositions (ENSURES-PREDICATES)
+
+A proposition may call a *predicate*: a function returning `Bool`, with no
+type or erased parameters, that has exactly one `ensures result => { P }` and
+one `ensures !result => { !(P) }` (or `P` written as `!(Q)` with
+`!result => { Q }`). The call `pred(a, b)` then means `P` with `a`, `b` for
+the parameters, in goals and hypotheses alike; predicates may call other
+predicates.
+
+```kush
+fn first_ok(f: Facts) -> Bool ! {}
+    ensures result => { !f.has_pin && bound(f) }
+    ensures !result => { !(!f.has_pin && bound(f)) }
+{ !f.has_pin && bound(f) }
+
+fn plan(f: Facts) -> Decision ! {}
+    ensures First(r) => { first_ok(f) && r == f.revision }
+    ..
+```
+
+Each call in a clause is checked where the clause is declared: the callee
+must be such a predicate (the `!result` clause is compared syntactically with
+the negation of the `result` clause, so the pair defines the call exactly),
+arguments must be names or field paths, and a predicate may not use itself.
+
 ## Checking a function
 
 The body is checked as usual. Every returned value is a *return point*: the

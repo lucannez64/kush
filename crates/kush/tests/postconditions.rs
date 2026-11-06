@@ -541,3 +541,150 @@ fn method_postconditions_do_not_prove_more_than_they_say() {
         "cannot prove",
     );
 }
+
+// ENSURES-PREDICATES (user-approved): a proposition may call a Bool function
+// whose `result => { P }` and `!result => { !(P) }` clauses define it; the
+// call means P for the arguments.
+const POLICY: &str = "
+struct Facts { authenticated: Bool, has_pin: Bool, revision: i64, pinned: i64 }
+enum Decision { First(i64), Update(i64), Reject }
+fn bound(f: Facts) -> Bool ! {}
+    ensures result => { f.authenticated && f.revision >= 1 }
+    ensures !result => { !(f.authenticated && f.revision >= 1) }
+{
+    f.authenticated && f.revision >= 1
+}
+fn first_ok(f: Facts) -> Bool ! {}
+    ensures result => { !f.has_pin && bound(f) }
+    ensures !result => { !(!f.has_pin && bound(f)) }
+{
+    !f.has_pin && bound(f)
+}
+fn update_ok(f: Facts) -> Bool ! {}
+    ensures result => { f.has_pin && bound(f) && f.revision > f.pinned }
+    ensures !result => { !(f.has_pin && bound(f) && f.revision > f.pinned) }
+{
+    f.has_pin && bound(f) && f.revision > f.pinned
+}
+fn plan(f: Facts) -> Decision ! {}
+    ensures First(r) => { first_ok(f) && r == f.revision }
+    ensures Update(r) => { update_ok(f) && r == f.revision }
+    ensures Reject => { !first_ok(f) && !update_ok(f) }
+{
+    if !f.has_pin && f.authenticated && f.revision >= 1 {
+        Decision.First(f.revision)
+    } else if f.has_pin && f.authenticated && f.revision >= 1 && f.revision > f.pinned {
+        Decision.Update(f.revision)
+    } else {
+        Decision.Reject
+    }
+}
+fn admitted(d: Decision) -> Bool ! {}
+    ensures result => { d is First || d is Update }
+    ensures !result => { d is Reject }
+{
+    match d { Decision.First(_) => true, Decision.Update(_) => true, Decision.Reject => false }
+}
+fn positive(v: i64, erased p: { v >= 1 }) -> i64 ! {} { v }
+";
+
+#[test]
+fn predicates_in_propositions_expand_to_their_definition() {
+    agrees(
+        &format!(
+            "{POLICY}
+            // Negative theorems stated with the predicates.
+            fn unauthenticated_never_admitted(f: Facts) -> Bool ! {{}}
+                ensures {{ !result }}
+            {{
+                if f.authenticated {{ false }} else {{ admitted(plan(f)) }}
+            }}
+            fn stale_update_never_admitted(f: Facts) -> Bool ! {{}}
+                ensures {{ !result }}
+            {{
+                if f.has_pin && f.revision <= f.pinned {{ admitted(plan(f)) }} else {{ false }}
+            }}
+            fn main() -> i64 ! {{panic}} {{
+                let f = Facts {{ authenticated: true, has_pin: false, revision: 3, pinned: 0 }};
+                let a = match plan(f) {{
+                    Decision.First(r) => positive(r, _),
+                    Decision.Update(r) => positive(r, _),
+                    Decision.Reject => 0,
+                }};
+                let g = Facts {{ authenticated: false, has_pin: false, revision: 3, pinned: 0 }};
+                let b = if unauthenticated_never_admitted(g) {{ 100 }} else {{ 0 }};
+                let h = Facts {{ authenticated: true, has_pin: true, revision: 2, pinned: 5 }};
+                let c = if stale_update_never_admitted(h) {{ 100 }} else {{ 0 }};
+                a + b + c
+            }}"
+        ),
+        3,
+    );
+}
+
+#[test]
+fn predicate_calls_are_checked() {
+    let with = |extra: &str| format!("{POLICY} {extra} fn main() -> i64 ! {{}} {{ 0 }}");
+    // Wrong claims through a predicate are rejected.
+    rejects(
+        &with(
+            "fn wrong(f: Facts) -> Bool ! {} ensures { !result } {
+                if f.has_pin { false } else { admitted(plan(f)) }
+            }",
+        ),
+        "cannot prove",
+    );
+    rejects(
+        &with(
+            "fn wrong(f: Facts) -> Decision ! {} ensures First(r) => { first_ok(f) } {
+                if f.authenticated { Decision.First(f.revision) } else { Decision.Reject }
+            }",
+        ),
+        "cannot prove",
+    );
+    // A function without the defining pair of clauses.
+    rejects(
+        &with(
+            "fn half(f: Facts) -> Bool ! {} ensures result => { f.authenticated } { f.authenticated }
+            fn uses(f: Facts) -> Bool ! {} ensures result => { half(f) } { f.authenticated }",
+        ),
+        "exactly one",
+    );
+    // The `!result` clause must be the negation of the `result` clause.
+    rejects(
+        &with(
+            "fn odd(f: Facts) -> Bool ! {}
+                ensures result => { f.authenticated }
+                ensures !result => { f.has_pin }
+            { f.authenticated }
+            fn uses(f: Facts) -> Bool ! {} ensures result => { odd(f) } { f.authenticated }",
+        ),
+        "negation",
+    );
+    // Arguments are names or field paths.
+    rejects(
+        &with(
+            "fn above(n: i64) -> Bool ! {} ensures result => { n >= 1 } ensures !result => { !(n >= 1) } { n >= 1 }
+            fn uses(n: i64) -> Bool ! {} ensures result => { above(n + 1) } { n >= 0 }",
+        ),
+        "name or a field path",
+    );
+    // A predicate may not use itself.
+    rejects(
+        &with(
+            "fn looped(n: i64) -> Bool ! {}
+                ensures result => { looped(n) }
+                ensures !result => { !(looped(n)) }
+            { n >= 1 }",
+        ),
+        "nest",
+    );
+    // Only Bool functions.
+    rejects(
+        &with(
+            "fn count(n: i64) -> i64 ! {} { n }
+            fn uses(n: i64) -> Bool ! {} ensures result => { count(n) } { n >= 0 }",
+        ),
+        "returns Bool",
+    );
+}
