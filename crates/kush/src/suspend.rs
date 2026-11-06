@@ -2751,13 +2751,10 @@ pub(crate) fn mark_abort_calls(program: &mut Executable) -> Result<()> {
                     BTreeSet::new()
                 }
                 ExprKind::Suspendable(suspendable) => {
-                    // Only a one-shot handler of a lexical operation can pass
-                    // an abort through its token (E-ABORT-INTERACT).
-                    let row = if suspendable.operation.is_none() && !suspendable.multishot {
-                        (self.row_operations)((self.callable_effects)(suspendable.token))
-                    } else {
-                        BTreeSet::new()
-                    };
+                    // A handler passes an abort through its token when the
+                    // token's row names it (E-ABORT-INTERACT, E-ABORT-ENTRIES:
+                    // also declared-operation and multishot tokens).
+                    let row = (self.row_operations)((self.callable_effects)(suspendable.token));
                     regions.push(Region {
                         scopes: scopes.len(),
                         row: row.clone(),
@@ -3095,6 +3092,20 @@ fn is_plain_scalar(ty: Type) -> bool {
 /// Mark the suspension points of a resumable entry for `operation`: dynamic
 /// performs of it and direct calls of functions that may perform it, outside
 /// any nested handler for the same operation.
+/// Whether `expr` is a suspension point of an entry for `operation`.
+fn is_entry_point(expr: &Expr, operation: usize, performs: &[BTreeSet<usize>]) -> bool {
+    match &expr.kind {
+        ExprKind::DynamicPerform {
+            operation: performed,
+            ..
+        } => *performed == operation,
+        ExprKind::Call(crate::executable::Target::Function(callee), _) => performs
+            .get(*callee)
+            .is_some_and(|set| set.contains(&operation)),
+        _ => false,
+    }
+}
+
 fn mark_entry_points(
     expr: &mut Expr,
     operation: usize,
@@ -3113,6 +3124,32 @@ fn mark_entry_points(
         | ExprKind::AbortScope { .. } => true,
         _ => nested,
     };
+    // E-ABORT-ENTRIES: a point that may abort was wrapped in an abort check
+    // before lowering. The check moves to the caller: the point leaves this
+    // region, and the region is the tail of the entry or continuation, so
+    // its placeholder value returns to the awaiting caller, which tests the
+    // abort word. Local exits cannot occur (a point inside a nested scope
+    // is rejected).
+    if let ExprKind::AbortCall { call, exits, .. } = &mut expr.kind
+        && exits.is_empty()
+        && !nested
+        && is_entry_point(call, operation, performs)
+    {
+        let call = std::mem::replace(
+            call.as_mut(),
+            Expr {
+                kind: ExprKind::Constant(0),
+                ty: Type::Unit,
+                span: expr.span,
+                resource: None,
+            },
+        );
+        let resource = expr.resource;
+        *expr = call;
+        if expr.resource.is_none() {
+            expr.resource = resource;
+        }
+    }
     let mut result = Ok(());
     expr.for_each_child_mut(&mut |child| {
         if result.is_ok() {
@@ -3180,13 +3217,10 @@ fn rewrite_entry_exits(expr: &mut Expr, cleanup: &[usize], nested: bool) -> Resu
     result?;
     let span = expr.span;
     match std::mem::replace(&mut expr.kind, ExprKind::Constant(0)) {
-        ExprKind::AbortPerform { .. }
-        | ExprKind::AbortCall {
-            propagates: true, ..
-        } => Err(Diagnostic::new(
-            span,
-            "a function resumed by a handler with code after 'resume' cannot abort out of itself; handle the abortive operation inside it",
-        )),
+        // E-ABORT-ENTRIES: an abort leaves the entry like `return` without
+        // calling `k`; `k` is a resource of the entry (or was moved into the
+        // continuation of the last point), so the abort path drops the
+        // caller's pending continuation exactly once.
         ExprKind::Return(_) | ExprKind::Try { .. } if nested => Err(Diagnostic::new(
             span,
             "'return' or '?' inside a handled body of a function that is resumed by an outer handler is not supported",

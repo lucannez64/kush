@@ -918,19 +918,12 @@ fn aborts_through_resumptions_are_checked() {
                  }
              }
          }",
-        "second parameter must be exactly",
+        // E-ABORT-ENTRIES: a declared operation's token may name `Fail`, but
+        // its handler stays pure apart from the operations its token names.
+        "must be pure",
     );
-    rejects(
-        "effect Fail: i64 -> Never;
-         fn main() -> i64 ! {panic} {
-             handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {} { c } {
-                 handle Ask: i64 -> i64 with fn(x: i64, k: fn(i64) -> i64 ! {Fail}) -> i64 ! {Fail, panic} { k(x) + k(x) } {
-                     let a = perform Ask(1); a
-                 }
-             }
-         }",
-        "second parameter must be exactly",
-    );
+    // (Multishot tokens may name abortive operations since E-ABORT-ENTRIES:
+    // `aborts_leave_multishot_resumptions`.)
     // A lexical (undeclared) abortive operation cannot cross the body.
     rejects(
         "fn main() -> i64 ! {panic} {
@@ -1019,4 +1012,165 @@ fn an_owner_moved_into_a_continuation_is_dropped_once_when_it_aborts() {
             "",
         );
     }
+}
+
+/// E-ABORT-ENTRIES: a one-shot handler of a declared operation whose token
+/// names `Fail` lets aborts leave its resumable entries. Every frame on the
+/// way drops its own values, and the caller's pending continuation (`k` of
+/// the entry, or the continuation it was moved into) is dropped once.
+fn entries(abort_at: &str, before: &str) -> String {
+    format!(
+        "effect Ask: i64 -> i64;
+         effect Fail: i64 -> Never;
+         fn both(x: i64) -> i64 ! {{Ask, Fail, io, alloc, panic}} {{
+             let own = Box.new(x);
+             {before}
+             let a = perform Ask(x);
+             if a > {abort_at} {{ perform Fail(a + Box.take(own)) }};
+             print_i64(a);
+             a + Box.take(own)
+         }}
+         fn caller(x: i64) -> i64 ! {{Ask, Fail, io, alloc, panic}} {{
+             let mine = Box.new(100);
+             let r = both(x);
+             let s = both(r);
+             r + s + Box.take(mine)
+         }}
+         fn main() -> i64 ! {{io, alloc, panic}} {{
+             let r = handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {{}} {{ c ^ 1024 }} {{
+                 let keep = Box.new(3);
+                 let v = handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {{Fail}}) -> i64 ! {{Fail}} {{
+                     k(x ^ 1) ^ 2
+                 }} {{
+                     let held = Box.new(7);
+                     let t = caller(4);
+                     t + Box.take(held)
+                 }};
+                 v + Box.take(keep)
+             }};
+             r
+         }}"
+    )
+}
+
+#[test]
+fn aborts_leave_resumable_entries_and_drop_pending_continuations() {
+    // No abort. both(4): the handler resumes with 5 (prints 5), giving 9;
+    // both(9): resumes with 8 (prints 8), giving 17; caller: 9 + 17 + 100;
+    // body: 126 + 7 = 133. Deep handlers: the second activation returns
+    // 133 ^ 2 = 135 to the first, which returns 135 ^ 2 = 133; plus 3.
+    agrees(&entries("100", ""), 136, "5\n8\n");
+    // The first call aborts after its resumption (5 > 4) with 5 + 4: the
+    // pending continuations of `caller` (holding `mine`) and of the handled
+    // body (`held`) drop, and so do `keep` and the handler activations.
+    agrees(&entries("4", ""), 9 ^ 1024, "");
+    // The second call aborts (8 > 7) with 8 + 9; the first already finished.
+    agrees(&entries("7", ""), 17 ^ 1024, "5\n");
+    // An abort before the entry's first suspension drops its `k` parameter.
+    agrees(
+        &entries("100", "if x > 8 { perform Fail(x + Box.take(own)) };"),
+        18 ^ 1024,
+        "5\n",
+    );
+}
+
+#[test]
+fn aborts_through_entries_stay_checked() {
+    // The token must name the operation.
+    rejects(
+        &entries("4", "").replace(
+            "k: linear once fn(i64) -> i64 ! {Fail}) -> i64 ! {Fail}",
+            "k: linear once fn(i64) -> i64 ! {}) -> i64 ! {}",
+        ),
+        "unless its one-shot resumption token names the abortive operation",
+    );
+    // The handler may not have other effects: a dynamic perform would hide them.
+    rejects(
+        &entries("4", "").replace(
+            ") -> i64 ! {Fail} {\n                     k(x ^ 1) ^ 2",
+            ") -> i64 ! {Fail, io, panic} {\n                     print_i64(0); k(x ^ 1) ^ 2",
+        ),
+        "must be pure",
+    );
+    // Paths that could not be resumed stay rejected: a task, a function value.
+    let both = "effect Ask: i64 -> i64;
+         effect Fail: i64 -> Never;
+         fn both(x: i64) -> i64 ! {Ask, Fail, panic} { let a = perform Ask(x); if a > 5 { perform Fail(a) }; a }";
+    let handler = "handle Ask: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {Fail}) -> i64 ! {Fail} { k(x ^ 9) ^ 1 }";
+    rejects(
+        &format!(
+            "use std.task.TaskExit; {both}
+             fn main() -> i64 ! {{Fail, alloc, panic, suspend}} {{
+                 {handler} {{
+                     Task.scope(fn() -> i64 ! {{Ask, alloc, panic, suspend}} {{
+                         handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {{}} {{ c }} {{ both(1) }}
+                     }})
+                 }}
+             }}"
+        ),
+        "cannot be resumed",
+    );
+    rejects(
+        &format!(
+            "{both}
+             fn main() -> i64 ! {{panic}} {{
+                 handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {{}} {{ c }} {{
+                     {handler} {{ let f = both; f(1) }}
+                 }}
+             }}"
+        ),
+        "function value",
+    );
+    // The handler cannot abort by itself: a dynamic perform needs `panic`,
+    // which a dynamically visible handler may not have. It aborts only
+    // through its token, after resuming.
+    rejects(
+        &entries("100", "").replace("k(x ^ 1) ^ 2", "if x > 2 { perform Fail(x) }; k(x ^ 1) ^ 2"),
+        "requires effects {panic}",
+    );
+}
+
+/// E-ABORT-ENTRIES: a multishot token may name abortive operations too. An
+/// abort out of one resumption leaves the handler (later resumptions do not
+/// run); multishot frames hold only copyable values.
+fn multishot(limit: &str, operation: &str) -> String {
+    format!(
+        "effect Fail: i64 -> Never;
+         effect Pick: i64 -> i64;
+         fn main() -> i64 ! {{io, alloc, panic}} {{
+             let r = handle Fail: i64 -> Never with fn(c: i64) -> i64 ! {{}} {{ c ^ 1024 }} {{
+                 let keep = Box.new(3);
+                 let v = handle {operation}: i64 -> i64 with fn(x: i64, k: fn(i64) -> i64 ! {{Fail}}) -> i64 ! {{Fail}} {{
+                     k(x) ^ k(x ^ {limit})
+                 }} {{
+                     let base = 2;
+                     let a = perform {operation}(base);
+                     if a > 10 {{ perform Fail(a + base) }};
+                     print_i64(a);
+                     a * 100 + base
+                 }};
+                 v + Box.take(keep)
+             }};
+             r
+         }}"
+    )
+}
+
+#[test]
+fn aborts_leave_multishot_resumptions() {
+    for operation in ["Choose", "Pick"] {
+        // Both resumptions finish: (202 ^ 302) + 3.
+        agrees(&multishot("1", operation), (202 ^ 302) + 3, "2\n3\n");
+        // The second resumption (2 ^ 20 = 22) aborts with 22 + 2; the first
+        // one printed.
+        agrees(&multishot("20", operation), 24 ^ 1024, "2\n");
+    }
+    // A multishot token without the operation in its row still rejects it.
+    rejects(
+        &multishot("20", "Choose").replace(
+            "k: fn(i64) -> i64 ! {Fail}) -> i64 ! {Fail}",
+            "k: fn(i64) -> i64 ! {}) -> i64 ! {}",
+        ),
+        "cannot leave the body",
+    );
 }

@@ -32727,19 +32727,25 @@ impl Checker<'_, '_> {
         }
         // A one-shot token of a lexical operation may name abortive
         // operations that leave through it (E-ABORT-INTERACT).
-        let token_effects = match signature.parameters[1] {
-            Type::Once(id) if declared.is_none() => {
+        // E-ABORT-ENTRIES: also tokens of declared operations and multishot
+        // tokens (`fn(R) -> R ! {F}`).
+        let (token_effects, token_multishot) = match signature.parameters[1] {
+            Type::Once(id) | Type::Fn(id) => {
                 let effects = self.types.function_types[id].effects;
-                (effects != 0
+                let multishot = matches!(signature.parameters[1], Type::Fn(_));
+                let named = effects != 0
                     && effects & !self.abortive_bits() == 0
-                    && signature.parameters[1] == self.resume_type_with(result_ty, false, effects))
-                .then_some(effects)
+                    && signature.parameters[1]
+                        == self.resume_type_with(result_ty, multishot, effects);
+                (named.then_some(effects), multishot)
             }
-            _ => None,
+            _ => (None, false),
         };
-        let multishot = if signature.parameters[1] == one_shot || token_effects.is_some() {
+        let multishot = if signature.parameters[1] == one_shot
+            || (token_effects.is_some() && !token_multishot)
+        {
             false
-        } else if signature.parameters[1] == multi_shot {
+        } else if signature.parameters[1] == multi_shot || token_effects.is_some() {
             true
         } else {
             return Err(Diagnostic::new(
@@ -32799,7 +32805,9 @@ impl Checker<'_, '_> {
                     "a dynamically visible handler must be a fn or once fn value",
                 ));
             }
-            if signature.effects != 0 {
+            // E-ABORT-ENTRIES: a one-shot handler may abort with the
+            // abortive operations its token names.
+            if signature.effects & !token_effects.unwrap_or(0) != 0 {
                 return Err(Diagnostic::new(
                     handler.span,
                     "a dynamically visible handler must be pure; perform in a called function would otherwise hide the handler's effects from the caller's row",
@@ -33153,10 +33161,9 @@ impl Checker<'_, '_> {
     /// through every non-tail handler body above scope `index` (exclusive):
     /// each must be a one-shot lexical handler whose token row names it.
     fn abort_crossing(&self, start: usize, bit: u16) -> Option<&HandlerScope> {
-        self.handlers[start..].iter().find(|scope| {
-            scope.region
-                && (scope.declared || scope.multishot || bit == 0 || scope.token_effects & bit == 0)
-        })
+        self.handlers[start..]
+            .iter()
+            .find(|scope| scope.region && (bit == 0 || scope.token_effects & bit == 0))
     }
     /// A type that can hold a borrow (view, reference, text or a record of
     /// them).

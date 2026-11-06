@@ -240,6 +240,45 @@ E-ABORT-ENTRIES).
   evaluator evaluates a dynamic abort's payload before the lookup, as native
   code does.
 
+### 3.8 As built (E-ABORT-ENTRIES)
+
+Extends 3.7 to every one-shot or multishot handler whose token names the
+abortive operation (2026-11-06):
+
+- **Declared operations.** A handler of a declared operation may write its
+  token as `linear once fn(R) -> R ! {F}`. Its own row may contain only the
+  operations its token names (it is still dynamically visible, so any other
+  effect would be hidden from the rows of the functions that perform the
+  operation); it can only abort through the token, since a dynamic perform of
+  `F` would need `panic`.
+- **Aborts out of resumable entries.** An abort in a resumable entry, or in a
+  continuation built from one, leaves it like `return` without calling `k`.
+  Points that were wrapped in an abort check are unwrapped when the entry is
+  built: the point leaves the region, the region is the tail of the entry or
+  continuation, so its placeholder returns to the awaiting caller, which
+  tests the abort word (in a continuation through the handler's `k(..)`
+  `AbortCall`, in the handle's function after its `Region`).
+- **Multishot tokens** may be `fn(R) -> R ! {F}`. An abort out of one
+  resumption leaves the handler through its `AbortCall`; later resumptions
+  do not run.
+
+**Use-after-free review.** The caller's pending continuation `k` is a
+resource of the entry until the entry's first point moves it into that
+point's continuation (or hands it to the handler at a tail point). An abort
+before the first point drops it through the entry's cleanup; an abort later
+drops it through the continuation that owns it; the frames that gave it away
+have nothing left to drop, so each environment in the chain is released once
+(`aborts_leave_resumable_entries_and_drop_pending_continuations` checks
+`allocations == deallocations` in both backends, aborting before the first
+point, after a resumption, and in the second of two calls). The handler
+activation that called the token returns through its `AbortCall`; a declared
+handler is pure, so it holds no owned values, and a lexical one drops its
+own as in 3.7. A handler cannot abort before resuming (its linear token would
+be pending). Unresumable paths (function values, tasks, vector callbacks)
+are still rejected, so the handler only runs at entry perform sites where the
+abort returns along the await chain. Multishot frames hold only copyable
+values, so there is nothing to drop.
+
 ## 4. Decisions
 
 1. **Abortive handlers use return-path propagation (option A)**, reusing the
@@ -271,4 +310,4 @@ E-ABORT-ENTRIES).
   dedicated use-after-free review. Done for the subset of 3.7.
 - **E-ABORT-ENTRIES** (L): aborts out of resumable entries (dropping the
   caller's pending continuation `k`), through declared-operation non-tail
-  handlers and through multishot resumptions.
+  handlers and through multishot resumptions. Done (3.8).
