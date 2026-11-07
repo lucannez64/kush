@@ -4981,6 +4981,103 @@
       "desc": "Thread bodies cannot suspend in v1: the task scheduler state is per process; make it per thread so a thread can run Task.scope.",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "STD-SYS-FOREIGN",
+      "title": "std.sys.linux: privileged foreign declarations for host calls",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Declare read, write, openat, close, fsync, ftruncate, fstat, unlinkat, renameat, mkdirat, getdents64 and friends as foreign functions with ! {io} in a std-only module (importing it outside std is rejected). First step toward IO in the library instead of the compiler, as in Rust std::sys or Go syscall.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "FOREIGN-BYTES-FILL",
+      "title": "Foreign calls that fill a Bytes buffer's spare capacity",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "STD-SYS-FOREIGN"
+      ],
+      "status": "todo",
+      "desc": "read(fd, buf, n) must write into unused capacity and then set the length. Add a trusted std-only primitive (or foreign ABI form) that passes capacity to the callee and sets len from its return value, checked against capacity.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "EVAL-FOREIGN-SHIMS",
+      "title": "Reference evaluator shims for std.sys symbols",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "STD-SYS-FOREIGN"
+      ],
+      "status": "todo",
+      "desc": "The evaluator rejects every foreign call today. Add a name-keyed shim table (like Miri's) for the fixed std.sys.linux set so std IO written in Kush runs in eval too; other foreign symbols stay rejected.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STD-IO-IN-KUSH",
+      "title": "IO.* stdin/stdout implemented in std over std.sys",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "STD-SYS-FOREIGN",
+        "FOREIGN-BYTES-FILL",
+        "EVAL-FOREIGN-SHIMS"
+      ],
+      "status": "todo",
+      "desc": "Rewrite IO.stdin/stdout/read_all/read_line/write as Kush code in std; keep existing tests passing on both backends.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STD-FS-IN-KUSH",
+      "title": "FS.* and std.file implemented over std.sys",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "STD-SYS-FOREIGN",
+        "FOREIGN-BYTES-FILL",
+        "EVAL-FOREIGN-SHIMS"
+      ],
+      "status": "todo",
+      "desc": "Move FS.* into std; std.file.File holds the descriptor and calls std.sys directly. Raw handle calls become std-private, closing the RAW-FS-HANDLES descriptor-reuse concern.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STD-ENV-IN-KUSH",
+      "title": "ENV.* and OS.* implemented over std.sys",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "STD-SYS-FOREIGN",
+        "FOREIGN-BYTES-FILL",
+        "EVAL-FOREIGN-SHIMS"
+      ],
+      "status": "todo",
+      "desc": "Args, environment variables, strerror and other host queries as Kush code in std.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "HOST-BUILTINS-REMOVE",
+      "title": "Remove host compiler builtins; keep only true intrinsics",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "STD-IO-IN-KUSH",
+        "STD-FS-IN-KUSH",
+        "STD-ENV-IN-KUSH"
+      ],
+      "status": "todo",
+      "desc": "Delete IO/FS/ENV/OS special cases from checker, evaluator and C runtime. Builtins left are those the backend must lower (Bytes layout, atomics, allocation, panics). Update docs/stdio.md and docs/host-api.md.",
+      "commit": null,
+      "log": []
     }
   ]
 }
