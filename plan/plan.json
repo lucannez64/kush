@@ -5012,10 +5012,16 @@
       "deps": [
         "STD-SYS-FOREIGN"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "read(fd, buf, n) must write into unused capacity and then set the length. Add a trusted std-only primitive (or foreign ABI form) that passes capacity to the callee and sets len from its return value, checked against capacity.",
-      "commit": null,
-      "log": []
+      "commit": "52a78fa",
+      "log": [
+        {
+          "time": "2026-11-07 02:14:38",
+          "who": "agent",
+          "text": "done 52a78fa"
+        }
+      ]
     },
     {
       "id": "EVAL-FOREIGN-SHIMS",
@@ -5025,14 +5031,19 @@
       "deps": [
         "STD-SYS-FOREIGN"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "The evaluator rejects every foreign call today. Add a name-keyed shim table (like Miri's) for the fixed std.sys.linux set so std IO written in Kush runs in eval too; other foreign symbols stay rejected.",
-      "commit": null,
+      "commit": "52a78fa",
       "log": [
         {
           "time": "2026-11-07 02:01:22",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-07 02:14:39",
+          "who": "agent",
+          "text": "done 52a78fa"
         }
       ]
     },
@@ -5064,7 +5075,13 @@
       "status": "todo",
       "desc": "Move FS.* into std; std.file.File holds the descriptor and calls std.sys directly. Raw handle calls become std-private, closing the RAW-FS-HANDLES descriptor-reuse concern.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-07 02:14:39",
+          "who": "agent",
+          "text": "std.file (open, read_at, write_at, sync, truncate, size, close, sync_dir) now runs on std.sys (52a78fa); path operations and listing remain"
+        }
+      ]
     },
     {
       "id": "STD-ENV-IN-KUSH",
