@@ -2194,8 +2194,15 @@ fn foreign_result_supported(types: &Types<'_>, ty: Type, error: bool) -> bool {
 }
 /// Validate the checked signature of a foreign declaration. The caller already
 /// required a concrete, monomorphic, non-erased signature with `io` in its row.
+///
+/// `std_sys` marks a std-only `kush_sys_*` runtime stub, which may also take
+/// an owned `Bytes` buffer (FOREIGN-BYTES-FILL): the stub appends into its
+/// spare capacity and hands it back through a `Result<Bytes, i64>` out slot,
+/// or frees it on failure, like the `FS.read_at` builtin.
+#[allow(clippy::too_many_arguments)]
 fn validate_foreign_function(
     types: &Types<'_>,
+    std_sys: bool,
     parameters: &[Type],
     result: Type,
     result_shape: Option<ResultShape>,
@@ -2210,7 +2217,7 @@ fn validate_foreign_function(
         ));
     }
     for ty in parameters {
-        if !foreign_value_supported(types, *ty) {
+        if !foreign_value_supported(types, *ty) && !(std_sys && *ty == Type::Bytes) {
             return Err(Diagnostic::new(
                 span,
                 format!(
@@ -11423,6 +11430,7 @@ impl<'a> Functions<'a> {
                 .and_then(|layout| types.enums[layout].result);
             validate_foreign_function(
                 types,
+                symbol.starts_with("kush_sys_"),
                 &parameters,
                 result,
                 shape,

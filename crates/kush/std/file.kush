@@ -3,9 +3,11 @@ module std.file;
 // Open files with positioned reads and writes and explicit durability
 // (STD-FILE). A `File` is linear: every path through the program must pass it
 // to `close`, so a descriptor is never leaked or used after it was closed.
-// Errors are Linux errno values, as for the other `FS` operations.
+// Errors are Linux errno values, as for the other `FS` operations. Built on
+// the one-syscall `std.sys` layer: retries and loops are here, in Kush.
 
 use std.result.Result;
+use std.sys;
 
 /// An open file. Only this module can build one, from a successful open.
 #[linear]
@@ -13,8 +15,20 @@ pub struct File {
     fd: i64,
 }
 
-fn opened(result: Result<i64, i64>) -> Result<File, i64> ! {} {
-    match result {
+/// open(2) with EINTR retried.
+fn open_flags(path: &Bytes, flags: i64, mode: i64) -> Result<i64, i64> ! {io} {
+    loop {
+        match sys.openat(path, flags, mode) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(fd) => { return Result.Ok(fd); },
+        }
+    }
+}
+
+fn opened(path: &Bytes, flags: i64, mode: i64) -> Result<File, i64> ! {io} {
+    match open_flags(path, flags, mode) {
         Result.Ok(fd) => Result.Ok(File { fd: fd }),
         Result.Err(code) => Result.Err(code),
     }
@@ -22,64 +36,126 @@ fn opened(result: Result<i64, i64>) -> Result<File, i64> ! {} {
 
 /// Open an existing file for reading.
 pub fn open_read(path: &Bytes) -> Result<File, i64> ! {io} {
-    opened(FS.open(path, 0))
+    opened(path, sys.O_RDONLY(), 0)
 }
 
 /// Open a file for reading and writing, creating it (mode 0666 minus the
 /// umask) if it does not exist. Existing contents are kept.
 pub fn open_write(path: &Bytes) -> Result<File, i64> ! {io} {
-    opened(FS.open(path, 1))
+    opened(path, sys.O_RDWR() | sys.O_CREAT(), 438)
 }
 
 /// Open an existing file for reading and writing; a missing file is ENOENT (2).
 pub fn open_existing(path: &Bytes) -> Result<File, i64> ! {io} {
-    opened(FS.open(path, 2))
+    opened(path, sys.O_RDWR(), 0)
 }
 
 /// Create a new file (mode 0600) for reading and writing. An existing path,
 /// including a symlink, is EEXIST (17).
 pub fn create_new(path: &Bytes) -> Result<File, i64> ! {io} {
-    opened(FS.open(path, 3))
+    opened(path, sys.O_RDWR() | sys.O_CREAT() | sys.O_EXCL(), 384)
 }
 
 /// Append up to `length` bytes read at `offset` to `buffer`. Fewer bytes are
 /// read only at the end of the file. The buffer must have room for `length`
 /// more bytes (EFBIG, 27, otherwise); on any error it is freed.
 pub fn read_at(file: &File, offset: i64, length: i64, buffer: Bytes) -> Result<Bytes, i64> ! {io} {
-    FS.read_at(file.fd, offset, length, buffer)
+    // Arithmetic below wraps only where these guards make it exact, so the
+    // signatures need no `panic` effect.
+    if offset < 0 || length < 0 || length > Int.wrapping_sub::<i64>(i64.MAX, offset) {
+        return Result.Err(22);
+    }
+    if length > Int.wrapping_sub::<i64>(Bytes.capacity(&buffer), Bytes.len(&buffer)) {
+        return Result.Err(27);
+    }
+    let mut buffer = buffer;
+    let mut done = 0;
+    while done < length {
+        let before = Bytes.len(&buffer);
+        match sys.read(file.fd, buffer, Int.wrapping_sub::<i64>(length, done), Int.wrapping_add::<i64>(offset, done)) {
+            Result.Err(code) => { return Result.Err(code); },
+            Result.Ok(next) => {
+                let received = Int.wrapping_sub::<i64>(Bytes.len(&next), before);
+                buffer = next;
+                if received == 0 { return Result.Ok(buffer); }
+                done = Int.wrapping_add::<i64>(done, received);
+            }
+        }
+    }
+    Result.Ok(buffer)
 }
 
 /// Write all of `data` at `offset`, extending the file if needed. Returns the
 /// number of bytes written, always the length of `data`.
 pub fn write_at(file: &File, offset: i64, data: &Bytes) -> Result<i64, i64> ! {io} {
-    FS.write_at(file.fd, offset, data)
+    let length = Bytes.len(data);
+    if offset < 0 || length > Int.wrapping_sub::<i64>(i64.MAX, offset) { return Result.Err(22); }
+    let mut done = 0;
+    while done < length {
+        match sys.write(file.fd, data, done, Int.wrapping_add::<i64>(offset, done)) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(written) => {
+                if written == 0 { return Result.Err(5); }
+                done = Int.wrapping_add::<i64>(done, written);
+            }
+        }
+    }
+    Result.Ok(length)
+}
+
+/// fsync(2) with EINTR retried.
+fn fsync_fd(fd: i64) -> Result<Unit, i64> ! {io} {
+    loop {
+        match sys.fsync(fd) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(_) => { return Result.Ok(()); },
+        }
+    }
 }
 
 /// Flush the file's data and metadata to stable storage (`fsync`).
 pub fn sync(file: &File) -> Result<Unit, i64> ! {io} {
-    FS.sync(file.fd)
+    fsync_fd(file.fd)
 }
 
 /// Set the file's length, cutting or zero-extending it.
 pub fn truncate(file: &File, length: i64) -> Result<Unit, i64> ! {io} {
-    FS.truncate(file.fd, length)
+    loop {
+        match sys.ftruncate(file.fd, length) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(_) => { return Result.Ok(()); },
+        }
+    }
 }
 
 /// The file's current length in bytes.
 pub fn size(file: &File) -> Result<i64, i64> ! {io} {
-    FS.file_size(file.fd)
+    sys.fstat_size(file.fd)
 }
 
 /// Close the file. The descriptor is released even when an error (such as a
 /// delayed write failure) is reported.
 pub fn close(file: File) -> Result<Unit, i64> ! {io} {
     match file {
-        File { fd } => FS.close(fd),
+        File { fd } => sys.close(fd),
     }
 }
 
 /// Make a rename or creation inside directory `path` durable (`fsync` on the
 /// directory).
 pub fn sync_dir(path: &Bytes) -> Result<Unit, i64> ! {io} {
-    FS.sync_dir(path)
+    match open_flags(path, sys.O_RDONLY() | sys.O_DIRECTORY(), 0) {
+        Result.Err(code) => Result.Err(code),
+        Result.Ok(fd) => {
+            let synced = fsync_fd(fd);
+            let _ = sys.close(fd);
+            synced
+        }
+    }
 }

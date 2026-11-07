@@ -4354,6 +4354,192 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         data.extend_from_slice(bytes);
         None
     }
+    /// Reference shims for the `kush_sys_*` stubs that `std.sys` imports
+    /// (EVAL-FOREIGN-SHIMS), keyed by symbol like Miri's foreign-function
+    /// shims. Descriptors live in the same never-reused table as `FS.open`,
+    /// so a stale descriptor is `EBADF` here. Any other foreign symbol is
+    /// still rejected by the caller.
+    fn sys_call(
+        &mut self,
+        symbol: &str,
+        shape: ResultShape,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value> {
+        use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
+        self.fuel = self
+            .fuel
+            .checked_sub(1)
+            .ok_or_else(|| Diagnostic::new(span, "reference host computation budget exhausted"))?;
+        let internal =
+            || Diagnostic::new(span, format!("internal error: bad arguments to {symbol}"));
+        let code = |result: io::Result<i64>| match result {
+            Ok(value) => (0, value),
+            Err(error) => (io_error_code(&error), 0),
+        };
+        // A path with a NUL byte cannot reach the OS: EINVAL, like the stub.
+        let path = |this: &Self, value: &Value| -> Result<io::Result<PathBuf>> {
+            let bytes = this.borrowed_bytes(value).ok_or_else(internal)?;
+            Ok(if bytes.contains(&0) {
+                Err(io::Error::from_raw_os_error(22))
+            } else {
+                Ok(path_from_bytes(&bytes))
+            })
+        };
+        let files = Arc::clone(&self.host.files);
+        let with_file = |fd: i64, f: &dyn Fn(&fs::File) -> io::Result<i64>| {
+            match files.lock().unwrap().open.get(&fd) {
+                None => (9, 0), // EBADF
+                Some(file) => code(f(file)),
+            }
+        };
+        let (status, value) = match symbol {
+            "kush_sys_openat" => {
+                let (flags, mode) = (args[1].scalar(), args[2].scalar());
+                match path(self, &args[0])? {
+                    Err(error) => code(Err(error)),
+                    Ok(path) => {
+                        let mut options = OpenOptions::new();
+                        match flags & 3 {
+                            0 => options.read(true),
+                            1 => options.write(true),
+                            _ => options.read(true).write(true),
+                        };
+                        options
+                            .create(flags & 64 != 0)
+                            .create_new(flags & 64 != 0 && flags & 128 != 0)
+                            .truncate(flags & 512 != 0)
+                            .append(flags & 1024 != 0)
+                            .custom_flags((flags & !(3 | 64 | 128 | 512 | 1024)) as i32)
+                            .mode(mode as u32);
+                        match options.open(path) {
+                            Ok(file) => {
+                                let mut table = self.host.files.lock().unwrap();
+                                table.next = table.next.max(2) + 1;
+                                let handle = table.next;
+                                table.open.insert(handle, file);
+                                (0, handle)
+                            }
+                            Err(error) => code(Err(error)),
+                        }
+                    }
+                }
+            }
+            "kush_sys_close" => match self
+                .host
+                .files
+                .lock()
+                .unwrap()
+                .open
+                .remove(&args[0].scalar())
+            {
+                Some(_) => (0, 0),
+                None => (9, 0),
+            },
+            "kush_sys_fsync" => with_file(args[0].scalar(), &|file| file.sync_all().map(|()| 0)),
+            "kush_sys_ftruncate" => {
+                let length = args[1].scalar();
+                with_file(args[0].scalar(), &|file| {
+                    if length < 0 {
+                        return Err(io::Error::from_raw_os_error(22));
+                    }
+                    file.set_len(length as u64).map(|()| 0)
+                })
+            }
+            "kush_sys_fstat_size" => with_file(args[0].scalar(), &|file| {
+                file.metadata().map(|m| m.len().min(i64::MAX as u64) as i64)
+            }),
+            "kush_sys_write" => {
+                let data = self.borrowed_bytes(&args[1]).ok_or_else(internal)?;
+                let (start, offset) = (args[2].scalar(), args[3].scalar());
+                with_file(args[0].scalar(), &|file| {
+                    if start < 0 || start as usize > data.len() {
+                        return Err(io::Error::from_raw_os_error(22));
+                    }
+                    let tail = &data[start as usize..];
+                    let written = if offset < 0 {
+                        io::Write::write(&mut &*file, tail)
+                    } else {
+                        file.write_at(tail, offset as u64)
+                    };
+                    written.map(|count| count as i64)
+                })
+            }
+            "kush_sys_read" => {
+                // Like the stub: append into spare capacity, retry EINTR,
+                // free the buffer on failure.
+                let (fd, length, offset) = (args[0].scalar(), args[2].scalar(), args[3].scalar());
+                let (id, mut data, capacity) = self.take_buffer(&args[1]).ok_or_else(internal)?;
+                let start = data.len();
+                let status = if length < 0 {
+                    22
+                } else if length as u64 > (capacity - start) as u64 {
+                    27 // EFBIG
+                } else {
+                    data.resize(start + length as usize, 0);
+                    let table = self.host.files.lock().unwrap();
+                    let (status, received) = match table.open.get(&fd) {
+                        None => (9, 0), // EBADF
+                        Some(file) => loop {
+                            let target = &mut data[start..];
+                            let result = if offset < 0 {
+                                io::Read::read(&mut &*file, target)
+                            } else {
+                                file.read_at(target, offset as u64)
+                            };
+                            match result {
+                                Ok(count) => break (0, count),
+                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                                Err(error) => break (io_error_code(&error), 0),
+                            }
+                        },
+                    };
+                    data.truncate(start + received);
+                    status
+                };
+                if status != 0 {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                return Ok(self.host_result(shape, 0, Value::Owned(id)));
+            }
+            "kush_sys_unlink" | "kush_sys_rmdir" => match path(self, &args[0])? {
+                Err(error) => code(Err(error)),
+                Ok(path) if symbol == "kush_sys_unlink" => code(fs::remove_file(path).map(|()| 0)),
+                Ok(path) => code(fs::remove_dir(path).map(|()| 0)),
+            },
+            "kush_sys_mkdir" => {
+                let mode = args[1].scalar() as u32;
+                match path(self, &args[0])? {
+                    Err(error) => code(Err(error)),
+                    Ok(path) => code(fs::DirBuilder::new().mode(mode).create(path).map(|()| 0)),
+                }
+            }
+            "kush_sys_rename" => match (path(self, &args[0])?, path(self, &args[1])?) {
+                (Ok(from), Ok(to)) => code(fs::rename(from, to).map(|()| 0)),
+                (Err(error), _) | (_, Err(error)) => code(Err(error)),
+            },
+            "kush_sys_stat" => {
+                let field = args[1].scalar();
+                match path(self, &args[0])? {
+                    Err(error) => code(Err(error)),
+                    Ok(path) => code(fs::metadata(path).and_then(|m| match field {
+                        0 => Ok(i64::from(m.mode())),
+                        1 => Ok(m.len().min(i64::MAX as u64) as i64),
+                        _ => Err(io::Error::from_raw_os_error(22)),
+                    })),
+                }
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    span,
+                    format!("the reference interpreter has no shim for '{symbol}'"),
+                ));
+            }
+        };
+        Ok(self.host_result(shape, status, Value::Scalar(value)))
+    }
     /// Reference implementation of the checked host operations. Its observable
     /// contract (buffer ownership, errno values, bounded reads, explicit
     /// timeouts) mirrors the generated native runtime; the two implementations
@@ -6189,16 +6375,23 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         self.call(*index, physical)?
                     }
                     Target::Foreign(index) => {
-                        let function = &self.program.foreign_functions[*index]
+                        let function = self.program.foreign_functions[*index]
                             .as_ref()
                             .expect("checked foreign target");
-                        return Err(Diagnostic::new(
-                            expr.span,
-                            format!(
-                                "foreign C function '{}' can only be executed by the native backend (kush build/run); the bounded reference interpreter rejects host FFI instead of guessing its behavior",
-                                function.symbol
-                            ),
-                        ));
+                        if let (Some(shape), true) =
+                            (function.fallible, function.symbol.starts_with("kush_sys_"))
+                        {
+                            let symbol = function.symbol.clone();
+                            self.sys_call(&symbol, shape, values, expr.span)?
+                        } else {
+                            return Err(Diagnostic::new(
+                                expr.span,
+                                format!(
+                                    "foreign C function '{}' can only be executed by the native backend (kush build/run); the bounded reference interpreter rejects host FFI instead of guessing its behavior",
+                                    function.symbol
+                                ),
+                            ));
+                        }
                     }
                     Target::DynCall { spec, .. } => {
                         let spec = self.program.dyn_calls[*spec].clone();

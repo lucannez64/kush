@@ -26,13 +26,34 @@ convention (return -1, set `errno`) into the bridge ABI (status plus out slot).
 - `kush build --lib` accepts `kush_sys_*` imports, since the runtime ships in
   the archive.
 
+## Reading into a buffer (FOREIGN-BYTES-FILL)
+
+A `kush_sys_*` import may take an owned `Bytes` (user foreign functions still
+cannot). `sys.read(fd, buffer, length, offset)` makes one `read`/`pread` into
+the buffer's spare capacity and returns it through `Result<Bytes, i64>` with
+its length advanced, or frees it on failure, like the `FS.read_at` builtin.
+Because a failed call loses the buffer, this stub retries `EINTR` itself.
+
+## Reference evaluator (EVAL-FOREIGN-SHIMS)
+
+`kush eval` runs `kush_sys_*` calls through a shim table in `eval.rs`, keyed
+by symbol like Miri's foreign-function shims. Descriptors share the
+evaluator's never-reused file table with `FS.open`, so a stale descriptor is
+`EBADF`. Any other foreign call is still rejected there.
+
 ## Status
 
-Declared: `openat`, `close`, `fsync`, `ftruncate`, `fstat_size`, `write`
-(`pwrite` when `offset >= 0`), `unlink`, `mkdir`, `rmdir`, `rename`, `stat`
-(mode or size), plus open flags and `st_mode` constants.
+Declared: `openat`, `close`, `fsync`, `ftruncate`, `fstat_size`, `read`
+(`pread` when `offset >= 0`), `write` (`pwrite` when `offset >= 0`),
+`unlink`, `mkdir`, `rmdir`, `rename`, `stat` (mode or size), plus open flags
+and `st_mode` constants.
 
-Not yet: reads into a buffer's spare capacity (FOREIGN-BYTES-FILL), the
-reference evaluator still rejects foreign calls (EVAL-FOREIGN-SHIMS), and the
-`IO.*`/`FS.*`/`ENV.*` builtins are still compiler builtins until std is
-rewritten over these calls. Tests: `crates/kush/tests/std_sys.rs`.
+[`std.file`](../crates/kush/std/file.kush) is written over these calls: its
+EINTR retries, full-length read and write loops and the `sync_dir` open,
+fsync, close sequence are Kush code, and its arithmetic wraps only behind
+guards, so the public signatures still need only `io`.
+
+Not yet: `IO.*`, `FS.*` (path operations, listing), `ENV.*`, `TIME.*`,
+`PROC.*`, `NET.*` and `OS.*` are still compiler builtins (STD-IO-IN-KUSH,
+STD-FS-IN-KUSH, STD-ENV-IN-KUSH, HOST-BUILTINS-REMOVE). Tests:
+`crates/kush/tests/std_sys.rs`, `crates/kush/tests/std_file.rs`.

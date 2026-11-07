@@ -42,3 +42,9 @@ pub foreign "kush_sys_rmdir" fn rmdir(path: &Bytes) -> Result<Unit, i64> ! {io};
 pub foreign "kush_sys_rename" fn rename(from: &Bytes, to: &Bytes) -> Result<Unit, i64> ! {io};
 /// stat(2) one field: 0 = st_mode, 1 = st_size.
 pub foreign "kush_sys_stat" fn stat(path: &Bytes, field: i64) -> Result<i64, i64> ! {io};
+/// One read of up to `length` bytes into `buffer`'s spare capacity, at
+/// `offset` (pread) or at the file position when `offset` is negative. The
+/// buffer comes back with its length advanced (unchanged at end of file), or
+/// is freed on failure; EINTR is retried inside, since a failed call loses
+/// the buffer. EFBIG when the buffer lacks room for `length` more bytes.
+pub foreign "kush_sys_read" fn read(fd: i64, buffer: Bytes, length: i64, offset: i64) -> Result<Bytes, i64> ! {io};

@@ -1416,6 +1416,30 @@ int64_t kush_sys_write(int64_t fd, const uint8_t *data, int64_t length, int64_t 
     *out = (int64_t)written;
     return 0;
 }
+/* One read of up to `length` bytes into the spare capacity of the owned
+   buffer (FOREIGN-BYTES-FILL), at `offset` (pread) or at the file position
+   when `offset` < 0 (read). The buffer comes back through `out` with its
+   length advanced, or is freed on failure, so EINTR is retried here: the
+   caller cannot retry with a buffer it no longer has. Room for `length` more
+   bytes is required up front (EFBIG otherwise). */
+int64_t kush_sys_read(int64_t fd, uint64_t buffer_handle, int64_t length, int64_t offset, uint64_t *out) {
+    KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
+    int64_t code = 0;
+    if (length < 0) code = EINVAL;
+    else if ((uint64_t)length > b->capacity - b->length) code = EFBIG;
+    ssize_t received = 0;
+    while (code == 0) {
+        received = offset < 0
+            ? read((int)fd, b->data + b->length, (size_t)length)
+            : pread((int)fd, b->data + b->length, (size_t)length, (off_t)offset);
+        if (received >= 0) break;
+        if (errno != EINTR) code = errno;
+    }
+    if (code != 0) { kush_bytes_free(buffer_handle); return code; }
+    b->length += (uint64_t)received;
+    *out = buffer_handle;
+    return 0;
+}
 int64_t kush_sys_unlink(const uint8_t *path, int64_t path_len) {
     int code = 0;
     char *text = kush_sys_path(path, path_len, &code);

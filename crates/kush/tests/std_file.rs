@@ -1,6 +1,6 @@
 //! STD-FILE: `std.file.File`, a linear open file with positioned reads and
-//! writes, `fsync`, truncation and size, over the `FS.open`/`FS.read_at`/...
-//! host calls. The reference evaluator and native builds must agree on the
+//! writes, `fsync`, truncation and size, over the one-syscall `std.sys` layer.
+//! The reference evaluator and native builds must agree on the
 //! output, the errno values and the file left on disk; the evaluator must
 //! free every buffer.
 
@@ -170,6 +170,40 @@ fn open_modes_and_errors() {
         }}"
     ));
     assert_eq!(output, "-2\n-2\n0\n-17\n0\n-22\n-9\n-27\n-22\n0\n");
+}
+
+/// HOST-IN-STD: read_at is a Kush loop over one-syscall `std.sys.read`.
+/// It appends after existing bytes, stops short at end of file, and rejects
+/// an offset whose end would overflow (instead of wrapping to "use the file
+/// position").
+#[test]
+fn read_at_appends_and_rejects_overflowing_offsets() {
+    let (output, _) = agree(&format!(
+        "{PRELUDE}
+        fn main() -> i64 ! {{io, alloc, panic}} {{
+            let path = Bytes.from(\"@DIR@/r\");
+            let f = match file.open_write(&path) {{ Result.Ok(f) => f, Result.Err(e) => return e }};
+            show(code(file.write_at(&f, 0, &Bytes.from(\"abcdef\"))));
+            let mut buffer = Bytes.with_capacity(16);
+            buffer = Bytes.push(buffer, 62);
+            match file.read_at(&f, 2, 3, buffer) {{
+                Result.Ok(b) => {{ show(Bytes.len(&b)); show(Bytes.get(&b, 0)); show(Bytes.get(&b, 3)); drop(b); }},
+                Result.Err(e) => show(-e),
+            }}
+            match file.read_at(&f, 4, 10, Bytes.with_capacity(10)) {{
+                Result.Ok(b) => {{ show(Bytes.len(&b)); drop(b); }},
+                Result.Err(e) => show(-e),
+            }}
+            match file.read_at(&f, i64.MAX, 1, Bytes.with_capacity(1)) {{
+                Result.Ok(b) => {{ show(Bytes.len(&b)); drop(b); }},
+                Result.Err(e) => show(-e),
+            }}
+            show(code(file.write_at(&f, i64.MAX, &Bytes.from(\"z\"))));
+            show(unit(file.close(f)));
+            0
+        }}"
+    ));
+    assert_eq!(output, "6\n4\n62\n101\n2\n-22\n-22\n0\n");
 }
 
 #[test]
