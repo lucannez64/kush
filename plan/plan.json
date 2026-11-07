@@ -5187,9 +5187,9 @@
       "deps": [
         "GPU-DESIGN"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Accept #[gpu] next to noalloc/nosuspend; reject non-GPU types, effects and calls to non-#[gpu] functions with exact diagnostics; GpuBuf<T> type with packed 4-byte elements.",
-      "commit": null,
+      "commit": "e6e7c15",
       "log": [
         {
           "time": "2026-11-07 03:27:39",
@@ -5200,6 +5200,16 @@
           "time": "2026-11-07 03:46:52",
           "who": "agent",
           "text": "#[gpu] attribute, GpuBuf<T> (i32/u32/f32), GpuBuf.len/get/set, allowlist pass in gpu.rs (types, IR forms, builtins, gpu-only calls, acyclic call graph), CPU-side rejections; 18 tests. Full local suite passed; Boat check running."
+        },
+        {
+          "time": "2026-11-07 03:57:40",
+          "who": "agent",
+          "text": "Boat check passed (fmt, tests, clippy)."
+        },
+        {
+          "time": "2026-11-07 03:57:40",
+          "who": "agent",
+          "text": "done e6e7c15"
         }
       ]
     },
