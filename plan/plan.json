@@ -5098,10 +5098,16 @@
         "FOREIGN-BYTES-FILL",
         "EVAL-FOREIGN-SHIMS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Args, environment variables, strerror and other host queries as Kush code in std.",
-      "commit": null,
-      "log": []
+      "commit": "6ebef79",
+      "log": [
+        {
+          "time": "2026-11-07 02:21:12",
+          "who": "agent",
+          "text": "done 6ebef79"
+        }
+      ]
     },
     {
       "id": "HOST-BUILTINS-REMOVE",
@@ -5111,10 +5117,26 @@
       "deps": [
         "STD-IO-IN-KUSH",
         "STD-FS-IN-KUSH",
-        "STD-ENV-IN-KUSH"
+        "STD-ENV-IN-KUSH",
+        "STD-PROC-NET-IN-KUSH"
       ],
       "status": "todo",
       "desc": "Delete IO/FS/ENV/OS special cases from checker, evaluator and C runtime. Builtins left are those the backend must lower (Bytes layout, atomics, allocation, panics). Update docs/stdio.md and docs/host-api.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "STD-PROC-NET-IN-KUSH",
+      "title": "PROC.run and NET.tcp_exchange in std over std.sys",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "STD-SYS-FOREIGN",
+        "FOREIGN-BYTES-FILL",
+        "EVAL-FOREIGN-SHIMS"
+      ],
+      "status": "todo",
+      "desc": "Subprocess (fork/exec, pipe, poll with timeout, wait) and TCP exchange (getaddrinfo, connect, send, poll/recv with timeout) as Kush loops over one-call stubs; the timeout and partial-read logic moves into std.",
       "commit": null,
       "log": []
     }
