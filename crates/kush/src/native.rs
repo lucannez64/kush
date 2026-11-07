@@ -1536,6 +1536,84 @@ int64_t kush_sys_stat(const uint8_t *path, int64_t path_len, int64_t field, int6
     else return EINVAL;
     return 0;
 }
+/* Append `length` bytes to an owned buffer, or free it: EFBIG when full. */
+static int64_t kush_sys_append_owned(uint64_t buffer_handle, const char *text, uint64_t *out) {
+    KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
+    uint64_t length = (uint64_t)strlen(text);
+    if (b->length > b->capacity || length > b->capacity - b->length) {
+        kush_bytes_free(buffer_handle);
+        return EFBIG;
+    }
+    memcpy(b->data + b->length, text, (size_t)length);
+    b->length += length;
+    *out = buffer_handle;
+    return 0;
+}
+int64_t kush_sys_argc(int64_t *out) {
+    *out = kush_host_argc < 0 ? 0 : kush_host_argc;
+    return 0;
+}
+/* Append argv[index]; ENOENT when out of range. */
+int64_t kush_sys_argv(int64_t index, uint64_t buffer_handle, uint64_t *out) {
+    if (index < 0 || index >= (int64_t)kush_host_argc || kush_host_argv == NULL) {
+        kush_bytes_free(buffer_handle);
+        return ENOENT;
+    }
+    return kush_sys_append_owned(buffer_handle, kush_host_argv[index], out);
+}
+/* Number of environ entries of the form NAME=VALUE. */
+int64_t kush_sys_environ_count(int64_t *out) {
+    int64_t count = 0;
+    if (environ != NULL) {
+        for (char **entry = environ; *entry != NULL; ++entry) {
+            if (strchr(*entry, '=') != NULL) ++count;
+        }
+    }
+    *out = count;
+    return 0;
+}
+/* getenv(3), appending the value; ENOENT when unset. */
+int64_t kush_sys_getenv(const uint8_t *name, int64_t name_len, uint64_t buffer_handle, uint64_t *out) {
+    int code = 0;
+    char *text = kush_sys_path(name, name_len, &code);
+    if (text == NULL) { kush_bytes_free(buffer_handle); return code; }
+    const char *value = getenv(text);
+    free(text);
+    if (value == NULL) { kush_bytes_free(buffer_handle); return ENOENT; }
+    return kush_sys_append_owned(buffer_handle, value, out);
+}
+/* clock_gettime(2): clock 0 = realtime, 1 = monotonic; field 0 = whole
+   seconds, 1 = nanoseconds since the clock's origin (EOVERFLOW if huge). */
+int64_t kush_sys_clock_gettime(int64_t clock, int64_t field, int64_t *out) {
+    struct timespec now;
+    if (clock != 0 && clock != 1) return EINVAL;
+    if (clock_gettime(clock == 0 ? CLOCK_REALTIME : CLOCK_MONOTONIC, &now) != 0) return errno;
+    if (field == 0) { *out = (int64_t)now.tv_sec; return 0; }
+    if (field != 1) return EINVAL;
+    if (now.tv_sec < 0 || (uint64_t)now.tv_sec > (uint64_t)INT64_MAX / UINT64_C(1000000000)) return EOVERFLOW;
+    uint64_t seconds = (uint64_t)now.tv_sec * UINT64_C(1000000000);
+    if (seconds > (uint64_t)INT64_MAX - (uint64_t)now.tv_nsec) return EOVERFLOW;
+    *out = (int64_t)(seconds + (uint64_t)now.tv_nsec);
+    return 0;
+}
+/* nanosleep(2) for `milliseconds` >= 0, resuming with the remaining time
+   after EINTR (the kernel reports it; a caller-side retry would restart). */
+int64_t kush_sys_nanosleep(int64_t milliseconds) {
+    if (milliseconds < 0) return EINVAL;
+    struct timespec request;
+    request.tv_sec = (time_t)(milliseconds / 1000);
+    request.tv_nsec = (long)((milliseconds % 1000) * 1000000);
+    while (nanosleep(&request, &request) != 0) {
+        if (errno != EINTR) return errno;
+    }
+    return 0;
+}
+/* strerror(3) text for 0 <= code <= 4095, appended. */
+int64_t kush_sys_strerror(int64_t code, uint64_t buffer_handle, uint64_t *out) {
+    if (code < 0 || code > 4095) { kush_bytes_free(buffer_handle); return EINVAL; }
+    const char *text = strerror((int)code);
+    return kush_sys_append_owned(buffer_handle, text == NULL ? "Unknown error" : text, out);
+}
 static int kush_host_open(const char *path, int flags, int with_mode, mode_t mode) {
     for (;;) {
         int fd = with_mode ? open(path, flags, mode) : open(path, flags);

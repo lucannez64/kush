@@ -907,3 +907,77 @@ fn main() -> i64 ! {io, alloc, panic} {
 fn std_fs_edge_cases_match_the_builtins() {
     std_fs_matches_builtins(STD_FS_EDGES, |_| {});
 }
+
+/// STD-ENV-IN-KUSH: the program through `std.env`, `std.time` and `std.os`
+/// must print what the `ENV.*`/`TIME.*`/`OS.*` builtins print, natively too.
+fn std_env_matches_builtins(source: &str, arguments: &[String], environment: &[(String, String)]) {
+    let library = format!(
+        "use std.env;\nuse std.time;\nuse std.os;\n{}",
+        source
+            .replace("ENV.", "env.")
+            .replace("TIME.", "time.")
+            .replace("OS.", "os.")
+    );
+    let builtin = reference(source, arguments, environment);
+    let ported = reference(&library, arguments, environment);
+    assert_eq!(
+        (ported.status, String::from_utf8_lossy(&ported.output)),
+        (builtin.status, String::from_utf8_lossy(&builtin.output)),
+    );
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let root = unique_directory("env-native");
+        let actual = native(&library, arguments, environment, &root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            (actual.status, String::from_utf8_lossy(&actual.output)),
+            (builtin.status, String::from_utf8_lossy(&builtin.output)),
+        );
+    }
+}
+
+#[test]
+fn std_env_matches_the_builtins() {
+    std_env_matches_builtins(
+        ENVIRONMENT,
+        &[
+            "alpha".to_owned(),
+            "two words".to_owned(),
+            "".to_owned(),
+            "z".repeat(80),
+        ],
+        &[("KUSH_HOST_TEST".to_owned(), "value".to_owned())],
+    );
+}
+
+#[test]
+fn std_time_and_os_match_the_builtins() {
+    std_env_matches_builtins(TIME_AND_ERRORS, &[], &[]);
+}
+
+const STD_ENV_EDGES: &str = r#"
+use std.result.Result;
+
+fn main() -> i64 ! {io, alloc, panic} {
+    print_i64(match ENV.arg(-1, Bytes.with_capacity(8)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
+    print_i64(match ENV.arg(1, Bytes.with_capacity(2)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
+    print_i64(match ENV.var(&Bytes.from("A\0B"), Bytes.with_capacity(8)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
+    print_i64(match ENV.var(&Bytes.from("KUSH_HOST_TEST"), Bytes.with_capacity(2)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
+    let mut prefix = Bytes.with_capacity(16);
+    prefix = Bytes.push(prefix, 61);
+    print_i64(match ENV.var(&Bytes.from("KUSH_HOST_TEST"), prefix) { Ok(b) => { let n = Bytes.len(&b); drop(b); n }, Err(e) => -e });
+    print_i64(match OS.strerror(4096, Bytes.with_capacity(64)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
+    print_i64(match OS.strerror(2, Bytes.with_capacity(3)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
+    print_i64(match TIME.sleep_ms(0) { Ok(_) => 0, Err(e) => e });
+    0
+}
+"#;
+
+#[test]
+fn std_env_edge_cases_match_the_builtins() {
+    std_env_matches_builtins(
+        STD_ENV_EDGES,
+        &["three".to_owned()],
+        &[("KUSH_HOST_TEST".to_owned(), "value".to_owned())],
+    );
+}

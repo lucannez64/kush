@@ -1,0 +1,9 @@
+module std.os;
+
+// Operating-system messages (STD-ENV-IN-KUSH), over `std.sys`.
+
+use std.result.Result;
+use std.sys;
+
+/// Append the host's message for errno `code` (0..4095, EINVAL otherwise).
+pub fn strerror(code: i64, buffer: Bytes) -> Result<Bytes, i64> ! {io} { sys.strerror(code, buffer) }

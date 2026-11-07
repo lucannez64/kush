@@ -117,6 +117,9 @@ error.
 
 ## Arguments and environment
 
+These are also library code: `std.env` (`env.arg`, ...), `std.time` and
+`std.os` mirror `ENV.*`, `TIME.*` and `OS.*` over [`std.sys`](std-sys.md).
+
 Native executables read the real process arguments and environment. `argv[0]`
 is the executable path, so application arguments conventionally start at index
 1. The project workflow already forwards arguments after `--` unchanged through

@@ -47,7 +47,10 @@ Declared: `openat`, `close`, `fsync`, `ftruncate`, `fstat_size`, `read`
 (`pread` when `offset >= 0`), `probe` (read and discard one byte), `write`
 (`pwrite` when `offset >= 0`), `unlink`, `mkdir`, `rmdir`, `rename`, `stat`
 (mode or size), `opendir`/`readdir`/`closedir`, plus open flags and
-`st_mode` constants. `readdir` skips `.` and `..` and appends `name\n`, so a
+`st_mode` constants; `argc`/`argv`, `environ_count`/`getenv`,
+`clock_gettime` (realtime or monotonic, seconds or nanoseconds),
+`nanosleep` (resumes after EINTR with the time left) and `strerror`.
+`readdir` skips `.` and `..` and appends `name\n`, so a
 listing needs no allocation or panic effect.
 
 [`std.file`](../crates/kush/std/file.kush) is written over these calls: its
@@ -62,8 +65,18 @@ guards, so the public signatures still need only `io`.
 run the `FS.*` test programs with `FS.` replaced by `fs.` and require the
 same output as the builtins in both backends.
 
-Not yet: the `FS.*` builtins still exist next to `std.fs`; `IO.*`, `ENV.*`,
-`TIME.*`, `PROC.*`, `NET.*` and `OS.*` are still compiler builtins
-(STD-IO-IN-KUSH, STD-ENV-IN-KUSH, HOST-BUILTINS-REMOVE). Tests:
+[`std.env`](../crates/kush/std/env.kush) (`arg_count`, `arg`, `var_count`,
+`var`), [`std.time`](../crates/kush/std/time.kush) (`unix_seconds`,
+`monotonic_ns`, `sleep_ms`) and [`std.os`](../crates/kush/std/os.kush)
+(`strerror`) replace `ENV.*`, `TIME.*` and `OS.*` the same way. These were
+already thin, so they are mostly one call each; what changes is that they
+go through the foreign mechanism instead of compiler special cases. The
+reference evaluator's shims read the injected `Host` arguments, environment
+and clock origin, so `Host::new` tests stay deterministic.
+
+Not yet: the `FS.*`, `ENV.*`, `TIME.*` and `OS.*` builtins still exist next
+to their std modules; `IO.*` (STD-IO-IN-KUSH), `PROC.*` and `NET.*`
+(STD-PROC-NET-IN-KUSH) are still compiler builtins only; removal is
+HOST-BUILTINS-REMOVE. Tests:
 `crates/kush/tests/std_sys.rs`, `crates/kush/tests/std_file.rs`,
-`crates/kush/tests/host_api.rs` (`std_fs_*`).
+`crates/kush/tests/host_api.rs` (`std_fs_*`, `std_env_*`, `std_time_*`).

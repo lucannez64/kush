@@ -1,0 +1,16 @@
+module std.time;
+
+// Clocks and sleeping (STD-ENV-IN-KUSH), over `std.sys`. Same signatures
+// and errno results as the `TIME.*` builtins.
+
+use std.result.Result;
+use std.sys;
+
+/// Whole seconds since the Unix epoch.
+pub fn unix_seconds() -> Result<i64, i64> ! {io} { sys.clock_gettime(0, 0) }
+
+/// Nanoseconds from an arbitrary fixed origin; never decreases.
+pub fn monotonic_ns() -> Result<i64, i64> ! {io} { sys.clock_gettime(1, 1) }
+
+/// Block the thread for `milliseconds`; a negative duration is EINVAL (22).
+pub fn sleep_ms(milliseconds: i64) -> Result<Unit, i64> ! {io} { sys.nanosleep(milliseconds) }

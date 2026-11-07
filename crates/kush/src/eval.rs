@@ -4574,6 +4574,80 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.heap.insert(id, Value::Buffer { data, capacity });
                 return Ok(self.host_result(shape, 0, Value::Owned(id)));
             }
+            "kush_sys_argc" => (0, self.host.args.len() as i64),
+            "kush_sys_environ_count" => (0, self.host.environment.len() as i64),
+            "kush_sys_argv" | "kush_sys_getenv" | "kush_sys_strerror" => {
+                // Append a host string to the owned buffer: the injected
+                // argv/environment, or the OS message without Rust's suffix.
+                let (id, mut data, capacity) = self.take_buffer(&args[1]).ok_or_else(internal)?;
+                let text = match symbol {
+                    "kush_sys_argv" => usize::try_from(args[0].scalar())
+                        .ok()
+                        .and_then(|index| self.host.args.get(index))
+                        .cloned()
+                        .ok_or(2),
+                    "kush_sys_getenv" => {
+                        let name = self.borrowed_bytes(&args[0]).ok_or_else(internal)?;
+                        if name.contains(&0) {
+                            Err(22)
+                        } else {
+                            self.host.var(&name).map(<[u8]>::to_vec).ok_or(2)
+                        }
+                    }
+                    _ => {
+                        let code = args[0].scalar();
+                        if (0..=4095).contains(&code) {
+                            let mut text = io::Error::from_raw_os_error(code as i32).to_string();
+                            if let Some(at) = text.rfind(" (os error ") {
+                                text.truncate(at);
+                            }
+                            Ok(text.into_bytes())
+                        } else {
+                            Err(22)
+                        }
+                    }
+                };
+                let status = match text {
+                    Err(status) => status,
+                    Ok(text) => Self::append_bounded(&mut data, capacity, &text).unwrap_or(0),
+                };
+                if status != 0 {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                return Ok(self.host_result(shape, 0, Value::Owned(id)));
+            }
+            "kush_sys_clock_gettime" => match (args[0].scalar(), args[1].scalar()) {
+                (0, 0) => {
+                    let seconds = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                        Ok(duration) => i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+                        Err(error) => {
+                            -i64::try_from(error.duration().as_secs()).unwrap_or(i64::MAX)
+                        }
+                    };
+                    (0, seconds)
+                }
+                (0, 1) => match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(duration) => match i64::try_from(duration.as_nanos()) {
+                        Ok(nanos) => (0, nanos),
+                        Err(_) => (75, 0), // EOVERFLOW
+                    },
+                    Err(_) => (75, 0),
+                },
+                (1, 0) => (0, self.host.monotonic_ns() / 1_000_000_000),
+                (1, 1) => (0, self.host.monotonic_ns()),
+                _ => (22, 0),
+            },
+            "kush_sys_nanosleep" => {
+                let milliseconds = args[0].scalar();
+                if milliseconds < 0 {
+                    (22, 0)
+                } else {
+                    thread::sleep(Duration::from_millis(milliseconds as u64));
+                    (0, 0)
+                }
+            }
             "kush_sys_unlink" | "kush_sys_rmdir" => match path(self, &args[0])? {
                 Err(error) => code(Err(error)),
                 Ok(path) if symbol == "kush_sys_unlink" => code(fs::remove_file(path).map(|()| 0)),
