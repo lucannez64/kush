@@ -5158,9 +5158,9 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "docs/gpu.md: #[gpu] fn subset (scalars, f32/i32/u32, loops, plain enums, buffer indexing; no Box/Vec/closures/dyn/io/alloc/suspend), packed GpuBuf<T> (&=read-only, &mut=read-write), Gpu.id() model, panic-to-error-flag, WGSL mapping, naga validation, wgpu runtime. Needs user approval before code.",
-      "commit": null,
+      "commit": "5369918",
       "log": [
         {
           "time": "2026-11-07 03:20:09",
@@ -5171,6 +5171,11 @@
           "time": "2026-11-07 03:21:16",
           "who": "agent",
           "text": "Draft docs/gpu.md written: #[gpu] subset, packed GpuBuf, synchronous Gpu.run, id-only &mut access, failure flag buffer, WGSL->naga->SPIR-V, C Vulkan runtime via dlopen, evaluator oracle. 5 open questions for the user."
+        },
+        {
+          "time": "2026-11-07 03:27:39",
+          "who": "agent",
+          "text": "done 5369918"
         }
       ]
     },
@@ -5182,10 +5187,16 @@
       "deps": [
         "GPU-DESIGN"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Accept #[gpu] next to noalloc/nosuspend; reject non-GPU types, effects and calls to non-#[gpu] functions with exact diagnostics; GpuBuf<T> type with packed 4-byte elements.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-07 03:27:39",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "GPU-WRITE-DISJOINT",
