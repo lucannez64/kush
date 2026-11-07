@@ -74,9 +74,21 @@ go through the foreign mechanism instead of compiler special cases. The
 reference evaluator's shims read the injected `Host` arguments, environment
 and clock origin, so `Host::new` tests stay deterministic.
 
-Not yet: the `FS.*`, `ENV.*`, `TIME.*` and `OS.*` builtins still exist next
-to their std modules; `IO.*` (STD-IO-IN-KUSH), `PROC.*` and `NET.*`
-(STD-PROC-NET-IN-KUSH) are still compiler builtins only; removal is
-HOST-BUILTINS-REMOVE. Tests:
+[`std.io`](../crates/kush/std/io.kush) replaces `IO.*`: `io.stdin()`,
+`io.stdout()`, `read_all`, `read_line` (one byte per read, so the next line
+stays unread), `read_chunk` and `write`, as loops over `sys.read`,
+`sys.probe` and `sys.write`. Its handle types are `io.Input` and
+`io.Output`, because `Stdin`/`Stdout` are still reserved builtin type
+names. Unlike the builtins, which accept any conventional `Result`
+declaration, `std.io` returns `std.result.Result`. In the reference
+evaluator descriptor 0 reads the injected input and 1 writes the output;
+`io.stdin()` goes through a `kush_sys_stdin` call so the evaluator still
+buffers standard input only for programs that can read it.
+
+Not yet: the `IO.*`, `FS.*`, `ENV.*`, `TIME.*` and `OS.*` builtins still
+exist next to their std modules; `PROC.*` and `NET.*` are still compiler
+builtins only (STD-PROC-NET-IN-KUSH); removal is HOST-BUILTINS-REMOVE. Tests:
 `crates/kush/tests/std_sys.rs`, `crates/kush/tests/std_file.rs`,
-`crates/kush/tests/host_api.rs` (`std_fs_*`, `std_env_*`, `std_time_*`).
+`crates/kush/tests/host_api.rs` (`std_fs_*`, `std_env_*`, `std_time_*`),
+`crates/kush/tests/native_stdio.rs` (every program also runs through
+`std.io`).

@@ -1440,6 +1440,9 @@ int64_t kush_sys_read(int64_t fd, uint64_t buffer_handle, int64_t length, int64_
     *out = buffer_handle;
     return 0;
 }
+/* The standard input descriptor. A separate call (not the constant 0) so the
+   reference evaluator can tell which programs read standard input. */
+int64_t kush_sys_stdin(int64_t *out) { *out = 0; return 0; }
 /* Read and discard up to one byte at the file position: the count tells a
    caller whose buffer is full whether more data follows (EINTR retried). */
 int64_t kush_sys_probe(int64_t fd, int64_t *out) {

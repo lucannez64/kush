@@ -1,0 +1,111 @@
+module std.io;
+
+// Synchronous standard streams (STD-IO-IN-KUSH), as Kush loops over
+// `std.sys`. Same contract as the `IO.*` builtins: reads append to the
+// initialized prefix of the buffer they consume without growing it and free
+// it on failure; EFBIG (27) means the input did not fit.
+
+use std.result.Result;
+use std.sys;
+
+/// The process's standard input (the `Stdin` builtin type keeps that name
+/// until HOST-BUILTINS-REMOVE). Copyable; only this module can make one.
+pub struct Input {
+    fd: i64,
+}
+
+/// The process's standard output. Copyable; only this module can make one.
+pub struct Output {
+    fd: i64,
+}
+
+pub fn stdin() -> Input ! {io} {
+    match sys.stdin() {
+        Result.Ok(fd) => Input { fd: fd },
+        Result.Err(_) => Input { fd: 0 },
+    }
+}
+
+pub fn stdout() -> Output ! {io} { Output { fd: 1 } }
+
+/// Read until end of input. More input than the spare capacity is EFBIG.
+pub fn read_all(input: Input, buffer: Bytes) -> Result<Bytes, i64> ! {io} {
+    let mut buffer = buffer;
+    loop {
+        let before = Bytes.len(&buffer);
+        let spare = Int.wrapping_sub::<i64>(Bytes.capacity(&buffer), before);
+        if spare == 0 {
+            return match sys.probe(input.fd) {
+                Result.Ok(0) => Result.Ok(buffer),
+                Result.Ok(_) => Result.Err(27),
+                Result.Err(code) => Result.Err(code),
+            };
+        }
+        match sys.read(input.fd, buffer, spare, -1) {
+            Result.Err(code) => { return Result.Err(code); },
+            Result.Ok(next) => {
+                buffer = next;
+                if Bytes.len(&buffer) == before { return Result.Ok(buffer); }
+            },
+        }
+    }
+}
+
+/// Whether the last byte of `b` is a newline.
+fn ends_line(b: &Bytes) -> Bool ! {} {
+    let last = Int.wrapping_sub::<i64>(Bytes.len(b), 1);
+    if last >= 0 && last < Bytes.len(b) { Bytes.at(b, last, _) == 10 } else { false }
+}
+
+/// Read one line, including its newline. It reads one byte at a time, so the
+/// next call still sees the following line. At end of input it returns the
+/// partial line, or the buffer unchanged. A line longer than the spare
+/// capacity is EFBIG.
+pub fn read_line(input: Input, buffer: Bytes) -> Result<Bytes, i64> ! {io} {
+    let mut buffer = buffer;
+    loop {
+        let before = Bytes.len(&buffer);
+        if before == Bytes.capacity(&buffer) {
+            return match sys.probe(input.fd) {
+                Result.Ok(0) => Result.Ok(buffer),
+                Result.Ok(_) => Result.Err(27),
+                Result.Err(code) => Result.Err(code),
+            };
+        }
+        match sys.read(input.fd, buffer, 1, -1) {
+            Result.Err(code) => { return Result.Err(code); },
+            Result.Ok(next) => {
+                buffer = next;
+                if Bytes.len(&buffer) == before || ends_line(&buffer) {
+                    return Result.Ok(buffer);
+                }
+            },
+        }
+    }
+}
+
+/// One successful read of whatever is available; zero new bytes means end
+/// of input. A buffer with no spare capacity is EFBIG.
+pub fn read_chunk(input: Input, buffer: Bytes) -> Result<Bytes, i64> ! {io} {
+    let spare = Int.wrapping_sub::<i64>(Bytes.capacity(&buffer), Bytes.len(&buffer));
+    if spare == 0 { return Result.Err(27); }
+    sys.read(input.fd, buffer, spare, -1)
+}
+
+/// Write all of `bytes`; a write that makes no progress is EIO (5).
+pub fn write(output: Output, bytes: &Bytes) -> Result<Unit, i64> ! {io} {
+    let length = Bytes.len(bytes);
+    let mut done = 0;
+    while done < length {
+        match sys.write(output.fd, bytes, done, -1) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(written) => {
+                if written == 0 { return Result.Err(5); }
+                done = Int.wrapping_add::<i64>(done, written);
+            },
+        }
+    }
+    Result.Ok(())
+}

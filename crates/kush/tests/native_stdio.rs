@@ -16,7 +16,7 @@ fn build(source: &str) -> (Scratch, PathBuf) {
     native::build(&executable::check(source).unwrap(), &binary).unwrap();
     (scratch, binary)
 }
-fn compare(source: &str, input: &[u8]) {
+fn compare_once(source: &str, input: &[u8]) -> (i64, Vec<u8>) {
     let program = executable::check(source).unwrap();
     let mut expected_output = Vec::new();
     let (expected_status, stats) = program
@@ -55,6 +55,48 @@ fn compare(source: &str, input: &[u8]) {
         result.stderr.is_empty(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
+    );
+    (expected_status, expected_output)
+}
+
+/// STD-IO-IN-KUSH: the same program through `std.io` (Kush loops over
+/// `std.sys`) instead of the `IO.*` builtins. `std.io` returns
+/// `std.result.Result`, so a local conventional `Result` declaration becomes
+/// that import.
+fn through_std_io(source: &str) -> String {
+    let mut text = source
+        .replace("IO.", "io.")
+        .replace("Stdin", "io.Input")
+        .replace("Stdout", "io.Output");
+    for local in [
+        "enum Result<T, E> { Ok(T), Err(E) }",
+        "enum Result<T,E>{Ok(T),Err(E)}",
+        "enum Result<T,E>{Err(E),Ok(T)}",
+    ] {
+        text = text.replace(local, "use std.result.Result;");
+    }
+    if !text.contains("use std.result.Result;") {
+        text = format!("use std.result.Result;\n{text}");
+    }
+    // `use` items go after a `module` header when there is one.
+    match text.find("module ") {
+        Some(0) => {
+            let end = text.find(';').unwrap() + 1;
+            format!("{}\nuse std.io;\n{}", &text[..end], &text[end..])
+        }
+        _ => format!("use std.io;\n{text}"),
+    }
+}
+
+/// Reference and native runs agree, and the `std.io` version of the program
+/// prints exactly what the builtin version prints.
+fn compare(source: &str, input: &[u8]) {
+    let builtin = compare_once(source, input);
+    let library = compare_once(&through_std_io(source), input);
+    assert_eq!(
+        (library.0, String::from_utf8_lossy(&library.1)),
+        (builtin.0, String::from_utf8_lossy(&builtin.1)),
+        "std.io differs from IO.*"
     );
 }
 
@@ -143,28 +185,35 @@ fn zero_capacity_checks_eof_and_cleans_buffers_on_error_propagation() {
 
 #[test]
 fn invalid_standard_descriptors_return_errors_and_release_owned_buffers() {
-    let (_scratch, binary) = build(
-        r#"
+    let read = r#"
         enum Result<T,E>{Ok(T),Err(E)}
         fn main()->i64 ! {io,alloc,panic} {
             match IO.read_all(IO.stdin(),Bytes.with_capacity(4)) {Ok(_)=>0,Err(code)=>code}
         }
-    "#,
-    );
-    let write_only = OpenOptions::new().write(true).open("/dev/null").unwrap();
-    let result = Command::new(&binary).stdin(write_only).output().unwrap();
-    assert_eq!(result.status.code(), Some(9));
-    assert!(result.stdout.is_empty());
-    assert!(result.stderr.is_empty());
-    let (_scratch, binary) = build(
-        r#"
+    "#;
+    let write = r#"
         enum Result<T,E>{Err(E),Ok(T)}
         fn main()->i64 ! {io,alloc,panic} {
             let bytes=Bytes.from("text");
             match IO.write(IO.stdout(),&bytes) {Ok(_)=>0,Err(code)=>code}
         }
-    "#,
-    );
+    "#;
+    for (read, write) in [
+        (read.to_owned(), write.to_owned()),
+        (through_std_io(read), through_std_io(write)),
+    ] {
+        invalid_descriptors(&read, &write);
+    }
+}
+
+fn invalid_descriptors(read: &str, write: &str) {
+    let (_scratch, binary) = build(read);
+    let write_only = OpenOptions::new().write(true).open("/dev/null").unwrap();
+    let result = Command::new(&binary).stdin(write_only).output().unwrap();
+    assert_eq!(result.status.code(), Some(9));
+    assert!(result.stdout.is_empty());
+    assert!(result.stderr.is_empty());
+    let (_scratch, binary) = build(write);
     let read_only = OpenOptions::new().read(true).open("/dev/null").unwrap();
     let result = Command::new(&binary)
         .stdout(read_only)
@@ -177,8 +226,7 @@ fn invalid_standard_descriptors_return_errors_and_release_owned_buffers() {
 
 #[test]
 fn broken_stdout_pipe_returns_epipe_instead_of_terminating_the_process() {
-    let (_scratch, binary) = build(
-        r#"
+    let source = r#"
         enum Result<T,E>{Ok(T),Err(E)}
         fn main()->i64 ! {io,alloc,panic} {
             // Reading until EOF is a barrier: the parent closes stdout before releasing stdin.
@@ -186,8 +234,13 @@ fn broken_stdout_pipe_returns_epipe_instead_of_terminating_the_process() {
             let bytes=Bytes.from("text");
             match IO.write(IO.stdout(),&bytes) {Ok(_)=>0,Err(code)=>code}
         }
-    "#,
-    );
+    "#;
+    broken_pipe(source);
+    broken_pipe(&through_std_io(source));
+}
+
+fn broken_pipe(source: &str) {
+    let (_scratch, binary) = build(source);
     let mut child = Command::new(binary)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

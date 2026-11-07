@@ -29,7 +29,15 @@ pub const DEFAULT_EVAL_FUEL: usize = 10_000_000;
 impl Executable {
     /// Whether any function obtains the standard input handle.
     fn reads_stdin(&self) -> bool {
-        fn walk(expr: &Expr) -> bool {
+        fn walk(program: &Executable, expr: &Expr) -> bool {
+            // `std.io.stdin()` obtains the descriptor from `kush_sys_stdin`.
+            if let ExprKind::Call(crate::executable::Target::Foreign(index), _) = &expr.kind
+                && program.foreign_functions[*index]
+                    .as_ref()
+                    .is_some_and(|foreign| foreign.symbol == "kush_sys_stdin")
+            {
+                return true;
+            }
             if matches!(
                 expr.kind,
                 ExprKind::Call(
@@ -40,7 +48,7 @@ impl Executable {
                 return true;
             }
             let mut found = false;
-            expr.for_each_child(&mut |child| found = found || walk(child));
+            expr.for_each_child(&mut |child| found = found || walk(program, child));
             found
         }
         self.functions.iter().any(|function| {
@@ -50,10 +58,14 @@ impl Executable {
                 .iter()
                 .any(|statement| match statement {
                     crate::executable::Statement::Let(_, value)
-                    | crate::executable::Statement::Expr(value) => walk(value),
+                    | crate::executable::Statement::Expr(value) => walk(self, value),
                     crate::executable::Statement::Declare(_) => false,
                 })
-                || function.body.tail.as_deref().is_some_and(walk)
+                || function
+                    .body
+                    .tail
+                    .as_deref()
+                    .is_some_and(|tail| walk(self, tail))
         })
     }
     /// Set the reference evaluator's step budget (per task); `kush eval
@@ -4395,7 +4407,90 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 Some(file) => code(f(file)),
             }
         };
+        // Standard streams: descriptor 0 reads the evaluator's input and 1
+        // writes its output (file handles start at 3). Positioned I/O on a
+        // stream is ESPIPE, as on a pipe.
+        let stream = matches!(
+            symbol,
+            "kush_sys_read" | "kush_sys_probe" | "kush_sys_write"
+        ) && (0..=2).contains(&args[0].scalar());
+        if stream {
+            let fd = args[0].scalar();
+            let positioned = match symbol {
+                "kush_sys_read" => args[3].scalar() >= 0,
+                "kush_sys_write" => args[3].scalar() >= 0,
+                _ => false,
+            };
+            let readable = fd == 0 && symbol != "kush_sys_write";
+            let writable = fd == 1 && symbol == "kush_sys_write";
+            let retry = |result: &io::Result<usize>| matches!(result, Err(error) if error.kind() == io::ErrorKind::Interrupted);
+            if symbol == "kush_sys_read" {
+                let length = args[2].scalar();
+                let (id, mut data, capacity) = self.take_buffer(&args[1]).ok_or_else(internal)?;
+                let start = data.len();
+                let status = if !readable {
+                    9
+                } else if positioned {
+                    29 // ESPIPE
+                } else if length < 0 {
+                    22
+                } else if length as u64 > (capacity - start) as u64 {
+                    27
+                } else {
+                    data.resize(start + length as usize, 0);
+                    let (status, received) = loop {
+                        let result = self.input.read(&mut data[start..]);
+                        if retry(&result) {
+                            continue;
+                        }
+                        break match result {
+                            Ok(count) => (0, count),
+                            Err(error) => (io_error_code(&error), 0),
+                        };
+                    };
+                    data.truncate(start + received);
+                    status
+                };
+                if status != 0 {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                return Ok(self.host_result(shape, 0, Value::Owned(id)));
+            }
+            let (status, value) = if symbol == "kush_sys_probe" {
+                if !readable {
+                    (9, 0)
+                } else {
+                    let mut probe = [0u8; 1];
+                    loop {
+                        let result = self.input.read(&mut probe);
+                        if !retry(&result) {
+                            break code(result.map(|count| count as i64));
+                        }
+                    }
+                }
+            } else {
+                let data = self.borrowed_bytes(&args[1]).ok_or_else(internal)?;
+                let start = args[2].scalar();
+                if !writable {
+                    (9, 0)
+                } else if positioned {
+                    (29, 0)
+                } else if start < 0 || start as usize > data.len() {
+                    (22, 0)
+                } else {
+                    code(
+                        self.output
+                            .write(&data[start as usize..])
+                            .map(|count| count as i64),
+                    )
+                }
+            };
+            return Ok(self.host_result(shape, status, Value::Scalar(value)));
+        }
         let (status, value) = match symbol {
+            "kush_sys_stdin" => (0, 0),
             "kush_sys_openat" => {
                 let (flags, mode) = (args[1].scalar(), args[2].scalar());
                 match path(self, &args[0])? {

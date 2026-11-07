@@ -19,6 +19,11 @@ printf 'hello\n' | cargo run -p kush -- run examples/stdio.kush
 # hello
 ```
 
+The same interface also exists as library code, [`std.io`](std-sys.md)
+(`use std.io;`, then `io.read_all(io.stdin(), buffer)`, with handle types
+`io.Input`/`io.Output`), written in Kush over the one-syscall `std.sys`
+layer. The builtins below will be removed in its favour.
+
 ## Values, types, and effects
 
 The signatures below describe compiler builtins, not declarations to add to a

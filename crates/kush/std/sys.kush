@@ -71,3 +71,6 @@ pub foreign "kush_sys_clock_gettime" fn clock_gettime(clock: i64, field: i64) ->
 pub foreign "kush_sys_nanosleep" fn nanosleep(milliseconds: i64) -> Result<Unit, i64> ! {io};
 /// strerror(3) text for 0 <= code <= 4095 (EINVAL otherwise), appended.
 pub foreign "kush_sys_strerror" fn strerror(code: i64, buffer: Bytes) -> Result<Bytes, i64> ! {io};
+/// The standard input descriptor (0). A call rather than a constant, so the
+/// reference evaluator knows the program reads standard input.
+pub foreign "kush_sys_stdin" fn stdin() -> Result<i64, i64> ! {io};
