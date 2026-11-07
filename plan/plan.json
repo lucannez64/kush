@@ -4988,10 +4988,21 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "Declare read, write, openat, close, fsync, ftruncate, fstat, unlinkat, renameat, mkdirat, getdents64 and friends as foreign functions with ! {io} in a std-only module (importing it outside std is rejected). First step toward IO in the library instead of the compiler, as in Rust std::sys or Go syscall.",
-      "commit": null,
-      "log": []
+      "commit": "b71f6de",
+      "log": [
+        {
+          "time": "2026-11-07 01:48:35",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-07 02:01:22",
+          "who": "agent",
+          "text": "done b71f6de"
+        }
+      ]
     },
     {
       "id": "FOREIGN-BYTES-FILL",
@@ -5014,10 +5025,16 @@
       "deps": [
         "STD-SYS-FOREIGN"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "The evaluator rejects every foreign call today. Add a name-keyed shim table (like Miri's) for the fixed std.sys.linux set so std IO written in Kush runs in eval too; other foreign symbols stay rejected.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-07 02:01:22",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "STD-IO-IN-KUSH",
