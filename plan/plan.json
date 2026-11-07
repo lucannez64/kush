@@ -5151,6 +5151,162 @@
       "desc": "Subprocess (fork/exec, pipe, poll with timeout, wait) and TCP exchange (getaddrinfo, connect, send, poll/recv with timeout) as Kush loops over one-call stubs; the timeout and partial-read logic moves into std.",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "GPU-DESIGN",
+      "title": "GPU functions: design doc and user approval",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "in_progress",
+      "desc": "docs/gpu.md: #[gpu] fn subset (scalars, f32/i32/u32, loops, plain enums, buffer indexing; no Box/Vec/closures/dyn/io/alloc/suspend), packed GpuBuf<T> (&=read-only, &mut=read-write), Gpu.id() model, panic-to-error-flag, WGSL mapping, naga validation, wgpu runtime. Needs user approval before code.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-07 03:20:09",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-07 03:21:16",
+          "who": "agent",
+          "text": "Draft docs/gpu.md written: #[gpu] subset, packed GpuBuf, synchronous Gpu.run, id-only &mut access, failure flag buffer, WGSL->naga->SPIR-V, C Vulkan runtime via dlopen, evaluator oracle. 5 open questions for the user."
+        }
+      ]
+    },
+    {
+      "id": "GPU-SUBSET",
+      "title": "#[gpu] attribute and checked function subset",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GPU-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "Accept #[gpu] next to noalloc/nosuspend; reject non-GPU types, effects and calls to non-#[gpu] functions with exact diagnostics; GpuBuf<T> type with packed 4-byte elements.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GPU-WRITE-DISJOINT",
+      "title": "Prove GPU invocations write disjoint elements",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "GPU-SUBSET"
+      ],
+      "status": "todo",
+      "desc": "&mut GpuBuf writes allowed only at an index derived injectively from Gpu.id() (reuse R-IDX-DISJOINT facts) or through Atomic; otherwise reject.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GPU-EVAL-ORACLE",
+      "title": "Reference evaluator runs #[gpu] functions",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GPU-SUBSET"
+      ],
+      "status": "todo",
+      "desc": "kush eval runs a dispatch as a sequential loop over ids, matching how threads run one at a time; deterministic oracle for parity tests, works without a GPU.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GPU-WGSL-EMIT",
+      "title": "Emit WGSL for #[gpu] functions",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "GPU-SUBSET"
+      ],
+      "status": "todo",
+      "desc": "Lower the checked subset to WGSL compute shaders; every emitted shader validated with naga in tests; exact-width f32/i32/u32 arithmetic semantics documented.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GPU-PANIC-FLAG",
+      "title": "GPU bounds/overflow checks via an error flag",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GPU-WGSL-EMIT"
+      ],
+      "status": "todo",
+      "desc": "Checked indexing and arithmetic set the first failure in a small flag buffer and stop the invocation; host re-raises it as a Kush panic after the dispatch.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GPU-RUNTIME",
+      "title": "wgpu runtime and packed buffer transfers",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GPU-DESIGN"
+      ],
+      "status": "todo",
+      "desc": "Rust runtime over wgpu: device, upload/download packing Vec<f32|i32|u32> to 4-byte elements, pipeline cache; software adapter (lavapipe) for CI and Boat.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GPU-SCOPE",
+      "title": "Gpu.scope / Gpu.dispatch with borrow rules",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GPU-RUNTIME",
+        "GPU-SUBSET"
+      ],
+      "status": "todo",
+      "desc": "Structured like Thread.scope: buffers borrowed by a dispatch are locked until the scope's fence; native lowering calls the runtime.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GPU-PARITY",
+      "title": "GPU vs evaluator parity tests",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GPU-SCOPE",
+        "GPU-EVAL-ORACLE",
+        "GPU-PANIC-FLAG",
+        "GPU-WRITE-DISJOINT"
+      ],
+      "status": "todo",
+      "desc": "saxpy, reductions with atomics, out-of-bounds panic; native GPU output equals kush eval output.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GPU-REVIEW",
+      "title": "Independent review: GPU functions",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "GPU-PARITY"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GPU",
+      "title": "Close: GPU functions written in Kush",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "GPU-REVIEW"
+      ],
+      "status": "todo",
+      "desc": "",
+      "commit": null,
+      "log": []
     }
   ]
 }
