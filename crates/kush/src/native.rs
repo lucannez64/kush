@@ -1440,6 +1440,54 @@ int64_t kush_sys_read(int64_t fd, uint64_t buffer_handle, int64_t length, int64_
     *out = buffer_handle;
     return 0;
 }
+/* Read and discard up to one byte at the file position: the count tells a
+   caller whose buffer is full whether more data follows (EINTR retried). */
+int64_t kush_sys_probe(int64_t fd, int64_t *out) {
+    unsigned char probe;
+    for (;;) {
+        ssize_t received = read((int)fd, &probe, 1);
+        if (received >= 0) { *out = (int64_t)received; return 0; }
+        if (errno != EINTR) return errno;
+    }
+}
+/* opendir(3); the DIR pointer is the handle. */
+int64_t kush_sys_opendir(const uint8_t *path, int64_t path_len, int64_t *out) {
+    int code = 0;
+    char *text = kush_sys_path(path, path_len, &code);
+    if (text == NULL) return code;
+    DIR *directory = opendir(text);
+    code = directory == NULL ? errno : 0;
+    free(text);
+    if (code == 0) *out = (int64_t)(uintptr_t)directory;
+    return code;
+}
+/* readdir(3) once, skipping "." and "..": append the next entry name and a
+   newline to the owned buffer (EFBIG and freed when it does not fit). At the
+   end of the directory the buffer comes back unchanged. */
+int64_t kush_sys_readdir(int64_t handle, uint64_t buffer_handle, uint64_t *out) {
+    DIR *directory = (DIR *)(uintptr_t)handle;
+    KushBytes *b = (KushBytes *)(uintptr_t)buffer_handle;
+    int64_t code = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (entry == NULL) { code = errno; break; }
+        const char *name = entry->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        uint64_t length = (uint64_t)strlen(name);
+        if (b->length > b->capacity || length + 1 > b->capacity - b->length) { code = EFBIG; break; }
+        memcpy(b->data + b->length, name, (size_t)length);
+        b->data[b->length + length] = '\n';
+        b->length += length + 1;
+        break;
+    }
+    if (code != 0) { kush_bytes_free(buffer_handle); return code; }
+    *out = buffer_handle;
+    return 0;
+}
+int64_t kush_sys_closedir(int64_t handle) {
+    return closedir((DIR *)(uintptr_t)handle) != 0 ? errno : 0;
+}
 int64_t kush_sys_unlink(const uint8_t *path, int64_t path_len) {
     int code = 0;
     char *text = kush_sys_path(path, path_len, &code);

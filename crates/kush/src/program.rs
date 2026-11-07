@@ -27,6 +27,7 @@ pub const STD: &[(&str, &str)] = &[
     ("std.crc32", include_str!("../std/crc32.kush")),
     ("std.bytemap", include_str!("../std/bytemap.kush")),
     ("std.sys", include_str!("../std/sys.kush")),
+    ("std.fs", include_str!("../std/fs.kush")),
 ];
 const MAX_MODULES: usize = 256;
 const MAX_TOTAL_SOURCE: usize = 16 * 1024 * 1024;

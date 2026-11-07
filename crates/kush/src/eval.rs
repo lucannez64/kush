@@ -582,6 +582,8 @@ pub struct Host {
 #[derive(Debug, Default)]
 struct FileTable {
     open: BTreeMap<i64, fs::File>,
+    /// Directories opened by `std.sys.opendir`, sharing the handle counter.
+    dirs: BTreeMap<i64, fs::ReadDir>,
     next: i64,
 }
 impl Default for Host {
@@ -4496,6 +4498,74 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     };
                     data.truncate(start + received);
                     status
+                };
+                if status != 0 {
+                    self.stats.deallocation();
+                    return Ok(self.host_result(shape, status, Value::Scalar(0)));
+                }
+                self.heap.insert(id, Value::Buffer { data, capacity });
+                return Ok(self.host_result(shape, 0, Value::Owned(id)));
+            }
+            "kush_sys_probe" => with_file(args[0].scalar(), &|file| {
+                let mut probe = [0u8; 1];
+                loop {
+                    match io::Read::read(&mut &*file, &mut probe) {
+                        Ok(count) => break Ok(count as i64),
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                        Err(error) => break Err(error),
+                    }
+                }
+            }),
+            "kush_sys_opendir" => match path(self, &args[0])? {
+                Err(error) => code(Err(error)),
+                Ok(path) => match fs::read_dir(path) {
+                    Ok(entries) => {
+                        let mut table = self.host.files.lock().unwrap();
+                        table.next = table.next.max(2) + 1;
+                        let handle = table.next;
+                        table.dirs.insert(handle, entries);
+                        (0, handle)
+                    }
+                    Err(error) => code(Err(error)),
+                },
+            },
+            "kush_sys_closedir" => match self
+                .host
+                .files
+                .lock()
+                .unwrap()
+                .dirs
+                .remove(&args[0].scalar())
+            {
+                Some(_) => (0, 0),
+                None => (9, 0),
+            },
+            "kush_sys_readdir" => {
+                // Like the stub: append "name\n" (std's read_dir already
+                // skips "." and ".."), EFBIG and free when it does not fit.
+                let (id, mut data, capacity) = self.take_buffer(&args[1]).ok_or_else(internal)?;
+                let next = match self
+                    .host
+                    .files
+                    .lock()
+                    .unwrap()
+                    .dirs
+                    .get_mut(&args[0].scalar())
+                {
+                    None => Err(9),
+                    Some(entries) => match entries.next() {
+                        None => Ok(None),
+                        Some(Ok(entry)) => Ok(Some(os_bytes(entry.file_name()))),
+                        Some(Err(error)) => Err(io_error_code(&error)),
+                    },
+                };
+                let status = match next {
+                    Err(status) => status,
+                    Ok(None) => 0,
+                    Ok(Some(mut name)) => {
+                        name.push(b'\n');
+                        Self::append_bounded(&mut data, capacity, &name).unwrap_or(0)
+                    }
                 };
                 if status != 0 {
                     self.stats.deallocation();

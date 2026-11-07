@@ -73,6 +73,11 @@ data. Metadata calls follow symlinks. Missing entries produce `Ok(false)` for
 the host's Linux errno values, for example `2` (`ENOENT`), `13` (`EACCES`), `17`
 (`EEXIST`), `20` (`ENOTDIR`), `21` (`EISDIR`), and `27` (`EFBIG`).
 
+The same calls are available as Kush library code in
+[`std.fs`](../crates/kush/std/fs.kush) (`use std.fs;` then `fs.read(...)`),
+built on the one-syscall [`std.sys`](std-sys.md) layer; the builtins will be
+removed in its favour.
+
 Byte-level helpers for building and inspecting paths live in
 [`std.path`](../crates/kush/std/path.kush): `basename`, `dirname`, `extension`,
 `is_absolute`, and `join`. They operate on bytes and do not canonicalize,

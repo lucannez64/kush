@@ -44,16 +44,26 @@ evaluator's never-reused file table with `FS.open`, so a stale descriptor is
 ## Status
 
 Declared: `openat`, `close`, `fsync`, `ftruncate`, `fstat_size`, `read`
-(`pread` when `offset >= 0`), `write` (`pwrite` when `offset >= 0`),
-`unlink`, `mkdir`, `rmdir`, `rename`, `stat` (mode or size), plus open flags
-and `st_mode` constants.
+(`pread` when `offset >= 0`), `probe` (read and discard one byte), `write`
+(`pwrite` when `offset >= 0`), `unlink`, `mkdir`, `rmdir`, `rename`, `stat`
+(mode or size), `opendir`/`readdir`/`closedir`, plus open flags and
+`st_mode` constants. `readdir` skips `.` and `..` and appends `name\n`, so a
+listing needs no allocation or panic effect.
 
 [`std.file`](../crates/kush/std/file.kush) is written over these calls: its
 EINTR retries, full-length read and write loops and the `sync_dir` open,
 fsync, close sequence are Kush code, and its arithmetic wraps only behind
 guards, so the public signatures still need only `io`.
 
-Not yet: `IO.*`, `FS.*` (path operations, listing), `ENV.*`, `TIME.*`,
-`PROC.*`, `NET.*` and `OS.*` are still compiler builtins (STD-IO-IN-KUSH,
-STD-FS-IN-KUSH, STD-ENV-IN-KUSH, HOST-BUILTINS-REMOVE). Tests:
-`crates/kush/tests/std_sys.rs`, `crates/kush/tests/std_file.rs`.
+[`std.fs`](../crates/kush/std/fs.kush) has every path-based `FS.*` call
+(`read`, `write`, `write_exclusive`, `append`, `remove`, `mkdir`,
+`remove_dir`, `rename`, `list`, `is_file`, `is_dir`, `exists`, `size`,
+`sync_dir`) with the same signatures and errno results, as Kush code. Tests
+run the `FS.*` test programs with `FS.` replaced by `fs.` and require the
+same output as the builtins in both backends.
+
+Not yet: the `FS.*` builtins still exist next to `std.fs`; `IO.*`, `ENV.*`,
+`TIME.*`, `PROC.*`, `NET.*` and `OS.*` are still compiler builtins
+(STD-IO-IN-KUSH, STD-ENV-IN-KUSH, HOST-BUILTINS-REMOVE). Tests:
+`crates/kush/tests/std_sys.rs`, `crates/kush/tests/std_file.rs`,
+`crates/kush/tests/host_api.rs` (`std_fs_*`).

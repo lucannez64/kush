@@ -48,3 +48,11 @@ pub foreign "kush_sys_stat" fn stat(path: &Bytes, field: i64) -> Result<i64, i64
 /// is freed on failure; EINTR is retried inside, since a failed call loses
 /// the buffer. EFBIG when the buffer lacks room for `length` more bytes.
 pub foreign "kush_sys_read" fn read(fd: i64, buffer: Bytes, length: i64, offset: i64) -> Result<Bytes, i64> ! {io};
+/// Read and discard up to one byte at the file position; 0 at end of file.
+pub foreign "kush_sys_probe" fn probe(fd: i64) -> Result<i64, i64> ! {io};
+/// opendir(3); the handle is only valid for readdir and closedir.
+pub foreign "kush_sys_opendir" fn opendir(path: &Bytes) -> Result<i64, i64> ! {io};
+/// Append the next entry name and a newline, skipping "." and "..". At the
+/// end the buffer comes back unchanged; EFBIG (and freed) when it is full.
+pub foreign "kush_sys_readdir" fn readdir(dir: i64, buffer: Bytes) -> Result<Bytes, i64> ! {io};
+pub foreign "kush_sys_closedir" fn closedir(dir: i64) -> Result<Unit, i64> ! {io};

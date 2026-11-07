@@ -803,3 +803,107 @@ fn filesystem_predicates_are_not_integers() {
         );
     }
 }
+
+/// STD-FS-IN-KUSH: the same program through `std.fs` (Kush over `std.sys`)
+/// instead of the `FS.*` builtins.
+fn through_std_fs(source: &str) -> String {
+    format!("use std.fs;\n{}", source.replace("FS.", "fs."))
+}
+
+/// The library version must print exactly what the builtins print, and the
+/// two backends must agree on it.
+fn std_fs_matches_builtins(source: &str, prepare: impl Fn(&Path)) {
+    let library = through_std_fs(source);
+    let builtin_root = unique_directory("fs-builtin");
+    let library_root = unique_directory("fs-library");
+    prepare(&builtin_root);
+    prepare(&library_root);
+    let builtin = reference(source, &[builtin_root.display().to_string()], &[]);
+    let ported = reference(&library, &[library_root.display().to_string()], &[]);
+    let _ = fs::remove_dir_all(&builtin_root);
+    let _ = fs::remove_dir_all(&library_root);
+    assert_eq!(
+        (ported.status, String::from_utf8_lossy(&ported.output)),
+        (builtin.status, String::from_utf8_lossy(&builtin.output)),
+    );
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let native_root = unique_directory("fs-native");
+        prepare(&native_root);
+        let actual = native(
+            &library,
+            &[native_root.display().to_string()],
+            &[],
+            &native_root,
+        );
+        let _ = fs::remove_dir_all(&native_root);
+        assert_eq!(
+            (actual.status, String::from_utf8_lossy(&actual.output)),
+            (builtin.status, String::from_utf8_lossy(&builtin.output)),
+        );
+    }
+}
+
+#[test]
+fn std_fs_round_trip_matches_the_builtins() {
+    std_fs_matches_builtins(FILESYSTEM, |_| {});
+}
+
+#[test]
+fn std_fs_write_exclusive_matches_the_builtins() {
+    std_fs_matches_builtins(WRITE_EXCLUSIVE, prepare_exclusive_fixture);
+}
+
+const STD_FS_EDGES: &str = r#"
+use std.result.Result;
+use std.path;
+
+fn flag(r: Result<Bool, i64>) -> i64 ! {panic} { match r { Result.Ok(b) => if b { 1 } else { 0 }, Result.Err(e) => -e } }
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let root = match ENV.arg(1, Bytes.with_capacity(4096)) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let exact = path.join(&root, &Bytes.from("exact"));
+    let dir = path.join(&root, &Bytes.from("d"));
+    let inner = path.join(&dir, &Bytes.from("x"));
+    let empty = Bytes.with_capacity(0);
+    // A file exactly as large as the spare capacity fits; one byte more is EFBIG.
+    print_i64(match FS.write(&exact, &Bytes.from("abcd")) { Ok(n) => n, Err(e) => -e });
+    print_i64(match FS.read(&exact, Bytes.with_capacity(4)) { Ok(b) => { let n = Bytes.len(&b); drop(b); n }, Err(e) => -e });
+    print_i64(match FS.read(&exact, Bytes.with_capacity(3)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
+    // An empty file into an empty buffer.
+    print_i64(match FS.write(&exact, &empty) { Ok(n) => n, Err(e) => -e });
+    print_i64(match FS.read(&exact, Bytes.with_capacity(0)) { Ok(b) => { let n = Bytes.len(&b); drop(b); n }, Err(e) => -e });
+    // Reading a directory is EISDIR; a path through a file is ENOTDIR (false).
+    print_i64(match FS.mkdir(&dir) { Ok(_) => 0, Err(e) => -e });
+    print_i64(match FS.mkdir(&dir) { Ok(_) => 0, Err(e) => e });
+    print_i64(match FS.read(&dir, Bytes.with_capacity(8)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
+    let through = path.join(&exact, &Bytes.from("y"));
+    print_i64(flag(FS.exists(&through)));
+    print_i64(match FS.size(&through) { Ok(n) => n, Err(e) => e });
+    // An empty directory lists nothing; a listing that does not fit is EFBIG.
+    print_i64(match FS.list(&dir, Bytes.with_capacity(0)) { Ok(b) => { let n = Bytes.len(&b); drop(b); n }, Err(e) => -e });
+    print_i64(match FS.write(&inner, &empty) { Ok(n) => n, Err(e) => -e });
+    print_i64(match FS.list(&dir, Bytes.with_capacity(1)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
+    print_i64(match FS.list(&dir, Bytes.with_capacity(2)) { Ok(b) => { let n = Bytes.len(&b); drop(b); n }, Err(e) => -e });
+    print_i64(match FS.list(&exact, Bytes.with_capacity(8)) { Ok(b) => { drop(b); -1 }, Err(e) => e });
+    print_i64(match FS.remove_dir(&dir) { Ok(_) => 0, Err(e) => e });
+    print_i64(match FS.sync_dir(&dir) { Ok(_) => 0, Err(e) => -e });
+    print_i64(match FS.sync_dir(&exact) { Ok(_) => 0, Err(e) => e });
+    print_i64(match FS.rename(&Bytes.from("a\0b"), &exact) { Ok(_) => 0, Err(e) => e });
+    drop(through);
+    drop(empty);
+    drop(inner);
+    drop(dir);
+    drop(exact);
+    drop(root);
+    0
+}
+"#;
+
+#[test]
+fn std_fs_edge_cases_match_the_builtins() {
+    std_fs_matches_builtins(STD_FS_EDGES, |_| {});
+}

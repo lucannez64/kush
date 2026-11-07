@@ -1,0 +1,225 @@
+module std.fs;
+
+// Path-based filesystem calls written in Kush over `std.sys`
+// (STD-FS-IN-KUSH). Same names, signatures and errno results as the `FS.*`
+// builtins they replace: paths and data are bytes, a path with a NUL byte is
+// EINVAL (22), reads and listings append to the buffer they consume and free
+// it on failure, metadata follows symlinks.
+
+use std.result.Result;
+use std.sys;
+
+
+/// stat(2) one field with EINTR retried.
+fn stat_field(path: &Bytes, field: i64) -> Result<i64, i64> ! {io} {
+    loop {
+        match sys.stat(path, field) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(value) => { return Result.Ok(value); },
+        }
+    }
+}
+
+fn open_flags(path: &Bytes, flags: i64, mode: i64) -> Result<i64, i64> ! {io} {
+    loop {
+        match sys.openat(path, flags, mode) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(fd) => { return Result.Ok(fd); },
+        }
+    }
+}
+
+/// Append the whole file to `buffer`'s initialized prefix without growing
+/// it. A file larger than the remaining capacity is EFBIG (27).
+pub fn read(path: &Bytes, buffer: Bytes) -> Result<Bytes, i64> ! {io} {
+    let fd = match open_flags(path, sys.O_RDONLY(), 0) {
+        Result.Ok(fd) => fd,
+        Result.Err(code) => { return Result.Err(code); },
+    };
+    let mut buffer = buffer;
+    loop {
+        let before = Bytes.len(&buffer);
+        let spare = Int.wrapping_sub::<i64>(Bytes.capacity(&buffer), before);
+        if spare == 0 {
+            // Full: one more byte means the file does not fit.
+            let more = sys.probe(fd);
+            let _ = sys.close(fd);
+            return match more {
+                Result.Ok(0) => Result.Ok(buffer),
+                Result.Ok(_) => Result.Err(27),
+                Result.Err(code) => Result.Err(code),
+            };
+        }
+        match sys.read(fd, buffer, spare, -1) {
+            Result.Err(code) => {
+                let _ = sys.close(fd);
+                return Result.Err(code);
+            },
+            Result.Ok(next) => {
+                buffer = next;
+                if Bytes.len(&buffer) == before {
+                    let _ = sys.close(fd);
+                    return Result.Ok(buffer);
+                }
+            },
+        }
+    }
+}
+
+/// Write all of `data` to a fresh descriptor, then close it; a close error
+/// other than EINTR is reported. Returns the number of bytes written.
+fn write_with(path: &Bytes, data: &Bytes, flags: i64, mode: i64) -> Result<i64, i64> ! {io} {
+    let fd = match open_flags(path, flags, mode) {
+        Result.Ok(fd) => fd,
+        Result.Err(code) => { return Result.Err(code); },
+    };
+    let length = Bytes.len(data);
+    let mut done = 0;
+    while done < length {
+        match sys.write(fd, data, done, -1) {
+            Result.Err(code) => {
+                if code != sys.EINTR() {
+                    let _ = sys.close(fd);
+                    return Result.Err(code);
+                }
+            },
+            Result.Ok(written) => {
+                if written == 0 {
+                    let _ = sys.close(fd);
+                    return Result.Err(5);
+                }
+                done = Int.wrapping_add::<i64>(done, written);
+            },
+        }
+    }
+    match sys.close(fd) {
+        Result.Ok(_) => Result.Ok(length),
+        Result.Err(code) => Result.Err(code),
+    }
+}
+
+/// Create or truncate `path` (mode 0666 minus the umask) and write `data`.
+pub fn write(path: &Bytes, data: &Bytes) -> Result<i64, i64> ! {io} {
+    write_with(path, data, sys.O_WRONLY() | sys.O_CREAT() | sys.O_TRUNC(), 438)
+}
+
+/// Create a brand-new file (O_EXCL, mode 0600) and write `data`. An existing
+/// path, including a symlink, is EEXIST (17).
+pub fn write_exclusive(path: &Bytes, data: &Bytes) -> Result<i64, i64> ! {io} {
+    write_with(path, data, sys.O_WRONLY() | sys.O_CREAT() | sys.O_EXCL(), 384)
+}
+
+/// Create `path` if needed and append `data`.
+pub fn append(path: &Bytes, data: &Bytes) -> Result<i64, i64> ! {io} {
+    write_with(path, data, sys.O_WRONLY() | sys.O_CREAT() | sys.O_APPEND(), 438)
+}
+
+pub fn remove(path: &Bytes) -> Result<Unit, i64> ! {io} {
+    loop {
+        match sys.unlink(path) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(_) => { return Result.Ok(()); },
+        }
+    }
+}
+
+/// Create one directory level (mode 0777 minus the umask).
+pub fn mkdir(path: &Bytes) -> Result<Unit, i64> ! {io} {
+    loop {
+        match sys.mkdir(path, 511) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(_) => { return Result.Ok(()); },
+        }
+    }
+}
+
+pub fn remove_dir(path: &Bytes) -> Result<Unit, i64> ! {io} {
+    loop {
+        match sys.rmdir(path) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(_) => { return Result.Ok(()); },
+        }
+    }
+}
+
+pub fn rename(from: &Bytes, to: &Bytes) -> Result<Unit, i64> ! {io} {
+    loop {
+        match sys.rename(from, to) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { return Result.Err(code); }
+            },
+            Result.Ok(_) => { return Result.Ok(()); },
+        }
+    }
+}
+
+/// Append one entry name per line, excluding "." and ".."; the order is not
+/// specified. EFBIG (27) when the names do not fit.
+pub fn list(path: &Bytes, buffer: Bytes) -> Result<Bytes, i64> ! {io} {
+    let dir = match sys.opendir(path) {
+        Result.Ok(dir) => dir,
+        Result.Err(code) => { return Result.Err(code); },
+    };
+    let mut buffer = buffer;
+    loop {
+        let before = Bytes.len(&buffer);
+        match sys.readdir(dir, buffer) {
+            Result.Err(code) => {
+                let _ = sys.closedir(dir);
+                return Result.Err(code);
+            },
+            Result.Ok(next) => {
+                buffer = next;
+                if Bytes.len(&buffer) == before {
+                    let _ = sys.closedir(dir);
+                    return Result.Ok(buffer);
+                }
+            },
+        }
+    }
+}
+
+/// st_mode type test; a missing entry (ENOENT, ENOTDIR) is false.
+fn mode_is(path: &Bytes, kind: i64) -> Result<Bool, i64> ! {io} {
+    match stat_field(path, 0) {
+        Result.Ok(mode) => Result.Ok(kind == 0 || (mode & sys.S_IFMT()) == kind),
+        Result.Err(code) => {
+            if code == 2 || code == 20 { Result.Ok(false) } else { Result.Err(code) }
+        },
+    }
+}
+
+pub fn is_file(path: &Bytes) -> Result<Bool, i64> ! {io} { mode_is(path, sys.S_IFREG()) }
+pub fn is_dir(path: &Bytes) -> Result<Bool, i64> ! {io} { mode_is(path, sys.S_IFDIR()) }
+pub fn exists(path: &Bytes) -> Result<Bool, i64> ! {io} { mode_is(path, 0) }
+
+/// Size in bytes; a missing entry is its errno.
+pub fn size(path: &Bytes) -> Result<i64, i64> ! {io} { stat_field(path, 1) }
+
+/// fsync(2) a directory, making a rename or creation inside it durable.
+pub fn sync_dir(path: &Bytes) -> Result<Unit, i64> ! {io} {
+    let fd = match open_flags(path, sys.O_RDONLY() | sys.O_DIRECTORY(), 0) {
+        Result.Ok(fd) => fd,
+        Result.Err(code) => { return Result.Err(code); },
+    };
+    let synced: Result<Unit, i64> = loop {
+        match sys.fsync(fd) {
+            Result.Err(code) => {
+                if code != sys.EINTR() { break Result.Err(code); }
+            },
+            Result.Ok(_) => { break Result.Ok(()); },
+        }
+    };
+    let _ = sys.close(fd);
+    synced
+}
