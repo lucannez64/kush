@@ -5057,10 +5057,16 @@
         "FOREIGN-BYTES-FILL",
         "EVAL-FOREIGN-SHIMS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Rewrite IO.stdin/stdout/read_all/read_line/write as Kush code in std; keep existing tests passing on both backends.",
-      "commit": null,
-      "log": []
+      "commit": "5c0b775",
+      "log": [
+        {
+          "time": "2026-11-07 02:32:01",
+          "who": "agent",
+          "text": "done 5c0b775"
+        }
+      ]
     },
     {
       "id": "STD-FS-IN-KUSH",
@@ -5123,7 +5129,13 @@
       "status": "todo",
       "desc": "Delete IO/FS/ENV/OS special cases from checker, evaluator and C runtime. Builtins left are those the backend must lower (Bytes layout, atomics, allocation, panics). Update docs/stdio.md and docs/host-api.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-07 02:32:01",
+          "who": "agent",
+          "text": "Open questions before starting: migration is breaking (FS.x -> use std.fs; fs.x, local enum Result -> std.result.Result), rename io.Input/io.Output back to Stdin/Stdout once the builtin types go, and whether to keep IO/FS names as deprecated aliases for a release."
+        }
+      ]
     },
     {
       "id": "STD-PROC-NET-IN-KUSH",
