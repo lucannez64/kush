@@ -5072,14 +5072,19 @@
         "FOREIGN-BYTES-FILL",
         "EVAL-FOREIGN-SHIMS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Move FS.* into std; std.file.File holds the descriptor and calls std.sys directly. Raw handle calls become std-private, closing the RAW-FS-HANDLES descriptor-reuse concern.",
-      "commit": null,
+      "commit": "e378bef",
       "log": [
         {
           "time": "2026-11-07 02:14:39",
           "who": "agent",
           "text": "std.file (open, read_at, write_at, sync, truncate, size, close, sync_dir) now runs on std.sys (52a78fa); path operations and listing remain"
+        },
+        {
+          "time": "2026-11-07 02:18:55",
+          "who": "agent",
+          "text": "done e378bef"
         }
       ]
     },
