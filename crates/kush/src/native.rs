@@ -1366,6 +1366,104 @@ static char *kush_host_c_path(const KushBytes *b, int *code) {
     text[b->length] = 0;
     return text;
 }
+/* ---- std.sys stubs (STD-SYS-FOREIGN) --------------------------------------
+   One system call each, imported by `std.sys` through the foreign bridge ABI
+   and callable only from std (the checker reserves `kush_sys_*`). A stub
+   returns 0 or the positive errno (EINTR included: retry policy is Kush code)
+   and writes a payload through `out`.
+   Paths arrive as (pointer, length) and are copied into a C string here, the
+   only marshalling the bridge cannot express. */
+static char *kush_sys_path(const uint8_t *data, int64_t length, int *code) {
+    if (length < 0 || memchr(data, 0, (size_t)length) != NULL) { *code = EINVAL; return NULL; }
+    char *text = (char *)malloc((size_t)length + 1);
+    if (text == NULL) { *code = ENOMEM; return NULL; }
+    memcpy(text, data, (size_t)length);
+    text[length] = 0;
+    return text;
+}
+int64_t kush_sys_openat(const uint8_t *path, int64_t path_len, int64_t flags, int64_t mode, int64_t *out) {
+    int code = 0;
+    char *text = kush_sys_path(path, path_len, &code);
+    if (text == NULL) return code;
+    int fd = openat(AT_FDCWD, text, (int)flags | O_CLOEXEC, (mode_t)mode);
+    code = fd < 0 ? errno : 0;
+    free(text);
+    if (code == 0) *out = fd;
+    return code;
+}
+int64_t kush_sys_close(int64_t fd) {
+    /* Linux releases the descriptor even when close reports EINTR. */
+    return close((int)fd) != 0 && errno != EINTR ? errno : 0;
+}
+int64_t kush_sys_fsync(int64_t fd) { return fsync((int)fd) != 0 ? errno : 0; }
+int64_t kush_sys_ftruncate(int64_t fd, int64_t length) {
+    if (length < 0) return EINVAL;
+    return ftruncate((int)fd, (off_t)length) != 0 ? errno : 0;
+}
+int64_t kush_sys_fstat_size(int64_t fd, int64_t *out) {
+    struct stat info;
+    if (fstat((int)fd, &info) != 0) return errno;
+    *out = (int64_t)info.st_size;
+    return 0;
+}
+/* Write data[start..] once; `offset` < 0 means the current file position. */
+int64_t kush_sys_write(int64_t fd, const uint8_t *data, int64_t length, int64_t start, int64_t offset, int64_t *out) {
+    if (start < 0 || start > length) return EINVAL;
+    ssize_t written = offset < 0
+        ? write((int)fd, data + start, (size_t)(length - start))
+        : pwrite((int)fd, data + start, (size_t)(length - start), (off_t)offset);
+    if (written < 0) return errno;
+    *out = (int64_t)written;
+    return 0;
+}
+int64_t kush_sys_unlink(const uint8_t *path, int64_t path_len) {
+    int code = 0;
+    char *text = kush_sys_path(path, path_len, &code);
+    if (text == NULL) return code;
+    code = unlink(text) != 0 ? errno : 0;
+    free(text);
+    return code;
+}
+int64_t kush_sys_mkdir(const uint8_t *path, int64_t path_len, int64_t mode) {
+    int code = 0;
+    char *text = kush_sys_path(path, path_len, &code);
+    if (text == NULL) return code;
+    code = mkdir(text, (mode_t)mode) != 0 ? errno : 0;
+    free(text);
+    return code;
+}
+int64_t kush_sys_rmdir(const uint8_t *path, int64_t path_len) {
+    int code = 0;
+    char *text = kush_sys_path(path, path_len, &code);
+    if (text == NULL) return code;
+    code = rmdir(text) != 0 ? errno : 0;
+    free(text);
+    return code;
+}
+int64_t kush_sys_rename(const uint8_t *from, int64_t from_len, const uint8_t *to, int64_t to_len) {
+    int code = 0;
+    char *a = kush_sys_path(from, from_len, &code);
+    if (a == NULL) return code;
+    char *b = kush_sys_path(to, to_len, &code);
+    if (b == NULL) { free(a); return code; }
+    code = rename(a, b) != 0 ? errno : 0;
+    free(a); free(b);
+    return code;
+}
+/* stat(2) one field: 0 = st_mode, 1 = st_size. */
+int64_t kush_sys_stat(const uint8_t *path, int64_t path_len, int64_t field, int64_t *out) {
+    int code = 0;
+    char *text = kush_sys_path(path, path_len, &code);
+    if (text == NULL) return code;
+    struct stat info;
+    code = stat(text, &info) != 0 ? errno : 0;
+    free(text);
+    if (code != 0) return code;
+    if (field == 0) *out = (int64_t)info.st_mode;
+    else if (field == 1) *out = (int64_t)info.st_size;
+    else return EINVAL;
+    return 0;
+}
 static int kush_host_open(const char *path, int flags, int with_mode, mode_t mode) {
     for (;;) {
         int fd = with_mode ? open(path, flags, mode) : open(path, flags);
@@ -4590,7 +4688,13 @@ pub fn build_library(program: &Executable, output: &Path, codegen: CodegenOption
             "a library needs at least one 'export \"symbol\" fn' declaration",
         ));
     }
-    if program.foreign_functions.iter().any(Option::is_some) {
+    // std.sys stubs (`kush_sys_*`) live in the runtime that ships in the archive.
+    if program
+        .foreign_functions
+        .iter()
+        .flatten()
+        .any(|foreign| !foreign.symbol.starts_with("kush_sys_"))
+    {
         return Err(error(
             "a library cannot import foreign functions yet; link them into the final program instead",
         ));

@@ -5540,6 +5540,26 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     "a foreign symbol must be a C identifier ([A-Za-z_][A-Za-z0-9_]*)",
                 ));
             }
+            // STD-SYS-FOREIGN: `kush_sys_*` symbols are the runtime's own host
+            // stubs, which trust their arguments (a descriptor number, a
+            // buffer's spare capacity). Only std may import them; the root
+            // unit (0) may call itself `std.x`, so it never counts as std.
+            if symbol.starts_with("kush_sys_") {
+                let unit = resolution.item_units.get(&span.start).copied().unwrap_or(0);
+                let std = unit != 0
+                    && resolution
+                        .units
+                        .get(unit)
+                        .is_some_and(|path| path.first().is_some_and(|p| p == "std"));
+                if !std {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!(
+                            "foreign symbol '{symbol}' is reserved for the Kush standard library"
+                        ),
+                    ));
+                }
+            }
             if !f.generics.is_empty() || !f.lifetimes.is_empty() {
                 return Err(Diagnostic::new(
                     span,
@@ -31518,6 +31538,25 @@ impl Checker<'_, '_> {
                     span,
                 )?;
             }
+        }
+        // STD-SYS-FOREIGN: runtime stubs trust their arguments, so only std
+        // may call them; programs reach them through std's safe modules.
+        if let Some(foreign) = self.functions.foreign_functions.get(&index)
+            && foreign.symbol.starts_with("kush_sys_")
+            && (self.unit == 0
+                || self
+                    .resolution
+                    .units
+                    .get(self.unit)
+                    .is_none_or(|path| path.first().is_none_or(|p| p != "std")))
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "'{}' is a std-internal system call; use the safe std modules (std.file, ...) instead",
+                    f.name
+                ),
+            ));
         }
         self.apply_effect_writes(signature.effects);
         let value = Expr {

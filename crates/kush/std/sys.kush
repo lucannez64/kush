@@ -1,0 +1,44 @@
+module std.sys;
+
+// Thin Linux system calls for the rest of std (STD-SYS-FOREIGN). Each
+// function is one call into a `kush_sys_*` runtime stub: it returns the
+// positive errno as `Err`, including EINTR, so retry and looping policy is
+// ordinary Kush code in the modules built on top. Only std may import
+// `kush_sys_*` symbols; programs use std.file and the other safe modules.
+
+use std.result.Result;
+
+pub fn EINTR() -> i64 ! {} { 4 }
+
+// open(2) flags (x86-64 Linux). O_CLOEXEC is always added by the stub.
+pub fn O_RDONLY() -> i64 ! {} { 0 }
+pub fn O_WRONLY() -> i64 ! {} { 1 }
+pub fn O_RDWR() -> i64 ! {} { 2 }
+pub fn O_CREAT() -> i64 ! {} { 64 }
+pub fn O_EXCL() -> i64 ! {} { 128 }
+pub fn O_TRUNC() -> i64 ! {} { 512 }
+pub fn O_APPEND() -> i64 ! {} { 1024 }
+pub fn O_DIRECTORY() -> i64 ! {} { 65536 }
+
+// st_mode file-type bits.
+pub fn S_IFMT() -> i64 ! {} { 61440 }
+pub fn S_IFREG() -> i64 ! {} { 32768 }
+pub fn S_IFDIR() -> i64 ! {} { 16384 }
+
+/// openat(AT_FDCWD, path, flags | O_CLOEXEC, mode); the new descriptor.
+pub foreign "kush_sys_openat" fn openat(path: &Bytes, flags: i64, mode: i64) -> Result<i64, i64> ! {io};
+/// close(2). Linux always releases the descriptor, so EINTR is success.
+pub foreign "kush_sys_close" fn close(fd: i64) -> Result<Unit, i64> ! {io};
+pub foreign "kush_sys_fsync" fn fsync(fd: i64) -> Result<Unit, i64> ! {io};
+pub foreign "kush_sys_ftruncate" fn ftruncate(fd: i64, length: i64) -> Result<Unit, i64> ! {io};
+/// fstat(2) st_size.
+pub foreign "kush_sys_fstat_size" fn fstat_size(fd: i64) -> Result<i64, i64> ! {io};
+/// One write of data[start..] at `offset` (pwrite), or at the file position
+/// when `offset` is negative (write). Returns the count, which may be short.
+pub foreign "kush_sys_write" fn write(fd: i64, data: &Bytes, start: i64, offset: i64) -> Result<i64, i64> ! {io};
+pub foreign "kush_sys_unlink" fn unlink(path: &Bytes) -> Result<Unit, i64> ! {io};
+pub foreign "kush_sys_mkdir" fn mkdir(path: &Bytes, mode: i64) -> Result<Unit, i64> ! {io};
+pub foreign "kush_sys_rmdir" fn rmdir(path: &Bytes) -> Result<Unit, i64> ! {io};
+pub foreign "kush_sys_rename" fn rename(from: &Bytes, to: &Bytes) -> Result<Unit, i64> ! {io};
+/// stat(2) one field: 0 = st_mode, 1 = st_size.
+pub foreign "kush_sys_stat" fn stat(path: &Bytes, field: i64) -> Result<i64, i64> ! {io};
