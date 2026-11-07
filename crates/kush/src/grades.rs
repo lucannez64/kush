@@ -1011,6 +1011,7 @@ impl<'a> Checker<'a> {
             | Type::Thread(_)
             | Type::Atomic
             | Type::Channel(_)
+            | Type::GpuBuf(_)
             | Type::DynObj(_) => true,
             Type::Enum(id) | Type::Variants(id, _) => {
                 self.program.owned_enums.get(id).copied().unwrap_or(false)

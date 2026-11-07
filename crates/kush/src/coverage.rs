@@ -271,6 +271,7 @@ fn useful(
             | Type::Stdout
             | Type::Atomic
             | Type::Channel(_)
+            | Type::GpuBuf(_)
             | Type::I64
             | Type::Int(_)
             | Type::Float(_)

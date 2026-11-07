@@ -1453,6 +1453,7 @@ impl<'a> Types<'a> {
                 | Type::Task(_)
                 | Type::Thread(_)
                 | Type::Channel(_)
+                | Type::GpuBuf(_)
                 | Type::DynObj(_) => true,
                 Type::Enum(id) | Type::Variants(id, _) if depth < 64 => {
                     types.enums[id].linear
@@ -2215,6 +2216,7 @@ impl<'a> Types<'a> {
             Type::Stdin => "Stdin".into(),
             Type::Atomic => "Atomic".into(),
             Type::Channel(p) => format!("Channel<{}>", self.name(self.pointees[p])),
+            Type::GpuBuf(p) => format!("GpuBuf<{}>", self.name(self.pointees[p])),
             Type::Stdout => "Stdout".into(),
             Type::Box(p) => format!("Box<{}>", self.name(self.pointees[p])),
             Type::Arena => "Arena".into(),
@@ -2610,10 +2612,11 @@ impl<'a> Types<'a> {
                         | Type::Bytes
                         | Type::String
                         | Type::Vec(_)
+                        | Type::GpuBuf(_)
                 ) {
                     return Err(Diagnostic::new(
                         ty.span,
-                        "mutable owner borrows support Box<T>, Arena, ArenaBox<T>, Bytes, String, Vec<T>, records, scalar/array places, and mutable slice views",
+                        "mutable owner borrows support Box<T>, Arena, ArenaBox<T>, Bytes, String, Vec<T>, GpuBuf<T>, records, scalar/array places, and mutable slice views",
                     ));
                 }
                 return Ok(Type::RefMut(self.pointer(inner)));
@@ -2633,11 +2636,12 @@ impl<'a> Types<'a> {
                         | Type::AllocatorContext
                         | Type::AllocBox(_)
                         | Type::AllocVec(_)
+                        | Type::GpuBuf(_)
                 )
             {
                 return Err(Diagnostic::new(
                     ty.span,
-                    "borrowing supports immutable &Box<T>, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &Record, &ForeignResource, scalar/array places, and &[T] slice views",
+                    "borrowing supports immutable &Box<T>, &ArenaBox<T>, &Bytes, &String, &Vec<T>, &GpuBuf<T>, &Record, &ForeignResource, scalar/array places, and &[T] slice views",
                 ));
             }
             return Ok(Type::Ref(self.pointer(inner)));
@@ -3344,6 +3348,27 @@ impl<'a> Types<'a> {
                     ));
                 }
                 return Ok(Type::Channel(self.pointer(inner)));
+            }
+            // GPU-SUBSET: `GpuBuf<T>` of packed 4-byte elements.
+            if b.kind == BindingKind::Builtin && b.name == "GpuBuf" {
+                if !lifetime_arguments.is_empty() || arguments.len() != 1 {
+                    return Err(Diagnostic::new(ty.span, "GpuBuf expects one element type"));
+                }
+                let inner = self.lower(arguments[0], substitution, depth + 1)?;
+                if !matches!(
+                    inner,
+                    Type::Int(crate::int::IntKind::I32 | crate::int::IntKind::U32)
+                        | Type::Float(crate::float::FloatKind::F32)
+                ) {
+                    return Err(Diagnostic::new(
+                        ty.span,
+                        format!(
+                            "a GPU buffer holds i32, u32 or f32 elements, found {}",
+                            self.name(inner)
+                        ),
+                    ));
+                }
+                return Ok(Type::GpuBuf(self.pointer(inner)));
             }
             if b.kind == BindingKind::Builtin
                 && matches!(
@@ -6816,6 +6841,10 @@ pub(crate) fn type_name_in(
         Type::Atomic => "Atomic".into(),
         Type::Channel(p) => format!(
             "Channel<{}>",
+            type_name_in(pointees[p], pointees, enums, unions, functions)
+        ),
+        Type::GpuBuf(p) => format!(
+            "GpuBuf<{}>",
             type_name_in(pointees[p], pointees, enums, unions, functions)
         ),
         Type::Stdout => "Stdout".into(),

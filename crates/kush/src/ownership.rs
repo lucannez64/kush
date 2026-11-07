@@ -1078,6 +1078,7 @@ fn owns(
         | Type::Task(_)
         | Type::Thread(_)
         | Type::Channel(_)
+        | Type::GpuBuf(_)
         | Type::DynObj(_) => true,
         Type::Enum(id) | Type::Variants(id, _) => enums[id],
         Type::Union(id) => unions[id]
@@ -6030,6 +6031,22 @@ impl Checker<'_> {
                 self.expr(left)?;
                 self.expr(right)?;
                 self.loans = loans;
+            }
+            // GPU-SUBSET: a device-side buffer operation reads its buffer
+            // parameter in place; the buffer is never moved or stored
+            // (`crate::gpu` admits it nowhere else).
+            ExprKind::Call(crate::executable::Target::Gpu(..), args) => {
+                if let Some(ExprKind::Local(slot)) = args.first().map(|buffer| &buffer.kind)
+                    && !self.available[*slot]
+                {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "use of an unavailable GPU buffer",
+                    ));
+                }
+                for arg in args.iter_mut().skip(1) {
+                    self.expr(arg)?;
+                }
             }
             ExprKind::Call(target, args) => {
                 let func = match target {

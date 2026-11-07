@@ -6737,6 +6737,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         result
                     }
                     Target::Panic => return Err(panic()),
+                    Target::Gpu(..) => {
+                        return Err(Diagnostic::new(
+                            expr.span,
+                            "internal error: a #[gpu] function ran on the CPU; only Gpu.run may start one",
+                        ));
+                    }
                     Target::Print => {
                         writeln!(self.output, "{}", values[0].scalar()).map_err(|e| {
                             Diagnostic::new(expr.span, format!("output failed: {e}"))

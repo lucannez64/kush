@@ -144,6 +144,11 @@ pub(crate) enum Type {
     /// user allocator. One word: a handle to checked metadata that records the
     /// allocator pair, the element block, length, and capacity.
     AllocVec(usize),
+    /// GPU-SUBSET: a device buffer of packed 4-byte `i32`/`u32`/`f32`
+    /// elements (the pointee). Owned and affine; one word on the CPU side.
+    /// `#[gpu]` entry functions receive it as `&GpuBuf<T>` (read-only
+    /// storage) or `&mut GpuBuf<T>` (read-write storage); see docs/gpu.md.
+    GpuBuf(usize),
 }
 impl Type {
     /// The admitted symbolic scalar carrier of a runtime type, if any. Only
@@ -303,6 +308,9 @@ pub struct Executable {
     pub(crate) uses_tasks: bool,
     /// THREAD-SCOPE: the program runs OS threads (thread-safe runtime paths).
     pub(crate) uses_threads: bool,
+    /// GPU-SUBSET: per function instance, whether it is a `#[gpu]` function.
+    /// Functions added after checking (continuations) are never GPU code.
+    pub(crate) gpu_functions: Vec<bool>,
     /// Effect-row bit of each declared operation, by operation id.
     pub(crate) effect_bits: Vec<u16>,
     /// Whether each declared operation is abortive (`-> Never`).
@@ -542,6 +550,21 @@ pub(crate) enum Target {
     /// Explicit float builtin or conversion.
     Float(crate::float::FloatOp),
     Panic,
+    /// GPU-SUBSET: `GpuBuf.len/get/set` inside a `#[gpu]` function, with the
+    /// element type. The first argument is the `&GpuBuf<T>` or
+    /// `&mut GpuBuf<T>` entry parameter; only the GPU backend lowers it.
+    #[allow(dead_code)] // read by the GPU backend (GPU-WGSL-EMIT)
+    Gpu(GpuOp, Type),
+}
+/// GPU-SUBSET: device-side buffer operations (docs/gpu.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum GpuOp {
+    /// `GpuBuf.len(b) -> u32`.
+    Len,
+    /// `GpuBuf.get(b, i) -> T`; panics out of range.
+    Get,
+    /// `GpuBuf.set(b, i, v)` through `&mut GpuBuf<T>`; panics out of range.
+    Set,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum IoOp {
@@ -4921,6 +4944,8 @@ struct Functions<'a> {
     /// Set when any body uses a structured-task operation.
     uses_tasks: bool,
     uses_threads: bool,
+    /// GPU-SUBSET: declarations marked `#[gpu]`.
+    gpu: BTreeSet<BindingId>,
     /// Task body functions whose binding-based linear result must be rejected
     /// once their body has been checked.
     /// Monotonic counter for compiler-internal elided input lifetimes. The
@@ -5364,6 +5389,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         allocator_contexts: Vec::new(),
         uses_tasks: false,
         uses_threads: false,
+        gpu: BTreeSet::new(),
         elided_lifetimes: 0,
         traits: BTreeMap::new(),
         inherent: BTreeMap::new(),
@@ -5476,8 +5502,10 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         );
         for attribute in &declaration.attributes {
             let valid = if function {
-                matches!(attribute.kind.as_str(), "noalloc" | "nosuspend" | "test")
-                    && attribute.argument.is_none()
+                matches!(
+                    attribute.kind.as_str(),
+                    "noalloc" | "nosuspend" | "test" | "gpu"
+                ) && attribute.argument.is_none()
             } else if data {
                 (attribute.kind == "linear" && attribute.argument.is_none())
                     || attribute.kind == "foreign"
@@ -5488,7 +5516,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 return Err(Diagnostic::new(
                     attribute.span,
                     if function {
-                        "functions support the #[noalloc], #[nosuspend], and #[test] attributes"
+                        "functions support the #[noalloc], #[nosuspend], #[test], and #[gpu] attributes"
                     } else if data {
                         "data declarations support #[linear] or #[foreign(\"release_symbol\")]"
                     } else {
@@ -5657,6 +5685,16 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             }
         }
         let binding = resolution.declarations[&span.start];
+        if declaration.attributes.iter().any(|a| a.kind == "gpu") {
+            crate::gpu::check_declaration(
+                f,
+                span,
+                &declaration.attributes,
+                fixed_effects,
+                &effect_variables,
+            )?;
+            functions.gpu.insert(binding);
+        }
         if f.name == "main"
             && !f.generics.is_empty()
             && resolution.unit_of.get(&binding) == Some(&0)
@@ -5974,7 +6012,13 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         resolution,
         &types,
     )?;
+    let gpu_functions = functions
+        .signatures
+        .iter()
+        .map(|signature| functions.gpu.contains(&signature.binding))
+        .collect();
     let mut executable = Executable {
+        gpu_functions,
         eval_fuel: crate::eval::DEFAULT_EVAL_FUEL,
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,
@@ -6023,6 +6067,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         exports,
         logical_definitions: logical.definitions.clone(),
     };
+    crate::gpu::check(&executable)?;
     crate::suspend::mark_abort_calls(&mut executable)?;
     crate::ownership::check(&mut executable)?;
     crate::grades::check(&executable)?;
@@ -23432,6 +23477,9 @@ impl Checker<'_, '_> {
                     if binding.kind == BindingKind::Builtin && binding.name.starts_with("Atomic.") {
                         return c.atomic_call(&binding.name.clone(), explicit, arguments, expected, span);
                     }
+                    if binding.kind == BindingKind::Builtin && binding.name.starts_with("GpuBuf.") {
+                        return c.gpu_buf_call(&binding.name.clone(), explicit, arguments, expected, span);
+                    }
                     if binding.kind == BindingKind::Builtin && (binding.name.starts_with("Task.") || binding.name.starts_with("Thread.")) {
                         return c.task_call(&binding.name.clone(), explicit, arguments, expected, span);
                     }
@@ -27726,7 +27774,7 @@ impl Checker<'_, '_> {
                 | Type::DynObj(_) => true,
                 // Never copied: reads go through `Atomic.*` (it owns nothing
                 // to drop; the ownership pass only tracks its moves).
-                Type::Atomic | Type::Channel(_) => true,
+                Type::Atomic | Type::Channel(_) | Type::GpuBuf(_) => true,
                 Type::Enum(id) | Type::Variants(id, _) if depth < 64 => {
                     types.enums[id].linear
                         || types.enums[id]
@@ -31134,6 +31182,108 @@ impl Checker<'_, '_> {
     }
     /// THREAD-ATOMICS: `Atomic.new(v)`, `Atomic.value(a)` and the view
     /// operations `load/store/fetch_add/swap/compare_exchange(view, i, ..)`.
+    /// GPU-SUBSET: `GpuBuf.len(b)`, `GpuBuf.get(b, i)` and
+    /// `GpuBuf.set(b, i, v)` on a `&GpuBuf<T>` / `&mut GpuBuf<T>`. Only
+    /// `#[gpu]` functions may use them; `crate::gpu::check` enforces that.
+    fn gpu_buf_call(
+        &mut self,
+        name: &str,
+        explicit: Option<&[ast::Type]>,
+        arguments: &[ast::Expr],
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Expr> {
+        use crate::int::IntKind;
+        if explicit.is_some() {
+            return Err(Diagnostic::new(
+                span,
+                format!("{name} takes no type arguments"),
+            ));
+        }
+        let (op, arity) = match name {
+            "GpuBuf.len" => (GpuOp::Len, 1),
+            "GpuBuf.get" => (GpuOp::Get, 2),
+            _ => (GpuOp::Set, 3),
+        };
+        if arguments.len() != arity {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "{name} expects {arity} arguments, found {}",
+                    arguments.len()
+                ),
+            ));
+        }
+        let buffer = self.expr(&arguments[0])?;
+        let element = buffer
+            .ty
+            .ref_pointee()
+            .and_then(|p| match self.types.pointees[p] {
+                Type::GpuBuf(e) => Some(self.types.pointees[e]),
+                _ => None,
+            });
+        let Some(element) = element else {
+            return Err(Diagnostic::new(
+                buffer.span,
+                format!(
+                    "{name} expects a GPU buffer '&GpuBuf<T>' or '&mut GpuBuf<T>', found {}",
+                    self.types.name(buffer.ty)
+                ),
+            ));
+        };
+        if op == GpuOp::Set && !matches!(buffer.ty, Type::RefMut(_)) {
+            return Err(Diagnostic::new(
+                buffer.span,
+                "GpuBuf.set requires a read-write buffer '&mut GpuBuf<T>'; a shared '&GpuBuf<T>' is read-only",
+            ));
+        }
+        let mut values = vec![buffer];
+        let ty = match op {
+            GpuOp::Len => Type::Int(IntKind::U32),
+            GpuOp::Get | GpuOp::Set => {
+                // A bare literal index is u32; any other index keeps its type
+                // so both u32 and i32 are accepted.
+                let index = if matches!(arguments[1].kind, ast::ExprKind::Integer(_)) {
+                    self.expr_expected(&arguments[1], Some(Type::Int(IntKind::U32)))?
+                } else {
+                    self.expr(&arguments[1])?
+                };
+                if !matches!(
+                    index.ty,
+                    Type::Int(IntKind::U32 | IntKind::I32) | Type::Never
+                ) {
+                    return Err(Diagnostic::new(
+                        index.span,
+                        format!(
+                            "a GPU buffer index is u32 or i32, found {}",
+                            self.types.name(index.ty)
+                        ),
+                    ));
+                }
+                values.push(index);
+                if op == GpuOp::Set {
+                    let value = self.expr_expected(&arguments[2], Some(element))?;
+                    self.expect(value.ty, element, value.span)?;
+                    values.push(value);
+                }
+                self.require(PANIC, span)?;
+                if op == GpuOp::Get {
+                    element
+                } else {
+                    Type::Unit
+                }
+            }
+        };
+        if let Some(expected) = expected {
+            self.expect(ty, expected, span)?;
+        }
+        Ok(Expr {
+            kind: ExprKind::Call(Target::Gpu(op, element), values),
+            ty,
+            span,
+            resource: None,
+        })
+    }
     fn atomic_call(
         &mut self,
         name: &str,
@@ -37594,6 +37744,7 @@ impl Executable {
             | Type::Task(_)
             | Type::Thread(_)
             | Type::Channel(_)
+            | Type::GpuBuf(_)
             | Type::DynObj(_) => true,
             Type::Enum(id) | Type::Variants(id, _) => self.owned_enums[id],
             Type::Union(id) => self.unions[id]

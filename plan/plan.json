@@ -5195,6 +5195,11 @@
           "time": "2026-11-07 03:27:39",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-07 03:46:52",
+          "who": "agent",
+          "text": "#[gpu] attribute, GpuBuf<T> (i32/u32/f32), GpuBuf.len/get/set, allowlist pass in gpu.rs (types, IR forms, builtins, gpu-only calls, acyclic call graph), CPU-side rejections; 18 tests. Full local suite passed; Boat check running."
         }
       ]
     },

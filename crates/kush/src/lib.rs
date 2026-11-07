@@ -10,6 +10,7 @@ pub use eval::Host;
 pub mod executable;
 mod facts;
 mod float;
+mod gpu;
 mod grades;
 mod int;
 pub mod interop;

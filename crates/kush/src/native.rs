@@ -5454,6 +5454,7 @@ fn synthesize_drops(
                 .map(Type::Channel)
                 .filter(|_| program.uses_threads),
         )
+        .chain((0..program.pointees.len()).map(Type::GpuBuf))
         .chain([Type::Arena, Type::AllocatorContext])
         .chain((0..program.enums.len()).map(Type::Enum))
         .chain((0..program.unions.len()).map(Type::Union))
@@ -5517,6 +5518,11 @@ fn synthesize_drops(
         match ty {
             Type::Bytes | Type::String => {
                 emit_drop(&mut builder, module, bytes_free, &args);
+                builder.ins().return_(&[]);
+            }
+            Type::GpuBuf(_) => {
+                // GPU-SUBSET: no CPU code creates a buffer yet; GPU-RUNTIME
+                // replaces this with the device release.
                 builder.ins().return_(&[]);
             }
             Type::Channel(_) => {
@@ -9691,6 +9697,12 @@ impl Generator<'_, '_> {
                         return Some(self.int_builtin(*op, *source, *target, &values, expr.ty));
                     }
                     Target::Panic => {
+                        self.abort();
+                        return None;
+                    }
+                    // GPU-SUBSET: `#[gpu]` bodies are compiled for the CPU
+                    // only as unreachable code; no CPU call reaches them.
+                    Target::Gpu(..) => {
                         self.abort();
                         return None;
                     }

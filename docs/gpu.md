@@ -1,7 +1,10 @@
 # GPU functions written in Kush
 
-Status: design approved by the user 2026-11-07 (GPU-DESIGN). Nothing is
-implemented yet. Plan nodes: GPU-SUBSET, GPU-WRITE-DISJOINT,
+Status: design approved by the user 2026-11-07 (GPU-DESIGN). GPU-SUBSET is
+implemented: the `#[gpu]` attribute, `GpuBuf<T>`, `GpuBuf.len/get/set`, and
+the checked subset below (`crates/kush/src/gpu.rs`, tests in
+`crates/kush/tests/gpu_subset.rs`). Nothing runs on a GPU yet: `Gpu.run`,
+the evaluator loop, WGSL output and the Vulkan runtime are later nodes. Plan nodes: GPU-SUBSET, GPU-WRITE-DISJOINT,
 GPU-EVAL-ORACLE, GPU-WGSL-EMIT, GPU-PANIC-FLAG, GPU-RUNTIME, GPU-SCOPE,
 GPU-PARITY.
 
@@ -33,6 +36,13 @@ fn main() -> Unit ! {io, alloc, panic} {
 ```
 
 ## The `#[gpu]` subset (GPU-SUBSET)
+
+The check is an allowlist over the checked IR, run before ownership: an
+expression form, builtin or type it does not list is rejected, so a new
+compiler feature never reaches the GPU backend by accident. CPU code may not
+call a `#[gpu]` function, take it as a function value, or use `GpuBuf.*`.
+Until GPU-SCOPE adds `Gpu.run`, `#[gpu]` functions are checked but never run;
+the native backend compiles them as unreachable CPU code.
 
 `#[gpu]` joins `#[noalloc]`, `#[nosuspend]` and `#[test]` in the function
 attribute list (`executable.rs`). The checker rejects, with an exact
