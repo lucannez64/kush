@@ -105,13 +105,6 @@ pub(super) struct RuntimeInterface {
     pub signatures: BTreeMap<String, CSignature>,
 }
 impl RuntimeInterface {
-    /// Whether the runtime was compiled to be internalized into the program
-    /// module, which then owns `main`.
-    fn whole_program(&self) -> bool {
-        self.signatures.get(RUNTIME_MAIN).is_some_and(|signature| {
-            signature.ret == Ty::I32 && signature.params == [Ty::I32, Ty::Ptr, Ty::Ptr]
-        })
-    }
     pub fn parse(ir: &str) -> Self {
         let mut interface = Self::default();
         for line in ir.lines() {
@@ -133,7 +126,10 @@ impl RuntimeInterface {
 fn parse_define(rest: &str) -> Option<(String, CSignature)> {
     let at = rest.find('@')?;
     let prefix = &rest[..at];
-    if prefix.split_whitespace().any(|word| word == "internal") {
+    if prefix
+        .split_whitespace()
+        .any(|word| word == "internal" || word == "hidden")
+    {
         return None;
     }
     let ret = Ty::parse(prefix.split_whitespace().next_back()?)?;
@@ -183,15 +179,168 @@ fn parse_define(rest: &str) -> Option<(String, CSignature)> {
     Some((name, CSignature { ret, params }))
 }
 
-/// The runtime's entry point when it is compiled for whole-program linking
-/// (`KUSH_WHOLE_PROGRAM`). The program module then defines `main`, which
-/// passes the program's entry function to it.
-const RUNTIME_MAIN: &str = "kush_runtime_main";
-const PROGRAM_ENTRY: &str = "kush_entry";
+/// The runtime's LLVM module, split for separate compilation.
+pub(super) struct RuntimeSplit {
+    /// The module to compile into the runtime object: unchanged, except that
+    /// internal functions and variables are hidden instead, i.e. visible to
+    /// the program object but not outside the executable.
+    pub exported: String,
+    /// The same module with every definition `available_externally`: LLVM may
+    /// inline these bodies into the program and then discards them. State
+    /// stays single because variables are `available_externally` too and
+    /// resolve to the runtime object's.
+    pub inlinable: String,
+    /// The target description and every function signature line, which is
+    /// all the translator needs to call the runtime with exact types.
+    pub interface: String,
+}
+
+/// Runtime functions whose bodies LLVM may inline into program code: reads,
+/// in-place writes and bookkeeping that never allocate, free or grow.
+const INLINABLE: [&str; 24] = [
+    "kush_vec_len",
+    "kush_vec_get",
+    "kush_vec_set",
+    "kush_vec_element",
+    "kush_bytes_len",
+    "kush_bytes_capacity",
+    "kush_bytes_get",
+    "kush_alloc_vec_len",
+    "kush_alloc_vec_get",
+    "kush_alloc_vec_data",
+    "kush_alloc_block_data",
+    "kush_alloc_box_payload",
+    "kush_utf8_scalar_len",
+    "kush_utf8_scalar_at",
+    "kush_str_scalar_len",
+    "kush_str_byte_at",
+    "kush_str_scalar_at",
+    "kush_float_from_int",
+    "kush_float_to_int",
+    "kush_float_int_present",
+    "kush_int_exact_in_float",
+    "kush_handler_depth",
+    "kush_handler_restore",
+    "kush_note_reuse",
+];
+
+/// Rewrite the linkage of each top-level definition of the runtime module.
+/// Returns `None` for constructs the scheme does not cover (aliases, special
+/// `@llvm.` variables, thread-local or common storage), so the caller can
+/// report it instead of producing a module that links but misbehaves.
+pub(super) fn split_runtime(ir: &str) -> Option<RuntimeSplit> {
+    let mut split = RuntimeSplit {
+        exported: String::with_capacity(ir.len()),
+        inlinable: String::with_capacity(ir.len() + ir.len() / 16),
+        interface: String::new(),
+    };
+    for line in ir.lines() {
+        let (exported, inlinable);
+        if let Some(rest) = line.strip_prefix("define ") {
+            // Only plain accessors may be inlined into program code. The
+            // allocator in particular must stay an opaque call: the alias
+            // facts the program module states (`noalias` parameters, memory
+            // classes) are about objects, and a recycled block is a new
+            // object only as long as LLVM cannot see through the recycling.
+            let name = rest.split_once('@')?.1.split('(').next()?;
+            let body = rest.strip_suffix('{')?;
+            let opaque = if INLINABLE.contains(&name) {
+                ""
+            } else {
+                "noinline "
+            };
+            (exported, inlinable) = match rest.strip_prefix("internal ") {
+                Some(_) => (
+                    format!("define hidden {}", &rest["internal ".len()..]),
+                    format!(
+                        "define available_externally hidden {}{opaque}{{",
+                        &body["internal ".len()..]
+                    ),
+                ),
+                None => (
+                    line.to_owned(),
+                    format!("define available_externally {body}{opaque}{{"),
+                ),
+            };
+            split.interface.push_str(&exported);
+            split.interface.push('\n');
+        } else if line.starts_with('@')
+            && let Some((name, rest)) = line.split_once(" = ")
+        {
+            let first = rest.split_whitespace().next()?;
+            if name.starts_with("@llvm.")
+                || rest.contains("thread_local")
+                || matches!(
+                    first,
+                    "alias"
+                        | "ifunc"
+                        | "common"
+                        | "weak"
+                        | "weak_odr"
+                        | "linkonce"
+                        | "linkonce_odr"
+                        | "appending"
+                )
+            {
+                return None;
+            }
+            (exported, inlinable) = if let Some(rest) = rest.strip_prefix("internal ") {
+                (
+                    format!("{name} = hidden {rest}"),
+                    format!("{name} = available_externally hidden {rest}"),
+                )
+            } else if matches!(first, "private" | "external" | "extern_weak") {
+                (line.to_owned(), line.to_owned())
+            } else {
+                (
+                    line.to_owned(),
+                    format!("{name} = available_externally {rest}"),
+                )
+            };
+        } else {
+            if line.starts_with("target datalayout") || line.starts_with("target triple") {
+                split.interface.push_str(line);
+                split.interface.push('\n');
+            }
+            (exported, inlinable) = (line.to_owned(), line.to_owned());
+        }
+        split.exported.push_str(&exported);
+        split.exported.push('\n');
+        split.inlinable.push_str(&inlinable);
+        split.inlinable.push('\n');
+    }
+    Some(split)
+}
+
+/// What kind of memory a load or store touches, when the generator knows.
+/// Accesses of different classes never overlap: a buffer's header words
+/// (length, capacity) are never an element of any buffer. The generator
+/// records the class as the instruction's source location.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub(super) enum MemoryClass {
+    BufferHeader = 1,
+    BufferElements = 2,
+}
+
+/// A defined function whose address-taking callers need the plain word
+/// signature: return type, parameter types with extensions, and which
+/// parameters are exclusive pointers.
+struct Typed {
+    ret: String,
+    params: Vec<String>,
+    exclusive: Vec<bool>,
+}
 
 /// The program's LLVM module under construction.
 pub(super) struct LlvmModule {
     runtime: RuntimeInterface,
+    /// Ownership facts: per function name, the parameters that are owning
+    /// handles or exclusive borrows. They become `ptr noalias` parameters.
+    exclusive: BTreeMap<String, Vec<usize>>,
+    typed: BTreeMap<String, Typed>,
+    /// Functions whose address is taken; each gets a word-typed thunk.
+    address_taken: BTreeSet<String>,
     functions: Vec<String>,
     defined: BTreeSet<FuncId>,
     data: BTreeMap<DataId, Vec<u8>>,
@@ -201,10 +350,20 @@ impl LlvmModule {
     pub fn new(runtime: RuntimeInterface) -> Self {
         Self {
             runtime,
+            exclusive: BTreeMap::new(),
+            typed: BTreeMap::new(),
+            address_taken: BTreeSet::new(),
             functions: Vec::new(),
             defined: BTreeSet::new(),
             data: BTreeMap::new(),
             intrinsics: BTreeSet::new(),
+        }
+    }
+    /// Record which parameters of a function the program owns exclusively.
+    /// Must be called before any function body is translated.
+    pub fn exclusive_parameters(&mut self, name: &str, parameters: Vec<usize>) {
+        if !parameters.is_empty() {
+            self.exclusive.insert(name.to_owned(), parameters);
         }
     }
     pub fn define_data(&mut self, id: DataId, bytes: Vec<u8>) {
@@ -218,16 +377,29 @@ impl LlvmModule {
     ) -> Result<()> {
         let declaration = declarations.get_function_decl(id);
         let name = declaration.linkage_name(id).into_owned();
-        // In a whole-program build only `main` is visible; the entry function
-        // is reached through the pointer `main` passes to the runtime.
-        let linkage = if name == PROGRAM_ENTRY && self.runtime.whole_program() {
-            Linkage::Local
-        } else {
-            declaration.linkage
-        };
-        let text = Translator::new(func, declarations, &self.runtime, &mut self.intrinsics)
-            .function(&name, linkage)
-            .map_err(|message| error(format!("LLVM backend: in {name}: {message}")))?;
+        let text = Translator::new(
+            func,
+            declarations,
+            &self.runtime,
+            &mut self.intrinsics,
+            &self.exclusive,
+            &mut self.address_taken,
+        )
+        .function(&name, declaration.linkage)
+        .map_err(|message| error(format!("LLVM backend: in {name}: {message}")))?;
+        if let Some(exclusive) = self.exclusive.get(&name) {
+            let (ret, params) = clif_signature(&func.signature)
+                .map_err(|message| error(format!("LLVM backend: {name}: {message}")))?;
+            let exclusive = (0..params.len()).map(|i| exclusive.contains(&i)).collect();
+            self.typed.insert(
+                name.clone(),
+                Typed {
+                    ret,
+                    params,
+                    exclusive,
+                },
+            );
+        }
         self.functions.push(text);
         self.defined.insert(id);
         Ok(())
@@ -294,16 +466,47 @@ impl LlvmModule {
             out.push_str(function);
             out.push('\n');
         }
-        // Whole-program builds internalize the runtime, which would hide its
-        // `main`; the real entry point lives here and forwards to it.
-        if self.runtime.whole_program() {
+        // A function with pointer-typed parameters is reached through a
+        // function pointer by a thunk with the plain word signature, so an
+        // indirect call always has exactly the type of what it calls.
+        for name in &self.address_taken {
+            let Some(typed) = self.typed.get(name) else {
+                continue;
+            };
+            let params = typed
+                .params
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| format!("{ty} %a{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
             let _ = writeln!(
                 out,
-                "declare i32 @{RUNTIME_MAIN}(i32, ptr, ptr)\n\
-                 define i32 @main(i32 %argc, ptr %argv) #0 {{\n  \
-                 %status = tail call i32 @{RUNTIME_MAIN}(i32 %argc, ptr %argv, ptr @{PROGRAM_ENTRY})\n  \
-                 ret i32 %status\n}}\n"
+                "define internal {} @{name}{WORD_THUNK}({params}) #0 {{",
+                typed.ret
             );
+            let mut arguments = Vec::new();
+            for (index, ty) in typed.params.iter().enumerate() {
+                if typed.exclusive[index] {
+                    let _ = writeln!(out, "  %p{index} = inttoptr i64 %a{index} to ptr");
+                    arguments.push(format!("ptr %p{index}"));
+                } else {
+                    arguments.push(format!("{ty} %a{index}"));
+                }
+            }
+            let arguments = arguments.join(", ");
+            if typed.ret == "void" {
+                let _ = writeln!(
+                    out,
+                    "  tail call void @{name}({arguments})\n  ret void\n}}\n"
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "  %r = tail call {ret} @{name}({arguments})\n  ret {ret} %r\n}}\n",
+                    ret = typed.ret
+                );
+            }
         }
         out.push_str("attributes #0 = { nounwind }\n");
         out.push_str(MODULE_METADATA);
@@ -364,6 +567,8 @@ struct Translator<'a> {
     declarations: &'a ModuleDeclarations,
     runtime: &'a RuntimeInterface,
     intrinsics: &'a mut BTreeSet<String>,
+    exclusive: &'a BTreeMap<String, Vec<usize>>,
+    address_taken: &'a mut BTreeSet<String>,
     /// Values that are plain literals and never get an SSA name.
     constants: BTreeMap<Value, String>,
     /// Pointer form of a value, valid wherever the value itself is.
@@ -383,12 +588,16 @@ impl<'a> Translator<'a> {
         declarations: &'a ModuleDeclarations,
         runtime: &'a RuntimeInterface,
         intrinsics: &'a mut BTreeSet<String>,
+        exclusive: &'a BTreeMap<String, Vec<usize>>,
+        address_taken: &'a mut BTreeSet<String>,
     ) -> Self {
         Self {
             func,
             declarations,
             runtime,
             intrinsics,
+            exclusive,
+            address_taken,
             constants: BTreeMap::new(),
             pointers: BTreeMap::new(),
             flags: BTreeMap::new(),
@@ -586,6 +795,25 @@ impl<'a> Translator<'a> {
             signature,
         ))
     }
+    /// The symbol to use for a function's address: its word-signature thunk
+    /// when the function itself takes pointer parameters.
+    fn address_of(&mut self, name: String) -> String {
+        if self.exclusive.contains_key(&name) {
+            let symbol = format!("@{name}{WORD_THUNK}");
+            self.address_taken.insert(name);
+            symbol
+        } else {
+            format!("@{name}")
+        }
+    }
+    /// Alias metadata for a load or store whose memory class is known.
+    fn memory_class(&self, inst: ir::Inst) -> &'static str {
+        match self.func.srcloc(inst).bits() {
+            bits if bits == MemoryClass::BufferHeader as u32 => ", !tbaa !4",
+            bits if bits == MemoryClass::BufferElements as u32 => ", !tbaa !5",
+            _ => "",
+        }
+    }
     fn convert_argument(&mut self, value: Value, to: Ty) -> Tx<Option<String>> {
         let from = Ty::of(self.ty(value)).ok_or("unsupported argument type")?;
         if from == to {
@@ -644,8 +872,17 @@ impl<'a> Translator<'a> {
             }
             return Ok(());
         }
+        let exclusive: &[usize] = callee
+            .strip_prefix('@')
+            .and_then(|name| self.exclusive.get(name))
+            .map_or(&[], Vec::as_slice);
         let mut rendered = Vec::new();
-        for (value, param) in arguments.iter().zip(&signature.params) {
+        for (index, (value, param)) in arguments.iter().zip(&signature.params).enumerate() {
+            if exclusive.contains(&index) {
+                let pointer = self.pointer(*value)?;
+                rendered.push(format!("ptr {pointer}"));
+                continue;
+            }
             rendered.push(format!(
                 "{}{} {}",
                 self.tyn(*value)?,
@@ -776,17 +1013,28 @@ impl<'a> Translator<'a> {
             Opcode::Sload32 => Some(("i32", "sext")),
             _ => return Err(format!("unsupported load {opcode}")),
         };
+        let class = self.memory_class(inst);
         match narrow {
-            None => self.line(format!("{name} = load {ty}, ptr {address}, align 1")),
+            None => self.line(format!("{name} = load {ty}, ptr {address}, align 1{class}")),
             Some((memory, extend)) => {
                 let temp = self.temp();
-                self.line(format!("{temp} = load {memory}, ptr {address}, align 1"));
+                self.line(format!(
+                    "{temp} = load {memory}, ptr {address}, align 1{class}"
+                ));
                 self.line(format!("{name} = {extend} {memory} {temp} to {ty}"));
             }
         }
         Ok(())
     }
-    fn store(&mut self, opcode: Opcode, value: Value, base: Value, offset: i64) -> Tx<()> {
+    fn store(
+        &mut self,
+        inst: ir::Inst,
+        opcode: Opcode,
+        value: Value,
+        base: Value,
+        offset: i64,
+    ) -> Tx<()> {
+        let class = self.memory_class(inst);
         let address = self.address(base, offset)?;
         let ty = self.tyn(value)?;
         let operand = self.op(value);
@@ -801,9 +1049,13 @@ impl<'a> Translator<'a> {
             Some(memory) if memory != ty => {
                 let temp = self.temp();
                 self.line(format!("{temp} = trunc {ty} {operand} to {memory}"));
-                self.line(format!("store {memory} {temp}, ptr {address}, align 1"));
+                self.line(format!(
+                    "store {memory} {temp}, ptr {address}, align 1{class}"
+                ));
             }
-            _ => self.line(format!("store {ty} {operand}, ptr {address}, align 1")),
+            _ => self.line(format!(
+                "store {ty} {operand}, ptr {address}, align 1{class}"
+            )),
         }
         Ok(())
     }
@@ -1052,10 +1304,10 @@ impl<'a> Translator<'a> {
             }
             InstructionData::LoadNoOffset { arg, .. } => self.load(inst, Opcode::Load, arg, 0)?,
             InstructionData::Store { args, offset, .. } => {
-                self.store(opcode, args[0], args[1], i64::from(offset))?;
+                self.store(inst, opcode, args[0], args[1], i64::from(offset))?;
             }
             InstructionData::StoreNoOffset { args, .. } => {
-                self.store(Opcode::Store, args[0], args[1], 0)?;
+                self.store(inst, Opcode::Store, args[0], args[1], 0)?;
             }
             InstructionData::StackAddr {
                 stack_slot, offset, ..
@@ -1087,10 +1339,12 @@ impl<'a> Translator<'a> {
                 let user = &self.func.params.user_named_funcs()[*reference];
                 let symbol = if user.namespace == 0 {
                     let id = FuncId::from_u32(user.index);
-                    self.declarations
+                    let name = self
+                        .declarations
                         .get_function_decl(id)
                         .linkage_name(id)
-                        .into_owned()
+                        .into_owned();
+                    self.address_of(name)[1..].to_owned()
                 } else {
                     let id = DataId::from_u32(user.index);
                     self.declarations
@@ -1112,7 +1366,8 @@ impl<'a> Translator<'a> {
             }
             InstructionData::FuncAddr { func_ref, .. } => {
                 let (callee, _) = self.function_name(func_ref)?;
-                self.define_pointer(dfg.first_result(inst), format!("@{callee}"));
+                let symbol = self.address_of(callee);
+                self.define_pointer(dfg.first_result(inst), symbol);
             }
             InstructionData::Call { args, func_ref, .. } => {
                 let arguments = args.as_slice(&dfg.value_lists).to_vec();
@@ -1270,6 +1525,7 @@ impl<'a> Translator<'a> {
         let func = self.func;
         let entry = func.layout.entry_block().ok_or("function has no entry")?;
         let reachable = self.reachable();
+        let exclusive: &[usize] = self.exclusive.get(name).map_or(&[], Vec::as_slice);
         let mut bodies: Vec<(Block, String)> = Vec::new();
         for block in func.layout.blocks() {
             if !reachable.contains(&block) {
@@ -1287,6 +1543,13 @@ impl<'a> Translator<'a> {
                         data.size.max(1)
                     );
                 }
+                // Exclusive parameters arrive as pointers. Everything derived
+                // from one stays based on it, which is what `noalias` needs.
+                for index in exclusive {
+                    let value = func.dfg.block_params(entry)[*index];
+                    let pointer = format!("%v{}.p", value.as_u32());
+                    self.define_pointer(value, pointer);
+                }
             }
             for inst in func.layout.block_insts(block) {
                 self.instruction(inst)?;
@@ -1299,18 +1562,23 @@ impl<'a> Translator<'a> {
         let mut out = String::new();
         let ret = return_type(&func.signature)?;
         let mut params = Vec::new();
-        for (value, param) in func
+        for (index, (value, param)) in func
             .dfg
             .block_params(entry)
             .iter()
             .zip(&func.signature.params)
+            .enumerate()
         {
-            params.push(format!(
-                "{}{} %v{}",
-                ty_name(param.value_type)?,
-                extension(param),
-                value.as_u32()
-            ));
+            if exclusive.contains(&index) {
+                params.push(format!("ptr noalias %v{}.p", value.as_u32()));
+            } else {
+                params.push(format!(
+                    "{}{} %v{}",
+                    ty_name(param.value_type)?,
+                    extension(param),
+                    value.as_u32()
+                ));
+            }
         }
         let linkage = match linkage {
             Linkage::Local | Linkage::Hidden => "internal ",
@@ -1355,8 +1623,19 @@ fn intrinsic_suffix(ty: &str) -> &str {
     }
 }
 
-/// Branch weights marking trap edges as never taken.
-const MODULE_METADATA: &str = "!0 = !{!\"branch_weights\", i32 1, i32 2000000}\n";
+/// Branch weights marking trap edges as never taken, then type-based alias
+/// tags for [`MemoryClass`]: a root of their own (so they say nothing about
+/// the C runtime's accesses), one scalar type per class, and one access tag
+/// per type (`!4` header, `!5` elements).
+const MODULE_METADATA: &str = "!0 = !{!\"branch_weights\", i32 1, i32 2000000}\n\
+!1 = !{!\"kush memory classes\"}\n\
+!2 = !{!\"buffer header\", !1, i64 0}\n\
+!3 = !{!\"buffer elements\", !1, i64 0}\n\
+!4 = !{!2, !2, i64 0}\n\
+!5 = !{!3, !3, i64 0}\n";
+
+/// Suffix of the word-signature thunk of a function with pointer parameters.
+const WORD_THUNK: &str = ".words";
 
 #[cfg(test)]
 mod tests {
@@ -1390,5 +1669,73 @@ mod tests {
         );
         assert!(!interface.signatures.contains_key("helper"));
         assert!(!interface.signatures.contains_key("pair"));
+    }
+
+    #[test]
+    fn the_runtime_module_splits_into_an_object_and_inlinable_bodies() {
+        let split = split_runtime(
+            "target triple = \"x86_64-pc-linux-gnu\"\n\
+             @.str = private unnamed_addr constant [2 x i8] c\"a\\00\", align 1\n\
+             @kush_pool = internal unnamed_addr global i64 0, align 8\n\
+             @kush_abort_word = local_unnamed_addr global i64 0, align 8\n\
+             @environ = external local_unnamed_addr global ptr, align 8\n\
+             define internal fastcc void @kush_claim(i64 %0) unnamed_addr #1 {\n\
+             }\n\
+             define i64 @kush_alloc(i64 noundef %0) local_unnamed_addr #2 {\n\
+             }\n\
+             define i64 @kush_vec_len(i64 noundef %0) local_unnamed_addr #2 {\n\
+             }\n",
+        )
+        .unwrap();
+        // The object exports former internals as hidden symbols.
+        assert!(
+            split
+                .exported
+                .contains("@kush_pool = hidden unnamed_addr global i64 0")
+        );
+        assert!(
+            split
+                .exported
+                .contains("define hidden fastcc void @kush_claim(i64 %0)")
+        );
+        assert!(split.exported.contains("\ndefine i64 @kush_alloc("));
+        // The inlinable copy defines nothing for real, shares all state, and
+        // keeps the allocator opaque.
+        assert!(
+            split
+                .inlinable
+                .contains("@kush_pool = available_externally hidden unnamed_addr global i64 0")
+        );
+        assert!(
+            split.inlinable.contains(
+                "@kush_abort_word = available_externally local_unnamed_addr global i64 0"
+            )
+        );
+        assert!(
+            split
+                .inlinable
+                .contains("@.str = private unnamed_addr constant")
+        );
+        assert!(
+            split
+                .inlinable
+                .contains("@environ = external local_unnamed_addr")
+        );
+        assert!(split.inlinable.contains(
+            "define available_externally hidden fastcc void @kush_claim(i64 %0) unnamed_addr #1 noinline {"
+        ));
+        assert!(split.inlinable.contains(
+            "define available_externally i64 @kush_alloc(i64 noundef %0) local_unnamed_addr #2 noinline {"
+        ));
+        assert!(split.inlinable.contains(
+            "define available_externally i64 @kush_vec_len(i64 noundef %0) local_unnamed_addr #2 {"
+        ));
+        let interface = RuntimeInterface::parse(&split.interface);
+        assert!(interface.signatures.contains_key("kush_alloc"));
+        assert!(!interface.signatures.contains_key("kush_claim"));
+        // Constructs the scheme does not cover are refused, not guessed.
+        assert!(split_runtime("@a = alias i64, ptr @b\n").is_none());
+        assert!(split_runtime("@t = thread_local global i64 0\n").is_none());
+        assert!(split_runtime("@llvm.used = appending global [1 x ptr] [ptr @a]\n").is_none());
     }
 }

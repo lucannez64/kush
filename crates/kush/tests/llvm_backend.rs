@@ -163,8 +163,7 @@ fn build_reports_its_backend_and_can_save_the_module() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("with LLVM."));
     let text = fs::read_to_string(&module).unwrap();
-    assert!(text.contains("define internal i64 @kush_entry()"), "{text}");
-    assert!(text.contains("define i32 @main(i32 %argc, ptr %argv)"));
+    assert!(text.contains("define i64 @kush_entry()"), "{text}");
     assert!(text.contains("@llvm.smul.with.overflow.i64"));
     let ran = Command::new(&binary).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&ran.stdout), "42\n720\n42\n");
@@ -220,4 +219,73 @@ fn a_missing_clang_is_reported_and_leaves_no_output() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!binary.exists());
+}
+
+/// Ownership reaches LLVM: owning handles and exclusive borrows are `noalias`
+/// pointer parameters, a function whose address is taken is called through a
+/// word-signature thunk, and buffer headers are distinguished from elements.
+#[test]
+fn ownership_facts_are_stated_in_the_module() {
+    if !clang_available() {
+        return;
+    }
+    let source = "
+        fn fill(view: &mut [i64], value: i64) -> Unit ! {panic} {
+            let mut i = 0;
+            while i < Slice.len(view) { Slice.set(view, i, value); i = i + 1; }
+        }
+        fn sum_all(values: Vec<i64>) -> i64 ! {panic} {
+            let mut acc = 0;
+            let mut i = 0;
+            while i < Vec.len(&values) { acc = acc + Vec.get(&values, i); i = i + 1; }
+            acc
+        }
+        fn open(ticket: Box<i64>) -> i64 ! {} { Box.take(ticket) }
+        fn apply(f: fn(Box<i64>) -> i64 ! {}, ticket: Box<i64>) -> i64 ! {} { f(ticket) }
+        fn main() -> Unit ! {io, alloc, panic} {
+            let mut numbers: [i64; 4] = [0, 0, 0, 0];
+            fill(&mut numbers[..], 3);
+            let mut values: Vec<i64> = Vec.with_capacity(2);
+            let mut i = 0;
+            while i < 5 { values = Vec.push(values, numbers[i % 4] + i); i = i + 1; }
+            print_i64(sum_all(values));
+            print_i64(apply(open, Box.new(7)) + open(Box.new(8)));
+        }";
+    let program = kush::executable::check(source).unwrap();
+    let text =
+        kush::native::emit_llvm_ir(&program, kush::native::CodegenOptions::release_llvm()).unwrap();
+    // fill(&mut [i64], i64): the data pointer of the exclusive view.
+    assert!(
+        text.contains("(ptr noalias %v0.p, i64 %v1, i64 %v2, i64 %v3, i64 %v4)"),
+        "{text}"
+    );
+    // sum_all(Vec<i64>) and open(Box<i64>): the owning handle.
+    assert!(
+        text.matches("(ptr noalias %v0.p) #0 {").count() >= 2,
+        "{text}"
+    );
+    // `open` is passed as a value, so it has a thunk and `apply` gets that.
+    assert!(text.contains(".words(i64 %a0) #0 {"), "{text}");
+    assert!(text.contains(".words to i64"), "{text}");
+    assert!(
+        text.contains("!tbaa !4") && text.contains("!tbaa !5"),
+        "{text}"
+    );
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let binary = scratch.path().join("facts");
+    for options in [
+        kush::native::CodegenOptions::default(),
+        kush::native::CodegenOptions::release_llvm(),
+    ] {
+        kush::native::build_with_codegen(
+            &program,
+            &binary,
+            false,
+            &kush::native::LinkSpec::default(),
+            options,
+        )
+        .unwrap();
+        let output = Command::new(&binary).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "25\n15\n");
+    }
 }

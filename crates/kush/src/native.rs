@@ -2523,14 +2523,7 @@ static void kush_task_finish(void) {
     kush_current = NULL;
     kush_task_count = 0;
 }
-#ifdef KUSH_WHOLE_PROGRAM
-/* LLVM whole-program builds internalize this runtime into the program module.
-   That module owns `main` and passes its (internal) entry function here, so
-   no symbol but `main` has to stay visible. */
-int kush_runtime_main(int argc, char **argv, int64_t (*kush_entry)(void)) {
-#else
 int main(int argc, char **argv) {
-#endif
     kush_host_init(argc, argv);
     /* Broken pipes become recoverable EPIPE results instead of process signals. */
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) kush_panic();
@@ -2786,9 +2779,9 @@ pub enum Backend {
     /// Cranelift machine code: fast builds, the default.
     #[default]
     Cranelift,
-    /// LLVM IR optimized by `clang` together with the C runtime: slower
-    /// builds, fastest programs. Requires `clang`; `llvm-link` and `opt` from
-    /// the same LLVM enable whole-program optimization with the runtime.
+    /// LLVM IR optimized by `clang`, with runtime accessors inlined into
+    /// user code: slower builds, fastest programs. Requires `clang`;
+    /// `llvm-link` from the same LLVM enables the inlining.
     Llvm,
 }
 
@@ -2932,7 +2925,7 @@ pub fn build_with_codegen(
             fs::write(&object_path, object).map_err(error)?;
             vec![object_path, runtime_object]
         }
-        Backend::Llvm => llvm_objects(program, codegen, &defines, links, &scratch)?,
+        Backend::Llvm => llvm_objects(program, codegen, &defines, &scratch)?,
     };
     let binary_path = scratch.path.join("program");
     let mut command = Command::new("cc");
@@ -3045,8 +3038,8 @@ pub fn emit_llvm_ir(program: &Executable, codegen: CodegenOptions) -> Result<Str
     if program.uses_tasks {
         defines.push("-DKUSH_HAS_TASKS=1".to_owned());
     }
-    let runtime_ir = runtime_cache::compile_llvm_ir(RUNTIME, &defines, &scratch, &tools.clang)?;
-    let interface = llvm::RuntimeInterface::parse(&fs::read_to_string(&runtime_ir).map_err(error)?);
+    let runtime = runtime_cache::compile_llvm(RUNTIME, &defines, &scratch, &tools.clang)?;
+    let interface = llvm::RuntimeInterface::parse(&runtime.interface);
     match lower(program, codegen, Some(interface))? {
         Lowered::Llvm(text) => Ok(text),
         Lowered::Object(_) => unreachable!("the LLVM backend lowers to LLVM IR"),
@@ -3055,31 +3048,23 @@ pub fn emit_llvm_ir(program: &Executable, codegen: CodegenOptions) -> Result<Str
 
 /// Lower through the LLVM backend and return the objects to link.
 ///
-/// With `llvm-link` available the C runtime's LLVM IR is linked into the
-/// program module lazily and internalized (only the runtime functions the
-/// program reaches are pulled in, and none stays visible outside the module),
-/// then the result is optimized as one unit, so runtime operations inline
-/// into user code. The runtime is compiled with `KUSH_WHOLE_PROGRAM`, which
-/// turns its `main` into a function taking the program entry, and the program
-/// module provides the real `main`; nothing else needs to stay visible.
-/// Programs with extra link inputs keep the whole runtime public, since
-/// foreign code may call it.
+/// The runtime is compiled once (and cached) into an ordinary object plus a
+/// bitcode file of the same definitions marked `available_externally`. Each
+/// build links the definitions the program reaches into the program module,
+/// where LLVM may inline them into user code and then discards them; anything
+/// not inlined is called in the runtime object. Only program code is
+/// optimized and compiled per build, like a Rust program against its
+/// precompiled standard library. Without `llvm-link` the program module is
+/// compiled alone and runtime operations stay calls.
 fn llvm_objects(
     program: &Executable,
     codegen: CodegenOptions,
     defines: &[String],
-    links: &LinkSpec,
     scratch: &Scratch,
 ) -> Result<Vec<PathBuf>> {
     let tools = LlvmTools::find()?;
-    let mut runtime_defines = defines.to_vec();
-    if tools.link.is_some() {
-        runtime_defines.push("-DKUSH_WHOLE_PROGRAM=1".to_owned());
-    }
-    let runtime_ir =
-        runtime_cache::compile_llvm_ir(RUNTIME, &runtime_defines, scratch, &tools.clang)?;
-    let runtime_text = fs::read_to_string(&runtime_ir).map_err(error)?;
-    let interface = llvm::RuntimeInterface::parse(&runtime_text);
+    let runtime = runtime_cache::compile_llvm(RUNTIME, defines, scratch, &tools.clang)?;
+    let interface = llvm::RuntimeInterface::parse(&runtime.interface);
     let Lowered::Llvm(text) = lower(program, codegen, Some(interface))? else {
         unreachable!("the LLVM backend lowers to LLVM IR")
     };
@@ -3101,25 +3086,25 @@ fn llvm_objects(
     // The module is generated; clang's note about overriding its target
     // triple is not a user diagnostic.
     compile.arg("-Wno-override-module");
-    let Some(link) = &tools.link else {
-        compile.arg(&program_ir).arg("-o").arg(&object);
-        run_tool(&mut compile, "clang (LLVM backend)")?;
-        let runtime_object = runtime_cache::compile(RUNTIME, defines, scratch)?;
-        return Ok(vec![object, runtime_object]);
+    let input = match &tools.link {
+        Some(link) => {
+            let linked = scratch.path.join("linked.bc");
+            run_tool(
+                Command::new(link)
+                    .arg(&program_ir)
+                    .arg(&runtime.inline)
+                    .arg("--only-needed")
+                    .arg("-o")
+                    .arg(&linked),
+                "llvm-link",
+            )?;
+            linked
+        }
+        None => program_ir,
     };
-    let linked = scratch.path.join("linked.bc");
-    let mut merge = Command::new(link);
-    merge.arg(&program_ir).arg(&runtime_ir);
-    let foreign = !(links.objects.is_empty()
-        && links.libraries.is_empty()
-        && links.system_libraries.is_empty());
-    if !foreign {
-        merge.arg("--internalize").arg("--only-needed");
-    }
-    run_tool(merge.arg("-o").arg(&linked), "llvm-link")?;
-    compile.arg(&linked).arg("-o").arg(&object);
+    compile.arg(&input).arg("-o").arg(&object);
     run_tool(&mut compile, "clang (LLVM backend)")?;
-    Ok(vec![object])
+    Ok(vec![object, runtime.object])
 }
 
 /// Scratch ownership is local to this process. Existing directories are never
@@ -3898,6 +3883,7 @@ fn lower(
         }
         foreign_ids.push(None);
         let mut sig = module.make_signature();
+        let mut exclusive_params = Vec::new();
         let erased_result = f.result_grade.is_some_and(Grade::is_zero);
         if erased_result {
             // A copyable `@[0]` result has no payload and no ABI return slot.
@@ -3926,27 +3912,45 @@ fn lower(
                 // site but has no physical ABI slot.
                 continue;
             }
-            sig.params
-                .extend((0..program.width(local.ty)).map(|_| AbiParam::new(I64)));
+            // The first word of an owning handle or exclusive borrow is a
+            // pointer nothing else may use while the callee runs.
+            let exclusive = matches!(
+                local.ty,
+                Type::Box(_)
+                    | Type::RefMut(_)
+                    | Type::Vec(_)
+                    | Type::Bytes
+                    | Type::String
+                    | Type::SliceMut(_)
+                    | Type::StrMut
+            );
+            for word in 0..program.width(local.ty) {
+                if exclusive && word == 0 {
+                    exclusive_params.push(sig.params.len());
+                }
+                sig.params.push(AbiParam::new(I64));
+            }
         }
         let name = if index == entry {
             "kush_entry".to_owned()
         } else {
             format!("kush_fn_{index}")
         };
-        ids.push(
-            module
-                .declare_function(
-                    &name,
-                    if index == entry {
-                        Linkage::Export
-                    } else {
-                        Linkage::Local
-                    },
-                    &sig,
-                )
-                .map_err(error)?,
-        );
+        let id = module
+            .declare_function(
+                &name,
+                if index == entry {
+                    Linkage::Export
+                } else {
+                    Linkage::Local
+                },
+                &sig,
+            )
+            .map_err(error)?;
+        if let Some(llvm) = &mut module.llvm {
+            llvm.exclusive_parameters(&name, exclusive_params);
+        }
+        ids.push(id);
     }
     for (index, f) in program.functions.iter().enumerate() {
         if program
@@ -9398,11 +9402,26 @@ impl Generator<'_, '_> {
     /// Decode ordinary buffer capacity. Headerless buffers have at most 1008
     /// data bytes, so their logical capacity fits in 16 bits. Header-bearing
     /// buffers retain the complete positive word, including large capacities.
+    /// Build memory accesses of one class. The class travels as the
+    /// instructions' source location, which Cranelift's code generator
+    /// ignores and the LLVM backend turns into alias metadata.
+    fn memory_class<T>(
+        &mut self,
+        class: llvm::MemoryClass,
+        build: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.builder.srcloc();
+        self.builder.set_srcloc(ir::SourceLoc::new(class as u32));
+        let built = build(self);
+        self.builder.set_srcloc(previous);
+        built
+    }
     fn buffer_capacity(&mut self, handle: Value) -> Value {
-        let word = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), handle, 8);
+        let word = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
+            g.builder
+                .ins()
+                .load(I64, ir::MemFlagsData::new(), handle, 8)
+        });
         let raw = self
             .builder
             .ins()
@@ -9419,14 +9438,16 @@ impl Generator<'_, '_> {
             .ins()
             .icmp_imm_u(IntCC::UnsignedGreaterThan, value, 255);
         self.guard(invalid);
-        let length = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), handle, 0);
-        let capacity = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), handle, 8);
+        let (length, capacity) = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
+            (
+                g.builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), handle, 0),
+                g.builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), handle, 8),
+            )
+        });
         let room = self
             .builder
             .ins()
@@ -9438,13 +9459,17 @@ impl Generator<'_, '_> {
         self.builder.ins().brif(room, fast, &[], slow, &[]);
         self.builder.switch_to_block(fast);
         let address = self.builder.ins().iadd(handle, length);
-        self.builder
-            .ins()
-            .istore8(ir::MemFlagsData::new(), value, address, 16);
+        self.memory_class(llvm::MemoryClass::BufferElements, |g| {
+            g.builder
+                .ins()
+                .istore8(ir::MemFlagsData::new(), value, address, 16);
+        });
         let next = self.builder.ins().iadd_imm_s(length, 1);
-        self.builder
-            .ins()
-            .store(ir::MemFlagsData::new(), next, handle, 0);
+        self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
+            g.builder
+                .ins()
+                .store(ir::MemFlagsData::new(), next, handle, 0);
+        });
         self.jump(join, &[handle]);
         self.builder.switch_to_block(slow);
         let grown = self.runtime_call(self.bytes_ops[&op], &[handle, value]);
@@ -9466,10 +9491,11 @@ impl Generator<'_, '_> {
             let call = self.builder.ins().call(callee, &[handle, item, width]);
             return self.builder.inst_results(call)[0];
         }
-        let length = self
-            .builder
-            .ins()
-            .load(I64, ir::MemFlagsData::new(), handle, 0);
+        let length = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
+            g.builder
+                .ins()
+                .load(I64, ir::MemFlagsData::new(), handle, 0)
+        });
         let capacity = self.buffer_capacity(handle);
         let room = self
             .builder
@@ -9486,18 +9512,22 @@ impl Generator<'_, '_> {
             .ins()
             .imul_imm_s(length, (words.len() * 8) as i64);
         let address = self.builder.ins().iadd(handle, offset);
-        for (word, value) in words.iter().enumerate() {
-            self.builder.ins().store(
-                ir::MemFlagsData::new(),
-                *value,
-                address,
-                (16 + word * 8) as i32,
-            );
-        }
+        self.memory_class(llvm::MemoryClass::BufferElements, |g| {
+            for (word, value) in words.iter().enumerate() {
+                g.builder.ins().store(
+                    ir::MemFlagsData::new(),
+                    *value,
+                    address,
+                    (16 + word * 8) as i32,
+                );
+            }
+        });
         let next = self.builder.ins().iadd_imm_s(length, 1);
-        self.builder
-            .ins()
-            .store(ir::MemFlagsData::new(), next, handle, 0);
+        self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
+            g.builder
+                .ins()
+                .store(ir::MemFlagsData::new(), next, handle, 0);
+        });
         self.jump(join, &[handle]);
         self.builder.switch_to_block(slow);
         let item = self.stack_words(words.len());

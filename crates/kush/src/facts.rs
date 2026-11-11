@@ -1383,37 +1383,133 @@ fn eliminate(mut rows: Vec<Row>) -> Option<Vec<Row>> {
     Some(rows)
 }
 
-/// Turn a contradictory row into a Farkas certificate over `sources`, whose
-/// indices are the row origins.
-fn farkas_from_conflict(conflict: &Row, sources: &[Constraint]) -> Option<Farkas> {
+/// The weights of a contradictory row: a positive denominator and, per
+/// source row (the row origins), a non-negative numerator.
+fn conflict_weights(conflict: &Row) -> Option<(i128, Vec<(u32, i128)>)> {
     let mut denominator = 1i128;
     for multiplier in conflict.origins.values() {
         denominator = lcm(denominator, multiplier.den);
     }
-    let mut steps = Vec::new();
-    let mut multipliers = Vec::new();
+    let mut weights = Vec::new();
     for (origin, multiplier) in &conflict.origins {
-        let source = sources.get(*origin)?.clone();
         let numerator = multiplier.num.checked_mul(denominator / multiplier.den)?;
-        steps.push(source);
-        multipliers.push(numerator);
+        weights.push((u32::try_from(*origin).ok()?, numerator));
     }
     // Reduce a common factor so certificates stay small.
     let mut divisor = denominator;
-    for numerator in &multipliers {
+    for (_, numerator) in &weights {
         divisor = gcd(divisor, *numerator);
     }
     if divisor > 1 {
         denominator /= divisor;
-        for numerator in &mut multipliers {
+        for (_, numerator) in &mut weights {
             *numerator /= divisor;
         }
+    }
+    Some((denominator, weights))
+}
+
+/// The Farkas certificate those weights describe over `sources`.
+fn farkas_from_weights(
+    denominator: i128,
+    weights: &[(u32, i128)],
+    sources: &[Constraint],
+) -> Option<Farkas> {
+    let mut steps = Vec::with_capacity(weights.len());
+    let mut multipliers = Vec::with_capacity(weights.len());
+    for (origin, numerator) in weights {
+        steps.push(sources.get(*origin as usize)?.clone());
+        multipliers.push(*numerator);
     }
     Some(Farkas {
         steps,
         multipliers,
         denominator,
     })
+}
+
+/// Serialize a system for the proof cache with its terms renamed to their
+/// rank in term order. Elimination depends only on the order of terms and of
+/// rows, so systems with equal serializations search identically.
+fn system_key(sources: &[Constraint], required: Option<usize>) -> u128 {
+    system_key_with(sources, &[required.map_or(u64::MAX, |index| index as u64)])
+}
+
+/// `domain` separates the kinds of question asked about one system.
+fn system_key_with(sources: &[Constraint], domain: &[u64]) -> u128 {
+    let mut terms = BTreeSet::new();
+    for source in sources {
+        terms.extend(source.coefficients.keys().copied());
+    }
+    let ranks: BTreeMap<Term, u32> = terms.into_iter().zip(0u32..).collect();
+    let mut bytes = Vec::with_capacity(sources.len() * 48 + 16);
+    for word in domain {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    for source in sources {
+        bytes.extend_from_slice(&(source.coefficients.len() as u32).to_le_bytes());
+        for (term, coefficient) in &source.coefficients {
+            bytes.extend_from_slice(&ranks[term].to_le_bytes());
+            bytes.extend_from_slice(&coefficient.to_le_bytes());
+        }
+        bytes.extend_from_slice(&source.bound.to_le_bytes());
+    }
+    crate::proof_cache::key(&bytes)
+}
+
+/// Search for a rational refutation of `sources`. With `required`, the
+/// refutation must use that row with a positive weight. Outcomes are
+/// remembered across builds; a remembered refutation is rebuilt over the
+/// current rows and verified again, so the cache is never trusted.
+fn refute_system(sources: &[Constraint], required: Option<usize>) -> Option<Farkas> {
+    let key = system_key(sources, required);
+    match crate::proof_cache::get(key) {
+        Some(None) => return None,
+        Some(Some((denominator, weights))) => {
+            let uses_required = required.is_none_or(|index| {
+                weights
+                    .iter()
+                    .any(|(origin, numerator)| *origin as usize == index && *numerator > 0)
+            });
+            if uses_required
+                && let Some(proof) = farkas_from_weights(denominator, &weights, sources)
+                && verify_farkas(sources, &proof)
+            {
+                return Some(proof);
+            }
+        }
+        None => {}
+    }
+    let found = search_refutation(sources, required);
+    crate::proof_cache::put(key, found.clone());
+    let (denominator, weights) = found?;
+    farkas_from_weights(denominator, &weights, sources)
+}
+
+fn search_refutation(
+    sources: &[Constraint],
+    required: Option<usize>,
+) -> Option<(i128, Vec<(u32, i128)>)> {
+    let mut rows = Vec::with_capacity(sources.len());
+    for (index, source) in sources.iter().enumerate() {
+        rows.push(Row::from_constraint(source, index)?);
+    }
+    let rows = eliminate(rows)?;
+    // After eliminating every variable, every row is `0 <= bound`. A negative
+    // bound is a contradiction. With a goal, prefer a contradiction that
+    // actually uses the goal's negation, so the certificate is a proof of the
+    // goal rather than merely an observation that the hypotheses are
+    // inconsistent.
+    let conflict = rows.iter().find(|row| {
+        row.coefficients.is_empty()
+            && row.bound.is_negative()
+            && required.is_none_or(|index| {
+                row.origins
+                    .get(&index)
+                    .is_some_and(|multiplier| multiplier.is_positive())
+            })
+    })?;
+    conflict_weights(conflict)
 }
 
 fn prove_with(hypotheses: &[Constraint], goal: &Constraint) -> Option<Farkas> {
@@ -1429,39 +1525,14 @@ fn prove_with(hypotheses: &[Constraint], goal: &Constraint) -> Option<Farkas> {
     sources.extend(hypotheses.iter().cloned());
     let negation_index = sources.len();
     sources.push(negated);
-    let mut rows = Vec::with_capacity(sources.len());
-    for (index, source) in sources.iter().enumerate() {
-        rows.push(Row::from_constraint(source, index)?);
-    }
-    let rows = eliminate(rows)?;
-    // After eliminating every variable, every row is `0 <= bound`. A negative
-    // bound is a contradiction. Prefer a contradiction that actually uses the
-    // goal's negation, so the certificate is a proof of the goal rather than
-    // merely an observation that the hypotheses are inconsistent.
-    let conflict = rows.iter().find(|row| {
-        row.coefficients.is_empty()
-            && row.bound.is_negative()
-            && row
-                .origins
-                .get(&negation_index)
-                .is_some_and(|multiplier| multiplier.is_positive())
-    })?;
-    farkas_from_conflict(conflict, &sources)
+    refute_system(&sources, Some(negation_index))
 }
 
 /// Refute a complete integer system without a distinguished goal. This is the
 /// leaf rule used by the integer fallback: any negative constant consequence
 /// of the available constraints is a contradiction.
 fn refute_rational(system: &[Constraint]) -> Option<Farkas> {
-    let mut rows = Vec::with_capacity(system.len());
-    for (index, constraint) in system.iter().enumerate() {
-        rows.push(Row::from_constraint(constraint, index)?);
-    }
-    let rows = eliminate(rows)?;
-    let conflict = rows
-        .iter()
-        .find(|row| row.coefficients.is_empty() && row.bound.is_negative())?;
-    farkas_from_conflict(conflict, system)
+    refute_system(system, None)
 }
 
 /// Exact non-negative rational used by the Fourier–Motzkin search.
@@ -1504,6 +1575,10 @@ impl Ratio {
     fn normalized(num: i128, den: i128) -> Option<Self> {
         if den == 0 {
             return None;
+        }
+        // Already in lowest terms; the common case, since weights are integers.
+        if den == 1 {
+            return Some(Ratio { num, den });
         }
         let (num, den) = if den < 0 {
             (num.checked_neg()?, den.checked_neg()?)
@@ -1655,7 +1730,26 @@ fn prove_integer_with(
     if system.len() > MAX_INTEGER_CONSTRAINTS {
         return None;
     }
-    solve_integer(&system, MAX_INTEGER_DEPTH, &mut budget)
+    // Most goals that reach the integer fallback are simply not provable,
+    // and establishing that is the expensive part. Remember failures only:
+    // a proof is searched again, so nothing remembered is ever trusted.
+    let key = system_key_with(
+        &system,
+        &[
+            u64::MAX - 1,
+            budget.nodes as u64,
+            budget.cuts as u64,
+            budget.cut_rounds as u64,
+        ],
+    );
+    if crate::proof_cache::get(key) == Some(None) {
+        return None;
+    }
+    let proof = solve_integer(&system, MAX_INTEGER_DEPTH, &mut budget);
+    if proof.is_none() {
+        crate::proof_cache::put(key, None);
+    }
+    proof
 }
 
 fn solve_integer(

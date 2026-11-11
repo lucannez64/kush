@@ -27,15 +27,15 @@ Environment:
 | `KUSH_CLANG` | The `clang` to use (default: `clang` on `PATH`). |
 | `KUSH_BACKEND=llvm\|cranelift` | Override the backend of every native build in the process. Meant for replaying a test suite on the other backend. |
 | `KUSH_EMIT_LLVM=path` | Also save the program's LLVM module (before linking with the runtime and optimizing). |
-| `KUSH_LLVM_NO_WHOLE_PROGRAM` | Compile the program module alone and link the ordinary runtime object. |
+| `KUSH_LLVM_NO_WHOLE_PROGRAM` | Do not use `llvm-link`: runtime operations stay calls into the runtime object. |
 | `KUSH_TRACE_DEFERRED` | Print why a loop keeps immediate overflow checks. |
 
 Requirements: Linux x86-64 and a `clang` with opaque pointers (LLVM 15 or
-newer; developed and tested with LLVM 18.1). For whole-program optimization
-`llvm-link` from the same LLVM must sit beside the real `clang` binary or be
-reported by `clang -print-prog-name=llvm-link`; distribution packages named
-`llvm` provide it. Without it the backend still works, but runtime operations
-are not inlined into user code.
+newer; developed and tested with LLVM 18.1). To inline runtime operations into
+user code, `llvm-link` from the same LLVM must sit beside the real `clang`
+binary or be reported by `clang -print-prog-name=llvm-link`; distribution
+packages named `llvm` provide it. Without it the backend still works, but
+runtime operations stay calls.
 
 ## Design
 
@@ -74,32 +74,73 @@ additions. Stack slots whose address does not escape are promoted to
 registers, and array accesses appear to LLVM as a pointer plus an induction
 variable, which is what its loop vectorizer needs.
 
-### The runtime is optimized with the program
+### A precompiled runtime with inlinable bodies
 
-`clang -S -emit-llvm` compiles the C runtime to LLVM IR once (cached like the
-runtime object, under a separate key). The backend reads each runtime
-function's real signature from that IR and emits calls with exactly that type,
-converting words to pointers where the C prototype has one; a call through a
-mismatched type would never be inlined.
+The C runtime is compiled by `clang` once per compiler, flags and system
+headers, and cached. From that single LLVM module the backend derives three
+artifacts (`split_runtime` in `native/llvm.rs`):
 
-`llvm-link --internalize --only-needed` then pulls the runtime functions the
-program reaches into the program module with internal linkage, and
-`clang -O3` optimizes and compiles the single module. `Vec.get`, `Vec.set`,
-byte operations, allocation fast paths and handler-depth bookkeeping inline
-into user code, and their bounds checks become visible to LLVM's range
-analysis. The runtime is compiled with `KUSH_WHOLE_PROGRAM`, which turns its
-`main` into `kush_runtime_main(argc, argv, entry)`; the program module defines
-the real `main` and passes its internal entry function, so `main` is the only
-visible symbol.
+- **the runtime object**, linked into every program. It is the module
+  unchanged, except that internal functions and variables are *hidden*
+  instead, so the program object can refer to them;
+- **inlinable bodies**: the same module as bitcode with every definition
+  marked `available_externally`. LLVM may inline such a body and then discards
+  it; it is never compiled again. Variables are `available_externally` too, so
+  there is exactly one copy of the allocator pools, counters and task state:
+  the runtime object's;
+- **the interface**: each runtime function's real signature. Calls are
+  emitted with exactly that type, converting words to pointers where the C
+  prototype has one, because a call through a mismatched type is never
+  inlined.
 
-Programs with extra link inputs (`Bridge.toml` adapters, foreign objects)
-link the whole runtime without internalizing, because foreign code may call
-runtime symbols.
+Each build then runs `llvm-link --only-needed` to pull the bodies the program
+reaches into the program module, and `clang -O3` on the result. Only program
+code is optimized and compiled per build, as with a Rust program and its
+precompiled standard library.
+
+Only plain accessors may actually be inlined (`INLINABLE`: vector, byte and
+string reads, in-place element writes, float conversions, handler depth).
+Everything else carries `noinline`. The allocator in particular must stay an
+opaque call, for the reason given under ownership facts.
+
+### Ownership facts
+
+Kush knows more about aliasing than LLVM can discover, and tells it in two
+ways.
+
+**Exclusive parameters.** A parameter that is an owning handle (`Box<T>`,
+`Vec<T>`, `Bytes`, `String`) or an exclusive borrow (`&mut T`, the data
+pointer of `&mut [T]` and `&mut str`) becomes a `ptr noalias` parameter. The
+translator derives every address computed from it by `getelementptr`, so the
+accesses stay based on that parameter. When such a function is inlined, LLVM
+keeps the fact as scoped alias metadata. A function with pointer parameters
+whose address is taken (function values, closures, task entries) gets a
+`.words` thunk with the plain word signature, and that thunk is what function
+pointers refer to, so an indirect call always has the type of its callee.
+
+**Memory classes.** The generator marks the loads and stores of its inline
+vector and byte-buffer paths as *buffer header* (length, capacity) or *buffer
+elements*. A header word is never an element of any buffer, so the two get
+distinct type-based alias tags under a root of their own; they say nothing
+about untagged accesses or about the C runtime's accesses. The class travels
+as the Cranelift instruction's source location, which Cranelift's code
+generator ignores. (Cranelift's own alias regions were not used: it treats
+untagged memory as disjoint from every region, which would be wrong here.)
+
+Both kinds of fact are statements about objects. Kush's allocator recycles
+blocks, so the same address can be a freed vector's elements and later a new
+vector's header. That is sound for the same reason it is in C and Rust: the
+recycling happens behind `kush_alloc`/`kush_free` calls LLVM cannot see
+through. This is why allocator functions are never inlined into program code.
+
+Not stated yet: shared borrows are not marked `readonly`, allocation results
+are not marked as fresh, and exclusive values held in locals or fields (as
+opposed to parameters) carry no fact.
 
 ### Checks
 
 Bounds checks are ordinary compare-and-branch code in both backends. With the
-runtime inlined, LLVM removes them wherever the index is bounded by the same
+accessors inlined, LLVM removes them wherever the index is bounded by the same
 length, which covers `while i < Slice.len(v)` and `while i < Vec.len(&v)`
 loops; `Vec.at`/`Slice.at` with a proof remain unchecked loads as before.
 
@@ -110,12 +151,13 @@ values are handled by [deferred overflow](deferred-overflow.md).
 ## Validation
 
 - `KUSH_BACKEND=llvm cargo test --workspace` replays the entire suite on the
-  LLVM backend: 1,691 tests pass on both backends (LLVM 18.1.3, 2026-11-11).
+  LLVM backend: 1,694 tests pass on both backends (LLVM 18.1.3, 2026-11-11).
   Tests that replace `cc` to exercise the Cranelift pipeline pin themselves to
   it.
 - `tests/llvm_backend.rs` runs 22 example programs through four LLVM
-  configurations and the separate-runtime pipeline and compares output and
-  exit status with Cranelift. It passes vacuously without `clang`.
+  configurations and the no-`llvm-link` pipeline, compares output and exit
+  status with Cranelift, and checks that ownership facts appear in the module.
+  It passes vacuously without `clang`.
 - `tests/deferred_overflow.rs` compares the evaluator with up to nine native
   configurations, including panicking programs.
 
@@ -132,57 +174,56 @@ build, which does not check.
 
 | Build | Time |
 | --- | ---: |
-| Kush, Cranelift `--release` | 141 |
-| Kush, LLVM, immediate checks | 78 |
-| Kush, LLVM | 69 |
-| Rust checked | 63 |
-| Rust | 60 |
+| Kush, Cranelift `--release` | 146 |
+| Kush, LLVM, immediate checks | 63 |
+| Kush, LLVM | 61 |
+| Rust checked | 62 |
+| Rust | 59 |
 
 `benchmarks/checked-loops`, 4,096 elements × 200,000 repetitions:
 
 | Kernel | Cranelift | LLVM immediate | LLVM | Rust checked | Rust | LLVM native | Rust native |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| sum | 786 | 260 | 170 | 265 | 84 | 70 | 52 |
-| dot | 1320 | 523 | 518 | 508 | 418 | 197 | 165 |
-| scale, then sum | 2269 | 1105 | 554 | 784 | 458 | 267 | 258 |
+| sum | 803 | 267 | 177 | 265 | 84 | 72 | 53 |
+| dot | 1324 | 530 | 519 | 528 | 425 | 196 | 162 |
+| scale, then sum | 2336 | 1128 | 565 | 818 | 468 | 269 | 254 |
 
 Reading these:
 
-- LLVM is 2 to 4.6 times faster than Cranelift `--release` here.
+- LLVM is 2.4 to 4.5 times faster than Cranelift `--release` here.
 - With checks kept, Kush matches or beats Rust built with overflow checks,
   and is within 3% to 2.1× of unchecked Rust. The sum is the worst case: its
   certificate costs four SSE2 instructions per vector next to Rust's one add.
-- The remaining gap in `feature-pipeline` is `Vec.push`. A Kush vector keeps
-  its length and capacity in the heap block, so each push loads and stores
-  them (14 instructions per element against Rust's 8, which keeps them in
-  registers). The map and checksum loops match Rust's code.
+- `feature-pipeline` is within 3% of Rust. Stating ownership facts took it
+  from 69 ms to 61 ms. What remains is `Vec.push`: a Kush vector keeps its
+  length and encoded capacity in the heap block, so each push loads both and
+  decodes the capacity (14 instructions per element against Rust's 8).
 
-Build time for the same two programs (warm runtime cache, median of five):
+Build time for the same two programs, median of five in milliseconds:
 
 | Build | feature-pipeline | checked-loops |
 | --- | ---: | ---: |
-| Kush, Cranelift | 133 | 139 |
-| Kush, Cranelift `--release` | 136 | 136 |
-| Kush, LLVM `--release` | 311 | 298 |
-| `rustc` debug | 139 | 118 |
-| `rustc -C opt-level=3` | 249 | 199 |
+| Kush, Cranelift | 74 | 78 |
+| Kush, LLVM `--release` | 156 | 159 |
+| `rustc` debug | 133 | 114 |
+| `rustc -C opt-level=3` | 250 | 210 |
+| Kush, Cranelift, no proof cache | 142 | 128 |
+| Kush, LLVM `--release`, no proof cache | 207 | 221 |
 
-For programs this small an LLVM release build of Kush is slower than `rustc`:
-Kush re-optimizes the runtime and standard-library code the program uses on
-every build, while Rust links a precompiled standard library, and about 85 ms
-of every Kush build is its own front end. Development builds are unchanged.
+With warm caches an LLVM release build takes about two thirds of `rustc`'s
+time and a development build a little over half. Two things make that
+possible. The runtime is precompiled, so only program code goes through LLVM.
+And the [proof cache](proof-cache.md) removes most of the front end's work:
+without it (the last two rows, which is also what the very first build of a
+project costs) Kush and `rustc` are about level. These are small programs;
+nothing here measures a large code base, where Kush still checks and compiles
+the whole program on every build.
 
 ## Limits
 
 - Linux x86-64 only, as for Cranelift.
-- No alias metadata yet. Ownership facts (`Box` uniqueness, `&mut`
-  exclusivity) are not passed to LLVM as `noalias`, and vector header fields
-  are not distinguished from element storage. Type-based tags for those were
-  left out deliberately: with the pool allocator inlined into the same module,
-  a freed element block can be reused as a header within one function, which
-  type-based alias rules would let LLVM reorder incorrectly.
-- Function parameters and loaded words are still integers; only values with a
-  local pointer origin get pointer forms.
+- Apart from exclusive parameters, function parameters and loaded words are
+  still integers; only values with a local pointer origin get pointer forms.
 - `--target-cpu native` code runs only on machines with the build machine's
   features.
 - Debug information is not emitted.
