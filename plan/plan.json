@@ -4670,6 +4670,25 @@
       "desc": "Needs a check for interior writes through shared handles (allocator context reference counts).",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "PROOF-SEARCH-SPEED",
+      "title": "Faster proof search and lazy lowering",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PROOF-CACHE"
+      ],
+      "status": "done",
+      "desc": "Integer-point witness for unprovable goals, per-component search, vector rows; only reachable functions are lowered. docs/proof-cache.md.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 06:07:25",
+          "who": "claude",
+          "text": "kush check on checked-loops 730M -> 228M instructions uncached, 86M cached; dev build 58 ms, LLVM release 135-159 ms; 1,697 tests pass on both backends"
+        }
+      ]
     }
   ]
 }

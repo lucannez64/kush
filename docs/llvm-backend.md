@@ -151,7 +151,7 @@ values are handled by [deferred overflow](deferred-overflow.md).
 ## Validation
 
 - `KUSH_BACKEND=llvm cargo test --workspace` replays the entire suite on the
-  LLVM backend: 1,694 tests pass on both backends (LLVM 18.1.3, 2026-11-11).
+  LLVM backend: 1,697 tests pass on both backends (LLVM 18.1.3, 2026-11-11).
   Tests that replace `cc` to exercise the Cranelift pipeline pin themselves to
   it.
 - `tests/llvm_backend.rs` runs 22 example programs through four LLVM
@@ -199,25 +199,26 @@ Reading these:
   length and encoded capacity in the heap block, so each push loads both and
   decodes the capacity (14 instructions per element against Rust's 8).
 
-Build time for the same two programs, median of five in milliseconds:
+Build time for the same two programs, median of seven in milliseconds:
 
 | Build | feature-pipeline | checked-loops |
 | --- | ---: | ---: |
-| Kush, Cranelift | 74 | 78 |
-| Kush, LLVM `--release` | 156 | 159 |
-| `rustc` debug | 133 | 114 |
-| `rustc -C opt-level=3` | 250 | 210 |
-| Kush, Cranelift, no proof cache | 142 | 128 |
-| Kush, LLVM `--release`, no proof cache | 207 | 221 |
+| Kush, Cranelift | 59 | 58 |
+| Kush, LLVM `--release` | 135 | 159 |
+| `rustc` debug | 140 | 115 |
+| `rustc -C opt-level=3` | 240 | 197 |
+| Kush, Cranelift, no proof cache | 72 | 75 |
+| Kush, LLVM `--release`, no proof cache | 149 | 161 |
 
-With warm caches an LLVM release build takes about two thirds of `rustc`'s
-time and a development build a little over half. Two things make that
-possible. The runtime is precompiled, so only program code goes through LLVM.
-And the [proof cache](proof-cache.md) removes most of the front end's work:
-without it (the last two rows, which is also what the very first build of a
-project costs) Kush and `rustc` are about level. These are small programs;
-nothing here measures a large code base, where Kush still checks and compiles
-the whole program on every build.
+A development build takes about half of `rustc`'s time and an LLVM release
+build between 55% and 80%. Three things make that possible. The runtime is
+precompiled, so only program code goes through LLVM. Only functions the
+program can reach are lowered and compiled. And the proof search, which used
+to be nearly all of the front end, is both faster and
+[remembered between builds](proof-cache.md); the last two rows show a build
+that remembers nothing. These are small programs; nothing here measures a
+large code base, where Kush still checks and compiles the whole program on
+every build.
 
 ## Limits
 

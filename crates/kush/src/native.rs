@@ -3185,6 +3185,8 @@ struct CodeModule {
     object: ObjectModule,
     llvm: Option<llvm::LlvmModule>,
     failure: Option<Diagnostic>,
+    /// Functions referred to by the bodies defined so far.
+    referenced: std::collections::BTreeSet<FuncId>,
 }
 impl Module for CodeModule {
     fn isa(&self) -> &dyn cranelift_codegen::isa::TargetIsa {
@@ -3229,6 +3231,11 @@ impl Module for CodeModule {
         ctx: &mut cranelift_codegen::Context,
         ctrl_plane: &mut cranelift_codegen::control::ControlPlane,
     ) -> cranelift_module::ModuleResult<()> {
+        for (_, name) in ctx.func.params.user_named_funcs().iter() {
+            if name.namespace == 0 {
+                self.referenced.insert(FuncId::from_u32(name.index));
+            }
+        }
         let Some(llvm) = &mut self.llvm else {
             return self
                 .object
@@ -3312,6 +3319,7 @@ fn lower(
         ),
         llvm: llvm.map(llvm::LlvmModule::new),
         failure: None,
+        referenced: std::collections::BTreeSet::new(),
     };
     let mut print_sig = module.make_signature();
     print_sig.params.push(AbiParam::new(I64));
@@ -3952,7 +3960,34 @@ fn lower(
         }
         ids.push(id);
     }
-    for (index, f) in program.functions.iter().enumerate() {
+    // Lower only what the program can reach. Every reference to a function,
+    // whether a call, a function value or a closure, goes through a
+    // declaration in the referring body, and `CodeModule` records those as
+    // bodies are defined; so the set grows from the entry point and from the
+    // glue synthesized above until nothing new turns up. Library functions
+    // the program never uses are neither lowered nor compiled.
+    let index_of: BTreeMap<FuncId, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect();
+    let mut lowered = vec![false; program.functions.len()];
+    let mut pending = vec![entry];
+    loop {
+        for id in std::mem::take(&mut module.referenced) {
+            if let Some(index) = index_of.get(&id)
+                && !lowered[*index]
+            {
+                pending.push(*index);
+            }
+        }
+        let Some(index) = pending.pop() else {
+            break;
+        };
+        if std::mem::replace(&mut lowered[index], true) {
+            continue;
+        }
+        let f = &program.functions[index];
         if program
             .foreign_functions
             .get(index)
@@ -4217,6 +4252,32 @@ fn lower(
                     ),
                 )
             })?;
+    }
+    // An object file must define every local symbol it declares, so the
+    // functions that were not reached get a body that only traps. (The LLVM
+    // module simply omits them.)
+    if module.llvm.is_none() {
+        for (index, id) in ids.iter().enumerate() {
+            // Imports have no body here whether or not they are reached.
+            if lowered[index] || foreign_ids[index].is_some() {
+                continue;
+            }
+            let mut context = module.make_context();
+            context.func.signature = module
+                .declarations()
+                .get_function_decl(*id)
+                .signature
+                .clone();
+            let mut function_context = FunctionBuilderContext::new();
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut function_context);
+            let block = builder.create_block();
+            builder.append_block_params_for_function_params(block);
+            builder.switch_to_block(block);
+            builder.ins().trap(TrapCode::unwrap_user(2));
+            builder.seal_all_blocks();
+            builder.finalize(module.target_config());
+            module.define_function(*id, &mut context).map_err(error)?;
+        }
     }
     if let Some(failure) = module.failure {
         return Err(failure);
