@@ -4572,6 +4572,68 @@
           "text": "done b2538f1"
         }
       ]
+    },
+    {
+      "id": "LLVM-BACKEND",
+      "title": "LLVM release backend (shared lowering, whole-program runtime)",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "CLIF-to-LLVM-IR translator behind CodeModule, pointer forms, runtime IR linked and internalized, --backend llvm, KUSH_BACKEND replay.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 04:16:27",
+          "who": "claude",
+          "text": "1,691 tests pass on both backends (LLVM 18.1.3); docs/llvm-backend.md"
+        }
+      ]
+    },
+    {
+      "id": "LLVM-DEFER",
+      "title": "Deferred overflow checks for counted loops",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LLVM-BACKEND"
+      ],
+      "status": "done",
+      "desc": "Exact sticky bits and magnitude certificates with exact replay; docs/deferred-overflow.md.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 04:16:27",
+          "who": "claude",
+          "text": "tests/deferred_overflow.rs across up to nine configurations; checked sum 260 -> 170 ms"
+        }
+      ]
+    },
+    {
+      "id": "LLVM-DEFER-REVIEW",
+      "title": "Independent hostile review of deferred overflow soundness",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "LLVM-DEFER"
+      ],
+      "status": "todo",
+      "desc": "Pinning of control and index values, replay with stores through exclusive slices, certificate arithmetic. Relies on &mut [T] exclusivity.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "LLVM-ALIAS",
+      "title": "Alias information for LLVM (noalias from ownership, vector header vs elements)",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "LLVM-BACKEND"
+      ],
+      "status": "todo",
+      "desc": "Vec.push keeps length/capacity in memory: 14 vs 8 instructions per element against Rust. Type-based tags are unsound while the pool allocator is inlined; needs an allocator boundary.",
+      "commit": null,
+      "log": []
     }
   ]
 }

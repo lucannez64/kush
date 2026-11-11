@@ -29,6 +29,8 @@ fn build(root: &Path, output: &str) -> Command {
         )
         .env("CC_LOG", root.join("compiles"))
         .env("KUSH_RUNTIME_CACHE", root.join("cache"))
+        // These tests replace `cc`; they are about the default backend.
+        .env_remove("KUSH_BACKEND")
         .env_remove("KUSH_NO_RUNTIME_CACHE");
     command
 }

@@ -160,6 +160,8 @@ fn source_and_link_failures_do_not_replace_existing_output() {
         .arg("-o")
         .arg(&output)
         .env("PATH", &tools)
+        // This test replaces `cc`; it is about the default backend.
+        .env_remove("KUSH_BACKEND")
         .output()
         .unwrap();
     assert!(!compiled.status.success());

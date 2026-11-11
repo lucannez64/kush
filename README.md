@@ -10,7 +10,11 @@ See the [core implementation and integration status](docs/core-status.md).
 Read the [v0.1 language specification](docs/spec-v0.1.md) for the proposed syntax,
 semantics, research gates, and implementation milestones.
 
-Kush has a working native compiler on Linux x86-64 using Cranelift. It supports
+Kush has a working native compiler on Linux x86-64 using Cranelift, and an
+opt-in [LLVM release backend](docs/llvm-backend.md)
+(`--release --backend llvm`, needs `clang`) that optimizes the program together
+with the runtime and [defers overflow checks](docs/deferred-overflow.md) out of
+hot loops without dropping them. It supports
 functions, recursion, checked fixed-width integers (`i8`/`i16`/`i32`/`i64` and
 `u8`/`u16`/`u32`/`u64`), Unicode `Char`, Booleans, inline tuples with positional
 projection and destructuring, validated UTF-8 `String` values over owning byte
@@ -97,7 +101,7 @@ relevance rules,
 user-defined graded modalities, general grade inference, structural record
 subtyping, effect handlers and general row constraints, full algebraic subtype
 inference, general automatic effectful fusion, nonblocking task
-I/O, forced cancellation unwinding, and LLVM remain future work. See
+I/O and forced cancellation unwinding remain future work. See
 [checked reuse and allocation diagnostics](docs/reuse.md) for the implemented
 storage-reuse fragment, [vector capacity reuse and explicit effectful map chains](docs/vector-reuse.md),
 [bounded native allocator pooling](docs/allocator-pool.md), [memory-completion contracts](docs/memory-completion.md)

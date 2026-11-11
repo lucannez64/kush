@@ -11,6 +11,10 @@ kush build --manifest-path path/Kush.toml --release
 kush run --manifest-path path/Kush.toml --release -- argument
 ```
 
+`--backend llvm` selects the [LLVM release backend](llvm-backend.md); the
+controls below describe the default Cranelift backend and keep their meaning
+there.
+
 These flags apply to native build/run, not check/eval/test. Flags after `--`
 belong to the program. Source-file builds retain their existing
 `FILE -o OUTPUT [options]` argument order.

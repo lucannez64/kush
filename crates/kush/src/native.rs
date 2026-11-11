@@ -30,6 +30,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+mod deferred;
+mod llvm;
 mod runtime_cache;
 /// Every native stack slot is word aligned (`1 << 3` bytes). References to
 /// locals point into these slots, so with the runtime's allocation contract
@@ -2521,7 +2523,14 @@ static void kush_task_finish(void) {
     kush_current = NULL;
     kush_task_count = 0;
 }
+#ifdef KUSH_WHOLE_PROGRAM
+/* LLVM whole-program builds internalize this runtime into the program module.
+   That module owns `main` and passes its (internal) entry function here, so
+   no symbol but `main` has to stay visible. */
+int kush_runtime_main(int argc, char **argv, int64_t (*kush_entry)(void)) {
+#else
 int main(int argc, char **argv) {
+#endif
     kush_host_init(argc, argv);
     /* Broken pipes become recoverable EPIPE results instead of process signals. */
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) kush_panic();
@@ -2770,16 +2779,103 @@ pub enum Optimization {
     Speed,
 }
 
+/// Which code generator consumes the lowered program. Both receive the same
+/// verified Cranelift IR from the one lowering in this module.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Backend {
+    /// Cranelift machine code: fast builds, the default.
+    #[default]
+    Cranelift,
+    /// LLVM IR optimized by `clang` together with the C runtime: slower
+    /// builds, fastest programs. Requires `clang`; `llvm-link` and `opt` from
+    /// the same LLVM enable whole-program optimization with the runtime.
+    Llvm,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CodegenOptions {
     pub optimization: Optimization,
     pub inline_scalar_callbacks: bool,
+    pub backend: Backend,
+    /// Defer overflow panics of side-effect-free loop arithmetic to the loop
+    /// exit so LLVM can vectorize it. Observable behaviour is unchanged: the
+    /// program still panics exactly when checked arithmetic would.
+    pub deferred_overflow: bool,
+    /// Tune LLVM code for the build machine's CPU (`-march=native`).
+    pub native_cpu: bool,
 }
 impl CodegenOptions {
+    /// Cranelift with explicit, independent controls.
+    pub const fn cranelift(optimization: Optimization, inline_scalar_callbacks: bool) -> Self {
+        Self {
+            optimization,
+            inline_scalar_callbacks,
+            backend: Backend::Cranelift,
+            deferred_overflow: false,
+            native_cpu: false,
+        }
+    }
     pub const fn release() -> Self {
         Self {
             optimization: Optimization::Speed,
             inline_scalar_callbacks: true,
+            backend: Backend::Cranelift,
+            deferred_overflow: false,
+            native_cpu: false,
+        }
+    }
+    /// `KUSH_BACKEND=llvm|cranelift` overrides the backend of every native
+    /// build in this process, so an entire test suite can be replayed on the
+    /// other backend without changing its sources.
+    fn with_environment(mut self) -> Result<Self> {
+        match std::env::var("KUSH_BACKEND").ok().as_deref() {
+            None | Some("") => {}
+            Some("cranelift") => {
+                self.backend = Backend::Cranelift;
+                self.deferred_overflow = false;
+            }
+            Some("llvm") => {
+                if self.backend != Backend::Llvm {
+                    self.backend = Backend::Llvm;
+                    self.deferred_overflow = true;
+                }
+            }
+            Some(other) => {
+                return Err(error(format!(
+                    "KUSH_BACKEND must be 'cranelift' or 'llvm', not '{other}'"
+                )));
+            }
+        }
+        Ok(self)
+    }
+    /// The backend a build with these options uses, for messages. Honours
+    /// the `KUSH_BACKEND` override.
+    pub fn backend_name(self) -> &'static str {
+        match self.with_environment().map(|options| options.backend) {
+            Ok(Backend::Llvm) => "LLVM",
+            _ => "Cranelift",
+        }
+    }
+    /// Whether generated code may assume a native 64-bit vector multiply:
+    /// only when tuning for this machine and it has AVX-512DQ.
+    fn wide_multiply(self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.native_cpu && std::arch::is_x86_feature_detected!("avx512dq")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+    /// Release settings on the LLVM backend.
+    pub const fn release_llvm() -> Self {
+        Self {
+            optimization: Optimization::Speed,
+            inline_scalar_callbacks: true,
+            backend: Backend::Llvm,
+            deferred_overflow: true,
+            native_cpu: false,
         }
     }
 }
@@ -2814,13 +2910,12 @@ pub fn build_with_codegen(
     codegen: CodegenOptions,
 ) -> Result<()> {
     links.validate()?;
-    let object = object(program, codegen)?;
+    let codegen = codegen.with_environment()?;
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let scratch = Scratch::new(parent)?;
-    let object_path = scratch.path.join("program.o");
     let mut defines = Vec::new();
     if program.uses_tasks {
         defines.push("-DKUSH_HAS_TASKS=1".to_owned());
@@ -2829,15 +2924,19 @@ pub fn build_with_codegen(
         defines.push("-DKUSH_STATS=1".to_owned());
         defines.push(format!("-DKUSH_FUSION_COUNT={}", program.fusion_count()));
     }
-    let runtime_object = runtime_cache::compile(RUNTIME, &defines, &scratch)?;
+    let objects = match codegen.backend {
+        Backend::Cranelift => {
+            let object = object(program, codegen)?;
+            let object_path = scratch.path.join("program.o");
+            let runtime_object = runtime_cache::compile(RUNTIME, &defines, &scratch)?;
+            fs::write(&object_path, object).map_err(error)?;
+            vec![object_path, runtime_object]
+        }
+        Backend::Llvm => llvm_objects(program, codegen, &defines, links, &scratch)?,
+    };
     let binary_path = scratch.path.join("program");
-    fs::write(&object_path, object).map_err(error)?;
     let mut command = Command::new("cc");
-    command
-        .arg("-std=c11")
-        .arg("-O2")
-        .arg(&object_path)
-        .arg(&runtime_object);
+    command.arg("-std=c11").arg("-O2").args(&objects);
     for path in &links.objects {
         command.arg(path);
     }
@@ -2866,6 +2965,161 @@ pub fn build_with_codegen(
             output.display()
         ))
     })
+}
+
+/// The LLVM toolchain used by the release backend. `clang` comes from
+/// `KUSH_CLANG` or `PATH`; `llvm-link` is the one that same `clang` reports,
+/// so the IR versions always agree.
+struct LlvmTools {
+    clang: PathBuf,
+    /// `llvm-link`, when whole-program optimization is available.
+    link: Option<PathBuf>,
+}
+impl LlvmTools {
+    fn find() -> Result<Self> {
+        let clang = PathBuf::from(
+            std::env::var_os("KUSH_CLANG").unwrap_or_else(|| std::ffi::OsString::from("clang")),
+        );
+        // The companion normally sits beside the real clang binary; finding
+        // it there avoids starting clang just to ask.
+        let resolved = if clang.components().count() > 1 {
+            Some(clang.clone())
+        } else {
+            std::env::var_os("PATH").and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|directory| directory.join(&clang))
+                    .find(|candidate| candidate.is_file())
+            })
+        };
+        let sibling = resolved
+            .and_then(|path| fs::canonicalize(path).ok())
+            .and_then(|path| Some(path.parent()?.join("llvm-link")))
+            .filter(|path| path.is_file());
+        let link = match sibling {
+            Some(link) => link,
+            None => {
+                let probe = Command::new(&clang)
+                    .arg("-print-prog-name=llvm-link")
+                    .output()
+                    .map_err(|e| {
+                        error(format!(
+                            "the LLVM backend needs clang (install it or set KUSH_CLANG): {e}"
+                        ))
+                    })?;
+                if !probe.status.success() {
+                    return Err(error(format!(
+                        "the LLVM backend could not run '{}'",
+                        clang.display()
+                    )));
+                }
+                PathBuf::from(String::from_utf8_lossy(&probe.stdout).trim())
+            }
+        };
+        let link = (std::env::var_os("KUSH_LLVM_NO_WHOLE_PROGRAM").is_none()
+            && link.is_absolute()
+            && link.is_file())
+        .then_some(link);
+        Ok(Self { clang, link })
+    }
+}
+
+fn run_tool(command: &mut Command, what: &str) -> Result<()> {
+    let output = command
+        .output()
+        .map_err(|e| error(format!("could not start {what}: {e}")))?;
+    if !output.status.success() {
+        return Err(error(format!(
+            "{what} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
+
+/// The program's own LLVM module as text, before it is merged with the
+/// runtime and optimized. Needs `clang` to learn the runtime's signatures.
+pub fn emit_llvm_ir(program: &Executable, codegen: CodegenOptions) -> Result<String> {
+    let tools = LlvmTools::find()?;
+    let scratch = Scratch::new(&std::env::temp_dir())?;
+    let mut defines = Vec::new();
+    if program.uses_tasks {
+        defines.push("-DKUSH_HAS_TASKS=1".to_owned());
+    }
+    let runtime_ir = runtime_cache::compile_llvm_ir(RUNTIME, &defines, &scratch, &tools.clang)?;
+    let interface = llvm::RuntimeInterface::parse(&fs::read_to_string(&runtime_ir).map_err(error)?);
+    match lower(program, codegen, Some(interface))? {
+        Lowered::Llvm(text) => Ok(text),
+        Lowered::Object(_) => unreachable!("the LLVM backend lowers to LLVM IR"),
+    }
+}
+
+/// Lower through the LLVM backend and return the objects to link.
+///
+/// With `llvm-link` available the C runtime's LLVM IR is linked into the
+/// program module lazily and internalized (only the runtime functions the
+/// program reaches are pulled in, and none stays visible outside the module),
+/// then the result is optimized as one unit, so runtime operations inline
+/// into user code. The runtime is compiled with `KUSH_WHOLE_PROGRAM`, which
+/// turns its `main` into a function taking the program entry, and the program
+/// module provides the real `main`; nothing else needs to stay visible.
+/// Programs with extra link inputs keep the whole runtime public, since
+/// foreign code may call it.
+fn llvm_objects(
+    program: &Executable,
+    codegen: CodegenOptions,
+    defines: &[String],
+    links: &LinkSpec,
+    scratch: &Scratch,
+) -> Result<Vec<PathBuf>> {
+    let tools = LlvmTools::find()?;
+    let mut runtime_defines = defines.to_vec();
+    if tools.link.is_some() {
+        runtime_defines.push("-DKUSH_WHOLE_PROGRAM=1".to_owned());
+    }
+    let runtime_ir =
+        runtime_cache::compile_llvm_ir(RUNTIME, &runtime_defines, scratch, &tools.clang)?;
+    let runtime_text = fs::read_to_string(&runtime_ir).map_err(error)?;
+    let interface = llvm::RuntimeInterface::parse(&runtime_text);
+    let Lowered::Llvm(text) = lower(program, codegen, Some(interface))? else {
+        unreachable!("the LLVM backend lowers to LLVM IR")
+    };
+    let program_ir = scratch.path.join("program.ll");
+    fs::write(&program_ir, text).map_err(error)?;
+    if let Some(path) = std::env::var_os("KUSH_EMIT_LLVM") {
+        fs::copy(&program_ir, path).map_err(error)?;
+    }
+    let object = scratch.path.join("program.o");
+    let level = match codegen.optimization {
+        Optimization::None => "-O1",
+        Optimization::Speed => "-O3",
+    };
+    let mut compile = Command::new(&tools.clang);
+    compile.arg(level).arg("-fPIC").arg("-c");
+    if codegen.native_cpu {
+        compile.arg("-march=native");
+    }
+    // The module is generated; clang's note about overriding its target
+    // triple is not a user diagnostic.
+    compile.arg("-Wno-override-module");
+    let Some(link) = &tools.link else {
+        compile.arg(&program_ir).arg("-o").arg(&object);
+        run_tool(&mut compile, "clang (LLVM backend)")?;
+        let runtime_object = runtime_cache::compile(RUNTIME, defines, scratch)?;
+        return Ok(vec![object, runtime_object]);
+    };
+    let linked = scratch.path.join("linked.bc");
+    let mut merge = Command::new(link);
+    merge.arg(&program_ir).arg(&runtime_ir);
+    let foreign = !(links.objects.is_empty()
+        && links.libraries.is_empty()
+        && links.system_libraries.is_empty());
+    if !foreign {
+        merge.arg("--internalize").arg("--only-needed");
+    }
+    run_tool(merge.arg("-o").arg(&linked), "llvm-link")?;
+    compile.arg(&linked).arg("-o").arg(&object);
+    run_tool(&mut compile, "clang (LLVM backend)")?;
+    Ok(vec![object])
 }
 
 /// Scratch ownership is local to this process. Existing directories are never
@@ -2932,7 +3186,120 @@ fn block_installs_handler(block: &ex::Block) -> bool {
     }) || block.tail.as_ref().is_some_and(|value| expression(value))
 }
 
+/// What one lowering produced.
+enum Lowered {
+    Object(Vec<u8>),
+    Llvm(String),
+}
+
+/// The module `Generator` lowers into. Declarations, signatures and function
+/// bodies are always built with Cranelift's module and IR builders. With the
+/// LLVM backend selected, each verified function body is translated to LLVM
+/// IR instead of being compiled by Cranelift.
+struct CodeModule {
+    object: ObjectModule,
+    llvm: Option<llvm::LlvmModule>,
+    failure: Option<Diagnostic>,
+}
+impl Module for CodeModule {
+    fn isa(&self) -> &dyn cranelift_codegen::isa::TargetIsa {
+        self.object.isa()
+    }
+    fn declarations(&self) -> &cranelift_module::ModuleDeclarations {
+        self.object.declarations()
+    }
+    fn declare_function(
+        &mut self,
+        name: &str,
+        linkage: Linkage,
+        signature: &ir::Signature,
+    ) -> cranelift_module::ModuleResult<FuncId> {
+        self.object.declare_function(name, linkage, signature)
+    }
+    fn declare_anonymous_function(
+        &mut self,
+        signature: &ir::Signature,
+    ) -> cranelift_module::ModuleResult<FuncId> {
+        self.object.declare_anonymous_function(signature)
+    }
+    fn declare_data(
+        &mut self,
+        name: &str,
+        linkage: Linkage,
+        writable: bool,
+        tls: bool,
+    ) -> cranelift_module::ModuleResult<DataId> {
+        self.object.declare_data(name, linkage, writable, tls)
+    }
+    fn declare_anonymous_data(
+        &mut self,
+        writable: bool,
+        tls: bool,
+    ) -> cranelift_module::ModuleResult<DataId> {
+        self.object.declare_anonymous_data(writable, tls)
+    }
+    fn define_function_with_control_plane(
+        &mut self,
+        func: FuncId,
+        ctx: &mut cranelift_codegen::Context,
+        ctrl_plane: &mut cranelift_codegen::control::ControlPlane,
+    ) -> cranelift_module::ModuleResult<()> {
+        let Some(llvm) = &mut self.llvm else {
+            return self
+                .object
+                .define_function_with_control_plane(func, ctx, ctrl_plane);
+        };
+        // Same acceptance rule as the Cranelift backend: only verified IR.
+        cranelift_codegen::verify_function(&ctx.func, self.object.isa()).map_err(|errors| {
+            cranelift_module::ModuleError::Compilation(cranelift_codegen::CodegenError::Verifier(
+                errors,
+            ))
+        })?;
+        if let Err(diagnostic) = llvm.define_function(func, &ctx.func, self.object.declarations()) {
+            self.failure.get_or_insert(diagnostic);
+        }
+        Ok(())
+    }
+    fn define_function_bytes(
+        &mut self,
+        func_id: FuncId,
+        alignment: u64,
+        bytes: &[u8],
+        relocs: &[cranelift_module::ModuleReloc],
+    ) -> cranelift_module::ModuleResult<()> {
+        self.object
+            .define_function_bytes(func_id, alignment, bytes, relocs)
+    }
+    fn define_data(
+        &mut self,
+        data_id: DataId,
+        data: &DataDescription,
+    ) -> cranelift_module::ModuleResult<()> {
+        let Some(llvm) = &mut self.llvm else {
+            return self.object.define_data(data_id, data);
+        };
+        let bytes = match &data.init {
+            cranelift_module::Init::Bytes { contents } => contents.to_vec(),
+            cranelift_module::Init::Zeros { size } => vec![0; *size],
+            cranelift_module::Init::Uninitialized => Vec::new(),
+        };
+        llvm.define_data(data_id, bytes);
+        Ok(())
+    }
+}
+
 fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
+    match lower(program, codegen, None)? {
+        Lowered::Object(bytes) => Ok(bytes),
+        Lowered::Llvm(_) => unreachable!("no LLVM runtime interface was supplied"),
+    }
+}
+
+fn lower(
+    program: &Executable,
+    codegen: CodegenOptions,
+    llvm: Option<llvm::RuntimeInterface>,
+) -> Result<Lowered> {
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         return Err(error(
             "the first native backend supports Linux x86-64 hosts only",
@@ -2954,8 +3321,13 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
         .map_err(error)?
         .finish(settings::Flags::new(flags))
         .map_err(error)?;
-    let mut module =
-        ObjectModule::new(ObjectBuilder::new(isa, "kush", default_libcall_names()).map_err(error)?);
+    let mut module = CodeModule {
+        object: ObjectModule::new(
+            ObjectBuilder::new(isa, "kush", default_libcall_names()).map_err(error)?,
+        ),
+        llvm: llvm.map(llvm::LlvmModule::new),
+        failure: None,
+    };
     let mut print_sig = module.make_signature();
     print_sig.params.push(AbiParam::new(I64));
     print_sig.returns.push(AbiParam::new(I64));
@@ -3632,6 +4004,7 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
             context_drops: &context_drops,
             tracked: vec![],
             function_index: index,
+            deferred: None,
             bytes_from,
             read_all,
             read_line,
@@ -3841,7 +4214,15 @@ fn object(program: &Executable, codegen: CodegenOptions) -> Result<Vec<u8>> {
                 )
             })?;
     }
-    module.finish().emit().map_err(error)
+    if let Some(failure) = module.failure {
+        return Err(failure);
+    }
+    match module.llvm {
+        Some(llvm) => Ok(Lowered::Llvm(llvm.finish(module.object.declarations())?)),
+        None => Ok(Lowered::Object(
+            module.object.finish().emit().map_err(error)?,
+        )),
+    }
 }
 fn aggregate_result(program: &Executable, ty: Type) -> bool {
     ty.layout().is_some() || program.width(ty) > 1
@@ -3893,7 +4274,7 @@ fn foreign_pointee_kind(program: &Executable, pointer: usize) -> PointeeKind {
     }
 }
 fn foreign_abi_signature(
-    module: &mut ObjectModule,
+    module: &mut CodeModule,
     program: &Executable,
     foreign: &ex::ForeignFunction,
 ) -> ir::Signature {
@@ -3948,7 +4329,7 @@ fn collect_expr_literals<'a>(expr: &'a Expr, out: &mut Vec<(usize, &'a [u8])>) {
 }
 fn emit_drop(
     builder: &mut FunctionBuilder<'_>,
-    module: &mut ObjectModule,
+    module: &mut CodeModule,
     id: FuncId,
     values: &[Value],
 ) {
@@ -4039,7 +4420,7 @@ type DropTables = (BTreeMap<Type, FuncId>, BTreeMap<Vec<Type>, FuncId>);
 /// releases the block. It is called only when the final context reference goes
 /// away, after every container block has been released.
 fn synthesize_context_drops(
-    module: &mut ObjectModule,
+    module: &mut CodeModule,
     program: &Executable,
     drops: &BTreeMap<Type, FuncId>,
     free: FuncId,
@@ -4092,7 +4473,7 @@ fn synthesize_context_drops(
     Ok(ids)
 }
 fn synthesize_drops(
-    module: &mut ObjectModule,
+    module: &mut CodeModule,
     program: &Executable,
     free: FuncId,
     buffer_frees: (FuncId, FuncId),
@@ -4535,7 +4916,7 @@ fn collect_task_types(program: &Executable) -> Vec<usize> {
 /// `(code, env, result_ptr) -> ()`, so the runtime can call a statically or
 /// dynamically selected once callable without knowing its signature.
 fn synthesize_task_wrappers(
-    module: &mut ObjectModule,
+    module: &mut CodeModule,
     program: &Executable,
     types: &[usize],
     drops: &BTreeMap<Type, FuncId>,
@@ -4733,7 +5114,7 @@ impl ScalarCallback {
 
 struct Generator<'a, 'b> {
     builder: FunctionBuilder<'a>,
-    module: &'b mut ObjectModule,
+    module: &'b mut CodeModule,
     ids: &'b [FuncId],
     foreign_ids: &'b [Option<FuncId>],
     program: &'b Executable,
@@ -4827,6 +5208,19 @@ struct Generator<'a, 'b> {
     task_pointer_drops: &'b BTreeMap<Type, FuncId>,
     tracked: Vec<Tracked>,
     function_index: usize,
+    /// The innermost loop whose overflow panics are deferred to its exit.
+    deferred: Option<DeferredLoop>,
+}
+/// State of one loop lowered with deferred overflow checks; see
+/// [`deferred`] for the conditions and the argument that this is unobservable.
+struct DeferredLoop {
+    plan: deferred::Plan,
+    /// Sign bit set once any `Exact` operation has overflowed.
+    sticky: Variable,
+    /// OR of the magnitude words of each tracked operand.
+    leaves: BTreeMap<usize, Variable>,
+    /// Number of reduction steps performed.
+    count: Variable,
 }
 /// An enclosing `AbortScope` during code generation.
 #[derive(Clone, Copy)]
@@ -7710,9 +8104,15 @@ impl Generator<'_, '_> {
                 } else if let Some(kind) = operand.ty.int_kind().filter(|k| *k != IntKind::I64) {
                     if *op == Kind::Minus {
                         let zero = self.constant(0);
-                        let (negated, overflow) = self.builder.ins().ssub_overflow(zero, value);
-                        self.guard(overflow);
-                        self.check_int_range(kind, negated)
+                        if self.deferral(expr).is_some() {
+                            // A narrow value negates exactly in 64 bits.
+                            let negated = self.builder.ins().isub(zero, value);
+                            self.defer_int_range(kind, negated)
+                        } else {
+                            let (negated, overflow) = self.builder.ins().ssub_overflow(zero, value);
+                            self.guard(overflow);
+                            self.check_int_range(kind, negated)
+                        }
                     } else {
                         let inverted = self.builder.ins().bnot(value);
                         self.canonical(kind, inverted)
@@ -7721,9 +8121,22 @@ impl Generator<'_, '_> {
                     self.builder.ins().bnot(value)
                 } else if *op == Kind::Minus {
                     let zero = self.constant(0);
-                    let (value, overflow) = self.builder.ins().ssub_overflow(zero, value);
-                    self.guard(overflow);
-                    value
+                    if let Some(mode) = self.deferral(expr) {
+                        let negated = self.builder.ins().isub(zero, value);
+                        if mode == deferred::Mode::Exact {
+                            // `0 - v` overflows exactly when `v` and the
+                            // result are both negative (`v == i64::MIN`).
+                            let overflow = self.builder.ins().band(value, negated);
+                            self.defer_sign(overflow);
+                        } else {
+                            self.track_leaf(deferred::key(operand), value);
+                        }
+                        negated
+                    } else {
+                        let (value, overflow) = self.builder.ins().ssub_overflow(zero, value);
+                        self.guard(overflow);
+                        value
+                    }
                 } else {
                     let comparison = self.builder.ins().icmp_imm_s(IntCC::Equal, value, 0);
                     self.builder.ins().uextend(I64, comparison)
@@ -7780,6 +8193,7 @@ impl Generator<'_, '_> {
             ExprKind::Binary(op, left, right_expr) => {
                 let left_ty = left.ty;
                 let left_kind = left.ty.int_kind();
+                let left_key = deferred::key(left);
                 let left = lower!(self.scalar(left));
                 if matches!(op, Kind::AmpAmp | Kind::PipePipe) {
                     return self.short_circuit(op, left, right_expr);
@@ -7791,10 +8205,23 @@ impl Generator<'_, '_> {
                     let right = self.float_value(kind, right);
                     return Some(vec![self.float_binary(kind, op, left, right)]);
                 }
+                let deferral = self.deferral(expr);
+                if matches!(
+                    deferral,
+                    Some(deferred::Mode::Certified | deferred::Mode::Accumulate)
+                ) {
+                    self.track_leaf(left_key, left);
+                    self.track_leaf(deferred::key(right_expr), right);
+                }
                 if let Some(kind) = left_kind {
-                    return Some(vec![self.int_binary(kind, op, left, right, right_kind)]);
+                    return Some(vec![
+                        self.int_binary(kind, op, left, right, right_kind, deferral),
+                    ]);
                 }
                 match op {
+                    Kind::Plus | Kind::Minus | Kind::Star if deferral.is_some() => {
+                        self.deferred_i64(op, left, right, deferral.unwrap())
+                    }
                     Kind::Plus | Kind::Minus | Kind::Star => {
                         let (value, overflow) = match op {
                             Kind::Plus => self.builder.ins().sadd_overflow(left, right),
@@ -9134,6 +9561,21 @@ impl Generator<'_, '_> {
     }
 
     fn lower_while(&mut self, condition: &Expr, body: &ex::Block) {
+        if self.codegen.deferred_overflow
+            && self.deferred.is_none()
+            && let Some(plan) = deferred::plan(
+                &self.program.functions[self.function_index],
+                condition,
+                body,
+                self.codegen.wide_multiply(),
+            )
+        {
+            self.lower_deferred_while(plan, condition, body);
+        } else {
+            self.lower_checked_while(condition, body);
+        }
+    }
+    fn lower_checked_while(&mut self, condition: &Expr, body: &ex::Block) {
         let candidate = self.loop_slice(condition);
         // Bound code growth and avoid recursively duplicating nested loops.
         fn eligible(expr: &Expr, budget: &mut usize) -> bool {
@@ -9707,6 +10149,228 @@ impl Generator<'_, '_> {
         }
     }
     /// Panic unless `value` (a 64-bit result) is in range for `kind`.
+    /// How this checked operation is lowered inside a deferred loop.
+    fn deferral(&self, expr: &Expr) -> Option<deferred::Mode> {
+        self.deferred
+            .as_ref()?
+            .plan
+            .modes
+            .get(&deferred::key(expr))
+            .copied()
+    }
+    /// Record a deferred overflow whose indicator is the word's sign bit.
+    fn defer_sign(&mut self, word: Value) {
+        let sticky = self.deferred.as_ref().expect("deferred loop").sticky;
+        let previous = self.builder.use_var(sticky);
+        let merged = self.builder.ins().bor(previous, word);
+        self.builder.def_var(sticky, merged);
+    }
+    /// Record a deferred overflow from a 0/1 flag.
+    fn defer_flag(&mut self, flag: Value) {
+        let wide = self.builder.ins().uextend(I64, flag);
+        let word = self.builder.ins().ineg(wide);
+        self.defer_sign(word);
+    }
+    fn defer_int_range(&mut self, kind: IntKind, value: Value) -> Value {
+        let canonical = self.canonical(kind, value);
+        let wrong = self.builder.ins().icmp(IntCC::NotEqual, canonical, value);
+        self.defer_flag(wrong);
+        value
+    }
+    /// OR an operand's magnitude word into its tracker, if it has one.
+    fn track_leaf(&mut self, key: usize, value: Value) {
+        let Some(tracker) = self
+            .deferred
+            .as_ref()
+            .and_then(|state| state.leaves.get(&key).copied())
+        else {
+            return;
+        };
+        let folded = self.magnitude(value);
+        let previous = self.builder.use_var(tracker);
+        let merged = self.builder.ins().bor(previous, folded);
+        self.builder.def_var(tracker, merged);
+    }
+    /// Wrapping signed 64-bit `+`, `-`, `*` with its check deferred. Exact
+    /// add/sub tests are plain bit operations so the loop stays vectorizable;
+    /// certified operations have no test at all.
+    fn deferred_i64(
+        &mut self,
+        op: &Kind,
+        left: Value,
+        right: Value,
+        mode: deferred::Mode,
+    ) -> Value {
+        if mode != deferred::Mode::Exact {
+            if mode == deferred::Mode::Accumulate {
+                let count = self.deferred.as_ref().expect("deferred loop").count;
+                let previous = self.builder.use_var(count);
+                let next = self.builder.ins().iadd_imm_s(previous, 1);
+                self.builder.def_var(count, next);
+            }
+            return match op {
+                Kind::Plus => self.builder.ins().iadd(left, right),
+                Kind::Minus => self.builder.ins().isub(left, right),
+                _ => self.builder.ins().imul(left, right),
+            };
+        }
+        match op {
+            Kind::Plus => {
+                let sum = self.builder.ins().iadd(left, right);
+                let a = self.builder.ins().bxor(left, sum);
+                let b = self.builder.ins().bxor(right, sum);
+                let overflow = self.builder.ins().band(a, b);
+                self.defer_sign(overflow);
+                sum
+            }
+            Kind::Minus => {
+                let difference = self.builder.ins().isub(left, right);
+                let a = self.builder.ins().bxor(left, right);
+                let b = self.builder.ins().bxor(left, difference);
+                let overflow = self.builder.ins().band(a, b);
+                self.defer_sign(overflow);
+                difference
+            }
+            _ => {
+                let (product, overflow) = self.builder.ins().smul_overflow(left, right);
+                self.defer_flag(overflow);
+                product
+            }
+        }
+    }
+    /// `v ^ (v << 1)`: a word of bit length `b` (0 for zero) such that
+    /// `|v| <= 2^(b - 1)`. Its highest set bit is one above the highest bit
+    /// where `v` differs from its sign. Two cheap vector operations.
+    fn magnitude(&mut self, value: Value) -> Value {
+        let doubled = self.builder.ins().iadd(value, value);
+        self.builder.ins().bxor(value, doubled)
+    }
+    /// The least tracked `u` with `|v| <= 2^u` for a magnitude word.
+    fn magnitude_bound(&mut self, word: Value) -> Value {
+        let zeros = self.builder.ins().clz(word);
+        let sixty_four = self.constant(64);
+        let bits = self.builder.ins().isub(sixty_four, zeros);
+        let one = self.constant(1);
+        let floor = self.builder.ins().umax(bits, one);
+        self.builder.ins().iadd_imm_s(floor, -1)
+    }
+    /// Evaluate a certificate bound after the loop.
+    fn bound_value(
+        &mut self,
+        bound: &deferred::Bound,
+        leaves: &BTreeMap<usize, Variable>,
+        entry: &BTreeMap<usize, Value>,
+        count: Variable,
+    ) -> Value {
+        use deferred::Bound;
+        match bound {
+            Bound::Constant(bits) => self.constant(i64::from(*bits)),
+            Bound::Leaf(key) => {
+                let word = self.builder.use_var(leaves[key]);
+                self.magnitude_bound(word)
+            }
+            Bound::Sum(left, right) => {
+                let left = self.bound_value(left, leaves, entry, count);
+                let right = self.bound_value(right, leaves, entry, count);
+                let larger = self.builder.ins().umax(left, right);
+                self.builder.ins().iadd_imm_s(larger, 1)
+            }
+            Bound::Product(left, right) => {
+                let left = self.bound_value(left, leaves, entry, count);
+                let right = self.bound_value(right, leaves, entry, count);
+                self.builder.ins().iadd(left, right)
+            }
+            Bound::Accumulated { local, operands } => {
+                let mut largest = self.magnitude_bound(entry[local]);
+                for operand in operands {
+                    let operand = self.bound_value(operand, leaves, entry, count);
+                    largest = self.builder.ins().umax(largest, operand);
+                }
+                let steps = self.builder.use_var(count);
+                let zeros = self.builder.ins().clz(steps);
+                let sixty_four = self.constant(64);
+                let bits = self.builder.ins().isub(sixty_four, zeros);
+                self.builder.ins().iadd(largest, bits)
+            }
+        }
+    }
+    /// Lower an innermost counted loop with its overflow panics deferred to
+    /// the exit. `deferred` documents why the result is indistinguishable
+    /// from checking every operation.
+    fn lower_deferred_while(&mut self, plan: deferred::Plan, condition: &Expr, body: &ex::Block) {
+        let zero = self.constant(0);
+        let sticky = self.builder.declare_var(I64);
+        let count = self.builder.declare_var(I64);
+        self.builder.def_var(sticky, zero);
+        self.builder.def_var(count, zero);
+        let mut leaves = BTreeMap::new();
+        for key in &plan.leaves {
+            let tracker = self.builder.declare_var(I64);
+            self.builder.def_var(tracker, zero);
+            leaves.insert(*key, tracker);
+        }
+        let mut entry_magnitudes = BTreeMap::new();
+        for slot in &plan.accumulators {
+            let value = self.local_words(*slot)[0];
+            let word = self.magnitude(value);
+            entry_magnitudes.insert(*slot, word);
+        }
+        let entry: Vec<(usize, Words)> = plan
+            .replay
+            .iter()
+            .map(|slot| (*slot, self.local_words(*slot)))
+            .collect();
+        self.deferred = Some(DeferredLoop {
+            plan,
+            sticky,
+            leaves,
+            count,
+        });
+        self.lower_checked_while(condition, body);
+        let state = self.deferred.take().expect("deferred loop");
+        if state.plan.obligations.is_empty() {
+            let overflowed = self.builder.use_var(sticky);
+            let overflowed = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedLessThan, overflowed, 0);
+            self.guard(overflowed);
+            return;
+        }
+        // The certificate: every bound is within the limit.
+        let mut worst = self.constant(0);
+        for obligation in &state.plan.obligations {
+            let value = self.bound_value(obligation, &state.leaves, &entry_magnitudes, count);
+            worst = self.builder.ins().umax(worst, value);
+        }
+        let proved =
+            self.builder
+                .ins()
+                .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, worst, deferred::LIMIT);
+        let certified = self.builder.create_block();
+        let replay = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.ins().brif(proved, certified, &[], replay, &[]);
+        // With the certificate, every value was exact, so the sticky word of
+        // the remaining exact tests is exact too.
+        self.builder.switch_to_block(certified);
+        let overflowed = self.builder.use_var(sticky);
+        let overflowed = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::SignedLessThan, overflowed, 0);
+        self.guard(overflowed);
+        self.jump(done, &[]);
+        // Without it nothing is known: run the loop again from its entry
+        // state with ordinary checks.
+        self.builder.switch_to_block(replay);
+        for (slot, words) in entry {
+            self.assign(slot, &words);
+        }
+        self.lower_checked_while(condition, body);
+        self.jump(done, &[]);
+        self.builder.switch_to_block(done);
+    }
     fn check_int_range(&mut self, kind: IntKind, value: Value) -> Value {
         if kind.bits() == 64 {
             return value;
@@ -9738,10 +10402,45 @@ impl Generator<'_, '_> {
         left: Value,
         right: Value,
         right_kind: Option<IntKind>,
+        deferral: Option<deferred::Mode>,
     ) -> Value {
         let signed = kind.signed();
         let wide = kind.bits() == 64;
         match op {
+            Kind::Plus | Kind::Minus | Kind::Star if deferral.is_some() => {
+                if !wide {
+                    // Canonical narrow operands combine exactly in 64 bits
+                    // (a `u32` product modulo 2^64 is still the exact
+                    // product), so the range test alone decides.
+                    let value = match op {
+                        Kind::Plus => self.builder.ins().iadd(left, right),
+                        Kind::Minus => self.builder.ins().isub(left, right),
+                        _ => self.builder.ins().imul(left, right),
+                    };
+                    return self.defer_int_range(kind, value);
+                }
+                if signed {
+                    return self.deferred_i64(op, left, right, deferral.unwrap());
+                }
+                let (value, overflow) = match op {
+                    Kind::Plus => {
+                        let sum = self.builder.ins().iadd(left, right);
+                        let carry = self.builder.ins().icmp(IntCC::UnsignedLessThan, sum, left);
+                        (sum, carry)
+                    }
+                    Kind::Minus => {
+                        let difference = self.builder.ins().isub(left, right);
+                        let borrow = self
+                            .builder
+                            .ins()
+                            .icmp(IntCC::UnsignedLessThan, left, right);
+                        (difference, borrow)
+                    }
+                    _ => self.builder.ins().umul_overflow(left, right),
+                };
+                self.defer_flag(overflow);
+                value
+            }
             Kind::Plus | Kind::Minus | Kind::Star => {
                 let (value, overflow) = match (op, signed || !wide) {
                     // Narrow kinds compute exactly in 64 bits, then range-check.
@@ -10419,10 +11118,7 @@ mod scalar_inline_codegen_tests {
                 &path,
                 object(
                     &program,
-                    CodegenOptions {
-                        optimization: Optimization::None,
-                        inline_scalar_callbacks: enabled,
-                    },
+                    CodegenOptions::cranelift(Optimization::None, enabled),
                 )
                 .unwrap(),
             )

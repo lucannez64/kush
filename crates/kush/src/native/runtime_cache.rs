@@ -16,10 +16,19 @@ fn digest(bytes: &[u8]) -> u64 {
     hash.finish()
 }
 
-fn compiler_identity(source: &Path, defines: &[String]) -> Option<Vec<u8>> {
-    let path = std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|directory| directory.join("cc"))
-        .find(|path| path.is_file())?;
+fn compiler_identity(
+    compiler: &Path,
+    source: &Path,
+    defines: &[String],
+    cheap_probes: bool,
+) -> Option<Vec<u8>> {
+    let path = if compiler.components().count() > 1 {
+        compiler.to_path_buf()
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|directory| directory.join(compiler))
+            .find(|path| path.is_file())?
+    };
     let path = fs::canonicalize(path).ok()?;
     let metadata = fs::metadata(&path).ok()?;
     let mut identity = format!(
@@ -28,8 +37,17 @@ fn compiler_identity(source: &Path, defines: &[String]) -> Option<Vec<u8>> {
         metadata.len()
     )
     .into_bytes();
-    for argument in ["--version", "-dumpmachine"] {
-        let output = Command::new("cc").arg(argument).output().ok()?;
+    // A clang start costs about ten times a gcc start. For the LLVM flavour
+    // the binary's identity above, the include graph below (its paths name
+    // the versioned resource directory) and the environment hash already pin
+    // the compiler, so the two extra probes are skipped.
+    let probes: &[&str] = if cheap_probes {
+        &["--version", "-dumpmachine"]
+    } else {
+        &[]
+    };
+    for argument in probes {
+        let output = Command::new(compiler).arg(argument).output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -40,7 +58,7 @@ fn compiler_identity(source: &Path, defines: &[String]) -> Option<Vec<u8>> {
     // Ask this compiler for its real include graph, including system headers.
     // This prevents a warm hit after a libc/header upgrade or include-path
     // change. Dependency scanning preprocesses only; it emits no object.
-    let dependencies = Command::new("cc")
+    let dependencies = Command::new(compiler)
         .args(["-std=c11", "-O2"])
         .args(defines)
         .args(["-M", "-MT", "kush_runtime"])
@@ -165,15 +183,48 @@ fn read_entry(path: &Path, key: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub(super) fn compile(runtime: &str, defines: &[String], scratch: &Scratch) -> Result<PathBuf> {
-    let object = scratch.path().join("runtime.o");
+    compile_as(runtime, defines, scratch, Path::new("cc"), Output::Object)
+}
+
+/// The runtime as textual LLVM IR, for whole-program optimization by the LLVM
+/// backend. Cached exactly like the object, under a distinct key.
+pub(super) fn compile_llvm_ir(
+    runtime: &str,
+    defines: &[String],
+    scratch: &Scratch,
+    clang: &Path,
+) -> Result<PathBuf> {
+    compile_as(runtime, defines, scratch, clang, Output::LlvmIr)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    Object,
+    LlvmIr,
+}
+
+fn compile_as(
+    runtime: &str,
+    defines: &[String],
+    scratch: &Scratch,
+    compiler: &Path,
+    kind: Output,
+) -> Result<PathBuf> {
+    let object = scratch.path().join(match kind {
+        Output::Object => "runtime.o",
+        Output::LlvmIr => "runtime.ll",
+    });
     let source = scratch.path().join("runtime.c");
     fs::write(&source, runtime).map_err(error)?;
     let directory = cache_directory(scratch);
     let identity = directory
         .as_ref()
-        .and_then(|_| compiler_identity(&source, defines));
+        .and_then(|_| compiler_identity(compiler, &source, defines, kind == Output::Object));
     let cache = directory.zip(identity);
-    let mut key = b"kush-c-runtime-v1\0-std=c11\0-O2\0".to_vec();
+    let mut key = match kind {
+        Output::Object => b"kush-c-runtime-v1\0-std=c11\0-O2\0".to_vec(),
+        Output::LlvmIr => b"kush-c-runtime-llvm-ir-v1\0-std=c11\0-O2\0".to_vec(),
+    };
     key.extend_from_slice(runtime.as_bytes());
     key.extend_from_slice(format!("{defines:?}").as_bytes());
     if let Some((_, identity)) = &cache {
@@ -186,15 +237,24 @@ pub(super) fn compile(runtime: &str, defines: &[String], scratch: &Scratch) -> R
         fs::write(&object, bytes).map_err(error)?;
         return Ok(object);
     }
-    let output = Command::new("cc")
-        .args(["-std=c11", "-O2"])
-        .args(defines)
-        .arg("-c")
+    let mut command = Command::new(compiler);
+    command.args(["-std=c11", "-O2"]).args(defines);
+    match kind {
+        Output::Object => command.arg("-c"),
+        // Position-independent like the Cranelift program object.
+        Output::LlvmIr => command.args(["-fPIC", "-S", "-emit-llvm"]),
+    };
+    let output = command
         .arg(&source)
         .arg("-o")
         .arg(&object)
         .output()
-        .map_err(|e| error(format!("could not start the native C compiler 'cc': {e}")))?;
+        .map_err(|e| {
+            error(format!(
+                "could not start the native C compiler '{}': {e}",
+                compiler.display()
+            ))
+        })?;
     if !output.status.success() {
         return Err(error(format!(
             "native runtime compilation failed: {}",

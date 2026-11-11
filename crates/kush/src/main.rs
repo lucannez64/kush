@@ -33,7 +33,10 @@ Native adapters (Bridge.toml):\n\
 Editors:\n\
   kush lsp\n\n\
 Native optimization (build/run, files or projects):\n\
-  --release           Cranelift speed optimization + scalar callback inlining\n\
+  --release           speed optimization + scalar callback inlining\n\
+  --backend <cranelift|llvm>  code generator; llvm needs clang and builds slower, runs faster\n\
+  --no-deferred-overflow  (llvm) panic at the overflowing operation instead of at loop exit\n\
+  --target-cpu <baseline|native>  (llvm) tune for the build machine\n\
   --opt-level <none|speed>  select backend optimization independently\n\
   --inline-scalars / --no-inline-scalars  control the restricted inliner\n\n\
   kush --help\n\
@@ -155,8 +158,13 @@ fn project_command(
                 },
             )
             .map_err(project_error)?;
-            writeln!(out, "Built {} with Cranelift.", built.output.display())
-                .map_err(output_error)?;
+            writeln!(
+                out,
+                "Built {} with {}.",
+                built.output.display(),
+                codegen.backend_name()
+            )
+            .map_err(output_error)?;
             Ok(0)
         }
         "run" => {
@@ -593,7 +601,29 @@ fn codegen_argument(
     command: &str,
 ) -> Result<bool, (u8, String)> {
     match args[*index].to_str() {
-        Some("--release") => *options = kush::native::CodegenOptions::release(),
+        Some("--release") => {
+            // Keeps an earlier `--backend` choice.
+            options.optimization = kush::native::Optimization::Speed;
+            options.inline_scalar_callbacks = true;
+        }
+        Some("--backend") => match value(args, index, command)?.to_str() {
+            Some("cranelift") => {
+                options.backend = kush::native::Backend::Cranelift;
+                options.deferred_overflow = false;
+            }
+            Some("llvm") => {
+                options.backend = kush::native::Backend::Llvm;
+                options.deferred_overflow = true;
+            }
+            _ => return Err((2, "--backend requires 'cranelift' or 'llvm'".into())),
+        },
+        Some("--deferred-overflow") => options.deferred_overflow = true,
+        Some("--no-deferred-overflow") => options.deferred_overflow = false,
+        Some("--target-cpu") => match value(args, index, command)?.to_str() {
+            Some("native") => options.native_cpu = true,
+            Some("baseline") => options.native_cpu = false,
+            _ => return Err((2, "--target-cpu requires 'baseline' or 'native'".into())),
+        },
         Some("--inline-scalars") => options.inline_scalar_callbacks = true,
         Some("--no-inline-scalars") => options.inline_scalar_callbacks = false,
         Some("--opt-level") => {
@@ -774,7 +804,13 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
             }
             kush::native::build_with_codegen(&checked, output, stats, &links, codegen)
                 .map_err(diagnostic)?;
-            writeln!(out, "Built {} with Cranelift.", output.display()).map_err(output_error)?;
+            writeln!(
+                out,
+                "Built {} with {}.",
+                output.display(),
+                codegen.backend_name()
+            )
+            .map_err(output_error)?;
         } else {
             let scratch = kush::native::Scratch::new(&env::temp_dir()).map_err(diagnostic)?;
             let binary = scratch.path().join("program");
