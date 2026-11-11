@@ -816,3 +816,59 @@ fn main() -> Unit ! {io, panic} {
 "#,
     );
 }
+
+/// A chunk that fails its certificate, or starts with a negative counter,
+/// runs with ordinary checks; the chunks after it are deferred again and
+/// must still be exact and still panic.
+#[test]
+fn checked_chunks_hand_back_to_deferred_ones() {
+    let program = |first: &str, late: &str, start: &str, factor: &str| {
+        format!(
+            "{SUM}
+            {SCALE}
+            fn fill(n: i64, first: i64, late: i64) -> Vec<i64> ! {{alloc, panic}} {{
+                let mut values: Vec<i64> = Vec.with_capacity(n);
+                let mut i = 0;
+                while i < n {{
+                    values = Vec.push(values, if i == 0 {{ first }} else {{ if i == 150000 {{ late }} else {{ (i & 15) - 7 }} }});
+                    i = i + 1;
+                }}
+                values
+            }}
+            fn ramp(start: i64, n: i64, factor: i64) -> i64 ! {{panic}} {{
+                let mut acc = 0;
+                let mut i = start;
+                while i < n {{
+                    acc = acc + i * factor;
+                    i = i + 1;
+                }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, alloc, panic}} {{
+                let source = fill(200000, {first}, {late});
+                let mut target = fill(200000, 0, 0);
+                print_i64(ramp({start}, 200000, {factor}));
+                scale(&source[..], &mut target[..], 1);
+                print_i64(Vec.get(&target, 0));
+                print_i64(Vec.get(&target, 150000));
+                print_i64(Vec.get(&target, 199999));
+                print_i64(sum(&target[..]) + sum(&source[..]));
+            }}"
+        )
+    };
+    // Nothing unusual.
+    native_modes_agree(&program("3", "5", "0", "3"));
+    // The first chunk cannot be certified, but nothing overflows.
+    native_modes_agree(&program("4611686018427387904", "5", "0", "3"));
+    // After that replay, an overflow two chunks later still panics.
+    native_modes_agree(&program(
+        "4611686018427387904",
+        "-9223372036854775801",
+        "0",
+        "3",
+    ));
+    // A counter that starts negative and crosses zero in the second chunk.
+    native_modes_agree(&program("3", "5", "0 - 70000", "3"));
+    // The same with an overflow that only the later, deferred chunks reach.
+    native_modes_agree(&program("3", "5", "0 - 70000", "922337203685477"));
+}

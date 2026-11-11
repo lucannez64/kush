@@ -4110,6 +4110,7 @@ fn lower(
             tracked: vec![],
             function_index: index,
             deferred: None,
+            checked_fuel: None,
             bytes_from,
             read_all,
             read_line,
@@ -5350,6 +5351,8 @@ struct Generator<'a, 'b> {
     function_index: usize,
     /// The innermost loop whose overflow panics are deferred to its exit.
     deferred: Option<DeferredLoop>,
+    /// Fuel of a chunk of a deferred loop that runs with ordinary checks.
+    checked_fuel: Option<Variable>,
 }
 /// State of one loop lowered with deferred overflow checks; see
 /// [`deferred`] for the conditions and the argument that this is unobservable.
@@ -9813,7 +9816,11 @@ impl Generator<'_, '_> {
             let fact = candidate
                 .map(|(index, view, _)| (self.local_words(index)[0], self.local_words(view)[1]));
             // A deferred loop runs a bounded number of iterations at a time.
-            let fuel = self.deferred.as_ref().map(|state| state.fuel);
+            let fuel = self
+                .deferred
+                .as_ref()
+                .map(|state| state.fuel)
+                .or(self.checked_fuel);
             let test = match fuel {
                 Some(fuel) => {
                     let left = self.builder.use_var(fuel);
@@ -10493,12 +10500,44 @@ impl Generator<'_, '_> {
         for key in &plan.leaves {
             leaves.insert(*key, self.builder.declare_var(I64));
         }
+        let done = self.builder.create_block();
+        // A replay re-reads what the first attempt read, so nothing the loop
+        // reads may be something it wrote. The borrow rules already say so
+        // of two distinct views; compare the address ranges anyway, once,
+        // and run a loop whose views do overlap with ordinary checks.
+        if !plan.disjoint.is_empty() {
+            let mut overlap = self.constant(0);
+            for (stored, loaded) in &plan.disjoint {
+                let (stored_start, stored_end) = self.view_range(*stored);
+                let (loaded_start, loaded_end) = self.view_range(*loaded);
+                let before =
+                    self.builder
+                        .ins()
+                        .icmp(IntCC::UnsignedLessThan, stored_start, loaded_end);
+                let after =
+                    self.builder
+                        .ins()
+                        .icmp(IntCC::UnsignedLessThan, loaded_start, stored_end);
+                let both = self.builder.ins().band(before, after);
+                let both = self.builder.ins().uextend(I64, both);
+                overlap = self.builder.ins().bor(overlap, both);
+            }
+            let plain = self.builder.create_block();
+            let apart = self.builder.create_block();
+            self.builder.ins().brif(overlap, plain, &[], apart, &[]);
+            self.builder.switch_to_block(plain);
+            self.lower_checked_while(condition, body);
+            self.jump(done, &[]);
+            self.builder.switch_to_block(apart);
+        }
         // The loop runs in chunks of at most `CHUNK` iterations, each checked
         // on its own, so an overflow is reported after a bounded amount of
         // further work no matter how long the loop would have run, or what
         // the wrapped values do to it in the meantime.
         let chunk = self.builder.create_block();
-        let done = self.builder.create_block();
+        // Where every kind of chunk ends: out of fuel means the loop may
+        // have more to do; anything else is the loop's own exit.
+        let next = self.builder.create_block();
         self.jump(chunk, &[]);
         self.builder.switch_to_block(chunk);
         self.builder.def_var(sticky, zero);
@@ -10511,8 +10550,8 @@ impl Generator<'_, '_> {
         // An upward counter that starts a chunk non-negative stays so, which
         // is what removes the lower bounds check of every index it forms.
         // Inside one loop LLVM sees that for itself; across chunks it has to
-        // be shown the starting sign. A negative start (rare, and legal)
-        // runs the loop with ordinary checks from here.
+        // be shown the starting sign. A chunk that starts negative (rare,
+        // and legal) runs with ordinary checks.
         if let Some(counter) = plan.ascending {
             let start = self.local_words(counter)[0];
             let negative = self
@@ -10523,8 +10562,10 @@ impl Generator<'_, '_> {
             let chunked = self.builder.create_block();
             self.builder.ins().brif(negative, plain, &[], chunked, &[]);
             self.builder.switch_to_block(plain);
+            self.checked_fuel = Some(fuel);
             self.lower_checked_while(condition, body);
-            self.jump(done, &[]);
+            self.checked_fuel = None;
+            self.jump(next, &[]);
             self.builder.switch_to_block(chunked);
         }
         let mut entry_magnitudes = BTreeMap::new();
@@ -10577,14 +10618,18 @@ impl Generator<'_, '_> {
             let certified = self.builder.create_block();
             let replay = self.builder.create_block();
             self.builder.ins().brif(proved, certified, &[], replay, &[]);
-            // Without it nothing is known: run the rest of the loop from this
-            // chunk's entry state with ordinary checks.
+            // Without it nothing is known: run this chunk again from its
+            // entry state with ordinary checks, then go on in chunks.
             self.builder.switch_to_block(replay);
             for (slot, words) in entry {
                 self.assign(slot, &words);
             }
+            let full = self.constant(deferred::CHUNK);
+            self.builder.def_var(fuel, full);
+            self.checked_fuel = Some(fuel);
             self.lower_checked_while(condition, body);
-            self.jump(done, &[]);
+            self.checked_fuel = None;
+            self.jump(next, &[]);
             // With it, every value was exact, so the sticky word of the
             // remaining exact tests is exact too.
             self.builder.switch_to_block(certified);
@@ -10595,12 +10640,19 @@ impl Generator<'_, '_> {
             .ins()
             .icmp_imm_s(IntCC::SignedLessThan, overflowed, 0);
         self.guard(overflowed);
-        // Out of fuel means the loop may have more to do; anything else is
-        // the loop's own exit.
+        self.jump(next, &[]);
+        self.builder.switch_to_block(next);
         let left = self.builder.use_var(fuel);
         let exhausted = self.builder.ins().icmp_imm_s(IntCC::Equal, left, 0);
         self.builder.ins().brif(exhausted, chunk, &[], done, &[]);
         self.builder.switch_to_block(done);
+    }
+    /// The address range `[start, end)` of a slice local's elements.
+    fn view_range(&mut self, slot: usize) -> (Value, Value) {
+        let words = self.local_words(slot);
+        let bytes = self.builder.ins().imul(words[1], words[2]);
+        let end = self.builder.ins().iadd(words[0], bytes);
+        (words[0], end)
     }
     fn check_int_range(&mut self, kind: IntKind, value: Value) -> Value {
         if kind.bits() == 64 {

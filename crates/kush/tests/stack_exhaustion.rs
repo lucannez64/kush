@@ -36,9 +36,8 @@ fn clang_available() -> bool {
 }
 
 /// Builds `source` in every configuration and runs it at a small and at an
-/// absurd depth. The small run must print `expected`; the deep one must
-/// either do the same arithmetic (an optimizer may run the recursion in
-/// constant stack) or panic, and must not die of anything but that panic.
+/// absurd depth. The small run must print `shallow`; the deep one must
+/// panic in every configuration: no backend turns a recursion into a loop.
 fn check(source: &str, shallow: &str) {
     let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
     let root = scratch.path();
@@ -48,7 +47,6 @@ fn check(source: &str, shallow: &str) {
         configurations.push(vec!["--backend", "llvm"]);
         configurations.push(vec!["--release", "--backend", "llvm"]);
     }
-    let mut panicked = 0;
     for flags in &configurations {
         let built = Command::new(env!("CARGO_BIN_EXE_kush"))
             .current_dir(root)
@@ -72,31 +70,19 @@ fn check(source: &str, shallow: &str) {
             .arg("400000000")
             .output()
             .unwrap();
-        if deep.status.success() {
-            assert_eq!(
-                String::from_utf8_lossy(&deep.stdout),
-                "1000000000\n",
-                "{flags:?}"
-            );
-        } else {
-            assert_eq!(
-                deep.status.signal(),
-                Some(6),
-                "{flags:?}: {:?}",
-                deep.status
-            );
-            assert!(
-                String::from_utf8_lossy(&deep.stderr).contains("panic: stack exhausted"),
-                "{flags:?}: {}",
-                String::from_utf8_lossy(&deep.stderr)
-            );
-            panicked += 1;
-        }
+        assert_eq!(
+            deep.status.signal(),
+            Some(6),
+            "{flags:?}: {:?}",
+            deep.status
+        );
+        assert!(
+            String::from_utf8_lossy(&deep.stderr).contains("panic: stack exhausted"),
+            "{flags:?}: {}",
+            String::from_utf8_lossy(&deep.stderr)
+        );
     }
-    // Cranelift never removes a recursion.
-    assert!(panicked >= 2);
 }
-
 #[test]
 fn unbounded_recursion_on_the_process_stack_panics() {
     check(
@@ -135,5 +121,29 @@ fn unbounded_recursion_on_a_task_stack_panics() {
             }}"
         ),
         "2500\n",
+    );
+}
+
+/// A tail call and an accumulating recursion are the shapes an optimizer
+/// would run in constant stack.
+#[test]
+fn tail_recursion_is_not_turned_into_a_loop() {
+    check(
+        &format!(
+            "enum Result<T, E> {{ Ok(T), Err(E) }}
+            {DOWN}
+            fn count(n: i64, acc: i64) -> i64 ! {{panic}} {{
+                if n == 0 {{ acc }} else {{ count(n - 1, acc + 1) }}
+            }}
+            fn climb(n: i64) -> i64 ! {{panic}} {{
+                if n == 0 {{ 0 }} else {{ 1 + climb(n - 1) }}
+            }}
+            fn main() -> i64 ! {{io, alloc, panic}} {{
+                let n = depth();
+                print_int(count(n, 0) + climb(n));
+                0
+            }}"
+        ),
+        "2000\n",
     );
 }

@@ -107,6 +107,10 @@ pub(super) struct Plan {
     pub accumulators: Vec<usize>,
     /// Locals restored before an exact replay.
     pub replay: Vec<usize>,
+    /// Pairs of a written view and a read view that a replay needs to be
+    /// disjoint. The types say they are; the lowering checks the addresses
+    /// anyway, so a replay never depends on that.
+    pub disjoint: Vec<(usize, usize)>,
     /// The counter of a loop that counts upward, when it has one.
     pub ascending: Option<usize>,
     /// Whether a certified operation multiplies two non-constant operands.
@@ -502,8 +506,18 @@ pub(super) fn plan(
     for id in &deferred {
         plan.modes.insert(*id, Mode::Exact);
     }
-    // A replay must observe the memory the first attempt observed.
-    if analysis.stored.is_disjoint(&analysis.loaded) {
+    // A replay must observe the memory the first attempt observed: nothing
+    // the loop reads may be something it wrote. Different locals are
+    // different views, and the lowering confirms at run time that their
+    // address ranges do not overlap, which it can do for slices.
+    let view = |slot: &usize| {
+        matches!(
+            function.locals[*slot].ty,
+            Type::Slice(_) | Type::SliceMut(_)
+        )
+    };
+    let checkable = analysis.stored.is_empty() || analysis.loaded.iter().all(view);
+    if analysis.stored.is_disjoint(&analysis.loaded) && checkable {
         certify(&analysis, &deferred, &mut plan);
         let varying = plan
             .leaves
@@ -516,6 +530,11 @@ pub(super) fn plan(
         }
     }
     if !plan.obligations.is_empty() {
+        for stored in &analysis.stored {
+            for loaded in &analysis.loaded {
+                plan.disjoint.push((*stored, *loaded));
+            }
+        }
         plan.replay = analysis
             .assignments
             .keys()

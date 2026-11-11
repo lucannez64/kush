@@ -61,8 +61,8 @@ before it is exact, so its operands are exact and were observed by the
 magnitude words; its mathematical result is then at most `2^62`, which fits.
 
 If a bound is too large, nothing is concluded. The state at the start of the
-chunk is restored and the rest of the loop runs with ordinary checks (it
-does not go back to chunks), which either panics at
+chunk is restored and that chunk runs again with ordinary checks; the loop
+then goes on in deferred chunks, which either panics at
 the right operation or produces the exact result. This is why a reduction
 whose every prefix must be checked (`[MAX, 1, -5]` panics although the total
 fits) still behaves exactly as before.
@@ -105,8 +105,8 @@ wrong values. Four properties make that harmless.
    however long the loop would have run and whatever the wrong values do to
    its control flow. A checked loop that panics in its first iteration and a
    deferred one differ by at most a fraction of a millisecond of work.
-   A chunk whose upward counter starts negative runs the rest of the loop
-   with ordinary checks instead; the branch that decides this is also what
+   A chunk whose upward counter starts negative runs with ordinary checks
+   instead; the branch that decides this is also what
    lets LLVM see that the counter stays non-negative across chunks and drop
    the lower bounds check, without which nothing would vectorize.
 2. **No access depends on a proof.** The checker's proofs may use "this
@@ -132,7 +132,11 @@ does not depend on it.
 
 Certified mode additionally requires that a replay sees the memory the first
 attempt saw: the loop may store only through exclusive slices (`&mut [T]`) it
-never reads. In-place updates fall back to exact mode.
+never reads, and may read only slices. The borrow rules make two distinct
+views disjoint, but the replay does not lean on that: before the loop the
+address range of every written slice is compared with that of every read
+slice, and a loop whose ranges overlap runs with ordinary checks. In-place
+updates fall back to exact mode, which needs no replay.
 
 One cost rule applies. Without a native 64-bit vector multiply (anything but
 `--target-cpu native` on an AVX-512DQ machine), a loop that multiplies two
@@ -143,9 +147,9 @@ faster with ordinary checks, so it keeps them.
 
 Per iteration, exact mode adds three bit operations to an add or subtract;
 certified mode adds two operations and an OR per tracked operand, and nothing
-per arithmetic operation. A failed certificate costs one extra pass over the
-chunk, and the rest of that loop then runs with ordinary checks; so does a
-loop whose upward counter starts a chunk negative. Operands near `2^62`, or long reductions of large values, take that path
+per arithmetic operation. A failed certificate costs one extra pass over that
+chunk, with ordinary checks, and nothing after it. A chunk whose upward
+counter starts negative runs once, with ordinary checks. Operands near `2^62`, or long reductions of large values, take that path
 every time and are slower than plain checking; values whose magnitude times
 the trip count stays far below `2^63` never do.
 
@@ -175,9 +179,12 @@ loops that ran for 2^62 iterations or forever where the checked build panics
 at once. Properties 1 to 3 above are the fixes; the seven reproducers are
 tests (`review_*`). The certificate arithmetic itself held up.
 
-That review did not audit the borrow checker. Certified mode with stores
-relies on the exclusivity of `&mut [T]` views. `--no-deferred-overflow` gives
-the plain checked code.
+That review did not audit the borrow checker, and deferral no longer needs
+it to: the replay checks disjointness itself (above). The `noalias` facts of
+the LLVM backend do rest on the exclusivity of `&mut [T]`;
+`tests/view_exclusivity.rs` holds the attempts at an aliasing pair that the
+checker must refuse, and slice views cannot be passed to foreign code at
+all. `--no-deferred-overflow` gives the plain checked code.
 
 Not covered: `loop`/nested loops as a unit, `Vec.map_in_place` callbacks with
 checked arithmetic, reductions over narrow or unsigned kinds (they use exact

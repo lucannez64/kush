@@ -509,7 +509,12 @@ impl LlvmModule {
         }
         // Probe every page of a large frame so it cannot step over the
         // guard below the stack (see the runtime's fault handler).
-        out.push_str("attributes #0 = { nounwind \"probe-stack\"=\"inline-asm\" }\n");
+        // And keep every call a call: turning a recursion into a loop would
+        // make the depth a program can reach, and whether a runaway
+        // recursion panics or spins, depend on the backend.
+        out.push_str(
+            "attributes #0 = { nounwind \"probe-stack\"=\"inline-asm\" \"disable-tail-calls\"=\"true\" }\n",
+        );
         out.push_str(MODULE_METADATA);
         Ok(out)
     }

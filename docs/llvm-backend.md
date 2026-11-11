@@ -166,11 +166,13 @@ ends in an unmapped guard, both backends probe each page of a frame larger
 than a page so no frame can step over it, and the runtime handles the fault
 on a separate signal stack. A fault anywhere else keeps its default action.
 
-How deep a recursion can go is not the same on both: frames differ in size,
-and LLVM may run a tail call, or a recursion with an accumulator, in constant
-stack. A recursion that exhausts the stack under Cranelift can therefore
-finish under LLVM, and one that never ends can loop instead of panicking.
-As in Rust, that depends on the optimizer and is not promised.
+A recursion stays a recursion on both backends. LLVM functions carry
+`"disable-tail-calls"="true"`, which stops it from running a tail call, or a
+recursion with an accumulator, as a loop; so a runaway recursion panics on
+both instead of panicking on one and spinning on the other. The depth a
+program can reach still differs with frame size, which is not promised. The
+price is that tail-recursive code does not become a loop in release builds;
+write the loop.
 
 ## Validation
 
