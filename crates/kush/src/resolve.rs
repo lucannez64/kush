@@ -1017,13 +1017,23 @@ impl Resolver {
         for clause in &f.ensures {
             self.scoped(|r| {
                 r.local("result", BindingKind::Local, clause.result_span, true)?;
-                if let EnsuresGuard::Variant { binders, .. } = &clause.guard {
+                if let EnsuresGuard::Variant {
+                    subject, binders, ..
+                } = &clause.guard
+                {
+                    if let Some(subject) = subject {
+                        r.expr(subject)?;
+                    }
                     for (name, span) in binders {
                         r.local(name, BindingKind::Local, *span, false)?;
                     }
                 }
                 r.expr(&clause.body)
             })?;
+        }
+        // The termination measure sees the parameters.
+        if let Some(measure) = &f.decreases {
+            self.scoped(|r| r.expr(measure))?;
         }
         if let Some(body) = &f.body {
             self.block(body)?;
@@ -1415,7 +1425,7 @@ impl Resolver {
                 ExprKind::Name(name) => {
                     r.reference(std::slice::from_ref(name), expr.span)?;
                 }
-                ExprKind::Record { ty, fields } => {
+                ExprKind::Record { ty, fields, base } => {
                     r.expr(ty)?;
                     let mut seen = BTreeSet::new();
                     for (name, value) in fields {
@@ -1426,6 +1436,9 @@ impl Resolver {
                             ));
                         }
                         r.expr(value)?;
+                    }
+                    if let Some(base) = base {
+                        r.expr(base)?;
                     }
                 }
                 ExprKind::StructuralLiteral(fields) => {

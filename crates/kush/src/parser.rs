@@ -754,6 +754,28 @@ impl Parser {
         let result = self.ty()?;
         let effects = self.effects()?;
         let ensures = self.ensures_clauses()?;
+        // `decreases { measure }` after the postconditions.
+        let decreases = if matches!(&self.current().kind, Kind::Ident(word) if word == "decreases")
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.kind == Kind::LBrace)
+        {
+            let start = self.current().span;
+            self.bump();
+            self.expect(&Kind::LBrace, "'{' before the measure")?;
+            let measure = self.expr()?;
+            self.expect(&Kind::RBrace, "'}' after the measure")?;
+            if ensures.is_empty() {
+                return Err(Diagnostic::new(
+                    start,
+                    "'decreases' justifies recursive calls that use a postcondition; this function has no 'ensures', so it needs none",
+                ));
+            }
+            Some(measure)
+        } else {
+            None
+        };
         let body = if self.eat(&Kind::Semi) {
             None
         } else {
@@ -780,11 +802,12 @@ impl Parser {
             body,
             foreign: None,
             ensures,
+            decreases,
         })
     }
     /// Contextual `ensures` clauses after the effect row:
     /// `ensures { P }`, `ensures result => { P }`, `ensures !result => { P }`,
-    /// `ensures Variant(a, b) => { P }`.
+    /// `ensures Variant(a, b) => { P }`, `ensures path is Variant(a, b) => { P }`.
     fn ensures_clauses(&mut self) -> Result<Vec<Ensures>> {
         let mut out = Vec::new();
         while matches!(&self.current().kind, Kind::Ident(word) if word == "ensures") {
@@ -804,8 +827,36 @@ impl Parser {
                 EnsuresGuard::Result(false)
             } else {
                 let guard_start = self.current().span;
-                let name = self.ident()?;
-                let guard = if name == "result" {
+                let mut name = self.ident()?;
+                // `path is Variant(..) =>`: the guard tests an enum reached
+                // from `result` or a parameter instead of the result itself.
+                let is_word =
+                    |p: &Self| matches!(&p.current().kind, Kind::Ident(word) if word == "is");
+                let subject = if self.at(&Kind::Dot) || is_word(self) {
+                    let mut subject = Node::new(ExprKind::Name(name), guard_start);
+                    while self.eat(&Kind::Dot) {
+                        let field = self.ident()?;
+                        subject = Node::new(
+                            ExprKind::Field {
+                                value: Box::new(subject),
+                                name: field,
+                            },
+                            self.since(guard_start),
+                        );
+                    }
+                    if !is_word(self) {
+                        return Err(Diagnostic::new(
+                            self.current().span,
+                            "expected 'is Variant =>' after the path in an ensures guard, as in 'ensures result.effect is Insert(permit) => { .. }'",
+                        ));
+                    }
+                    self.bump();
+                    name = self.ident()?;
+                    Some(subject)
+                } else {
+                    None
+                };
+                let guard = if name == "result" && subject.is_none() {
                     EnsuresGuard::Result(true)
                 } else {
                     let mut binders = Vec::new();
@@ -823,6 +874,7 @@ impl Parser {
                         }
                     }
                     EnsuresGuard::Variant {
+                        subject,
                         name,
                         binders,
                         span: self.since(guard_start),
@@ -1657,15 +1709,42 @@ impl Parser {
                 }
                 if self.record_literal_ahead(&left) {
                     self.bump();
-                    let fields = self.separated(Kind::RBrace, |p| {
-                        let name = p.ident()?;
-                        p.expect(&Kind::Colon, "':' after record field name")?;
-                        Ok((name, p.expr()?))
-                    })?;
+                    // `field: value` pairs, optionally ended by `..base`
+                    // (struct update: the remaining fields come from `base`).
+                    let mut fields = Vec::new();
+                    let mut base = None;
+                    while !self.at(&Kind::RBrace) {
+                        if self.eat(&Kind::DotDot) {
+                            let value = self.expr()?;
+                            if !update_base(&value) {
+                                return Err(Diagnostic::new(
+                                    value.span,
+                                    "the base of a struct update must be a local or a field path such as 'driver' or 'state.driver'; bind other values with 'let' first",
+                                ));
+                            }
+                            base = Some(Box::new(value));
+                            self.eat(&Kind::Comma);
+                            if !self.at(&Kind::RBrace) {
+                                return Err(Diagnostic::new(
+                                    self.current().span,
+                                    "'..base' must be the last entry of a struct update",
+                                ));
+                            }
+                            break;
+                        }
+                        let name = self.ident()?;
+                        self.expect(&Kind::Colon, "':' after record field name")?;
+                        fields.push((name, self.expr()?));
+                        if !self.eat(&Kind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&Kind::RBrace, "RBrace")?;
                     left = Node::new(
                         ExprKind::Record {
                             ty: Box::new(left),
                             fields,
+                            base,
                         },
                         self.since(start),
                     );
@@ -2196,5 +2275,15 @@ impl Parser {
             _ => return Err(self.error("expected a pattern")),
         };
         Ok(Node::new(kind, self.since(start)))
+    }
+}
+
+/// A struct update base is read once per missing field, so it must be a
+/// place without effects: a name or a field path.
+fn update_base(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Name(_) => true,
+        ExprKind::Field { value, .. } => update_base(value),
+        _ => false,
     }
 }

@@ -34,7 +34,7 @@
 //! guessed proof.
 use crate::{
     Diagnostic, Span,
-    executable::{BytesOp, Expr, ExprKind, SliceOp, Target, VecOp},
+    executable::{BytesOp, Expr, ExprKind, SliceOp, StrOp, StringOp, Target, VecOp},
     lexer::Kind,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -70,6 +70,9 @@ pub(crate) enum Step {
     Tag,
     /// Payload word offset of the given variant.
     Payload(u32, u32),
+    /// The length of the Vec, Bytes, String, array or slice at this path.
+    /// Always the last step.
+    Len,
 }
 
 type PathKey = (Root, Vec<Step>);
@@ -935,14 +938,19 @@ impl Facts {
                     None
                 }
             }
+            // A `String` never changes length, and the exclusive `&mut str`
+            // operations keep the byte length, so their lengths are terms
+            // like the Bytes/Vec/slice ones.
             ExprKind::Call(
                 Target::Bytes(BytesOp::Len)
                 | Target::Vec(VecOp::Len, _)
-                | Target::Slice(SliceOp::Len, _),
+                | Target::Slice(SliceOp::Len, _)
+                | Target::String(StringOp::Len)
+                | Target::Str(StrOp::Len),
                 arguments,
             ) => {
                 let slot = owner_slot(&arguments[0]).filter(|slot| !self.opaque.contains(slot))?;
-                Some(Linear::variable(Term::Len(slot, self.version(slot))))
+                Some(self.len_of_slot(slot))
             }
             ExprKind::Block(block) if block.statements.is_empty() => {
                 self.linear(block.tail.as_ref()?)
@@ -1030,14 +1038,88 @@ impl Facts {
         }
         with_ranges.certify(&goal, span, "the result stays in range")
     }
+    /// The length term of the value at `root` followed by `steps`. A bare
+    /// local keeps its `Term::Len`; any other place is a path ending in
+    /// [`Step::Len`].
+    pub(crate) fn len_of_root(&self, root: Root, steps: &[Step]) -> Linear {
+        if steps.is_empty()
+            && let Root::Var(slot, version) = root
+        {
+            return Linear::variable(Term::Len(slot, version));
+        }
+        let mut steps = steps.to_vec();
+        steps.push(Step::Len);
+        let term = path_term(root, &steps);
+        self.note_term(term, (0, i128::from(i64::MAX)));
+        Linear::variable(term)
+    }
+    /// The length term of the value a local currently denotes: its own, or
+    /// that of the place it aliases (a moved local, a `match` payload, a
+    /// call result).
+    pub(crate) fn len_of_slot(&self, slot: usize) -> Linear {
+        let (root, steps) = self.local_root(slot);
+        self.len_of_root(root, &steps)
+    }
+    /// The length of a Bytes/Vec/String/slice-valued expression, when it is
+    /// a known place or a construction whose effect on the length is fixed.
+    pub(crate) fn length(&self, value: &Expr) -> Option<Linear> {
+        if !has_length(value.ty) {
+            return None;
+        }
+        match &value.kind {
+            ExprKind::Call(
+                Target::Vec(VecOp::Push, _) | Target::Bytes(BytesOp::Push | BytesOp::PushReserved),
+                arguments,
+            ) => self.length(arguments.first()?)?.add(&Linear::constant(1)),
+            ExprKind::Call(
+                Target::Vec(VecOp::WithCapacity | VecOp::Clear, _)
+                | Target::Bytes(BytesOp::WithCapacity | BytesOp::Clear),
+                _,
+            ) => Some(Linear::constant(0)),
+            ExprKind::Call(Target::Vec(VecOp::Reserve, _), arguments) => {
+                self.length(arguments.first()?)
+            }
+            ExprKind::BytesLiteral(bytes) => {
+                Some(Linear::constant(i128::try_from(bytes.len()).ok()?))
+            }
+            ExprKind::Block(block) if block.statements.is_empty() => {
+                self.length(block.tail.as_ref()?)
+            }
+            _ => {
+                let (root, steps) = self.root_of(value)?;
+                Some(self.len_of_root(root, &steps))
+            }
+        }
+    }
+    /// The length behind a borrow or a reference-typed local: that of the
+    /// local it names.
+    pub(crate) fn borrowed_length(&self, value: &Expr) -> Option<Linear> {
+        let slot = owner_slot(value).filter(|slot| !self.opaque.contains(slot))?;
+        Some(self.len_of_slot(slot))
+    }
+    /// After `slot` (at its current version) received `value`, its length
+    /// is the value's.
+    fn define_length(&mut self, slot: usize, length: Option<Linear>) {
+        let Some(length) = length.filter(|_| !self.opaque.contains(&slot)) else {
+            return;
+        };
+        let own = Linear::variable(Term::Len(slot, self.version(slot)));
+        if own != length {
+            let mut out = Vec::new();
+            compare(own, &Kind::EqEq, length, &mut out);
+            self.known.extend(out);
+        }
+    }
     /// `slot = value`: the right side is read at the old version, then the
     /// slot moves to a new version equal to it.
     pub fn assign(&mut self, slot: usize, value: &Expr) {
         // The slot has the value's type; record its range before any fact
         // mentions it (`in_range` treats an unrecorded slot as `i64`).
         self.note_type(slot, value.ty);
+        let length = self.length(value);
         let value = self.linear(value);
         self.bump(slot);
+        self.define_length(slot, length);
         if let Some(value) = value.filter(|_| !self.opaque.contains(&slot)) {
             let var = Linear::variable(Term::Var(slot, self.version(slot)));
             let mut out = Vec::new();
@@ -1051,6 +1133,7 @@ impl Facts {
             return;
         }
         self.note_type(slot, value.ty);
+        self.define_length(slot, self.length(value));
         if let Some(value) = self.linear(value) {
             let var = Linear::variable(Term::Var(slot, self.version(slot)));
             let mut out = Vec::new();
@@ -1272,6 +1355,21 @@ fn fact_safe(expr: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// Types whose values have a length the prover can name.
+pub(crate) fn has_length(ty: crate::executable::Type) -> bool {
+    use crate::executable::Type;
+    matches!(
+        ty,
+        Type::Bytes
+            | Type::String
+            | Type::Str
+            | Type::StrMut
+            | Type::Vec(_)
+            | Type::Slice(_)
+            | Type::SliceMut(_)
+    )
 }
 
 /// The local that owns (or is borrowed as) a length-carrying value.
@@ -2175,64 +2273,195 @@ pub fn verify(certificate: &Certificate) -> bool {
     }
 }
 
-pub(crate) fn describe(term: Term, names: &dyn Fn(usize) -> String) -> String {
-    match term {
-        Term::Zero => "0".into(),
-        Term::Var(slot, _) => names(slot),
-        Term::Len(slot, _) => format!("len({})", names(slot)),
-        Term::Path(id) => {
-            let (root, steps) = path_of(id);
-            let mut text = match root {
-                Root::Var(slot, _) => names(slot),
-                Root::Value(value) => format!("call#{value}"),
-            };
-            for step in steps {
-                text.push_str(&match step {
-                    Step::Field(offset) => format!(".field@{offset}"),
-                    Step::Tag => ".tag".to_owned(),
-                    Step::Payload(variant, offset) => format!(".payload{variant}@{offset}"),
-                });
-            }
-            text
-        }
-    }
+/// How a term reads in source, for proof-failure messages.
+pub(crate) struct TermInfo {
+    pub(crate) name: String,
+    pub(crate) kind: TermKind,
 }
 
-fn describe_constraint(constraint: &Constraint, names: &dyn Fn(usize) -> String) -> String {
-    if constraint.coefficients.is_empty() {
-        return format!("0 <= {}", constraint.bound);
+pub(crate) enum TermKind {
+    Bool,
+    /// An enum tag, with the variant names in tag order. `name` is the enum
+    /// value, not the tag.
+    Tag(Vec<String>),
+    /// An integer, with its type's range when known.
+    Int(Option<(i128, i128)>),
+}
+
+fn linear_sum(terms: &[(String, i128)], constant: i128) -> String {
+    let mut text = String::new();
+    for (name, coefficient) in terms {
+        if !text.is_empty() {
+            text.push_str(" + ");
+        }
+        if *coefficient == 1 {
+            text.push_str(name);
+        } else {
+            text.push_str(&format!("{coefficient}*{name}"));
+        }
     }
-    let terms = constraint
-        .coefficients
-        .iter()
-        .map(|(term, coefficient)| {
-            let term = describe(*term, names);
-            if *coefficient == 1 {
-                term
-            } else {
-                format!("{coefficient}*{term}")
+    if text.is_empty() {
+        return constant.to_string();
+    }
+    match constant {
+        0 => {}
+        c if c > 0 => text.push_str(&format!(" + {c}")),
+        c => text.push_str(&format!(" - {}", c.unsigned_abs())),
+    }
+    text
+}
+
+/// The known facts as source-level statements. Facts about one term are
+/// merged into an interval and printed as `x`, `!x`, `v is Variant` or a
+/// bound; a fact that only restates a type's range is omitted. Facts over
+/// several terms print as `a + 1 <= b`.
+fn describe_facts(known: &[Constraint], info: &dyn Fn(Term) -> TermInfo) -> Vec<String> {
+    let mut order = Vec::new();
+    let mut single: BTreeMap<Term, (Option<i128>, Option<i128>)> = BTreeMap::new();
+    let mut out = Vec::new();
+    let mut contradiction = false;
+    let mut several = Vec::new();
+    for constraint in known {
+        match constraint.coefficients.len() {
+            0 => contradiction |= constraint.bound < 0,
+            1 => {
+                let (term, coefficient) = constraint.coefficients.iter().next().unwrap();
+                let entry = single.entry(*term).or_insert_with(|| {
+                    order.push(*term);
+                    (None, None)
+                });
+                // c*t <= b: an upper bound for c > 0, a lower bound for c < 0.
+                // Extreme values that would overflow are left out of the
+                // message; they never affect what is proved.
+                if *coefficient > 0 {
+                    if let Some(bound) = constraint.bound.checked_div_euclid(*coefficient) {
+                        entry.1 = Some(entry.1.map_or(bound, |old: i128| old.min(bound)));
+                    }
+                } else if let Some(bound) = coefficient
+                    .checked_neg()
+                    .and_then(|positive| constraint.bound.checked_div_euclid(positive))
+                    .and_then(i128::checked_neg)
+                {
+                    entry.0 = Some(entry.0.map_or(bound, |old: i128| old.max(bound)));
+                }
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" + ");
-    format!("{terms} <= {}", constraint.bound)
+            _ => several.push(constraint),
+        }
+    }
+    if contradiction {
+        out.push("false".to_owned());
+    }
+    for term in order {
+        let (low, high) = single[&term];
+        let TermInfo { name, kind } = info(term);
+        let range = match &kind {
+            TermKind::Bool => Some((0, 1)),
+            TermKind::Tag(variants) => Some((0, variants.len() as i128 - 1)),
+            TermKind::Int(range) => *range,
+        };
+        let low = low.filter(|l| range.is_none_or(|r| *l > r.0));
+        let high = high.filter(|h| range.is_none_or(|r| *h < r.1));
+        if low.is_none() && high.is_none() {
+            continue;
+        }
+        let from = low.or(range.map(|r| r.0));
+        let to = high.or(range.map(|r| r.1));
+        if let (Some(from), Some(to)) = (from, to)
+            && from > to
+        {
+            out.push(format!("{name} has no possible value"));
+            continue;
+        }
+        match kind {
+            TermKind::Bool => out.push(if from == Some(1) {
+                name
+            } else {
+                format!("!{name}")
+            }),
+            TermKind::Tag(variants) => {
+                let (from, to) = (from.unwrap_or(0), to.unwrap_or(variants.len() as i128 - 1));
+                let allowed = variants
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| (from..=to).contains(&(*index as i128)))
+                    .map(|(_, variant)| variant.as_str())
+                    .collect::<Vec<_>>();
+                if allowed.len() * 2 <= variants.len() || allowed.len() <= 2 {
+                    out.push(format!("{name} is {}", allowed.join(" or ")));
+                } else {
+                    let excluded = variants
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| !(from..=to).contains(&(*index as i128)))
+                        .map(|(_, variant)| variant.as_str())
+                        .collect::<Vec<_>>();
+                    out.push(format!("{name} is not {}", excluded.join(" or ")));
+                }
+            }
+            TermKind::Int(_) => out.push(match (low, high) {
+                (Some(l), Some(h)) if l == h => format!("{name} == {l}"),
+                (Some(l), Some(h)) => format!("{l} <= {name} <= {h}"),
+                (Some(l), None) => format!("{name} >= {l}"),
+                (None, Some(h)) => format!("{name} <= {h}"),
+                (None, None) => unreachable!("checked above"),
+            }),
+        }
+    }
+    for constraint in several {
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for (term, coefficient) in &constraint.coefficients {
+            let info = info(*term);
+            let name = match info.kind {
+                TermKind::Tag(_) => format!("tag({})", info.name),
+                _ => info.name,
+            };
+            if *coefficient > 0 {
+                left.push((name, *coefficient));
+            } else {
+                right.push((name, coefficient.saturating_neg()));
+            }
+        }
+        // left - right <= bound, printed with no negative coefficient.
+        let (left_constant, right_constant) = if constraint.bound >= 0 {
+            (0, constraint.bound)
+        } else {
+            (constraint.bound.saturating_neg(), 0)
+        };
+        let (left, right) = (
+            linear_sum(&left, left_constant),
+            linear_sum(&right, right_constant),
+        );
+        // `a <= b` together with `b <= a` reads `a == b`.
+        let opposite = format!("{right} <= {left}");
+        if let Some(position) = out.iter().position(|text| *text == opposite) {
+            out[position] = format!("{right} == {left}");
+            continue;
+        }
+        let text = format!("{left} <= {right}");
+        if !out.contains(&text) && !out.contains(&format!("{left} == {right}")) {
+            out.push(text);
+        }
+    }
+    out
 }
 
 pub(crate) fn failure(
     span: Span,
     obligation: &str,
     known: &[Constraint],
-    names: &dyn Fn(usize) -> String,
+    info: &dyn Fn(Term) -> TermInfo,
 ) -> Diagnostic {
-    let facts = known
+    let known = known
         .iter()
         .filter(|c| {
             !c.coefficients
                 .iter()
                 .all(|(term, coefficient)| matches!(term, Term::Len(..)) && *coefficient == -1)
         })
-        .map(|constraint| describe_constraint(constraint, names))
+        .cloned()
         .collect::<Vec<_>>();
+    let facts = describe_facts(&known, info);
     Diagnostic::new(
         span,
         format!(

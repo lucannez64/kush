@@ -319,9 +319,11 @@ fn postconditions_of_calls_in_short_circuit_operands() {
     );
     // `never` returns only when x <= 0. After `x >= 5 && never(x)` the caller
     // knows `x < 5 || x <= 0`, not `x <= 0`: the call may not have run.
+    // (It diverges with a loop: a recursive call that uses the postcondition
+    // must be shown to end, see tests/termination.rs.)
     rejects(
         "fn never(x: i64) -> Bool ! {} ensures { x <= 0 } {
-             if x <= 0 { true } else { never(x) }
+             if x <= 0 { true } else { loop {} }
          }
          fn at_most_zero(v: i64, erased p: { v <= 0 }) -> i64 ! {} { v }
          fn f(x: i64) -> i64 ! {} { let b = x >= 5 && never(x); at_most_zero(x, _) }
@@ -330,7 +332,7 @@ fn postconditions_of_calls_in_short_circuit_operands() {
     );
     agrees(
         "fn never(x: i64) -> Bool ! {} ensures { x <= 0 } {
-             if x <= 0 { true } else { never(x) }
+             if x <= 0 { true } else { loop {} }
          }
          fn below_five(v: i64, erased p: { v <= 4 }) -> i64 ! {} { v }
          fn f(x: i64) -> i64 ! {} { let b = x >= 5 && never(x); below_five(x, _) }

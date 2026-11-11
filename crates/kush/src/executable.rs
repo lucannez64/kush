@@ -2577,10 +2577,13 @@ fn collect_body_returns<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
                 collect_body_returns(&arm.body, out);
             }
         }
-        ast::ExprKind::Record { ty, fields } => {
+        ast::ExprKind::Record { ty, fields, base } => {
             collect_body_returns(ty, out);
             for (_, field) in fields {
                 collect_body_returns(field, out);
+            }
+            if let Some(base) = base {
+                collect_body_returns(base, out);
             }
         }
         ast::ExprKind::While { condition, body } => {
@@ -4819,6 +4822,9 @@ struct Functions<'a> {
     /// function index and the source/target arrow types.
     adapter_cache: BTreeMap<(Option<usize>, Type, Type), usize>,
     certificates: Vec<crate::facts::Certificate>,
+    /// TERMINATION: for each declared function, the functions with
+    /// postconditions that its body mentions. Built on first use.
+    assumes: Option<BTreeMap<BindingId, BTreeSet<BindingId>>>,
     /// Checked foreign imports, keyed by the function-instance index used by
     /// `Target::Foreign`. Only direct calls reach these entries.
     foreign_functions: BTreeMap<usize, ForeignFunction>,
@@ -5094,6 +5100,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         pending: Vec::new(),
         adapter_cache: BTreeMap::new(),
         certificates: Vec::new(),
+        assumes: None,
         foreign_functions: BTreeMap::new(),
         fusions: 0,
         allocator_contexts: Vec::new(),
@@ -5516,6 +5523,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             index_relations: BTreeSet::new(),
             pending_lengths: BTreeMap::new(),
             ensures_context: None,
+            entry_params: Vec::new(),
+            call_info: BTreeMap::new(),
             ensures_tail: false,
             branch_tail: false,
         };
@@ -5542,6 +5551,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     checker.admit_scalar_index(id, *ty, p.span)?;
                 }
             }
+            checker.entry_params = ensures_params.clone();
             if !f.ensures.is_empty() {
                 checker.ensures_context = Some(EnsuresContext {
                     clauses: f.ensures.clone(),
@@ -11610,7 +11620,17 @@ fn ensures_text(clause: &ast::Ensures) -> String {
                 operand,
                 ..
             } => format!("!({})", text(operand)),
+            ast::ExprKind::Unary {
+                op: Kind::Amp,
+                operand,
+                ..
+            } => format!("&{}", text(operand)),
             ast::ExprKind::Unary { operand, .. } => format!("-{}", text(operand)),
+            ast::ExprKind::Call { callee, arguments } => format!(
+                "{}({})",
+                text(callee),
+                arguments.iter().map(text).collect::<Vec<_>>().join(", ")
+            ),
             ast::ExprKind::Binary { op, left, right } => {
                 let op = match op {
                     Kind::Lt => "<",
@@ -11655,11 +11675,25 @@ fn ensures_text(clause: &ast::Ensures) -> String {
         ast::EnsuresGuard::Always => String::new(),
         ast::EnsuresGuard::Result(true) => "result => ".into(),
         ast::EnsuresGuard::Result(false) => "!result => ".into(),
-        ast::EnsuresGuard::Variant { name, binders, .. } if binders.is_empty() => {
-            format!("{name} => ")
-        }
-        ast::EnsuresGuard::Variant { name, binders, .. } => format!(
-            "{name}({}) => ",
+        ast::EnsuresGuard::Variant {
+            subject,
+            name,
+            binders,
+            ..
+        } if binders.is_empty() => match subject {
+            Some(subject) => format!("{} is {name} => ", text(subject)),
+            None => format!("{name} => "),
+        },
+        ast::EnsuresGuard::Variant {
+            subject,
+            name,
+            binders,
+            ..
+        } => format!(
+            "{}{name}({}) => ",
+            subject
+                .as_ref()
+                .map_or(String::new(), |subject| format!("{} is ", text(subject))),
             binders
                 .iter()
                 .map(|(binder, _)| binder.as_str())
@@ -12479,6 +12513,12 @@ struct Checker<'a, 't> {
     pending_lengths: BTreeMap<BindingId, BindingId>,
     /// ENSURES: the current function's postconditions, if any.
     ensures_context: Option<EnsuresContext>,
+    /// TERMINATION: the function's runtime parameters (binder and slot), in
+    /// order. Version 0 of each slot is the value on entry.
+    entry_params: Vec<(BindingId, usize)>,
+    /// ENSURES: callee name and result type of each registered call result,
+    /// for proof-failure messages.
+    call_info: BTreeMap<u32, (String, Type)>,
     /// The expression being checked is a value the function returns.
     ensures_tail: bool,
     /// The `if`/`match`/block being checked is in return position, so its
@@ -17503,8 +17543,7 @@ impl Checker<'_, '_> {
         let Ok(length) = self.runtime_length_term(binder, value.span) else {
             return;
         };
-        let view =
-            crate::facts::Linear::variable(crate::facts::Term::Len(slot, self.facts.version(slot)));
+        let view = self.facts.len_of_slot(slot);
         let mut facts = Vec::new();
         crate::facts::compare(view, &Kind::EqEq, length, &mut facts);
         self.facts.add(facts);
@@ -19786,7 +19825,7 @@ impl Checker<'_, '_> {
         evidence: &ast::Expr,
         span: Span,
     ) -> Result<()> {
-        use crate::facts::{Linear, ParamLinear, ParamTerm, Term};
+        use crate::facts::{Linear, ParamLinear, ParamTerm};
         match &evidence.kind {
             ast::ExprKind::Name(name) if name == "_" => {}
             ast::ExprKind::Name(_)
@@ -19840,7 +19879,7 @@ impl Checker<'_, '_> {
                                         "pass a named buffer here so its length can appear in a proof obligation",
                                     )
                                 })?;
-                            Linear::variable(Term::Len(slot, self.facts.version(slot)))
+                            self.facts.len_of_slot(slot)
                         }
                     };
                         expression = expression.add_scaled(&part, *coefficient).ok_or_else(|| {
@@ -19860,14 +19899,11 @@ impl Checker<'_, '_> {
         }
         let Some(certificates) = self.facts.certify(&goal, span, &proposition.text) else {
             let known = self.facts.snapshot_formula(&goal);
-            let names = (0..self.locals.len())
-                .map(|s| self.local_name(s))
-                .collect::<Vec<_>>();
             return Err(crate::facts::failure(
                 span,
                 &proposition.text,
                 &known,
-                &|slot| names[slot].clone(),
+                &|term| self.term_info(term),
             ));
         };
         self.functions.certificates.extend(certificates);
@@ -21842,8 +21878,14 @@ impl Checker<'_, '_> {
                 {
                     return c.field(value, name, span, expected);
                 }
-                ast::ExprKind::Record { ty, fields } => {
-                    return c.record(ty, fields, span, expected);
+                ast::ExprKind::Record { ty, fields, base } => {
+                    return match base {
+                        None => c.record(ty, fields, span, expected),
+                        Some(base) => {
+                            let fields = c.record_update_fields(ty, fields, base, span)?;
+                            c.record(ty, &fields, span, expected)
+                        }
+                    };
                 }
                 ast::ExprKind::StructuralLiteral(fields) => {
                     return c.structural_literal(fields, expected, span);
@@ -30781,6 +30823,11 @@ impl Checker<'_, '_> {
             resource: None,
         };
         if !f.ensures.is_empty()
+            && let ExprKind::Call(_, arguments) = &value.kind
+        {
+            self.check_recursive_call(id, f, arguments, span)?;
+        }
+        if !f.ensures.is_empty()
             && ty != Type::Never
             && let ExprKind::Call(_, arguments) = &value.kind
         {
@@ -30842,6 +30889,81 @@ impl Checker<'_, '_> {
                 }
             })
             .collect()
+    }
+    /// Struct update `Path { field: value, ..base }` as a full literal: every
+    /// declared field that is not written reads `base.field`. The result is
+    /// in declaration order (and so are its field evaluations), which keeps
+    /// it visible to the postcondition facts. `base` is a local or a field
+    /// path (the parser rejects anything else), so reading it several times
+    /// has no effect. A copied field that owns heap data is rejected by the
+    /// ordinary field-move rule; written fields may own.
+    fn record_update_fields(
+        &mut self,
+        path: &ast::Expr,
+        fields: &[(String, ast::Expr)],
+        base: &ast::Expr,
+        span: Span,
+    ) -> Result<Vec<(String, ast::Expr)>> {
+        let name = match &path.kind {
+            ast::ExprKind::Specialize { callee, .. } => callee.as_ref(),
+            _ => path,
+        };
+        let id = self
+            .resolution
+            .reference(name.span)
+            .filter(|id| self.types.is_record(*id))
+            .ok_or_else(|| Diagnostic::new(name.span, "expected a record (struct) type name"))?;
+        let declared = self
+            .types
+            .record_fields(id)
+            .1
+            .iter()
+            .map(|field| field.name.clone())
+            .collect::<Vec<_>>();
+        for (name, value) in fields {
+            if !declared.contains(name) {
+                return Err(Diagnostic::new(
+                    value.span,
+                    format!("record has no field '{name}'"),
+                ));
+            }
+        }
+        if declared
+            .iter()
+            .all(|name| fields.iter().any(|(written, _)| written == name))
+        {
+            return Err(Diagnostic::new(
+                base.span,
+                "this struct update writes every field, so '..' has nothing to copy; remove it",
+            ));
+        }
+        // The copied `base.field` reads are new nodes. Their span runs from
+        // the literal's start to the end of the base: no parsed node has it,
+        // so the name resolution recorded for the base's own span is not
+        // mistaken for a resolution of the field read.
+        let read_span = Span::new(span.start, base.span.end);
+        let from_base = |name: &String| {
+            (
+                name.clone(),
+                ast::Expr::new(
+                    ast::ExprKind::Field {
+                        value: Box::new(base.clone()),
+                        name: name.clone(),
+                    },
+                    read_span,
+                ),
+            )
+        };
+        Ok(declared
+            .iter()
+            .map(|name| {
+                fields
+                    .iter()
+                    .find(|(written, _)| written == name)
+                    .cloned()
+                    .unwrap_or_else(|| from_base(name))
+            })
+            .collect())
     }
     fn record(
         &mut self,
@@ -32773,6 +32895,142 @@ impl Checker<'_, '_> {
         };
         Some((sym, field_ty))
     }
+    /// How a prover term reads in source: `d.stage`, `step(..).driver.restored`,
+    /// `len(result)`. Used only to print proof failures.
+    fn term_info(&self, term: crate::facts::Term) -> crate::facts::TermInfo {
+        use crate::facts::{Root, Step, Term, TermInfo, TermKind};
+        let scalar = |ty: Type| match ty {
+            Type::Bool => TermKind::Bool,
+            _ => TermKind::Int(crate::facts::scalar_range(ty)),
+        };
+        let length = TermKind::Int(Some((0, i128::from(i64::MAX))));
+        // A local at an earlier version (before a reassignment) is `old(x)`.
+        let local = |slot: usize, version: u32| {
+            let name = self.local_name(slot);
+            if version < self.facts.version(slot) {
+                format!("old({name})")
+            } else {
+                name
+            }
+        };
+        match term {
+            Term::Zero => TermInfo {
+                name: "0".to_owned(),
+                kind: TermKind::Int(None),
+            },
+            Term::Var(slot, version) => TermInfo {
+                name: local(slot, version),
+                kind: scalar(self.locals[slot].ty),
+            },
+            Term::Len(slot, version) => TermInfo {
+                name: format!("len({})", local(slot, version)),
+                kind: length,
+            },
+            Term::Path(id) => {
+                let (root, steps) = crate::facts::path_of(id);
+                let (mut name, mut ty) = match root {
+                    Root::Var(slot, version) => (local(slot, version), Some(self.locals[slot].ty)),
+                    Root::Value(value) => match self.call_info.get(&value) {
+                        Some((callee, ty)) => (format!("{callee}(..)"), Some(*ty)),
+                        None => (format!("call#{value}"), None),
+                    },
+                };
+                for step in steps {
+                    let layout = ty.and_then(|ty| ty.layout());
+                    match step {
+                        Step::Field(offset) => {
+                            let field =
+                                layout
+                                    .filter(|id| self.types.enums[*id].record)
+                                    .and_then(|id| {
+                                        let record = &self.types.enums[id];
+                                        let mut at = record.tag_words();
+                                        record.variants[0]
+                                            .fields
+                                            .iter()
+                                            .zip(&record.variants[0].names)
+                                            .find_map(|(field, field_name)| {
+                                                let here = at;
+                                                at += self.types.width(*field);
+                                                (here == offset as usize)
+                                                    .then(|| (field_name.clone(), *field))
+                                            })
+                                    });
+                            match field {
+                                Some((field_name, field_ty)) => {
+                                    name.push('.');
+                                    name.push_str(&field_name);
+                                    ty = Some(field_ty);
+                                }
+                                None => {
+                                    name.push_str(&format!(".field@{offset}"));
+                                    ty = None;
+                                }
+                            }
+                        }
+                        Step::Tag => {
+                            let variants =
+                                layout.filter(|id| !self.types.enums[*id].record).map(|id| {
+                                    self.types.enums[id]
+                                        .variants
+                                        .iter()
+                                        .map(|variant| variant.name.clone())
+                                        .collect::<Vec<_>>()
+                                });
+                            return match variants {
+                                Some(variants) => TermInfo {
+                                    name,
+                                    kind: TermKind::Tag(variants),
+                                },
+                                None => TermInfo {
+                                    name: format!("{name}.tag"),
+                                    kind: TermKind::Int(None),
+                                },
+                            };
+                        }
+                        Step::Payload(variant, offset) => {
+                            let field =
+                                layout
+                                    .filter(|id| !self.types.enums[*id].record)
+                                    .and_then(|id| {
+                                        let layout = &self.types.enums[id];
+                                        let variant = layout.variants.get(variant as usize)?;
+                                        let mut at = layout.tag_words();
+                                        variant.fields.iter().enumerate().find_map(
+                                            |(index, field)| {
+                                                let here = at;
+                                                at += self.types.width(*field);
+                                                (here == offset as usize)
+                                                    .then(|| (variant.name.clone(), index, *field))
+                                            },
+                                        )
+                                    });
+                            match field {
+                                Some((variant_name, index, field_ty)) => {
+                                    name.push_str(&format!(".{variant_name}.{index}"));
+                                    ty = Some(field_ty);
+                                }
+                                None => {
+                                    name.push_str(&format!(".payload{variant}@{offset}"));
+                                    ty = None;
+                                }
+                            }
+                        }
+                        Step::Len => {
+                            return TermInfo {
+                                name: format!("len({name})"),
+                                kind: length,
+                            };
+                        }
+                    }
+                }
+                TermInfo {
+                    name,
+                    kind: ty.map_or(TermKind::Int(None), scalar),
+                }
+            }
+        }
+    }
     fn variant_index(&self, ty: Type, name: &str) -> Option<usize> {
         let layout = ty.layout().filter(|id| !self.types.enums[*id].record)?;
         self.types.enums[layout]
@@ -32889,7 +33147,50 @@ impl Checker<'_, '_> {
                 let (sym, ty) = self.ensures_value(e, env)?;
                 self.sym_linear(&sym, ty)
             }
+            // `Vec.len(v)`, `Bytes.len(b)`, `Slice.len(s)`, `String.len(t)`,
+            // `Str.len(t)` of a parameter, `result`, a guard binder or a
+            // field path; `&v` is accepted as in code.
+            ast::ExprKind::Call { callee, arguments } if arguments.len() == 1 => {
+                let builtin = self.resolution.reference(callee.span).is_some_and(|id| {
+                    let binding = &self.resolution.bindings[id];
+                    binding.kind == BindingKind::Builtin
+                        && matches!(
+                            binding.name.as_str(),
+                            "Bytes.len" | "Vec.len" | "Slice.len" | "String.len" | "Str.len"
+                        )
+                });
+                if !builtin {
+                    return None;
+                }
+                let place = match &arguments[0].kind {
+                    ast::ExprKind::Unary {
+                        op: Kind::Amp,
+                        operand,
+                        ..
+                    } => operand.as_ref(),
+                    _ => &arguments[0],
+                };
+                let (sym, ty) = self.ensures_value(place, env)?;
+                self.sym_length(&sym, ty)
+            }
             _ => None,
+        }
+    }
+    /// The length of a symbolic Bytes/Vec/String/slice value (or of the
+    /// owner behind a reference).
+    fn sym_length(&self, sym: &Sym, ty: Type) -> Option<crate::facts::Linear> {
+        let owner = match ty {
+            Type::Ref(pointee) | Type::RefMut(pointee) => self.types.pointees[pointee],
+            ty => ty,
+        };
+        if !crate::facts::has_length(owner) {
+            return None;
+        }
+        match sym {
+            Sym::Path(root, steps) => Some(self.facts.len_of_root(*root, steps)),
+            Sym::Value(expr) if expr.ty.is_ref() => self.facts.borrowed_length(expr),
+            Sym::Value(expr) => self.facts.length(expr),
+            Sym::Unknown => None,
         }
     }
     /// A postcondition proposition as a formula. `lenient` (a hypothesis)
@@ -33012,7 +33313,19 @@ impl Checker<'_, '_> {
                     compare_dnf(term, &Kind::EqEq, Linear::constant(i128::from(!truth)))
                 }),
             },
-            ast::EnsuresGuard::Variant { name, binders, .. } => {
+            ast::EnsuresGuard::Variant {
+                subject,
+                name,
+                binders,
+                ..
+            } => {
+                // The enum the guard tests: the result, or a path from it
+                // or from a parameter.
+                let subject = match subject {
+                    Some(path) => self.ensures_value(path, &env)?,
+                    None => result.clone(),
+                };
+                let result = &subject;
                 let index = self.variant_index(result.1, name)?;
                 for (position, (_, span)) in binders.iter().enumerate() {
                     let binding = self.resolution.binder(*span)?;
@@ -33079,20 +33392,223 @@ impl Checker<'_, '_> {
             };
             let Some(certificates) = self.facts.certify(&goal, value.span, "postcondition") else {
                 let known = self.facts.snapshot_formula(&goal);
-                let names = (0..self.locals.len())
-                    .map(|s| self.local_name(s))
-                    .collect::<Vec<_>>();
                 return Err(crate::facts::failure(
                     value.span,
                     &format!("ensures {}", ensures_text(clause)),
                     &known,
-                    &|slot| names[slot].clone(),
+                    &|term| self.term_info(term),
                 )
                 .with_note(clause.span, "postcondition declared here"));
             };
             self.functions.certificates.extend(certificates);
         }
         Ok(())
+    }
+    // ── TERMINATION: recursion that uses a postcondition is well-founded ─────
+
+    /// Whether a call from the function being checked to `callee` (which has
+    /// postconditions) closes a cycle of functions that use each other's
+    /// postconditions. An edge `a -> b` exists when `a`'s body mentions `b`
+    /// and `b` has postconditions; mentions are a superset of direct calls.
+    fn closes_assumption_cycle(&mut self, callee: BindingId) -> bool {
+        if callee == self.binding {
+            return true;
+        }
+        if self.functions.assumes.is_none() {
+            let with_ensures = self
+                .functions
+                .declared
+                .iter()
+                .filter(|(_, declared)| !declared.ast.ensures.is_empty())
+                .map(|(id, _)| *id)
+                .collect::<BTreeSet<_>>();
+            let mut graph = BTreeMap::new();
+            for (id, declared) in &self.functions.declared {
+                let mut mentioned = BTreeSet::new();
+                if let Some(body) = &declared.ast.body {
+                    collect_lambda_refs(self.resolution, body, &mut mentioned);
+                }
+                graph.insert(
+                    *id,
+                    mentioned
+                        .intersection(&with_ensures)
+                        .copied()
+                        .collect::<BTreeSet<_>>(),
+                );
+            }
+            self.functions.assumes = Some(graph);
+        }
+        let graph = self.functions.assumes.as_ref().expect("built above");
+        // Does `callee` reach the current function?
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![callee];
+        while let Some(next) = pending.pop() {
+            if !seen.insert(next) {
+                continue;
+            }
+            for target in graph.get(&next).into_iter().flatten() {
+                if *target == self.binding {
+                    return true;
+                }
+                pending.push(*target);
+            }
+        }
+        false
+    }
+    /// A recursive call that receives postcondition facts must be shown to
+    /// make progress, so that a postcondition proved with the help of a
+    /// recursive call is proved by well-founded induction. Without this a
+    /// function such as `fn f(x: i64) -> i64 ensures { result > x && result < x }
+    /// { f(x) }` is accepted: it never returns, so its clause says nothing.
+    ///
+    /// With `decreases { m }` on caller and callee, the call must prove
+    /// `0 <= m(arguments) < m(parameters on entry)`. Without it, a direct
+    /// self-call is accepted when some argument is a strict part of the same
+    /// parameter's entry value (a payload or field reached by `match`,
+    /// possibly through `Box.take`), or is an integer proved at least 0 and
+    /// smaller than that parameter's entry value. Values are finite trees
+    /// (boxes are uniquely owned and record layouts are finite), so a strict
+    /// part is strictly smaller.
+    ///
+    /// This covers recursion only. Loops, panics and calls of functions
+    /// without postconditions are still partial correctness.
+    fn check_recursive_call(
+        &mut self,
+        callee: BindingId,
+        f: &ast::Function,
+        arguments: &[Expr],
+        span: Span,
+    ) -> Result<()> {
+        if !self.closes_assumption_cycle(callee) {
+            return Ok(());
+        }
+        let current = self.functions.declared[&self.binding].ast;
+        let entry = self
+            .entry_params
+            .iter()
+            .map(|(id, slot)| {
+                (
+                    *id,
+                    (
+                        Sym::Path(crate::facts::Root::Var(*slot, 0), Vec::new()),
+                        self.locals[*slot].ty,
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let zero = || crate::facts::Linear::constant(0);
+        match (&current.decreases, &f.decreases) {
+            (Some(ours), Some(theirs)) => {
+                let actual = f
+                    .parameters
+                    .iter()
+                    .filter(|p| !p.erased)
+                    .zip(arguments)
+                    .filter_map(|(p, argument)| {
+                        Some((
+                            self.resolution.binder(p.span)?,
+                            (self.sym_of(argument), argument.ty),
+                        ))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let before = self.ensures_linear(ours, &entry).ok_or_else(|| {
+                    Diagnostic::new(
+                        ours.span,
+                        "this measure cannot be stated: 'decreases' takes a linear integer expression over parameters and their field paths",
+                    )
+                })?;
+                let after = self.ensures_linear(theirs, &actual).ok_or_else(|| {
+                    Diagnostic::new(
+                        span,
+                        format!(
+                            "the measure of '{}' cannot be stated for these arguments; pass locals, field paths or linear expressions",
+                            f.name
+                        ),
+                    )
+                    .with_note(theirs.span, "measure declared here")
+                })?;
+                let text = if callee == self.binding {
+                    "the measure is at least 0 and smaller than on entry".to_owned()
+                } else {
+                    format!(
+                        "the measure of '{}' is at least 0 and smaller than this function's on entry",
+                        f.name
+                    )
+                };
+                if self.try_prove(
+                    vec![
+                        (after.clone(), Kind::Ge, zero()),
+                        (after.clone(), Kind::Lt, before.clone()),
+                    ],
+                    &text,
+                    span,
+                ) {
+                    return Ok(());
+                }
+                let mut goals = Vec::new();
+                crate::facts::compare(after.clone(), &Kind::Ge, zero(), &mut goals);
+                crate::facts::compare(after, &Kind::Lt, before, &mut goals);
+                let known = self.facts.snapshot_formula(&vec![goals]);
+                Err(
+                    crate::facts::failure(span, &format!("decreases: {text}"), &known, &|term| {
+                        self.term_info(term)
+                    })
+                    .with_note(theirs.span, "measure declared here"),
+                )
+            }
+            (None, None) if callee == self.binding => {
+                for (index, (_, slot)) in self.entry_params.clone().into_iter().enumerate() {
+                    let Some(argument) = arguments.get(index) else {
+                        continue;
+                    };
+                    // A strict part of the parameter's entry value.
+                    let mut part = argument;
+                    while let ExprKind::BoxTake(inner)
+                    | ExprKind::AllocBoxTake(inner)
+                    | ExprKind::ArenaBoxTake(inner) = &part.kind
+                    {
+                        part = inner;
+                    }
+                    if let Some((crate::facts::Root::Var(root, 0), steps)) =
+                        self.facts.root_of(part)
+                        && root == slot
+                        && !steps.is_empty()
+                    {
+                        return Ok(());
+                    }
+                    // An integer that is at least 0 and smaller than on entry.
+                    let ty = self.locals[slot].ty;
+                    if ty != Type::Bool
+                        && let Some(range) = crate::facts::scalar_range(ty)
+                        && let Some(value) = self.facts.linear(argument)
+                    {
+                        let before =
+                            self.path_linear(crate::facts::Root::Var(slot, 0), &[], range, ty);
+                        if self.try_prove(
+                            vec![(value.clone(), Kind::Ge, zero()), (value, Kind::Lt, before)],
+                            "the argument is at least 0 and smaller than the parameter on entry",
+                            span,
+                        ) {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "cannot show that this recursion ends: '{name}' has postconditions and this call uses them, so each recursive call must make progress. No argument is a part of the same parameter (a payload from a 'match' on it), and no integer argument is proved at least 0 and smaller than its parameter. Add 'decreases {{ measure }}' after the ensures clauses, where the measure is a linear integer expression that every recursive call makes smaller and keeps at least 0",
+                        name = f.name
+                    ),
+                ))
+            }
+            _ => Err(Diagnostic::new(
+                span,
+                format!(
+                    "'{}' and '{}' use each other's postconditions through this call, so the recursion must be shown to end: add 'decreases {{ measure }}' to every function of the cycle",
+                    current.name, f.name
+                ),
+            )),
+        }
     }
     /// After a call to a function with postconditions, its clauses hold of
     /// this call's result (a fresh identity) and the actual arguments.
@@ -33104,6 +33620,17 @@ impl Checker<'_, '_> {
         result: Type,
     ) {
         let id = self.facts.register_call(span);
+        let ordinal = self
+            .call_info
+            .values()
+            .filter(|(name, _)| name.split('#').next() == Some(f.name.as_str()))
+            .count();
+        let shown = if ordinal == 0 {
+            f.name.clone()
+        } else {
+            format!("{}#{}", f.name, ordinal + 1)
+        };
+        self.call_info.insert(id, (shown, result));
         let params = f
             .parameters
             .iter()
@@ -36395,9 +36922,12 @@ pub(crate) fn ast_children<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::E
         | E::Break(None) => {}
         E::Tuple(values) | E::Array(values) => values.iter().for_each(f),
         E::StructuralLiteral(fields) => fields.iter().for_each(|(_, value)| f(value)),
-        E::Record { ty, fields } => {
+        E::Record { ty, fields, base } => {
             f(ty);
             fields.iter().for_each(|(_, value)| f(value));
+            if let Some(base) = base {
+                f(base);
+            }
         }
         E::Block(inner) | E::Loop(inner) => block(inner, f),
         E::Unary { operand, .. }
@@ -36775,10 +37305,13 @@ fn collect_expr_refs(resolution: &Resolution, expr: &ast::Expr, out: &mut BTreeS
                 collect_expr_refs(resolution, &arm.body, out);
             }
         }
-        ast::ExprKind::Record { ty, fields } => {
+        ast::ExprKind::Record { ty, fields, base } => {
             collect_expr_refs(resolution, ty, out);
             for (_, value) in fields {
                 collect_expr_refs(resolution, value, out);
+            }
+            if let Some(base) = base {
+                collect_expr_refs(resolution, base, out);
             }
         }
         ast::ExprKind::While { condition, body } => {
