@@ -4726,7 +4726,7 @@
         {
           "time": "2026-11-11 23:29:09",
           "who": "claude",
-          "text": "Second independent review of the chunked lowering: no defect in differential tests (chunk boundaries, certificate thresholds, replay with stores, counters, narrow kinds, 630 fuzzed loops x ~15,000 inputs x 6 builds) or by reading. Follow-ups done: a proved (unchecked) counter step now counts as a step, so plain  loops are deferred; loops whose indices do not follow the counter are not deferred (they stay scalar and were up to 48% slower); doc overclaims corrected. The reviewer's fuzzer was re-run on the step change with no difference."
+          "text": "Second independent review of the chunked lowering: no defect in differential tests (chunk boundaries, certificate thresholds, replay with stores, counters, narrow kinds, 630 fuzzed loops x ~15,000 inputs x 6 builds) or by reading. Follow-ups done: a proved (unchecked) counter step now counts as a step, so plain while-i-less-than-n loops are deferred; loops whose indices do not follow the counter are not deferred (they stay scalar and were up to 48% slower); doc overclaims corrected. The reviewer's fuzzer was re-run on the step change with no difference."
         }
       ]
     }
