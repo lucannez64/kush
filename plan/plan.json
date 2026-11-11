@@ -4409,10 +4409,16 @@
       "deps": [
         "FIELD-PRIVACY"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Negative theorems in the VELA port list every field; support ..base, with facts for each field (and for let of a struct literal).",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-11 02:29:00",
+          "who": "claude",
+          "text": "Implemented on branch claude/proof-usability: Path { f: v, ..base } with facts for each copied field (declaration-order construction). Not closed: awaits review and merge."
+        }
+      ]
     },
     {
       "id": "KUSH-RUST-EXPORT",
@@ -4570,6 +4576,82 @@
           "time": "2026-11-06 16:22:34",
           "who": "agent",
           "text": "done b2538f1"
+        }
+      ]
+    },
+    {
+      "id": "ENSURES-TERMINATION",
+      "title": "Well-founded recursion for functions with postconditions",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "ENSURES"
+      ],
+      "status": "in_progress",
+      "desc": "A recursive call that uses a postcondition must make progress: structural (a matched part of the same parameter), a falling non-negative integer argument, or an explicit 'decreases { measure }' (required on every function of a mutual cycle). Closes 'fn f(x) ensures { result > x && result < x } { f(x) }'. Loops and callees without ensures stay partial correctness. New syntax (decreases) needs user approval; soundness review before closing.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 02:29:00",
+          "who": "claude",
+          "text": "Implemented on branch claude/proof-usability; tests in crates/kush/tests/proof_usability.rs"
+        }
+      ]
+    },
+    {
+      "id": "ENSURES-PATH-GUARD",
+      "title": "Ensures guards on a path (result.effect is Insert(permit) => ..)",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "ENSURES"
+      ],
+      "status": "in_progress",
+      "desc": "A guard may test an enum reached from result or a parameter and name its payload, which a plain proposition cannot. New syntax, needs user approval.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 02:29:00",
+          "who": "claude",
+          "text": "Implemented on branch claude/proof-usability"
+        }
+      ]
+    },
+    {
+      "id": "ENSURES-LENGTHS",
+      "title": "Length terms in postconditions",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "ENSURES"
+      ],
+      "status": "in_progress",
+      "desc": "Vec.len/Bytes.len/Slice.len/String.len/Str.len of parameters, result, binders and field paths as linear terms; length facts for moves, call results, record fields, push/new/clear/reserve and bytes literals. No content equality. Soundness review before closing.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 02:29:00",
+          "who": "claude",
+          "text": "Implemented on branch claude/proof-usability"
+        }
+      ]
+    },
+    {
+      "id": "PROOF-ERRORS",
+      "title": "Proof failures in source terms",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "ENSURES"
+      ],
+      "status": "in_progress",
+      "desc": "Known facts print field and variant names, callee names for call results, len(x), old(x) and merged equalities instead of field@N.tag and call#N.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 02:29:00",
+          "who": "claude",
+          "text": "Implemented on branch claude/proof-usability"
         }
       ]
     }

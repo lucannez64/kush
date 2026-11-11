@@ -1339,7 +1339,15 @@ const SEMANTIC_TOKEN_TYPES: &[&str] = &[
 ];
 
 const KEYWORD_WORDS: &[&str] = &[
-    "trait", "impl", "prop", "test", "effect", "row", "foreign", "ensures",
+    "trait",
+    "impl",
+    "prop",
+    "test",
+    "effect",
+    "row",
+    "foreign",
+    "ensures",
+    "decreases",
 ];
 
 /// Contextual words that are keywords only when a name follows (`x is Some`,

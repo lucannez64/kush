@@ -319,6 +319,10 @@ pub struct Function {
     /// `ensures` postconditions (ENSURES), checked at every return and
     /// available to callers as facts.
     pub ensures: Vec<Ensures>,
+    /// `decreases { measure }` (TERMINATION): a linear integer measure over
+    /// the parameters. Every recursive call that uses a postcondition must
+    /// make it strictly smaller while keeping it at least 0.
+    pub decreases: Option<Expr>,
 }
 /// One `ensures` clause: `ensures [guard =>] { proposition }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,8 +341,11 @@ pub enum EnsuresGuard {
     Always,
     /// `ensures result => { P }` (a `Bool` result) or `!result => { P }`.
     Result(bool),
-    /// `ensures Variant(x, ..) => { P }` (an enum result).
+    /// `ensures Variant(x, ..) => { P }` (an enum result), or
+    /// `ensures path is Variant(x, ..) => { P }` for an enum reached by a
+    /// field path from `result` or a parameter (`subject`).
     Variant {
+        subject: Option<Expr>,
         name: String,
         binders: Vec<(String, Span)>,
         span: Span,
@@ -568,9 +575,13 @@ pub enum ExprKind {
         arms: Vec<Arm>,
     },
     /// `Path { field: value, ... }`. `ty` is the path (or specialized path) expression.
+    ///
+    /// `base` is the struct update form `Path { field: value, ..base }`: the
+    /// fields not written are read from `base`, a local or a field path.
     Record {
         ty: Box<Expr>,
         fields: Vec<(String, Expr)>,
+        base: Option<Box<Expr>>,
     },
     While {
         condition: Box<Expr>,

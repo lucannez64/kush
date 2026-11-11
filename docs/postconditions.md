@@ -3,6 +3,14 @@
 Status: implemented (ENSURES, 2026-11-06; syntax approved by the user).
 Tests: `crates/kush/tests/postconditions.rs`.
 
+Proof usability additions (2026-11-11, tests in
+`crates/kush/tests/proof_usability.rs`): [well-founded recursion and
+`decreases`](#recursion-and-decreases), [guards on a path](#syntax),
+[length terms](#lengths), [struct update](#struct-update) and
+[readable proof failures](#proof-failures). The `decreases` clause and the
+`path is Variant(..) =>` guard are new syntax and still need the user's
+approval; the recursion check and the length facts need a soundness review.
+
 A function may promise facts about its result. The checker proves each
 promise at every value the function returns, and every caller receives it as
 a fact about that call's result.
@@ -40,12 +48,42 @@ Clauses follow the effect row, before the body:
 | `ensures result => { P }` | a `Bool` result that is `true` satisfies `P` |
 | `ensures !result => { P }` | a `false` result satisfies `P` |
 | `ensures V(a, b) => { P }` | an enum result of variant `V` satisfies `P`, with `a`, `b` naming its payload |
+| `ensures path is V(a, b) => { P }` | the enum at `path` (from `result` or a parameter, e.g. `result.effect`) of variant `V` satisfies `P`, with `a`, `b` naming its payload |
+| `decreases { m }` | after the clauses: the measure that justifies recursive calls (see below) |
 
 `P` is a proposition of the `{ .. }` fragment
 ([runtime indices](runtime-indices.md) 4a: linear integer comparisons,
 `Bool` atoms, `&&`, `||`, `!=`, `!( .. )`) whose terms may be parameters,
 `result`, guard binders, field paths such as `facts.has_pin` or `p.revision`,
 and `value is Variant`. `is` exists only inside `ensures`.
+
+A guard on a path names the payload of an enum inside a record result,
+which a plain proposition cannot:
+
+```kush
+fn step(d: Driver, e: Event) -> Transition ! {}
+    ensures result.effect is Insert(permit) => { permit.epoch == d.epoch }
+```
+
+### Lengths
+
+`Vec.len(x)`, `Bytes.len(x)`, `Slice.len(x)`, `String.len(x)` and
+`Str.len(x)` are linear terms when `x` is a parameter, `result`, a guard
+binder or a field path (`&x` is accepted as in code):
+
+```kush
+fn push1(v: Vec<i64>) -> Vec<i64> ! {alloc, panic}
+    ensures { Vec.len(result) == Vec.len(v) + 1 }
+{ Vec.push(v, 1) }
+```
+
+The prover knows the length of a value that is moved or bound (`let w = v`),
+returned by a call with a length postcondition, stored in a record field at
+construction, or built by `Vec.push`/`Bytes.push` (one more), `Vec.new`,
+`Vec.with_capacity`, `Vec.clear`, `Bytes.with_capacity`, `Bytes.clear`
+(zero), `Vec.reserve` (unchanged) or a bytes literal. A reassigned local has
+a new length; a local borrowed with `&mut` has none. Contents are not
+modelled: there is no equality of two `Bytes` or `String` values.
 
 ## Checking a function
 
@@ -67,7 +105,81 @@ Restrictions, each a diagnostic:
   postconditions.
 
 Postconditions are partial correctness: they hold *if* the function returns.
-A recursive call may use the function's own postcondition.
+A recursive call may use the function's own postcondition, provided the
+recursion is shown to end.
+
+## Recursion and `decreases`
+
+A postcondition proved with the help of a recursive call is an induction, and
+an induction needs a well-founded order. Without one this was accepted:
+
+```kush
+fn f(x: i64) -> i64 ! {} ensures { result > x && result < x } { f(x) }
+```
+
+`f` never returns, so the clause says nothing, but it reads as a theorem.
+Every call that receives postcondition facts and closes a cycle of functions
+using each other's postconditions must now make progress:
+
+- **A direct self-call without `decreases`** is accepted when one argument is
+  a strict part of the same parameter's value on entry (a payload or field
+  reached by `match`, possibly through `Box.take`), or is an integer proved
+  at least 0 and smaller than that parameter on entry. Values are finite
+  trees (boxes are uniquely owned, record layouts are finite), so a strict
+  part is strictly smaller.
+- **With `decreases { m }`**, where `m` is a linear integer expression over
+  the parameters, each such call must prove
+  `0 <= m(arguments) < m(parameters on entry)`. Mutual recursion needs a
+  `decreases` on every function of the cycle; the callee's measure of the
+  arguments is compared with the caller's measure on entry.
+
+```kush
+fn count(items: List) -> i64 ! {} ensures { result >= 0 } {
+    match items {
+        List.Nil => 0,
+        List.Cons(_, rest) => count(Box.take(rest)),   // a part of `items`
+    }
+}
+
+fn upto(i: i64, n: i64) -> i64 ! {} ensures { result >= 0 }
+    decreases { n - i }
+{
+    if i >= n { 0 } else { upto(i + 1, n) }
+}
+```
+
+The cycle is found on mentions, a superset of direct calls: an edge `a -> b`
+exists when the body of `a` names `b` and `b` has postconditions.
+
+What this does **not** cover: loops, panics, and calls of functions without
+postconditions. A function whose `while` never ends still satisfies its
+clauses vacuously; the check only makes proofs *by recursion* well-founded.
+A function that is meant to diverge on some inputs must do so with a loop,
+not with a recursive call that uses its postcondition.
+
+## Struct update
+
+`Path { field: value, ..base }` builds a record whose unwritten fields are
+read from `base`:
+
+```kush
+Driver { stage: Stage.Done, restored: true, ..d }
+```
+
+`base` is a local or a field path (bind anything else with `let` first), is
+written last, and must leave at least one field to copy. The result is built
+in declaration order, so it stays visible to the postcondition facts
+(`result.n == d.n` is known for a copied `n`). A copied field cannot own heap
+data (the ordinary rule against moving an owned field out of a record); a
+written field can.
+
+## Proof failures
+
+A failed proof lists the known facts in source terms: record fields and
+variants by name (`d.stage is Done`, `!t.driver.restored`), call results by
+callee (`step(..).effect is Complete`), lengths as `len(x)`, the value of a
+local before a reassignment as `old(x)`, and a pair of opposite inequalities
+as an equality. Facts that only restate a type's range are omitted.
 
 ## Using a postcondition
 
@@ -124,6 +236,12 @@ rejected and has a regression test (`review_regressions_for_postconditions`):
   so a wrong proof could never make the two backends disagree.
 
 ## Limits
+
+- Termination is checked for recursion only (see above).
+- Length facts stop at `&mut` borrows, `Vec.pop`, `Vec.set`, slices of a
+  vector (`&v[a..b]` has its own, unrelated length) and the length of a field
+  read through a borrow (`Vec.len(&q.items)`).
+- `Path { ..base }` with no written field is not parsed; it is a copy.
 
 - Method calls (`value.method()`) do not yet receive postcondition facts;
   only direct calls of named functions do.
