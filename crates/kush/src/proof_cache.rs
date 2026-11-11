@@ -28,7 +28,7 @@ use std::{
 pub(crate) type Outcome = Option<(i128, Vec<(u32, i128)>)>;
 
 /// Start over rather than load an ever-growing file.
-const MAX_FILE: u64 = 16 * 1024 * 1024;
+const MAX_FILE: u64 = 4 * 1024 * 1024;
 /// One file per compiler binary; see [`prune`].
 const MAX_FILES: usize = 32;
 
@@ -124,8 +124,11 @@ fn encode(key: u128, outcome: &Outcome) -> Vec<u8> {
     record
 }
 
-/// Read records until the first one that is truncated or damaged.
-fn decode(mut bytes: &[u8]) -> HashMap<u128, Outcome> {
+/// Read records until the first one that is truncated or damaged. Returns
+/// the entries (a later record for a key replaces an earlier one) and the
+/// length of the intact prefix.
+fn decode(all: &[u8]) -> (HashMap<u128, Outcome>, usize) {
+    let mut bytes = all;
     let mut entries = HashMap::new();
     while let Some((header, rest)) = bytes.split_at_checked(20) {
         let key = u128::from_le_bytes(header[..16].try_into().unwrap());
@@ -159,7 +162,7 @@ fn decode(mut bytes: &[u8]) -> HashMap<u128, Outcome> {
         entries.insert(key, outcome);
         bytes = rest;
     }
-    entries
+    (entries, all.len() - bytes.len())
 }
 
 /// Every rebuilt compiler starts a new file. Before adding one, keep only
@@ -192,13 +195,22 @@ fn store() -> &'static Mutex<Store> {
     STORE.get_or_init(|| {
         let mut entries = HashMap::new();
         let file = path().and_then(|path| {
-            let oversized = fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE);
-            if oversized {
-                let _ = fs::remove_file(&path);
-            } else if let Ok(bytes) = fs::read(&path) {
-                entries = decode(&bytes);
+            // Only ever a regular file of ours, never something planted.
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if !metadata.is_file() => return None,
+                Ok(metadata) if metadata.len() > MAX_FILE => {
+                    let _ = fs::remove_file(&path);
+                }
+                _ => {}
             }
-            if !path.exists() {
+            let mut intact = None;
+            if let Ok(bytes) = fs::read(&path) {
+                let (read, length) = decode(&bytes);
+                entries = read;
+                if length < bytes.len() {
+                    intact = Some(length as u64);
+                }
+            } else {
                 prune(&path);
             }
             let mut options = fs::OpenOptions::new();
@@ -208,7 +220,15 @@ fn store() -> &'static Mutex<Store> {
                 use std::os::unix::fs::OpenOptionsExt;
                 options.mode(0o600);
             }
-            options.open(path).ok()
+            let file = options.open(path).ok()?;
+            // Records after a damaged one would never be read again, so cut
+            // the file back to its intact prefix before appending.
+            if let Some(length) = intact {
+                let _ = file.set_len(length);
+            }
+            // `prune` keeps the most recently used files.
+            let _ = file.set_modified(std::time::SystemTime::now());
+            Some(file)
         });
         Mutex::new(Store { entries, file })
     })
@@ -225,7 +245,9 @@ pub(crate) fn put(key: u128, outcome: Outcome) {
         return;
     };
     let record = encode(key, &outcome);
-    if store.entries.insert(key, outcome).is_none()
+    // A changed outcome is appended too: it replaces a stored entry that
+    // failed verification, and the last record for a key wins on reading.
+    if store.entries.insert(key, outcome.clone()) != Some(outcome)
         && let Some(file) = &mut store.file
     {
         let _ = file.write_all(&record);
@@ -241,16 +263,23 @@ mod tests {
         let proof: Outcome = Some((6, vec![(0, 3), (7, i128::MAX)]));
         let mut bytes = encode(1, &None);
         bytes.extend(encode(u128::MAX, &proof));
-        let entries = decode(&bytes);
+        let (entries, length) = decode(&bytes);
+        assert_eq!(length, bytes.len());
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[&1], None);
         assert_eq!(entries[&u128::MAX], proof);
         // A flipped byte in the second record keeps only the first.
         let last = bytes.len() - 12;
         bytes[last] ^= 1;
-        assert_eq!(decode(&bytes).len(), 1);
-        // A truncated tail is ignored.
-        assert_eq!(decode(&bytes[..bytes.len() - 30]).len(), 1);
-        assert!(decode(&[1, 2, 3]).is_empty());
+        let first = encode(1, &None).len();
+        assert_eq!(decode(&bytes), (HashMap::from([(1, None)]), first));
+        // A truncated tail is ignored, and the intact prefix is reported so
+        // the file can be cut back to it.
+        assert_eq!(decode(&bytes[..bytes.len() - 30]).1, first);
+        assert_eq!(decode(&[1, 2, 3]), (HashMap::new(), 0));
+        // The last record for a key wins.
+        let mut replaced = encode(7, &None);
+        replaced.extend(encode(7, &proof));
+        assert_eq!(decode(&replaced).0[&7], proof);
     }
 }

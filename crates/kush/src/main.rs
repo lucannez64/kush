@@ -35,7 +35,7 @@ Editors:\n\
 Native optimization (build/run, files or projects):\n\
   --release           speed optimization + scalar callback inlining\n\
   --backend <cranelift|llvm>  code generator; llvm needs clang and builds slower, runs faster\n\
-  --no-deferred-overflow  (llvm) panic at the overflowing operation instead of at loop exit\n\
+  --no-deferred-overflow  (llvm) panic at the overflowing operation, not after its chunk of iterations\n\
   --target-cpu <baseline|native>  (llvm) tune for the build machine\n\
   --opt-level <none|speed>  select backend optimization independently\n\
   --inline-scalars / --no-inline-scalars  control the restricted inliner\n\n\
@@ -607,18 +607,12 @@ fn codegen_argument(
             options.inline_scalar_callbacks = true;
         }
         Some("--backend") => match value(args, index, command)?.to_str() {
-            Some("cranelift") => {
-                options.backend = kush::native::Backend::Cranelift;
-                options.deferred_overflow = false;
-            }
-            Some("llvm") => {
-                options.backend = kush::native::Backend::Llvm;
-                options.deferred_overflow = true;
-            }
+            Some("cranelift") => options.backend = kush::native::Backend::Cranelift,
+            Some("llvm") => options.backend = kush::native::Backend::Llvm,
             _ => return Err((2, "--backend requires 'cranelift' or 'llvm'".into())),
         },
-        Some("--deferred-overflow") => options.deferred_overflow = true,
-        Some("--no-deferred-overflow") => options.deferred_overflow = false,
+        Some("--deferred-overflow") => options.deferred_overflow = Some(true),
+        Some("--no-deferred-overflow") => options.deferred_overflow = Some(false),
         Some("--target-cpu") => match value(args, index, command)?.to_str() {
             Some("native") => options.native_cpu = true,
             Some("baseline") => options.native_cpu = false,

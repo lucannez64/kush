@@ -289,3 +289,146 @@ fn ownership_facts_are_stated_in_the_module() {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "25\n15\n");
     }
 }
+
+fn emitted(flags: &[&str]) -> String {
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let module = scratch.path().join("module.ll");
+    let output = kush()
+        .arg("build")
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../benchmarks/checked-loops/kush/main.kush"),
+        )
+        .arg("-o")
+        .arg(scratch.path().join("program"))
+        .args(flags)
+        .env("KUSH_EMIT_LLVM", &module)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{flags:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::read_to_string(module).unwrap()
+}
+
+#[test]
+fn the_overflow_flag_does_not_depend_on_where_the_backend_is_named() {
+    if !clang_available() {
+        return;
+    }
+    let deferred = emitted(&["--release", "--backend", "llvm"]);
+    let before = emitted(&["--release", "--no-deferred-overflow", "--backend", "llvm"]);
+    let after = emitted(&["--release", "--backend", "llvm", "--no-deferred-overflow"]);
+    assert_eq!(before, after);
+    assert_ne!(before, deferred);
+}
+
+/// A C callee may assume that an argument narrower than `int` arrives
+/// extended to 32 bits; the caller has to do it.
+#[test]
+fn narrow_foreign_arguments_are_extended_for_the_callee() {
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let root = scratch.path();
+    fs::write(
+        root.join("lib.c"),
+        "#include <stdint.h>\n\
+         int64_t ext_u8(uint8_t x) { return (int64_t)(int)x * 1000; }\n\
+         int64_t ext_i8(int8_t x) { return (int64_t)(int)x * 1000; }\n\
+         int64_t ext_u16(uint16_t x) { return (int64_t)(int)x + 1; }\n\
+         int64_t ext_i16(int16_t x) { return (int64_t)(int)x + 1; }\n\
+         static const int64_t table[4] = {10, 20, 30, 40};\n\
+         int64_t ext_idx(uint8_t x) { return x < 4 ? table[x] : -1; }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .current_dir(root)
+            .args(["-std=c11", "-O2", "-fPIC", "-c", "lib.c", "-o", "lib.o"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("ar")
+            .current_dir(root)
+            .args(["crs", "libnarrow.a", "lib.o"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(
+        root.join("main.kush"),
+        "enum Result<T, E> { Ok(T), Err(E) }
+foreign \"ext_u8\" fn ext_u8(x: u8) -> i64 ! {io};
+foreign \"ext_i8\" fn ext_i8(x: i8) -> i64 ! {io};
+foreign \"ext_u16\" fn ext_u16(x: u16) -> i64 ! {io};
+foreign \"ext_i16\" fn ext_i16(x: i16) -> i64 ! {io};
+foreign \"ext_idx\" fn ext_idx(x: u8) -> i64 ! {io};
+fn main() -> i64 ! {io, alloc, panic} {
+    let line = match IO.read_line(IO.stdin(), Bytes.with_capacity(64)) {
+        Ok(b) => b,
+        Err(_) => Bytes.with_capacity(1),
+    };
+    let mut n = 0;
+    let mut i = 0;
+    while i < Bytes.len(&line) {
+        let c = Int.convert::<i64>(Bytes.get(&line, i));
+        if c >= 48 && c <= 57 { n = n * 10 + c - 48; }
+        i = i + 1;
+    }
+    let a: u8 = Int.truncate(n);
+    let b: i8 = Int.truncate(n);
+    let c: u16 = Int.truncate(n);
+    let d: i16 = Int.truncate(n);
+    print_int(ext_u8(a));
+    print_int(ext_i8(b));
+    print_int(ext_u16(c));
+    print_int(ext_i16(d));
+    print_int(ext_idx(Int.truncate(n)));
+    0
+}
+",
+    )
+    .unwrap();
+    let mut configurations = vec![vec![], vec!["--release"]];
+    if clang_available() {
+        configurations.push(vec!["--backend", "llvm"]);
+        configurations.push(vec!["--release", "--backend", "llvm"]);
+    }
+    for flags in configurations {
+        use std::io::Write;
+        let built = kush()
+            .current_dir(root)
+            .args([
+                "build",
+                "main.kush",
+                "-o",
+                "program",
+                "--link",
+                "libnarrow.a",
+            ])
+            .args(&flags)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{flags:?}: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let mut child = Command::new(root.join("program"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // 0x103E8: every narrow view has set bits above it.
+        child.stdin.take().unwrap().write_all(b"66536\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "232000\n-24000\n1001\n1001\n-1\n",
+            "{flags:?}"
+        );
+    }
+}

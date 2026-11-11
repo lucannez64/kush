@@ -34,8 +34,10 @@ slice in place, and all narrow and unsigned kinds.
 
 **Certified.** Signed 64-bit `+`, `-`, `*` wrap with no test at all. The loop
 instead ORs a magnitude word (`v ^ (v << 1)`) for every *leaf* operand, that
-is, every operand that is not itself a certified operation, and counts
-reduction steps. After the loop each leaf has a `u` with `|leaf| <= 2^u`, and
+is, every operand that is not itself a certified operation. The number of
+reduction steps is not counted in the loop (that would be a vector reduction
+of its own): it is bounded afterwards by the iterations the chunk started
+times the reduction operations in the body. After the loop each leaf has a `u` with `|leaf| <= 2^u`, and
 bounds follow from the expression structure:
 
 ```text
@@ -66,27 +68,52 @@ All of these must hold, otherwise the loop keeps immediate checks
 (`KUSH_TRACE_DEFERRED=1` prints the reason per loop):
 
 - It is an innermost `while`, with no `continue`.
-- It is counted: `while i < bound { ...; i = i + c; ... }` (or `<=`, or
-  `>`/`>=` with `i = i - c`), `c` a positive constant, exactly one update of
-  `i` at the top level of the body, and a bound the loop does not change.
+- It is counted over an integer: `while i < bound { ...; i = i + c; ... }`
+  (or `<=`, or `>`/`>=` with `i = i - c`), `c` a positive constant, exactly
+  one update of `i` at the top level of the body, and a bound made of
+  constants, locals the loop does not assign, container lengths, and
+  arithmetic on those.
 - Its body contains only scalar locals, arithmetic, comparisons, `if`,
-  `break`, integer and float builtins, and `Slice`/`Vec`/`Bytes` length and
-  element reads, plus `Slice.set` through an exclusive view. No calls, I/O,
-  allocation, drops, borrows, or effects.
+  `break`, integer and float builtins, and bounds-checked `Slice`/`Vec`/`Bytes`
+  length and element reads, plus `Slice.set` through an exclusive view. No
+  calls, I/O, allocation, drops, borrows, effects, or proved unchecked reads
+  (`Slice.at`, `Vec.at`).
 
-Within such a loop, three rules keep the speculative execution well behaved
-after an overflow that has not been reported yet:
+## Why the speculative run is safe
 
-1. **Control never depends on a deferred value.** Every operation feeding a
-   loop condition, an `if` condition, or the left side of `&&`/`||` keeps its
-   immediate check, transitively through locals. Together with the counted
-   shape this fixes the trip count; a loop that relies on an overflow panic to
-   stop is not counted and is left alone.
-2. **Indices never depend on a deferred value**, by the same transitive rule,
-   so a statically proved unchecked access never sees a wrapped index.
-3. **Everything else that can panic still panics immediately.** Reaching such
+After an overflow that has not been reported yet, the loop is computing with
+wrong values. Four properties make that harmless.
+
+1. **Bounded delay.** The loop runs in chunks of 65,536 iterations. Each
+   chunk has its own sticky word, certificate and replay state, and is
+   checked when it ends. An overflow is therefore reported within one chunk,
+   however long the loop would have run and whatever the wrong values do to
+   its control flow. A checked loop that panics in its first iteration and a
+   deferred one differ by at most a fraction of a millisecond of work.
+   A chunk whose upward counter starts negative runs the rest of the loop
+   with ordinary checks instead; the branch that decides this is also what
+   lets LLVM see that the counter stays non-negative across chunks and drop
+   the lower bounds check, without which nothing would vectorize.
+2. **No access depends on a proof.** The checker's proofs may use "this
+   operation did not overflow" or "this value has its type's range" as
+   hypotheses. A deferred operation breaks exactly those, so a loop
+   containing a proved unchecked read is not deferred, and every memory
+   access in a deferred loop is bounds-checked at run time.
+3. **Values stay canonical.** A deferred narrow operation yields its wrapped
+   result, and arithmetic the checker proved in range is wrapped as well
+   inside a deferred loop. Every narrow value therefore keeps the
+   sign- or zero-extended form the rest of the lowering assumes (a narrow
+   signed division, for example, has no `MIN / -1` guard because canonical
+   operands cannot need one).
+4. **Everything else that can panic still panics immediately.** Reaching such
    a panic with wrong values means an overflow already happened, and the
    checked loop would have panicked too.
+
+In addition, every operation feeding a loop condition, an `if` condition, the
+left side of `&&`/`||` or an index keeps its immediate check, transitively
+through locals. This keeps the speculative run on the checked run's path in
+the common case, which keeps certificates from failing needlessly; safety
+does not depend on it.
 
 Certified mode additionally requires that a replay sees the memory the first
 attempt saw: the loop may store only through exclusive slices (`&mut [T]`) it
@@ -119,13 +146,24 @@ native configuration on programs chosen to hit each path: successful
 certificates, failed certificates that replay, prefix overflow with a fitting
 total, exact mode in place, narrow and unsigned kinds, mixed modes in one
 loop, values that steer control, effects inside the loop, and loops that are
-not counted. The full suite also passes with deferral enabled on LLVM.
+not counted. A panic must be the panic message followed by SIGABRT; any other
+signal fails the test. The full suite also passes with deferral enabled on
+LLVM.
 
-The soundness argument above has not had the independent hostile review the
-borrow checker received. The property it relies on outside this module is the
-exclusivity of `&mut [T]` views. Until it has been reviewed,
-`--no-deferred-overflow` gives the plain checked code.
+An independent review (2026-11-11) differential-tested about 8,000 generated
+loop programs without finding a difference, and then broke the first version
+by reasoning about what the argument left out. It found an out-of-bounds read
+through a proved index whose proof depended on a deferred operation, an
+arithmetic trap from a non-canonical narrow value reaching a division, and
+loops that ran for 2^62 iterations or forever where the checked build panics
+at once. Properties 1 to 3 above are the fixes; the seven reproducers are
+tests (`review_*`). The certificate arithmetic itself held up.
+
+That review did not audit the borrow checker. Certified mode with stores
+relies on the exclusivity of `&mut [T]` views. `--no-deferred-overflow` gives
+the plain checked code.
 
 Not covered: `loop`/nested loops as a unit, `Vec.map_in_place` callbacks with
 checked arithmetic, reductions over narrow or unsigned kinds (they use exact
-mode and stay scalar), and loops containing calls, even to pure functions.
+mode and stay scalar), loops with proved unchecked reads, and loops
+containing calls, even to pure functions.

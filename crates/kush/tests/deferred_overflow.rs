@@ -20,20 +20,20 @@ fn modes() -> Vec<CodegenOptions> {
     let mut modes = vec![CodegenOptions::default(), CodegenOptions::release()];
     for optimization in [Optimization::None, Optimization::Speed] {
         modes.push(CodegenOptions {
-            deferred_overflow: true,
+            deferred_overflow: Some(true),
             ..CodegenOptions::cranelift(optimization, true)
         });
     }
     if clang_available() {
         modes.push(CodegenOptions::release_llvm());
         modes.push(CodegenOptions {
-            deferred_overflow: false,
+            deferred_overflow: Some(false),
             ..CodegenOptions::release_llvm()
         });
         modes.push(CodegenOptions {
             optimization: Optimization::None,
             backend: Backend::Llvm,
-            deferred_overflow: true,
+            deferred_overflow: Some(true),
             ..CodegenOptions::default()
         });
         modes.push(CodegenOptions {
@@ -43,11 +43,58 @@ fn modes() -> Vec<CodegenOptions> {
     }
     // Planning for the build machine certifies multiply-heavy loops too.
     modes.push(CodegenOptions {
-        deferred_overflow: true,
+        deferred_overflow: Some(true),
         native_cpu: true,
         ..CodegenOptions::release()
     });
     modes
+}
+
+/// A Kush panic: the message, then SIGABRT. A segfault, an arithmetic trap or
+/// an illegal instruction is not a panic.
+fn assert_panicked(output: &std::process::Output, context: &str) {
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(output.status.signal(), Some(6), "{context}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("panic"),
+        "{context}"
+    );
+}
+
+/// Every native mode agrees with the ordinary build: same output, and a
+/// panic where it panics. For programs the evaluator cannot afford to run.
+fn native_modes_agree(source: &str) {
+    let program = executable::check(source).unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+    let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+    let mut reference = None;
+    for (at, options) in modes().into_iter().enumerate() {
+        let binary = scratch.path().join(format!("agree-{at}"));
+        native::build_with_codegen(&program, &binary, false, &LinkSpec::default(), options)
+            .unwrap_or_else(|error| panic!("{options:?}: {error:?}\n{source}"));
+        let mut child = Command::new(&binary)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // A deferred loop must report promptly however long it would run.
+        let started = std::time::Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            if started.elapsed() > std::time::Duration::from_secs(30) {
+                child.kill().unwrap();
+                panic!("{options:?} did not finish\n{source}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let output = child.wait_with_output().unwrap();
+        if !output.status.success() {
+            assert_panicked(&output, &format!("{options:?}\n{source}"));
+        }
+        let result = (output.stdout, output.status.success());
+        match &reference {
+            None => reference = Some(result),
+            Some(expected) => assert_eq!(&result, expected, "{options:?}\n{source}"),
+        }
+    }
 }
 
 /// Run on every mode and compare with the evaluator. `None` is a panic.
@@ -82,10 +129,7 @@ fn agrees(source: &str, expected: Option<&[i128]>) {
             "{options:?}\n{source}"
         );
         if expected.is_none() {
-            assert!(
-                String::from_utf8_lossy(&output.stderr).contains("panic"),
-                "{options:?}\n{source}"
-            );
+            assert_panicked(&output, &format!("{options:?}\n{source}"));
         }
     }
 }
@@ -555,7 +599,7 @@ fn planned_loops_carry_a_certificate_and_rejected_ones_do_not() {
         let checked = native::emit_llvm_ir(
             &program,
             CodegenOptions {
-                deferred_overflow: false,
+                deferred_overflow: Some(false),
                 ..CodegenOptions::release_llvm()
             },
         )
@@ -590,4 +634,185 @@ fn planned_loops_carry_a_certificate_and_rejected_ones_do_not() {
             print_i64(x);
         }"
     ));
+}
+
+// Programs found by an independent review. Each one panics in an ordinary
+// build and used to crash, trap or hang with deferral on.
+
+/// Review finding: a proof that rests on a deferred operation must not license an unchecked read.
+#[test]
+fn review_oob() {
+    native_modes_agree(
+        r#"
+fn f(view: &[i64], n: i64) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut j: i32 = 0;
+    let mut i = 0;
+    while i <= n {
+        let d: i32 = j + 2147483644;
+        if 4 <= Slice.len(view) {
+            acc = acc + Slice.at(view, Int.convert(j), _);
+        }
+        j = j + 1;
+        i = i + 1;
+    }
+    acc
+}
+fn main() -> Unit ! {io, panic} {
+    let xs: [i64; 4] = [1, 2, 3, 4];
+    print_i64(1);
+    print_i64(f(&xs[..], 100000000));
+}
+"#,
+    );
+}
+
+/// Review finding: a wrapped narrow value stored and reloaded stays in range.
+#[test]
+fn review_memidx() {
+    native_modes_agree(
+        r#"
+fn f<'a,'b>(table: &'a Vec<i64>, src: &'b [u16], out: &'b mut [u16]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(src) {
+        Slice.set(out, 0, Slice.get(src, i) * Slice.get(src, i) * Slice.get(src, i));
+        let v: u16 = Slice.get(out, 0);
+        if 65536 <= Vec.len(table) {
+            acc = acc + Vec.at(table, Int.convert(v), _);
+        }
+        i = i + 1;
+    }
+    acc
+}
+fn main() -> Unit ! {io, panic, alloc} {
+    let mut table: Vec<i64> = Vec.new();
+    let mut k = 0;
+    while k < 65536 { table = Vec.push(table, k); k = k + 1; }
+    let s: [u16; 3] = [3, 60000, 7];
+    let mut o: [u16; 1] = [3];
+    print_i64(1);
+    print_i64(f(&table, &s[..], &mut o[..]));
+}
+"#,
+    );
+}
+
+/// Review finding: a wrapped narrow operand reaches a division in canonical form.
+#[test]
+fn review_fpe() {
+    native_modes_agree(
+        r#"
+fn f(view: &[i32], d: i32) -> i32 ! {panic} {
+    let mut last: i32 = 0;
+    let mut i = 0;
+    while i < Slice.len(view) {
+        let a = Slice.get(view, i);
+        last = (a * a * 2) / d;
+        i = i + 1;
+    }
+    last
+}
+fn main() -> Unit ! {io, panic} {
+    let values: [i32; 2] = [1, -2147483648];
+    print_i64(1);
+    print_int(f(&values[..], -1));
+}
+"#,
+    );
+}
+
+/// Review finding: the same for a remainder.
+#[test]
+fn review_rem() {
+    native_modes_agree(
+        r#"
+fn f(view: &[i32], d: i32) -> i32 ! {panic} {
+    let mut last: i32 = 0;
+    let mut i = 0;
+    while i < Slice.len(view) {
+        let a = Slice.get(view, i);
+        last = (a * a * 2) % d;
+        i = i + 1;
+    }
+    last
+}
+fn main() -> Unit ! {io, panic} {
+    let values: [i32; 2] = [1, -2147483648];
+    print_i64(1);
+    print_int(f(&values[..], -1));
+}
+"#,
+    );
+}
+
+/// Review finding: an overflow is reported promptly in a loop of 9e18 iterations.
+#[test]
+fn review_hang3() {
+    native_modes_agree(
+        r#"
+fn spin(view: &[i64], out: &mut [i64], n: i64, start: i64) -> i64 ! {panic} {
+    let mut acc = start;
+    let mut i = 0;
+    while i <= n {
+        acc = acc + Slice.get(view, i % 4);
+        Slice.set(out, i % 4, acc);
+        i = i + 1;
+    }
+    acc
+}
+fn main() -> Unit ! {io, panic} {
+    let values: [i64; 4] = [1, 2, 3, 4];
+    let mut out: [i64; 4] = [1, 2, 3, 4];
+    print_i64(1);
+    print_i64(spin(&values[..], &mut out[..], 9000000000000000000, 9223372036854775807));
+}
+"#,
+    );
+}
+
+/// Review finding: a float counter does not make a loop counted.
+#[test]
+fn review_float() {
+    native_modes_agree(
+        r#"
+fn f(view: &[i64], start: i64) -> i64 ! {panic} {
+    let mut acc = start;
+    let mut x = 1.0;
+    while x < 2.0 {
+        acc = acc + Slice.get(view, 0);
+        x = x + 0.00000000000000000000000001;
+    }
+    acc
+}
+fn main() -> Unit ! {io, panic} {
+    let values: [i64; 2] = [1, 2];
+    print_i64(1);
+    print_i64(f(&values[..], 9223372036854775800));
+}
+"#,
+    );
+}
+
+/// Review finding: a bound reloaded from memory the loop writes.
+#[test]
+fn review_membound() {
+    native_modes_agree(
+        r#"
+fn f<'a,'b>(a: &'a [i64], out: &'b mut [i64]) -> i64 ! {panic} {
+    let mut i = 0;
+    while i < Slice.get(out, 0) {
+        Slice.set(out, 0, Slice.get(a, i % 2) * 4611686018427387904);
+        i = i + 1;
+    }
+    i
+}
+fn main() -> Unit ! {io, panic} {
+    let a: [i64; 2] = [5, 5];
+    let mut o: [i64; 1] = [3];
+    print_i64(1);
+    print_i64(f(&a[..], &mut o[..]));
+}
+"#,
+    );
 }

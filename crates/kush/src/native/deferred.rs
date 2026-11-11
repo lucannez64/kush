@@ -38,16 +38,28 @@
 //! it may only store through exclusive slices it never reads.
 //!
 //! Both are unobservable: a panic aborts the process, and the loop performs
-//! no I/O, calls, allocation or ownership transfer. Three properties keep the
-//! speculative execution well behaved after a (not yet reported) overflow:
+//! no I/O, calls, allocation or ownership transfer. What keeps the
+//! speculative execution well behaved after an overflow that has not been
+//! reported yet:
 //!
-//! * the loop is counted (`while i < bound { ...; i = i + c }`), and every
-//!   value feeding a loop or branch condition keeps its immediate check, so
-//!   the trip count never depends on a wrapped value;
-//! * every index keeps its immediate check, so a statically proved access
-//!   never sees a wrapped value;
-//! * everything else that can panic still panics immediately, which is the
-//!   outcome the checked loop would have had.
+//! * **Bounded delay.** The loop runs in chunks of `CHUNK` iterations, each
+//!   with its own sticky word, certificate and replay state. Whatever wrapped
+//!   values do to the loop, it stops and reports within one chunk.
+//! * **No proof-dependent access.** The checker's proofs may use "this
+//!   operation did not overflow" as a hypothesis, so a loop with a proved,
+//!   unchecked read (`Slice.at`, `Vec.at`) is not deferred. Every memory
+//!   access in a deferred loop is bounds-checked at run time.
+//! * **Canonical values.** A deferred narrow operation yields its wrapped
+//!   result, and proved-in-range narrow arithmetic is wrapped too, so every
+//!   narrow value stays in the form the rest of the lowering assumes.
+//! * **Everything else that can panic still panics immediately**, which is
+//!   the outcome the checked loop would have had.
+//!
+//! In addition the loop must be counted over an integer with a bound made of
+//! constants, locals and lengths, and every value feeding a loop or branch
+//! condition or an index keeps its immediate check. That keeps the
+//! speculative run on the checked run's path in the common case; safety does
+//! not rest on it.
 use crate::executable::{self as ex, BytesOp, Expr, ExprKind, SliceOp, Statement, Target, VecOp};
 use crate::executable::{Function, Type};
 use crate::lexer::Kind;
@@ -95,12 +107,17 @@ pub(super) struct Plan {
     pub accumulators: Vec<usize>,
     /// Locals restored before an exact replay.
     pub replay: Vec<usize>,
+    /// The counter of a loop that counts upward, when it has one.
+    pub ascending: Option<usize>,
     /// Whether a certified operation multiplies two non-constant operands.
     multiplies: bool,
 }
 
 /// A certified result may be at most `2^LIMIT` in absolute value.
 pub(super) const LIMIT: i64 = 62;
+
+/// A deferred loop reports after at most this many iterations.
+pub(super) const CHUNK: i64 = 1 << 16;
 
 fn scalar(ty: Type) -> bool {
     matches!(
@@ -240,8 +257,9 @@ impl<'a> Analysis<'a> {
             Target::Slice(SliceOp::Len, _)
             | Target::Vec(VecOp::Len, _)
             | Target::Bytes(BytesOp::Len) => (Some(Access::Length), None),
-            Target::Slice(SliceOp::Get | SliceOp::At, element)
-            | Target::Vec(VecOp::Get | VecOp::At, element)
+            // Only checked reads. A proved, unchecked read (`at`) may owe its
+            // proof to a deferred operation not having overflowed.
+            Target::Slice(SliceOp::Get, element) | Target::Vec(VecOp::Get, element)
                 if scalar(*element) =>
             {
                 (Some(Access::Load), None)
@@ -274,8 +292,8 @@ impl<'a> Analysis<'a> {
                 continue;
             }
             self.expr(argument)?;
-            // Indices and conversion operands keep their immediate checks; a
-            // stored value may be speculative because a panic discards it.
+            // Indices keep their immediate checks; a stored value may be
+            // speculative because a panic discards it.
             if receiver && Some(index) != value {
                 self.exact.push(argument);
             }
@@ -297,10 +315,13 @@ fn reads_local(expr: &Expr, slot: usize) -> bool {
 /// `while i <op> bound { ...; i = i +/- c; ... }` with `c > 0`, one
 /// unconditional update per iteration and a loop-invariant bound.
 fn induction(condition: &Expr, body: &ex::Block) -> Option<usize> {
-    let ExprKind::Binary(comparison, left, _) = &condition.kind else {
+    let ExprKind::Binary(comparison, left, bound) = &condition.kind else {
         return None;
     };
     let slot = local_read(left)?;
+    if !integer(left.ty) || !plain_bound(bound) {
+        return None;
+    }
     let step = match comparison {
         Kind::Lt | Kind::Le => Kind::Plus,
         Kind::Gt | Kind::Ge => Kind::Minus,
@@ -325,6 +346,24 @@ fn induction(condition: &Expr, body: &ex::Block) -> Option<usize> {
         .count()
         + usize::from(body.tail.as_deref().is_some_and(is_step));
     (top_level == 1).then_some(slot)
+}
+
+/// A loop bound made of constants, locals, container lengths and arithmetic
+/// on those: nothing the loop body could change by storing.
+fn plain_bound(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Constant(_) | ExprKind::Local(_) | ExprKind::Peek(_) => integer(expr.ty),
+        ExprKind::Binary(Kind::Plus | Kind::Minus | Kind::Star, left, right) => {
+            integer(expr.ty) && plain_bound(left) && plain_bound(right)
+        }
+        ExprKind::Call(
+            Target::Slice(SliceOp::Len, _)
+            | Target::Vec(VecOp::Len, _)
+            | Target::Bytes(BytesOp::Len),
+            arguments,
+        ) => arguments.len() == 1,
+        _ => false,
+    }
 }
 
 /// Plan deferred overflow checks for one innermost `while` loop, or `None`
@@ -409,6 +448,9 @@ pub(super) fn plan(
     }
 
     let mut plan = Plan::default();
+    if matches!(&condition.kind, ExprKind::Binary(Kind::Lt | Kind::Le, _, _)) {
+        plan.ascending = Some(counter);
+    }
     for id in &deferred {
         plan.modes.insert(*id, Mode::Exact);
     }

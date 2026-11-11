@@ -1553,10 +1553,16 @@ fn refute_component(sources: &[&Constraint], required: Option<usize>) -> Option<
         }
         None => {}
     }
-    let found = search_refutation(sources, required);
-    crate::proof_cache::put(key, found.clone());
-    let (denominator, weights) = found?;
-    farkas_from_weights(denominator, &weights, sources)
+    // A search result is held to the same standard as a remembered one. A
+    // combination whose multipliers overflow cannot be checked, so it is not
+    // a proof; saying so here lets the caller try another component instead
+    // of failing later with a certificate nobody can verify.
+    let found = search_refutation(sources, required).and_then(|(denominator, weights)| {
+        let proof = farkas_from_weights(denominator, &weights, sources)?;
+        refutes(&proof).then_some(((denominator, weights), proof))
+    });
+    crate::proof_cache::put(key, found.as_ref().map(|(weights, _)| weights.clone()));
+    found.map(|(_, proof)| proof)
 }
 
 /// Whether a certificate's own steps, which were just taken from the system

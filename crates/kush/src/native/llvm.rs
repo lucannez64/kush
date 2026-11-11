@@ -197,7 +197,7 @@ pub(super) struct RuntimeSplit {
 
 /// Runtime functions whose bodies LLVM may inline into program code: reads,
 /// in-place writes and bookkeeping that never allocate, free or grow.
-const INLINABLE: [&str; 24] = [
+pub(super) const INLINABLE: [&str; 23] = [
     "kush_vec_len",
     "kush_vec_get",
     "kush_vec_set",
@@ -220,7 +220,6 @@ const INLINABLE: [&str; 24] = [
     "kush_float_int_present",
     "kush_int_exact_in_float",
     "kush_handler_depth",
-    "kush_handler_restore",
     "kush_note_reuse",
 ];
 
@@ -1097,17 +1096,8 @@ impl<'a> Translator<'a> {
         let data = dfg.insts[inst];
         let opcode = data.opcode();
         match data {
-            InstructionData::UnaryImm { imm, .. } => {
-                let result = dfg.first_result(inst);
-                let bits = Ty::of(self.ty(result)).ok_or("constant type")?.bits();
-                let raw = imm.bits();
-                let value = if bits == 64 {
-                    raw
-                } else {
-                    (raw << (64 - bits)) >> (64 - bits)
-                };
-                self.constants.insert(result, value.to_string());
-            }
+            // Collected up front in `function`.
+            InstructionData::UnaryImm { .. } => {}
             InstructionData::UnaryIeee32 { imm, .. } => {
                 let name = self.name(dfg.first_result(inst));
                 self.line(format!("{name} = bitcast i32 {} to float", imm.bits()));
@@ -1447,9 +1437,13 @@ impl<'a> Translator<'a> {
                 let table = &self.func.dfg.jump_tables[table];
                 let ty = self.tyn(arg)?;
                 let operand = self.op(arg);
+                // LLVM wants one phi entry per switch edge, so every case
+                // records its own edge, repeated targets included; all edges
+                // from this block to one target must then carry equal values.
                 let (default, default_values) = self.edge(table.default_block())?;
                 let mut seen: BTreeMap<Block, Vec<String>> = BTreeMap::new();
-                seen.insert(default, default_values);
+                seen.insert(default, default_values.clone());
+                let mut edges = vec![(default, default_values)];
                 let mut cases = String::new();
                 for (index, call) in table.as_slice().iter().enumerate() {
                     let (target, values) = self.edge(*call)?;
@@ -1458,15 +1452,16 @@ impl<'a> Translator<'a> {
                             return Err("jump table passes different arguments to one block".into());
                         }
                     } else {
-                        seen.insert(target, values);
+                        seen.insert(target, values.clone());
                     }
                     let _ = write!(cases, " {ty} {index}, label %b{}", target.as_u32());
+                    edges.push((target, values));
                 }
                 self.line(format!(
                     "switch {ty} {operand}, label %b{} [{cases} ]",
                     default.as_u32()
                 ));
-                for (target, values) in seen {
+                for (target, values) in edges {
                     self.edges.push(Edge {
                         from: self.label.clone(),
                         target,
@@ -1525,6 +1520,23 @@ impl<'a> Translator<'a> {
         let func = self.func;
         let entry = func.layout.entry_block().ok_or("function has no entry")?;
         let reachable = self.reachable();
+        // Constants are operands, not instructions, so collect them before
+        // any use: block layout order need not be dominance order.
+        for block in func.layout.blocks() {
+            for inst in func.layout.block_insts(block) {
+                if let InstructionData::UnaryImm { imm, .. } = func.dfg.insts[inst] {
+                    let result = func.dfg.first_result(inst);
+                    let bits = Ty::of(self.ty(result)).ok_or("constant type")?.bits();
+                    let raw = imm.bits();
+                    let value = if bits == 64 {
+                        raw
+                    } else {
+                        (raw << (64 - bits)) >> (64 - bits)
+                    };
+                    self.constants.insert(result, value.to_string());
+                }
+            }
+        }
         let exclusive: &[usize] = self.exclusive.get(name).map_or(&[], Vec::as_slice);
         let mut bodies: Vec<(Block, String)> = Vec::new();
         for block in func.layout.blocks() {

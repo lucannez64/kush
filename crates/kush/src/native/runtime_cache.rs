@@ -56,6 +56,13 @@ fn include_graph(compiler: &Path, source: &Path, defines: &[String]) -> Option<V
     if escaped || paths.is_empty() {
         return None;
     }
+    // The source itself is rewritten for every build and must not count.
+    // The compiler may spell it differently than the caller did (a relative
+    // scratch directory, a leading `./`), so compare resolved paths.
+    let resolved = fs::canonicalize(source).ok();
+    paths.retain(|path| {
+        path != source && (resolved.is_none() || fs::canonicalize(path).ok() != resolved)
+    });
     Some(paths)
 }
 
@@ -132,7 +139,7 @@ fn compiler_identity(
         Some(paths) => paths,
         None => {
             let paths = include_graph(compiler, source, defines)?;
-            let listed: Vec<&PathBuf> = paths.iter().filter(|path| *path != source).collect();
+            let listed: Vec<&PathBuf> = paths.iter().collect();
             if let Some(file) = &graph_file
                 && let Some(root) = file.parent()
                 && listed.iter().all(|path| {
@@ -156,9 +163,6 @@ fn compiler_identity(
         }
     };
     for path in paths {
-        if path == source {
-            continue;
-        }
         let metadata = fs::metadata(&path).ok()?;
         identity.extend_from_slice(
             format!(
@@ -351,7 +355,10 @@ pub(super) fn compile_llvm(
     let cache = directory.zip(identity);
     let entry = |artifact: &str| {
         let mut key =
-            format!("kush-c-runtime-llvm-v3\0{artifact}\0-std=c11\0-O2\0-fPIC\0").into_bytes();
+            format!("kush-c-runtime-llvm-v4\0{artifact}\0-std=c11\0-O2\0-fPIC\0").into_bytes();
+        // How the runtime is split is part of what the artifacts are.
+        key.extend_from_slice(super::llvm::INLINABLE.join(",").as_bytes());
+        key.push(0);
         key.extend_from_slice(runtime.as_bytes());
         key.extend_from_slice(format!("{defines:?}").as_bytes());
         if let Some((_, identity)) = &cache {

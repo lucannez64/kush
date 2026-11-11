@@ -31,8 +31,11 @@ nothing remembered: 730 M before, 228 M after.
 The documented size limits (terms and rows per system, integer terms) still
 apply to the whole system. The elimination pair budget and the integer node
 and cut budgets now apply per part, so a search can succeed where the joint
-one ran out of budget; it cannot fail where the joint one succeeded for lack
-of rows. `facts::tests` compares the component search with plain elimination
+one ran out of budget. When a system has several contradictions, the one
+found first can differ from before, because parts are tried in order of their
+first row. A search result is now checked before it is returned (a
+combination whose multipliers overflow is not a proof), so an uncheckable
+contradiction in one part no longer hides a good one in another. `facts::tests` compares the component search with plain elimination
 on 400 generated systems and checks that a reported integer point never
 coincides with a refutation.
 
@@ -49,8 +52,11 @@ without it, 86 M with it (about 20 ms).
   two systems with the same key are searched identically.
 - For a rational refutation the entry holds only which rows were combined and
   with what multipliers. On a hit the certificate is rebuilt from the
-  *current* rows and checked by the same `verify_farkas` used elsewhere. If it
-  does not verify, the search runs as if there were no entry.
+  *current* rows and checked (`refutes`: positive denominator, non-negative
+  multipliers, no overflow, all terms cancel, negative bound). If it does not
+  check, the search runs as if there were no entry and its outcome replaces
+  the entry. Every certificate is also verified against the real context at
+  the end of checking, exactly as before.
 - For the integer fallback only failures are stored; a proof is always
   searched again.
 - A stored "no proof" is the one thing taken on trust. A wrong one (file
@@ -64,9 +70,11 @@ because another solver version may find different proofs within its budgets.
 
 The cache is `$XDG_CACHE_HOME/kush/proofs-v1` (default
 `~/.cache/kush/proofs-v1`), one append-only file per compiler binary, private
-to the user, never followed through a symlink, the same rules as the runtime
-cache. A file over 16 MiB is started over, and only the 32 most recently used
-files are kept.
+to the user, the same rules as the runtime cache; neither the directory nor
+the file is used if it is a symlink or not what it should be. A file over
+4 MiB is started over, only the 32 most recently used files are kept, and a
+file with a damaged record (a build killed mid-write) is cut back to its
+intact prefix the next time it is opened.
 
 | Variable | Meaning |
 | --- | --- |
@@ -75,3 +83,10 @@ files are kept.
 
 Results are identical with and without the cache; only the time differs. The
 first build with a new compiler binary pays the full search once.
+`KUSH_NO_PROOF_CACHE` turns off the files; outcomes are still remembered
+within one compiler process.
+
+The binary is identified by path, size and modification time. A different
+compiler installed over the old one with all three unchanged would inherit
+its entries, which could reject a provable goal until the directory is
+cleared; it could not accept an unprovable one.

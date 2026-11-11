@@ -2790,10 +2790,12 @@ pub struct CodegenOptions {
     pub optimization: Optimization,
     pub inline_scalar_callbacks: bool,
     pub backend: Backend,
-    /// Defer overflow panics of side-effect-free loop arithmetic to the loop
-    /// exit so LLVM can vectorize it. Observable behaviour is unchanged: the
-    /// program still panics exactly when checked arithmetic would.
-    pub deferred_overflow: bool,
+    /// Defer overflow panics of side-effect-free loop arithmetic to the end
+    /// of a bounded chunk of iterations so LLVM can vectorize it. Observable
+    /// behaviour is unchanged: the program still panics exactly when checked
+    /// arithmetic would. `None` follows the backend: on for LLVM, off for
+    /// Cranelift.
+    pub deferred_overflow: Option<bool>,
     /// Tune LLVM code for the build machine's CPU (`-march=native`).
     pub native_cpu: bool,
 }
@@ -2804,7 +2806,7 @@ impl CodegenOptions {
             optimization,
             inline_scalar_callbacks,
             backend: Backend::Cranelift,
-            deferred_overflow: false,
+            deferred_overflow: None,
             native_cpu: false,
         }
     }
@@ -2813,7 +2815,7 @@ impl CodegenOptions {
             optimization: Optimization::Speed,
             inline_scalar_callbacks: true,
             backend: Backend::Cranelift,
-            deferred_overflow: false,
+            deferred_overflow: None,
             native_cpu: false,
         }
     }
@@ -2823,23 +2825,26 @@ impl CodegenOptions {
     fn with_environment(mut self) -> Result<Self> {
         match std::env::var("KUSH_BACKEND").ok().as_deref() {
             None | Some("") => {}
-            Some("cranelift") => {
-                self.backend = Backend::Cranelift;
-                self.deferred_overflow = false;
-            }
-            Some("llvm") => {
-                if self.backend != Backend::Llvm {
-                    self.backend = Backend::Llvm;
-                    self.deferred_overflow = true;
-                }
+            Some("cranelift") => self.backend = Backend::Cranelift,
+            Some("llvm") => self.backend = Backend::Llvm,
+            // Also at release settings, whatever the build asked for.
+            Some("llvm-release") => {
+                self.backend = Backend::Llvm;
+                self.optimization = Optimization::Speed;
+                self.inline_scalar_callbacks = true;
             }
             Some(other) => {
                 return Err(error(format!(
-                    "KUSH_BACKEND must be 'cranelift' or 'llvm', not '{other}'"
+                    "KUSH_BACKEND must be 'cranelift', 'llvm' or 'llvm-release', not '{other}'"
                 )));
             }
         }
         Ok(self)
+    }
+    /// Whether loops are lowered with deferred overflow checks.
+    fn defers_overflow(self) -> bool {
+        self.deferred_overflow
+            .unwrap_or(self.backend == Backend::Llvm)
     }
     /// The backend a build with these options uses, for messages. Honours
     /// the `KUSH_BACKEND` override.
@@ -2867,7 +2872,7 @@ impl CodegenOptions {
             optimization: Optimization::Speed,
             inline_scalar_callbacks: true,
             backend: Backend::Llvm,
-            deferred_overflow: true,
+            deferred_overflow: None,
             native_cpu: false,
         }
     }
@@ -2984,8 +2989,15 @@ impl LlvmTools {
                     .find(|candidate| candidate.is_file())
             })
         };
+        // Only beside a binary that is itself clang: a compiler wrapper
+        // (ccache and the like) lives elsewhere than the LLVM it runs.
         let sibling = resolved
             .and_then(|path| fs::canonicalize(path).ok())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("clang"))
+            })
             .and_then(|path| Some(path.parent()?.join("llvm-link")))
             .filter(|path| path.is_file());
         let link = match sibling {
@@ -3089,7 +3101,9 @@ fn llvm_objects(
     let input = match &tools.link {
         Some(link) => {
             let linked = scratch.path.join("linked.bc");
-            run_tool(
+            // A linker from another LLVM cannot read this clang's bitcode.
+            // Inlining the runtime is an optimization; do without it.
+            match run_tool(
                 Command::new(link)
                     .arg(&program_ir)
                     .arg(&runtime.inline)
@@ -3097,8 +3111,10 @@ fn llvm_objects(
                     .arg("-o")
                     .arg(&linked),
                 "llvm-link",
-            )?;
-            linked
+            ) {
+                Ok(()) => linked,
+                Err(_) => program_ir,
+            }
         }
         None => program_ir,
     };
@@ -4356,6 +4372,15 @@ fn foreign_abi_signature(
                 sig.params.push(AbiParam::new(I64));
                 sig.params.push(AbiParam::new(I64));
             }
+            // The C ABI on x86-64 lets a callee assume that an argument
+            // narrower than 32 bits arrives extended to 32; say how, so both
+            // backends pass the canonical value and not a raw register.
+            Type::Int(IntKind::I8 | IntKind::I16) => {
+                sig.params.push(AbiParam::new(abi_value_type(*ty)).sext())
+            }
+            Type::Int(IntKind::U8 | IntKind::U16) => {
+                sig.params.push(AbiParam::new(abi_value_type(*ty)).uext())
+            }
             _ => sig.params.push(AbiParam::new(abi_value_type(*ty))),
         }
     }
@@ -5284,8 +5309,8 @@ struct DeferredLoop {
     sticky: Variable,
     /// OR of the magnitude words of each tracked operand.
     leaves: BTreeMap<usize, Variable>,
-    /// Number of reduction steps performed.
-    count: Variable,
+    /// Iterations left before the loop must stop and report.
+    fuel: Variable,
 }
 /// An enclosing `AbortScope` during code generation.
 #[derive(Clone, Copy)]
@@ -9471,6 +9496,12 @@ impl Generator<'_, '_> {
         class: llvm::MemoryClass,
         build: impl FnOnce(&mut Self) -> T,
     ) -> T {
+        // Locations are stored relative to a base; fix it at zero so that no
+        // class can coincide with "no location".
+        self.builder
+            .func
+            .params
+            .ensure_base_srcloc(ir::SourceLoc::new(0));
         let previous = self.builder.srcloc();
         self.builder.set_srcloc(ir::SourceLoc::new(class as u32));
         let built = build(self);
@@ -9652,7 +9683,7 @@ impl Generator<'_, '_> {
     }
 
     fn lower_while(&mut self, condition: &Expr, body: &ex::Block) {
-        if self.codegen.deferred_overflow
+        if self.codegen.defers_overflow()
             && self.deferred.is_none()
             && let Some(plan) = deferred::plan(
                 &self.program.functions[self.function_index],
@@ -9731,6 +9762,19 @@ impl Generator<'_, '_> {
         if let Some(test) = self.scalar(condition) {
             let fact = candidate
                 .map(|(index, view, _)| (self.local_words(index)[0], self.local_words(view)[1]));
+            // A deferred loop runs a bounded number of iterations at a time.
+            let fuel = self.deferred.as_ref().map(|state| state.fuel);
+            let test = match fuel {
+                Some(fuel) => {
+                    let left = self.builder.use_var(fuel);
+                    let some = self.builder.ins().icmp_imm_s(IntCC::NotEqual, left, 0);
+                    let some = self.builder.ins().uextend(I64, some);
+                    let holds = self.builder.ins().icmp_imm_s(IntCC::NotEqual, test, 0);
+                    let holds = self.builder.ins().uextend(I64, holds);
+                    self.builder.ins().band(holds, some)
+                }
+                None => test,
+            };
             self.builder.ins().brif(test, enter, &[], exit, &[]);
             self.builder.seal_block(enter);
             self.builder.switch_to_block(enter);
@@ -9743,6 +9787,11 @@ impl Generator<'_, '_> {
             self.loops.pop();
             self.upper_bounds.truncate(saved);
             if finished.is_some() {
+                if let Some(fuel) = fuel {
+                    let left = self.builder.use_var(fuel);
+                    let left = self.builder.ins().iadd_imm_s(left, -1);
+                    self.builder.def_var(fuel, left);
+                }
                 self.jump(head, &[]);
             }
         }
@@ -10266,7 +10315,10 @@ impl Generator<'_, '_> {
         let canonical = self.canonical(kind, value);
         let wrong = self.builder.ins().icmp(IntCC::NotEqual, canonical, value);
         self.defer_flag(wrong);
-        value
+        // The wrapped result, not the raw word: the rest of the lowering
+        // relies on narrow values being in canonical form (for instance, a
+        // narrow signed division has no `MIN / -1` guard).
+        canonical
     }
     /// OR an operand's magnitude word into its tracker, if it has one.
     fn track_leaf(&mut self, key: usize, value: Value) {
@@ -10293,12 +10345,6 @@ impl Generator<'_, '_> {
         mode: deferred::Mode,
     ) -> Value {
         if mode != deferred::Mode::Exact {
-            if mode == deferred::Mode::Accumulate {
-                let count = self.deferred.as_ref().expect("deferred loop").count;
-                let previous = self.builder.use_var(count);
-                let next = self.builder.ins().iadd_imm_s(previous, 1);
-                self.builder.def_var(count, next);
-            }
             return match op {
                 Kind::Plus => self.builder.ins().iadd(left, right),
                 Kind::Minus => self.builder.ins().isub(left, right),
@@ -10392,13 +10438,44 @@ impl Generator<'_, '_> {
         let zero = self.constant(0);
         let sticky = self.builder.declare_var(I64);
         let count = self.builder.declare_var(I64);
-        self.builder.def_var(sticky, zero);
-        self.builder.def_var(count, zero);
+        let fuel = self.builder.declare_var(I64);
         let mut leaves = BTreeMap::new();
         for key in &plan.leaves {
-            let tracker = self.builder.declare_var(I64);
-            self.builder.def_var(tracker, zero);
-            leaves.insert(*key, tracker);
+            leaves.insert(*key, self.builder.declare_var(I64));
+        }
+        // The loop runs in chunks of at most `CHUNK` iterations, each checked
+        // on its own, so an overflow is reported after a bounded amount of
+        // further work no matter how long the loop would have run, or what
+        // the wrapped values do to it in the meantime.
+        let chunk = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.jump(chunk, &[]);
+        self.builder.switch_to_block(chunk);
+        self.builder.def_var(sticky, zero);
+        self.builder.def_var(count, zero);
+        let full = self.constant(deferred::CHUNK);
+        self.builder.def_var(fuel, full);
+        for tracker in leaves.values() {
+            self.builder.def_var(*tracker, zero);
+        }
+        // An upward counter that starts a chunk non-negative stays so, which
+        // is what removes the lower bounds check of every index it forms.
+        // Inside one loop LLVM sees that for itself; across chunks it has to
+        // be shown the starting sign. A negative start (rare, and legal)
+        // runs the loop with ordinary checks from here.
+        if let Some(counter) = plan.ascending {
+            let start = self.local_words(counter)[0];
+            let negative = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedLessThan, start, 0);
+            let plain = self.builder.create_block();
+            let chunked = self.builder.create_block();
+            self.builder.ins().brif(negative, plain, &[], chunked, &[]);
+            self.builder.switch_to_block(plain);
+            self.lower_checked_while(condition, body);
+            self.jump(done, &[]);
+            self.builder.switch_to_block(chunked);
         }
         let mut entry_magnitudes = BTreeMap::new();
         for slot in &plan.accumulators {
@@ -10415,51 +10492,64 @@ impl Generator<'_, '_> {
             plan,
             sticky,
             leaves,
-            count,
+            fuel,
         });
         self.lower_checked_while(condition, body);
         let state = self.deferred.take().expect("deferred loop");
-        if state.plan.obligations.is_empty() {
-            let overflowed = self.builder.use_var(sticky);
-            let overflowed = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::SignedLessThan, overflowed, 0);
-            self.guard(overflowed);
-            return;
+        if !state.plan.obligations.is_empty() {
+            // How many terms the reductions took in, at most: each
+            // accumulating operation runs at most once per iteration, and
+            // the fuel says how many iterations completed. One more covers
+            // an iteration that left the loop part-way. Counting in the
+            // loop would be exact but costs a vector reduction of its own.
+            let accumulating = state
+                .plan
+                .modes
+                .values()
+                .filter(|mode| **mode == deferred::Mode::Accumulate)
+                .count() as i64;
+            let left = self.builder.use_var(fuel);
+            let limit = self.constant(deferred::CHUNK + 1);
+            let started = self.builder.ins().isub(limit, left);
+            let terms = self.builder.ins().imul_imm_s(started, accumulating);
+            self.builder.def_var(count, terms);
+            // The certificate: every bound is within the limit.
+            let mut worst = self.constant(0);
+            for obligation in &state.plan.obligations {
+                let value = self.bound_value(obligation, &state.leaves, &entry_magnitudes, count);
+                worst = self.builder.ins().umax(worst, value);
+            }
+            let proved = self.builder.ins().icmp_imm_u(
+                IntCC::UnsignedLessThanOrEqual,
+                worst,
+                deferred::LIMIT,
+            );
+            let certified = self.builder.create_block();
+            let replay = self.builder.create_block();
+            self.builder.ins().brif(proved, certified, &[], replay, &[]);
+            // Without it nothing is known: run the rest of the loop from this
+            // chunk's entry state with ordinary checks.
+            self.builder.switch_to_block(replay);
+            for (slot, words) in entry {
+                self.assign(slot, &words);
+            }
+            self.lower_checked_while(condition, body);
+            self.jump(done, &[]);
+            // With it, every value was exact, so the sticky word of the
+            // remaining exact tests is exact too.
+            self.builder.switch_to_block(certified);
         }
-        // The certificate: every bound is within the limit.
-        let mut worst = self.constant(0);
-        for obligation in &state.plan.obligations {
-            let value = self.bound_value(obligation, &state.leaves, &entry_magnitudes, count);
-            worst = self.builder.ins().umax(worst, value);
-        }
-        let proved =
-            self.builder
-                .ins()
-                .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, worst, deferred::LIMIT);
-        let certified = self.builder.create_block();
-        let replay = self.builder.create_block();
-        let done = self.builder.create_block();
-        self.builder.ins().brif(proved, certified, &[], replay, &[]);
-        // With the certificate, every value was exact, so the sticky word of
-        // the remaining exact tests is exact too.
-        self.builder.switch_to_block(certified);
         let overflowed = self.builder.use_var(sticky);
         let overflowed = self
             .builder
             .ins()
             .icmp_imm_s(IntCC::SignedLessThan, overflowed, 0);
         self.guard(overflowed);
-        self.jump(done, &[]);
-        // Without it nothing is known: run the loop again from its entry
-        // state with ordinary checks.
-        self.builder.switch_to_block(replay);
-        for (slot, words) in entry {
-            self.assign(slot, &words);
-        }
-        self.lower_checked_while(condition, body);
-        self.jump(done, &[]);
+        // Out of fuel means the loop may have more to do; anything else is
+        // the loop's own exit.
+        let left = self.builder.use_var(fuel);
+        let exhausted = self.builder.ins().icmp_imm_s(IntCC::Equal, left, 0);
+        self.builder.ins().brif(exhausted, chunk, &[], done, &[]);
         self.builder.switch_to_block(done);
     }
     fn check_int_range(&mut self, kind: IntKind, value: Value) -> Value {
@@ -10709,10 +10799,18 @@ impl Generator<'_, '_> {
             // already in canonical (sign- or zero-extended) form.
             IntOp::Unchecked(arith) => {
                 let b = values[1];
-                vec![match arith {
+                let value = match arith {
                     ArithOp::Add => self.builder.ins().iadd(a, b),
                     ArithOp::Sub => self.builder.ins().isub(a, b),
                     ArithOp::Mul => self.builder.ins().imul(a, b),
+                };
+                // The proof may rest on an operation whose overflow panic a
+                // deferred loop has not reported yet. Until it is, keep the
+                // value in canonical form like every other narrow value.
+                vec![if self.deferred.is_some() && source.bits() < 64 {
+                    self.canonical(source, value)
+                } else {
+                    value
                 }]
             }
             IntOp::Wrapping(arith) | IntOp::Saturating(arith) | IntOp::Checked(arith, _, _) => {
