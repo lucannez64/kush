@@ -19,9 +19,15 @@ indices become unchecked loads. Wrapping would make those proofs false.
 ## The transformation
 
 For an innermost counted loop with no observable effects, the panic moves to
-the loop exit. A panic aborts the process, so "panic at iteration 5" and
-"panic when the loop finishes" cannot be told apart if nothing observable
-happens in between.
+the end of a bounded chunk of iterations. A panic aborts the process, so
+"panic at iteration 5" and "panic a little later" cannot be told apart if
+nothing observable happens in between. Two things this rests on, stated
+plainly: the memory a deferred loop writes (`Slice.set`) is private to the
+process until the loop is done, so a few thousand extra element writes
+before the abort are not observable; and every panic prints the same
+message, so an overflow reported in place of a later bounds or division
+panic of the same chunk looks the same. Per-cause panic messages, or a loop
+writing memory another process maps, would need this revisited.
 
 There are two modes, chosen per operation (`native/deferred.rs`).
 
@@ -46,13 +52,17 @@ u(a * b) = u(a) + u(b)
 u(prefix sums of acc) = max(u(acc at entry), u(step operands)) + bits(step count)
 ```
 
-If every certified result has `u <= 62`, nothing overflowed. Proof: take the
+If every certified result has `u <= 62` and no exact-mode operation of the
+chunk set the sticky word, nothing overflowed (the sticky word is tested
+after the certificate, so the argument is about the first overflow of
+either kind). Proof for the certified part: take the
 first certified operation that overflows in the checked execution. Everything
 before it is exact, so its operands are exact and were observed by the
 magnitude words; its mathematical result is then at most `2^62`, which fits.
 
-If a bound is too large, nothing is concluded. The loop's entry state is
-restored and the loop runs again with ordinary checks, which either panics at
+If a bound is too large, nothing is concluded. The state at the start of the
+chunk is restored and the rest of the loop runs with ordinary checks (it
+does not go back to chunks), which either panics at
 the right operation or produces the exact result. This is why a reduction
 whose every prefix must be checked (`[MAX, 1, -5]` panics although the total
 fits) still behaves exactly as before.
@@ -72,7 +82,12 @@ All of these must hold, otherwise the loop keeps immediate checks
   (or `<=`, or `>`/`>=` with `i = i - c`), `c` a positive constant, exactly
   one update of `i` at the top level of the body, and a bound made of
   constants, locals the loop does not assign, container lengths, and
-  arithmetic on those.
+  arithmetic on those. A step the checker has proved cannot overflow counts
+  as well.
+- Every element index is the counter, or the counter plus or minus a
+  constant. Anything else is a gather, a scatter or a dependence between
+  iterations; such a loop stays scalar, where a deferred check costs more
+  than the branch it replaces (measured: up to 48% slower).
 - Its body contains only scalar locals, arithmetic, comparisons, `if`,
   `break`, integer and float builtins, and bounds-checked `Slice`/`Vec`/`Bytes`
   length and element reads, plus `Slice.set` through an exclusive view. No
@@ -129,7 +144,8 @@ faster with ordinary checks, so it keeps them.
 Per iteration, exact mode adds three bit operations to an add or subtract;
 certified mode adds two operations and an OR per tracked operand, and nothing
 per arithmetic operation. A failed certificate costs one extra pass over the
-loop. Operands near `2^62`, or long reductions of large values, take that path
+chunk, and the rest of that loop then runs with ordinary checks; so does a
+loop whose upward counter starts a chunk negative. Operands near `2^62`, or long reductions of large values, take that path
 every time and are slower than plain checking; values whose magnitude times
 the trip count stays far below `2^63` never do.
 

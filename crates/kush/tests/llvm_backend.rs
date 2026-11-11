@@ -432,3 +432,82 @@ fn main() -> i64 ! {io, alloc, panic} {
         );
     }
 }
+
+/// Which loops are deferred, as the planner reports it.
+#[test]
+fn the_planner_defers_counted_loops_whose_indices_follow_the_counter() {
+    if !clang_available() {
+        return;
+    }
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let root = scratch.path();
+    fs::write(
+        root.join("main.kush"),
+        "fn plain(n: i64, k: i64) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < n { acc = acc + i * k; i = i + 1; }
+    acc
+}
+fn down(n: i64, k: i64) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = n;
+    while i > 0 { acc = acc + i * k; i = i - 1; }
+    acc
+}
+fn stencil(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 1;
+    while i < Slice.len(values) { acc = acc + Slice.get(values, i) - Slice.get(values, i - 1); i = i + 1; }
+    acc
+}
+fn gather(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) { acc = acc + Slice.get(values, i & 7); i = i + 1; }
+    acc
+}
+fn main() -> i64 ! {alloc, panic} {
+    let mut values: Vec<i64> = Vec.with_capacity(8);
+    let mut i = 0;
+    while i < 8 { values = Vec.push(values, i); i = i + 1; }
+    plain(9, 2) + down(9, 2) + stencil(&values[..]) + gather(&values[..]) - 197
+}
+",
+    )
+    .unwrap();
+    let built = kush()
+        .current_dir(root)
+        .args([
+            "build",
+            "main.kush",
+            "-o",
+            "program",
+            "--release",
+            "--backend",
+            "llvm",
+        ])
+        .env("KUSH_TRACE_DEFERRED", "1")
+        .output()
+        .unwrap();
+    let trace = String::from_utf8_lossy(&built.stderr);
+    assert!(built.status.success(), "{trace}");
+    for deferred in ["plain", "down", "stencil"] {
+        assert!(
+            !trace.contains(&format!("loop in {deferred} keeps")),
+            "{trace}"
+        );
+    }
+    assert!(
+        trace.contains(
+            "loop in gather keeps immediate checks: an index that does not follow the counter"
+        ),
+        "{trace}"
+    );
+    assert!(
+        Command::new(root.join("program"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}

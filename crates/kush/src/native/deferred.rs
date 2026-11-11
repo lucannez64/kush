@@ -144,6 +144,8 @@ struct Analysis<'a> {
     candidates: Vec<&'a Expr>,
     /// Expressions whose value must equal the checked execution's value.
     exact: Vec<&'a Expr>,
+    /// Element indices of the loop's reads and writes.
+    indices: Vec<&'a Expr>,
     /// `local = <checked + or ->` statements.
     updates: Vec<(usize, &'a Expr)>,
     /// Slice locals the loop stores through, and container locals it reads.
@@ -296,6 +298,7 @@ impl<'a> Analysis<'a> {
             // speculative because a panic discards it.
             if receiver && Some(index) != value {
                 self.exact.push(argument);
+                self.indices.push(argument);
             }
         }
         Ok(())
@@ -327,15 +330,27 @@ fn induction(condition: &Expr, body: &ex::Block) -> Option<usize> {
         Kind::Gt | Kind::Ge => Kind::Minus,
         _ => return None,
     };
+    // The step is written `i + c`, but when the checker proves it cannot
+    // overflow (as it does under `i < bound`) it arrives as an unchecked
+    // operation instead.
+    let unchecked = match step {
+        Kind::Plus => crate::int::ArithOp::Add,
+        _ => crate::int::ArithOp::Sub,
+    };
     let is_step = |expr: &Expr| {
         let ExprKind::Assign(target, value) = &expr.kind else {
             return false;
         };
-        let ExprKind::Binary(op, base, amount) = &value.kind else {
-            return false;
+        let (base, amount) = match &value.kind {
+            ExprKind::Binary(op, base, amount) if *op == step => (&**base, &**amount),
+            ExprKind::Call(Target::Int(crate::int::IntOp::Unchecked(op), _, _), arguments)
+                if *op == unchecked && arguments.len() == 2 =>
+            {
+                (&arguments[0], &arguments[1])
+            }
+            _ => return false,
         };
         *target == slot
-            && *op == step
             && local_read(base) == Some(slot)
             && matches!(amount.kind, ExprKind::Constant(c) if c > 0)
     };
@@ -346,6 +361,26 @@ fn induction(condition: &Expr, body: &ex::Block) -> Option<usize> {
         .count()
         + usize::from(body.tail.as_deref().is_some_and(is_step));
     (top_level == 1).then_some(slot)
+}
+
+/// `counter`, or `counter` plus or minus a constant.
+fn follows_counter(index: &Expr, counter: usize) -> bool {
+    if local_read(index) == Some(counter) {
+        return true;
+    }
+    let (base, offset) = match &index.kind {
+        ExprKind::Binary(Kind::Plus | Kind::Minus, base, offset) => (&**base, &**offset),
+        ExprKind::Call(
+            Target::Int(
+                crate::int::IntOp::Unchecked(crate::int::ArithOp::Add | crate::int::ArithOp::Sub),
+                _,
+                _,
+            ),
+            arguments,
+        ) if arguments.len() == 2 => (&arguments[0], &arguments[1]),
+        _ => return false,
+    };
+    local_read(base) == Some(counter) && matches!(offset.kind, ExprKind::Constant(_))
 }
 
 /// A loop bound made of constants, locals, container lengths and arithmetic
@@ -394,6 +429,7 @@ pub(super) fn plan(
         reads: BTreeMap::new(),
         candidates: Vec::new(),
         exact: Vec::new(),
+        indices: Vec::new(),
         updates: Vec::new(),
         stored: BTreeSet::new(),
         loaded: BTreeSet::new(),
@@ -419,6 +455,18 @@ pub(super) fn plan(
             .any(|slot| reads_local(bound, *slot))
     {
         trace("its bound or counter changes inside the loop");
+        return None;
+    }
+    // Deferring pays only where the loop then vectorizes; in a scalar loop
+    // a sticky flag costs more than the branch it replaces. An element
+    // reached by anything but the counter (plus or minus a constant) is a
+    // gather, a scatter or a dependence between iterations.
+    if !analysis
+        .indices
+        .iter()
+        .all(|index| follows_counter(index, counter))
+    {
+        trace("an index that does not follow the counter");
         return None;
     }
     analysis.exact.push(condition);
