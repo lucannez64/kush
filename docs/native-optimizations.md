@@ -153,6 +153,9 @@ Native builds cache the compiled C runtime under
 `~/.cache/kush/native-runtime-v1`). `KUSH_RUNTIME_CACHE=/path/to/private/cache`
 selects another directory; setting `KUSH_NO_RUNTIME_CACHE` disables it.
 The cache is shared across source programs and optimization modes.
+A hit records the use, and each new entry prunes the cache to the 96 files
+and 256 MiB used most recently, so old toolchains and runtime revisions do
+not accumulate.
 
 A key includes runtime contents, C flags, task/statistics defines and fusion
 count, resolved compiler identity/version/target, working directory, a hash of

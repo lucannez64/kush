@@ -507,7 +507,9 @@ impl LlvmModule {
                 );
             }
         }
-        out.push_str("attributes #0 = { nounwind }\n");
+        // Probe every page of a large frame so it cannot step over the
+        // guard below the stack (see the runtime's fault handler).
+        out.push_str("attributes #0 = { nounwind \"probe-stack\"=\"inline-asm\" }\n");
         out.push_str(MODULE_METADATA);
         Ok(out)
     }

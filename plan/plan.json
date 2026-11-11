@@ -4592,6 +4592,11 @@
           "time": "2026-11-11 14:48:20",
           "who": "claude",
           "text": "Independent review: narrow foreign arguments are now extended for the callee (both backends), runtime cache hits with a bare output name, llvm-link is not taken from beside a compiler wrapper and its failure falls back, flag order no longer matters, one phi entry per switch edge, constants collected before use, handler_restore no longer inlinable. 1,708 tests pass on Cranelift, llvm and llvm-release."
+        },
+        {
+          "time": "2026-11-11 21:11:25",
+          "who": "claude",
+          "text": "Stack exhaustion is a panic on both backends and all stacks (fault handler on a signal stack; stack probes in Cranelift and LLVM code); runtime cache pruned to the 96 files / 256 MiB used most recently; dot loop confirmed instruction-identical to checked Rust. 1,711 tests pass on Cranelift, llvm and llvm-release."
         }
       ]
     },

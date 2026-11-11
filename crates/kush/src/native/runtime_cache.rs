@@ -236,7 +236,53 @@ fn read_entry(path: &Path, key: &[u8]) -> Option<Vec<u8>> {
     if checksum != digest(object).to_le_bytes() || object.is_empty() {
         return None;
     }
+    // Record the use, so pruning removes what has not been needed longest.
+    if let Ok(file) = fs::OpenOptions::new().append(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
     Some(object.to_vec())
+}
+
+/// Most entries (artifacts and remembered include graphs) kept.
+const MAX_ENTRIES: usize = 96;
+/// Most bytes kept.
+const MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Remove the entries used longest ago until the cache is within its limits.
+/// Each toolchain, flag set and runtime revision adds a few entries and
+/// nothing else ever removes them. Only regular files this cache names are
+/// touched; `keep` is the entry just written. Best effort: a concurrent
+/// build that loses an entry compiles cold.
+fn prune(root: &Path, keep: &Path) {
+    let Ok(directory) = fs::read_dir(root) else {
+        return;
+    };
+    let mut entries = Vec::new();
+    for item in directory.flatten() {
+        let path = item.path();
+        let named = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension == "cache" || extension == "graph");
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !named || !metadata.is_file() {
+            continue;
+        }
+        let used = metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        entries.push((used, metadata.len(), path));
+    }
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+    let mut bytes = 0u64;
+    for (index, (_, length, path)) in entries.iter().enumerate() {
+        bytes = bytes.saturating_add(*length);
+        if (index >= MAX_ENTRIES || bytes > MAX_BYTES) && path != keep {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 /// Publish one cache entry atomically. A private staging directory makes this
@@ -260,6 +306,7 @@ fn publish(entry: &Path, key: &[u8], bytes: &[u8]) {
         file.sync_all()?;
         fs::rename(temporary, entry)
     })();
+    prune(root, entry);
 }
 
 fn run(command: &mut Command, compiler: &Path) -> Result<()> {
@@ -438,4 +485,36 @@ pub(super) fn compile_llvm(
         object,
         inline,
     })
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    #[test]
+    fn pruning_keeps_the_most_recently_used_entries() {
+        let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+        let root = scratch.path();
+        let now = std::time::SystemTime::now();
+        for index in 0..MAX_ENTRIES + 8 {
+            let path = root.join(format!("{index:016x}.cache"));
+            fs::write(&path, b"entry").unwrap();
+            // Larger index, used longer ago.
+            let used = now - std::time::Duration::from_secs(60 * (index as u64 + 1));
+            fs::File::options()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(used)
+                .unwrap();
+        }
+        fs::write(root.join("notes.txt"), b"not ours").unwrap();
+        let oldest = root.join(format!("{:016x}.cache", MAX_ENTRIES + 7));
+        prune(root, &oldest);
+        let left = |index: usize| root.join(format!("{index:016x}.cache")).exists();
+        assert!(left(0) && left(MAX_ENTRIES - 1));
+        assert!(!left(MAX_ENTRIES) && !left(MAX_ENTRIES + 6));
+        assert!(oldest.exists());
+        assert!(root.join("notes.txt").exists());
+    }
 }

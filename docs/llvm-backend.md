@@ -160,10 +160,17 @@ values are handled by [deferred overflow](deferred-overflow.md).
 
 ### Differences from Cranelift
 
-Unbounded recursion ends differently: Cranelift code overflows the stack and
-dies with SIGSEGV, while LLVM may turn a self-call into a loop that never
-returns. Neither is a defined Kush outcome; a stack-depth check is future
-work for both backends.
+Running out of stack is a panic (`panic: stack exhausted`, then abort) on
+both backends and on every stack, the process's and each task's. Every stack
+ends in an unmapped guard, both backends probe each page of a frame larger
+than a page so no frame can step over it, and the runtime handles the fault
+on a separate signal stack. A fault anywhere else keeps its default action.
+
+How deep a recursion can go is not the same on both: frames differ in size,
+and LLVM may run a tail call, or a recursion with an accumulator, in constant
+stack. A recursion that exhausts the stack under Cranelift can therefore
+finish under LLVM, and one that never ends can loop instead of panicking.
+As in Rust, that depends on the optimizer and is not promised.
 
 ## Validation
 
@@ -209,9 +216,13 @@ Reading these:
 
 - LLVM is 2 to 4.5 times faster than Cranelift `--release` here.
 - With checks kept, Kush beats Rust built with overflow checks on the sum
-  and the scale, and is 8% behind it on the dot product, whose loop keeps
-  immediate checks on this target and whose code is the same in both LLVM
-  columns apart from layout. Against unchecked Rust it is between 7% and
+  and the scale, and equals it on the dot product: that loop keeps immediate
+  checks on this target, and its ten instructions are the same, one for
+  one, in both LLVM columns and in checked Rust. The spread between those
+  three dot numbers is this machine's run-to-run spread (pinned runs of one
+  binary vary by as much). Sticky flags and a magnitude certificate were
+  both measured for this loop and are slower than branches without a
+  64-bit vector multiply. Against unchecked Rust it is between 7% and
   2× slower. The sum is the worst case: its certificate costs four SSE2
   instructions per vector next to Rust's one add.
 - These numbers are with loops checked in chunks of 65,536 iterations (see

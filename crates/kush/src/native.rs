@@ -89,6 +89,51 @@ _Noreturn void kush_panic(void) {
     kush_best_effort_write(2, message, sizeof(message) - 1);
     abort();
 }
+/* Stack exhaustion is a panic, not a bare SIGSEGV. Every stack (the process
+   stack and each task stack) ends in an unmapped guard, and generated code
+   probes each page of a large frame, so running out always faults just
+   below the stack pointer. The handler runs on its own stack, recognizes
+   that fault by its distance from the interrupted stack pointer, and
+   reports it. Any other fault is left to the default action. */
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+#include <ucontext.h>
+#define KUSH_STACK_GUARD 1
+static char kush_signal_stack[1 << 16];
+static void kush_fault(int number, siginfo_t *info, void *raw) {
+    ucontext_t *context = (ucontext_t *)raw;
+#if defined(__x86_64__)
+    uintptr_t sp = (uintptr_t)context->uc_mcontext.gregs[REG_RSP];
+#else
+    uintptr_t sp = (uintptr_t)context->uc_mcontext.sp;
+#endif
+    uintptr_t address = (uintptr_t)info->si_addr;
+    /* A probe touches at most one page below the stack pointer; a red zone
+       or a call's return address lies just above or at it. */
+    uintptr_t slack = UINT64_C(1) << 16;
+    if (address + slack >= sp && address <= sp + slack) {
+        static const char message[] = "panic: stack exhausted\n";
+        kush_best_effort_write(2, message, sizeof(message) - 1);
+        abort();
+    }
+    signal(number, SIG_DFL);
+}
+static void kush_stack_guard_init(void) {
+    stack_t stack;
+    struct sigaction action;
+    memset(&stack, 0, sizeof(stack));
+    stack.ss_sp = kush_signal_stack;
+    stack.ss_size = sizeof(kush_signal_stack);
+    if (sigaltstack(&stack, NULL) != 0) kush_panic();
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = kush_fault;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    if (sigemptyset(&action.sa_mask) != 0) kush_panic();
+    if (sigaction(SIGSEGV, &action, NULL) != 0) kush_panic();
+    if (sigaction(SIGBUS, &action, NULL) != 0) kush_panic();
+}
+#else
+static void kush_stack_guard_init(void) {}
+#endif
 int64_t kush_print_i64(int64_t value) {
     char buffer[32];
     char *end = buffer + sizeof(buffer), *p = end;
@@ -2527,6 +2572,7 @@ int main(int argc, char **argv) {
     kush_host_init(argc, argv);
     /* Broken pipes become recoverable EPIPE results instead of process signals. */
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) kush_panic();
+    kush_stack_guard_init();
     /* Formatting and parse-back must never depend on the host locale. */
     if (setlocale(LC_NUMERIC, "C") == NULL) kush_panic();
 #ifdef KUSH_HAS_TASKS
@@ -3316,6 +3362,10 @@ fn lower(
     let entry = program.entry()?;
     let mut flags = settings::builder();
     flags.set("is_pic", "true").map_err(error)?;
+    // A frame larger than a page must touch every page on the way down, or
+    // it could step over the guard below the stack.
+    flags.set("enable_probestack", "true").map_err(error)?;
+    flags.set("probestack_strategy", "inline").map_err(error)?;
     flags
         .set(
             "opt_level",
