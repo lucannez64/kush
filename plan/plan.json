@@ -4780,9 +4780,9 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "Release builds are 2-3.5x slower than rustc -O on benchmarks/build-scale, from LLVM's work on deferred loops. Ideas: defer only where it pays, split the module for parallel codegen. Also: MAX_FUNCTIONS = 256 and the 100,000-token file limit cap programs at about 2,300 and 12,000 lines.",
-      "commit": null,
+      "commit": "3b6c529",
       "log": [
         {
           "time": "2026-11-12 04:22:37",
@@ -4798,6 +4798,11 @@
           "time": "2026-11-12 06:33:16",
           "who": "agent",
           "text": "Parallel LLVM partitions (call-graph grouping, available_externally copies of small shared functions), runtime cache keyed on what the compiler reads, leaner IR (trivial phis forwarded, i1 conditions, one range check per slice, constant slice layout). Release now 1.1-2x rustc -O (was 1.8-3.4x); 180 units 13.1 -> 4.5 s. Small programs stay whole: splitting cost hot kernels up to 25% run time. The 100,000-token file limit remains."
+        },
+        {
+          "time": "2026-11-12 06:33:16",
+          "who": "agent",
+          "text": "done 3b6c529"
         }
       ]
     },
