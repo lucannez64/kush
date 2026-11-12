@@ -4960,10 +4960,16 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "effect Op: P -> R ! {io}; reusable frames for capturing handlers with copyable captures; scoped reference captures; Game Boy front ends as handlers; linear Window/Audio",
-      "commit": null,
-      "log": []
+      "commit": "aad49d9",
+      "log": [
+        {
+          "time": "2026-11-12 22:58:55",
+          "who": "agent",
+          "text": "done aad49d9"
+        }
+      ]
     }
   ]
 }
