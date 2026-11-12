@@ -39,7 +39,7 @@ fn colour(out: Bytes, ground: i64, shade: u8) -> Bytes ! {alloc, panic} {
 }
 
 /// Append the cells that differ from `shown`, and record them there.
-fn draw(screen: &Bytes, shown: &mut Vec<u8>, out: Bytes) -> Bytes ! {alloc, panic} {
+fn draw(screen: &Vec<u8>, shown: &mut Vec<u8>, out: Bytes) -> Bytes ! {alloc, panic} {
     let mut o = out;
     let width = machine.SCREEN_WIDTH;
     let mut foreground: u8 = 255;
@@ -52,8 +52,8 @@ fn draw(screen: &Bytes, shown: &mut Vec<u8>, out: Bytes) -> Bytes ! {alloc, pani
         while x < width {
             let top_at = row * 2 * width + x;
             let bottom_at = top_at + width;
-            let top: u8 = Int.truncate(screen[top_at]);
-            let bottom: u8 = Int.truncate(screen[bottom_at]);
+            let top = screen[top_at];
+            let bottom = screen[bottom_at];
             if top != shown[top_at] || bottom != shown[bottom_at] {
                 shown[top_at] = top;
                 shown[bottom_at] = bottom;
@@ -123,10 +123,10 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes) -> Result<Unit, i64> !
         let held = buttons();
         if (held & QUIT) != 0 { resume(-1) } else { resume(held & 0xFF) }
     } {
-        handle Present: Bytes -> Bool with fn(
-            screen: Bytes,
-            resume: linear once fn(Bool) -> Bool ! {},
-        ) -> Bool ! {io, alloc, panic} {
+        handle Present: Vec<u8> -> (Vec<u8>, Bool) with fn(
+            screen: Vec<u8>,
+            resume: linear once fn((Vec<u8>, Bool)) -> (Vec<u8>, Bool) ! {},
+        ) -> (Vec<u8>, Bool) ! {io, alloc, panic} {
             let mut out = draw(&screen, shown, Bytes.with_capacity(65536));
             frames = frames + 1;
             let now = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => second };
@@ -136,13 +136,13 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes) -> Result<Unit, i64> !
                 second = now;
             }
             let _ = IO.write(IO.stdout(), &out);
-            resume(true)
+            resume((screen, true))
         } {
             // No sound in the terminal: the clock paces the game.
-            handle Play: Vec<i64> -> Unit with fn(
+            handle Play: Vec<i64> -> Vec<i64> with fn(
                 samples: Vec<i64>,
-                resume: linear once fn(Unit) -> Unit ! {},
-            ) -> Unit ! {io, panic} {
+                resume: linear once fn(Vec<i64>) -> Vec<i64> ! {},
+            ) -> Vec<i64> ! {io, panic} {
                 next = next + FRAME_NS;
                 let now = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => next };
                 if next > now {
@@ -151,7 +151,7 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes) -> Result<Unit, i64> !
                     // More than 100 ms behind: drop the debt rather than race.
                     next = now;
                 }
-                resume(())
+                resume(samples)
             } {
                 emulator.run(m)
             }

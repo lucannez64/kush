@@ -102,9 +102,9 @@ Some choices that show the language:
   `emulator.run(m)`, that performs three declared operations per frame:
 
   ```kush
-  pub effect Buttons: Unit -> i64 ! {io, alloc, panic};   // held buttons, -1 stops
-  pub effect Present: Bytes -> Bool ! {io, alloc, panic}; // the frame's shades
-  pub effect Play: Vec<i64> -> Unit ! {io, alloc, panic}; // the frame's sound
+  pub effect Buttons: Unit -> i64 ! {io, alloc, panic};                // held buttons, -1 stops
+  pub effect Present: Vec<u8> -> (Vec<u8>, Bool) ! {io, alloc, panic}; // a frame, lent and given back
+  pub effect Play: Vec<i64> -> Vec<i64> ! {io, alloc, panic};          // the frame's sound, lent and given back
   ```
 
   The window, the terminal, the headless runner and a test are each a few
@@ -113,7 +113,10 @@ Some choices that show the language:
   `pad: &mut Controls`) and counters, and the window installs `Play` outside
   its other handlers, once paced by the audio device and once by a clock, so
   the same session code runs with or without sound. The operation lists the
-  effects its handlers may have, so `run`'s row says it can do I/O.
+  effects its handlers may have, so `run`'s row says it can do I/O. Nothing
+  is copied per frame: the core keeps a second screen and sample buffer,
+  swaps the finished ones out with `m.screen.replace(spare)`, and the
+  handlers give them back.
 - **Memory accesses are proved in bounds.** The memories are
   length-refined fields (`vram: Vec<u8> where len >= 0x2000`), so a bus read
   after `if address < 0xA000 { .. }` is a plain load. Helpers state ranges

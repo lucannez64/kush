@@ -3,6 +3,7 @@ module gameboy.emulator;
 use std.result.Result;
 use std.text;
 use gameboy.apu;
+use gameboy.cartridge;
 use gameboy.cartridge.Mapper;
 use gameboy.cpu;
 use gameboy.machine;
@@ -34,46 +35,28 @@ pub fn run_frame<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc, panic} {
 /// The buttons held for the next frame (bits as `machine.press` takes them),
 /// or -1 to stop.
 pub effect Buttons: Unit -> i64 ! {io, alloc, panic};
-/// A finished frame: one shade (0-3) per pixel, row-major. False stops.
-pub effect Present: Bytes -> Bool ! {io, alloc, panic};
+/// A finished frame, one shade (0-3) per pixel, row-major. The handler gives
+/// the buffer back, with false to stop.
+pub effect Present: Vec<u8> -> (Vec<u8>, Bool) ! {io, alloc, panic};
 /// The frame's sound: interleaved left/right samples at `apu.SAMPLE_RATE`.
-pub effect Play: Vec<i64> -> Unit ! {io, alloc, panic};
+/// The handler gives the buffer back.
+pub effect Play: Vec<i64> -> Vec<i64> ! {io, alloc, panic};
 
-/// Run frames until the front end says stop.
+/// Run frames until the front end says stop. Nothing is copied: the core
+/// keeps a second screen and sample buffer, swaps the finished ones out with
+/// `replace`, lends them to the front end and swaps them back.
 pub fn run<M: Mapper>(m: &mut Machine<M>) -> Unit ! {Buttons, Present, Play, io, alloc, panic} {
+    let mut spare = cartridge.zeroed(machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT);
+    let mut sound: Vec<i64> = Vec.with_capacity(2048);
     let mut held = perform Buttons(());
     while held >= 0 {
         machine.press(m, Int.truncate(held & 0xFF));
         run_frame(m);
-        if !perform Present(shades(m)) { return; }
-        perform Play(take_samples(m));
-        held = perform Buttons(());
+        let (screen, more) = perform Present(m.screen.replace(spare));
+        spare = m.screen.replace(screen);
+        sound = perform Play(m.apu.samples.replace(sound)).clear();
+        held = if more { perform Buttons(()) } else { -1 };
     }
-}
-
-/// The screen, one shade per pixel.
-pub fn shades<M>(m: &Machine<M>) -> Bytes ! {alloc, panic} {
-    let size = machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT;
-    let mut out = Bytes.with_capacity(size);
-    let mut i = 0;
-    while i < size {
-        out = out.push(Int.convert(m.screen[i]));
-        i = i + 1;
-    }
-    out
-}
-
-/// The samples made since last taken; the machine starts a new batch.
-fn take_samples<M>(m: &mut Machine<M>) -> Vec<i64> ! {alloc, panic} {
-    let mut fresh: Vec<i64> = Vec.with_capacity(2048);
-    let count = m.apu.samples.len();
-    let mut i = 0;
-    while i < count {
-        fresh = fresh.push(m.apu.samples[i]);
-        i = i + 1;
-    }
-    m.apu.samples.clear();
-    fresh
 }
 
 /// The DMG's four greens, lightest first, as RGB.

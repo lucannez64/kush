@@ -3604,6 +3604,22 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                     ),
                 }))
             }
+            VecOp::ReplaceBorrowed => {
+                // The place keeps its identity and takes the new vector's
+                // contents; the old contents move to a fresh identity. Both
+                // allocations stay live, so no allocation is counted.
+                let Value::Borrowed(id) = args[0] else {
+                    unreachable!()
+                };
+                let Value::Owned(incoming) = args[1] else {
+                    return Err(failure("internal ownership error: replacement vector"));
+                };
+                let (Some(old), Some(new)) = (self.heap.take(id), self.heap.take(incoming)) else {
+                    return Err(failure("internal ownership error: borrowed vector"));
+                };
+                self.heap.insert(id, new);
+                Ok(Value::Owned(self.heap.allocate(old)))
+            }
             VecOp::ClearBorrowed => {
                 let Value::Borrowed(id) = args[0] else {
                     unreachable!()

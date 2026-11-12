@@ -135,7 +135,8 @@ The promise is kept three ways:
   length (a `panic` if it is short), so the record literal needs `panic`.
 - **Nothing can shorten the field.** `place.clear()` is rejected, and so is
   `&mut place`, since the borrower could shorten it. Elements are written with
-  `place[i] = value`; `push`, `set` and `reserve` stay allowed.
+  `place[i] = value`; `push`, `set` and `reserve` stay allowed, and
+  `place.replace(other)` swaps in another vector after checking its length.
 - **Accesses use it.** `place[i]` asks the prover for `0 <= i && i < N` from
   the facts at that point: branch conditions, early returns, masks
   (`x & 0x1FFF` is at most `0x1FFF`), the range of a narrower integer
@@ -158,6 +159,15 @@ proof:
 - a call argument without a linear form (an element read) is still a value
   of its parameter type, so `ensures { result == value }` on
   `fn wide(value: u8) -> i64` gives the caller `0 <= result <= 255`.
+
+## Swapping a vector out of a place
+
+`place.replace(new)` (or `Vec.replace(&mut v, new)`) stores `new` in a `Vec`
+place and returns the vector it held. Only the two handles move; no element
+is copied. It works on fields through references, where moving the field out
+is not allowed, and on length-refined fields, where `new`'s length is checked
+first. The Game Boy core uses it to lend its finished screen and sound to the
+front end without copying them.
 
 `KUSH_PROOF_REPORT=1 kush check` prints how many element accesses were proved
 and how many keep a check; `KUSH_PROOF_REPORT=verbose` also lists every access

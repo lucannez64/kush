@@ -218,3 +218,38 @@ fn captured_references_are_scoped_borrows() {
         "",
     );
 }
+
+#[test]
+fn buffers_travel_through_an_operation_and_back() {
+    // The caller lends a vector to the handler and gets it back each time;
+    // an owned operation result is an ordinary affine value, so it can be
+    // carried around a loop.
+    agrees(
+        r#"
+        effect Fill: Vec<i64> -> Vec<i64> ! {alloc, panic};
+        fn core() -> i64 ! {Fill, alloc, panic} {
+            let mut buffer: Vec<i64> = Vec.with_capacity(4);
+            let mut turn = 0;
+            let mut sum = 0;
+            while turn < 3 {
+                buffer = perform Fill(buffer);
+                sum = sum + Vec.len(&buffer);
+                buffer = buffer.clear();
+                turn = turn + 1;
+            }
+            sum
+        }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut calls = 0;
+            handle Fill: Vec<i64> -> Vec<i64> with fn(
+                v: Vec<i64>,
+                resume: linear once fn(Vec<i64>) -> Vec<i64> ! {},
+            ) -> Vec<i64> ! {alloc, panic} {
+                calls = calls + 1;
+                resume(v.push(calls).push(calls))
+            } { core() }
+        }"#,
+        6,
+        "",
+    );
+}

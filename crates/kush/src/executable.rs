@@ -878,6 +878,9 @@ pub(crate) enum VecOp {
     SetBorrowed,
     ClearBorrowed,
     ReserveBorrowed,
+    /// `Vec.replace(&mut place, new)`: store `new` in the place and return
+    /// the vector it held, moving both handles (no element is copied).
+    ReplaceBorrowed,
     /// `SetBorrowed` of a copyable element whose index was proved in bounds:
     /// an inline store with no check.
     SetProved,
@@ -5521,6 +5524,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             pending_capability: None,
             expanding_constants: Vec::new(),
             writing_bounded_field: false,
+            replace_min_length: None,
             abort_labels: 0,
             capability_slots: BTreeSet::new(),
             capability_passable: BTreeSet::new(),
@@ -12489,6 +12493,9 @@ struct Checker<'a, 't> {
     /// Set while an element write borrows a `where len >= N` field: the only
     /// exclusive borrow of such a field that cannot shorten it.
     writing_bounded_field: bool,
+    /// Set while checking `place.replace(v)` on a length-refined field: the
+    /// length `v` must be checked to have.
+    replace_min_length: Option<i64>,
     /// Next `AbortScope` label of this checker (unique per function body).
     abort_labels: usize,
     /// Locals holding a second-class capability (EFF-CAP-LEXICAL).
@@ -13031,7 +13038,7 @@ impl Checker<'_, '_> {
             });
         // A mutating Vec builtin on a field (`m.log.push(x)`) updates the
         // field in place through `&mut m.log`, instead of consuming it.
-        let mutated_field = matches!(name, "push" | "set" | "clear" | "reserve")
+        let mutated_field = matches!(name, "push" | "set" | "clear" | "reserve" | "replace")
             && matches!(receiver.kind, ast::ExprKind::Field { .. })
             && self.is_place(receiver)
             && self
@@ -13047,8 +13054,12 @@ impl Checker<'_, '_> {
                         "this field keeps 'len >= N'; clearing it would break that",
                     ));
                 }
-                // push, set and reserve cannot shorten the vector.
+                // push, set and reserve cannot shorten the vector; replace
+                // checks the incoming vector's length.
                 self.writing_bounded_field = true;
+                if name == "replace" {
+                    self.replace_min_length = self.place_min_length(receiver);
+                }
             }
             let first = self.container_receiver(receiver, true);
             self.writing_bounded_field = false;
@@ -13234,7 +13245,7 @@ impl Checker<'_, '_> {
         if matches!(base, Some(Type::Vec(_))) {
             let (method, borrow) = match name {
                 "len" | "get" | "at" => (name, true),
-                "clear" | "push" | "reserve" | "try_reserve" | "set" => (name, false),
+                "clear" | "push" | "reserve" | "try_reserve" | "set" | "replace" => (name, false),
                 _ => return Err(unsupported(self)),
             };
             let first = if borrow {
@@ -22644,7 +22655,7 @@ impl Checker<'_, '_> {
                     if *mutable && !c.writing_bounded_field && c.place_min_length(operand).is_some() {
                         return Err(Diagnostic::new(
                             span,
-                            "this field keeps 'len >= N', so it cannot be borrowed with '&mut'; write elements with place[i] = value or append with place.push(value)",
+                            "this field keeps 'len >= N', so it cannot be borrowed with '&mut'; write elements with place[i] = value, append with place.push(value), or swap the vector with place.replace(other)",
                         ));
                     }
                     // Explicit reborrow: `&*p` narrows an existing reference
@@ -23389,7 +23400,18 @@ impl Checker<'_, '_> {
                                     span,
                                 );
                             }
-                            if Self::builtin_method(name) {
+                            // `replace` is a Vec method only on a Vec place
+                            // (or a `&mut Vec`): the name stays free for user
+                            // methods on other types.
+                            let vec_replace = name == "replace"
+                                && c.place_type(value).is_some_and(|ty| {
+                                    let ty = match ty {
+                                        Type::RefMut(pointer) => c.types.pointees[pointer],
+                                        ty => ty,
+                                    };
+                                    matches!(ty, Type::Vec(_))
+                                });
+                            if Self::builtin_method(name) || vec_replace {
                                 return c.method_call(
                                     value, name, explicit, arguments, expected, span,
                                 );
@@ -27926,6 +27948,61 @@ impl Checker<'_, '_> {
     /// A record literal whose fields declare `where len >= N`: each such
     /// vector is checked once here (a read of element N - 1), so every later
     /// access may rely on the length.
+    /// `value` (a `Vec<T>` of type `ty`), checked at run time to hold at
+    /// least `length` elements: the value of a length-refined field.
+    fn length_checked(&mut self, value: Expr, ty: Type, length: i64) -> Result<Expr> {
+        let Type::Vec(pointer) = ty else {
+            return Err(Diagnostic::new(
+                value.span,
+                "'where len >= N' applies to Vec<T> fields",
+            ));
+        };
+        if value.ty == Type::Never || length <= 0 {
+            return Ok(value);
+        }
+        let element = self.unannotate(self.types.pointees[pointer]);
+        self.require(PANIC, value.span)?;
+        let span = value.span;
+        let slot = self.fresh_local(span, ty)?;
+        let borrow = Expr {
+            kind: ExprKind::Borrow(slot),
+            ty: Type::Ref(self.types.pointer(ty)),
+            span,
+            resource: None,
+        };
+        let check = Expr {
+            kind: ExprKind::Call(
+                Target::Vec(VecOp::Get, element),
+                vec![
+                    borrow,
+                    Expr {
+                        kind: ExprKind::Constant(length - 1),
+                        ty: Type::I64,
+                        span,
+                        resource: None,
+                    },
+                ],
+            ),
+            ty: element,
+            span,
+            resource: None,
+        };
+        Ok(Expr {
+            kind: ExprKind::Block(Block {
+                statements: vec![Statement::Let(slot, value), Statement::Expr(check)],
+                tail: Some(Box::new(Expr {
+                    kind: ExprKind::Local(slot),
+                    ty,
+                    span,
+                    resource: None,
+                })),
+                ty,
+            }),
+            ty,
+            span,
+            resource: None,
+        })
+    }
     fn establish_field_lengths(&mut self, mut value: Expr) -> Result<Expr> {
         let target = match &mut value.kind {
             ExprKind::Coerce { value: inner, .. } => &mut **inner,
@@ -27953,16 +28030,12 @@ impl Checker<'_, '_> {
                     "the length in 'where len >= N' must be a compile-time integer",
                 ));
             };
-            let Type::Vec(pointer) = types[index] else {
+            if !matches!(types[index], Type::Vec(_)) {
                 return Err(Diagnostic::new(
                     fields[index].span,
                     "'where len >= N' applies to Vec<T> fields",
                 ));
-            };
-            if length <= 0 {
-                continue;
             }
-            let element = self.unannotate(self.types.pointees[pointer]);
             let field = std::mem::replace(
                 &mut fields[index],
                 Expr {
@@ -27972,51 +28045,7 @@ impl Checker<'_, '_> {
                     resource: None,
                 },
             );
-            if field.ty == Type::Never {
-                fields[index] = field;
-                continue;
-            }
-            self.require(PANIC, field.span)?;
-            let span = field.span;
-            let slot = self.fresh_local(span, types[index])?;
-            let borrow = Expr {
-                kind: ExprKind::Borrow(slot),
-                ty: Type::Ref(self.types.pointer(types[index])),
-                span,
-                resource: None,
-            };
-            let check = Expr {
-                kind: ExprKind::Call(
-                    Target::Vec(VecOp::Get, element),
-                    vec![
-                        borrow,
-                        Expr {
-                            kind: ExprKind::Constant(length - 1),
-                            ty: Type::I64,
-                            span,
-                            resource: None,
-                        },
-                    ],
-                ),
-                ty: element,
-                span,
-                resource: None,
-            };
-            fields[index] = Expr {
-                kind: ExprKind::Block(Block {
-                    statements: vec![Statement::Let(slot, field), Statement::Expr(check)],
-                    tail: Some(Box::new(Expr {
-                        kind: ExprKind::Local(slot),
-                        ty: types[index],
-                        span,
-                        resource: None,
-                    })),
-                    ty: types[index],
-                }),
-                ty: types[index],
-                span,
-                resource: None,
-            };
+            fields[index] = self.length_checked(field, types[index], length)?;
         }
         Ok(value)
     }
@@ -35435,7 +35464,8 @@ impl Checker<'_, '_> {
             | "Vec.map_in_place"
             | "Vec.map_in_place_grow"
             | "Vec.reserve"
-            | "Vec.try_reserve" => 2,
+            | "Vec.try_reserve"
+            | "Vec.replace" => 2,
             "Vec.map_chain_in_place" | "Vec.map_chain_in_place_grow" => 3,
             _ => 3,
         };
@@ -35588,7 +35618,7 @@ impl Checker<'_, '_> {
         };
         let arity = match name {
             "Vec.len" | "Vec.clear" => 0,
-            "Vec.get" | "Vec.push" | "Vec.reserve" | "Vec.try_reserve" => 1,
+            "Vec.get" | "Vec.push" | "Vec.reserve" | "Vec.try_reserve" | "Vec.replace" => 1,
             _ => 2,
         };
         if rest.len() != arity {
@@ -35616,9 +35646,10 @@ impl Checker<'_, '_> {
                 "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" | "Vec.try_reserve",
                 Type::Vec(_),
             ) => first.ty,
-            ("Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve", Type::RefMut(p))
-                if matches!(self.types.pointees[p], Type::Vec(_)) =>
-            {
+            (
+                "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" | "Vec.replace",
+                Type::RefMut(p),
+            ) if matches!(self.types.pointees[p], Type::Vec(_)) => {
                 borrowed_mutation = true;
                 self.types.pointees[p]
             }
@@ -35629,6 +35660,7 @@ impl Checker<'_, '_> {
                     "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" | "Vec.try_reserve" => {
                         "an owned Vec<T> (it is consumed and returned), or an exclusive '&mut Vec<T>' for an in-place update"
                     }
+                    "Vec.replace" => "an exclusive '&mut Vec<T>' whose vector is swapped out",
                     _ => "&Vec<T>",
                 };
                 return Err(Diagnostic::new(
@@ -35662,6 +35694,23 @@ impl Checker<'_, '_> {
             }
             values.push(value);
         }
+        if name == "Vec.replace" {
+            if crate::runtime_types::has_borrow(self.types, element) {
+                return Err(Diagnostic::new(
+                    span,
+                    "Vec.replace moves vectors of owned or copyable elements; this element holds a borrow",
+                ));
+            }
+            let value = self.expr_expected(&rest[0], Some(buffer))?;
+            self.expect(value.ty, buffer, value.span)?;
+            // Into a length-refined field: the new vector is checked to keep
+            // the promised length, once, like a record construction.
+            let value = match self.replace_min_length.take() {
+                Some(length) => self.length_checked(value, buffer, length)?,
+                None => value,
+            };
+            values.push(value);
+        }
         if matches!(name, "Vec.reserve" | "Vec.try_reserve") {
             let additional = self.expr_expected(&rest[0], Some(Type::I64))?;
             self.expect(additional.ty, Type::I64, additional.span)?;
@@ -35679,6 +35728,7 @@ impl Checker<'_, '_> {
         let (op, effects, ty) = match name {
             "Vec.len" => (VecOp::Len, 0, Type::I64),
             "Vec.clear" if borrowed_mutation => (VecOp::ClearBorrowed, 0, Type::Unit),
+            "Vec.replace" => (VecOp::ReplaceBorrowed, 0, buffer),
             "Vec.clear" => (VecOp::Clear, 0, buffer),
             "Vec.reserve" if borrowed_mutation => {
                 (VecOp::ReserveBorrowed, ALLOC | PANIC, Type::Unit)

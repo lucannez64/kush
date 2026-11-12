@@ -357,6 +357,7 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "Vec.map_in_place_grow",
     "Vec.map_chain_in_place_grow",
     "Vec.clear",
+    "Vec.replace",
     "Vec.reserve",
     "Vec.try_reserve",
     "Slice.len",

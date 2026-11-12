@@ -4652,7 +4652,16 @@ impl Checker<'_> {
             }
             ExprKind::HandlerPush { body, .. } => self.block_value_moves_linear(body),
             ExprKind::AbortScope { body, .. } => self.block_value_moves_linear(body),
-            ExprKind::DynamicPerform { .. } => self.moves(expr.ty),
+            // An operation result is an ordinary value: owned results are
+            // affine, and only a linear result type carries an obligation.
+            ExprKind::DynamicPerform { .. } => is_linear(
+                expr.ty,
+                self.linear,
+                self.unions,
+                self.pointees,
+                self.functions,
+                self.dyn_linear,
+            ),
             ExprKind::FnValue { captures, .. } => captures
                 .iter()
                 .any(|capture| self.value_moves_linear(capture)),
@@ -6088,6 +6097,7 @@ impl Checker<'_> {
                         crate::executable::VecOp::WithCapacity
                         | crate::executable::VecOp::Clear
                         | crate::executable::VecOp::ClearBorrowed
+                        | crate::executable::VecOp::ReplaceBorrowed
                         | crate::executable::VecOp::TryReserve { .. } => {}
                         crate::executable::VecOp::Push
                         | crate::executable::VecOp::Set

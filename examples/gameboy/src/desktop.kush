@@ -118,11 +118,11 @@ fn controls() -> Controls ! {} {
 }
 
 /// A frame's shades as RGB bytes for the window.
-fn pixels(screen: &Bytes) -> Bytes ! {alloc, panic} {
+fn pixels(screen: &Vec<u8>) -> Bytes ! {alloc, panic} {
     let mut out = Bytes.with_capacity(screen.len() * 3);
     let mut i = 0;
     while i < screen.len() {
-        let (r, g, b) = emulator.rgb(Int.truncate(screen[i]));
+        let (r, g, b) = emulator.rgb(screen[i]);
         out = out.push(r).push(g).push(b);
         i = i + 1;
     }
@@ -163,17 +163,17 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64) -> Result<
     let result = match audio.open(apu.SAMPLE_RATE, 2) {
         Result.Ok(device) => {
             let speaker = &device;
-            let result = handle Play: Vec<i64> -> Unit with fn(
+            let result = handle Play: Vec<i64> -> Vec<i64> with fn(
                 samples: Vec<i64>,
-                resume: linear once fn(Unit) -> Unit ! {},
-            ) -> Unit ! {io, alloc, panic} {
+                resume: linear once fn(Vec<i64>) -> Vec<i64> ! {},
+            ) -> Vec<i64> ! {io, alloc, panic} {
                 let _ = audio.queue(speaker, &encode(&samples));
                 // The audio clock paces the game: wait while more than
                 // the target is queued, so sound and picture stay together.
                 while audio.queued(speaker) > AUDIO_TARGET {
                     let _ = TIME.sleep_ms(1);
                 }
-                resume(())
+                resume(samples)
             } {
                 session(m, &win, title)
             };
@@ -183,10 +183,10 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64) -> Result<
         Result.Err(missing) => {
             // Silent: a 59.7 Hz clock paces the game.
             let mut next = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => 0 };
-            handle Play: Vec<i64> -> Unit with fn(
+            handle Play: Vec<i64> -> Vec<i64> with fn(
                 samples: Vec<i64>,
-                resume: linear once fn(Unit) -> Unit ! {},
-            ) -> Unit ! {io, panic} {
+                resume: linear once fn(Vec<i64>) -> Vec<i64> ! {},
+            ) -> Vec<i64> ! {io, panic} {
                 next = next + FRAME_NS;
                 let now = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => next };
                 if next > now {
@@ -195,7 +195,7 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64) -> Result<
                     // More than 100 ms behind: drop the debt rather than race.
                     next = now;
                 }
-                resume(())
+                resume(samples)
             } {
                 session(m, &win, title)
             }
@@ -224,10 +224,10 @@ fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes) -> Resu
         pad.tapped = 0;
         if pad.quit { resume(-1) } else { resume(buttons) }
     } {
-        handle Present: Bytes -> Bool with fn(
-            screen: Bytes,
-            resume: linear once fn(Bool) -> Bool ! {},
-        ) -> Bool ! {io, alloc, panic} {
+        handle Present: Vec<u8> -> (Vec<u8>, Bool) with fn(
+            screen: Vec<u8>,
+            resume: linear once fn((Vec<u8>, Bool)) -> (Vec<u8>, Bool) ! {},
+        ) -> (Vec<u8>, Bool) ! {io, alloc, panic} {
             match window.present(shown, &pixels(&screen)) {
                 Result.Ok(_) => {},
                 Result.Err(code) => { failure = code; },
@@ -239,7 +239,7 @@ fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes) -> Resu
                 frames = 0;
                 second = now;
             }
-            resume(failure == 0)
+            resume((screen, failure == 0))
         } {
             emulator.run(m)
         }

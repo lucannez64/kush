@@ -247,3 +247,57 @@ fn the_bound_cannot_be_broken() {
         "Vec",
     );
 }
+
+const SMALL: &str = r#"
+    const SIZE: i64 = 16;
+    struct Memory { tag: u8, ram: Vec<u8> where len >= SIZE, log: Vec<u8> }
+    fn zeroed(n: i64) -> Vec<u8> ! {alloc, panic} {
+        let mut v: Vec<u8> = Vec.with_capacity(n);
+        let mut i = 0;
+        while i < n { v = v.push(0); i = i + 1; }
+        v
+    }
+"#;
+
+#[test]
+fn replace_swaps_a_vector_out_of_a_place_without_copying() {
+    let source = format!(
+        "{SMALL}
+        fn swap_in(m: &mut Memory, other: Vec<u8>) -> Vec<u8> ! {{alloc, panic}} {{
+            m.ram.replace(other)
+        }}
+        fn main() -> i64 ! {{io, alloc, panic}} {{
+            let mut m = Memory {{ tag: 1, ram: zeroed(SIZE), log: Vec.new() }};
+            m.ram[5] = 42;
+            let mut log: Vec<u8> = Vec.new();
+            log = log.push(7);
+            let empty = m.log.replace(log);
+            let old = swap_in(&mut m, zeroed(SIZE + 1));
+            print_i64(Int.convert(old[5]));
+            print_i64(Vec.len(&m.ram));
+            print_i64(Vec.len(&empty));
+            let mut local: Vec<u8> = Vec.new();
+            let previous = Vec.replace(&mut local, old);
+            print_i64(Vec.len(&local) - SIZE);
+            print_i64(Vec.len(&previous));
+            Int.convert(m.log[0])
+        }}"
+    );
+    agrees(&source, 7, "42\n17\n0\n0\n0\n");
+    // Into a length-refined field, the incoming vector is checked.
+    let short = format!(
+        "{SMALL}
+        fn main() -> i64 ! {{io, alloc, panic}} {{
+            let mut m = Memory {{ tag: 1, ram: zeroed(SIZE), log: Vec.new() }};
+            print_i64(1);
+            let old = m.ram.replace(zeroed(SIZE - 1));
+            print_i64(2);
+            0
+        }}"
+    );
+    let program = check(&short).unwrap();
+    let mut output = Vec::new();
+    let error = program.evaluate(&mut output).unwrap_err();
+    assert!(error.message.contains("panic"), "{error:?}");
+    assert_eq!(String::from_utf8(output).unwrap(), "1\n");
+}

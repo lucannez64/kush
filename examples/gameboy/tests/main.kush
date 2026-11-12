@@ -198,19 +198,19 @@ fn the_core_runs_under_a_scripted_front_end() -> Unit ! {io, alloc, panic} {
         frame = frame + 1;
         if frame > 4 { resume(-1) } else if frame >= 3 { resume(0x10) } else { resume(0) }
     } {
-        handle Present: Bytes -> Bool with fn(
-            screen: Bytes,
-            resume: linear once fn(Bool) -> Bool ! {},
-        ) -> Bool ! {panic} {
+        handle Present: Vec<u8> -> (Vec<u8>, Bool) with fn(
+            screen: Vec<u8>,
+            resume: linear once fn((Vec<u8>, Bool)) -> (Vec<u8>, Bool) ! {},
+        ) -> (Vec<u8>, Bool) ! {panic} {
             if screen.len() == machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT { pictures = pictures + 1; }
-            resume(true)
+            resume((screen, true))
         } {
-            handle Play: Vec<i64> -> Unit with fn(
+            handle Play: Vec<i64> -> Vec<i64> with fn(
                 sound: Vec<i64>,
-                resume: linear once fn(Unit) -> Unit ! {},
-            ) -> Unit ! {panic} {
+                resume: linear once fn(Vec<i64>) -> Vec<i64> ! {},
+            ) -> Vec<i64> ! {panic} {
                 samples = samples + sound.len();
-                resume(())
+                resume(sound)
             } {
                 emulator.run(&mut m)
             }

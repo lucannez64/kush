@@ -82,14 +82,14 @@ fn headless<M: Mapper>(m: &mut Machine<M>, frames: i64, screenshot: &Bytes) -> i
         ) -> i64 ! {panic} {
             if left == 0 { resume(-1) } else { left = left - 1; resume(0) }
         } {
-            handle Present: Bytes -> Bool with fn(
-                screen: Bytes,
-                resume: linear once fn(Bool) -> Bool ! {},
-            ) -> Bool ! {} { resume(true) } {
-                handle Play: Vec<i64> -> Unit with fn(
+            handle Present: Vec<u8> -> (Vec<u8>, Bool) with fn(
+                screen: Vec<u8>,
+                resume: linear once fn((Vec<u8>, Bool)) -> (Vec<u8>, Bool) ! {},
+            ) -> (Vec<u8>, Bool) ! {} { resume((screen, true)) } {
+                handle Play: Vec<i64> -> Vec<i64> with fn(
                     samples: Vec<i64>,
-                    resume: linear once fn(Unit) -> Unit ! {},
-                ) -> Unit ! {} { resume(()) } {
+                    resume: linear once fn(Vec<i64>) -> Vec<i64> ! {},
+                ) -> Vec<i64> ! {} { resume(samples) } {
                     emulator.run(m)
                 }
             }

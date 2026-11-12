@@ -10545,6 +10545,17 @@ impl Generator<'_, '_> {
                 let owner = self.builder.ins().select(failed, values[0], grown);
                 vec![tag, owner]
             }
+            VecOp::ReplaceBorrowed => {
+                let reference = values[0];
+                let old = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), values[1], reference, 0);
+                vec![old]
+            }
             VecOp::ClearBorrowed => {
                 let reference = values[0];
                 let handle = self
