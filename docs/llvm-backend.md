@@ -181,6 +181,12 @@ function is cut from its only caller: forcing the `checked-loops` benchmark
 into two or three partitions made its dot product or scale kernel up to 25%
 slower. That is why small programs stay whole.
 
+ThinLTO across partitions, as rustc does, was tried and not adopted. It
+recovers the lost inlining (the kernels ran as fast as from one module), but
+it optimizes each function twice, before and after importing. On two cores
+it saved only 15% on a 775-line program (0.62 to 0.53 seconds) and made a
+6,407-line one slower (2.6 to 3.0 seconds or more).
+
 `KUSH_LLVM_PARTITIONS=N` forces `N` partitions (1 keeps the program whole);
 `KUSH_EMIT_LLVM=path` then writes partition `k > 0` to `path.k`.
 `KUSH_TIME_PHASES=1` prints the time of each build phase to standard error.
