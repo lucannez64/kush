@@ -10,6 +10,16 @@ for testing and plays in a terminal.
 
 ## Results
 
+- **A real game**: Sanqui's open-source [2048-gb](https://github.com/Sanqui/2048-gb)
+  (zlib licence; the ROM is in the [Homebrew Hub database](https://github.com/gbdev/database/tree/master/entries/2048gb))
+  boots, shows its title screen, and plays in the terminal at a steady
+  60 frames per second: arrow keys slide and merge the tiles, and the score
+  and the cartridge-RAM high score update.
+
+| Title screen (headless) | Playing, decoded from the terminal output |
+| --- | --- |
+| ![2048 title](images/2048_title.png) | ![2048 in play](images/2048_terminal.png) |
+
 - **Blargg's `cpu_instrs`**: all 11 parts pass, individually and as the
   combined MBC1 cartridge. **`instr_timing`** passes too, so every
   instruction takes the right number of cycles.
@@ -91,6 +101,5 @@ exclusive borrows in calls, and records wider than 32 words.
 - The HALT bug and the exact timing of reads and writes inside an instruction
   are not modelled: an instruction's memory accesses happen at its start, and
   the picture processor draws each line whole when it finishes.
-- Not checked against `dmg-acid2` or real games yet: neither a built
-  `dmg-acid2` ROM nor an open-source game's ROM could be fetched in the
-  environment this was written in. Both build from source with RGBDS.
+- Not checked against `dmg-acid2` yet: no built ROM could be fetched in the
+  environment this was written in; it builds from source with RGBDS.

@@ -4887,6 +4887,11 @@
           "time": "2026-11-12 18:42:06",
           "who": "agent",
           "text": "Core done in b5641cc: Blargg cpu_instrs + instr_timing pass, PPU scene test, terminal front end at 60 fps. Blocked on fetching ROMs: dmg-acid2 and homebrew games need RGBDS (building it was not permitted here) or ROM files from the user."
+        },
+        {
+          "time": "2026-11-12 19:14:15",
+          "who": "agent",
+          "text": "Plays a real game: 2048-gb (Homebrew Hub ROM) boots and plays in the terminal at 60 fps. dmg-acid2 still unrun."
         }
       ]
     }
