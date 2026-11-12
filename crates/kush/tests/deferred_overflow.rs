@@ -907,3 +907,30 @@ fn a_long_loop_reports_its_overflow_at_once() {
         program("acc = acc * k + i;", "4611686018427387904")
     ));
 }
+
+/// A qualifying loop reached with a view that is not consecutive whole
+/// elements (here a byte view) runs as an ordinary loop, and the same
+/// function still defers for a plain view.
+#[test]
+fn a_byte_view_takes_the_ordinary_loop() {
+    let program = |count: &str, big: &str| {
+        format!(
+            "{SUM}
+            fn main() -> Unit ! {{io, alloc, panic}} {{
+                let mut plain: Vec<i64> = Vec.with_capacity(4);
+                let mut bytes = Bytes.with_capacity(4);
+                let mut i = 0;
+                while i < {count} {{
+                    plain = Vec.push(plain, if i == 3 {{ {big} }} else {{ i & 255 }});
+                    bytes = Bytes.push(bytes, i & 255);
+                    i = i + 1;
+                }}
+                print_i64(sum(&bytes[..]));
+                print_i64(sum(&plain[..]));
+            }}"
+        )
+    };
+    native_modes_agree(&program("70000", "7"));
+    native_modes_agree(&program("70000", "9223372036854775000"));
+    native_modes_agree(&program("0", "7"));
+}

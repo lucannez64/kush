@@ -4687,10 +4687,16 @@
       "deps": [
         "LLVM-ALIAS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Needs a check for interior writes through shared handles (allocator context reference counts).",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-12 02:45:24",
+          "who": "claude",
+          "text": "Measured before building: noalias on shared slice parameters gained nothing on two kernels (596 vs 620 ms, 617 vs 651 ms; noise). The one visible gap, 5-10% for a loop over views of local vectors, needs scoped alias metadata; not done. Closed without a code change."
+        }
+      ]
     },
     {
       "id": "PROOF-SEARCH-SPEED",
@@ -4748,6 +4754,36 @@
           "text": "No defect in the deferral changes (about 3,200 generated deferred loops plus edge cases, up to 8 builds each). Two low-severity defects in the new fault handler, both fixed with tests: a write running off the top of the stack was reported as stack exhaustion, and the first SIGSEGV/SIGBUS sent from outside was swallowed. Doc overclaims corrected; bounded delay has a test on a loop that still qualifies. The handler fixes themselves were made after this review. 1,719 tests pass on Cranelift, llvm and llvm-release."
         }
       ]
+    },
+    {
+      "id": "LLVM-FOLLOWUPS",
+      "title": "Push loops, deferred-loop code size, build time at scale",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "LLVM-BACKEND"
+      ],
+      "status": "done",
+      "desc": "Vec.push keeps length and capacity in variables across push-only loops (LLVM); deferred loops lowered three times instead of up to eight; certificate clz operand made non-zero (removes a quadratic LLVM pass); benchmarks/build-scale.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 02:45:24",
+          "who": "claude",
+          "text": "Pre-sized fill 471 -> 430 ms (Rust 466). 100-unit build 12.4 -> 6.3 s (rustc -O 1.95 s). Fourth independent review: no correctness defect in ~46,000 differential runs; its findings (byte-view loops 2.4x slower through the checked chunk, two tests not exercising shadows, stale docs) are fixed. 1,727 tests on three settings."
+        }
+      ]
+    },
+    {
+      "id": "BUILD-SCALE",
+      "title": "Release build time and size limits on larger programs",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Release builds are 2-3.5x slower than rustc -O on benchmarks/build-scale, from LLVM's work on deferred loops. Ideas: defer only where it pays, split the module for parallel codegen. Also: MAX_FUNCTIONS = 256 and the 100,000-token file limit cap programs at about 2,300 and 12,000 lines.",
+      "commit": null,
+      "log": []
     }
   ]
 }

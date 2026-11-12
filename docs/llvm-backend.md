@@ -242,9 +242,17 @@ Reading these:
   [deferred-overflow.md](deferred-overflow.md)); chunking itself costs
   nothing measurable here.
 - `feature-pipeline` is within 7% of Rust. Stating ownership facts took it
-  from 69 ms to 61 ms on the earlier measurement run. What remains is `Vec.push`: a Kush vector keeps its
-  length and encoded capacity in the heap block, so each push loads both and
-  decodes the capacity (14 instructions per element against Rust's 8).
+  from 69 ms to 61 ms on the earlier measurement run. A Kush vector keeps its
+  length and encoded capacity in the heap block, and a push used to load
+  both and decode the capacity every time. A loop that touches a vector
+  only through `v = Vec.push(v, e)` and reads of its length or elements now
+  keeps the two in variables (the length is still stored at each push, so
+  memory is never stale): the push itself went from ten instructions to
+  five, and a loop filling a pre-sized vector of 4,096 elements from 471 ms
+  to 430 ms per 200,000 runs, against 466 ms for Rust. Growing from empty
+  is still slower than Rust (569 ms against 442 ms): growth copies into a
+  new block where Rust's allocator can extend in place. Cranelift keeps
+  the reloads; the same change made its code 15 to 20% slower.
 
 Build time for the same two programs, median of seven in milliseconds:
 
@@ -264,9 +272,15 @@ precompiled, so only program code goes through LLVM. Only functions the
 program can reach are lowered and compiled. And the proof search, which used
 to be nearly all of the front end, is both faster and
 [remembered between builds](proof-cache.md); the last two rows show a build
-that remembers nothing. These are small programs; nothing here measures a
-large code base, where Kush still checks and compiles the whole program on
-every build.
+that remembers nothing.
+
+These are small programs, and the release result does not carry over to
+larger ones. On a generated program of 2,300 to 11,500 lines
+([benchmarks/build-scale](../benchmarks/build-scale/README.md)) a
+development build stays 25% to 45% faster than a `rustc` debug build, but an
+LLVM release build is 2 to 3.5 times slower than `rustc -C opt-level=3`,
+almost all of it LLVM's work on deferred-overflow loops. Kush also checks
+and compiles the whole program on every build.
 
 ## Limits
 

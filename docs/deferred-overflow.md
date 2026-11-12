@@ -96,6 +96,39 @@ All of these must hold, otherwise the loop keeps immediate checks
   calls, I/O, allocation, drops, borrows, effects, or proved unchecked reads
   (`Slice.at`, `Vec.at`).
 
+Two more conditions are tested when the loop is reached, because they depend
+on values: the slice the loop walks (`while i < Slice.len(s)`) must be laid
+out as consecutive whole elements (a view over `Bytes` is not), and (below)
+written and read views must not overlap. A loop that fails either runs as an
+ordinary loop. `KUSH_TRACE_DEFERRED` cannot report this: it prints nothing
+for such a loop, since the decision is made at run time.
+
+## What is generated
+
+The loop body is lowered three times:
+
+- the deferred chunk, specialized to the plain slice layout;
+- one chunk with ordinary checks, shared by the replay of a chunk whose
+  certificate failed and by a chunk whose upward counter starts negative;
+- the whole loop with ordinary checks and no chunks, for a loop that failed
+  the two run-time tests above. (Sending it through the checked chunk
+  instead measured 2.4 times slower than an ordinary loop.)
+
+Every chunk starts at one header, so the chunks form a single ordinary loop.
+An ordinary loop over a slice is lowered twice, so a deferred loop costs one
+more copy. An earlier version lowered the body up to eight times (one copy
+per reason, each in two layouts), which doubled LLVM's work on programs with
+many loops. The larger function can still cost an inlining decision: a
+small loop function called with a byte view measured 34% slower than with
+`--no-deferred-overflow`, where it was inlined and specialized to its caller.
+
+The certificate counts leading zeros of `word | 1`. That gives the same
+bound, and the operand is visibly non-zero. Otherwise, on a target without a
+cheap leading-zero count, LLVM's code generation puts a branch around each
+count and rescans the whole function every time it does: with a few hundred
+deferred loops inlined into one function, that pass alone took two thirds of
+the build.
+
 ## Why the speculative run is safe
 
 After an overflow that has not been reported yet, the loop is computing with
@@ -134,7 +167,8 @@ does not depend on it.
 
 Certified mode additionally requires that a replay sees the memory the first
 attempt saw: the loop may store only through exclusive slices (`&mut [T]`) it
-never reads, and may read only slices. The borrow rules make two distinct
+never reads, and a loop that stores may read only slices (one that stores
+nothing may also read vectors and byte buffers). The borrow rules make two distinct
 views disjoint, but the replay does not lean on that: before the loop the
 address range of every written slice is compared with that of every read
 slice, and a loop whose ranges overlap runs with ordinary checks. In-place
@@ -151,7 +185,8 @@ Per iteration, exact mode adds three bit operations to an add or subtract;
 certified mode adds two operations and an OR per tracked operand, and nothing
 per arithmetic operation. A failed certificate costs one extra pass over that
 chunk, with ordinary checks, and nothing after it. A chunk whose upward
-counter starts negative runs once, with ordinary checks. Operands near `2^62`, or long reductions of large values, take that path
+counter starts negative runs once, with ordinary checks.
+Operands near `2^62`, or long reductions of large values, take that path
 every time and are slower than plain checking; values whose magnitude times
 the trip count stays far below `2^63` never do.
 

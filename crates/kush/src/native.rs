@@ -2626,6 +2626,102 @@ int main(int argc, char **argv) {
 }
 "#;
 
+/// The vector locals a loop touches through `v = Vec.push(v, e)` and
+/// read-only length or element reads alone, so that nothing else in the loop
+/// can change their length or capacity. Loops containing an expression kind
+/// this does not know the shape of yield nothing.
+fn push_only_vectors(condition: &Expr, body: &ex::Block) -> Vec<usize> {
+    #[derive(Default)]
+    struct Uses {
+        pushed: std::collections::BTreeSet<usize>,
+        /// Mentioned some other way, or declared inside the loop.
+        other: std::collections::BTreeSet<usize>,
+        unknown: bool,
+    }
+    fn slot_of(expr: &Expr) -> Option<usize> {
+        match expr.kind {
+            ExprKind::Local(slot)
+            | ExprKind::Move(slot)
+            | ExprKind::Borrow(slot)
+            | ExprKind::Peek(slot) => Some(slot),
+            _ => None,
+        }
+    }
+    fn block(block: &ex::Block, uses: &mut Uses) {
+        for statement in &block.statements {
+            match statement {
+                ex::Statement::Let(slot, value) => {
+                    uses.other.insert(*slot);
+                    expr(value, uses);
+                }
+                ex::Statement::Expr(value) => expr(value, uses),
+                ex::Statement::Declare(slot) => {
+                    uses.other.insert(*slot);
+                }
+            }
+        }
+        if let Some(tail) = &block.tail {
+            expr(tail, uses);
+        }
+    }
+    fn expr(e: &Expr, uses: &mut Uses) {
+        match &e.kind {
+            ExprKind::Constant(_) => {}
+            ExprKind::Local(slot)
+            | ExprKind::Move(slot)
+            | ExprKind::Borrow(slot)
+            | ExprKind::Peek(slot) => {
+                uses.other.insert(*slot);
+            }
+            ExprKind::Assign(slot, value) => {
+                if let ExprKind::Call(Target::Vec(VecOp::Push, _), arguments) = &value.kind
+                    && let [vector, item] = arguments.as_slice()
+                    && matches!(vector.kind, ExprKind::Move(moved) | ExprKind::Local(moved) if moved == *slot)
+                {
+                    uses.pushed.insert(*slot);
+                    expr(item, uses);
+                } else {
+                    uses.other.insert(*slot);
+                    expr(value, uses);
+                }
+            }
+            ExprKind::Call(target, arguments) => {
+                let reads = matches!(target, Target::Vec(VecOp::Len | VecOp::Get, _));
+                for (index, argument) in arguments.iter().enumerate() {
+                    if reads && index == 0 && slot_of(argument).is_some() {
+                        continue;
+                    }
+                    expr(argument, uses);
+                }
+            }
+            ExprKind::Unary(_, operand) => expr(operand, uses),
+            ExprKind::Binary(_, left, right) => {
+                expr(left, uses);
+                expr(right, uses);
+            }
+            ExprKind::If(test, then_block, else_block) => {
+                expr(test, uses);
+                block(then_block, uses);
+                block(else_block, uses);
+            }
+            ExprKind::Block(inner) => block(inner, uses),
+            ExprKind::While(test, inner) => {
+                expr(test, uses);
+                block(inner, uses);
+            }
+            ExprKind::Break(None, _) | ExprKind::Continue(_) => {}
+            _ => uses.unknown = true,
+        }
+    }
+    let mut uses = Uses::default();
+    expr(condition, &mut uses);
+    block(body, &mut uses);
+    if uses.unknown {
+        return Vec::new();
+    }
+    uses.pushed.difference(&uses.other).copied().collect()
+}
+
 /// Extra inputs for the native link step. Every path is passed to `cc` as one
 /// argument (no shell interpolation); library names are validated identifiers
 /// for `cc -l<name>`.
@@ -4164,6 +4260,9 @@ fn lower(
             aborts: Vec::new(),
             slice_layouts: BTreeMap::new(),
             upper_bounds: Vec::new(),
+            vec_shadows: BTreeMap::new(),
+            pending_pushes: Vec::new(),
+            push_shadow: None,
         };
         let entry = g.builder.create_block();
         g.builder.append_block_params_for_function_params(entry);
@@ -5275,6 +5374,13 @@ struct Generator<'a, 'b> {
     slice_layouts: BTreeMap<usize, usize>,
     // Dominating signed `index < length` tests, identified by SSA value.
     upper_bounds: Vec<(Value, Value)>,
+    /// Vector locals whose length and capacity a loop keeps in variables:
+    /// slot to (length, capacity). See [`Generator::lower_while`].
+    vec_shadows: BTreeMap<usize, (Variable, Variable)>,
+    /// Push expressions (by address) registered for a shadowed slot, and the
+    /// shadow of the push being lowered right now.
+    pending_pushes: Vec<(usize, usize)>,
+    push_shadow: Option<(Variable, Variable)>,
     print: FuncId,
     print_u64: FuncId,
     print_f64: FuncId,
@@ -8297,6 +8403,11 @@ impl Generator<'_, '_> {
                 }
             }
             ExprKind::Assign(slot, replacement) => {
+                if self.vec_shadows.contains_key(slot) {
+                    // By construction of the shadow, this is `v = push(v, e)`.
+                    self.pending_pushes
+                        .push((std::ptr::from_ref::<Expr>(replacement) as usize, *slot));
+                }
                 let value = lower!(self.expr(replacement));
                 self.consume(replacement);
                 if !self.erased_local(*slot) {
@@ -8836,7 +8947,25 @@ impl Generator<'_, '_> {
                     Target::UnionBorrowCall { spec, .. } => {
                         return Some(self.union_borrow_call(*spec, values));
                     }
-                    Target::Vec(op, element) => return Some(self.vec_call(*op, *element, values)),
+                    Target::Vec(op, element) => {
+                        // The push a loop registered for one of its
+                        // shadowed vectors is this very expression.
+                        let address = std::ptr::from_ref(expr) as usize;
+                        self.push_shadow = match self
+                            .pending_pushes
+                            .iter()
+                            .position(|(pending, _)| *pending == address)
+                        {
+                            Some(at) if *op == VecOp::Push => {
+                                let (_, slot) = self.pending_pushes.remove(at);
+                                self.vec_shadows.get(&slot).copied()
+                            }
+                            _ => None,
+                        };
+                        let result = self.vec_call(*op, *element, values);
+                        self.push_shadow = None;
+                        return Some(result);
+                    }
                     Target::AllocVec(op, element) => {
                         return Some(self.alloc_vec_call(*op, *element, values, expr.ty));
                     }
@@ -9647,16 +9776,25 @@ impl Generator<'_, '_> {
             let call = self.builder.ins().call(callee, &[handle, item, width]);
             return self.builder.inst_results(call)[0];
         }
-        let length = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
-            g.builder
-                .ins()
-                .load(I64, ir::MemFlagsData::new(), handle, 0)
-        });
-        let capacity = self.buffer_capacity(handle);
+        let shadow = self.push_shadow.take();
+        let (length, capacity) = match shadow {
+            Some((length, capacity)) => {
+                (self.builder.use_var(length), self.builder.use_var(capacity))
+            }
+            None => {
+                let length = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
+                    g.builder
+                        .ins()
+                        .load(I64, ir::MemFlagsData::new(), handle, 0)
+                });
+                (length, self.buffer_capacity(handle))
+            }
+        };
         let room = self
             .builder
             .ins()
             .icmp(IntCC::UnsignedLessThan, length, capacity);
+        let next = self.builder.ins().iadd_imm_s(length, 1);
         let fast = self.builder.create_block();
         let slow = self.builder.create_block();
         let join = self.builder.create_block();
@@ -9678,7 +9816,6 @@ impl Generator<'_, '_> {
                 );
             }
         });
-        let next = self.builder.ins().iadd_imm_s(length, 1);
         self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
             g.builder
                 .ins()
@@ -9690,8 +9827,17 @@ impl Generator<'_, '_> {
         self.store_words(item, words);
         let call = self.builder.ins().call(callee, &[handle, item, width]);
         let grown = self.builder.inst_results(call)[0];
+        if let Some((_, capacity)) = shadow {
+            // The push succeeded or panicked, so the length is one more
+            // either way; the capacity is whatever the new block has.
+            let grown_capacity = self.buffer_capacity(grown);
+            self.builder.def_var(capacity, grown_capacity);
+        }
         self.jump(join, &[grown]);
         self.builder.switch_to_block(join);
+        if let Some((length_var, _)) = shadow {
+            self.builder.def_var(length_var, next);
+        }
         self.builder.block_params(join)[0]
     }
 
@@ -9747,6 +9893,60 @@ impl Generator<'_, '_> {
     }
 
     fn lower_while(&mut self, condition: &Expr, body: &ex::Block) {
+        // A loop that appends to a vector reloads its length and capacity
+        // from the heap block on every `Vec.push`, and decodes the capacity,
+        // because the growth call in the same loop may have changed both.
+        // Where the loop touches the vector's header through nothing but
+        // those pushes, keep the two in variables instead: load them once,
+        // update them at each push (the length is still stored, so memory
+        // is never stale), and reload the capacity only after a growth.
+        // Only for LLVM: Cranelift's code for the same loop measured 15 to
+        // 20% slower with the two extra loop-carried values than with the
+        // reloads.
+        let shadowed: Vec<usize> = if self.codegen.optimization == Optimization::Speed
+            && self.codegen.backend == Backend::Llvm
+        {
+            push_only_vectors(condition, body)
+                .into_iter()
+                .filter(|slot| {
+                    !self.vec_shadows.contains_key(slot)
+                        && !self.erased_local(*slot)
+                        && self.variables[*slot].len() == 1
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !shadowed.is_empty() && std::env::var_os("KUSH_TRACE_SHADOWS").is_some() {
+            eprintln!(
+                "vector shadows: a loop in {} keeps {} vector(s) in variables",
+                self.program.functions[self.function_index].name,
+                shadowed.len()
+            );
+        }
+        for slot in &shadowed {
+            let handle = self.local_words(*slot)[0];
+            let length = self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
+                g.builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), handle, 0)
+            });
+            let capacity = self.buffer_capacity(handle);
+            let length_var = self.builder.declare_var(I64);
+            let capacity_var = self.builder.declare_var(I64);
+            self.builder.def_var(length_var, length);
+            self.builder.def_var(capacity_var, capacity);
+            self.vec_shadows.insert(*slot, (length_var, capacity_var));
+        }
+        self.lower_while_checks(condition, body);
+        for slot in &shadowed {
+            self.vec_shadows.remove(slot);
+        }
+        if self.vec_shadows.is_empty() {
+            self.pending_pushes.clear();
+        }
+    }
+    fn lower_while_checks(&mut self, condition: &Expr, body: &ex::Block) {
         if self.codegen.defers_overflow()
             && self.deferred.is_none()
             && let Some(plan) = deferred::plan(
@@ -10450,9 +10650,21 @@ impl Generator<'_, '_> {
         let doubled = self.builder.ins().iadd(value, value);
         self.builder.ins().bxor(value, doubled)
     }
+    /// Leading zeros of a word, counting zero itself as one (63).
+    ///
+    /// Where they are used the two give the same bound, and the operand is
+    /// then visibly non-zero. Without that, a target that has no cheap
+    /// count-leading-zeros gets a branch around each one late in LLVM's
+    /// code generation, and each such split rescans the whole function:
+    /// build time grew with the square of the number of deferred loops
+    /// inlined into one function.
+    fn leading_zeros(&mut self, word: Value) -> Value {
+        let nonzero = self.builder.ins().bor_imm_s(word, 1);
+        self.builder.ins().clz(nonzero)
+    }
     /// The least tracked `u` with `|v| <= 2^u` for a magnitude word.
     fn magnitude_bound(&mut self, word: Value) -> Value {
-        let zeros = self.builder.ins().clz(word);
+        let zeros = self.leading_zeros(word);
         let sixty_four = self.constant(64);
         let bits = self.builder.ins().isub(sixty_four, zeros);
         let one = self.constant(1);
@@ -10491,8 +10703,9 @@ impl Generator<'_, '_> {
                     let operand = self.bound_value(operand, leaves, entry, count);
                     largest = self.builder.ins().umax(largest, operand);
                 }
+                // At least one: the loop has an accumulating operation.
                 let steps = self.builder.use_var(count);
-                let zeros = self.builder.ins().clz(steps);
+                let zeros = self.leading_zeros(steps);
                 let sixty_four = self.constant(64);
                 let bits = self.builder.ins().isub(sixty_four, zeros);
                 self.builder.ins().iadd(largest, bits)
@@ -10502,6 +10715,13 @@ impl Generator<'_, '_> {
     /// Lower an innermost counted loop with its overflow panics deferred to
     /// the exit. `deferred` documents why the result is indistinguishable
     /// from checking every operation.
+    /// The loop body is lowered three times: the deferred chunk, specialized
+    /// to the walked slice being consecutive whole elements; one chunk with
+    /// ordinary checks, shared by a chunk that failed its certificate
+    /// (replayed from its entry state) and a chunk whose upward counter
+    /// starts negative; and the whole loop with ordinary checks, for views
+    /// that overlap or a walked slice with another layout. An ordinary loop
+    /// over a slice is lowered twice.
     fn lower_deferred_while(&mut self, plan: deferred::Plan, condition: &Expr, body: &ex::Block) {
         let zero = self.constant(0);
         let sticky = self.builder.declare_var(I64);
@@ -10512,44 +10732,59 @@ impl Generator<'_, '_> {
             leaves.insert(*key, self.builder.declare_var(I64));
         }
         let done = self.builder.create_block();
-        // A replay re-reads what the first attempt read, so nothing the loop
-        // reads may be something it wrote. The borrow rules already say so
-        // of two distinct views; compare the address ranges anyway, once,
-        // and run a loop whose views do overlap with ordinary checks.
-        if !plan.disjoint.is_empty() {
-            let mut overlap = self.constant(0);
-            for (stored, loaded) in &plan.disjoint {
-                let (stored_start, stored_end) = self.view_range(*stored);
-                let (loaded_start, loaded_end) = self.view_range(*loaded);
-                let before =
-                    self.builder
-                        .ins()
-                        .icmp(IntCC::UnsignedLessThan, stored_start, loaded_end);
-                let after =
-                    self.builder
-                        .ins()
-                        .icmp(IntCC::UnsignedLessThan, loaded_start, stored_end);
-                let both = self.builder.ins().band(before, after);
-                let both = self.builder.ins().uextend(I64, both);
-                overlap = self.builder.ins().bor(overlap, both);
-            }
-            let plain = self.builder.create_block();
-            let apart = self.builder.create_block();
-            self.builder.ins().brif(overlap, plain, &[], apart, &[]);
-            self.builder.switch_to_block(plain);
-            self.lower_checked_while(condition, body);
-            self.jump(done, &[]);
-            self.builder.switch_to_block(apart);
-        }
         // The loop runs in chunks of at most `CHUNK` iterations, each checked
         // on its own, so an overflow is reported after a bounded amount of
         // further work no matter how long the loop would have run, or what
         // the wrapped values do to it in the meantime.
         let chunk = self.builder.create_block();
-        // Where every kind of chunk ends: out of fuel means the loop may
-        // have more to do; anything else is the loop's own exit.
+        let checked = self.builder.create_block();
+        // Where every chunk ends: out of fuel means the loop may have more
+        // to do; anything else is the loop's own exit.
         let next = self.builder.create_block();
-        self.jump(chunk, &[]);
+        let mut unsuitable = self.constant(0);
+        // A replay re-reads what the first attempt read, so nothing the loop
+        // reads may be something it wrote. The borrow rules already say so
+        // of two distinct views; compare the address ranges anyway, once.
+        for (stored, loaded) in &plan.disjoint {
+            let (stored_start, stored_end) = self.view_range(*stored);
+            let (loaded_start, loaded_end) = self.view_range(*loaded);
+            let before = self
+                .builder
+                .ins()
+                .icmp(IntCC::UnsignedLessThan, stored_start, loaded_end);
+            let after = self
+                .builder
+                .ins()
+                .icmp(IntCC::UnsignedLessThan, loaded_start, stored_end);
+            let both = self.builder.ins().band(before, after);
+            let both = self.builder.ins().uextend(I64, both);
+            unsuitable = self.builder.ins().bor(unsuitable, both);
+        }
+        // The deferred chunk is specialized to the slice the loop walks
+        // being consecutive whole elements; nothing else would vectorize.
+        let candidate = self.loop_slice(condition);
+        let layout = candidate.filter(|_| {
+            self.codegen.optimization == Optimization::Speed && self.slice_layouts.is_empty()
+        });
+        if let Some((_, slot, width)) = layout {
+            let words = self.local_words(slot);
+            let stride =
+                self.builder
+                    .ins()
+                    .icmp_imm_s(IntCC::NotEqual, words[2], (width * 8) as i64);
+            let stride = self.builder.ins().uextend(I64, stride);
+            unsuitable = self.builder.ins().bor(unsuitable, stride);
+            unsuitable = self.builder.ins().bor(unsuitable, words[3]);
+        }
+        // Such a loop is an ordinary loop: no chunks, no fuel. (Running it
+        // through the checked chunk instead measured 2.4 times slower.)
+        let plain = self.builder.create_block();
+        self.builder.ins().brif(unsuitable, plain, &[], chunk, &[]);
+        self.builder.switch_to_block(plain);
+        self.while_body(condition, body, candidate);
+        self.jump(done, &[]);
+        // Every chunk starts here, so the chunks form one ordinary loop
+        // with a single way in.
         self.builder.switch_to_block(chunk);
         self.builder.def_var(sticky, zero);
         self.builder.def_var(count, zero);
@@ -10569,14 +10804,10 @@ impl Generator<'_, '_> {
                 .builder
                 .ins()
                 .icmp_imm_s(IntCC::SignedLessThan, start, 0);
-            let plain = self.builder.create_block();
             let chunked = self.builder.create_block();
-            self.builder.ins().brif(negative, plain, &[], chunked, &[]);
-            self.builder.switch_to_block(plain);
-            self.checked_fuel = Some(fuel);
-            self.lower_checked_while(condition, body);
-            self.checked_fuel = None;
-            self.jump(next, &[]);
+            self.builder
+                .ins()
+                .brif(negative, checked, &[], chunked, &[]);
             self.builder.switch_to_block(chunked);
         }
         let mut entry_magnitudes = BTreeMap::new();
@@ -10596,7 +10827,13 @@ impl Generator<'_, '_> {
             leaves,
             fuel,
         });
-        self.lower_checked_while(condition, body);
+        if let Some((_, slot, width)) = layout {
+            self.slice_layouts.insert(slot, width);
+        }
+        self.while_body(condition, body, candidate);
+        if let Some((_, slot, _)) = layout {
+            self.slice_layouts.remove(&slot);
+        }
         let state = self.deferred.take().expect("deferred loop");
         if !state.plan.obligations.is_empty() {
             // How many terms the reductions took in, at most: each
@@ -10635,12 +10872,7 @@ impl Generator<'_, '_> {
             for (slot, words) in entry {
                 self.assign(slot, &words);
             }
-            let full = self.constant(deferred::CHUNK);
-            self.builder.def_var(fuel, full);
-            self.checked_fuel = Some(fuel);
-            self.lower_checked_while(condition, body);
-            self.checked_fuel = None;
-            self.jump(next, &[]);
+            self.jump(checked, &[]);
             // With it, every value was exact, so the sticky word of the
             // remaining exact tests is exact too.
             self.builder.switch_to_block(certified);
@@ -10651,6 +10883,16 @@ impl Generator<'_, '_> {
             .ins()
             .icmp_imm_s(IntCC::SignedLessThan, overflowed, 0);
         self.guard(overflowed);
+        self.jump(next, &[]);
+        // The one chunk with ordinary checks. Every way in arrives with the
+        // locals of a checked execution: untouched, or a chunk's entry state
+        // restored, or the result of an earlier chunk that passed.
+        self.builder.switch_to_block(checked);
+        let full = self.constant(deferred::CHUNK);
+        self.builder.def_var(fuel, full);
+        self.checked_fuel = Some(fuel);
+        self.while_body(condition, body, candidate);
+        self.checked_fuel = None;
         self.jump(next, &[]);
         self.builder.switch_to_block(next);
         let left = self.builder.use_var(fuel);
