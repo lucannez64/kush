@@ -285,6 +285,11 @@ moved to another binding, returned, stored in data or a box, passed to another
 function, adapted to a union or other function type, or captured by a task. See
 [borrowing and lifetimes](lifetimes.md#scoped-borrowed-closure-captures).
 
+A reference (`&T` or `&mut T`) is captured the same scoped way: the closure
+holds the reference's loan while it is live, so the owner cannot be moved and
+an exclusive reference cannot be used beside it, and the closure cannot
+escape its binding's scope. A spawned task cannot capture a reference.
+
 A mutable scalar local (`i64`, another fixed-width integer, `f32`/`f64`,
 `Char`, `Bool`, or `Unit`) is captured **by reference**. The environment stores
 the address of the caller's binding rather than a copy; a write in the lambda

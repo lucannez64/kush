@@ -378,6 +378,7 @@ impl Executable {
                     redirect: None,
                     consume: false,
                     abort: None,
+                    reusable: false,
                 })
                 .collect(),
             abort_scopes: Vec::new(),
@@ -1207,6 +1208,9 @@ struct HandlerFrame {
     consume: bool,
     /// An abortive `handle` activation (no handler value).
     abort: Option<u64>,
+    /// A capturing handler with copyable captures: each perform calls a
+    /// fresh copy of its environment.
+    reusable: bool,
 }
 struct Evaluator<'a, R: Read, W: Write> {
     program: &'a Executable,
@@ -5365,17 +5369,19 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         operation: usize,
         handler: &Expr,
         body: &Block,
+        reusable: bool,
         frame: &mut Frame,
     ) -> Result<Flow> {
         let handler_value = value!(self.expr(handler, frame));
         self.consume(handler, frame);
-        let consume = matches!(handler.ty, Type::Once(_));
+        let consume = matches!(handler.ty, Type::Once(_)) && !reusable;
         self.dynamic_handlers.push(HandlerFrame {
             operation,
             handler: Some(handler_value),
             redirect: None,
             consume,
             abort: None,
+            reusable,
         });
         let flow = self.block(body, frame);
         let popped = self.dynamic_handlers.pop();
@@ -5434,7 +5440,33 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         self.consume(payload, frame);
         self.consume(resume, frame);
         let consume = self.dynamic_handlers[index].consume;
-        if consume {
+        if self.dynamic_handlers[index].reusable {
+            let (function, environment) = match self.dynamic_handlers[index].handler.as_ref() {
+                Some(Value::Function {
+                    function,
+                    environment: Some(environment),
+                }) => (*function, *environment),
+                _ => {
+                    return Err(Diagnostic::new(
+                        expr.span,
+                        "internal error: a reusable dynamic handler has an environment",
+                    ));
+                }
+            };
+            let captures = self.heap.get(environment).ok_or_else(|| {
+                Diagnostic::new(expr.span, "internal error: reusable handler environment")
+            })?;
+            let Value::Owned(copy) = self.allocate(captures) else {
+                unreachable!()
+            };
+            let handler = Value::Function {
+                function,
+                environment: Some(copy),
+            };
+            Ok(Flow::Value(
+                self.call_value(handler, vec![payload_value, resume_value])?,
+            ))
+        } else if consume {
             let handler = self.dynamic_handlers[index]
                 .handler
                 .take()
@@ -6147,7 +6179,8 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 operation,
                 handler,
                 body,
-            } => value!(self.handler_push(*operation, handler, body, frame)),
+                reusable,
+            } => value!(self.handler_push(*operation, handler, body, *reusable, frame)),
             ExprKind::DynamicPerform {
                 operation,
                 payload,
@@ -6727,6 +6760,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         redirect: None,
                         consume: false,
                         abort: Some(activation),
+                        reusable: false,
                     });
                 }
                 self.abort_scopes.push((*label, activation));
@@ -6858,6 +6892,7 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         redirect: Some(target),
                         consume: true,
                         abort: None,
+                        reusable: false,
                     });
                 }
                 let flow = self.block(body, frame);

@@ -4936,6 +4936,34 @@
           "text": "done a181540"
         }
       ]
+    },
+    {
+      "id": "length-refined-fields",
+      "title": "Length-refined Vec fields with proved element accesses",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Length-refined Vec fields, proved element accesses, KUSH_PROOF_REPORT",
+      "commit": "05ad4a6",
+      "log": [
+        {
+          "time": "2026-11-12 22:32:56",
+          "who": "agent",
+          "text": "done 05ad4a6"
+        }
+      ]
+    },
+    {
+      "id": "stateful-effect-handlers",
+      "title": "Effectful, reusable capturing handlers; reference captures; linear media handles",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "effect Op: P -> R ! {io}; reusable frames for capturing handlers with copyable captures; scoped reference captures; Game Boy front ends as handlers; linear Window/Audio",
+      "commit": null,
+      "log": []
     }
   ]
 }

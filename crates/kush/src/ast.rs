@@ -99,6 +99,10 @@ pub enum ItemKind {
         name: String,
         parameter: Type,
         result: Type,
+        /// `effect Op: P -> R ! { io };`: built-in effects a handler of `Op`
+        /// may have. Every `perform Op` requires them too, so a called
+        /// function's row still shows what its handler may do.
+        effects: Vec<Type>,
     },
     /// `effect row Name = { io, alloc };` declares a named finite effect row.
     ///

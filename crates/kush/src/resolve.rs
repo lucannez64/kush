@@ -978,10 +978,17 @@ impl Resolver {
                         r.ty(ty)
                     }
                     ItemKind::Effect {
-                        parameter, result, ..
+                        parameter,
+                        result,
+                        effects,
+                        ..
                     } => {
                         r.ty(parameter)?;
-                        r.ty(result)
+                        r.ty(result)?;
+                        for effect in effects {
+                            r.ty(effect)?;
+                        }
+                        Ok(())
                     }
                     ItemKind::EffectRow { effects, .. } => {
                         for effect in effects {

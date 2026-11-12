@@ -24,20 +24,26 @@ loop {
         Option.Some(Event.ButtonDown(pad, button)) => { /* a gamepad */ },
         Option.Some(_) => {},
         Option.None => {
-            window.present(&win, &pixels)?;   // 160 * 144 * 3 RGB bytes
-            audio.queue(&sound, &samples)?;   // signed 16-bit, interleaved
+            let _ = window.present(&win, &pixels);   // 160 * 144 * 3 RGB bytes
+            let _ = audio.queue(&sound, &samples);   // signed 16-bit, interleaved
         },
     }
 }
+audio.close(sound);
+window.close(win);
 ```
+
+`Window` and `Audio` are linear: the checker rejects a program in which some
+path forgets to `close` one, closes it twice, or uses it after closing it, so
+a window or device is never leaked or used once released.
 
 ## API
 
 | Module | What it has |
 | --- | --- |
-| `media.window` | `Window` (closed when dropped), `open`, `present`, `set_title`, `next_event` |
+| `media.window` | `Window` (linear), `open`, `close`, `present`, `set_title`, `next_event` |
 | `media.input` | `Event` (`Quit`, `KeyDown`/`KeyUp`, `ButtonDown`/`ButtonUp`, `AxisMoved`, `PadAdded`/`PadRemoved`), `Key`, `Button`, `Axis` |
-| `media.audio` | `Audio` (closed when dropped), `open`, `queue`, `queued`, `push` (encode one sample) |
+| `media.audio` | `Audio` (linear), `open`, `close`, `queue`, `queued`, `push` (encode one sample) |
 
 - **Window**: the image is scaled with sharp pixels and keeps its aspect ratio
   when the window is resized. `open` fails with `ENODEV` (19) when there is no

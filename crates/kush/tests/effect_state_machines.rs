@@ -1480,8 +1480,8 @@ fn review_a_consumed_once_frame_does_not_fall_through() {
         effect D: i64 -> i64;
         fn d(n: i64) -> i64 ! {D, panic} { perform D(n) }
         fn inner() -> i64 ! {alloc, panic} {
-            let base = 1000;
-            handle D: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { k(x | base) } {
+            let base = Box.new(1000);
+            handle D: i64 -> i64 with fn(x: i64, k: linear once fn(i64) -> i64 ! {}) -> i64 ! {} { k(x | Box.take(base)) } {
                 let a = d(1);
                 let b = d(2);
                 a + b

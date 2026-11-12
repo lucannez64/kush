@@ -1216,6 +1216,11 @@ pub(crate) enum ExprKind {
         operation: usize,
         handler: Box<Expr>,
         body: Box<Block>,
+        /// A capturing handler whose captures are all copyable: the frame
+        /// keeps its environment and each perform calls a fresh copy, so it
+        /// serves any number of performs (stateful front ends write through
+        /// by-reference captures).
+        reusable: bool,
     },
     /// `perform` resolved through the dynamic handler stack. The handler
     /// contract is pure; a copyable function is reusable, while a capturing
@@ -5179,6 +5184,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             name,
             parameter,
             result,
+            effects,
         } = &declaration.item.kind
         else {
             continue;
@@ -5216,6 +5222,13 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 "dynamic effect operations cannot carry borrowed payloads or results; a handler stack entry has no caller lifetime to borrow from",
             ));
         }
+        let (latent, variables) = crate::runtime_types::effect_bits_partial(resolution, effects)?;
+        if !variables.is_empty() || latent & !EFFECT_BITS != 0 {
+            return Err(Diagnostic::new(
+                declaration.item.span,
+                "an effect operation's handler effects are built-in effects (io, alloc, panic, suspend)",
+            ));
+        }
         let id = effect_operations.len();
         effect_operations.insert(
             name.clone(),
@@ -5223,6 +5236,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 id,
                 parameter,
                 result,
+                latent,
             },
         );
         types
@@ -12339,6 +12353,9 @@ struct EffectOperation {
     id: usize,
     parameter: Type,
     result: Type,
+    /// Built-in effects a handler may have (`effect Op: P -> R ! {..}`);
+    /// every dynamic perform requires them.
+    latent: u16,
 }
 /// The canonical kernel index of an admitted runtime scalar binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12399,6 +12416,9 @@ struct HandlerScope {
     /// Abortive operations that may leave the body through the resumption
     /// token (its row; E-ABORT-INTERACT).
     token_effects: u16,
+    /// A reusable capturing handler (see `HandlerPush::reusable`): its
+    /// performs, lexical ones included, go through the dynamic frame.
+    reusable: bool,
 }
 
 struct Checker<'a, 't> {
@@ -24428,6 +24448,7 @@ impl Checker<'_, '_> {
         let borrowed_capture = capture_refs.iter().any(|by_ref| *by_ref)
             || captures.iter().any(|slot| {
                 self.locals[*slot].ty.is_slice()
+                    || self.locals[*slot].ty.is_ref()
                     || self.carrier_type(self.locals[*slot].ty)
                     || crate::runtime_types::is_reference_container(
                         self.types,
@@ -24446,13 +24467,6 @@ impl Checker<'_, '_> {
                     "a lambda or task cannot capture TaskExit<T> with a borrowed payload; match it inside the scope that joined it",
                 )
                 .with_note(local.span, "joined borrowed result declared here"));
-            }
-            if matches!(ty, Type::Ref(_) | Type::RefMut(_)) {
-                return Err(Diagnostic::new(
-                    span,
-                    "a lambda cannot capture a borrowed owner reference; pass it as an explicit call argument while its owner is live",
-                )
-                .with_note(self.locals[*slot].span, "captured borrow declared here"));
             }
             if matches!(ty, Type::Task(_)) {
                 return Err(Diagnostic::new(
@@ -33342,10 +33356,19 @@ impl Checker<'_, '_> {
                     "a dynamically visible handler must be a fn or once fn value",
                 ));
             }
-            if signature.effects != 0 {
+            let latent = declared.map_or(0, |declared| declared.latent);
+            if signature.effects & !latent != 0 {
                 return Err(Diagnostic::new(
                     handler.span,
-                    "a dynamically visible handler must be pure; perform in a called function would otherwise hide the handler's effects from the caller's row",
+                    if latent == 0 {
+                        "a dynamically visible handler must be pure; perform in a called function would otherwise hide the handler's effects from the caller's row. Declare the effects the handler may have on the operation: 'effect Op: P -> R ! { io };'".to_owned()
+                    } else {
+                        format!(
+                            "this handler's effects {} are not among the operation's declared effects {}",
+                            effect_names(self.resolution, signature.effects),
+                            effect_names(self.resolution, latent)
+                        )
+                    },
                 ));
             }
         }
@@ -33425,9 +33448,23 @@ impl Checker<'_, '_> {
         // Types of the handler's captured values. An opaque handler value
         // (not a lambda or function here) was checked where it was built;
         // its captures are not visible.
-        let handler_capture_types = self
-            .closure_capture_types(&handler_value)
-            .unwrap_or_default();
+        let known_captures = self.closure_capture_types(&handler_value);
+        // A capturing tail-resumptive handler of a declared operation whose
+        // captures are all copyable (references, by-reference scalars,
+        // plain values) can serve every perform from a copy of its
+        // environment, like a noncapturing `fn`.
+        let reusable = declared.is_some()
+            && !multishot
+            && !region
+            && matches!(handler_value.ty, Type::Once(_))
+            && !signature.linear
+            && known_captures.as_ref().is_some_and(|captures| {
+                !captures.is_empty()
+                    && captures
+                        .iter()
+                        .all(|ty| !self.owned_type(*ty) && !self.linear_type(*ty))
+            });
+        let handler_capture_types = known_captures.unwrap_or_default();
         self.handlers.push(HandlerScope {
             operation: operation.to_owned(),
             parameter: parameter_ty,
@@ -33442,6 +33479,7 @@ impl Checker<'_, '_> {
             declared: declared.is_some(),
             abort: None,
             token_effects: token_effects.unwrap_or(0),
+            reusable,
         });
         // A lexical handle discharges the declared operation's row requirement
         // for its body: the body is checked as if `Op` were available, while the
@@ -33497,6 +33535,7 @@ impl Checker<'_, '_> {
                         resource: None,
                     }),
                     body: Box::new(inner),
+                    reusable,
                 },
                 ty,
                 span,
@@ -33631,6 +33670,7 @@ impl Checker<'_, '_> {
             declared: declared.is_some(),
             abort: Some(label),
             token_effects: 0,
+            reusable: false,
         });
         let operation_effect = self.operation_effect(operation);
         let saved_effects = self.effects;
@@ -34935,7 +34975,7 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
-        self.require(PANIC | operation_effect, span)?;
+        self.require(PANIC | operation_effect | declared.latent, span)?;
         let payload = self.expr_expected(value, Some(declared.parameter))?;
         let payload = self.coerce_argument(payload, declared.parameter, span)?;
         Ok(Expr {
@@ -34966,6 +35006,7 @@ impl Checker<'_, '_> {
             .handlers
             .iter()
             .rposition(|scope| scope.operation == operation)
+            && !self.handlers[index].reusable
         {
             return self.lexical_perform(index, operation, operation_effect, value, expected, span);
         }
@@ -34984,7 +35025,7 @@ impl Checker<'_, '_> {
         // a dynamically resolved operation can always panic. A declared
         // operation is a concrete row effect too: the enclosing function must
         // list it (a lexical handle removes it for its body).
-        self.require(PANIC | operation_effect, span)?;
+        self.require(PANIC | operation_effect | declared.latent, span)?;
         let payload = self.expr_expected(value, Some(declared.parameter))?;
         let payload = self.coerce_argument(payload, declared.parameter, span)?;
         let resume = self.resume_value(declared.result, false, span)?;

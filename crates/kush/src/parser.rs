@@ -231,11 +231,17 @@ impl Parser {
                     let parameter = self.ty()?;
                     self.expect(&Kind::Arrow, "'->' in an effect operation signature")?;
                     let result = self.ty()?;
+                    let effects = if self.at(&Kind::Bang) {
+                        self.effects()?
+                    } else {
+                        Vec::new()
+                    };
                     self.expect(&Kind::Semi, "';' after an effect declaration")?;
                     ItemKind::Effect {
                         name,
                         parameter,
                         result,
+                        effects,
                     }
                 }
             } else if self.word_keyword("impl") {

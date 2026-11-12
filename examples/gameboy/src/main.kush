@@ -67,22 +67,42 @@ fn play<M: Mapper>(board: M, frames: i64, screenshot: &Bytes, title: &Bytes) -> 
     headless(&mut m, frames, screenshot)
 }
 
-/// Run `frames` frames, stopping early once a test ROM has reported.
+/// Run `frames` frames, stopping early once a test ROM has reported. The
+/// headless front end is three small handlers: the button handler counts
+/// frames down, and picture and sound are dropped.
 fn headless<M: Mapper>(m: &mut Machine<M>, frames: i64, screenshot: &Bytes) -> i64 ! {io, alloc, panic} {
     let mut frame = 0;
     while frame < frames {
-        emulator.run_frame(m);
-        frame = frame + 1;
-        if frame % 60 == 0 {
-            let output = emulator.serial_text(m);
-            if text.contains(&output, &Bytes.from("Passed")) || text.contains(&output, &Bytes.from("Failed")) {
-                frame = frames;
+        // Run a second of game time, then look for a test report.
+        let chunk = if frames - frame < 60 { frames - frame } else { 60 };
+        let mut left = chunk;
+        handle Buttons: Unit -> i64 with fn(
+            nothing: Unit,
+            resume: linear once fn(i64) -> i64 ! {},
+        ) -> i64 ! {panic} {
+            if left == 0 { resume(-1) } else { left = left - 1; resume(0) }
+        } {
+            handle Present: Bytes -> Bool with fn(
+                screen: Bytes,
+                resume: linear once fn(Bool) -> Bool ! {},
+            ) -> Bool ! {} { resume(true) } {
+                handle Play: Vec<i64> -> Unit with fn(
+                    samples: Vec<i64>,
+                    resume: linear once fn(Unit) -> Unit ! {},
+                ) -> Unit ! {} { resume(()) } {
+                    emulator.run(m)
+                }
             }
-            // A cartridge-RAM report is final once its status leaves 0x80.
-            if machine.read(m, 0xA001) == 0xDE && machine.read(m, 0xA002) == 0xB0
-                && machine.read(m, 0xA003) == 0x61 && machine.read(m, 0xA000) != 0x80 {
-                frame = frames;
-            }
+        };
+        frame = frame + chunk;
+        let output = emulator.serial_text(m);
+        if text.contains(&output, &Bytes.from("Passed")) || text.contains(&output, &Bytes.from("Failed")) {
+            frame = frames;
+        }
+        // A cartridge-RAM report is final once its status leaves 0x80.
+        if machine.read(m, 0xA001) == 0xDE && machine.read(m, 0xA002) == 0xB0
+            && machine.read(m, 0xA003) == 0x61 && machine.read(m, 0xA000) != 0x80 {
+            frame = frames;
         }
     }
     let output = emulator.serial_text(m);

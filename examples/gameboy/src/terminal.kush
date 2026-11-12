@@ -39,7 +39,7 @@ fn colour(out: Bytes, ground: i64, shade: u8) -> Bytes ! {alloc, panic} {
 }
 
 /// Append the cells that differ from `shown`, and record them there.
-fn draw<M>(m: &Machine<M>, shown: &mut Vec<u8>, out: Bytes) -> Bytes ! {alloc, panic} {
+fn draw(screen: &Bytes, shown: &mut Vec<u8>, out: Bytes) -> Bytes ! {alloc, panic} {
     let mut o = out;
     let width = machine.SCREEN_WIDTH;
     let mut foreground: u8 = 255;
@@ -52,8 +52,8 @@ fn draw<M>(m: &Machine<M>, shown: &mut Vec<u8>, out: Bytes) -> Bytes ! {alloc, p
         while x < width {
             let top_at = row * 2 * width + x;
             let bottom_at = top_at + width;
-            let top = m.screen[top_at];
-            let bottom = m.screen[bottom_at];
+            let top: u8 = Int.truncate(screen[top_at]);
+            let bottom: u8 = Int.truncate(screen[bottom_at]);
             if top != shown[top_at] || bottom != shown[bottom_at] {
                 shown[top_at] = top;
                 shown[bottom_at] = bottom;
@@ -101,46 +101,61 @@ fn status(title: &Bytes, frames_per_second: i64) -> Bytes ! {alloc, panic} {
     o
 }
 
-/// Play in the terminal until the player quits.
+/// Play in the terminal until the player quits: three handlers around
+/// `emulator.run`, like the window's, drawing with escape codes instead.
 pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
     enter()?;
-    let mut shown: Vec<u8> = Vec.with_capacity(machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT);
+    let mut cells: Vec<u8> = Vec.with_capacity(machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT);
     let mut i = 0;
     while i < machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT {
-        shown = shown.push(255);
+        cells = cells.push(255);
         i = i + 1;
     }
-    let mut next = TIME.monotonic_ns()?;
-    let mut second = next;
+    let shown = &mut cells;
+    let start = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => 0 };
+    let mut next = start;
+    let mut second = start;
     let mut frames = 0;
-    let mut rate = 0;
-    let mut running = true;
-    while running {
+    handle Buttons: Unit -> i64 with fn(
+        nothing: Unit,
+        resume: linear once fn(i64) -> i64 ! {},
+    ) -> i64 ! {io, panic} {
         let held = buttons();
-        if (held & QUIT) != 0 {
-            running = false;
-        } else {
-            machine.press(m, Int.truncate(held & 0xFF));
-            emulator.run_frame(m);
-            let mut out = draw(m, &mut shown, Bytes.with_capacity(65536));
+        if (held & QUIT) != 0 { resume(-1) } else { resume(held & 0xFF) }
+    } {
+        handle Present: Bytes -> Bool with fn(
+            screen: Bytes,
+            resume: linear once fn(Bool) -> Bool ! {},
+        ) -> Bool ! {io, alloc, panic} {
+            let mut out = draw(&screen, shown, Bytes.with_capacity(65536));
             frames = frames + 1;
-            let now = TIME.monotonic_ns()?;
+            let now = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => second };
             if now - second >= 1000000000 {
-                rate = frames;
+                out = emulator.append(out, &status(title, frames));
                 frames = 0;
                 second = now;
-                out = emulator.append(out, &status(title, rate));
             }
             let _ = IO.write(IO.stdout(), &out);
-            next = next + FRAME_NS;
-            let after = TIME.monotonic_ns()?;
-            if next > after {
-                TIME.sleep_ms((next - after) / 1000000)?;
-            } else if after - next > 100000000 {
-                // More than 100 ms behind: drop the debt rather than race.
-                next = after;
+            resume(true)
+        } {
+            // No sound in the terminal: the clock paces the game.
+            handle Play: Vec<i64> -> Unit with fn(
+                samples: Vec<i64>,
+                resume: linear once fn(Unit) -> Unit ! {},
+            ) -> Unit ! {io, panic} {
+                next = next + FRAME_NS;
+                let now = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => next };
+                if next > now {
+                    let _ = TIME.sleep_ms((next - now) / 1000000);
+                } else if now - next > 100000000 {
+                    // More than 100 ms behind: drop the debt rather than race.
+                    next = now;
+                }
+                resume(())
+            } {
+                emulator.run(m)
             }
         }
-    }
+    };
     leave()
 }

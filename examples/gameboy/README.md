@@ -90,14 +90,43 @@ Test ROMs are not included. Blargg's are at
 | `src/cpu.kush` | The instruction set, decoded into the `Reg8`, `Pair`, `Alu`, `Cond` and `Shift` enums. |
 | `src/ppu.kush` | Scanline timing, STAT interrupts and line rendering. |
 | `src/apu.kush` | The sound chip: two square channels (one with sweep), wave, noise, frame sequencer, stereo mixing. |
-| `src/desktop.kush` | The window front end: picture, sound, keyboard and gamepads. |
-| `src/emulator.kush` | The frame loop and screenshots. |
-| `src/terminal.kush` | The terminal renderer and frame pacing. |
+| `src/desktop.kush` | The window front end, as handlers: picture, sound, keyboard and gamepads. |
+| `src/emulator.kush` | The core's interface (`Buttons`, `Present`, `Play`), the frame loop and screenshots. |
+| `src/terminal.kush` | The terminal front end, as handlers: renderer and frame pacing. |
 | `terminal/` | A Rust adapter with no dependencies: raw mode and key events. |
-| `tests/main.kush` | DAA, the stack, a timer interrupt waking HALT, MBC1 banking, frame length, a square wave and its length counter. |
+| `tests/main.kush` | DAA, the stack, a timer interrupt waking HALT, MBC1 banking, frame length, a square wave and its length counter, and the core under a scripted test front end. |
 
 Some choices that show the language:
 
+- **Front ends are effect handlers.** The core is one loop,
+  `emulator.run(m)`, that performs three declared operations per frame:
+
+  ```kush
+  pub effect Buttons: Unit -> i64 ! {io, alloc, panic};   // held buttons, -1 stops
+  pub effect Present: Bytes -> Bool ! {io, alloc, panic}; // the frame's shades
+  pub effect Play: Vec<i64> -> Unit ! {io, alloc, panic}; // the frame's sound
+  ```
+
+  The window, the terminal, the headless runner and a test are each a few
+  handlers around that call; the core has no idea which one drives it.
+  Handlers keep state by capturing references (`shown: &Window`,
+  `pad: &mut Controls`) and counters, and the window installs `Play` outside
+  its other handlers, once paced by the audio device and once by a clock, so
+  the same session code runs with or without sound. The operation lists the
+  effects its handlers may have, so `run`'s row says it can do I/O.
+- **Memory accesses are proved in bounds.** The memories are
+  length-refined fields (`vram: Vec<u8> where len >= 0x2000`), so a bus read
+  after `if address < 0xA000 { .. }` is a plain load. Helpers state ranges
+  with `ensures` (`fn wide(value: u8) -> i64 ensures { result == value }`)
+  and erased parameters (`tile_pixel(m, at, column, erased inside: { 0 <= at
+  && at < 0x1FFF })`). `KUSH_PROOF_REPORT=verbose kush check` lists what is
+  left: 118 accesses are proved, every memory-bus read and write and every
+  per-pixel access; the I/O registers keep their checks. It took 3600 frames
+  of a commercial game from 6.6 s to 4.9 s with Cranelift (LLVM, which
+  already hoisted most checks, stays at about 1.2 s).
+- **The window and the audio device are linear.** `window.open` returns a
+  `Window` that every path must pass to `window.close`; forgetting one is a
+  compile error.
 - **The machine is generic over its cartridge.** `main` reads the header and
   calls `play` with the right controller; each controller gets its own
   specialized emulator, and the bus calls `m.cartridge.load(address)` with no
@@ -119,6 +148,13 @@ and index assignment on `Vec` fields through references, field assignment on
 exclusive borrows in calls, records without size limits, fields inside owning
 fields through references (`m.apu.powered`), and exclusive borrows of two
 different owning fields at once (`apu.sequence(&mut m.apu, &mut m.io)`).
+
+Then, to use what is particular to Kush: length-refined `Vec` fields and
+stronger loop and branch facts for the prover
+([places](../../docs/places.md#length-refined-fields)); effects declared on
+operations, reusable capturing handlers for called functions
+([effect handlers](../../docs/effect-handlers.md)); and closures that capture
+references as scoped borrows ([functions](../../docs/functions.md)).
 
 ## Not yet
 

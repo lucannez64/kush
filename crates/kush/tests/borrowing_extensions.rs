@@ -1018,7 +1018,8 @@ fn slice_element_references_cannot_escape_their_storage() {
         }"#,
         "reference escapes the lexical scope of the storage it borrows",
     );
-    // A lambda cannot capture an element reference, and an exclusive view
+    // A lambda capturing an element reference keeps its owner borrowed
+    // while the lambda is live, and an exclusive view
     // passed twice to a helper is moved by the first call.
     rejects(
         r#"
@@ -1030,7 +1031,7 @@ fn slice_element_references_cannot_escape_their_storage() {
             let w = v;
             f() + Vec.len(&w)
         }"#,
-        "a lambda cannot capture a borrowed owner reference",
+        "cannot move an owner while it is borrowed",
     );
     rejects(
         r#"
@@ -1157,7 +1158,7 @@ fn slice_element_references_work_in_loops_tasks_and_closures() {
                 match Task.join(t) { TaskExit.Completed(x) => x, TaskExit.Cancelled => 1 }
             })
         }"#,
-        "a lambda cannot capture a borrowed owner reference",
+        "a spawned task cannot capture a borrowed owner reference",
     );
     // Vec-backed element writes through a record field, and a temporary
     // owner whose element reference ends before the owner grows again.

@@ -2340,7 +2340,18 @@ int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
         out[0] = frame->code;
         out[1] = frame->environment;
         out[2] = frame->once;
-        if (frame->once) {
+        if (frame->once == 2) {
+            /* A reusable handler (all captures copyable) keeps its
+               environment; each call owns and frees a fresh copy. */
+            KushAllocHeader *header =
+                (KushAllocHeader *)(uintptr_t)frame->environment - 1;
+            uint64_t copy = kush_alloc(header->usable);
+            memcpy((void *)(uintptr_t)copy,
+                   (const void *)(uintptr_t)frame->environment,
+                   (size_t)header->usable);
+            out[1] = (int64_t)copy;
+            out[2] = 1;
+        } else if (frame->once) {
             /* A once handler transfers its environment to this call. The
                callee frees it, so the frame must never drop it again. */
             frame->consumed = 1;
@@ -6909,12 +6920,13 @@ impl Generator<'_, '_> {
                 operation,
                 handler,
                 body,
+                reusable,
             } => {
                 let values = lower!(self.expr(handler));
                 let code = values[0];
                 let (environment, once) = if matches!(handler.ty, Type::Once(_)) {
                     let environment = values.get(1).copied().unwrap_or_else(|| self.constant(0));
-                    (environment, self.constant(1))
+                    (environment, self.constant(if *reusable { 2 } else { 1 }))
                 } else {
                     (self.constant(0), self.constant(0))
                 };

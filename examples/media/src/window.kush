@@ -6,40 +6,58 @@ use media.input;
 use media.input.Event;
 
 // A window showing one RGB image, scaled up with sharp pixels and its aspect
-// ratio kept when resized. Closing it (dropping the `Window`) releases it.
+// ratio kept when resized. A `Window` is linear: every path through the
+// program must pass it to `close`, so a window is never leaked or used after
+// it was closed.
 
 #[foreign("media_window_release")]
-pub struct Window {}
+struct Handle {}
 
-foreign "media_window_open" fn open_window(title: &Bytes, width: i64, height: i64, scale: i64) -> Result<Window, i64> ! {io};
-foreign "media_window_present" fn present_pixels(window: &Window, pixels: &Bytes) -> Result<Unit, i64> ! {io};
-foreign "media_window_set_title" fn title_window(window: &Window, title: &Bytes) -> Result<Unit, i64> ! {io};
-foreign "media_window_next_event" fn next_packed(window: &Window) -> i64 ! {io};
+/// An open window. Only `open` makes one; `close` ends it.
+#[linear]
+pub struct Window {
+    raw: Handle,
+}
+
+foreign "media_window_open" fn open_window(title: &Bytes, width: i64, height: i64, scale: i64) -> Result<Handle, i64> ! {io};
+foreign "media_window_present" fn present_pixels(window: &Handle, pixels: &Bytes) -> Result<Unit, i64> ! {io};
+foreign "media_window_set_title" fn title_window(window: &Handle, title: &Bytes) -> Result<Unit, i64> ! {io};
+foreign "media_window_next_event" fn next_packed(window: &Handle) -> i64 ! {io};
 
 /// Open a window for a `width` x `height` image, shown `scale` times as
 /// large. Fails with ENODEV (19) when there is no display.
 pub fn open(title: &Bytes, width: i64, height: i64, scale: i64) -> Result<Window, i64> ! {io} {
-    open_window(title, width, height, scale)
+    match open_window(title, width, height, scale) {
+        Result.Ok(raw) => Result.Ok(Window { raw: raw }),
+        Result.Err(code) => Result.Err(code),
+    }
+}
+
+/// Close the window.
+pub fn close(window: Window) -> Unit ! {} {
+    match window {
+        Window { raw } => {},
+    }
 }
 
 /// Show an image: 3 bytes (red, green, blue) per pixel, rows top to
 /// bottom, exactly the size the window was opened for (EINVAL otherwise).
 pub fn present(window: &Window, pixels: &Bytes) -> Result<Unit, i64> ! {io} {
-    present_pixels(window, pixels)
+    present_pixels(&window.raw, pixels)
 }
 
 pub fn set_title(window: &Window, title: &Bytes) -> Result<Unit, i64> ! {io} {
-    title_window(window, title)
+    title_window(&window.raw, title)
 }
 
 /// The next pending event, if any. Call it until it returns `None` once
 /// per frame; key auto-repeat is not reported.
 pub fn next_event(window: &Window) -> Option<Event> ! {io, panic} {
-    let mut packed = next_packed(window);
+    let mut packed = next_packed(&window.raw);
     while packed != 0 {
         match input.decode(packed) {
             Option.Some(event) => { return Option.Some(event); },
-            Option.None => { packed = next_packed(window); },
+            Option.None => { packed = next_packed(&window.raw); },
         }
     }
     Option.None

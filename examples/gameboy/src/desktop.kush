@@ -14,6 +14,7 @@ use media.window.Window;
 use gameboy.apu;
 use gameboy.cartridge.Mapper;
 use gameboy.emulator;
+use gameboy.emulator.Play;
 use gameboy.machine;
 use gameboy.machine.Machine;
 
@@ -112,29 +113,30 @@ fn handle_events(win: &Window, c: &mut Controls) -> Unit ! {io, panic} {
     }
 }
 
-/// The screen as RGB bytes for the window.
-fn pixels<M>(m: &Machine<M>) -> Bytes ! {alloc, panic} {
-    let size = machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT;
-    let mut out = Bytes.with_capacity(size * 3);
+fn controls() -> Controls ! {} {
+    Controls { keys: 0, pad: 0, tapped: 0, stick_x: 0, stick_y: 0, quit: false }
+}
+
+/// A frame's shades as RGB bytes for the window.
+fn pixels(screen: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(screen.len() * 3);
     let mut i = 0;
-    while i < size {
-        let (r, g, b) = emulator.rgb(m.screen[i]);
+    while i < screen.len() {
+        let (r, g, b) = emulator.rgb(Int.truncate(screen[i]));
         out = out.push(r).push(g).push(b);
         i = i + 1;
     }
     out
 }
 
-/// The samples made since last time, encoded for the audio queue.
-fn take_samples<M>(m: &mut Machine<M>) -> Bytes ! {alloc, panic} {
-    let count = m.apu.samples.len();
-    let mut out = Bytes.with_capacity(count * 2);
+/// Samples encoded for the audio queue.
+fn encode(samples: &Vec<i64>) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(samples.len() * 2);
     let mut i = 0;
-    while i < count {
-        out = audio.push(out, m.apu.samples[i]);
+    while i < samples.len() {
+        out = audio.push(out, samples[i]);
         i = i + 1;
     }
-    m.apu.samples.clear();
     out
 }
 
@@ -146,72 +148,101 @@ fn show_rate(win: &Window, title: &Bytes, rate: i64) -> Unit ! {io, alloc, panic
     let _ = window.set_title(win, &name);
 }
 
-/// One frame: input, emulation, picture. False once the player quits.
-fn frame<M: Mapper>(m: &mut Machine<M>, win: &Window, c: &mut Controls) -> Result<Bool, i64> ! {io, alloc, panic} {
-    handle_events(win, c);
-    if c.quit { return Ok(false); }
-    machine.press(m, Int.truncate(held(c)));
-    c.tapped = 0;
-    emulator.run_frame(m);
-    window.present(win, &pixels(m))?;
-    Ok(true)
-}
-
-fn controls() -> Controls ! {} {
-    Controls { keys: 0, pad: 0, tapped: 0, stick_x: 0, stick_y: 0, quit: false }
-}
-
-/// Play with sound: the audio device's clock paces the frames.
-fn with_sound<M: Mapper>(m: &mut Machine<M>, win: &Window, sound: &Audio, title: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
-    let mut c = controls();
-    let mut second = TIME.monotonic_ns()?;
-    let mut frames = 0;
-    while frame(m, win, &mut c)? {
-        let samples = take_samples(m);
-        audio.queue(sound, &samples)?;
-        // Wait while more than the target is queued; this keeps sound and
-        // picture together without drifting.
-        while audio.queued(sound) > AUDIO_TARGET {
-            TIME.sleep_ms(1)?;
-        }
-        frames = frames + 1;
-        let now = TIME.monotonic_ns()?;
-        if now - second >= 1000000000 {
-            show_rate(win, title, frames);
-            frames = 0;
-            second = now;
-        }
-    }
-    Ok(())
-}
-
-/// Play silently, paced by the clock.
-fn silent<M: Mapper>(m: &mut Machine<M>, win: &Window, title: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
-    let mut c = controls();
-    let mut next = TIME.monotonic_ns()?;
-    let mut second = next;
-    let mut frames = 0;
-    while frame(m, win, &mut c)? {
-        m.apu.samples.clear();
-        next = next + FRAME_NS;
-        let now = TIME.monotonic_ns()?;
-        if next > now { TIME.sleep_ms((next - now) / 1000000)?; } else if now - next > 100000000 { next = now; }
-        frames = frames + 1;
-        if now - second >= 1000000000 {
-            show_rate(win, title, frames);
-            frames = 0;
-            second = now;
-        }
-    }
-    Ok(())
-}
-
 /// Open a window and play until it is closed. Fails with ENODEV (19) when
 /// there is no display; sound is optional.
+///
+/// The front end is three handlers around `emulator.run`: `Buttons` reads
+/// the window's events, `Present` draws the frame and keeps the frame rate
+/// in the title, `Play` queues the sound and paces the game. They share the
+/// window and the controls through references the handlers capture.
 pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64) -> Result<Unit, i64> ! {io, alloc, panic} {
     let win = window.open(&emulator.append(Bytes.from("Kush Game Boy - "), title), machine.SCREEN_WIDTH, machine.SCREEN_HEIGHT, scale)?;
-    match audio.open(apu.SAMPLE_RATE, 2) {
-        Ok(sound) => with_sound(m, &win, &sound, title),
-        Err(_) => silent(m, &win, title),
-    }
+    // Sound is handled out here, so `session` works the same with or
+    // without it: its `emulator.run` performs `Play` and reaches whichever
+    // handler is active.
+    let result = match audio.open(apu.SAMPLE_RATE, 2) {
+        Result.Ok(device) => {
+            let speaker = &device;
+            let result = handle Play: Vec<i64> -> Unit with fn(
+                samples: Vec<i64>,
+                resume: linear once fn(Unit) -> Unit ! {},
+            ) -> Unit ! {io, alloc, panic} {
+                let _ = audio.queue(speaker, &encode(&samples));
+                // The audio clock paces the game: wait while more than
+                // the target is queued, so sound and picture stay together.
+                while audio.queued(speaker) > AUDIO_TARGET {
+                    let _ = TIME.sleep_ms(1);
+                }
+                resume(())
+            } {
+                session(m, &win, title)
+            };
+            audio.close(device);
+            result
+        },
+        Result.Err(missing) => {
+            // Silent: a 59.7 Hz clock paces the game.
+            let mut next = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => 0 };
+            handle Play: Vec<i64> -> Unit with fn(
+                samples: Vec<i64>,
+                resume: linear once fn(Unit) -> Unit ! {},
+            ) -> Unit ! {io, panic} {
+                next = next + FRAME_NS;
+                let now = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => next };
+                if next > now {
+                    let _ = TIME.sleep_ms((next - now) / 1000000);
+                } else if now - next > 100000000 {
+                    // More than 100 ms behind: drop the debt rather than race.
+                    next = now;
+                }
+                resume(())
+            } {
+                session(m, &win, title)
+            }
+        },
+    };
+    window.close(win);
+    result
+}
+
+/// The window's side of the front end: `Buttons` reads the window's events,
+/// `Present` draws each frame and keeps the frame rate in the title. The
+/// handlers share the window and the controls through references they
+/// capture; `Play` is left to the caller.
+fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes) -> Result<Unit, i64> ! {Play, io, alloc, panic} {
+    let mut c = controls();
+    let pad = &mut c;
+    let mut second = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => 0 };
+    let mut frames = 0;
+    let mut failure = 0;
+    handle Buttons: Unit -> i64 with fn(
+        nothing: Unit,
+        resume: linear once fn(i64) -> i64 ! {},
+    ) -> i64 ! {io, panic} {
+        handle_events(shown, pad);
+        let buttons = held(pad);
+        pad.tapped = 0;
+        if pad.quit { resume(-1) } else { resume(buttons) }
+    } {
+        handle Present: Bytes -> Bool with fn(
+            screen: Bytes,
+            resume: linear once fn(Bool) -> Bool ! {},
+        ) -> Bool ! {io, alloc, panic} {
+            match window.present(shown, &pixels(&screen)) {
+                Result.Ok(_) => {},
+                Result.Err(code) => { failure = code; },
+            }
+            frames = frames + 1;
+            let now = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => second };
+            if now - second >= 1000000000 {
+                show_rate(shown, title, frames);
+                frames = 0;
+                second = now;
+            }
+            resume(failure == 0)
+        } {
+            emulator.run(m)
+        }
+    };
+    if failure != 0 { Result.Err(failure) } else { Result.Ok(()) }
 }

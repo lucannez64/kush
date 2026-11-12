@@ -6549,6 +6549,12 @@ impl Checker<'_> {
                 let mut lent = Vec::new();
                 if let ExprKind::FnValue { captures, .. } = &site.kind {
                     for capture in captures {
+                        if capture.ty.is_ref() {
+                            return Err(Diagnostic::new(
+                                capture.span,
+                                "a spawned task cannot capture a borrowed owner reference; pass the storage as a slice view, or move the value into the task",
+                            ));
+                        }
                         if capture.ty.is_slice() {
                             lent.push((
                                 self.view_origins(capture),
@@ -6678,9 +6684,11 @@ impl Checker<'_> {
                             || capabilities.contains(index)
                     })
                     .collect::<Vec<_>>();
+                // References are scoped borrowed captures exactly like slice
+                // views: the closure holds their loans while it is live.
                 let borrowed = captures
                     .iter()
-                    .filter(|capture| capture.ty.is_slice())
+                    .filter(|capture| capture.ty.is_slice() || capture.ty.is_ref())
                     .collect::<Vec<_>>();
                 let records = captures
                     .iter()
@@ -6727,8 +6735,13 @@ impl Checker<'_> {
                     for capture in &borrowed {
                         let capture_origins = self.view_origins(capture);
                         let labels = self.split_labels(capture);
-                        let capture_mut = capture.ty.is_mut_slice();
-                        let capture_field = self.view_loan(capture).field;
+                        let capture_mut =
+                            capture.ty.is_mut_slice() || matches!(capture.ty, Type::RefMut(_));
+                        let capture_field = if capture.ty.is_ref() {
+                            None
+                        } else {
+                            self.view_loan(capture).field
+                        };
                         self.check_view_creation(
                             &capture_origins,
                             capture_mut,
@@ -6892,8 +6905,53 @@ impl Checker<'_> {
                 self.expr(array)?;
             }
             ExprKind::HandlerPush { handler, body, .. } => {
-                self.expr(handler)?;
+                // A handler closure with borrowed captures (by-reference
+                // scalars, views) is called by performs throughout the body,
+                // so its loans stay live until the body ends, exactly as a
+                // scoped closure's loans do across a call's arguments.
+                let loans = self.loans.clone();
+                let capture_info = match &handler.kind {
+                    ExprKind::Local(slot) => self.borrowed_closures.get(slot).cloned(),
+                    _ => None,
+                };
+                let old_callee_site = self.callee_site;
+                if capture_info.is_some() {
+                    self.callee_site = Some(&**handler as *const Expr as usize);
+                }
+                let checked = self.expr(handler);
+                self.callee_site = old_callee_site;
+                checked?;
+                if let Some(info) = &capture_info {
+                    for mutable in [false, true] {
+                        let origins = if mutable {
+                            info.exclusive_origins.clone()
+                        } else {
+                            info.origins
+                                .difference(&info.exclusive_origins)
+                                .copied()
+                                .collect()
+                        };
+                        if origins.is_empty() {
+                            continue;
+                        }
+                        let roots = self.origins_roots(&origins);
+                        self.temporary_regions.push(RetainedView {
+                            origins: origins.clone(),
+                            roots,
+                            mutable,
+                            splits: info.splits.clone(),
+                            field: None,
+                        });
+                        self.loans.extend(origins.iter().copied());
+                        if mutable {
+                            self.temporary_exclusive.extend(origins);
+                        } else {
+                            self.temporary_shared.extend(origins);
+                        }
+                    }
+                }
                 self.block(body)?;
+                self.loans = loans;
             }
             ExprKind::Suspendable(suspendable) => self.block(&mut suspendable.body)?,
             ExprKind::Suspend { call, .. } => self.expr(call)?,
