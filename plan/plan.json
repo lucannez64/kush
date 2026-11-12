@@ -4572,6 +4572,182 @@
           "text": "done b2538f1"
         }
       ]
+    },
+    {
+      "id": "LLVM-BACKEND",
+      "title": "LLVM release backend (shared lowering, whole-program runtime)",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "CLIF-to-LLVM-IR translator behind CodeModule, pointer forms, runtime IR linked and internalized, --backend llvm, KUSH_BACKEND replay.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 04:16:27",
+          "who": "claude",
+          "text": "1,694 tests pass on both backends (LLVM 18.1.3); docs/llvm-backend.md"
+        },
+        {
+          "time": "2026-11-11 14:48:20",
+          "who": "claude",
+          "text": "Independent review: narrow foreign arguments are now extended for the callee (both backends), runtime cache hits with a bare output name, llvm-link is not taken from beside a compiler wrapper and its failure falls back, flag order no longer matters, one phi entry per switch edge, constants collected before use, handler_restore no longer inlinable. 1,708 tests pass on Cranelift, llvm and llvm-release."
+        },
+        {
+          "time": "2026-11-11 21:11:25",
+          "who": "claude",
+          "text": "Stack exhaustion is a panic on both backends and all stacks (fault handler on a signal stack; stack probes in Cranelift and LLVM code); runtime cache pruned to the 96 files / 256 MiB used most recently; dot loop confirmed instruction-identical to checked Rust. 1,711 tests pass on Cranelift, llvm and llvm-release."
+        }
+      ]
+    },
+    {
+      "id": "LLVM-DEFER",
+      "title": "Deferred overflow checks for counted loops",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LLVM-BACKEND"
+      ],
+      "status": "done",
+      "desc": "Exact sticky bits and magnitude certificates with exact replay; docs/deferred-overflow.md.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 04:16:27",
+          "who": "claude",
+          "text": "tests/deferred_overflow.rs across up to nine configurations; checked sum 260 -> 170 ms"
+        }
+      ]
+    },
+    {
+      "id": "LLVM-DEFER-REVIEW",
+      "title": "Independent hostile review of deferred overflow soundness",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "LLVM-DEFER"
+      ],
+      "status": "done",
+      "desc": "Pinning of control and index values, replay with stores through exclusive slices, certificate arithmetic. Relies on &mut [T] exclusivity.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 14:48:20",
+          "who": "claude",
+          "text": "Independent review found three defects, all fixed with regression tests: out-of-bounds read through a proved Vec.at/Slice.at after a deferred overflow; non-canonical narrow values reaching division (SIGFPE/SIGILL); unbounded delay of the panic (huge bound, float counter, bound read from memory). Loops are now checked in chunks of 65,536 iterations, proved reads are not deferred, narrow results are canonical."
+        }
+      ]
+    },
+    {
+      "id": "LLVM-ALIAS",
+      "title": "Alias information for LLVM (noalias from ownership, vector header vs elements)",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "LLVM-BACKEND"
+      ],
+      "status": "done",
+      "desc": "Vec.push keeps length/capacity in memory: 14 vs 8 instructions per element against Rust. Type-based tags are unsound while the pool allocator is inlined; needs an allocator boundary.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 05:14:46",
+          "who": "claude",
+          "text": "noalias for owning/exclusive parameters with word thunks, header/element memory classes, allocator kept opaque; feature-pipeline 69 -> 61 ms (Rust 59)"
+        }
+      ]
+    },
+    {
+      "id": "PROOF-CACHE",
+      "title": "Persistent, re-verified cache of arithmetic proof search",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Front end 86 -> 20 ms on checked-loops; remembered Farkas weights are rebuilt and verified, integer fallback remembers failures only. docs/proof-cache.md.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 05:14:46",
+          "who": "claude",
+          "text": "kush check 86 -> 20 ms warm; 1,694 tests pass"
+        },
+        {
+          "time": "2026-11-11 14:48:20",
+          "who": "claude",
+          "text": "Independent review: a fresh search result is verified before it is stored or used; a damaged cache file is truncated to its intact prefix; size and file-count limits."
+        }
+      ]
+    },
+    {
+      "id": "LLVM-ALIAS-MORE",
+      "title": "More ownership facts: readonly shared borrows, fresh allocation results, exclusive locals and fields",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "LLVM-ALIAS"
+      ],
+      "status": "todo",
+      "desc": "Needs a check for interior writes through shared handles (allocator context reference counts).",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PROOF-SEARCH-SPEED",
+      "title": "Faster proof search and lazy lowering",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PROOF-CACHE"
+      ],
+      "status": "done",
+      "desc": "Integer-point witness for unprovable goals, per-component search, vector rows; only reachable functions are lowered. docs/proof-cache.md.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 06:07:25",
+          "who": "claude",
+          "text": "kush check on checked-loops 730M -> 228M instructions uncached, 86M cached; dev build 58 ms, LLVM release 135-159 ms; 1,697 tests pass on both backends"
+        }
+      ]
+    },
+    {
+      "id": "LLVM-DEFER-REVIEW-2",
+      "title": "Second review of the chunked deferred-overflow lowering",
+      "size": "S",
+      "hard": true,
+      "deps": [
+        "LLVM-DEFER-REVIEW"
+      ],
+      "status": "done",
+      "desc": "The chunk loop, the negative-counter fallback and the term-count bound (iterations started times reduction operations) were written in response to the first review and have only been tested, not reviewed.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 23:29:09",
+          "who": "claude",
+          "text": "Second independent review of the chunked lowering: no defect in differential tests (chunk boundaries, certificate thresholds, replay with stores, counters, narrow kinds, 630 fuzzed loops x ~15,000 inputs x 6 builds) or by reading. Follow-ups done: a proved (unchecked) counter step now counts as a step, so plain while-i-less-than-n loops are deferred; loops whose indices do not follow the counter are not deferred (they stay scalar and were up to 48% slower); doc overclaims corrected. The reviewer's fuzzer was re-run on the step change with no difference."
+        }
+      ]
+    },
+    {
+      "id": "LLVM-DEFER-REVIEW-3",
+      "title": "Third independent review: changes made after the second",
+      "size": "S",
+      "hard": true,
+      "deps": [
+        "LLVM-DEFER-REVIEW-2"
+      ],
+      "status": "done",
+      "desc": "Planner step and index rules, chunk hand-back, run-time overlap check, stack fault handler, disable-tail-calls.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 00:59:41",
+          "who": "claude",
+          "text": "No defect in the deferral changes (about 3,200 generated deferred loops plus edge cases, up to 8 builds each). Two low-severity defects in the new fault handler, both fixed with tests: a write running off the top of the stack was reported as stack exhaustion, and the first SIGSEGV/SIGBUS sent from outside was swallowed. Doc overclaims corrected; bounded delay has a test on a loop that still qualifies. The handler fixes themselves were made after this review. 1,719 tests pass on Cranelift, llvm and llvm-release."
+        }
+      ]
     }
   ]
 }

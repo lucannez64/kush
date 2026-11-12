@@ -29,6 +29,8 @@ fn build(root: &Path, output: &str) -> Command {
         )
         .env("CC_LOG", root.join("compiles"))
         .env("KUSH_RUNTIME_CACHE", root.join("cache"))
+        // These tests replace `cc`; they are about the default backend.
+        .env_remove("KUSH_BACKEND")
         .env_remove("KUSH_NO_RUNTIME_CACHE");
     command
 }
@@ -132,4 +134,30 @@ fn compiler_header_changes_invalidate_a_warm_entry() {
     fs::write(&header, "#include_next <math.h>\n/* header changed */\n").unwrap();
     success(build(root, "third").env("CPATH", &includes));
     assert_eq!(compiles(root), 2);
+}
+
+/// An output without a directory puts the scratch directory at a relative
+/// path, which the compiler's dependency listing spells its own way.
+#[test]
+fn a_bare_output_name_still_reuses_the_runtime() {
+    let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+    let root = scratch.path();
+    setup(root);
+    let mut entries = Vec::new();
+    for output in ["first", "second"] {
+        let template = build(root, output);
+        let mut bare = Command::new(template.get_program());
+        bare.current_dir(root)
+            .args(["build", "main.kush", "-o", output]);
+        for (key, value) in template.get_envs() {
+            match value {
+                Some(value) => bare.env(key, value),
+                None => bare.env_remove(key),
+            };
+        }
+        success(&mut bare);
+        entries.push(fs::read_dir(root.join("cache")).unwrap().count());
+    }
+    assert_eq!(compiles(root), 1);
+    assert_eq!(entries[0], entries[1]);
 }

@@ -6,18 +6,9 @@ use kush::{
 use std::{fs, process::Command};
 
 const OPTIONS: [CodegenOptions; 4] = [
-    CodegenOptions {
-        optimization: Optimization::None,
-        inline_scalar_callbacks: false,
-    },
-    CodegenOptions {
-        optimization: Optimization::Speed,
-        inline_scalar_callbacks: false,
-    },
-    CodegenOptions {
-        optimization: Optimization::None,
-        inline_scalar_callbacks: true,
-    },
+    CodegenOptions::cranelift(Optimization::None, false),
+    CodegenOptions::cranelift(Optimization::Speed, false),
+    CodegenOptions::cranelift(Optimization::None, true),
     CodegenOptions::release(),
 ];
 fn agrees(source: &str) {

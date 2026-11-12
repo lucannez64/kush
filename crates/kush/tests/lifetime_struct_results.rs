@@ -36,10 +36,7 @@ fn agrees(source: &str, expected_status: i64, expected_output: &str) {
         let modes = [
             (
                 "default",
-                CodegenOptions {
-                    optimization: Optimization::None,
-                    inline_scalar_callbacks: false,
-                },
+                CodegenOptions::cranelift(Optimization::None, false),
             ),
             ("release", CodegenOptions::release()),
         ];
