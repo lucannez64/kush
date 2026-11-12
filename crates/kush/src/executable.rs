@@ -11117,12 +11117,6 @@ impl<'a> Functions<'a> {
                 "a function cannot return a task handle; a child handle must not escape its scope",
             ));
         }
-        if parameters.iter().map(|ty| types.width(*ty)).sum::<usize>() > 128 {
-            return Err(Diagnostic::new(
-                declared.span,
-                "function parameters exceed the 128-word ABI limit",
-            ));
-        }
         let specialized =
             !key.1.is_empty() || !key.2.is_empty() || !key.3.is_empty() || !key.4.is_empty();
         let name = if !specialized {

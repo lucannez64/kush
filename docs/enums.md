@@ -187,10 +187,9 @@ Finite nesting such as `Wrap<Wrap<i64>>` is supported. Generic enum definitions
 are structurally validated when declared, and their concrete layouts are checked
 when instantiated. Non-generic enum layouts are checked even if unused.
 
-Initial limits are 64 variants per enum, 32 words per concrete enum (256 for a
+Initial limits are 64 variants per enum, 32 words per concrete enum (none for a
 nominal record, see [places](places.md)), 32 active
-layout levels, 256 concrete enum instantiations, and 128 flattened argument words
-per function, alongside the existing frontend/function/local limits. Exceeding a
+layout levels, and 256 concrete enum instantiations, alongside the existing frontend/function/local limits. Exceeding a
 limit is a diagnostic. Compiler/interpreter bookkeeping may allocate in Rust;
 these layouts alone do not establish the spec's general resource model. Checked
 `noalloc`/`nosuspend` functions now exist for the [supported operation set](ownership.md).

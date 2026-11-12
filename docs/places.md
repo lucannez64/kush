@@ -86,9 +86,10 @@ with effects keep their relative order. A call whose early argument is itself a
 reference or view is left as written, since a hidden local cannot carry its
 lifetime.
 
-## Wide records
+## Records without size limits
 
-A nominal record (`struct`) may be up to 256 words wide; other inline layouts
-(arrays, tuples, enums, unions) keep the 32-word limit. A record is the natural
-home of a large state, such as a whole console, and is usually passed by
-reference.
+A nominal record (`struct`) has no limit on its width, its number of fields,
+or the words it takes as a by-value argument. Its cost is in by-value copies,
+which the program chooses: pass a large state by reference. Other inline
+layouts (arrays, tuples, enums, unions, structural records) keep their 32-word
+limit.

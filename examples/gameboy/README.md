@@ -92,7 +92,7 @@ Writing it this way needed six additions to Kush, made alongside it and
 documented in [places](../../docs/places.md): module-level `const`, indexing
 and index assignment on `Vec` fields through references, field assignment on
 `let mut` records, method calls on fields and through references, two-phase
-exclusive borrows in calls, and records wider than 32 words.
+exclusive borrows in calls, and records without size limits.
 
 ## Not yet
 

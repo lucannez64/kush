@@ -260,32 +260,44 @@ fn an_exclusive_argument_is_taken_after_the_reads_of_its_owner() {
 }
 
 #[test]
-fn records_may_be_wider_than_other_inline_layouts() {
-    let fields: Vec<String> = (0..40).map(|i| format!("f{i}: i64")).collect();
-    let values: Vec<String> = (0..40).map(|i| format!("f{i}: {i}")).collect();
+fn records_have_no_size_or_field_limit() {
+    // 300 fields, and a 1200-word record passed and returned by value.
+    let fields: Vec<String> = (0..300).map(|i| format!("f{i}: i64")).collect();
+    let values: Vec<String> = (0..300).map(|i| format!("f{i}: {i}")).collect();
+    let part: Vec<String> = (0..300).map(|i| format!("p{i}: i64")).collect();
+    let part_values: Vec<String> = (0..300).map(|i| format!("p{i}: seed + {i}")).collect();
     agrees(
         &format!(
             "struct Wide {{ {} }}
-             fn last(w: &Wide) -> i64 ! {{}} {{ w.f39 }}
-             fn main() -> i64 ! {{panic}} {{ let w = Wide {{ {} }}; last(&w) + w.f1 }}",
+             struct Part {{ {} }}
+             struct Huge {{ a: Part, b: Part, c: Part, d: Part }}
+             fn make(seed: i64) -> Part ! {{panic}} {{ Part {{ {} }} }}
+             fn bump(w: Wide) -> Wide ! {{panic}} {{
+                 let mut v = w;
+                 v.f0 = v.f0 + 1000;
+                 v.f299 = v.f299 + 1;
+                 v
+             }}
+             fn sum_parts(h: Huge) -> i64 ! {{panic}} {{ h.a.p0 + h.b.p150 + h.c.p299 + h.d.p1 }}
+             fn grow(h: &mut Huge) -> Unit ! {{panic}} {{ h.d.p1 = h.d.p1 * 2; }}
+             fn main() -> i64 ! {{io, panic}} {{
+                 let v = bump(Wide {{ {} }});
+                 print_i64(v.f0);
+                 print_i64(v.f150);
+                 print_i64(v.f299);
+                 let mut h = Huge {{ a: make(0), b: make(1), c: make(2), d: make(3) }};
+                 grow(&mut h);
+                 sum_parts(h)
+             }}",
             fields.join(", "),
+            part.join(", "),
+            part_values.join(", "),
             values.join(", ")
         ),
-        40,
-        "",
+        460,
+        "1000\n150\n300\n",
     );
-    // Records hold at most 64 fields, so nest them to pass 256 words.
-    let inner: Vec<String> = (0..60).map(|i| format!("f{i}: i64")).collect();
-    rejects(
-        &format!(
-            "struct Part {{ {} }}
-             struct TooWide {{ a: Part, b: Part, c: Part, d: Part, e: Part }}
-             fn main() -> i64 ! {{}} {{ 0 }}
-             fn make(p: Part) -> TooWide ! {{}} {{ TooWide {{ a: p, b: p, c: p, d: p, e: p }} }}",
-            inner.join(", ")
-        ),
-        "256-word",
-    );
+    // Other inline layouts keep their 32-word limit.
     let fields = vec!["i64"; 32].join(",");
     rejects(
         &format!("enum Wide {{ Value({fields}) }} fn main() -> Unit ! {{}} {{}}"),

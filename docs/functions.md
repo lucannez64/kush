@@ -434,7 +434,7 @@ converted by the same checked rules.
   the union discriminator.
 - Function instances, including lambdas, adapters, and thunks, share the
   existing 256-instance budget. Function parameters/results count toward the
-  existing word-layout and 128-word parameter ABI limits.
+  existing word-layout limits; there is no limit on parameter words.
 
 ## Examples and tests
 
