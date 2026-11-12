@@ -428,32 +428,39 @@ fn borrowed_record_receivers_compose_with_generic_methods() {
 
 #[test]
 fn exclusive_loans_survive_into_later_generic_method_arguments() {
-    rejects(
-        "struct P { x: i64 }
+    // Scalar arguments are read before the exclusive receiver borrow starts
+    // (two-phase borrow, docs/places.md); a reference argument would alias
+    // the receiver for the whole call and is still rejected.
+    for source in ["struct P { x: i64 }
         impl P {
             fn consume<T>(self: &mut Self, value: T) -> Unit ! {panic} {
                 self.x = self.x + 1;
             }
             fn peek(&self) -> i64 ! {panic} { self.x }
         }
-        fn main() -> Unit ! {panic} {
+        fn main() -> i64 ! {panic} {
             let mut p = P { x: 1 };
             p.consume(p.peek());
-        }",
-        "exclusive",
-    );
+            p.consume(p.x);
+            p.x
+        }"]
+    {
+        let program = check(source).unwrap();
+        let mut output = Vec::new();
+        assert_eq!(program.evaluate(&mut output).unwrap(), 3);
+    }
     rejects(
         "struct P { x: i64 }
         impl P {
-            fn consume<T>(self: &mut Self, value: T) -> Unit ! {panic} {
-                self.x = self.x + 1;
+            fn mix<T>(self: &mut Self, value: T, other: &P) -> Unit ! {panic} {
+                self.x = self.x + other.x;
             }
         }
         fn main() -> Unit ! {panic} {
             let mut p = P { x: 1 };
-            p.consume(p.x)
+            p.mix(1, &p)
         }",
-        "while an exclusive",
+        "exclusive",
     );
 }
 

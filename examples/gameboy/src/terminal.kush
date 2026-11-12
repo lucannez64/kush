@@ -1,0 +1,146 @@
+module gameboy.terminal;
+
+use std.result.Result;
+use std.text;
+use gameboy.cartridge.Mapper;
+use gameboy.emulator;
+use gameboy.machine;
+use gameboy.machine.Machine;
+
+// The terminal front end. Each character cell shows two pixels stacked: the
+// upper half block in the foreground colour, the lower pixel as background.
+// Only cells that changed since the last frame are redrawn, so a mostly still
+// screen costs a few hundred bytes per frame.
+
+foreign "gb_terminal_enter" fn enter() -> Result<Unit, i64> ! {io};
+foreign "gb_terminal_leave" fn leave() -> Result<Unit, i64> ! {io};
+foreign "gb_terminal_buttons" fn buttons() -> i64 ! {io};
+
+const QUIT: i64 = 256;
+/// Nanoseconds per frame at the DMG's 59.73 Hz.
+const FRAME_NS: i64 = 16742706;
+const ROWS: i64 = 72;
+
+fn escape(out: Bytes) -> Bytes ! {alloc, panic} {
+    out.push(27).push(91)
+}
+
+fn colour(out: Bytes, ground: i64, shade: u8) -> Bytes ! {alloc, panic} {
+    let (r, g, b) = emulator.rgb(shade);
+    let mut o = escape(out);
+    o = text.format_i64_into(o, ground);
+    o = emulator.append(o, &Bytes.from(";2;"));
+    o = text.format_i64_into(o, r);
+    o = o.push(59);
+    o = text.format_i64_into(o, g);
+    o = o.push(59);
+    o = text.format_i64_into(o, b);
+    o.push(109)
+}
+
+/// Append the cells that differ from `shown`, and record them there.
+fn draw<M>(m: &Machine<M>, shown: &mut Vec<u8>, out: Bytes) -> Bytes ! {alloc, panic} {
+    let mut o = out;
+    let width = machine.SCREEN_WIDTH;
+    let mut foreground: u8 = 255;
+    let mut background: u8 = 255;
+    // Where the terminal cursor is: one past the last cell drawn.
+    let mut cursor = -1;
+    let mut row = 0;
+    while row < ROWS {
+        let mut x = 0;
+        while x < width {
+            let top_at = row * 2 * width + x;
+            let bottom_at = top_at + width;
+            let top = m.screen[top_at];
+            let bottom = m.screen[bottom_at];
+            if top != shown[top_at] || bottom != shown[bottom_at] {
+                shown[top_at] = top;
+                shown[bottom_at] = bottom;
+                let cell = row * width + x;
+                if cell != cursor {
+                    o = escape(o);
+                    o = text.format_i64_into(o, row + 1);
+                    o = o.push(59);
+                    o = text.format_i64_into(o, x + 1);
+                    o = o.push(72);
+                }
+                if top != foreground {
+                    o = colour(o, 38, top);
+                    foreground = top;
+                }
+                if bottom != background {
+                    o = colour(o, 48, bottom);
+                    background = bottom;
+                }
+                // U+2580 UPPER HALF BLOCK.
+                o = o.push(0xE2).push(0x96).push(0x80);
+                // The terminal may be wider than the screen: at the end of
+                // a row the cursor does not wrap to the next one.
+                cursor = if x + 1 == width { -1 } else { cell + 1 };
+            }
+            x = x + 1;
+        }
+        row = row + 1;
+    }
+    o
+}
+
+fn status(title: &Bytes, frames_per_second: i64) -> Bytes ! {alloc, panic} {
+    let mut o = escape(Bytes.with_capacity(128));
+    o = text.format_i64_into(o, ROWS + 1);
+    o = emulator.append(o, &Bytes.from(";1H"));
+    o = escape(o);
+    o = emulator.append(o, &Bytes.from("0m"));
+    o = escape(o);
+    o = emulator.append(o, &Bytes.from("2K Kush Game Boy | "));
+    o = emulator.append(o, title);
+    o = emulator.append(o, &Bytes.from(" | "));
+    o = text.format_i64_into(o, frames_per_second);
+    o = emulator.append(o, &Bytes.from(" fps | arrows/WASD, X/K = A, Z/J = B, Enter = Start, Space = Select, Q = quit"));
+    o
+}
+
+/// Play in the terminal until the player quits.
+pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
+    enter()?;
+    let mut shown: Vec<u8> = Vec.with_capacity(machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT);
+    let mut i = 0;
+    while i < machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT {
+        shown = shown.push(255);
+        i = i + 1;
+    }
+    let mut next = TIME.monotonic_ns()?;
+    let mut second = next;
+    let mut frames = 0;
+    let mut rate = 0;
+    let mut running = true;
+    while running {
+        let held = buttons();
+        if (held & QUIT) != 0 {
+            running = false;
+        } else {
+            machine.press(m, Int.truncate(held & 0xFF));
+            emulator.run_frame(m);
+            let mut out = draw(m, &mut shown, Bytes.with_capacity(65536));
+            frames = frames + 1;
+            let now = TIME.monotonic_ns()?;
+            if now - second >= 1000000000 {
+                rate = frames;
+                frames = 0;
+                second = now;
+                out = emulator.append(out, &status(title, rate));
+            }
+            let _ = IO.write(IO.stdout(), &out);
+            next = next + FRAME_NS;
+            let after = TIME.monotonic_ns()?;
+            if next > after {
+                TIME.sleep_ms((next - after) / 1000000)?;
+            } else if after - next > 100000000 {
+                // More than 100 ms behind: drop the debt rather than race.
+                next = after;
+            }
+        }
+    }
+    leave()
+}

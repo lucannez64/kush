@@ -1,0 +1,205 @@
+module gameboy.cartridge;
+
+// A cartridge is its ROM, its battery-backed RAM, and the memory bank
+// controller (MBC) that maps both into the 0x0000-0x7FFF and 0xA000-0xBFFF
+// windows. Each controller is one implementation of `Mapper`; the machine is
+// generic over it, so every controller gets its own specialized emulator
+// with no dispatch on the hot path.
+
+/// The byte the bus reads where nothing drives it.
+pub const OPEN_BUS: u8 = 0xFF;
+
+pub trait Mapper {
+    /// A read in 0x0000-0x7FFF (ROM) or 0xA000-0xBFFF (cartridge RAM).
+    fn load(self: &Self, address: u16) -> u8 ! {panic};
+    /// A write in the same windows: ROM writes program the controller.
+    fn store(self: &mut Self, address: u16, value: u8) -> Unit ! {panic};
+}
+
+/// What the header at 0x0147 says is on the board.
+pub enum Kind { Plain, Mbc1, Mbc3, Mbc5, Unsupported(u8) }
+
+pub fn kind(rom: &Vec<u8>) -> Kind ! {panic} {
+    if rom.len() < 0x150 { return Kind.Unsupported(0); }
+    let code = rom[0x147];
+    match code {
+        0x00 | 0x08 | 0x09 => Kind.Plain,
+        0x01 | 0x02 | 0x03 => Kind.Mbc1,
+        0x0F | 0x10 | 0x11 | 0x12 | 0x13 => Kind.Mbc3,
+        0x19 | 0x1A | 0x1B | 0x1C | 0x1D | 0x1E => Kind.Mbc5,
+        _ => Kind.Unsupported(code),
+    }
+}
+
+/// Cartridge RAM size from the header byte at 0x0149.
+pub fn ram_size(rom: &Vec<u8>) -> i64 ! {panic} {
+    match rom[0x149] {
+        0x02 => 0x2000,
+        0x03 => 0x8000,
+        0x04 => 0x20000,
+        0x05 => 0x10000,
+        _ => 0x2000,
+    }
+}
+
+/// The game's title, from the header at 0x0134.
+pub fn title(rom: &Vec<u8>) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(16);
+    let mut i = 0x134;
+    while i < 0x144 {
+        let c = rom[i];
+        if c == 0 { return out; }
+        if c >= 0x20 && c < 0x7F { out = out.push(Int.convert(c)); }
+        i = i + 1;
+    }
+    out
+}
+
+pub fn zeroed(size: i64) -> Vec<u8> ! {alloc, panic} {
+    let mut out: Vec<u8> = Vec.with_capacity(size);
+    let mut i = 0;
+    while i < size { out = out.push(0); i = i + 1; }
+    out
+}
+
+/// A ROM byte at `bank * 0x4000 + offset`, wrapping banks past the end of
+/// the image as the address lines do on a real board.
+fn rom_byte(rom: &Vec<u8>, bank: i64, offset: i64) -> u8 ! {panic} {
+    rom[(bank * 0x4000 + offset) % rom.len()]
+}
+
+fn offset(address: u16, window: u16) -> i64 ! {} {
+    Int.convert(address & window)
+}
+
+// --- No controller: 32 KiB of ROM, optionally 8 KiB of RAM. -------------
+
+pub struct Plain { pub rom: Vec<u8>, pub ram: Vec<u8> }
+
+impl Mapper for Plain {
+    pub fn load(self: &Self, address: u16) -> u8 ! {panic} {
+        if address < 0x8000 { return rom_byte(&self.rom, 0, Int.convert(address)); }
+        let at = offset(address, 0x1FFF);
+        if at < self.ram.len() { self.ram[at] } else { OPEN_BUS }
+    }
+    pub fn store(self: &mut Self, address: u16, value: u8) -> Unit ! {panic} {
+        if address >= 0xA000 {
+            let at = offset(address, 0x1FFF);
+            if at < self.ram.len() { self.ram[at] = value; }
+        }
+    }
+}
+
+// --- MBC1: up to 2 MiB ROM / 32 KiB RAM. ----------------------------------
+
+pub struct Mbc1 {
+    pub rom: Vec<u8>,
+    pub ram: Vec<u8>,
+    pub ram_enabled: Bool,
+    pub low: i64,
+    pub high: i64,
+    pub advanced: Bool,
+}
+
+impl Mapper for Mbc1 {
+    pub fn load(self: &Self, address: u16) -> u8 ! {panic} {
+        if address < 0x4000 {
+            let bank = if self.advanced { self.high << 5 } else { 0 };
+            return rom_byte(&self.rom, bank, offset(address, 0x3FFF));
+        }
+        if address < 0x8000 {
+            return rom_byte(&self.rom, (self.high << 5) | self.low, offset(address, 0x3FFF));
+        }
+        if !self.ram_enabled { return OPEN_BUS; }
+        let bank = if self.advanced { self.high } else { 0 };
+        self.ram[(bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len()]
+    }
+    pub fn store(self: &mut Self, address: u16, value: u8) -> Unit ! {panic} {
+        let v: i64 = Int.convert(value);
+        if address < 0x2000 {
+            self.ram_enabled = (v & 0x0F) == 0x0A;
+        } else if address < 0x4000 {
+            // Bank 0 cannot be selected in the switchable window.
+            let low = v & 0x1F;
+            self.low = if low == 0 { 1 } else { low };
+        } else if address < 0x6000 {
+            self.high = v & 0x03;
+        } else if address < 0x8000 {
+            self.advanced = (v & 1) == 1;
+        } else if self.ram_enabled {
+            let bank = if self.advanced { self.high } else { 0 };
+            let at = (bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len();
+            self.ram[at] = value;
+        }
+    }
+}
+
+// --- MBC3: up to 2 MiB ROM / 32 KiB RAM; the clock reads as stopped. ----
+
+pub struct Mbc3 {
+    pub rom: Vec<u8>,
+    pub ram: Vec<u8>,
+    pub ram_enabled: Bool,
+    pub rom_bank: i64,
+    pub ram_bank: i64,
+}
+
+impl Mapper for Mbc3 {
+    pub fn load(self: &Self, address: u16) -> u8 ! {panic} {
+        if address < 0x4000 { return rom_byte(&self.rom, 0, offset(address, 0x3FFF)); }
+        if address < 0x8000 { return rom_byte(&self.rom, self.rom_bank, offset(address, 0x3FFF)); }
+        if !self.ram_enabled { return OPEN_BUS; }
+        if self.ram_bank > 3 { return 0; }
+        self.ram[(self.ram_bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len()]
+    }
+    pub fn store(self: &mut Self, address: u16, value: u8) -> Unit ! {panic} {
+        let v: i64 = Int.convert(value);
+        if address < 0x2000 {
+            self.ram_enabled = (v & 0x0F) == 0x0A;
+        } else if address < 0x4000 {
+            let bank = v & 0x7F;
+            self.rom_bank = if bank == 0 { 1 } else { bank };
+        } else if address < 0x6000 {
+            self.ram_bank = v & 0x0F;
+        } else if address < 0x8000 {
+            // Latching the real-time clock: there is no clock to latch.
+        } else if self.ram_enabled && self.ram_bank <= 3 {
+            let at = (self.ram_bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len();
+            self.ram[at] = value;
+        }
+    }
+}
+
+// --- MBC5: up to 8 MiB ROM / 128 KiB RAM. ---------------------------------
+
+pub struct Mbc5 {
+    pub rom: Vec<u8>,
+    pub ram: Vec<u8>,
+    pub ram_enabled: Bool,
+    pub rom_bank: i64,
+    pub ram_bank: i64,
+}
+
+impl Mapper for Mbc5 {
+    pub fn load(self: &Self, address: u16) -> u8 ! {panic} {
+        if address < 0x4000 { return rom_byte(&self.rom, 0, offset(address, 0x3FFF)); }
+        if address < 0x8000 { return rom_byte(&self.rom, self.rom_bank, offset(address, 0x3FFF)); }
+        if !self.ram_enabled { return OPEN_BUS; }
+        self.ram[(self.ram_bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len()]
+    }
+    pub fn store(self: &mut Self, address: u16, value: u8) -> Unit ! {panic} {
+        let v: i64 = Int.convert(value);
+        if address < 0x2000 {
+            self.ram_enabled = (v & 0x0F) == 0x0A;
+        } else if address < 0x3000 {
+            self.rom_bank = (self.rom_bank & 0x100) | v;
+        } else if address < 0x4000 {
+            self.rom_bank = (self.rom_bank & 0xFF) | ((v & 1) << 8);
+        } else if address < 0x6000 {
+            self.ram_bank = v & 0x0F;
+        } else if address >= 0xA000 && self.ram_enabled {
+            let at = (self.ram_bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len();
+            self.ram[at] = value;
+        }
+    }
+}

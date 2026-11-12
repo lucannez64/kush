@@ -1,0 +1,80 @@
+module gameboy.emulator;
+
+use std.result.Result;
+use std.text;
+use gameboy.cartridge.Mapper;
+use gameboy.cpu;
+use gameboy.machine;
+use gameboy.machine.Machine;
+use gameboy.ppu;
+
+/// Clock cycles in one frame at 59.7 frames per second.
+pub const CYCLES_PER_FRAME: i64 = 70224;
+
+/// Run until the display finishes a frame (or a frame's worth of cycles has
+/// passed with the display off).
+pub fn run_frame<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc, panic} {
+    m.frame_done = false;
+    let mut budget = CYCLES_PER_FRAME;
+    while !m.frame_done && budget > 0 {
+        let cycles = cpu.step(m);
+        machine.tick_timer(m, cycles);
+        ppu.advance(m, cycles);
+        m.cycles = m.cycles + cycles;
+        budget = budget - cycles;
+    }
+}
+
+/// The DMG's four greens, lightest first, as RGB.
+pub fn rgb(shade: u8) -> (i64, i64, i64) ! {} {
+    match shade {
+        0 => (0xE0, 0xF8, 0xD0),
+        1 => (0x88, 0xC0, 0x70),
+        2 => (0x34, 0x68, 0x56),
+        _ => (0x08, 0x18, 0x20),
+    }
+}
+
+/// The screen as a binary PPM image, scaled up by `scale`.
+pub fn screenshot<M>(m: &Machine<M>, scale: i64) -> Bytes ! {alloc, panic} {
+    let width = machine.SCREEN_WIDTH * scale;
+    let height = machine.SCREEN_HEIGHT * scale;
+    let mut out = Bytes.with_capacity(32 + width * height * 3);
+    out = append(out, &Bytes.from("P6\n"));
+    out = text.format_i64_into(out, width);
+    out = out.push(32);
+    out = text.format_i64_into(out, height);
+    out = append(out, &Bytes.from("\n255\n"));
+    let mut y = 0;
+    while y < height {
+        let mut x = 0;
+        while x < width {
+            let (r, g, b) = rgb(m.screen[(y / scale) * machine.SCREEN_WIDTH + x / scale]);
+            out = out.push(r).push(g).push(b);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    out
+}
+
+/// What the program has sent to the serial port so far.
+pub fn serial_text<M>(m: &Machine<M>) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(m.serial.len());
+    let mut i = 0;
+    while i < m.serial.len() {
+        out = out.push(Int.convert(m.serial[i]));
+        i = i + 1;
+    }
+    out
+}
+
+pub fn append(out: Bytes, more: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut result = out;
+    let mut i = 0;
+    while i < more.len() {
+        result = result.push(more[i]);
+        i = i + 1;
+    }
+    result
+}

@@ -311,11 +311,42 @@ impl Parser {
                     generics,
                     ty,
                 }
+            } else if self.word_keyword("const") {
+                // `const NAME: Type = value;` is a parameterless function
+                // marked constant; each use is replaced by `value`.
+                if total {
+                    return Err(self.error("'total' applies only to fn and enum declarations"));
+                }
+                self.bump();
+                let name = self.ident()?;
+                self.expect(&Kind::Colon, "':' after the constant's name")?;
+                let result = self.ty()?;
+                self.expect(&Kind::Eq, "'=' before the constant's value")?;
+                let value = self.expr()?;
+                self.expect(&Kind::Semi, "';' after a constant")?;
+                let span = self.since(start);
+                ItemKind::Function(Function {
+                    total: false,
+                    name,
+                    lifetimes: Vec::new(),
+                    generics: Vec::new(),
+                    parameters: Vec::new(),
+                    result,
+                    effects: Vec::new(),
+                    body: Some(Block {
+                        statements: Vec::new(),
+                        tail: Some(Box::new(value)),
+                        span,
+                    }),
+                    foreign: None,
+                    ensures: Vec::new(),
+                    constant: true,
+                })
             } else {
                 if total {
                     return Err(self.error("expected 'fn' or 'enum' after 'total'"));
                 }
-                return Err(self.error("expected a declaration; this frontend supports fn, struct, enum, type, module, and use"));
+                return Err(self.error("expected a declaration; this frontend supports fn, const, struct, enum, type, module, and use"));
             };
             items.push(Declaration {
                 public,
@@ -780,6 +811,7 @@ impl Parser {
             body,
             foreign: None,
             ensures,
+            constant: false,
         })
     }
     /// Contextual `ensures` clauses after the effect row:

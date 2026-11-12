@@ -111,6 +111,12 @@ for justified automatic fusion, widening/fallible reuse, the built-in arena
 allocator, and the reproducible benchmark harness, and [structured async and cooperative
 cancellation](docs/async.md) for the task system.
 
+A [Game Boy emulator](examples/gameboy/README.md) written in Kush passes
+Blargg's CPU instruction and timing test ROMs, runs about 65 times faster than
+the real console in an LLVM build, and plays in a terminal. It is generic over
+the cartridge's memory bank controller, and leans on
+[constants, places and two-phase borrows](docs/places.md).
+
 An interactive [todo terminal app](docs/todo.md) is available in
 [examples/todo.kush](examples/todo.kush): add, toggle, delete and filter tasks
 with commands followed by Enter. It redraws an ANSI board and keeps tasks for

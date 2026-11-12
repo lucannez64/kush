@@ -1,0 +1,140 @@
+module gameboy;
+
+use std.result.Result;
+use std.text;
+use gameboy.cartridge;
+use gameboy.cartridge.Kind;
+use gameboy.cartridge.Mapper;
+use gameboy.emulator;
+use gameboy.machine;
+use gameboy.machine.Machine;
+use gameboy.terminal;
+
+// gameboy ROM                         play in the terminal
+// gameboy ROM FRAMES [SCREENSHOT.ppm]  run headless
+//
+// Headless, the ROM runs for FRAMES frames (about 60 per second of game
+// time), whatever it sent to the serial port is printed, and the last frame
+// can be saved as an image. Test ROMs report through the serial port, so this
+// is also how the emulator is checked.
+
+fn say(text: &Bytes) -> Unit ! {io, alloc, panic} {
+    let _ = IO.write(IO.stdout(), text);
+}
+
+fn line(text: Bytes) -> Unit ! {io, alloc, panic} {
+    say(&text.push(10));
+}
+
+fn argument(index: i64) -> Result<Bytes, i64> ! {io, alloc, panic} {
+    ENV.arg(index, Bytes.with_capacity(4096))
+}
+
+fn load(path: &Bytes) -> Result<Vec<u8>, i64> ! {io, alloc, panic} {
+    let size = FS.size(path)?;
+    let bytes = FS.read(path, Bytes.with_capacity(size))?;
+    let mut rom: Vec<u8> = Vec.with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        rom = rom.push(Int.truncate(bytes[i]));
+        i = i + 1;
+    }
+    Ok(rom)
+}
+
+/// Play in the terminal when `frames` is 0; otherwise run headless.
+fn play<M: Mapper>(board: M, frames: i64, screenshot: &Bytes, title: &Bytes) -> i64 ! {io, alloc, panic} {
+    let mut m = machine.new(board);
+    if frames == 0 {
+        return match terminal.play(&mut m, title) {
+            Ok(_) => 0,
+            Err(code) => {
+                line(Bytes.from("the terminal front end needs an interactive terminal"));
+                code
+            },
+        };
+    }
+    headless(&mut m, frames, screenshot)
+}
+
+/// Run `frames` frames, stopping early once a test ROM has reported.
+fn headless<M: Mapper>(m: &mut Machine<M>, frames: i64, screenshot: &Bytes) -> i64 ! {io, alloc, panic} {
+    let mut frame = 0;
+    while frame < frames {
+        emulator.run_frame(m);
+        frame = frame + 1;
+        if frame % 60 == 0 {
+            let output = emulator.serial_text(m);
+            if text.contains(&output, &Bytes.from("Passed")) || text.contains(&output, &Bytes.from("Failed")) {
+                frame = frames;
+            }
+        }
+    }
+    let output = emulator.serial_text(m);
+    say(&output);
+    if output.len() > 0 { line(Bytes.from("")); }
+    if screenshot.len() > 0 {
+        let image = emulator.screenshot(m, 1);
+        match FS.write(screenshot, &image) {
+            Ok(_) => {},
+            Err(_) => { line(Bytes.from("could not write the screenshot")); return 1; },
+        }
+    }
+    let mut report = Bytes.from("frames: ");
+    report = text.format_i64_into(report, frame);
+    report = emulator.append(report, &Bytes.from(", cycles: "));
+    report = text.format_i64_into(report, m.cycles);
+    line(report);
+    0
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let count = match ENV.arg_count() { Ok(n) => n, Err(_) => 0 };
+    if count < 2 {
+        line(Bytes.from("usage: gameboy ROM                        (play in the terminal)"));
+        line(Bytes.from("       gameboy ROM FRAMES [SCREENSHOT.ppm] (run headless)"));
+        return 2;
+    }
+    let path = match argument(1) { Ok(p) => p, Err(_) => { return 2; } };
+    let frames = if count > 2 {
+        match argument(2) {
+            Ok(text_value) => match text.parse_i64(&text_value) { Ok(n) => n, Err(_) => 600 },
+            Err(_) => 600,
+        }
+    } else { 0 };
+    let screenshot = if count > 3 {
+        match argument(3) { Ok(p) => p, Err(_) => Bytes.from("") }
+    } else { Bytes.from("") };
+    let rom = match load(&path) {
+        Ok(rom) => rom,
+        Err(_) => { line(Bytes.from("cannot read the ROM")); return 1; },
+    };
+    let title = cartridge.title(&rom);
+    if frames > 0 {
+        let mut name = Bytes.from("cartridge: ");
+        name = emulator.append(name, &title);
+        line(name);
+    }
+    let ram = cartridge.zeroed(cartridge.ram_size(&rom));
+    match cartridge.kind(&rom) {
+        Kind.Plain => play(cartridge.Plain { rom: rom, ram: ram }, frames, &screenshot, &title),
+        Kind.Mbc1 => play(
+            cartridge.Mbc1 { rom: rom, ram: ram, ram_enabled: false, low: 1, high: 0, advanced: false },
+            frames, &screenshot, &title,
+        ),
+        Kind.Mbc3 => play(
+            cartridge.Mbc3 { rom: rom, ram: ram, ram_enabled: false, rom_bank: 1, ram_bank: 0 },
+            frames, &screenshot, &title,
+        ),
+        Kind.Mbc5 => play(
+            cartridge.Mbc5 { rom: rom, ram: ram, ram_enabled: false, rom_bank: 1, ram_bank: 0 },
+            frames, &screenshot, &title,
+        ),
+        Kind.Unsupported(code) => {
+            let mut message = Bytes.from("unsupported cartridge type ");
+            message = text.format_i64_into(message, Int.convert(code));
+            line(message);
+            1
+        },
+    }
+}

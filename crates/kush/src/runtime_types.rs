@@ -12,6 +12,9 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 type Result<T> = std::result::Result<T, Diagnostic>;
 pub(crate) const MAX_WORDS: usize = 32;
+/// A nominal record (`struct`) may be wider than other inline layouts: it
+/// is the natural home of a large state, and it is passed by reference.
+pub(crate) const MAX_RECORD_WORDS: usize = 256;
 /// A normalized union has at most this many alternatives. Larger unions are
 /// rejected rather than causing unbounded dispatchers and layout searches.
 pub(crate) const MAX_UNION_MEMBERS: usize = 16;
@@ -4968,7 +4971,13 @@ impl<'a> Types<'a> {
                 }
                 largest = largest.max(words);
             }
-            if largest > MAX_WORDS {
+            if enums[id].record && largest > MAX_RECORD_WORDS {
+                return Err(Diagnostic::new(
+                    span,
+                    "record exceeds the 256-word layout limit",
+                ));
+            }
+            if !enums[id].record && largest > MAX_WORDS {
                 return Err(Diagnostic::new(
                     span,
                     "inline enum exceeds the 32-word layout limit",

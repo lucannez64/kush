@@ -533,9 +533,8 @@ representation while their declared lifetime travels in the same annotation.
 - Fallible reserve of a reference vector remains rejected because general
   borrow-carrying `Result` payloads are unsupported; `Vec.reserve` preserves
   reference-vector provenance without a sum-type boundary.
-- A record may store a reference container. Because owner references require a
-  direct local receiver, destructure the container field into a local before
-  borrowing it for `Box.read`/`Vec.get`.
+- A record may store a reference container. Read builtins on the field borrow
+  it in place (`r.items.len()`, `r.items[i]`); see [places](places.md).
 - Containers may appear in function parameters/results and in arrows. The
   declared element lifetime travels in the callable's leaf list and is related
   to the caller's actual element provenance at every direct or indirect call.

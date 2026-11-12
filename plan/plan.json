@@ -4843,6 +4843,42 @@
           "text": "Fifth independent review: accesses after the counter update were proved one step short (out-of-bounds read and write); fixed and re-reviewed, 0 differences over ~8,000 further fuzzed runs. Also a compile-time blowup from the per-declaration instance cap (mutual polymorphic recursion); fixed with a 1024 total for generic instances."
         }
       ]
+    },
+    {
+      "id": "LANG-PLACES",
+      "title": "Constants, element access and methods on places, two-phase borrows, wide records",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "in_progress",
+      "desc": "Module-level const; v[i] reads and place[i] = x writes on Vec fields through references; field assignment on let mut records; &self/&mut self methods on fields and through references; two-phase exclusive borrows in calls; records up to 256 words. docs/places.md.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 18:36:30",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
+    },
+    {
+      "id": "GAMEBOY",
+      "title": "Game Boy emulator example in Kush",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LANG-PLACES"
+      ],
+      "status": "in_progress",
+      "desc": "examples/gameboy: SM83 CPU, PPU, timer, MBC1/3/5, terminal front end. Passes Blargg cpu_instrs and instr_timing; 65x real time in LLVM builds. Left: dmg-acid2 and a real homebrew game (needs RGBDS or ROM files), audio, saves, HALT bug.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 18:36:30",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     }
   ]
 }

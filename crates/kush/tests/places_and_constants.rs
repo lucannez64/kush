@@ -1,0 +1,360 @@
+//! Module-level constants, element access and method calls on places
+//! (fields, references), two-phase exclusive borrows in calls, and wide
+//! records. Every program runs on the reference evaluator and natively,
+//! with balanced allocations; the rejections keep their soundness rules.
+
+use kush::executable::check;
+
+fn rejects(source: &str, fragment: &str) {
+    let error = check(source).unwrap_err();
+    assert!(
+        error.message.contains(fragment),
+        "expected {fragment:?}, got {error:?}"
+    );
+}
+
+fn agrees(source: &str, expected_status: i64, expected_output: &str) {
+    let program = check(source).unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+    let mut output = Vec::new();
+    let (status, stats) = program.evaluate_with_stats(&mut output).unwrap();
+    assert_eq!(stats.allocations, stats.deallocations, "{source}");
+    assert_eq!(status, expected_status, "{source}");
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        expected_output,
+        "{source}"
+    );
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("places-and-constants-test");
+        kush::native::build(&program, &binary).unwrap();
+        let output = std::process::Command::new(&binary).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some((expected_status as u64 & 255) as i32),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected_output);
+    }
+}
+
+#[test]
+fn constants_are_their_values_at_each_use() {
+    agrees(
+        r#"
+        const ZERO: u8 = 0x80;
+        const BOTH: u8 = ZERO | 0x10;
+        pub const WIDTH: i64 = 160;
+        const AREA: i64 = WIDTH * 144;
+        fn flag(on: Bool) -> u8 ! {} { if on { ZERO } else { 0 } }
+        fn main() -> i64 ! {io, panic} {
+            print_i64(Int.convert(flag(true)));
+            print_i64(Int.convert(BOTH));
+            print_i64(AREA);
+            let low: u8 = BOTH & 0x0F;
+            print_i64(Int.convert(low));
+            0
+        }
+        "#,
+        0,
+        "128\n144\n23040\n0\n",
+    );
+    rejects(
+        "const LOOP: i64 = LOOP + 1; fn main() -> i64 ! {panic} { LOOP }",
+        "refers to itself",
+    );
+    rejects(
+        "const BAD: u8 = 300; fn main() -> i64 ! {} { 0 } fn use_it() -> u8 ! {} { BAD }",
+        "",
+    );
+}
+
+#[test]
+fn elements_of_fields_are_read_and_written_in_place() {
+    agrees(
+        r#"
+        struct M { a: u8, memory: Vec<u8>, text: Bytes }
+        fn read(m: &M, i: i64) -> u8 ! {panic} { m.memory[i] }
+        fn read_byte(m: &M, i: i64) -> i64 ! {panic} { m.text[i] }
+        fn write(m: &mut M, i: i64) -> Unit ! {panic} {
+            // The value reads the owner whose field is written.
+            m.memory[i] = m.a;
+            m.a = m.memory[i - 1];
+        }
+        fn through(v: &mut Vec<u8>) -> Unit ! {panic} { v[0] = v[1]; }
+        fn view(s: &mut [i64]) -> Unit ! {panic} { s[2] = s[0] + s[1]; s[0] = 5; }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut v: Vec<u8> = Vec.new();
+            v = v.push(1);
+            v = v.push(2);
+            v = v.push(3);
+            v[2] = 30;
+            print_i64(Int.convert(v[2]));
+            let mut m = M { a: 9, memory: v, text: Bytes.from("xy") };
+            write(&mut m, 1);
+            print_i64(Int.convert(read(&m, 1)));
+            print_i64(Int.convert(m.a));
+            print_i64(read_byte(&m, 1));
+            print_i64(m.memory.len());
+            through(&mut m.memory);
+            print_i64(Int.convert(m.memory[0]));
+            let mut array: [i64; 3] = [1, 2, 0];
+            array[1] = 20;
+            view(&mut array[..]);
+            print_i64(array[0] + array[1] + array[2]);
+            let mut k = 0;
+            while k < 3 { array[k] = k * 100; k = k + 1; }
+            print_i64(array[2]);
+            0
+        }
+        "#,
+        0,
+        "30\n9\n1\n121\n3\n9\n46\n200\n",
+    );
+    rejects(
+        r#"
+        struct M { text: Bytes }
+        fn write(m: &mut M) -> Unit ! {panic} { m.text[0] = 1; }
+        fn main() -> i64 ! {} { 0 }
+        "#,
+        "Vec<u8>",
+    );
+    rejects(
+        r#"
+        struct M { memory: Vec<u8> }
+        fn write(m: &M) -> Unit ! {panic} { m.memory[0] = 1; }
+        fn main() -> i64 ! {} { 0 }
+        "#,
+        "shared",
+    );
+    rejects(
+        r#"
+        fn main() -> i64 ! {alloc, panic} {
+            let mut boxes: Vec<Box<i64>> = Vec.new();
+            boxes = boxes.push(Box.new(1));
+            boxes[0] = Box.new(2);
+            0
+        }
+        "#,
+        "copyable element",
+    );
+}
+
+#[test]
+fn vector_fields_grow_in_place_through_method_syntax() {
+    agrees(
+        r#"
+        struct Log { count: i64, items: Vec<u8> }
+        fn record(log: &mut Log, value: u8) -> Unit ! {alloc, panic} {
+            log.items.push(value);
+            log.count = log.count + 1;
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut log = Log { count: 0, items: Vec.new() };
+            record(&mut log, 4);
+            record(&mut log, 2);
+            print_i64(log.count);
+            print_i64(log.items.len());
+            print_i64(Int.convert(log.items[0]) * 10 + Int.convert(log.items[1]));
+            0
+        }
+        "#,
+        0,
+        "2\n2\n42\n",
+    );
+}
+
+#[test]
+fn methods_are_called_on_fields_and_through_references() {
+    agrees(
+        r#"
+        trait Counter {
+            fn current(self: &Self) -> i64 ! {};
+            fn bump(self: &mut Self) -> Unit ! {panic};
+        }
+        struct Plain { n: i64 }
+        struct Owning { n: i64, history: Vec<i64> }
+        impl Counter for Plain {
+            fn current(self: &Self) -> i64 ! {} { self.n }
+            fn bump(self: &mut Self) -> Unit ! {panic} { self.n = self.n + 1; }
+        }
+        impl Counter for Owning {
+            fn current(self: &Self) -> i64 ! {} { self.n }
+            fn bump(self: &mut Self) -> Unit ! {panic} { self.n = self.n + self.history.len(); }
+        }
+        struct Machine<C> { cycles: i64, counter: C }
+        fn tick<C: Counter>(m: &mut Machine<C>) -> i64 ! {panic} {
+            m.counter.bump();
+            m.counter.bump();
+            m.cycles = m.cycles + m.counter.current();
+            m.cycles
+        }
+        fn twice<C: Counter>(c: &mut C) -> Unit ! {panic} { c.bump(); c.bump(); }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut plain = Machine { cycles: 0, counter: Plain { n: 0 } };
+            print_i64(tick(&mut plain));
+            twice(&mut plain.counter);
+            print_i64(plain.counter.current());
+            let mut history: Vec<i64> = Vec.new();
+            history = history.push(7);
+            history = history.push(8);
+            let mut owning = Machine { cycles: 0, counter: Owning { n: 1, history: history } };
+            print_i64(tick(&mut owning));
+            0
+        }
+        "#,
+        0,
+        "2\n4\n5\n",
+    );
+    rejects(
+        r#"
+        struct P { x: i64 }
+        impl P {
+            fn bump(&mut self) -> Unit ! {panic} { self.x = self.x + 1; }
+        }
+        struct Q { p: P }
+        fn call(q: &Q) -> Unit ! {panic} { q.p.bump(); }
+        fn main() -> Unit ! {panic} {}
+        "#,
+        "shared",
+    );
+    rejects(
+        r#"
+        struct P { items: Vec<i64> }
+        impl P { fn consume(self: Self) -> i64 ! {} { 0 } }
+        struct Q { p: P }
+        fn call(q: &mut Q) -> i64 ! {} { q.p.consume() }
+        fn main() -> Unit ! {panic} {}
+        "#,
+        "cannot move an owned field",
+    );
+}
+
+#[test]
+fn an_exclusive_argument_is_taken_after_the_reads_of_its_owner() {
+    agrees(
+        r#"
+        struct M { pc: u16, sp: u16, log: Vec<u8> }
+        fn push(m: &mut M, value: u16) -> Unit ! {panic} { m.sp = value; }
+        fn note(m: &mut M, a: i64, b: i64) -> Unit ! {io, panic} { print_i64(a * 10 + b); }
+        fn shown(x: i64) -> i64 ! {io, panic} { print_i64(x); x }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut m = M { pc: 7, sp: 0, log: Vec.new() };
+            push(&mut m, m.pc);
+            print_i64(Int.convert(m.sp));
+            let r = &mut m;
+            push(r, r.pc + 1);
+            print_i64(Int.convert(r.sp));
+            // Arguments with effects keep their order.
+            note(&mut m, shown(1), shown(2));
+            m.log.push(Int.truncate(m.pc));
+            print_i64(Int.convert(m.log[0]));
+            0
+        }
+        "#,
+        0,
+        "7\n8\n1\n2\n12\n7\n",
+    );
+}
+
+#[test]
+fn records_may_be_wider_than_other_inline_layouts() {
+    let fields: Vec<String> = (0..40).map(|i| format!("f{i}: i64")).collect();
+    let values: Vec<String> = (0..40).map(|i| format!("f{i}: {i}")).collect();
+    agrees(
+        &format!(
+            "struct Wide {{ {} }}
+             fn last(w: &Wide) -> i64 ! {{}} {{ w.f39 }}
+             fn main() -> i64 ! {{panic}} {{ let w = Wide {{ {} }}; last(&w) + w.f1 }}",
+            fields.join(", "),
+            values.join(", ")
+        ),
+        40,
+        "",
+    );
+    // Records hold at most 64 fields, so nest them to pass 256 words.
+    let inner: Vec<String> = (0..60).map(|i| format!("f{i}: i64")).collect();
+    rejects(
+        &format!(
+            "struct Part {{ {} }}
+             struct TooWide {{ a: Part, b: Part, c: Part, d: Part, e: Part }}
+             fn main() -> i64 ! {{}} {{ 0 }}
+             fn make(p: Part) -> TooWide ! {{}} {{ TooWide {{ a: p, b: p, c: p, d: p, e: p }} }}",
+            inner.join(", ")
+        ),
+        "256-word",
+    );
+    let fields = vec!["i64"; 32].join(",");
+    rejects(
+        &format!("enum Wide {{ Value({fields}) }} fn main() -> Unit ! {{}} {{}}"),
+        "32-word",
+    );
+}
+
+#[test]
+fn fields_of_mutable_record_locals_are_assigned_in_place() {
+    agrees(
+        r#"
+        struct Inner { v: i64 }
+        struct Cpu { a: i64, halted: Bool, inner: Inner }
+        fn main() -> i64 ! {io, panic} {
+            let mut cpu = Cpu { a: 1, halted: true, inner: Inner { v: 2 } };
+            cpu.a = cpu.a + 40;
+            cpu.halted = false;
+            cpu.inner.v = cpu.inner.v * 10;
+            print_i64(cpu.a);
+            print_i64(cpu.inner.v);
+            if cpu.halted { 1 } else { 0 }
+        }
+        "#,
+        0,
+        "41\n20\n",
+    );
+    rejects(
+        r#"
+        struct Cpu { a: i64 }
+        fn main() -> i64 ! {panic} { let cpu = Cpu { a: 1 }; cpu.a = 2; cpu.a }
+        "#,
+        "let mut",
+    );
+    rejects(
+        r#"
+        struct Holder { items: Vec<i64> }
+        fn main() -> i64 ! {alloc, panic} {
+            let mut h = Holder { items: Vec.new() };
+            h.items = Vec.new();
+            0
+        }
+        "#,
+        "copyable",
+    );
+}
+
+#[test]
+fn a_field_write_is_seen_by_later_overflow_checks() {
+    // The prover may know `p.x == 1` from the literal; after the field write
+    // that fact is gone, so the addition stays checked and panics.
+    let program = check(
+        r#"
+        struct P { x: i64 }
+        fn main() -> i64 ! {panic} {
+            let mut p = P { x: 1 };
+            p.x = 9223372036854775807;
+            p.x + 1
+        }
+        "#,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    assert!(program.evaluate_with_stats(&mut output).is_err());
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+        let binary = scratch.path().join("field-write-overflow");
+        kush::native::build(&program, &binary).unwrap();
+        let status = std::process::Command::new(&binary).status().unwrap();
+        assert!(!status.success());
+    }
+}

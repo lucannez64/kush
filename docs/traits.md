@@ -836,8 +836,10 @@ without moving, while owning records, enums, `String`, `Bytes`, `Vec<T>`, and
 `Box<T>` are moved exactly once. An owned temporary returned by a call may be
 used as a by-value receiver.
 
-Borrowed receivers are supported only for nominal records, not enums, and only
-for a **direct local owner**. `point.sum()` auto-borrows `point` exactly once;
+Borrowed receivers are supported only for nominal records, not enums. The
+receiver may be a local owner, a field (including one that owns storage), or an
+existing reference, which is reborrowed (see [places](places.md)).
+`point.sum()` auto-borrows `point` exactly once;
 `point.shift(2)` creates one exclusive borrow and leaves the updated fields
 visible in the caller in both backends. The parser accepts `&self`/`&mut self`
 as sugar for `self: &Self`/`self: &mut Self`; an impl must still match the
@@ -847,15 +849,15 @@ An inherited default receiver is re-validated against every impl target that
 materializes it: `&Self`/`&mut Self` defaults are accepted only for nominal
 record targets, and an exclusive receiver is rejected for a record with
 borrowed fields. The default body then follows the ordinary call-scoped
-borrowing rules. In particular, a `&self` default body cannot call another
-borrowed method through its own reference, because reference reborrows remain
-unsupported; read fields directly or call a value-receiver method instead.
+borrowing rules. A `&self` default body may call another `&self` method
+through its own reference, which is reborrowed; a `&mut self` method needs an
+exclusive receiver.
 
 Ordinary functions may similarly take `&Record` or `&mut Record` parameters
 and are called with `helper(&owner)` or `helper(&mut owner)`. These references
 are call-scoped: they cannot be stored in a `let`, returned, captured by a
-closure or task, placed in a record/tuple/container, or used to call a borrowed
-method through an existing reference. A shared `&Record` reference permits
+closure or task, or placed in a record/tuple/container; they may be passed on
+to further calls and used as method receivers. A shared `&Record` reference permits
 reads of scalar/copyable fields, shared aliases, and field access through
 nested copyable records. An exclusive `&mut Record` reference additionally
 permits replacing copyable, non-owning fields. Owning or linear fields, borrowed slice

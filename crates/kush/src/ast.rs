@@ -319,6 +319,9 @@ pub struct Function {
     /// `ensures` postconditions (ENSURES), checked at every return and
     /// available to callers as facts.
     pub ensures: Vec<Ensures>,
+    /// `const NAME: Type = value;`: a parameterless function whose uses are
+    /// replaced by its value expression, checked at each use.
+    pub constant: bool,
 }
 /// One `ensures` clause: `ensures [guard =>] { proposition }`.
 #[derive(Debug, Clone, PartialEq, Eq)]

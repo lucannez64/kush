@@ -5472,6 +5472,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             lambda_hint: None,
             required_effects: std::cell::Cell::new(0),
             pending_capability: None,
+            expanding_constants: Vec::new(),
             abort_labels: 0,
             capability_slots: BTreeSet::new(),
             capability_passable: BTreeSet::new(),
@@ -5805,6 +5806,21 @@ fn expr_key(expr: &ast::Expr) -> String {
 /// Split a checked projection chain into its root reference expression and the
 /// combined word offset from the record tag. Used only for field assignments
 /// through `&mut Record`; reads use the ordinary `Project` expression.
+/// A field place of a record held directly in a local (not behind a
+/// reference): the local and the field's word offset.
+fn split_local_projection(expr: &Expr) -> Option<(usize, usize)> {
+    let ExprKind::Project(base, offset) = &expr.kind else {
+        return None;
+    };
+    match &base.kind {
+        ExprKind::Peek(slot) | ExprKind::Local(slot) if !base.ty.is_ref() => Some((*slot, *offset)),
+        ExprKind::Project(..) => {
+            let (slot, inner) = split_local_projection(base)?;
+            Some((slot, inner + offset))
+        }
+        _ => None,
+    }
+}
 fn split_reference_projection(expr: Expr) -> Option<(Expr, usize)> {
     let ExprKind::Project(base, offset) = expr.kind else {
         return None;
@@ -12394,6 +12410,8 @@ struct Checker<'a, 't> {
     required_effects: std::cell::Cell<u16>,
     /// The binder span of `handle Op as op`, consumed by `handle_effect`.
     pending_capability: Option<(String, Span)>,
+    /// Constants whose value is being checked, to reject a cycle.
+    expanding_constants: Vec<BindingId>,
     /// Next `AbortScope` label of this checker (unique per function body).
     abort_labels: usize,
     /// Locals holding a second-class capability (EFF-CAP-LEXICAL).
@@ -12910,7 +12928,45 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
-        let first = self.expr(receiver)?;
+        // A read-only builtin on an owning field (`m.memory.len()`) borrows
+        // the field in place, as `&m.memory` would, instead of moving it out.
+        let read_only = matches!(
+            name,
+            "len"
+                | "capacity"
+                | "get"
+                | "try_get"
+                | "at"
+                | "copy"
+                | "byte_at"
+                | "scalar_at"
+                | "scalar_len"
+                | "as_bytes"
+                | "as_str"
+                | "substr"
+                | "read"
+        );
+        let owning_field = read_only
+            && matches!(receiver.kind, ast::ExprKind::Field { .. })
+            && self.is_place(receiver)
+            && self.place_type(receiver).is_some_and(|ty| {
+                matches!(ty, Type::Vec(_) | Type::Bytes | Type::String | Type::Box(_))
+            });
+        // A mutating Vec builtin on a field (`m.log.push(x)`) updates the
+        // field in place through `&mut m.log`, instead of consuming it.
+        let mutated_field = matches!(name, "push" | "set" | "clear" | "reserve")
+            && matches!(receiver.kind, ast::ExprKind::Field { .. })
+            && self.is_place(receiver)
+            && self
+                .place_type(receiver)
+                .is_some_and(|ty| matches!(ty, Type::Vec(_)));
+        let first = if owning_field {
+            self.container_receiver(receiver, false)?
+        } else if mutated_field {
+            self.container_receiver(receiver, true)?
+        } else {
+            self.expr(receiver)?
+        };
         if first.ty == Type::Never {
             return Ok(first);
         }
@@ -13041,7 +13097,7 @@ impl Checker<'_, '_> {
         }
         // Collection and text methods dispatch on the receiver type.
         let pointee = |c: &Self, ty: Type| match ty {
-            Type::Ref(p) => Some(c.types.pointees[p]),
+            Type::Ref(p) | Type::RefMut(p) => Some(c.types.pointees[p]),
             other => Some(other),
         };
         let base = pointee(self, ty);
@@ -14147,6 +14203,44 @@ impl Checker<'_, '_> {
         // A trait object stored in a field (of a local aggregate, or behind a
         // stored record reference) is a checked place: dispatch borrows that
         // exact storage instead of reading or copying the field.
+        // An owning field (a record that owns storage, reached through a
+        // local or a reference) cannot be read as a value. A `&self` or
+        // `&mut self` method borrows it in place instead.
+        if matches!(receiver_ast.kind, ast::ExprKind::Field { .. })
+            && self.is_place(receiver_ast)
+            && let Some(field_ty) = self.place_type(receiver_ast)
+            && self.owned_type(field_ty)
+            && !self.is_object_type(field_ty)
+            && field_ty.layout().is_some()
+        {
+            let definition = self.lookup_method(field_ty, name, trait_selection.clone(), span)?;
+            self.check_method_visibility(definition, name, span)?;
+            let Some(mutable) = self.method_receiver_borrow(definition.binding) else {
+                return Err(Diagnostic::new(
+                    receiver_ast.span,
+                    "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
+                ));
+            };
+            let borrow = ast::Expr {
+                kind: ast::ExprKind::Unary {
+                    op: Kind::Amp,
+                    mutable,
+                    operand: Box::new(receiver_ast.clone()),
+                },
+                span: receiver_ast.span,
+            };
+            let receiver = self.expr(&borrow)?;
+            return self.invoke_method(
+                definition.binding,
+                definition.impl_arguments,
+                receiver_ast,
+                receiver,
+                explicit,
+                arguments,
+                expected,
+                span,
+            );
+        }
         let mut receiver = if let Some(place) = self.object_field_place(receiver_ast) {
             place
         } else if self.is_place(receiver_ast) {
@@ -14252,16 +14346,59 @@ impl Checker<'_, '_> {
         let definition = self.lookup_method(lookup_ty, name, trait_selection, span)?;
         self.check_method_visibility(definition, name, span)?;
         if let Some(mutable) = self.method_receiver_borrow(definition.binding) {
+            // An existing reference is passed on as the receiver, exactly as
+            // it would be passed to an ordinary function: the call reborrows
+            // it, and `&mut` serves a `&self` method.
             if receiver.ty.is_ref() {
-                return Err(Diagnostic::new(
-                    receiver_ast.span,
-                    "calling a borrowed method through an existing reference is not supported in this call-scoped subset; call it on the owning local, or pass the reference to an ordinary function",
-                ));
+                if mutable && !matches!(receiver.ty, Type::RefMut(_)) {
+                    return Err(Diagnostic::new(
+                        receiver_ast.span,
+                        "this method takes '&mut self', but the receiver is a shared reference",
+                    ));
+                }
+                if let ExprKind::Peek(slot) = receiver.kind {
+                    receiver.kind = ExprKind::Local(slot);
+                }
+                return self.invoke_method(
+                    definition.binding,
+                    definition.impl_arguments,
+                    receiver_ast,
+                    receiver,
+                    explicit,
+                    arguments,
+                    expected,
+                    span,
+                );
+            }
+            // A field (or deeper place) of a local or reference is borrowed in
+            // place, exactly as an explicit `&place` / `&mut place` would be.
+            if !matches!(receiver.kind, ExprKind::Peek(_) | ExprKind::Local(_))
+                && self.is_place(receiver_ast)
+            {
+                let borrow = ast::Expr {
+                    kind: ast::ExprKind::Unary {
+                        op: Kind::Amp,
+                        mutable,
+                        operand: Box::new(receiver_ast.clone()),
+                    },
+                    span: receiver_ast.span,
+                };
+                let receiver = self.expr(&borrow)?;
+                return self.invoke_method(
+                    definition.binding,
+                    definition.impl_arguments,
+                    receiver_ast,
+                    receiver,
+                    explicit,
+                    arguments,
+                    expected,
+                    span,
+                );
             }
             let (ExprKind::Peek(slot) | ExprKind::Local(slot)) = receiver.kind else {
                 return Err(Diagnostic::new(
                     receiver_ast.span,
-                    "a borrowed method receiver must be a direct local binding; borrowed temporaries and projected receivers are not supported",
+                    "a borrowed method receiver must be a place (a local or one of its fields); bind a temporary to a local first",
                 ));
             };
             if mutable {
@@ -16094,15 +16231,125 @@ impl Checker<'_, '_> {
             coerced.push(self.coerce_argument(value, ty, span)?);
         }
         self.apply_effect_writes(signature.effects);
-        let value = Expr {
-            kind: ExprKind::Call(Target::Function(index), coerced),
-            ty,
-            span,
-            resource: None,
-        };
+        let (statements, coerced) = self.two_phase_arguments(coerced, ty)?;
+        let value = Self::after(
+            statements,
+            Expr {
+                kind: ExprKind::Call(Target::Function(index), coerced),
+                ty,
+                span,
+                resource: None,
+            },
+        );
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
+        }
+    }
+    /// Two-phase exclusive borrows for a call's arguments. Passing an
+    /// exclusive reference (`m`, `&mut x`, `&mut m.field`) has no side
+    /// effect, so the call may take it after its other arguments have been
+    /// evaluated. When another argument reads the same root
+    /// (`push(m, m.pc)`), the non-place arguments and those reads are
+    /// evaluated first, in order, into hidden locals, and the reference is
+    /// taken last. Without this, the reborrow would be live while `m.pc` is
+    /// read, and the read would be rejected. Returns the statements to run
+    /// before the call and the call's arguments.
+    fn two_phase_arguments(
+        &mut self,
+        arguments: Vec<Expr>,
+        ty: Type,
+    ) -> Result<(Vec<Statement>, Vec<Expr>)> {
+        fn root(expr: &Expr) -> Option<usize> {
+            match &expr.kind {
+                ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Borrow(slot) => {
+                    Some(*slot)
+                }
+                ExprKind::BorrowPlace(inner) | ExprKind::Project(inner, _) => root(inner),
+                _ => None,
+            }
+        }
+        fn mentions(expr: &Expr, slot: usize) -> bool {
+            if let ExprKind::Local(s) | ExprKind::Peek(s) | ExprKind::Borrow(s) = &expr.kind
+                && *s == slot
+            {
+                return true;
+            }
+            let mut found = false;
+            expr.for_each_child(&mut |child| found = found || mentions(child, slot));
+            found
+        }
+        if ty == Type::Never || arguments.iter().any(|a| a.ty == Type::Never) {
+            return Ok((Vec::new(), arguments));
+        }
+        let exclusive: Vec<Option<usize>> = arguments
+            .iter()
+            .map(|argument| match argument.ty {
+                Type::RefMut(_) => root(argument),
+                _ => None,
+            })
+            .collect();
+        let roots: Vec<usize> = exclusive.iter().flatten().copied().collect();
+        if roots.is_empty() {
+            return Ok((Vec::new(), arguments));
+        }
+        let reads_root = |index: usize, argument: &Expr| {
+            exclusive[index].is_none() && roots.iter().any(|&slot| mentions(argument, slot))
+        };
+        if !arguments.iter().enumerate().any(|(i, a)| reads_root(i, a)) {
+            return Ok((Vec::new(), arguments));
+        }
+        // Reads of a borrowed root, and any argument with effects (which
+        // must keep its order relative to them), are evaluated early.
+        let early: Vec<bool> = arguments
+            .iter()
+            .enumerate()
+            .map(|(i, a)| exclusive[i].is_none() && (reads_root(i, a) || root(a).is_none()))
+            .collect();
+        // A reference or view cannot be parked in a hidden local without a
+        // lifetime of its own; leave such calls as they are.
+        if arguments
+            .iter()
+            .zip(&early)
+            .any(|(a, early)| *early && (a.ty.is_ref() || a.ty.is_view()))
+        {
+            return Ok((Vec::new(), arguments));
+        }
+        let mut statements = Vec::new();
+        let mut values = Vec::with_capacity(arguments.len());
+        for (argument, early) in arguments.into_iter().zip(early) {
+            if !early || matches!(argument.kind, ExprKind::Constant(_)) {
+                values.push(argument);
+                continue;
+            }
+            let slot = self.fresh_local(argument.span, argument.ty)?;
+            let local = Expr {
+                kind: ExprKind::Local(slot),
+                ty: argument.ty,
+                span: argument.span,
+                resource: None,
+            };
+            statements.push(Statement::Let(slot, argument));
+            values.push(local);
+        }
+        Ok((statements, values))
+    }
+    /// Wrap a call in the statements its two-phase arguments need.
+    fn after(statements: Vec<Statement>, call: Expr) -> Expr {
+        if statements.is_empty() {
+            return call;
+        }
+        let ty = call.ty;
+        let span = call.span;
+        Expr {
+            kind: ExprKind::Block(Block {
+                statements,
+                tail: Some(Box::new(call)),
+                ty,
+            }),
+            ty,
+            span,
+            resource: None,
         }
     }
     /// Byte-buffer builtin with an already checked receiver.
@@ -21662,8 +21909,11 @@ impl Checker<'_, '_> {
                 expr.kind,
                 ast::ExprKind::Name(_) | ast::ExprKind::Field { .. }
             ) && let Some(id) = c.resolution.reference(span)
-                && c.functions.declared.contains_key(&id)
+                && let Some(declared) = c.functions.declared.get(&id)
             {
+                if declared.ast.constant {
+                    return c.constant(id, expected, span);
+                }
                 return c.function_value(id, None, expected, span);
             }
             if let ast::ExprKind::Specialize { callee, arguments } = &expr.kind
@@ -22038,6 +22288,9 @@ impl Checker<'_, '_> {
                     return c.vec_literal(values, span, expected);
                 }
                 ast::ExprKind::Index { value, index } => {
+                    if let Some(value) = c.container_index(value, index, expected, span)? {
+                        return Ok(value);
+                    }
                     let base = c.place(value)?;
                     if base.ty.is_text() {
                         return Err(Diagnostic::new(
@@ -22529,10 +22782,45 @@ impl Checker<'_, '_> {
                     {
                         let target = c.place(left)?;
                         let field_ty = target.ty;
+                        // A field of a `let mut` record local is written
+                        // through an exclusive borrow of that local, exactly
+                        // as through an explicit `&mut` receiver.
+                        let through_local = matches!(
+                            split_local_projection(&target),
+                            Some((slot, _)) if c.locals[slot].mutable
+                        );
+                        let target = match split_local_projection(&target) {
+                            Some((slot, offset)) if c.locals[slot].mutable => {
+                                // Facts about the local's fields are stale
+                                // after a write through a borrow.
+                                c.facts.make_opaque(slot);
+                                let record = c.locals[slot].ty;
+                                let pointer = c.types.pointer(record);
+                                let borrow = Expr {
+                                    kind: ExprKind::Borrow(slot),
+                                    ty: Type::RefMut(pointer),
+                                    span: left.span,
+                                    resource: None,
+                                };
+                                Expr {
+                                    kind: ExprKind::Project(Box::new(borrow), offset),
+                                    ty: field_ty,
+                                    span: target.span,
+                                    resource: None,
+                                }
+                            }
+                            Some(_) => {
+                                return Err(Diagnostic::new(
+                                    left.span,
+                                    "cannot assign to a field of an immutable binding; declare it with let mut",
+                                ));
+                            }
+                            None => target,
+                        };
                         let Some((reference, offset)) = split_reference_projection(target) else {
                             return Err(Diagnostic::new(
                                 left.span,
-                                "field assignment requires an exclusive '&mut Record' receiver; update owning locals by rebinding them instead",
+                                "field assignment requires a 'let mut' record local or an exclusive '&mut Record' receiver",
                             ));
                         };
                         let Some(pointer) = reference.ty.ref_pointee() else {
@@ -22575,10 +22863,46 @@ impl Checker<'_, '_> {
                         } else {
                             Type::Unit
                         };
-                        (
-                            ExprKind::RefAssign(Box::new(reference), offset, Box::new(value)),
-                            ty,
-                        )
+                        if through_local && ty != Type::Never {
+                            // The value may read the local (`r.a = r.a + 1`):
+                            // evaluate it before the write borrows the local.
+                            let slot = c.fresh_local(value.span, field_ty)?;
+                            let value_span = value.span;
+                            let write = Expr {
+                                kind: ExprKind::RefAssign(
+                                    Box::new(reference),
+                                    offset,
+                                    Box::new(Expr {
+                                        kind: ExprKind::Local(slot),
+                                        ty: field_ty,
+                                        span: value_span,
+                                        resource: None,
+                                    }),
+                                ),
+                                ty,
+                                span,
+                                resource: None,
+                            };
+                            (
+                                ExprKind::Block(Block {
+                                    statements: vec![Statement::Let(slot, value)],
+                                    tail: Some(Box::new(write)),
+                                    ty,
+                                }),
+                                ty,
+                            )
+                        } else {
+                            (
+                                ExprKind::RefAssign(Box::new(reference), offset, Box::new(value)),
+                                ty,
+                            )
+                        }
+                    } else if let ast::ExprKind::Index {
+                        value: base,
+                        index,
+                    } = &left.kind
+                    {
+                        return c.index_assign(base, index, right, span);
                     } else if let ast::ExprKind::Unary { op: Kind::Star, operand, .. } = &left.kind {
                         // `*p = value` replaces the referent exactly once. The
                         // old affine (non-linear) payload is destroyed by the
@@ -27394,6 +27718,271 @@ impl Checker<'_, '_> {
         go(self.types, ty, 0)
     }
     /// A non-moving read of a local or a nested record field of one.
+    /// A use of `const NAME: Type = value;`: `value`, checked here against
+    /// `Type`. A literal value therefore compiles to that literal.
+    fn constant(&mut self, id: BindingId, expected: Option<Type>, span: Span) -> Result<Expr> {
+        let declared = &self.functions.declared[&id];
+        let f = declared.ast;
+        let Some(value) = f.body.as_ref().and_then(|body| body.tail.as_deref()) else {
+            unreachable!("a constant always has a value");
+        };
+        if self.expanding_constants.contains(&id) {
+            return Err(Diagnostic::new(
+                span,
+                "this constant's value refers to itself",
+            ));
+        }
+        let ty = self.ty(&f.result)?;
+        self.expanding_constants.push(id);
+        let checked = self.expr_expected(value, Some(ty));
+        self.expanding_constants.pop();
+        let mut checked = checked?;
+        self.expect(checked.ty, ty, span)?;
+        checked.span = span;
+        match expected {
+            Some(expected) => self.coerce(checked, expected, span),
+            None => Ok(checked),
+        }
+    }
+    /// The type of a place (a local or a field chain rooted at one), looked
+    /// up without checking or reading it, so no ownership rule applies yet.
+    fn place_type(&self, expr: &ast::Expr) -> Option<Type> {
+        match &expr.kind {
+            ast::ExprKind::Name(name) if name != "_" => {
+                self.slot(expr.span).ok().map(|slot| self.locals[slot].ty)
+            }
+            ast::ExprKind::Field { value, name }
+                if self.resolution.reference(expr.span).is_none() =>
+            {
+                let base = self.place_type(value)?;
+                let base = match base.ref_pointee() {
+                    Some(pointer) => self.types.pointees[pointer],
+                    None => base,
+                };
+                self.record_offset(base, name, expr.span)
+                    .ok()
+                    .map(|(_, ty)| ty)
+            }
+            _ => None,
+        }
+    }
+    /// The receiver for an element access of an owning `Vec`/`Bytes` place:
+    /// an existing reference is passed on (reborrowed), anything else is
+    /// borrowed in place, as `&place` / `&mut place` would be.
+    fn container_receiver(&mut self, base: &ast::Expr, mutable: bool) -> Result<Expr> {
+        let reference = self.place_type(base).is_some_and(|ty| ty.is_ref());
+        if reference && matches!(base.kind, ast::ExprKind::Name(_)) {
+            let slot = self.slot(base.span)?;
+            let ty = self.locals[slot].ty;
+            if mutable && !matches!(ty, Type::RefMut(_)) {
+                return Err(Diagnostic::new(
+                    base.span,
+                    "cannot write through a shared reference; it must be an exclusive '&mut'",
+                ));
+            }
+            return Ok(match (mutable, ty) {
+                // A shared read through `&mut` reborrows it as shared.
+                (false, Type::RefMut(pointer)) => Expr {
+                    kind: ExprKind::Peek(slot),
+                    ty: Type::Ref(pointer),
+                    span: base.span,
+                    resource: None,
+                },
+                _ => Expr {
+                    kind: ExprKind::Local(slot),
+                    ty,
+                    span: base.span,
+                    resource: None,
+                },
+            });
+        }
+        let borrow = ast::Expr {
+            kind: ast::ExprKind::Unary {
+                op: Kind::Amp,
+                mutable,
+                operand: Box::new(base.clone()),
+            },
+            span: base.span,
+        };
+        self.expr(&borrow)
+    }
+    /// `place[index]` for a `Vec<T>` or `Bytes` place, including a field
+    /// reached through a reference: the same checked read as
+    /// `Vec.get(&place, index)` / `Bytes.get(&place, index)`.
+    fn container_index(
+        &mut self,
+        base: &ast::Expr,
+        index: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Option<Expr>> {
+        if !self.is_place(base) {
+            return Ok(None);
+        }
+        let Some(ty) = self.place_type(base) else {
+            return Ok(None);
+        };
+        let pointee = match ty.ref_pointee() {
+            Some(pointer) => self.types.pointees[pointer],
+            None => ty,
+        };
+        match pointee {
+            Type::Vec(_) => {
+                let receiver = self.container_receiver(base, false)?;
+                self.vec_call_with(
+                    "Vec.get",
+                    receiver,
+                    std::slice::from_ref(index),
+                    expected,
+                    span,
+                )
+                .map(Some)
+            }
+            Type::Bytes => {
+                let receiver = self.container_receiver(base, false)?;
+                self.bytes_method(
+                    BytesOp::Get,
+                    receiver,
+                    std::slice::from_ref(index),
+                    expected,
+                    span,
+                )
+                .map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+    /// `place[index] = value`. The index and the value are evaluated first,
+    /// in that order, into hidden locals; only then is the place borrowed
+    /// exclusively for the write. So the value may read the place's owner
+    /// (`m.memory[i] = m.a`), as a call that took `&mut` first could not.
+    /// A `Vec<T>` place is written as `Vec.set(&mut place, i, v)`; an inline
+    /// array or an exclusive slice view as `Slice.set(&mut place[..], i, v)`.
+    fn index_assign(
+        &mut self,
+        base: &ast::Expr,
+        index: &ast::Expr,
+        value: &ast::Expr,
+        span: Span,
+    ) -> Result<Expr> {
+        let ty = self.place_type(base);
+        let pointee = ty.map(|ty| match ty.ref_pointee() {
+            Some(pointer) => self.types.pointees[pointer],
+            None => ty,
+        });
+        let element = match pointee {
+            Some(Type::Vec(pointer)) => Some(self.types.pointees[pointer]),
+            Some(Type::Bytes) => {
+                return Err(Diagnostic::new(
+                    span,
+                    "a byte of Bytes is written through a byte view: Slice.set(&mut bytes[..], index, value); or store the bytes in a Vec<u8>, which supports place[index] = value",
+                ));
+            }
+            _ => None,
+        };
+        let element = match element {
+            Some(element) => element,
+            None => {
+                // Inline arrays and exclusive slice views: the element type
+                // comes from the view.
+                let probe = match ty {
+                    Some(Type::SliceMut(pointer)) => Some(self.types.pointees[pointer]),
+                    Some(ty) => ty
+                        .layout()
+                        .and_then(|id| self.types.enums[id].array)
+                        .map(|(element, _)| element),
+                    None => None,
+                };
+                let Some(element) = probe else {
+                    return Err(Diagnostic::new(
+                        base.span,
+                        "index assignment needs a Vec<T>, an inline array or an exclusive '&mut [T]' view",
+                    ));
+                };
+                element
+            }
+        };
+        if self.owned_type(element) || self.linear_type(element) {
+            return Err(Diagnostic::new(
+                span,
+                "index assignment replaces a copyable element; this element owns resources or is linear",
+            ));
+        }
+        self.require(PANIC, span)?;
+        let index = self.expr_expected(index, Some(Type::I64))?;
+        self.expect(index.ty, Type::I64, index.span)?;
+        let value = self.expr_expected(value, Some(element))?;
+        self.expect(value.ty, element, value.span)?;
+        if index.ty == Type::Never || value.ty == Type::Never {
+            let mut statements = vec![Statement::Expr(index)];
+            statements.push(Statement::Expr(value));
+            return Ok(Expr {
+                kind: ExprKind::Block(Block {
+                    statements,
+                    tail: None,
+                    ty: Type::Never,
+                }),
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        let index_slot = self.fresh_local(index.span, Type::I64)?;
+        let value_slot = self.fresh_local(value.span, element)?;
+        let local = |slot, ty, span| Expr {
+            kind: ExprKind::Local(slot),
+            ty,
+            span,
+            resource: None,
+        };
+        let index_span = index.span;
+        let value_span = value.span;
+        let statements = vec![
+            Statement::Let(index_slot, index),
+            Statement::Let(value_slot, value),
+        ];
+        let call = if matches!(pointee, Some(Type::Vec(_))) {
+            let receiver = self.container_receiver(base, true)?;
+            Expr {
+                kind: ExprKind::Call(
+                    Target::Vec(VecOp::SetBorrowed, element),
+                    vec![
+                        receiver,
+                        local(index_slot, Type::I64, index_span),
+                        local(value_slot, element, value_span),
+                    ],
+                ),
+                ty: Type::Unit,
+                span,
+                resource: None,
+            }
+        } else {
+            let view = self.slice_view(base, None, None, true, span, None)?;
+            Expr {
+                kind: ExprKind::Call(
+                    Target::Slice(SliceOp::Set, element),
+                    vec![
+                        view,
+                        local(index_slot, Type::I64, index_span),
+                        local(value_slot, element, value_span),
+                    ],
+                ),
+                ty: Type::Unit,
+                span,
+                resource: None,
+            }
+        };
+        Ok(Expr {
+            kind: ExprKind::Block(Block {
+                statements,
+                tail: Some(Box::new(call)),
+                ty: Type::Unit,
+            }),
+            ty: Type::Unit,
+            span,
+            resource: None,
+        })
+    }
     fn place(&mut self, expr: &ast::Expr) -> Result<Expr> {
         match &expr.kind {
             ast::ExprKind::Name(name) if name != "_" => {
@@ -30800,6 +31389,7 @@ impl Checker<'_, '_> {
             }
         }
         self.apply_effect_writes(signature.effects);
+        let (statements, values) = self.two_phase_arguments(values, ty)?;
         let value = Expr {
             kind: ExprKind::Call(
                 if self.functions.foreign_functions.contains_key(&index) {
@@ -30819,6 +31409,7 @@ impl Checker<'_, '_> {
         {
             self.assume_postconditions(f, arguments, span, ty);
         }
+        let value = Self::after(statements, value);
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
@@ -34734,7 +35325,11 @@ impl Checker<'_, '_> {
                 None => Ok(value),
             };
         }
-        let value = unit(ExprKind::Call(Target::Vec(op, element), values), ty);
+        let (statements, values) = self.two_phase_arguments(values, ty)?;
+        let value = Self::after(
+            statements,
+            unit(ExprKind::Call(Target::Vec(op, element), values), ty),
+        );
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),

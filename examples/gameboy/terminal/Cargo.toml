@@ -1,0 +1,16 @@
+[package]
+name = "kush-gameboy-terminal"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Raw-mode keyboard input for the Kush Game Boy front end. No dependencies:
+# the few libc calls it needs are declared by hand.
+
+[lib]
+name = "kush_gameboy_terminal"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+
+[workspace]

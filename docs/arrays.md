@@ -17,7 +17,8 @@ Run `cargo run -p kush -- run examples/arrays.kush` to print 42.
 
 Arrays are inline values and construction/indexing do not allocate. Passing and
 returning them uses the existing aggregate ABI. The current layout includes a
-private tag word and is limited to 32 words including nested elements.
+private tag word and is limited to 32 words including nested elements. Elements
+are written with `values[i] = x` on a `let mut` array (see [places](places.md)).
 A length is a compile-time expression: integer literals, `N: Nat` const
 parameters, admitted total logical computations, and checked
 `+`/`-`/`*`/`/`/`%` over those, such as `[i64; (1 + 1) * 2]`,

@@ -197,13 +197,30 @@ fn exclusive_borrows_reject_shared_aliases_moves_reads_and_replacement() {
         "#,
         "immutable binding",
     );
-    rejects(
+    // Two-phase borrow (docs/places.md): the scalar argument is read before
+    // the exclusive receiver borrow starts.
+    agrees(
         r#"
         struct P { x: i64 }
         impl P { fn bump(&mut self, by: i64) -> Unit ! {panic} { self.x = self.x + by; } }
-        fn main() -> Unit ! {panic} {
+        fn main() -> i64 ! {panic} {
             let mut p = P { x: 1 };
             p.bump(p.x);
+            p.x
+        }
+        "#,
+        2,
+        "",
+    );
+    // A reference argument would alias the exclusive receiver for the whole
+    // call, so it is still rejected.
+    rejects(
+        r#"
+        struct P { x: i64 }
+        impl P { fn mix(&mut self, other: &P) -> Unit ! {panic} { self.x = self.x + other.x; } }
+        fn main() -> Unit ! {panic} {
+            let mut p = P { x: 1 };
+            p.mix(&p);
         }
         "#,
         "exclusive",
@@ -273,7 +290,7 @@ fn references_reject_temporaries_fields_storage_returns_and_owned_writes() {
         impl P { fn peek_value(&self) -> i64 ! {panic} { self.x } }
         fn main() -> i64 ! {panic} { P { x: 1 }.peek_value() }
         "#,
-        "direct local binding",
+        "bind a temporary to a local",
     );
     // `&p.x` is now a checked `&i64` place reference; the callee expects
     // `&P`, so the call is still a type mismatch rather than a borrow-form
@@ -308,13 +325,19 @@ fn references_reject_temporaries_fields_storage_returns_and_owned_writes() {
         "#,
         "escapes",
     );
-    rejects(
+    // A shared read of an owning field through `&self` borrows the field in
+    // place (docs/places.md); moving it out is still rejected below.
+    agrees(
         r#"
         struct P { token: Box<i64>, x: i64 }
         impl P { fn token_value(&self) -> i64 ! {panic} { self.token.read() } }
-        fn main() -> Unit ! {panic} {}
+        fn main() -> i64 ! {alloc, panic} {
+            let p = P { token: Box.new(41), x: 1 };
+            p.token_value() + p.x
+        }
         "#,
-        "owns storage",
+        42,
+        "",
     );
     rejects(
         r#"
@@ -345,7 +368,7 @@ fn shared_receivers_cannot_write_or_be_upgraded() {
         }
         fn main() -> Unit ! {panic} {}
         "#,
-        "existing reference",
+        "but the receiver is a shared reference",
     );
     rejects(
         r#"
@@ -622,16 +645,34 @@ fn borrowed_methods_example_runs_in_both_backends() {
 
 #[test]
 fn exclusive_record_loans_block_later_method_aliases() {
-    rejects(
+    // `p.peek()` finishes before the exclusive receiver borrow starts
+    // (two-phase borrow), so it sees the old value.
+    agrees(
         r#"
         struct P { x: i64 }
         impl P {
             fn bump(&mut self, by: i64) -> Unit ! {panic} { self.x = self.x + by; }
             fn peek(&self) -> i64 ! {panic} { self.x }
         }
+        fn main() -> i64 ! {panic} {
+            let mut p = P { x: 3 };
+            p.bump(p.peek());
+            p.x
+        }
+        "#,
+        6,
+        "",
+    );
+    // A returned reference to the receiver would outlive that order.
+    rejects(
+        r#"
+        struct P { x: i64 }
+        impl P {
+            fn mix(&mut self, other: &P) -> Unit ! {panic} { self.x = self.x + other.x; }
+        }
         fn main() -> Unit ! {panic} {
             let mut p = P { x: 1 };
-            p.bump(p.peek());
+            p.mix(&p);
         }
         "#,
         "exclusive",
