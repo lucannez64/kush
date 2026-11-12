@@ -4748,6 +4748,82 @@
           "text": "No defect in the deferral changes (about 3,200 generated deferred loops plus edge cases, up to 8 builds each). Two low-severity defects in the new fault handler, both fixed with tests: a write running off the top of the stack was reported as stack exhaustion, and the first SIGSEGV/SIGBUS sent from outside was swallowed. Doc overclaims corrected; bounded delay has a test on a loop that still qualifies. The handler fixes themselves were made after this review. 1,719 tests pass on Cranelift, llvm and llvm-release."
         }
       ]
+    },
+    {
+      "id": "SEPCOMP-INTERFACE",
+      "title": "Interface files: emit, read, and check programs against them",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "docs/separate-compilation.md",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SEPCOMP-RUNTIME",
+      "title": "C runtime as a shared library (libkushrt.so)",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "SEPCOMP-INTERFACE"
+      ],
+      "status": "todo",
+      "desc": "docs/separate-compilation.md",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SEPCOMP-LIB",
+      "title": "kush build --lib and programs linked against installed libraries",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "SEPCOMP-RUNTIME"
+      ],
+      "status": "todo",
+      "desc": "docs/separate-compilation.md",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SEPCOMP-ABI",
+      "title": "ABI hash enforced at build and load time",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "SEPCOMP-LIB"
+      ],
+      "status": "todo",
+      "desc": "docs/separate-compilation.md",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SEPCOMP-VTABLE",
+      "title": "Vtables for dyn Trait across libraries",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "SEPCOMP-LIB"
+      ],
+      "status": "todo",
+      "desc": "docs/separate-compilation.md",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "SEPCOMP-MODULES",
+      "title": "Per-module compilation and caching within a package, in parallel",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "SEPCOMP-INTERFACE"
+      ],
+      "status": "todo",
+      "desc": "docs/separate-compilation.md",
+      "commit": null,
+      "log": []
     }
   ]
 }
