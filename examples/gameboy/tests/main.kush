@@ -142,3 +142,38 @@ fn a_frame_is_70224_cycles_and_raises_vblank() -> Unit ! {io, alloc, panic} {
     test.is_true(second >= 70224 - 12 && second <= 70224 + 12);
     test.equal_i64(wide(m.io[0x0F]) & 0x01, 1);
 }
+
+#[test]
+fn a_triggered_square_wave_sounds_and_its_length_runs_out() -> Unit ! {io, alloc, panic} {
+    let mut code: Vec<u8> = Vec.new();
+    code = code.push(0x18).push(0xFE);
+    let mut m = machine_for(&code);
+    // Channel 1, both sides, full volume, 50% duty, 440-ish Hz, with a
+    // length of 64 - 0x3C = 4 ticks of 256 Hz (about 16 ms).
+    machine.write(&mut m, 0xFF26, 0x80);
+    machine.write(&mut m, 0xFF24, 0x77);
+    machine.write(&mut m, 0xFF25, 0x11);
+    machine.write(&mut m, 0xFF12, 0xF0);
+    machine.write(&mut m, 0xFF11, 0xBC);
+    machine.write(&mut m, 0xFF13, 0x00);
+    machine.write(&mut m, 0xFF14, 0xC7);
+    test.equal_i64(wide(machine.read(&m, 0xFF26)) & 0x01, 1);
+    m.apu.samples.clear();
+    let start = m.cycles;
+    emulator.run_frame(&mut m);
+    // The channel played, swinging both ways, then its length expired.
+    let mut highest = 0;
+    let mut lowest = 0;
+    let mut i = 0;
+    while i < m.apu.samples.len() {
+        let s = m.apu.samples[i];
+        if s > highest { highest = s; }
+        if s < lowest { lowest = s; }
+        i = i + 1;
+    }
+    test.is_true(highest > 1000 && lowest < -1000);
+    test.equal_i64(wide(machine.read(&m, 0xFF26)) & 0x01, 0);
+    // 48,000 stereo samples per 4,194,304 cycles, within one sample.
+    let expected = (m.cycles - start) * 48000 / 4194304 * 2;
+    test.is_true(m.apu.samples.len() >= expected - 2 && m.apu.samples.len() <= expected + 2);
+}

@@ -72,6 +72,22 @@ borrow it in place too (`m.memory.len()`), and the mutating `Vec` builtins
 `&mut` (`log.items.push(x)`). A by-value method on an owning field is still
 rejected: it would move the field out of its record.
 
+## Fields inside owning fields
+
+A field of a field that owns storage is still a place through a reference:
+`m.apu.powered` reads, and `m.apu.step = 0` writes, a scalar of the `Apu`
+record that `m: &mut Machine` holds, although `Apu` owns vectors. Only the
+final field is read or written; moving an owning field out
+(`o.inner.log` as a value) is still rejected.
+
+## Disjoint owning fields
+
+Two exclusive borrows of different fields of one record may be live at once,
+also when the fields own storage and also through a reference:
+`apu.sequence(&mut m.apu, &mut m.io)`. The same field twice is still an
+alias and rejected. (Before, a field that owns storage was loaned as its whole
+record.)
+
 ## Two-phase exclusive borrows in calls
 
 Passing an exclusive reference (`m`, `&mut x`, `&mut m.field`) has no side

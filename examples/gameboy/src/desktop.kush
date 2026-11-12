@@ -1,0 +1,217 @@
+module gameboy.desktop;
+
+use std.option.Option;
+use std.result.Result;
+use std.text;
+use media.audio;
+use media.audio.Audio;
+use media.input.Axis;
+use media.input.Button;
+use media.input.Event;
+use media.input.Key;
+use media.window;
+use media.window.Window;
+use gameboy.apu;
+use gameboy.cartridge.Mapper;
+use gameboy.emulator;
+use gameboy.machine;
+use gameboy.machine.Machine;
+
+// The desktop front end: a window (through the `media` package, on SDL2),
+// sound, keyboard and gamepads.
+
+// Game Boy button bits, as `machine.press` takes them.
+const RIGHT: i64 = 0x01;
+const LEFT: i64 = 0x02;
+const UP: i64 = 0x04;
+const DOWN: i64 = 0x08;
+const A: i64 = 0x10;
+const B: i64 = 0x20;
+const SELECT: i64 = 0x40;
+const START: i64 = 0x80;
+
+/// A stick must be pushed this far (of 32767) to count as a direction.
+const DEADZONE: i64 = 12000;
+/// Keep about this many bytes of sound queued: 4 frames, ~67 ms.
+const AUDIO_TARGET: i64 = 4 * 800 * 4;
+const FRAME_NS: i64 = 16742706;
+
+/// What the player is holding, from every input source.
+struct Controls {
+    keys: i64,
+    pad: i64,
+    /// Buttons pressed since the last frame: held for at least that frame,
+    /// so a tap shorter than a frame is not lost.
+    tapped: i64,
+    stick_x: i64,
+    stick_y: i64,
+    quit: Bool,
+}
+
+fn key_bit(key: Key) -> i64 ! {} {
+    match key {
+        Key.Up => UP, Key.Down => DOWN, Key.Left => LEFT, Key.Right => RIGHT,
+        Key.Enter => START, Key.Space => SELECT, Key.Backspace => SELECT,
+        Key.Char(c) => match c {
+            119 => UP, 97 => LEFT, 115 => DOWN, 100 => RIGHT, // w a s d
+            120 => A, 107 => A,                                // x k
+            122 => B, 106 => B,                                // z j
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// Buttons laid out like a Nintendo pad: the right face button is A.
+fn button_bit(button: Button) -> i64 ! {} {
+    match button {
+        Button.East => A, Button.North => A,
+        Button.South => B, Button.West => B,
+        Button.Start => START, Button.Back => SELECT,
+        Button.DpadUp => UP, Button.DpadDown => DOWN,
+        Button.DpadLeft => LEFT, Button.DpadRight => RIGHT,
+        _ => 0,
+    }
+}
+
+fn held(c: &Controls) -> i64 ! {panic} {
+    let mut stick = 0;
+    if c.stick_x < 0 - DEADZONE { stick = stick | LEFT; }
+    if c.stick_x > DEADZONE { stick = stick | RIGHT; }
+    if c.stick_y < 0 - DEADZONE { stick = stick | UP; }
+    if c.stick_y > DEADZONE { stick = stick | DOWN; }
+    c.keys | c.pad | c.tapped | stick
+}
+
+/// Apply every pending window event to the controls.
+fn handle_events(win: &Window, c: &mut Controls) -> Unit ! {io, panic} {
+    let mut more = true;
+    while more {
+        match window.next_event(win) {
+            Option.None => { more = false; },
+            Option.Some(event) => match event {
+                Event.Quit => { c.quit = true; },
+                Event.KeyDown(Key.Escape) => { c.quit = true; },
+                Event.KeyDown(key) => {
+                    let bit = key_bit(key);
+                    c.keys = c.keys | bit;
+                    c.tapped = c.tapped | bit;
+                },
+                Event.KeyUp(key) => { c.keys = c.keys & (0xFF - key_bit(key)); },
+                Event.ButtonDown(_, button) => {
+                    let bit = button_bit(button);
+                    c.pad = c.pad | bit;
+                    c.tapped = c.tapped | bit;
+                },
+                Event.ButtonUp(_, button) => { c.pad = c.pad & (0xFF - button_bit(button)); },
+                Event.AxisMoved(_, Axis.LeftX, value) => { c.stick_x = value; },
+                Event.AxisMoved(_, Axis.LeftY, value) => { c.stick_y = value; },
+                _ => {},
+            },
+        }
+    }
+}
+
+/// The screen as RGB bytes for the window.
+fn pixels<M>(m: &Machine<M>) -> Bytes ! {alloc, panic} {
+    let size = machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT;
+    let mut out = Bytes.with_capacity(size * 3);
+    let mut i = 0;
+    while i < size {
+        let (r, g, b) = emulator.rgb(m.screen[i]);
+        out = out.push(r).push(g).push(b);
+        i = i + 1;
+    }
+    out
+}
+
+/// The samples made since last time, encoded for the audio queue.
+fn take_samples<M>(m: &mut Machine<M>) -> Bytes ! {alloc, panic} {
+    let count = m.apu.samples.len();
+    let mut out = Bytes.with_capacity(count * 2);
+    let mut i = 0;
+    while i < count {
+        out = audio.push(out, m.apu.samples[i]);
+        i = i + 1;
+    }
+    m.apu.samples.clear();
+    out
+}
+
+fn show_rate(win: &Window, title: &Bytes, rate: i64) -> Unit ! {io, alloc, panic} {
+    let mut name = emulator.append(Bytes.from("Kush Game Boy - "), title);
+    name = emulator.append(name, &Bytes.from(" - "));
+    name = text.format_i64_into(name, rate);
+    name = emulator.append(name, &Bytes.from(" fps"));
+    let _ = window.set_title(win, &name);
+}
+
+/// One frame: input, emulation, picture. False once the player quits.
+fn frame<M: Mapper>(m: &mut Machine<M>, win: &Window, c: &mut Controls) -> Result<Bool, i64> ! {io, alloc, panic} {
+    handle_events(win, c);
+    if c.quit { return Ok(false); }
+    machine.press(m, Int.truncate(held(c)));
+    c.tapped = 0;
+    emulator.run_frame(m);
+    window.present(win, &pixels(m))?;
+    Ok(true)
+}
+
+fn controls() -> Controls ! {} {
+    Controls { keys: 0, pad: 0, tapped: 0, stick_x: 0, stick_y: 0, quit: false }
+}
+
+/// Play with sound: the audio device's clock paces the frames.
+fn with_sound<M: Mapper>(m: &mut Machine<M>, win: &Window, sound: &Audio, title: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
+    let mut c = controls();
+    let mut second = TIME.monotonic_ns()?;
+    let mut frames = 0;
+    while frame(m, win, &mut c)? {
+        let samples = take_samples(m);
+        audio.queue(sound, &samples)?;
+        // Wait while more than the target is queued; this keeps sound and
+        // picture together without drifting.
+        while audio.queued(sound) > AUDIO_TARGET {
+            TIME.sleep_ms(1)?;
+        }
+        frames = frames + 1;
+        let now = TIME.monotonic_ns()?;
+        if now - second >= 1000000000 {
+            show_rate(win, title, frames);
+            frames = 0;
+            second = now;
+        }
+    }
+    Ok(())
+}
+
+/// Play silently, paced by the clock.
+fn silent<M: Mapper>(m: &mut Machine<M>, win: &Window, title: &Bytes) -> Result<Unit, i64> ! {io, alloc, panic} {
+    let mut c = controls();
+    let mut next = TIME.monotonic_ns()?;
+    let mut second = next;
+    let mut frames = 0;
+    while frame(m, win, &mut c)? {
+        m.apu.samples.clear();
+        next = next + FRAME_NS;
+        let now = TIME.monotonic_ns()?;
+        if next > now { TIME.sleep_ms((next - now) / 1000000)?; } else if now - next > 100000000 { next = now; }
+        frames = frames + 1;
+        if now - second >= 1000000000 {
+            show_rate(win, title, frames);
+            frames = 0;
+            second = now;
+        }
+    }
+    Ok(())
+}
+
+/// Open a window and play until it is closed. Fails with ENODEV (19) when
+/// there is no display; sound is optional.
+pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64) -> Result<Unit, i64> ! {io, alloc, panic} {
+    let win = window.open(&emulator.append(Bytes.from("Kush Game Boy - "), title), machine.SCREEN_WIDTH, machine.SCREEN_HEIGHT, scale)?;
+    match audio.open(apu.SAMPLE_RATE, 2) {
+        Ok(sound) => with_sound(m, &win, &sound, title),
+        Err(_) => silent(m, &win, title),
+    }
+}

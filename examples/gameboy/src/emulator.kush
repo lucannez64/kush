@@ -2,6 +2,7 @@ module gameboy.emulator;
 
 use std.result.Result;
 use std.text;
+use gameboy.apu;
 use gameboy.cartridge.Mapper;
 use gameboy.cpu;
 use gameboy.machine;
@@ -20,6 +21,7 @@ pub fn run_frame<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc, panic} {
         let cycles = cpu.step(m);
         machine.tick_timer(m, cycles);
         ppu.advance(m, cycles);
+        apu.tick(&mut m.apu, cycles);
         m.cycles = m.cycles + cycles;
         budget = budget - cycles;
     }

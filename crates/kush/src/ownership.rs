@@ -1480,7 +1480,14 @@ impl Checker<'_> {
                         }
                         _ => return None,
                     };
-                    return Some((root, Vec::new()));
+                    // A field of the referent: fields of one referent are as
+                    // disjoint as fields of a local record.
+                    let path = self
+                        .referent(base.ty)
+                        .and_then(|referent| self.field_index(referent, *offset))
+                        .map(|index| vec![index])
+                        .unwrap_or_default();
+                    return Some((root, path));
                 }
                 let (root, mut path) = self.place_ident(base)?;
                 path.push(self.field_index(base.ty, *offset)?);
@@ -1541,7 +1548,20 @@ impl Checker<'_> {
         if !leaf.origins.is_empty() && !matches!(place.kind, ExprKind::PlaceIndex { .. }) {
             let mut loan = leaf;
             if let Some((root, path)) = self.place_ident(place) {
-                loan.field.get_or_insert(FieldBorrow { root, path });
+                // An owning field's handle loan names its root with an empty
+                // path (the whole record); the place's own field path is the
+                // precise one, so `&mut o.a` and `&mut o.b` stay disjoint.
+                match &mut loan.field {
+                    Some(field)
+                        if field.root == root
+                            && field.path.len() < path.len()
+                            && path.starts_with(&field.path) =>
+                    {
+                        field.path = path;
+                    }
+                    Some(_) => {}
+                    None => loan.field = Some(FieldBorrow { root, path }),
+                }
             }
             return loan;
         }
@@ -4956,7 +4976,11 @@ impl Checker<'_> {
         let origins = self.view_origins(expr);
         let splits = self.split_labels(expr);
         let mutable = expr.ty.is_mut_slice() || matches!(expr.ty, Type::RefMut(_));
-        let field = self.view_loan(expr).field;
+        // A borrowed place (`&mut o.x`) covers exactly that field path.
+        let field = match &expr.kind {
+            ExprKind::BorrowPlace(place) => self.place_loan(place).field,
+            _ => self.view_loan(expr).field,
+        };
         // `&mut record` is exclusive over the record and its exclusive leaves,
         // but only shared over the storage behind its shared leaves: through
         // the reference a shared leaf can be read or replaced, never written.

@@ -4863,6 +4863,11 @@
           "time": "2026-11-12 18:42:06",
           "who": "agent",
           "text": "done b5641cc"
+        },
+        {
+          "time": "2026-11-12 21:32:53",
+          "who": "agent",
+          "text": "Follow-ups: owning records as intermediate steps of reference places (m.apu.powered); precise field paths for owning-field loans and fields through references, so disjoint owning fields can be borrowed together; struct size/field/argument limits removed."
         }
       ]
     },
@@ -4894,6 +4899,31 @@
           "text": "Plays a real game: 2048-gb (Homebrew Hub ROM) boots and plays in the terminal at 60 fps. dmg-acid2 still unrun."
         }
       ]
+    },
+    {
+      "id": "MEDIA",
+      "title": "media package: SDL2 window, keyboard and gamepad events, audio stream",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "examples/media: typed Kush API (Window, Event, Key, Button, Axis, Audio) over a dependency-free Rust adapter linking the system SDL2. Gamepads tested with a virtual SDL controller.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GAMEBOY-SOUND",
+      "title": "Game Boy sound chip and desktop front end",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GAMEBOY",
+        "MEDIA"
+      ],
+      "status": "todo",
+      "desc": "APU (2 square, wave, noise, frame sequencer on DIV bit 12, mixing); window with sound paced by the audio queue, gamepads. dmg_sound 9/12; wave-RAM-while-playing quirks left.",
+      "commit": null,
+      "log": []
     }
   ]
 }

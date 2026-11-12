@@ -1,0 +1,46 @@
+module media.window;
+
+use std.option.Option;
+use std.result.Result;
+use media.input;
+use media.input.Event;
+
+// A window showing one RGB image, scaled up with sharp pixels and its aspect
+// ratio kept when resized. Closing it (dropping the `Window`) releases it.
+
+#[foreign("media_window_release")]
+pub struct Window {}
+
+foreign "media_window_open" fn open_window(title: &Bytes, width: i64, height: i64, scale: i64) -> Result<Window, i64> ! {io};
+foreign "media_window_present" fn present_pixels(window: &Window, pixels: &Bytes) -> Result<Unit, i64> ! {io};
+foreign "media_window_set_title" fn title_window(window: &Window, title: &Bytes) -> Result<Unit, i64> ! {io};
+foreign "media_window_next_event" fn next_packed(window: &Window) -> i64 ! {io};
+
+/// Open a window for a `width` x `height` image, shown `scale` times as
+/// large. Fails with ENODEV (19) when there is no display.
+pub fn open(title: &Bytes, width: i64, height: i64, scale: i64) -> Result<Window, i64> ! {io} {
+    open_window(title, width, height, scale)
+}
+
+/// Show an image: 3 bytes (red, green, blue) per pixel, rows top to
+/// bottom, exactly the size the window was opened for (EINVAL otherwise).
+pub fn present(window: &Window, pixels: &Bytes) -> Result<Unit, i64> ! {io} {
+    present_pixels(window, pixels)
+}
+
+pub fn set_title(window: &Window, title: &Bytes) -> Result<Unit, i64> ! {io} {
+    title_window(window, title)
+}
+
+/// The next pending event, if any. Call it until it returns `None` once
+/// per frame; key auto-repeat is not reported.
+pub fn next_event(window: &Window) -> Option<Event> ! {io, panic} {
+    let mut packed = next_packed(window);
+    while packed != 0 {
+        match input.decode(packed) {
+            Option.Some(event) => { return Option.Some(event); },
+            Option.None => { packed = next_packed(window); },
+        }
+    }
+    Option.None
+}

@@ -1,5 +1,7 @@
 module gameboy.machine;
 
+use gameboy.apu;
+use gameboy.apu.Apu;
 use gameboy.cartridge;
 use gameboy.cartridge.Mapper;
 
@@ -60,6 +62,7 @@ pub struct Machine<M> {
     pub sprites: Vec<u8>,
     /// Pressed buttons: bit 0-3 right, left, up, down; bit 4-7 A, B, select, start.
     pub buttons: u8,
+    pub apu: Apu,
     /// Everything written to the serial port.
     pub serial: Vec<u8>,
     pub cycles: i64,
@@ -72,6 +75,15 @@ pub fn new<M: Mapper>(board: M) -> Machine<M> ! {alloc, panic} {
     io[0x47] = 0xFC; // BGP
     io[0x48] = 0xFF;
     io[0x49] = 0xFF;
+    // Sound registers as the boot ROM leaves them.
+    io[0x10] = 0x80; io[0x11] = 0xBF; io[0x12] = 0xF3; io[0x14] = 0xBF;
+    io[0x16] = 0x3F; io[0x19] = 0xBF; io[0x1A] = 0x7F; io[0x1B] = 0xFF;
+    io[0x1C] = 0x9F; io[0x1E] = 0xBF; io[0x20] = 0xFF; io[0x23] = 0xBF;
+    io[0x24] = 0x77; io[0x25] = 0xF3;
+    let mut sound = apu.new();
+    sound.square1.dac = true;
+    sound.square1.duty = 2;
+    sound.right_enables = 0x3;
     Machine {
         // The state the boot ROM leaves behind on a DMG.
         a: 0x01, f: 0xB0, b: 0x00, c: 0x13, d: 0x00, e: 0xD8, h: 0x01, l: 0x4D,
@@ -92,6 +104,7 @@ pub fn new<M: Mapper>(board: M) -> Machine<M> ! {alloc, panic} {
         screen: cartridge.zeroed(SCREEN_WIDTH * SCREEN_HEIGHT),
         sprites: cartridge.zeroed(10),
         buttons: 0,
+        apu: sound,
         serial: Vec.with_capacity(256),
         cycles: 0,
     }
@@ -123,8 +136,13 @@ fn read_io<M>(m: &Machine<M>, register: i64) -> u8 ! {panic} {
         0x00 => joypad(m),
         0x04 => Int.truncate(m.divider >> 8),
         0x0F => m.io[0x0F] | 0xE0,
+        0x26 => apu.status(&m.apu),
         0x41 => m.io[0x41] | 0x80,
-        _ => m.io[register],
+        _ => {
+            if register >= 0x30 && register < 0x40 { return m.apu.wave_ram[register - 0x30]; }
+            if register >= 0x10 && register < 0x30 { return m.io[register] | apu.read_mask(register); }
+            m.io[register]
+        },
     }
 }
 
@@ -184,7 +202,16 @@ fn write_io<M: Mapper>(m: &mut Machine<M>, register: i64, value: u8) -> Unit ! {
         0x41 => { m.io[0x41] = (m.io[0x41] & 0x07) | (value & 0x78); },
         0x44 => {},
         0x46 => { dma(m, value); },
-        _ => { m.io[register] = value; },
+        _ => {
+            if register >= 0x10 && register < 0x40 {
+                // Registers keep their byte only while the APU is powered
+                // (NR52 itself and wave RAM always).
+                if m.apu.powered || register >= 0x26 { m.io[register] = value; }
+                apu.write(&mut m.apu, &mut m.io, register, value);
+            } else {
+                m.io[register] = value;
+            }
+        },
     }
 }
 
@@ -221,8 +248,11 @@ fn tick_tima<M>(m: &mut Machine<M>) -> Unit ! {panic} {
 
 fn set_divider<M>(m: &mut Machine<M>, value: i64) -> Unit ! {panic} {
     let before = timer_bit(m);
+    let sequencer_bit = (m.divider & 0x1000) != 0;
     m.divider = value & 0xFFFF;
     if before && !timer_bit(m) { tick_tima(m); }
+    // The APU's frame sequencer steps on falling edges of divider bit 12.
+    if sequencer_bit && (m.divider & 0x1000) == 0 { apu.sequence(&mut m.apu, &mut m.io); }
 }
 
 /// Advance the timer by `cycles` clock cycles, four at a time.

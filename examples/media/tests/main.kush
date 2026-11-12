@@ -1,0 +1,59 @@
+module media.tests.main;
+
+use std.option.Option;
+use std.test;
+use media.audio;
+use media.input;
+use media.input.Axis;
+use media.input.Button;
+use media.input.Event;
+use media.input.Key;
+
+fn pack(kind: i64, device: i64, code: i64, value: i64) -> i64 ! {panic} {
+    let raw = if value < 0 { value + 65536 } else { value };
+    kind + (device << 8) + (code << 16) + (raw << 48)
+}
+
+#[test]
+fn keys_decode_by_meaning() -> Unit ! {panic} {
+    let up = match input.decode(pack(2, 0, 0x40000052, 0)) {
+        Option.Some(Event.KeyDown(Key.Up)) => true,
+        _ => false,
+    };
+    test.is_true(up);
+    let x = match input.decode(pack(3, 0, 120, 0)) {
+        Option.Some(Event.KeyUp(Key.Char(c))) => c == 120,
+        _ => false,
+    };
+    test.is_true(x);
+    let f5 = match input.key(0x4000003E) { Key.Function(n) => n == 5, _ => false };
+    test.is_true(f5);
+}
+
+#[test]
+fn gamepad_events_keep_device_and_signed_values() -> Unit ! {panic} {
+    let pressed = match input.decode(pack(4, 2, 13, 0)) {
+        Option.Some(Event.ButtonDown(pad, Button.DpadLeft)) => pad == 2,
+        _ => false,
+    };
+    test.is_true(pressed);
+    let stick = match input.decode(pack(6, 1, 1, -32768)) {
+        Option.Some(Event.AxisMoved(pad, Axis.LeftY, value)) => pad == 1 && value == -32768,
+        _ => false,
+    };
+    test.is_true(stick);
+    let none = match input.decode(0) { Option.None => true, _ => false };
+    test.is_true(none);
+}
+
+#[test]
+fn samples_are_little_endian_and_clamped() -> Unit ! {io, alloc, panic} {
+    let mut out = Bytes.with_capacity(8);
+    out = audio.push(out, -2);
+    out = audio.push(out, 40000);
+    test.equal_i64(out.len(), 4);
+    test.equal_i64(out[0], 0xFE);
+    test.equal_i64(out[1], 0xFF);
+    test.equal_i64(out[2], 0xFF);
+    test.equal_i64(out[3], 0x7F);
+}

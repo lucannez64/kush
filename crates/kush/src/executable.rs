@@ -27711,7 +27711,6 @@ impl Checker<'_, '_> {
         }
         go(self.types, ty, 0)
     }
-    /// A non-moving read of a local or a nested record field of one.
     /// A use of `const NAME: Type = value;`: `value`, checked here against
     /// `Type`. A literal value therefore compiles to that literal.
     fn constant(&mut self, id: BindingId, expected: Option<Type>, span: Span) -> Result<Expr> {
@@ -27977,7 +27976,15 @@ impl Checker<'_, '_> {
             resource: None,
         })
     }
+    /// A non-moving read of a local or a nested record field of one.
     fn place(&mut self, expr: &ast::Expr) -> Result<Expr> {
+        self.place_at(expr, false)
+    }
+    /// `intermediate`: this place is only a step towards a field of it
+    /// (`m.apu` in `m.apu.powered`). An owning record may be such a step
+    /// through a reference: nothing is moved or copied but the final field,
+    /// which must itself be copyable.
+    fn place_at(&mut self, expr: &ast::Expr, intermediate: bool) -> Result<Expr> {
         match &expr.kind {
             ast::ExprKind::Name(name) if name != "_" => {
                 if let Ok(slot) = self.slot(expr.span) {
@@ -27992,12 +27999,15 @@ impl Checker<'_, '_> {
             ast::ExprKind::Field { value, name }
                 if self.resolution.reference(expr.span).is_none() =>
             {
-                let base = self.place(value)?;
+                let base = self.place_at(value, true)?;
                 if base.ty.is_ref() {
                     let pointer = base.ty.ref_pointee().expect("reference pointee");
                     let pointee = self.types.pointees[pointer];
                     let (offset, ty) = self.record_offset(pointee, name, expr.span)?;
-                    if self.owned_type(ty)
+                    let owning_step = intermediate
+                        && ty.layout().is_some_and(|id| self.types.enums[id].record)
+                        && !self.linear_type(ty);
+                    if (self.owned_type(ty) && !owning_step)
                         || self.linear_type(ty)
                         || (ty.is_view() && ty.is_mut_slice())
                         || matches!(ty, Type::RefMut(_))
@@ -28244,7 +28254,9 @@ impl Checker<'_, '_> {
         span: Span,
         expected: Option<Type>,
     ) -> Result<Expr> {
-        let base = self.place(value)?;
+        // The base is only a step towards the field: an owning record may be
+        // reached through a reference when the field read is copyable.
+        let base = self.place_at(value, true)?;
         if base.ty.is_ref() {
             let pointer = base.ty.ref_pointee().expect("reference pointee");
             let pointee = self.types.pointees[pointer];

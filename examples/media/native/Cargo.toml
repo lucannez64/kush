@@ -1,0 +1,16 @@
+[package]
+name = "kush-media-native"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The few SDL2 functions the media package needs, declared by hand; the
+# system libSDL2 is linked by the Kush project (`[native] libraries`).
+
+[lib]
+name = "kush_media_native"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+
+[workspace]

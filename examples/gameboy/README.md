@@ -3,12 +3,26 @@
 An emulator of the original Game Boy (DMG), written in Kush: the Sharp SM83
 CPU with every instruction, the memory map, the timer, interrupts, OAM DMA, the
 joypad, the serial port, the picture processor with background, window and
-sprites, and the MBC1, MBC3 and MBC5 cartridge controllers. It runs headless
-for testing and plays in a terminal.
+sprites, the four-channel sound chip, and the MBC1, MBC3 and MBC5 cartridge
+controllers. It plays in a window with sound and gamepad support (through the
+[media](../media/README.md) package, on SDL2), in a terminal, or headless for
+testing.
 
 ![Blargg's cpu_instrs, passed](images/cpu_instrs.png)
 
 ## Results
+
+- **Window, sound, gamepads**: tested on a virtual X display. The window's
+  contents, read back from the display server, show the game at 4× with sharp
+  pixels; key presses sent to the window drive the game; the sound, captured
+  from SDL's output, is the game's music and effects; with a realistic audio
+  device, 12 seconds of play produce exactly 12 seconds of sound at 60 fps.
+  Gamepads are tested with a virtual SDL controller (see `../media`).
+- **Blargg's `dmg_sound`**: 9 of 12 pass (registers, length counters, trigger,
+  sweep, sweep details, overflow on trigger, length/sweep period sync, length
+  counter during power, registers after power). The three failures read or
+  write wave RAM while the wave channel plays, which depends on the exact
+  cycle the channel reads it.
 
 - **A real game**: Sanqui's open-source [2048-gb](https://github.com/Sanqui/2048-gb)
   (zlib licence; the ROM is in the [Homebrew Hub database](https://github.com/gbdev/database/tree/master/entries/2048gb))
@@ -43,15 +57,23 @@ From this directory, with a current `kush`, Cargo and a C linker:
 
 ```sh
 kush build --release --backend llvm      # or plain `kush build` for a fast build
-./target/kush/gameboy game.gb             # play in the terminal
+./target/kush/gameboy game.gb             # play in a window, with sound
+./target/kush/gameboy game.gb --terminal  # play in the terminal
 ./target/kush/gameboy test.gb 3000        # run 3000 frames headless; print serial output
 ./target/kush/gameboy test.gb 600 shot.ppm  # ...and save the last frame
 kush test                                 # the emulator's own tests
 ```
 
 Controls: arrows or WASD, X or K for A, Z or J for B, Enter for Start, Space
-for Select, Q to quit. The screen needs a terminal at least 160 columns by 73
-rows with true colour. Where the terminal supports the kitty keyboard protocol
+or Backspace for Select; Escape closes the window (Q quits in the terminal).
+A gamepad is laid out like a Nintendo pad: the right face button is A, the
+bottom one B, plus Start, Back (Select), the d-pad and the left stick.
+Building needs SDL2 (`libsdl2-dev` or your distribution's package); without a
+display the window falls back to the terminal, and without an audio device the
+game runs silently, paced by the clock. With sound, the audio device's clock
+paces the frames, so picture and sound never drift apart.
+
+The terminal needs at least 160 columns by 73 rows with true colour. Where the terminal supports the kitty keyboard protocol
 (kitty, WezTerm, foot, Ghostty, recent iTerm2), key releases are exact;
 elsewhere a key counts as held for 180 ms after each press or autorepeat.
 
@@ -67,10 +89,12 @@ Test ROMs are not included. Blargg's are at
 | `src/machine.kush` | `Machine<M: Mapper>`: registers, memories, I/O registers; the bus, timer, DMA, joypad and serial port. |
 | `src/cpu.kush` | The instruction set, decoded into the `Reg8`, `Pair`, `Alu`, `Cond` and `Shift` enums. |
 | `src/ppu.kush` | Scanline timing, STAT interrupts and line rendering. |
+| `src/apu.kush` | The sound chip: two square channels (one with sweep), wave, noise, frame sequencer, stereo mixing. |
+| `src/desktop.kush` | The window front end: picture, sound, keyboard and gamepads. |
 | `src/emulator.kush` | The frame loop and screenshots. |
 | `src/terminal.kush` | The terminal renderer and frame pacing. |
 | `terminal/` | A Rust adapter with no dependencies: raw mode and key events. |
-| `tests/main.kush` | DAA, the stack, a timer interrupt waking HALT, MBC1 banking, frame length. |
+| `tests/main.kush` | DAA, the stack, a timer interrupt waking HALT, MBC1 banking, frame length, a square wave and its length counter. |
 
 Some choices that show the language:
 
@@ -88,16 +112,18 @@ Some choices that show the language:
 
 ## What it needed from the compiler
 
-Writing it this way needed six additions to Kush, made alongside it and
+Writing it this way needed additions to Kush, made alongside it and
 documented in [places](../../docs/places.md): module-level `const`, indexing
 and index assignment on `Vec` fields through references, field assignment on
 `let mut` records, method calls on fields and through references, two-phase
-exclusive borrows in calls, and records without size limits.
+exclusive borrows in calls, records without size limits, fields inside owning
+fields through references (`m.apu.powered`), and exclusive borrows of two
+different owning fields at once (`apu.sequence(&mut m.apu, &mut m.io)`).
 
 ## Not yet
 
-- No sound, no Game Boy Color, no serial link, no saved games (cartridge RAM
-  lives as long as the process), and the MBC3 clock reads as stopped.
+- No Game Boy Color, no serial link, no saved games (cartridge RAM lives as
+  long as the process), and the MBC3 clock reads as stopped.
 - The HALT bug and the exact timing of reads and writes inside an instruction
   are not modelled: an instruction's memory accesses happen at its start, and
   the picture processor draws each line whole when it finishes.

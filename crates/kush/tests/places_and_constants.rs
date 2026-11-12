@@ -370,3 +370,82 @@ fn a_field_write_is_seen_by_later_overflow_checks() {
         assert!(!status.success());
     }
 }
+
+#[test]
+fn fields_inside_owning_fields_are_reached_through_references() {
+    // `o.inner` owns a vector; its scalar fields are still plain places.
+    agrees(
+        r#"
+        struct Inner { on: Bool, n: i64, log: Vec<i64> }
+        struct Outer { a: i64, inner: Inner }
+        fn peek(o: &Outer) -> i64 ! {panic} { if o.inner.on { o.inner.n } else { 0 } }
+        fn poke(o: &mut Outer) -> Unit ! {alloc, panic} {
+            o.inner.n = o.inner.n + 1;
+            o.inner.log.push(o.inner.n);
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut o = Outer { a: 1, inner: Inner { on: true, n: 41, log: Vec.new() } };
+            poke(&mut o);
+            print_i64(o.inner.log.len());
+            peek(&o)
+        }
+        "#,
+        42,
+        "1\n",
+    );
+    rejects(
+        r#"
+        struct Inner { log: Vec<i64> }
+        struct Outer { inner: Inner }
+        fn steal(o: &Outer) -> Vec<i64> ! {} { o.inner.log }
+        fn main() -> i64 ! {} { 0 }
+        "#,
+        "cannot move owned field",
+    );
+}
+
+#[test]
+fn disjoint_owning_fields_are_borrowed_together() {
+    agrees(
+        r#"
+        struct Inner { n: i64, v: Vec<i64> }
+        struct O { x: Inner, y: Vec<i64> }
+        fn both(a: &mut Inner, b: &mut Vec<i64>) -> Unit ! {alloc, panic} {
+            a.n = a.n + 1;
+            b.push(a.n);
+            a.v.push(7);
+        }
+        fn via(o: &mut O) -> Unit ! {alloc, panic} {
+            both(&mut o.x, &mut o.y);
+            both(&mut o.x, &mut o.y);
+        }
+        fn main() -> i64 ! {io, alloc, panic} {
+            let mut o = O { x: Inner { n: 40, v: Vec.new() }, y: Vec.new() };
+            via(&mut o);
+            both(&mut o.x, &mut o.y);
+            print_i64(o.y.len() * 100 + o.x.v.len());
+            o.x.n
+        }
+        "#,
+        43,
+        "303\n",
+    );
+    // The same field twice still aliases, from a local or a reference.
+    rejects(
+        r#"
+        struct O { y: Vec<i64> }
+        fn same(a: &mut Vec<i64>, b: &mut Vec<i64>) -> Unit ! {} {}
+        fn main() -> i64 ! {alloc, panic} { let mut o = O { y: Vec.new() }; same(&mut o.y, &mut o.y); 0 }
+        "#,
+        "overlapping",
+    );
+    rejects(
+        r#"
+        struct O { y: Vec<i64>, z: Vec<i64> }
+        fn same(a: &mut Vec<i64>, b: &mut Vec<i64>) -> Unit ! {} {}
+        fn via(o: &mut O) -> Unit ! {} { same(&mut o.y, &mut o.y); }
+        fn main() -> i64 ! {} { 0 }
+        "#,
+        "overlapping",
+    );
+}

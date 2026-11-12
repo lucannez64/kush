@@ -113,7 +113,9 @@ cancellation](docs/async.md) for the task system.
 
 A [Game Boy emulator](examples/gameboy/README.md) written in Kush passes
 Blargg's CPU instruction and timing test ROMs, runs about 65 times faster than
-the real console in an LLVM build, and plays in a terminal. It is generic over
+the real console in an LLVM build, and plays in a window with sound and
+gamepads (through the reusable [media](examples/media/README.md) package on
+SDL2) or in a terminal. It is generic over
 the cartridge's memory bank controller, and leans on
 [constants, places and two-phase borrows](docs/places.md).
 

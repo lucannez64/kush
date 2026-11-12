@@ -1,0 +1,462 @@
+module gameboy.apu;
+
+// The audio processing unit: two square channels (the first with a
+// frequency sweep), a wave channel playing 32 programmable 4-bit samples, and
+// a noise channel, mixed to stereo. A frame sequencer clocks length counters
+// at 256 Hz, the sweep at 128 Hz and volume envelopes at 64 Hz; it advances on
+// falling edges of bit 12 of the divider, as on hardware.
+//
+// The register bytes themselves stay in the machine's I/O array (so reads
+// see them, through the masks below); this module keeps the running state.
+
+/// Output samples per second.
+pub const SAMPLE_RATE: i64 = 48000;
+/// The CPU clock, in cycles per second.
+const CLOCK: i64 = 4194304;
+
+pub struct Voice {
+    pub enabled: Bool,
+    pub dac: Bool,
+    /// Ticks left before the length counter silences the channel.
+    pub length: i64,
+    pub length_enabled: Bool,
+    pub volume: i64,
+    pub envelope_up: Bool,
+    pub envelope_period: i64,
+    pub envelope_timer: i64,
+    /// The 11-bit frequency value (square and wave channels).
+    pub frequency: i64,
+    /// Clock cycles until the waveform advances.
+    pub timer: i64,
+    /// Step within the waveform: 0-7 for squares, 0-31 for the wave.
+    pub position: i64,
+    pub duty: i64,
+}
+
+pub struct Apu {
+    pub powered: Bool,
+    pub square1: Voice,
+    pub square2: Voice,
+    pub wave: Voice,
+    pub noise: Voice,
+    /// The frame-sequencer step that runs next (0-7).
+    pub step: i64,
+    // Channel 1 sweep.
+    pub sweep_enabled: Bool,
+    pub sweep_shadow: i64,
+    pub sweep_timer: i64,
+    pub sweep_period: i64,
+    pub sweep_negate: Bool,
+    pub sweep_shift: i64,
+    pub sweep_negated: Bool,
+    // Wave channel.
+    pub wave_shift: i64,
+    pub wave_ram: Vec<u8>,
+    // Noise channel.
+    pub lfsr: i64,
+    pub noise_narrow: Bool,
+    pub noise_shift: i64,
+    pub noise_divisor: i64,
+    // Mixing.
+    pub left_enables: i64,
+    pub right_enables: i64,
+    pub left_volume: i64,
+    pub right_volume: i64,
+    /// Accumulates `cycles * SAMPLE_RATE` until a sample is due.
+    pub sample_clock: i64,
+    /// High-pass filter state, removing the DACs' DC offset.
+    pub left_charge: i64,
+    pub right_charge: i64,
+    /// Interleaved left/right samples produced since last taken.
+    pub samples: Vec<i64>,
+}
+
+fn voice() -> Voice ! {} {
+    Voice {
+        enabled: false, dac: false, length: 0, length_enabled: false,
+        volume: 0, envelope_up: false, envelope_period: 0, envelope_timer: 0,
+        frequency: 0, timer: 0, position: 0, duty: 0,
+    }
+}
+
+pub fn new() -> Apu ! {alloc, panic} {
+    let mut wave_ram: Vec<u8> = Vec.with_capacity(16);
+    let mut i = 0;
+    while i < 16 {
+        // The DMG powers up with this pattern in wave RAM.
+        wave_ram = wave_ram.push(if i % 2 == 0 { 0x00 } else { 0xFF });
+        i = i + 1;
+    }
+    Apu {
+        powered: true,
+        square1: voice(), square2: voice(), wave: voice(), noise: voice(),
+        step: 0,
+        sweep_enabled: false, sweep_shadow: 0, sweep_timer: 0, sweep_period: 0,
+        sweep_negate: false, sweep_shift: 0, sweep_negated: false,
+        wave_shift: 4, wave_ram: wave_ram,
+        lfsr: 0x7FFF, noise_narrow: false, noise_shift: 0, noise_divisor: 8,
+        left_enables: 0xF, right_enables: 0xF, left_volume: 8, right_volume: 8,
+        sample_clock: 0, left_charge: 0, right_charge: 0,
+        samples: Vec.with_capacity(2048),
+    }
+}
+
+/// Bits that read as 1 whatever was written, for 0xFF10-0xFF2F.
+pub fn read_mask(register: i64) -> u8 ! {} {
+    match register {
+        0x10 => 0x80, 0x11 => 0x3F, 0x12 => 0x00, 0x13 => 0xFF, 0x14 => 0xBF,
+        0x15 => 0xFF, 0x16 => 0x3F, 0x17 => 0x00, 0x18 => 0xFF, 0x19 => 0xBF,
+        0x1A => 0x7F, 0x1B => 0xFF, 0x1C => 0x9F, 0x1D => 0xFF, 0x1E => 0xBF,
+        0x1F => 0xFF, 0x20 => 0xFF, 0x21 => 0x00, 0x22 => 0x00, 0x23 => 0xBF,
+        0x24 => 0x00, 0x25 => 0x00,
+        _ => 0xFF,
+    }
+}
+
+/// NR52 as read: power, and which channels are on.
+pub fn status(a: &Apu) -> u8 ! {} {
+    let mut bits: u8 = 0x70;
+    if a.powered { bits = bits | 0x80; }
+    if a.square1.enabled { bits = bits | 0x01; }
+    if a.square2.enabled { bits = bits | 0x02; }
+    if a.wave.enabled { bits = bits | 0x04; }
+    if a.noise.enabled { bits = bits | 0x08; }
+    bits
+}
+
+fn wide(value: u8) -> i64 ! {} { Int.convert(value) }
+
+// --- Frame sequencer -----------------------------------------------------------
+
+fn clock_length(v: &mut Voice) -> Unit ! {panic} {
+    if v.length_enabled && v.length > 0 {
+        v.length = v.length - 1;
+        if v.length == 0 { v.enabled = false; }
+    }
+}
+
+fn clock_envelope(v: &mut Voice) -> Unit ! {panic} {
+    if v.envelope_period == 0 { return; }
+    v.envelope_timer = v.envelope_timer - 1;
+    if v.envelope_timer <= 0 {
+        v.envelope_timer = v.envelope_period;
+        if v.envelope_up && v.volume < 15 { v.volume = v.volume + 1; }
+        if !v.envelope_up && v.volume > 0 { v.volume = v.volume - 1; }
+    }
+}
+
+/// The frequency the sweep would set next; past 2047 it silences channel 1.
+fn sweep_target(a: &mut Apu) -> i64 ! {panic} {
+    let delta = a.sweep_shadow >> a.sweep_shift;
+    let target = if a.sweep_negate {
+        a.sweep_negated = true;
+        a.sweep_shadow - delta
+    } else {
+        a.sweep_shadow + delta
+    };
+    if target > 2047 { a.square1.enabled = false; }
+    target
+}
+
+fn clock_sweep(a: &mut Apu, io: &mut Vec<u8>) -> Unit ! {panic} {
+    a.sweep_timer = a.sweep_timer - 1;
+    if a.sweep_timer > 0 { return; }
+    a.sweep_timer = if a.sweep_period == 0 { 8 } else { a.sweep_period };
+    if !a.sweep_enabled || a.sweep_period == 0 { return; }
+    let target = sweep_target(a);
+    if target <= 2047 && a.sweep_shift != 0 {
+        a.sweep_shadow = target;
+        a.square1.frequency = target;
+        io[0x13] = Int.truncate(target & 0xFF);
+        io[0x14] = (io[0x14] & 0xF8) | Int.truncate(target >> 8);
+        sweep_target(a);
+    }
+}
+
+/// One frame-sequencer step, on a falling edge of divider bit 12.
+pub fn sequence(a: &mut Apu, io: &mut Vec<u8>) -> Unit ! {panic} {
+    if !a.powered { return; }
+    let step = a.step;
+    if step % 2 == 0 {
+        clock_length(&mut a.square1);
+        clock_length(&mut a.square2);
+        clock_length(&mut a.wave);
+        clock_length(&mut a.noise);
+    }
+    if step == 2 || step == 6 { clock_sweep(a, io); }
+    if step == 7 {
+        clock_envelope(&mut a.square1);
+        clock_envelope(&mut a.square2);
+        clock_envelope(&mut a.noise);
+    }
+    a.step = (step + 1) % 8;
+}
+
+// --- Register writes ----------------------------------------------------------
+
+fn write_envelope(v: &mut Voice, value: i64) -> Unit ! {panic} {
+    v.envelope_up = (value & 0x08) != 0;
+    v.envelope_period = value & 0x07;
+    v.dac = (value & 0xF8) != 0;
+    if !v.dac { v.enabled = false; }
+}
+
+/// NRx4's length-enable bit. Enabling it in the first half of a length
+/// period (when the next sequencer step does not clock lengths) clocks the
+/// counter once at once.
+fn write_length_enable(v: &mut Voice, value: i64, step: i64) -> Unit ! {panic} {
+    let was = v.length_enabled;
+    v.length_enabled = (value & 0x40) != 0;
+    if !was && v.length_enabled && step % 2 == 1 && v.length > 0 {
+        v.length = v.length - 1;
+        if v.length == 0 && (value & 0x80) == 0 { v.enabled = false; }
+    }
+}
+
+/// A trigger: restart the channel, reloading an expired length counter.
+fn trigger(v: &mut Voice, full_length: i64, step: i64, initial_volume: i64) -> Unit ! {panic} {
+    v.enabled = v.dac;
+    if v.length == 0 {
+        v.length = full_length;
+        if v.length_enabled && step % 2 == 1 { v.length = v.length - 1; }
+    }
+    v.volume = initial_volume;
+    v.envelope_timer = v.envelope_period;
+}
+
+fn square_period(v: &Voice) -> i64 ! {panic} { (2048 - v.frequency) * 4 }
+
+/// A write to 0xFF10-0xFF3F (`register` is the offset from 0xFF00). The
+/// register byte itself is stored by the caller.
+pub fn write(a: &mut Apu, io: &mut Vec<u8>, register: i64, value: u8) -> Unit ! {alloc, panic} {
+    let v = wide(value);
+    if register >= 0x30 {
+        a.wave_ram[register - 0x30] = value;
+        return;
+    }
+    if register == 0x26 {
+        let on = (v & 0x80) != 0;
+        if a.powered && !on {
+            // Power off clears every register and stops every channel;
+            // the DMG keeps the length counters.
+            let mut r = 0x10;
+            while r < 0x26 { io[r] = 0; r = r + 1; }
+            let lengths = (a.square1.length, a.square2.length, a.wave.length, a.noise.length);
+            let (l1, l2, l3, l4) = lengths;
+            a.square1 = voice();
+            a.square2 = voice();
+            a.wave = voice();
+            a.noise = voice();
+            a.square1.length = l1;
+            a.square2.length = l2;
+            a.wave.length = l3;
+            a.noise.length = l4;
+            a.sweep_enabled = false;
+            a.sweep_shadow = 0;
+            a.sweep_period = 0;
+            a.sweep_negate = false;
+            a.sweep_shift = 0;
+            a.sweep_negated = false;
+            a.wave_shift = 4;
+            a.noise_narrow = false;
+            a.noise_shift = 0;
+            a.noise_divisor = 8;
+            a.left_enables = 0;
+            a.right_enables = 0;
+            a.left_volume = 1;
+            a.right_volume = 1;
+            a.powered = false;
+        }
+        if !a.powered && on {
+            a.powered = true;
+            a.step = 0;
+        }
+        return;
+    }
+    if !a.powered {
+        // Only the length counters can be written while powered off.
+        match register {
+            0x11 => { a.square1.length = 64 - (v & 0x3F); },
+            0x16 => { a.square2.length = 64 - (v & 0x3F); },
+            0x1B => { a.wave.length = 256 - v; },
+            0x20 => { a.noise.length = 64 - (v & 0x3F); },
+            _ => {},
+        }
+        return;
+    }
+    let step = a.step;
+    match register {
+        0x10 => {
+            a.sweep_period = (v >> 4) & 0x07;
+            let negate = (v & 0x08) != 0;
+            if a.sweep_negated && !negate { a.square1.enabled = false; }
+            a.sweep_negate = negate;
+            a.sweep_shift = v & 0x07;
+        },
+        0x11 => { a.square1.duty = v >> 6; a.square1.length = 64 - (v & 0x3F); },
+        0x12 => write_envelope(&mut a.square1, v),
+        0x13 => { a.square1.frequency = (a.square1.frequency & 0x700) | v; },
+        0x14 => {
+            a.square1.frequency = (a.square1.frequency & 0xFF) | ((v & 0x07) << 8);
+            write_length_enable(&mut a.square1, v, step);
+            if (v & 0x80) != 0 {
+                let initial = wide(io[0x12]) >> 4;
+                trigger(&mut a.square1, 64, step, initial);
+                a.square1.timer = square_period(&a.square1);
+                a.sweep_shadow = a.square1.frequency;
+                a.sweep_timer = if a.sweep_period == 0 { 8 } else { a.sweep_period };
+                a.sweep_enabled = a.sweep_period != 0 || a.sweep_shift != 0;
+                a.sweep_negated = false;
+                if a.sweep_shift != 0 { sweep_target(a); }
+            }
+        },
+        0x16 => { a.square2.duty = v >> 6; a.square2.length = 64 - (v & 0x3F); },
+        0x17 => write_envelope(&mut a.square2, v),
+        0x18 => { a.square2.frequency = (a.square2.frequency & 0x700) | v; },
+        0x19 => {
+            a.square2.frequency = (a.square2.frequency & 0xFF) | ((v & 0x07) << 8);
+            write_length_enable(&mut a.square2, v, step);
+            if (v & 0x80) != 0 {
+                let initial = wide(io[0x17]) >> 4;
+                trigger(&mut a.square2, 64, step, initial);
+                a.square2.timer = square_period(&a.square2);
+            }
+        },
+        0x1A => {
+            a.wave.dac = (v & 0x80) != 0;
+            if !a.wave.dac { a.wave.enabled = false; }
+        },
+        0x1B => { a.wave.length = 256 - v; },
+        0x1C => {
+            a.wave_shift = match (v >> 5) & 0x03 { 0 => 4, 1 => 0, 2 => 1, _ => 2 };
+        },
+        0x1D => { a.wave.frequency = (a.wave.frequency & 0x700) | v; },
+        0x1E => {
+            a.wave.frequency = (a.wave.frequency & 0xFF) | ((v & 0x07) << 8);
+            write_length_enable(&mut a.wave, v, step);
+            if (v & 0x80) != 0 {
+                trigger(&mut a.wave, 256, step, 0);
+                a.wave.position = 0;
+                a.wave.timer = (2048 - a.wave.frequency) * 2 + 6;
+            }
+        },
+        0x20 => { a.noise.length = 64 - (v & 0x3F); },
+        0x21 => write_envelope(&mut a.noise, v),
+        0x22 => {
+            a.noise_shift = v >> 4;
+            a.noise_narrow = (v & 0x08) != 0;
+            let code = v & 0x07;
+            a.noise_divisor = if code == 0 { 8 } else { code * 16 };
+        },
+        0x23 => {
+            write_length_enable(&mut a.noise, v, step);
+            if (v & 0x80) != 0 {
+                let initial = wide(io[0x21]) >> 4;
+                trigger(&mut a.noise, 64, step, initial);
+                a.lfsr = 0x7FFF;
+                a.noise.timer = a.noise_divisor << a.noise_shift;
+            }
+        },
+        0x24 => {
+            a.left_volume = ((v >> 4) & 0x07) + 1;
+            a.right_volume = (v & 0x07) + 1;
+        },
+        0x25 => {
+            a.right_enables = v & 0x0F;
+            a.left_enables = v >> 4;
+        },
+        _ => {},
+    }
+}
+
+// --- Running ------------------------------------------------------------------
+
+/// The digital output (0-15) of a channel, or -1 when its DAC is off.
+fn square_level(v: &Voice) -> i64 ! {panic} {
+    if !v.dac { return -1; }
+    if !v.enabled { return 0; }
+    let pattern = match v.duty { 0 => 0x01, 1 => 0x81, 2 => 0x87, _ => 0x7E };
+    if ((pattern >> (7 - v.position)) & 1) == 1 { v.volume } else { 0 }
+}
+
+fn wave_level(a: &Apu) -> i64 ! {panic} {
+    if !a.wave.dac { return -1; }
+    if !a.wave.enabled { return 0; }
+    let byte = wide(a.wave_ram[a.wave.position / 2]);
+    let sample = if a.wave.position % 2 == 0 { byte >> 4 } else { byte & 0x0F };
+    sample >> a.wave_shift
+}
+
+fn noise_level(a: &Apu) -> i64 ! {panic} {
+    if !a.noise.dac { return -1; }
+    if !a.noise.enabled { return 0; }
+    if (a.lfsr & 1) == 0 { a.noise.volume } else { 0 }
+}
+
+/// A DAC turns 0-15 into -15..15; a disabled DAC outputs nothing.
+fn analog(level: i64) -> i64 ! {panic} {
+    if level < 0 { 0 } else { level * 2 - 15 }
+}
+
+fn advance_square(v: &mut Voice, cycles: i64) -> Unit ! {panic} {
+    v.timer = v.timer - cycles;
+    while v.timer <= 0 {
+        v.timer = v.timer + (2048 - v.frequency) * 4;
+        v.position = (v.position + 1) % 8;
+    }
+}
+
+/// Advance the channels by `cycles` clock cycles and produce the samples
+/// that fall in that time.
+pub fn tick(a: &mut Apu, cycles: i64) -> Unit ! {alloc, panic} {
+    if a.powered {
+        advance_square(&mut a.square1, cycles);
+        advance_square(&mut a.square2, cycles);
+        a.wave.timer = a.wave.timer - cycles;
+        while a.wave.timer <= 0 {
+            a.wave.timer = a.wave.timer + (2048 - a.wave.frequency) * 2;
+            a.wave.position = (a.wave.position + 1) % 32;
+        }
+        a.noise.timer = a.noise.timer - cycles;
+        while a.noise.timer <= 0 {
+            a.noise.timer = a.noise.timer + (a.noise_divisor << a.noise_shift);
+            let bit = (a.lfsr ^ (a.lfsr >> 1)) & 1;
+            a.lfsr = (a.lfsr >> 1) | (bit << 14);
+            if a.noise_narrow { a.lfsr = (a.lfsr & 0x7FBF) | (bit << 6); }
+        }
+    }
+    a.sample_clock = a.sample_clock + cycles * SAMPLE_RATE;
+    while a.sample_clock >= CLOCK {
+        a.sample_clock = a.sample_clock - CLOCK;
+        mix(a);
+    }
+}
+
+fn mix(a: &mut Apu) -> Unit ! {alloc, panic} {
+    let levels = (
+        analog(square_level(&a.square1)),
+        analog(square_level(&a.square2)),
+        analog(wave_level(a)),
+        analog(noise_level(a)),
+    );
+    let (one, two, three, four) = levels;
+    let mut left = 0;
+    let mut right = 0;
+    if (a.left_enables & 1) != 0 { left = left + one; }
+    if (a.left_enables & 2) != 0 { left = left + two; }
+    if (a.left_enables & 4) != 0 { left = left + three; }
+    if (a.left_enables & 8) != 0 { left = left + four; }
+    if (a.right_enables & 1) != 0 { right = right + one; }
+    if (a.right_enables & 2) != 0 { right = right + two; }
+    if (a.right_enables & 4) != 0 { right = right + three; }
+    if (a.right_enables & 8) != 0 { right = right + four; }
+    // At most 4 channels x 15 x volume 8 x 32 = 15360: room to spare.
+    let left_in = left * a.left_volume * 32;
+    let right_in = right * a.right_volume * 32;
+    let left_out = left_in - a.left_charge;
+    let right_out = right_in - a.right_charge;
+    a.left_charge = a.left_charge + (left_out >> 8);
+    a.right_charge = a.right_charge + (right_out >> 8);
+    a.samples.push(left_out);
+    a.samples.push(right_out);
+}

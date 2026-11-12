@@ -7,10 +7,12 @@ use gameboy.cartridge.Kind;
 use gameboy.cartridge.Mapper;
 use gameboy.emulator;
 use gameboy.machine;
+use gameboy.desktop;
 use gameboy.machine.Machine;
 use gameboy.terminal;
 
-// gameboy ROM                         play in the terminal
+// gameboy ROM                         play in a window, with sound
+// gameboy ROM --terminal              play in the terminal
 // gameboy ROM FRAMES [SCREENSHOT.ppm]  run headless
 //
 // Headless, the ROM runs for FRAMES frames (about 60 per second of game
@@ -42,10 +44,18 @@ fn load(path: &Bytes) -> Result<Vec<u8>, i64> ! {io, alloc, panic} {
     Ok(rom)
 }
 
-/// Play in the terminal when `frames` is 0; otherwise run headless.
+/// Frames: 0 plays in a window (falling back to the terminal), -1 plays in
+/// the terminal, more runs headless.
 fn play<M: Mapper>(board: M, frames: i64, screenshot: &Bytes, title: &Bytes) -> i64 ! {io, alloc, panic} {
     let mut m = machine.new(board);
     if frames == 0 {
+        match desktop.play(&mut m, title, 4) {
+            Ok(_) => { return 0; },
+            Err(19) => {},
+            Err(code) => { return code; },
+        }
+    }
+    if frames <= 0 {
         return match terminal.play(&mut m, title) {
             Ok(_) => 0,
             Err(code) => {
@@ -68,11 +78,30 @@ fn headless<M: Mapper>(m: &mut Machine<M>, frames: i64, screenshot: &Bytes) -> i
             if text.contains(&output, &Bytes.from("Passed")) || text.contains(&output, &Bytes.from("Failed")) {
                 frame = frames;
             }
+            // A cartridge-RAM report is final once its status leaves 0x80.
+            if machine.read(m, 0xA001) == 0xDE && machine.read(m, 0xA002) == 0xB0
+                && machine.read(m, 0xA003) == 0x61 && machine.read(m, 0xA000) != 0x80 {
+                frame = frames;
+            }
         }
     }
     let output = emulator.serial_text(m);
     say(&output);
     if output.len() > 0 { line(Bytes.from("")); }
+    // Newer Blargg tests also report in cartridge RAM: the signature
+    // DE B0 61 at 0xA001, a status at 0xA000 (0 = passed), text at 0xA004.
+    if machine.read(m, 0xA001) == 0xDE && machine.read(m, 0xA002) == 0xB0 && machine.read(m, 0xA003) == 0x61 {
+        let mut report = Bytes.from("cartridge RAM report, status ");
+        report = text.format_i64_into(report, Int.convert(machine.read(m, 0xA000)));
+        line(report);
+        let mut message = Bytes.with_capacity(256);
+        let mut address: u16 = 0xA004;
+        while machine.read(m, address) != 0 && address < 0xBFFF {
+            message = message.push(Int.convert(machine.read(m, address)));
+            address = address + 1;
+        }
+        line(message);
+    }
     if screenshot.len() > 0 {
         let image = emulator.screenshot(m, 1);
         match FS.write(screenshot, &image) {
@@ -91,14 +120,19 @@ fn headless<M: Mapper>(m: &mut Machine<M>, frames: i64, screenshot: &Bytes) -> i
 fn main() -> i64 ! {io, alloc, panic} {
     let count = match ENV.arg_count() { Ok(n) => n, Err(_) => 0 };
     if count < 2 {
-        line(Bytes.from("usage: gameboy ROM                        (play in the terminal)"));
+        line(Bytes.from("usage: gameboy ROM                        (play in a window, with sound)"));
+        line(Bytes.from("       gameboy ROM --terminal             (play in the terminal)"));
         line(Bytes.from("       gameboy ROM FRAMES [SCREENSHOT.ppm] (run headless)"));
         return 2;
     }
     let path = match argument(1) { Ok(p) => p, Err(_) => { return 2; } };
     let frames = if count > 2 {
         match argument(2) {
-            Ok(text_value) => match text.parse_i64(&text_value) { Ok(n) => n, Err(_) => 600 },
+            Ok(text_value) => {
+                if text.contains(&text_value, &Bytes.from("--terminal")) { -1 } else {
+                    match text.parse_i64(&text_value) { Ok(n) => n, Err(_) => 600 }
+                }
+            },
             Err(_) => 600,
         }
     } else { 0 };
