@@ -161,10 +161,21 @@ values are handled by [deferred overflow](deferred-overflow.md).
 ### Differences from Cranelift
 
 Running out of stack is a panic (`panic: stack exhausted`, then abort) on
-both backends and on every stack, the process's and each task's. Every stack
-ends in an unmapped guard, both backends probe each page of a frame larger
-than a page so no frame can step over it, and the runtime handles the fault
-on a separate signal stack. A fault anywhere else keeps its default action.
+both backends, on the process stack and on each task stack. Every stack ends
+in an unmapped guard, generated code probes each page of a frame larger than
+a page so that it cannot step over the guard, and the runtime handles the
+fault on a separate signal stack. It reports a fault as exhaustion only when
+the address lies in the frame being set up (from 64 KiB below the
+interrupted stack pointer to two pages above it) and below the frame the
+process started in. Every other fault, and any SIGSEGV or SIGBUS sent by
+another process, gets its default action.
+
+Limits: the handler exists on Linux x86-64 and AArch64, which is also where
+the native backends run. Only generated code is probed. The C runtime's own
+frames are about 1 KiB at most, but a libc built without stack-clash
+protection could, in principle, enter a frame larger than a page at the very
+end of a task stack and step over its single guard page. With an unlimited
+stack (`ulimit -s unlimited`) a runaway recursion ends when memory does.
 
 A recursion stays a recursion on both backends. LLVM functions carry
 `"disable-tail-calls"="true"`, which stops it from running a tail call, or a

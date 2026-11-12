@@ -99,6 +99,7 @@ _Noreturn void kush_panic(void) {
 #include <ucontext.h>
 #define KUSH_STACK_GUARD 1
 static char kush_signal_stack[1 << 16];
+static uintptr_t kush_stack_ceiling = UINTPTR_MAX;
 static void kush_fault(int number, siginfo_t *info, void *raw) {
     ucontext_t *context = (ucontext_t *)raw;
 #if defined(__x86_64__)
@@ -107,18 +108,28 @@ static void kush_fault(int number, siginfo_t *info, void *raw) {
     uintptr_t sp = (uintptr_t)context->uc_mcontext.sp;
 #endif
     uintptr_t address = (uintptr_t)info->si_addr;
-    /* A probe touches at most one page below the stack pointer; a red zone
-       or a call's return address lies just above or at it. */
-    uintptr_t slack = UINT64_C(1) << 16;
-    if (address + slack >= sp && address <= sp + slack) {
+    /* Exhaustion faults in the frame being set up: a probe or a push just
+       below the stack pointer, or a store into a frame smaller than the
+       probe interval just above it. Anything further up is some other
+       access, and so is anything above the frame the process started in
+       (a write running off the top of the stack). A signal sent by another
+       process (si_code <= 0) is never a fault of ours. */
+    uintptr_t below = UINT64_C(1) << 16, above = UINT64_C(2) << 12;
+    if (info->si_code > 0 && address + below >= sp && address < sp + above
+        && address < kush_stack_ceiling) {
         static const char message[] = "panic: stack exhausted\n";
         kush_best_effort_write(2, message, sizeof(message) - 1);
         abort();
     }
+    /* Not ours: give the signal its default action. A fault repeats when
+       the instruction is retried; a sent signal has to be raised again, and
+       is delivered once this handler returns. */
     signal(number, SIG_DFL);
+    if (info->si_code <= 0) raise(number);
 }
 static void kush_stack_guard_init(void) {
     stack_t stack;
+    kush_stack_ceiling = (uintptr_t)__builtin_frame_address(0);
     struct sigaction action;
     memset(&stack, 0, sizeof(stack));
     stack.ss_sp = kush_signal_stack;

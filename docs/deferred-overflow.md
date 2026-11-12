@@ -24,9 +24,11 @@ the end of a bounded chunk of iterations. A panic aborts the process, so
 nothing observable happens in between. Two things this rests on, stated
 plainly: the memory a deferred loop writes (`Slice.set`) is private to the
 process until the loop is done, so a few thousand extra element writes
-before the abort are not observable; and every panic prints the same
-message, so an overflow reported in place of a later bounds or division
-panic of the same chunk looks the same. Per-cause panic messages, or a loop
+before the abort are not observable; and overflow, bounds and division
+panics all print the same message, so an overflow reported in place of a
+later bounds or division panic of the same chunk looks the same (the one
+other message, for stack exhaustion, cannot arise in a deferred loop, which
+contains no calls). Per-cause panic messages, or a loop
 writing memory another process maps, would need this revisited.
 
 There are two modes, chosen per operation (`native/deferred.rs`).
@@ -177,7 +179,10 @@ through a proved index whose proof depended on a deferred operation, an
 arithmetic trap from a non-canonical narrow value reaching a division, and
 loops that ran for 2^62 iterations or forever where the checked build panics
 at once. Properties 1 to 3 above are the fixes; the seven reproducers are
-tests (`review_*`). The certificate arithmetic itself held up.
+tests (`review_*`). Later qualification rules stopped deferring five of
+those seven programs altogether, so the bounded-delay property has its own
+test on a loop that still qualifies
+(`a_long_loop_reports_its_overflow_at_once`). The certificate arithmetic itself held up.
 
 That review did not audit the borrow checker, and deferral no longer needs
 it to: the replay checks disjointness itself (above). The `noalias` facts of

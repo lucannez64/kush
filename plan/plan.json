@@ -4729,6 +4729,25 @@
           "text": "Second independent review of the chunked lowering: no defect in differential tests (chunk boundaries, certificate thresholds, replay with stores, counters, narrow kinds, 630 fuzzed loops x ~15,000 inputs x 6 builds) or by reading. Follow-ups done: a proved (unchecked) counter step now counts as a step, so plain while-i-less-than-n loops are deferred; loops whose indices do not follow the counter are not deferred (they stay scalar and were up to 48% slower); doc overclaims corrected. The reviewer's fuzzer was re-run on the step change with no difference."
         }
       ]
+    },
+    {
+      "id": "LLVM-DEFER-REVIEW-3",
+      "title": "Third independent review: changes made after the second",
+      "size": "S",
+      "hard": true,
+      "deps": [
+        "LLVM-DEFER-REVIEW-2"
+      ],
+      "status": "done",
+      "desc": "Planner step and index rules, chunk hand-back, run-time overlap check, stack fault handler, disable-tail-calls.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 00:59:41",
+          "who": "claude",
+          "text": "No defect in the deferral changes (about 3,200 generated deferred loops plus edge cases, up to 8 builds each). Two low-severity defects in the new fault handler, both fixed with tests: a write running off the top of the stack was reported as stack exhaustion, and the first SIGSEGV/SIGBUS sent from outside was swallowed. Doc overclaims corrected; bounded delay has a test on a loop that still qualifies. The handler fixes themselves were made after this review. 1,719 tests pass on Cranelift, llvm and llvm-release."
+        }
+      ]
     }
   ]
 }

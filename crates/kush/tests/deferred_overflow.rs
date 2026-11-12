@@ -872,3 +872,38 @@ fn checked_chunks_hand_back_to_deferred_ones() {
     // The same with an overflow that only the later, deferred chunks reach.
     native_modes_agree(&program("3", "5", "0 - 70000", "922337203685477"));
 }
+
+/// Bounded delay, on loops that do qualify: an overflow in the first
+/// iterations of a loop with 9e18 to go is reported at once (the harness
+/// kills a build that takes longer than thirty seconds).
+#[test]
+fn a_long_loop_reports_its_overflow_at_once() {
+    let program = |body: &str, start: &str| {
+        format!(
+            "fn spin(n: i64, start: i64, k: i64) -> i64 ! {{panic}} {{
+                let mut acc = start;
+                let mut i = 0;
+                while i < n {{
+                    {body}
+                    i = i + 1;
+                }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, alloc, panic}} {{
+                let n = match ENV.arg(1, Bytes.with_capacity(8)) {{ Ok(_) => 7, Err(_) => 9000000000000000000 }};
+                print_i64(1);
+                print_i64(spin(n, {start}, 3));
+            }}"
+        )
+    };
+    let preamble = "enum Result<T, E> { Ok(T), Err(E) }\n";
+    // A reduction (certified) and a product chain (exact).
+    native_modes_agree(&format!(
+        "{preamble}{}",
+        program("acc = acc + i * k;", "9223372036854775000")
+    ));
+    native_modes_agree(&format!(
+        "{preamble}{}",
+        program("acc = acc * k + i;", "4611686018427387904")
+    ));
+}

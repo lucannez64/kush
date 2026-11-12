@@ -147,3 +147,144 @@ fn tail_recursion_is_not_turned_into_a_loop() {
         "2000\n",
     );
 }
+
+/// A write that runs off the top of the stack is not stack exhaustion, and
+/// keeps the default action.
+#[test]
+fn an_overrun_past_the_top_of_the_stack_is_not_reported_as_exhaustion() {
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let root = scratch.path();
+    fs::write(
+        root.join("lib.c"),
+        "#include <stdint.h>\n\
+         int64_t ext_overrun(int64_t n) {\n\
+             volatile char buffer[16];\n\
+             volatile char *p = (volatile char *)buffer;\n\
+             for (int64_t i = 0; i < n; i++) p[i] = 1;\n\
+             return buffer[0];\n\
+         }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .current_dir(root)
+            .args([
+                "-O1",
+                "-fPIC",
+                "-fno-stack-protector",
+                "-c",
+                "lib.c",
+                "-o",
+                "lib.o"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("ar")
+            .current_dir(root)
+            .args(["crs", "liboverrun.a", "lib.o"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(
+        root.join("main.kush"),
+        "foreign \"ext_overrun\" fn overrun(n: i64) -> i64 ! {io};
+        fn main() -> Unit ! {io, panic} { print_i64(overrun(100000000)); }",
+    )
+    .unwrap();
+    let mut configurations = vec![vec![]];
+    if clang_available() {
+        configurations.push(vec!["--release", "--backend", "llvm"]);
+    }
+    for flags in configurations {
+        let built = Command::new(env!("CARGO_BIN_EXE_kush"))
+            .current_dir(root)
+            .args([
+                "build",
+                "main.kush",
+                "-o",
+                "program",
+                "--link",
+                "liboverrun.a",
+            ])
+            .args(&flags)
+            .env_remove("KUSH_BACKEND")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let output = Command::new(root.join("program")).output().unwrap();
+        assert_eq!(
+            output.status.signal(),
+            Some(11),
+            "{flags:?}: {:?}",
+            output.status
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("stack exhausted"),
+            "{flags:?}"
+        );
+    }
+}
+
+/// A SIGSEGV or SIGBUS sent from outside kills the process the first time.
+#[test]
+fn a_sent_fault_signal_keeps_its_default_action() {
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let root = scratch.path();
+    fs::write(
+        root.join("main.kush"),
+        "enum Result<T, E> { Ok(T), Err(E) }
+        fn main() -> Unit ! {io, alloc, panic} {
+            print_i64(1);
+            let line = match IO.read_line(IO.stdin(), Bytes.with_capacity(8)) {
+                Ok(bytes) => bytes,
+                Err(_) => Bytes.with_capacity(1),
+            };
+            print_i64(Bytes.len(&line));
+        }",
+    )
+    .unwrap();
+    let built = Command::new(env!("CARGO_BIN_EXE_kush"))
+        .current_dir(root)
+        .args(["build", "main.kush", "-o", "program"])
+        .env_remove("KUSH_BACKEND")
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    for (name, number) in [("SEGV", 11), ("BUS", 7)] {
+        use std::io::Read;
+        let mut child = Command::new(root.join("program"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Wait until it is past start-up and blocked on its input.
+        let mut first = [0u8; 2];
+        child
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut first)
+            .unwrap();
+        assert!(
+            Command::new("kill")
+                .args([&format!("-{name}"), &child.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(number), "{name}: {status:?}");
+    }
+}
