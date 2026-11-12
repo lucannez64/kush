@@ -280,6 +280,10 @@ pub struct Field {
     /// `pub` on a struct field: visible outside the struct's module
     /// (FIELD-PRIVACY). Ignored for enum payloads and structural rows.
     pub public: bool,
+    /// `name: Vec<T> where len >= N` on a struct field: the vector always
+    /// holds at least `N` elements (a compile-time integer), so indexes
+    /// proved below `N` need no runtime check. See docs/places.md.
+    pub min_length: Option<Box<Expr>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Variant {

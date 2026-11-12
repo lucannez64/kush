@@ -10606,6 +10606,19 @@ impl Generator<'_, '_> {
                 self.drop_value(element, &previous);
                 vec![self.constant(0)]
             }
+            VecOp::SetProved => {
+                // Proved in bounds, copyable element: a direct store after the
+                // 16-byte header, nothing to drop.
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                let stride = self.builder.ins().imul_imm_s(values[1], (width * 8) as i64);
+                let base = self.builder.ins().iadd(handle, stride);
+                let slot = self.builder.ins().iadd_imm_s(base, 16);
+                self.store_words(slot, &values[2..2 + width]);
+                vec![self.constant(0)]
+            }
             VecOp::Clear => {
                 let handle = values[0];
                 if self.program.owns(element) {

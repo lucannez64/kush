@@ -949,7 +949,14 @@ impl Resolver {
                             generics,
                             GenericContext::Unsupported("a record declaration"),
                         )?;
-                        r.fields(fields)
+                        r.fields(fields)?;
+                        // `where len >= N`: N names constants in scope.
+                        for field in fields {
+                            if let Some(length) = &field.min_length {
+                                r.expr(length)?;
+                            }
+                        }
+                        Ok(())
                     }
                     ItemKind::Enum {
                         generics, variants, ..

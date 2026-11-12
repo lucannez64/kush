@@ -51,7 +51,7 @@ pub struct Apu {
     pub sweep_negated: Bool,
     // Wave channel.
     pub wave_shift: i64,
-    pub wave_ram: Vec<u8>,
+    pub wave_ram: Vec<u8> where len >= 16,
     // Noise channel.
     pub lfsr: i64,
     pub noise_narrow: Bool,
@@ -124,7 +124,7 @@ pub fn status(a: &Apu) -> u8 ! {} {
     bits
 }
 
-fn wide(value: u8) -> i64 ! {} { Int.convert(value) }
+fn wide(value: u8) -> i64 ! {} ensures { result == value } { Int.convert(value) }
 
 // --- Frame sequencer -----------------------------------------------------------
 
@@ -230,7 +230,7 @@ fn square_period(v: &Voice) -> i64 ! {panic} { (2048 - v.frequency) * 4 }
 /// register byte itself is stored by the caller.
 pub fn write(a: &mut Apu, io: &mut Vec<u8>, register: i64, value: u8) -> Unit ! {alloc, panic} {
     let v = wide(value);
-    if register >= 0x30 {
+    if register >= 0x30 && register < 0x40 {
         a.wave_ram[register - 0x30] = value;
         return;
     }
@@ -382,7 +382,7 @@ fn square_level(v: &Voice) -> i64 ! {panic} {
 fn wave_level(a: &Apu) -> i64 ! {panic} {
     if !a.wave.dac { return -1; }
     if !a.wave.enabled { return 0; }
-    let byte = wide(a.wave_ram[a.wave.position / 2]);
+    let byte = wide(a.wave_ram[(a.wave.position >> 1) & 15]);
     let sample = if a.wave.position % 2 == 0 { byte >> 4 } else { byte & 0x0F };
     sample >> a.wave_shift
 }

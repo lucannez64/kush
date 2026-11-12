@@ -109,3 +109,64 @@ or the words it takes as a by-value argument. Its cost is in by-value copies,
 which the program chooses: pass a large state by reference. Other inline
 layouts (arrays, tuples, enums, unions, structural records) keep their 32-word
 limit.
+
+## Length-refined fields
+
+Tests: `crates/kush/tests/length_refined_fields.rs`.
+
+A `Vec` field may promise a minimum length:
+
+```kush
+const SIZE: i64 = 0x2000;
+struct Machine { vram: Vec<u8> where len >= SIZE, log: Vec<u8> }
+
+fn read(m: &Machine, address: u16) -> u8 ! {panic} {
+    let at: i64 = Int.convert(address);
+    if address < 0x8000 { return 0xFF; }
+    if address < 0xA000 { return m.vram[at - 0x8000]; }   // no run-time check
+    0xFF
+}
+```
+
+`N` is a compile-time integer (a literal, a constant, or arithmetic on them).
+The promise is kept three ways:
+
+- **Construction checks it once.** Building the record checks the vector's
+  length (a `panic` if it is short), so the record literal needs `panic`.
+- **Nothing can shorten the field.** `place.clear()` is rejected, and so is
+  `&mut place`, since the borrower could shorten it. Elements are written with
+  `place[i] = value`; `push`, `set` and `reserve` stay allowed.
+- **Accesses use it.** `place[i]` asks the prover for `0 <= i && i < N` from
+  the facts at that point: branch conditions, early returns, masks
+  (`x & 0x1FFF` is at most `0x1FFF`), the range of a narrower integer
+  (`Int.convert(b)` for a `u8` is `0..=255`), loop conditions, `ensures`
+  clauses of called functions and erased ranges on parameters
+  (`erased inside: { 0 <= at && at < 0x1FFF }`, proved by every caller). A
+  proved read is a plain load and a proved write a plain store; anything else
+  keeps the ordinary run-time check, so the program means the same either way.
+
+Facts the prover keeps for this, all checked by certificates like every other
+proof:
+
+- a branch that never falls through (`if c { touch(m); return; }`) does not
+  erase facts after the `if`, even when it wrote values;
+- a `while` loop without `break` exits with its condition false and every
+  value at its loop-head version (`while i < n { .. }` gives `i >= n`);
+- in a condition that writes nothing, a conjunct the prover cannot read (an
+  element read, a call) no longer hides its siblings: in
+  `while at > 0 && v[at - 1] > x { .. }` the body knows `at > 0`;
+- a call argument without a linear form (an element read) is still a value
+  of its parameter type, so `ensures { result == value }` on
+  `fn wide(value: u8) -> i64` gives the caller `0 <= result <= 255`.
+
+`KUSH_PROOF_REPORT=1 kush check` prints how many element accesses were proved
+and how many keep a check; `KUSH_PROOF_REPORT=verbose` also lists every access
+into a length-refined field that was not proved, with its file and line.
+
+In the Game Boy example, refining video RAM, work RAM, OAM, high RAM, the
+screen, the sprite list and wave RAM proves 118 accesses (all memory-bus reads
+and writes and every per-pixel access of the renderer). Running 3600 frames of
+a commercial game takes 4.9 s instead of 6.6 s with Cranelift; with LLVM's
+optimiser the time is unchanged (about 1.2 s), as it already hoists most of
+those checks. The I/O registers stay checked: `apu` borrows them as
+`&mut Vec<u8>`, which a refined field cannot lend.

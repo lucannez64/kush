@@ -3801,12 +3801,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                         }),
                 }
             }
-            VecOp::PushBorrowed | VecOp::SetBorrowed => {
+            VecOp::PushBorrowed | VecOp::SetBorrowed | VecOp::SetProved => {
                 let Value::Borrowed(id) = args[0] else {
                     unreachable!()
                 };
                 let mut args = args.into_iter().skip(1);
-                let (index, value) = if op == VecOp::SetBorrowed {
+                let (index, value) = if matches!(op, VecOp::SetBorrowed | VecOp::SetProved) {
                     (Some(args.next().unwrap()), args.next().unwrap())
                 } else {
                     (None, args.next().unwrap())

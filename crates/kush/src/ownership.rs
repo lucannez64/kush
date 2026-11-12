@@ -6092,12 +6092,14 @@ impl Checker<'_> {
                         crate::executable::VecOp::Push
                         | crate::executable::VecOp::Set
                         | crate::executable::VecOp::PushBorrowed
-                        | crate::executable::VecOp::SetBorrowed => {
+                        | crate::executable::VecOp::SetBorrowed
+                        | crate::executable::VecOp::SetProved => {
                             provenance = self.container_provenance(&args[0]);
                             let setting = matches!(
                                 op,
                                 crate::executable::VecOp::Set
                                     | crate::executable::VecOp::SetBorrowed
+                                    | crate::executable::VecOp::SetProved
                             );
                             let value_index = if setting { 2 } else { 1 };
                             if self.is_carrier_type(element) {
@@ -6172,6 +6174,7 @@ impl Checker<'_> {
                                     op,
                                     crate::executable::VecOp::PushBorrowed
                                         | crate::executable::VecOp::SetBorrowed
+                                        | crate::executable::VecOp::SetProved
                                 ) {
                                     let updated = provenance.clone();
                                     if !self.merge_container_provenance(&args[0], updated, false) {
@@ -6239,6 +6242,7 @@ impl Checker<'_> {
                                     op,
                                     crate::executable::VecOp::PushBorrowed
                                         | crate::executable::VecOp::SetBorrowed
+                                        | crate::executable::VecOp::SetProved
                                 ) {
                                     let updated = provenance
                                         .leaves

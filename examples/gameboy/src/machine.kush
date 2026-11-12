@@ -38,10 +38,11 @@ pub struct Machine<M> {
     pub halted: Bool,
 
     pub cartridge: M,
-    pub vram: Vec<u8>,
-    pub wram: Vec<u8>,
-    pub oam: Vec<u8>,
-    pub hram: Vec<u8>,
+    pub vram: Vec<u8> where len >= 0x2000,
+    pub wram: Vec<u8> where len >= 0x2000,
+    /// 0xA0 bytes of OAM, backed by 0x100 so any byte offset is in bounds.
+    pub oam: Vec<u8> where len >= 0x100,
+    pub hram: Vec<u8> where len >= 0x7F,
     /// 0xFF00-0xFF7F as last written; reads of live registers are computed.
     pub io: Vec<u8>,
     pub ie: u8,
@@ -57,9 +58,9 @@ pub struct Machine<M> {
     pub stat_line: Bool,
     pub frame_done: Bool,
     /// Shades 0-3, one per pixel, row-major.
-    pub screen: Vec<u8>,
+    pub screen: Vec<u8> where len >= SCREEN_WIDTH * SCREEN_HEIGHT,
     /// OAM indices of the sprites on the line being drawn, best first.
-    pub sprites: Vec<u8>,
+    pub sprites: Vec<u8> where len >= 10,
     /// Pressed buttons: bit 0-3 right, left, up, down; bit 4-7 A, B, select, start.
     pub buttons: u8,
     pub apu: Apu,
@@ -92,7 +93,7 @@ pub fn new<M: Mapper>(board: M) -> Machine<M> ! {alloc, panic} {
         cartridge: board,
         vram: cartridge.zeroed(0x2000),
         wram: cartridge.zeroed(0x2000),
-        oam: cartridge.zeroed(0xA0),
+        oam: cartridge.zeroed(0x100),
         hram: cartridge.zeroed(0x7F),
         io: io,
         ie: 0,
@@ -110,7 +111,9 @@ pub fn new<M: Mapper>(board: M) -> Machine<M> ! {alloc, panic} {
     }
 }
 
-pub fn wide(value: u16) -> i64 ! {} { Int.convert(value) }
+/// Widen a byte or word for arithmetic. The postcondition hands callers the
+/// value's range (0-255 for a byte), which the bounds proofs use.
+pub fn wide(value: u16) -> i64 ! {} ensures { result == value } { Int.convert(value) }
 
 pub fn request<M>(m: &mut Machine<M>, interrupt: u8) -> Unit ! {panic} {
     m.io[0x0F] = m.io[0x0F] | interrupt;
@@ -118,7 +121,7 @@ pub fn request<M>(m: &mut Machine<M>, interrupt: u8) -> Unit ! {panic} {
 
 /// A CPU read, as the bus routes it.
 pub fn read<M: Mapper>(m: &Machine<M>, address: u16) -> u8 ! {panic} {
-    let at = wide(address);
+    let at: i64 = Int.convert(address);
     if address < 0x8000 { return m.cartridge.load(address); }
     if address < 0xA000 { return m.vram[at - 0x8000]; }
     if address < 0xC000 { return m.cartridge.load(address); }
@@ -163,7 +166,7 @@ pub fn press<M>(m: &mut Machine<M>, buttons: u8) -> Unit ! {panic} {
 
 /// A CPU write, as the bus routes it.
 pub fn write<M: Mapper>(m: &mut Machine<M>, address: u16, value: u8) -> Unit ! {alloc, panic} {
-    let at = wide(address);
+    let at: i64 = Int.convert(address);
     if address < 0x8000 { m.cartridge.store(address, value); return; }
     if address < 0xA000 { m.vram[at - 0x8000] = value; return; }
     if address < 0xC000 { m.cartridge.store(address, value); return; }

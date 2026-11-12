@@ -499,6 +499,19 @@ impl IntegerBudget {
 }
 
 impl Facts {
+    /// Take `other`'s value versions (and aliases), keeping this state's
+    /// opaque slots: used for a branch that never reaches the join.
+    pub fn versions_from(&mut self, other: &Self) {
+        self.versions = other.versions.clone();
+        self.aliases = other.aliases.clone();
+    }
+    /// The value versions alone, to detect writes cheaply.
+    pub fn version_stamp(&self) -> BTreeMap<usize, u32> {
+        self.versions.clone()
+    }
+    pub fn same_stamp(&self, stamp: &BTreeMap<usize, u32>) -> bool {
+        &self.versions == stamp
+    }
     pub fn same_versions(&self, other: &Self) -> bool {
         self.versions == other.versions
     }
@@ -634,6 +647,32 @@ impl Facts {
             let mut distinct = Vec::new();
             self.collect_distinct(condition, truth, &mut distinct);
             self.distinct.extend(distinct);
+        }
+    }
+    /// `assume` for a condition whose evaluation wrote no local (the caller
+    /// compared value versions before and after checking it): a conjunct
+    /// that is not itself fact-safe (an element read, say) no longer hides
+    /// its fact-safe siblings, since nothing they mention changed.
+    pub fn assume_unwritten(&mut self, condition: &Expr, truth: bool) {
+        if fact_safe(condition) {
+            return self.assume(condition, truth);
+        }
+        match &condition.kind {
+            ExprKind::Unary(Kind::Bang, inner) => self.assume_unwritten(inner, !truth),
+            ExprKind::Binary(Kind::AmpAmp, l, r) if truth => {
+                self.assume_unwritten(l, true);
+                self.assume_unwritten(r, true);
+            }
+            ExprKind::Binary(Kind::PipePipe, l, r) if !truth => {
+                self.assume_unwritten(l, false);
+                self.assume_unwritten(r, false);
+            }
+            ExprKind::Block(block) if block.statements.is_empty() => {
+                if let Some(tail) = &block.tail {
+                    self.assume_unwritten(tail, truth);
+                }
+            }
+            _ => {}
         }
     }
     fn collect_distinct(&self, expr: &Expr, truth: bool, out: &mut Vec<Linear>) {
@@ -962,9 +1001,16 @@ impl Facts {
                 self.note_term(term, (0, mask));
                 Some(Linear::variable(term))
             }
-            // A lossless widening keeps the value.
+            // A lossless widening keeps the value. When the source has no
+            // linear form (a field read through a reference, a call), it is
+            // still an unknown value within its type's range.
             ExprKind::Call(Target::Int(crate::int::IntOp::Convert, _, _), arguments) => {
-                self.linear(&arguments[0])
+                self.linear(&arguments[0]).or_else(|| {
+                    let range = scalar_range(arguments[0].ty)?;
+                    let term = path_term(Root::Value(fresh_value()), &[]);
+                    self.note_term(term, range);
+                    Some(Linear::variable(term))
+                })
             }
             // Proved in range, so its value is the exact result.
             ExprKind::Call(Target::Int(crate::int::IntOp::Unchecked(arith), _, _), arguments) => {

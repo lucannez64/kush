@@ -403,12 +403,25 @@ impl Parser {
             let name = p.ident()?;
             p.expect(&Kind::Colon, "':' after field name")?;
             let ty = p.ty()?;
+            // `where len >= N`: a minimum length for a vector field.
+            let min_length = if p.word_keyword("where") {
+                p.bump();
+                if !p.word_keyword("len") {
+                    return Err(p.error("expected 'len >= N' after 'where' on a field"));
+                }
+                p.bump();
+                p.expect(&Kind::Ge, "'>=' in 'where len >= N'")?;
+                Some(Box::new(p.expr()?))
+            } else {
+                None
+            };
             Ok(Field {
                 name,
                 source: None,
                 ty,
                 span: p.since(start),
                 public,
+                min_length,
             })
         })
     }
@@ -1215,6 +1228,7 @@ impl Parser {
                     ty,
                     span: self.since(field_start),
                     public: true,
+                    min_length: None,
                 });
                 if !self.eat(&Kind::Comma) {
                     break;
