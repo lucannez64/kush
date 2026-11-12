@@ -4687,10 +4687,16 @@
       "deps": [
         "LLVM-ALIAS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Needs a check for interior writes through shared handles (allocator context reference counts).",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-12 02:45:24",
+          "who": "claude",
+          "text": "Measured before building: noalias on shared slice parameters gained nothing on two kernels (596 vs 620 ms, 617 vs 651 ms; noise). The one visible gap, 5-10% for a loop over views of local vectors, needs scoped alias metadata; not done. Closed without a code change."
+        }
+      ]
     },
     {
       "id": "PROOF-SEARCH-SPEED",
@@ -4746,6 +4752,95 @@
           "time": "2026-11-12 00:59:41",
           "who": "claude",
           "text": "No defect in the deferral changes (about 3,200 generated deferred loops plus edge cases, up to 8 builds each). Two low-severity defects in the new fault handler, both fixed with tests: a write running off the top of the stack was reported as stack exhaustion, and the first SIGSEGV/SIGBUS sent from outside was swallowed. Doc overclaims corrected; bounded delay has a test on a loop that still qualifies. The handler fixes themselves were made after this review. 1,719 tests pass on Cranelift, llvm and llvm-release."
+        }
+      ]
+    },
+    {
+      "id": "LLVM-FOLLOWUPS",
+      "title": "Push loops, deferred-loop code size, build time at scale",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "LLVM-BACKEND"
+      ],
+      "status": "done",
+      "desc": "Vec.push keeps length and capacity in variables across push-only loops (LLVM); deferred loops lowered three times instead of up to eight; certificate clz operand made non-zero (removes a quadratic LLVM pass); benchmarks/build-scale.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 02:45:24",
+          "who": "claude",
+          "text": "Pre-sized fill 471 -> 430 ms (Rust 466). 100-unit build 12.4 -> 6.3 s (rustc -O 1.95 s). Fourth independent review: no correctness defect in ~46,000 differential runs; its findings (byte-view loops 2.4x slower through the checked chunk, two tests not exercising shadows, stale docs) are fixed. 1,727 tests on three settings."
+        }
+      ]
+    },
+    {
+      "id": "BUILD-SCALE",
+      "title": "Release build time and size limits on larger programs",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Release builds are 2-3.5x slower than rustc -O on benchmarks/build-scale, from LLVM's work on deferred loops. Ideas: defer only where it pays, split the module for parallel codegen. Also: MAX_FUNCTIONS = 256 and the 100,000-token file limit cap programs at about 2,300 and 12,000 lines.",
+      "commit": "3b6c529",
+      "log": [
+        {
+          "time": "2026-11-12 04:22:37",
+          "who": "claude",
+          "text": "MAX_FUNCTIONS (256 per program) replaced by MAX_INSTANCES (256 per declaration); the 100,000-token file limit remains."
+        },
+        {
+          "time": "2026-11-12 05:11:35",
+          "who": "claude",
+          "text": "Release build still 2.6-3.4x rustc -O. Next lever: split the module for parallel LLVM codegen."
+        },
+        {
+          "time": "2026-11-12 06:33:16",
+          "who": "agent",
+          "text": "Parallel LLVM partitions (call-graph grouping, available_externally copies of small shared functions), runtime cache keyed on what the compiler reads, leaner IR (trivial phis forwarded, i1 conditions, one range check per slice, constant slice layout). Release now 1.1-2x rustc -O (was 1.8-3.4x); 180 units 13.1 -> 4.5 s. Small programs stay whole: splitting cost hot kernels up to 25% run time. The 100,000-token file limit remains."
+        },
+        {
+          "time": "2026-11-12 06:33:16",
+          "who": "agent",
+          "text": "done 3b6c529"
+        }
+      ]
+    },
+    {
+      "id": "DEFER-PAYS",
+      "title": "Deferred overflow only where it pays, and cheaper to compile",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "BUILD-SCALE"
+      ],
+      "status": "done",
+      "desc": "Prove element accesses in range per chunk from exact values and emit them unchecked; recognize reduction chains; type-bounded leaves; chunk limit instead of fuel; one fallback copy; defer only loops LLVM vectorizes profitably on the target.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 05:11:35",
+          "who": "claude",
+          "text": "Every deferred loop shape measured gains 1.4-2.3x on baseline x86-64 and 3.9-5.8x native (was: only single-slice loops vectorized). LLVM time on the 6,400-line build-scale program 6.2 -> 5.3 s. 1,735 tests on three settings."
+        }
+      ]
+    },
+    {
+      "id": "DEFER-PAYS-REVIEW",
+      "title": "Independent review of per-chunk bounds proofs",
+      "size": "S",
+      "hard": true,
+      "deps": [
+        "DEFER-PAYS"
+      ],
+      "status": "done",
+      "desc": "Hoisted bounds checks remove per-element checks from memory accesses; needs an independent review before merge.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 05:11:35",
+          "who": "claude",
+          "text": "Fifth independent review: accesses after the counter update were proved one step short (out-of-bounds read and write); fixed and re-reviewed, 0 differences over ~8,000 further fuzzed runs. Also a compile-time blowup from the per-declaration instance cap (mutual polymorphic recursion); fixed with a 1024 total for generic instances."
         }
       ]
     }

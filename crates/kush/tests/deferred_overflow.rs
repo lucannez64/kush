@@ -818,10 +818,10 @@ fn main() -> Unit ! {io, panic} {
 }
 
 /// A chunk that fails its certificate, or starts with a negative counter,
-/// runs with ordinary checks; the chunks after it are deferred again and
-/// must still be exact and still panic.
+/// runs the rest of the loop with ordinary checks, from that chunk's entry
+/// state; results and panics must not change.
 #[test]
-fn checked_chunks_hand_back_to_deferred_ones() {
+fn a_failed_certificate_or_negative_counter_runs_the_rest_checked() {
     let program = |first: &str, late: &str, start: &str, factor: &str| {
         format!(
             "{SUM}
@@ -906,4 +906,355 @@ fn a_long_loop_reports_its_overflow_at_once() {
         "{preamble}{}",
         program("acc = acc * k + i;", "4611686018427387904")
     ));
+}
+
+/// A qualifying loop reached with a view that is not consecutive whole
+/// elements (here a byte view) runs as an ordinary loop, and the same
+/// function still defers for a plain view.
+#[test]
+fn a_byte_view_takes_the_ordinary_loop() {
+    let program = |count: &str, big: &str| {
+        format!(
+            "{SUM}
+            fn main() -> Unit ! {{io, alloc, panic}} {{
+                let mut plain: Vec<i64> = Vec.with_capacity(4);
+                let mut bytes = Bytes.with_capacity(4);
+                let mut i = 0;
+                while i < {count} {{
+                    plain = Vec.push(plain, if i == 3 {{ {big} }} else {{ i & 255 }});
+                    bytes = Bytes.push(bytes, i & 255);
+                    i = i + 1;
+                }}
+                print_i64(sum(&bytes[..]));
+                print_i64(sum(&plain[..]));
+            }}"
+        )
+    };
+    native_modes_agree(&program("70000", "7"));
+    native_modes_agree(&program("70000", "9223372036854775000"));
+    native_modes_agree(&program("0", "7"));
+}
+
+/// Element accesses are proved in range once per chunk and then run without
+/// checks. Each way of falling outside must still panic exactly where the
+/// checked loop does, and each way of staying inside must give its result.
+#[test]
+fn hoisted_bounds_checks_panic_where_the_checked_loop_does() {
+    const VALUES: &str = "let values: [i64; 5] = [1, 2, 3, 4, 5];";
+    // A bound held in a local, which may exceed the slice.
+    let local = |n: &str| {
+        format!(
+            "fn f(view: &[i64], n: i64) -> i64 ! {{panic}} {{
+                let mut acc = 0;
+                let mut i = 0;
+                while i < n {{ acc = acc + Slice.get(view, i) * 3; i = i + 1; }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, panic}} {{ {VALUES} print_i64(f(&values[..], {n})); }}"
+        )
+    };
+    agrees(&local("5"), Some(&[45]));
+    agrees(&local("6"), None);
+    agrees(&local("0"), Some(&[0]));
+    agrees(&local("0 - 3"), Some(&[0]));
+    // A second slice, shorter than the one the loop walks.
+    let two = |other: &str| {
+        format!(
+            "fn f<'a, 'b>(view: &'a [i64], other: &'b [i64]) -> i64 ! {{panic}} {{
+                let mut acc = 0;
+                let mut i = 0;
+                while i < Slice.len(view) {{
+                    acc = acc + Slice.get(view, i) + Slice.get(other, i) * 2;
+                    i = i + 1;
+                }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, panic}} {{
+                {VALUES}
+                let other: {other};
+                print_i64(f(&values[..], &other[..]));
+            }}"
+        )
+    };
+    agrees(&two("[i64; 5] = [10, 20, 30, 40, 50]"), Some(&[315]));
+    agrees(&two("[i64; 4] = [10, 20, 30, 40]"), None);
+    // Offsets below and above the counter.
+    let offset = |start: &str, bound: &str, index: &str| {
+        format!(
+            "fn f(view: &[i64]) -> i64 ! {{panic}} {{
+                let mut acc = 0;
+                let mut i = {start};
+                while i < {bound} {{ acc = acc + Slice.get(view, {index}); i = i + 1; }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, panic}} {{ {VALUES} print_i64(f(&values[..])); }}"
+        )
+    };
+    agrees(&offset("0", "Slice.len(view)", "i - 1"), None);
+    agrees(&offset("1", "Slice.len(view)", "i - 1"), Some(&[10]));
+    agrees(&offset("0", "Slice.len(view)", "i + 1"), None);
+    agrees(&offset("0", "Slice.len(view) - 1", "i + 1"), Some(&[14]));
+    // Counting down.
+    let down = |start: &str, comparison: &str, index: &str| {
+        format!(
+            "fn f(view: &[i64]) -> i64 ! {{panic}} {{
+                let mut acc = 0;
+                let mut i = {start};
+                while i {comparison} {{ acc = acc + Slice.get(view, {index}) * 2; i = i - 1; }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, panic}} {{ {VALUES} print_i64(f(&values[..])); }}"
+        )
+    };
+    agrees(&down("4", ">= 0", "i"), Some(&[30]));
+    agrees(&down("5", ">= 0", "i"), None);
+    agrees(&down("5", "> 0", "i - 1"), Some(&[30]));
+    agrees(&down("4", "> 0 - 1", "i - 1"), None);
+    // Vectors and byte buffers, read by `Vec.get` and `Bytes.get`.
+    let containers = |n: &str| {
+        format!(
+            "fn v(values: &Vec<i64>, n: i64) -> i64 ! {{panic}} {{
+                let mut acc = 0;
+                let mut i = 0;
+                while i < n {{ acc = acc + Vec.get(values, i) * 3; i = i + 1; }}
+                acc
+            }}
+            fn b(values: &Bytes, n: i64) -> i64 ! {{panic}} {{
+                let mut acc = 0;
+                let mut i = 0;
+                while i < n {{ acc = acc + Bytes.get(values, i) * 3; i = i + 1; }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, alloc, panic}} {{
+                let mut list: Vec<i64> = Vec.with_capacity(4);
+                let mut bytes = Bytes.with_capacity(4);
+                let mut i = 0;
+                while i < 4 {{
+                    list = Vec.push(list, i * 100);
+                    bytes = Bytes.push(bytes, i * 60);
+                    i = i + 1;
+                }}
+                print_i64(b(&bytes, {n}));
+                print_i64(v(&list, {n}));
+            }}"
+        )
+    };
+    agrees(&containers("4"), Some(&[1080, 1800]));
+    agrees(&containers("5"), None);
+    // A step larger than one, with `<=`.
+    let stride = |bound: &str| {
+        format!(
+            "fn f(view: &[i64], n: i64) -> i64 ! {{panic}} {{
+                let mut acc = 0;
+                let mut i = 0;
+                while i <= n {{ acc = acc + Slice.get(view, i); i = i + 2; }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, panic}} {{ {VALUES} print_i64(f(&values[..], {bound})); }}"
+        )
+    };
+    agrees(&stride("4"), Some(&[9]));
+    agrees(&stride("5"), Some(&[9]));
+    agrees(&stride("6"), None);
+}
+
+/// The same across chunks: a bound past the end is only reached after many
+/// chunks, and one container is shorter than the other by one element.
+#[test]
+fn hoisted_bounds_checks_across_chunks() {
+    let program = |n: &str, other: &str| {
+        format!(
+            "fn fill(n: i64) -> Vec<i64> ! {{alloc, panic}} {{
+                let mut values: Vec<i64> = Vec.with_capacity(n);
+                let mut i = 0;
+                while i < n {{ values = Vec.push(values, (i * 7919) & 1023); i = i + 1; }}
+                values
+            }}
+            fn f<'a, 'b>(view: &'a [i64], other: &'b [i64], n: i64) -> i64 ! {{panic}} {{
+                let mut acc = 0;
+                let mut i = 0;
+                while i < n {{ acc = acc + Slice.get(view, i) - Slice.get(other, i) * 2; i = i + 1; }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, alloc, panic}} {{
+                let view = fill(200000);
+                let other = fill({other});
+                print_i64(1);
+                print_i64(f(&view[..], &other[..], {n}));
+            }}"
+        )
+    };
+    native_modes_agree(&program("200000", "200000"));
+    native_modes_agree(&program("200000", "199999"));
+    native_modes_agree(&program("200001", "200001"));
+    native_modes_agree(&program("131072", "131072"));
+    native_modes_agree(&program("65537", "65536"));
+}
+
+/// A reduction written as a chain, `acc = acc + a - b`, is certified as a
+/// whole, but each intermediate value is still a checked result: one that
+/// overflows panics even when the chain's total would fit.
+#[test]
+fn reduction_chains_panic_on_an_intermediate_overflow() {
+    let program = |body: &str, start: &str| {
+        format!(
+            "fn f<'a, 'b>(left: &'a [i64], right: &'b [i64], start: i64) -> i64 ! {{panic}} {{
+                let mut acc = start;
+                let mut i = 0;
+                while i < Slice.len(left) {{ {body} i = i + 1; }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, panic}} {{
+                let left: [i64; 3] = [5, 6, 7];
+                let right: [i64; 3] = [10, 20, 30];
+                print_i64(f(&left[..], &right[..], {start}));
+            }}"
+        )
+    };
+    let add_first = "acc = acc + Slice.get(left, i) - Slice.get(right, i);";
+    let subtract_first = "acc = acc - Slice.get(right, i) + Slice.get(left, i);";
+    agrees(&program(add_first, "100"), Some(&[58]));
+    agrees(&program(subtract_first, "100"), Some(&[58]));
+    // 9223372036854775804 + 5 overflows before `- 10` brings it back.
+    agrees(&program(add_first, "9223372036854775804"), None);
+    agrees(
+        &program(subtract_first, "9223372036854775804"),
+        Some(&[9_223_372_036_854_775_762]),
+    );
+}
+
+/// Byte reads and widened narrow values are bounded by their type instead
+/// of being tracked; an accumulator near the limit must still panic.
+#[test]
+fn values_bounded_by_their_type_still_overflow() {
+    let bytes = |start: &str| {
+        format!(
+            "fn f(values: &Bytes, start: i64) -> i64 ! {{panic}} {{
+                let mut acc = start;
+                let mut i = 0;
+                while i < Bytes.len(values) {{ acc = acc + Bytes.get(values, i); i = i + 1; }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, alloc, panic}} {{
+                let mut bytes = Bytes.with_capacity(2);
+                bytes = Bytes.push(bytes, 255);
+                bytes = Bytes.push(bytes, 255);
+                print_i64(f(&bytes, {start}));
+            }}"
+        )
+    };
+    agrees(&bytes("9223372036854775297"), Some(&[i64::MAX as i128]));
+    agrees(&bytes("9223372036854775298"), None);
+    let narrow = |start: &str| {
+        format!(
+            "fn f(values: &[i32], start: i64) -> i64 ! {{panic}} {{
+                let mut acc = start;
+                let mut i = 0;
+                while i < Slice.len(values) {{
+                    acc = acc - Int.convert::<i64>(Slice.get(values, i));
+                    i = i + 1;
+                }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, panic}} {{
+                let values: [i32; 2] = [2147483647, 2147483647];
+                print_i64(f(&values[..], {start}));
+            }}"
+        )
+    };
+    // Exactly i64::MIN after two subtractions, then one below it.
+    agrees(
+        &narrow("0 - 9223372036854775807 - 1 + 4294967294"),
+        Some(&[i64::MIN as i128]),
+    );
+    agrees(&narrow("0 - 9223372036854775807 - 1 + 4294967293"), None);
+}
+
+/// Counters near the ends of their range: the chunk limit saturates
+/// instead of wrapping.
+#[test]
+fn chunk_limits_saturate_at_the_ends_of_the_range() {
+    let up = "fn f(view: &[i64], start: i64) -> i64 ! {panic} {
+        let mut acc = 0;
+        let mut i = start;
+        while i <= 9223372036854775806 { acc = acc + Slice.get(view, i & 3); i = i + 1; }
+        acc
+    }";
+    native_modes_agree(&format!(
+        "{up}
+        fn main() -> Unit ! {{io, panic}} {{
+            let values: [i64; 4] = [1, 2, 3, 4];
+            print_i64(f(&values[..], 9223372036854775800));
+        }}"
+    ));
+    let unsigned = "fn g(start: u64) -> u64 ! {panic} {
+        let mut acc: u64 = 0;
+        let mut i: u64 = start;
+        while i < 18446744073709551615 { acc = acc + (i & 7) * 3; i = i + 1; }
+        acc
+    }";
+    native_modes_agree(&format!(
+        "{unsigned}
+        fn main() -> Unit ! {{io, panic}} {{ print_int(g(18446744073709551000)); }}"
+    ));
+    let down = "fn h(start: i64) -> i64 ! {panic} {
+        let mut acc = 0;
+        let mut i = start;
+        while i > 0 - 9223372036854775807 { acc = acc + (i & 7) * 3; i = i - 3; }
+        acc
+    }";
+    native_modes_agree(&format!(
+        "{down}
+        fn main() -> Unit ! {{io, panic}} {{ print_i64(h(0 - 9223372036854775000)); }}"
+    ));
+}
+
+/// Review finding: an access after the counter's update sees the counter
+/// one step on, and the chunk's range proof has to say so. Without that, a
+/// chunk read and wrote one step past its container (into a neighbouring
+/// vector, or unmapped memory).
+#[test]
+fn accesses_after_the_counter_update_see_it_moved() {
+    const VALUES: &str = "let values: [i64; 5] = [1, 2, 3, 4, 5];";
+    let read = |start: &str, condition: &str, update: &str, index: &str| {
+        format!(
+            "fn f(view: &[i64], n: i64) -> i64 ! {{panic}} {{
+                let mut acc = 0;
+                let mut i = {start};
+                while {condition} {{ {update} acc = acc + Slice.get(view, {index}) * 3; }}
+                acc
+            }}
+            fn main() -> Unit ! {{io, panic}} {{ {VALUES} print_i64(f(&values[..], 4)); }}"
+        )
+    };
+    // Reads view[1..=4]; one more iteration would read view[5].
+    agrees(&read("0", "i < n", "i = i + 1;", "i"), Some(&[42]));
+    agrees(&read("0", "i <= n", "i = i + 1;", "i"), None);
+    agrees(&read("0", "i < n + 1", "i = i + 1;", "i - 1"), Some(&[45]));
+    agrees(&read("0", "i < n", "i = i + 2;", "i"), Some(&[24]));
+    agrees(&read("0", "i < n", "i = i + 8;", "i"), None);
+    // Counting down: after the update the counter is one lower.
+    agrees(&read("5", "i > 0", "i = i - 1;", "i"), Some(&[45]));
+    agrees(&read("2", "i >= 0", "i = i - 1;", "i"), None);
+    agrees(&read("4", "i >= 1", "i = i - 1;", "i + 1"), Some(&[42]));
+    // A store after the update must not land in a neighbouring vector.
+    let write = |n: &str| {
+        format!(
+            "fn g(t: &mut [i64], n: i64, x: i64) -> Unit ! {{panic}} {{
+                let mut i = 0;
+                while i < n {{ i = i + 1; Slice.set(t, i, x + i); }}
+            }}
+            fn main() -> Unit ! {{io, alloc, panic}} {{
+                let mut t: Vec<i64> = Vec.with_capacity(4);
+                let mut victim: Vec<i64> = Vec.with_capacity(4);
+                let mut i = 0;
+                while i < 4 {{ t = Vec.push(t, 0); victim = Vec.push(victim, 7); i = i + 1; }}
+                g(&mut t[..], {n}, 1000);
+                print_i64(Vec.get(&t, 3));
+                print_i64(Vec.get(&victim, 0));
+            }}"
+        )
+    };
+    agrees(&write("3"), Some(&[1003, 7]));
+    agrees(&write("4"), None);
 }

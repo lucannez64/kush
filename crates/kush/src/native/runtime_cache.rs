@@ -66,6 +66,43 @@ fn include_graph(compiler: &Path, source: &Path, defines: &[String]) -> Option<V
     Some(paths)
 }
 
+/// Whether a resolved compiler binary is GCC or Clang itself rather than a
+/// wrapper (ccache, distcc, a script).
+fn plain_compiler(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    (name.contains("gcc") || name.contains("clang"))
+        && !["ccache", "distcc", "sccache", "icecc"]
+            .iter()
+            .any(|wrapper| name.contains(wrapper))
+}
+
+/// Environment variables GCC or Clang read when compiling and preprocessing
+/// C, or that select the tools they run.
+fn compiler_reads(name: &std::ffi::OsStr) -> bool {
+    const NAMES: [&str; 12] = [
+        "PATH",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "OBJC_INCLUDE_PATH",
+        "LIBRARY_PATH",
+        "COMPILER_PATH",
+        "SOURCE_DATE_EPOCH",
+        "DEPENDENCIES_OUTPUT",
+        "SUNPRO_DEPENDENCIES",
+        "SDKROOT",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "TMPDIR",
+    ];
+    const PREFIXES: [&str; 3] = ["GCC_", "CLANG_", "CCC_"];
+    let Some(name) = name.to_str() else {
+        return true;
+    };
+    NAMES.contains(&name) || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
 fn compiler_identity(
     compiler: &Path,
     source: &Path,
@@ -105,10 +142,17 @@ fn compiler_identity(
         identity.extend_from_slice(&output.stdout);
         identity.extend_from_slice(&output.stderr);
     }
-    identity.extend_from_slice(format!("{:?}", std::env::current_dir().ok()?).as_bytes());
-    // Compiler wrappers can depend on arbitrary environment variables. Hash the
-    // complete environment rather than persisting possible credential values.
-    let mut environment: Vec<_> = std::env::vars_os().collect();
+    // The working directory is not part of the key: the runtime is compiled
+    // with no debug information and no relative include path, so it cannot
+    // reach the object. The environment is, but only as much of it as the
+    // compiler reads: GCC and Clang read a documented set of variables, and
+    // anything else (`OLDPWD` after a `cd`, a terminal's own variables) used
+    // to cost a 0.8 s rebuild of the runtime. A compiler that resolves to
+    // anything but GCC or Clang may be a wrapper that reads anything, so for
+    // it the whole environment counts. Only a hash is kept, never values.
+    let mut environment: Vec<_> = std::env::vars_os()
+        .filter(|(name, _)| !plain_compiler(&path) || compiler_reads(name))
+        .collect();
     environment.sort();
     let mut hash = DefaultHasher::new();
     environment.hash(&mut hash);
@@ -402,7 +446,7 @@ pub(super) fn compile_llvm(
     let cache = directory.zip(identity);
     let entry = |artifact: &str| {
         let mut key =
-            format!("kush-c-runtime-llvm-v4\0{artifact}\0-std=c11\0-O2\0-fPIC\0").into_bytes();
+            format!("kush-c-runtime-llvm-v5\0{artifact}\0-std=c11\0-O2\0-fPIC\0").into_bytes();
         // How the runtime is split is part of what the artifacts are.
         key.extend_from_slice(super::llvm::INLINABLE.join(",").as_bytes());
         key.push(0);

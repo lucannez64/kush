@@ -154,6 +154,8 @@ fn build_reports_its_backend_and_can_save_the_module() {
         .arg(&binary)
         .args(["--release", "--backend", "llvm"])
         .env("KUSH_EMIT_LLVM", &module)
+        // The whole module: one partition.
+        .env("KUSH_LLVM_PARTITIONS", "1")
         .output()
         .unwrap();
     assert!(
@@ -303,6 +305,8 @@ fn emitted(flags: &[&str]) -> String {
         .arg(scratch.path().join("program"))
         .args(flags)
         .env("KUSH_EMIT_LLVM", &module)
+        // The whole module: one partition.
+        .env("KUSH_LLVM_PARTITIONS", "1")
         .output()
         .unwrap();
     assert!(
@@ -434,8 +438,10 @@ fn main() -> i64 ! {io, alloc, panic} {
 }
 
 /// Which loops are deferred, as the planner reports it.
+/// Which loops are deferred, as the planner reports it: those LLVM can
+/// vectorize profitably on the target, and no others.
 #[test]
-fn the_planner_defers_counted_loops_whose_indices_follow_the_counter() {
+fn the_planner_defers_loops_that_vectorize() {
     if !clang_available() {
         return;
     }
@@ -461,24 +467,62 @@ fn stencil(values: &[i64]) -> i64 ! {panic} {
     while i < Slice.len(values) { acc = acc + Slice.get(values, i) - Slice.get(values, i - 1); i = i + 1; }
     acc
 }
+fn listed(values: &Vec<i64>, n: i64) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < n { acc = acc + Vec.get(values, i) * 3; i = i + 1; }
+    acc
+}
+fn later(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) { i = i + 1; acc = acc + Slice.get(values, i - 1); }
+    acc
+}
 fn gather(values: &[i64]) -> i64 ! {panic} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(values) { acc = acc + Slice.get(values, i & 7); i = i + 1; }
     acc
 }
+fn early(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) { if Slice.get(values, i) == 99 { break; } acc = acc + Slice.get(values, i); i = i + 1; }
+    acc
+}
+fn halves(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) { acc = acc + Slice.get(values, i) / 2; i = i + 1; }
+    acc
+}
+fn some(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) { if Slice.get(values, i) > 3 { acc = acc + Slice.get(values, i); } i = i + 1; }
+    acc
+}
+fn bytes(values: &Bytes) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Bytes.len(values) { acc = acc + Bytes.get(values, i); i = i + 1; }
+    acc
+}
 fn main() -> i64 ! {alloc, panic} {
     let mut values: Vec<i64> = Vec.with_capacity(8);
+    let mut text = Bytes.with_capacity(8);
     let mut i = 0;
-    while i < 8 { values = Vec.push(values, i); i = i + 1; }
-    plain(9, 2) + down(9, 2) + stencil(&values[..]) + gather(&values[..]) - 197
+    while i < 8 { values = Vec.push(values, i); text = Bytes.push(text, i); i = i + 1; }
+    plain(9, 2) + down(9, 2) + stencil(&values[..]) + listed(&values, 8) + later(&values[..]) + gather(&values[..])
+        + early(&values[..]) + halves(&values[..]) + some(&values[..]) + bytes(&text) - 399
 }
 ",
     )
     .unwrap();
-    let built = kush()
-        .current_dir(root)
-        .args([
+    let trace = |native: bool| {
+        let mut command = kush();
+        command.current_dir(root).args([
             "build",
             "main.kush",
             "-o",
@@ -486,28 +530,154 @@ fn main() -> i64 ! {alloc, panic} {
             "--release",
             "--backend",
             "llvm",
-        ])
-        .env("KUSH_TRACE_DEFERRED", "1")
-        .output()
-        .unwrap();
-    let trace = String::from_utf8_lossy(&built.stderr);
-    assert!(built.status.success(), "{trace}");
-    for deferred in ["plain", "down", "stencil"] {
+        ]);
+        if native {
+            command.args(["--target-cpu", "native"]);
+        }
+        let built = command.env("KUSH_TRACE_DEFERRED", "1").output().unwrap();
+        let trace = String::from_utf8_lossy(&built.stderr).into_owned();
+        assert!(built.status.success(), "{trace}");
         assert!(
-            !trace.contains(&format!("loop in {deferred} keeps")),
+            Command::new(root.join("program"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        trace
+    };
+    let keeps = |trace: &str, function: &str, reason: &str| {
+        trace.contains(&format!(
+            "loop in {function} keeps immediate checks: {reason}"
+        ))
+    };
+    for native in [false, true] {
+        let trace = trace(native);
+        for deferred in ["plain", "down", "stencil", "listed", "later"] {
+            assert!(
+                !trace.contains(&format!("loop in {deferred} keeps")),
+                "{trace}"
+            );
+        }
+        assert!(
+            keeps(
+                &trace,
+                "gather",
+                "an index that does not follow the counter"
+            ),
+            "{trace}"
+        );
+        assert!(keeps(&trace, "early", "an early exit"), "{trace}");
+        assert!(keeps(&trace, "halves", "a division"), "{trace}");
+        // Only pays on wide vectors.
+        assert_eq!(
+            keeps(&trace, "some", "arithmetic under a condition"),
+            !native,
+            "{trace}"
+        );
+        assert_eq!(
+            keeps(&trace, "bytes", "byte-buffer reads"),
+            !native,
             "{trace}"
         );
     }
-    assert!(
-        trace.contains(
-            "loop in gather keeps immediate checks: an index that does not follow the counter"
-        ),
-        "{trace}"
-    );
-    assert!(
-        Command::new(root.join("program"))
-            .status()
+}
+
+/// A program split into partitions compiled separately behaves exactly as
+/// the whole: calls across partitions, shared data, function pointers and
+/// their thunks, and small functions copied into every partition that
+/// calls them.
+#[test]
+fn a_program_split_into_partitions_behaves_as_the_whole() {
+    if !clang_available() {
+        return;
+    }
+    let scratch = kush::native::Scratch::new(&std::env::temp_dir()).unwrap();
+    let root = scratch.path();
+    fs::write(
+        root.join("main.kush"),
+        "fn small(x: i64) -> i64 ! {panic} { x * 3 + 1 }
+fn grow(values: Vec<i64>, n: i64) -> Vec<i64> ! {alloc, panic} {
+    let mut out = values;
+    let mut i = 0;
+    while i < n { out = Vec.push(out, small(i)); i = i + 1; }
+    out
+}
+fn summed(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) { acc = acc + Slice.get(values, i); i = i + 1; }
+    acc
+}
+fn twice(f: fn(i64) -> i64 ! {panic}, x: i64) -> i64 ! {panic} { f(f(x)) }
+fn first(n: i64) -> i64 ! {alloc, panic} {
+    let values = grow(Vec.with_capacity(4), n);
+    summed(&values[..]) + small(n)
+}
+fn second(n: i64) -> i64 ! {alloc, panic} { twice(small, n) + first(n + 1) }
+enum Result<T, E> { Ok(T), Err(E) }
+fn main() -> i64 ! {io, alloc, panic} {
+    print_i64(first(10));
+    print_i64(second(20));
+    let text = Bytes.from(\"partitioned\\n\");
+    match IO.write(IO.stdout(), &text) { Ok(_) => {}, Err(_) => { return 1; } };
+    print_i64(small(3074457345618258603));
+    0
+}
+",
+    )
+    .unwrap();
+    let mut outputs = Vec::new();
+    for parts in ["1", "2", "5"] {
+        let module = root.join(format!("module-{parts}.ll"));
+        let built = kush()
+            .current_dir(root)
+            .args([
+                "build",
+                "main.kush",
+                "-o",
+                "program",
+                "--release",
+                "--backend",
+                "llvm",
+            ])
+            .env("KUSH_LLVM_PARTITIONS", parts)
+            .env("KUSH_EMIT_LLVM", &module)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{parts}: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let modules: Vec<String> = fs::read_dir(root)
             .unwrap()
-            .success()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(&format!("module-{parts}.ll"))
+            })
+            .map(|path| fs::read_to_string(path).unwrap())
+            .collect();
+        if parts != "1" {
+            assert!(modules.len() > 1, "{parts}: {}", modules.len());
+            // Some function is called from another partition, and some
+            // small one is copied for inlining.
+            assert!(modules.iter().any(|text| text.contains("define hidden ")));
+            assert!(modules.iter().any(|text| text.contains("declare hidden ")));
+        }
+        let ran = Command::new(root.join("program")).output().unwrap();
+        outputs.push((
+            String::from_utf8_lossy(&ran.stdout).into_owned(),
+            ran.status.code(),
+        ));
+    }
+    // The last line overflows and panics after the rest is printed.
+    assert!(outputs[0].0.ends_with("partitioned\n"), "{:?}", outputs[0]);
+    assert_eq!(outputs[0].1, None);
+    assert!(
+        outputs.iter().all(|output| *output == outputs[0]),
+        "{outputs:?}"
     );
 }

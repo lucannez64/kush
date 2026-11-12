@@ -340,7 +340,8 @@ pub(super) struct LlvmModule {
     typed: BTreeMap<String, Typed>,
     /// Functions whose address is taken; each gets a word-typed thunk.
     address_taken: BTreeSet<String>,
-    functions: Vec<String>,
+    /// Translated functions: name and text, in definition order.
+    functions: Vec<(String, String)>,
     defined: BTreeSet<FuncId>,
     data: BTreeMap<DataId, Vec<u8>>,
     intrinsics: BTreeSet<String>,
@@ -399,21 +400,69 @@ impl LlvmModule {
                 },
             );
         }
-        self.functions.push(text);
+        self.functions.push((name, text));
         self.defined.insert(id);
         Ok(())
     }
-    /// The complete textual module.
-    pub fn finish(self, declarations: &ModuleDeclarations) -> Result<String> {
+    /// The program as LLVM modules, each compiled on its own (see
+    /// [`partition`] and [`super::Split`]). One partition is exactly the
+    /// whole program.
+    pub fn finish(
+        self,
+        declarations: &ModuleDeclarations,
+        split: super::Split,
+    ) -> Result<Vec<String>> {
+        // Thunks are functions like any other: a function with pointer
+        // parameters is reached through a function pointer by a thunk with
+        // the plain word signature, so an indirect call always has exactly
+        // the type of what it calls.
+        let mut functions = self.functions.clone();
+        for name in &self.address_taken {
+            let Some(typed) = self.typed.get(name) else {
+                continue;
+            };
+            functions.push((format!("{name}{WORD_THUNK}"), thunk(name, typed)));
+        }
+        let total: usize = functions.iter().map(|(_, text)| text.lines().count()).sum();
+        let wanted = match total.checked_div(split.minimum) {
+            Some(most) => split.cores.max(total.div_ceil(split.target)).min(most),
+            None => split.cores,
+        }
+        .max(1);
+        let plan = partition(&functions, wanted);
+        let mut modules = Vec::new();
+        for part in 0..plan.count {
+            modules.push(self.module(declarations, &functions, &plan, part)?);
+        }
+        Ok(modules)
+    }
+    /// One partition's module text.
+    fn module(
+        &self,
+        declarations: &ModuleDeclarations,
+        functions: &[(String, String)],
+        plan: &Partitioning,
+        part: usize,
+    ) -> Result<String> {
+        let split = plan.count > 1;
         let mut out = String::new();
         out.push_str("; Kush program module (LLVM release backend)\n");
         out.push_str(&self.runtime.header);
         out.push('\n');
+        // Data lives in the first partition; the others refer to it.
         for (id, declaration) in declarations.get_data_objects() {
             let name = declaration.linkage_name(id);
             match self.data.get(&id) {
+                Some(bytes) if split && part != 0 => {
+                    let _ = writeln!(
+                        out,
+                        "@{name} = external hidden global [{} x i8], align 8",
+                        bytes.len()
+                    );
+                }
                 Some(bytes) => {
                     let linkage = match declaration.linkage {
+                        Linkage::Local | Linkage::Hidden if split => "hidden ",
                         Linkage::Local | Linkage::Hidden => "internal ",
                         _ => "",
                     };
@@ -456,56 +505,35 @@ impl LlvmModule {
                 }
             }
         }
+        // Functions defined in another partition and used here.
+        for (index, (_, text)) in functions.iter().enumerate() {
+            if plan.declared[part].contains(&index) {
+                let _ = writeln!(out, "{}", declaration_of(text));
+            }
+        }
         for intrinsic in &self.intrinsics {
             out.push_str(intrinsic);
             out.push('\n');
         }
         out.push('\n');
-        for function in &self.functions {
-            out.push_str(function);
-            out.push('\n');
-        }
-        // A function with pointer-typed parameters is reached through a
-        // function pointer by a thunk with the plain word signature, so an
-        // indirect call always has exactly the type of what it calls.
-        for name in &self.address_taken {
-            let Some(typed) = self.typed.get(name) else {
+        for (index, (_, text)) in functions.iter().enumerate() {
+            let text = if plan.home[index] == part {
+                if plan.exported.contains(&index) {
+                    // Called from another partition: visible to the linker,
+                    // but not outside the program.
+                    text.replacen("define internal ", "define hidden ", 1)
+                } else {
+                    text.clone()
+                }
+            } else if plan.copied[part].contains(&index) {
+                // A small function used here and defined elsewhere: a copy
+                // LLVM may inline, never emitted.
+                text.replacen("define internal ", "define available_externally ", 1)
+            } else {
                 continue;
             };
-            let params = typed
-                .params
-                .iter()
-                .enumerate()
-                .map(|(index, ty)| format!("{ty} %a{index}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let _ = writeln!(
-                out,
-                "define internal {} @{name}{WORD_THUNK}({params}) #0 {{",
-                typed.ret
-            );
-            let mut arguments = Vec::new();
-            for (index, ty) in typed.params.iter().enumerate() {
-                if typed.exclusive[index] {
-                    let _ = writeln!(out, "  %p{index} = inttoptr i64 %a{index} to ptr");
-                    arguments.push(format!("ptr %p{index}"));
-                } else {
-                    arguments.push(format!("{ty} %a{index}"));
-                }
-            }
-            let arguments = arguments.join(", ");
-            if typed.ret == "void" {
-                let _ = writeln!(
-                    out,
-                    "  tail call void @{name}({arguments})\n  ret void\n}}\n"
-                );
-            } else {
-                let _ = writeln!(
-                    out,
-                    "  %r = tail call {ret} @{name}({arguments})\n  ret {ret} %r\n}}\n",
-                    ret = typed.ret
-                );
-            }
+            out.push_str(&text);
+            out.push('\n');
         }
         // Probe every page of a large frame so it cannot step over the
         // guard below the stack (see the runtime's fault handler).
@@ -517,6 +545,237 @@ impl LlvmModule {
         );
         out.push_str(MODULE_METADATA);
         Ok(out)
+    }
+}
+
+/// The word-signature thunk of a function with pointer parameters.
+fn thunk(name: &str, typed: &Typed) -> String {
+    let mut out = String::new();
+    let params = typed
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| format!("{ty} %a{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        out,
+        "define internal {} @{name}{WORD_THUNK}({params}) #0 {{",
+        typed.ret
+    );
+    let mut arguments = Vec::new();
+    for (index, ty) in typed.params.iter().enumerate() {
+        if typed.exclusive[index] {
+            let _ = writeln!(out, "  %p{index} = inttoptr i64 %a{index} to ptr");
+            arguments.push(format!("ptr %p{index}"));
+        } else {
+            arguments.push(format!("{ty} %a{index}"));
+        }
+    }
+    let arguments = arguments.join(", ");
+    if typed.ret == "void" {
+        let _ = writeln!(out, "  tail call void @{name}({arguments})\n  ret void\n}}");
+    } else {
+        let _ = writeln!(
+            out,
+            "  %r = tail call {ret} @{name}({arguments})\n  ret {ret} %r\n}}",
+            ret = typed.ret
+        );
+    }
+    out
+}
+
+/// `declare hidden RET @name(TYPES)` for a function whose text starts
+/// `define LINKAGE RET @name(TYPE %v, ...) #0 {`.
+fn declaration_of(text: &str) -> String {
+    let header = text.lines().next().unwrap_or_default();
+    let header = header
+        .strip_prefix("define ")
+        .unwrap_or(header)
+        .trim_start_matches("internal ")
+        .trim_start_matches("hidden ");
+    let open = header.find('(').unwrap_or(header.len());
+    let close = header.rfind(')').unwrap_or(header.len());
+    let params = header[open + 1..close]
+        .split(", ")
+        .filter(|param| !param.is_empty())
+        .map(|param| match param.rfind(" %") {
+            Some(at) => &param[..at],
+            None => param,
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("declare hidden {}({params})", &header[..open])
+}
+
+/// Where each function of a split program goes.
+struct Partitioning {
+    count: usize,
+    /// The partition each function is defined in.
+    home: Vec<usize>,
+    /// Functions defined in one partition and called from another.
+    exported: BTreeSet<usize>,
+    /// Per partition, small functions defined elsewhere that it gets a copy
+    /// of for inlining.
+    copied: Vec<BTreeSet<usize>>,
+    /// Per partition, functions defined elsewhere that it refers to.
+    declared: Vec<BTreeSet<usize>>,
+}
+
+/// A function at most this many lines is copied into every partition that
+/// calls it, as C++ inline functions are, so splitting the program does not
+/// stop LLVM from inlining it.
+const SHARED_SMALL: usize = 80;
+
+/// Split the program's functions into at most `wanted` partitions that LLVM
+/// can optimize and compile in parallel, losing as little inlining as it
+/// can. A function with one caller joins its caller's group, where LLVM
+/// would have inlined it, until a group reaches a share of the program; a
+/// small function with several callers is copied into each partition that
+/// calls it (see [`SHARED_SMALL`]). Groups are then packed into partitions
+/// of about equal size. Deterministic: the same program splits the same way.
+fn partition(functions: &[(String, String)], wanted: usize) -> Partitioning {
+    let count = functions.len();
+    let index: BTreeMap<&str, usize> = functions
+        .iter()
+        .enumerate()
+        .map(|(at, (name, _))| (name.as_str(), at))
+        .collect();
+    let sizes: Vec<usize> = functions
+        .iter()
+        .map(|(_, text)| text.lines().count().max(1))
+        .collect();
+    // Which defined functions each function refers to (calls, addresses).
+    let references: Vec<BTreeSet<usize>> = functions
+        .iter()
+        .enumerate()
+        .map(|(at, (_, text))| {
+            let mut found = BTreeSet::new();
+            let bytes = text.as_bytes();
+            let mut position = 0;
+            while let Some(offset) = text[position..].find('@') {
+                let start = position + offset + 1;
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric()
+                        || matches!(bytes[end], b'_' | b'.' | b'$'))
+                {
+                    end += 1;
+                }
+                if let Some(&callee) = index.get(&text[start..end])
+                    && callee != at
+                {
+                    found.insert(callee);
+                }
+                position = end.max(start);
+            }
+            found
+        })
+        .collect();
+    if wanted <= 1 || count <= 1 {
+        return Partitioning {
+            count: 1,
+            home: vec![0; count],
+            exported: BTreeSet::new(),
+            copied: vec![BTreeSet::new()],
+            declared: vec![BTreeSet::new()],
+        };
+    }
+    let mut callers: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); count];
+    for (caller, callees) in references.iter().enumerate() {
+        for callee in callees {
+            callers[*callee].insert(caller);
+        }
+    }
+    let total: usize = sizes.iter().sum();
+    let cap = (total / (wanted * 2)).max(1);
+    // Union-find over groups, with each group's size.
+    let mut parent: Vec<usize> = (0..count).collect();
+    let mut group_size = sizes.clone();
+    fn root(parent: &mut [usize], mut at: usize) -> usize {
+        while parent[at] != at {
+            parent[at] = parent[parent[at]];
+            at = parent[at];
+        }
+        at
+    }
+    let mut order: Vec<usize> = (0..count).collect();
+    order.sort_by_key(|at| (sizes[*at], *at));
+    for callee in order {
+        let [caller] = callers[callee].iter().copied().collect::<Vec<_>>()[..] else {
+            continue;
+        };
+        let (a, b) = (root(&mut parent, caller), root(&mut parent, callee));
+        if a != b && group_size[a] + group_size[b] <= cap {
+            parent[b] = a;
+            group_size[a] += group_size[b];
+        }
+    }
+    // Pack groups, largest first, into the lightest partition.
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for at in 0..count {
+        let group = root(&mut parent, at);
+        groups.entry(group).or_default().push(at);
+    }
+    let mut groups: Vec<(usize, Vec<usize>)> = groups
+        .into_values()
+        .map(|members| (members.iter().map(|at| sizes[*at]).sum(), members))
+        .collect();
+    groups.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    let mut loads = vec![0usize; wanted];
+    let mut home = vec![0; count];
+    for (size, members) in groups {
+        let lightest = (0..wanted)
+            .min_by_key(|part| (loads[*part], *part))
+            .unwrap_or(0);
+        loads[lightest] += size;
+        for at in members {
+            home[at] = lightest;
+        }
+    }
+    // Number the partitions that received anything, in order.
+    let mut used: Vec<usize> = home.clone();
+    used.sort_unstable();
+    used.dedup();
+    for at in home.iter_mut() {
+        *at = used.binary_search(at).unwrap_or(0);
+    }
+    let parts = used.len();
+    let mut copied = vec![BTreeSet::new(); parts];
+    let mut declared = vec![BTreeSet::new(); parts];
+    let mut exported = BTreeSet::new();
+    for (caller, callees) in references.iter().enumerate() {
+        for callee in callees {
+            let part = home[caller];
+            if home[*callee] == part {
+                continue;
+            }
+            exported.insert(*callee);
+            if sizes[*callee] <= SHARED_SMALL && callers[*callee].len() > 1 {
+                copied[part].insert(*callee);
+            } else {
+                declared[part].insert(*callee);
+            }
+        }
+    }
+    // A copy's own references must be visible where it is copied.
+    for part in 0..parts {
+        let copies: Vec<usize> = copied[part].iter().copied().collect();
+        for copy in copies {
+            for callee in &references[copy] {
+                if home[*callee] != part && !copied[part].contains(callee) {
+                    exported.insert(*callee);
+                    declared[part].insert(*callee);
+                }
+            }
+        }
+    }
+    Partitioning {
+        count: parts,
+        home,
+        exported,
+        copied,
+        declared,
     }
 }
 
@@ -581,6 +840,9 @@ struct Translator<'a> {
     pointers: BTreeMap<Value, String>,
     /// `i1` form of a comparison or overflow flag.
     flags: BTreeMap<Value, String>,
+    /// Block parameters that always receive one value (or themselves): they
+    /// get no phi and every use names that value instead.
+    forwarded: BTreeMap<Value, Value>,
     body: String,
     label: String,
     temporaries: usize,
@@ -607,6 +869,7 @@ impl<'a> Translator<'a> {
             constants: BTreeMap::new(),
             pointers: BTreeMap::new(),
             flags: BTreeMap::new(),
+            forwarded: BTreeMap::new(),
             body: String::new(),
             label: String::new(),
             temporaries: 0,
@@ -615,7 +878,77 @@ impl<'a> Translator<'a> {
         }
     }
     fn resolve(&self, value: Value) -> Value {
-        self.func.dfg.resolve_aliases(value)
+        let mut value = self.func.dfg.resolve_aliases(value);
+        while let Some(&next) = self.forwarded.get(&value) {
+            value = self.func.dfg.resolve_aliases(next);
+        }
+        value
+    }
+    /// Find the block parameters that are trivial phis: every incoming value
+    /// is either one other value or the parameter itself. Replacing such a
+    /// parameter by that value keeps SSA valid, and removing one can make
+    /// others trivial, so repeat until nothing changes.
+    fn forward_trivial_parameters(&mut self, reachable: &BTreeSet<Block>) {
+        let func = self.func;
+        let entry = func.layout.entry_block();
+        let mut incoming: BTreeMap<Block, Vec<Vec<Value>>> = BTreeMap::new();
+        for &block in reachable {
+            let Some(last) = func.layout.last_inst(block) else {
+                continue;
+            };
+            let pool = &func.dfg.value_lists;
+            for call in func.dfg.insts[last]
+                .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
+            {
+                let mut values = Vec::new();
+                for argument in call.args(pool) {
+                    match argument.as_value() {
+                        Some(value) => values.push(value),
+                        // Exception arguments are rejected later; forward
+                        // nothing into such a block.
+                        None => return,
+                    }
+                }
+                incoming.entry(call.block(pool)).or_default().push(values);
+            }
+        }
+        loop {
+            let mut changed = false;
+            for (&block, edges) in &incoming {
+                if Some(block) == entry {
+                    continue;
+                }
+                for (index, &param) in func.dfg.block_params(block).iter().enumerate() {
+                    if self.forwarded.contains_key(&param) {
+                        continue;
+                    }
+                    let mut only = None;
+                    let mut trivial = true;
+                    for edge in edges {
+                        let Some(&value) = edge.get(index) else {
+                            trivial = false;
+                            break;
+                        };
+                        let value = self.resolve(value);
+                        if value == param || only == Some(value) {
+                            continue;
+                        }
+                        if only.is_some() {
+                            trivial = false;
+                            break;
+                        }
+                        only = Some(value);
+                    }
+                    if let (true, Some(value)) = (trivial, only) {
+                        self.forwarded.insert(param, value);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
     }
     fn ty(&self, value: Value) -> ir::Type {
         self.func.dfg.value_type(value)
@@ -690,12 +1023,19 @@ impl<'a> Translator<'a> {
         Ok(())
     }
     fn defining(&self, value: Value) -> Option<&InstructionData> {
-        match self.func.dfg.value_def(value) {
+        match self.func.dfg.value_def(self.resolve(value)) {
             ValueDef::Result(inst, 0) => Some(&self.func.dfg.insts[inst]),
             _ => None,
         }
     }
     /// Whether a value is clearly an offset rather than an address.
+    /// Whether `value` is a word loaded from memory.
+    fn loaded(&self, value: Value) -> bool {
+        matches!(
+            self.defining(self.resolve(value)),
+            Some(InstructionData::Load { .. })
+        )
+    }
     fn offset_like(&self, value: Value) -> bool {
         let value = self.resolve(value);
         if self.constants.contains_key(&value) {
@@ -746,6 +1086,14 @@ impl<'a> Translator<'a> {
             } else if self.offset_like(right) && !self.offset_like(left) {
                 Some((left, right))
             } else if self.offset_like(left) && !self.offset_like(right) {
+                Some((right, left))
+            } else if self.loaded(left) && !self.loaded(right) {
+                // A word read from memory plus anything else is a handle or
+                // pointer plus an index far more often than the reverse, and
+                // only as a `getelementptr` from a fixed base can LLVM see
+                // consecutive accesses (a byte buffer read in a loop).
+                Some((left, right))
+            } else if self.loaded(right) && !self.loaded(left) {
                 Some((right, left))
             } else {
                 None
@@ -934,6 +1282,37 @@ impl<'a> Translator<'a> {
         self.line(format!("{name} = {operation} {ty} {left}, {right}"));
         Ok(())
     }
+    /// The `i1` a value is the zero extension of, if it is known to be one.
+    fn flag_of(&self, value: Value) -> Option<String> {
+        let value = self.resolve(value);
+        if let Some(flag) = self.flags.get(&value) {
+            return Some(flag.clone());
+        }
+        match self.constants.get(&value).map(String::as_str) {
+            Some("0") => Some("false".into()),
+            Some("1") => Some("true".into()),
+            _ => None,
+        }
+    }
+    /// Bitwise logic, kept in `i1` when both sides are flags so that chains
+    /// of conditions reach their branch without widening at every step.
+    fn logical(&mut self, inst: ir::Inst, operation: &str, args: [Value; 2]) -> Tx<()> {
+        let (Some(left), Some(right)) = (self.flag_of(args[0]), self.flag_of(args[1])) else {
+            return self.binary(inst, operation, args);
+        };
+        let result = self.func.dfg.first_result(inst);
+        let flag = match (operation, left.as_str(), right.as_str()) {
+            ("or", "false", other) | ("or", other, "false") => other.to_owned(),
+            ("and", "true", other) | ("and", other, "true") => other.to_owned(),
+            ("xor", "false", other) | ("xor", other, "false") => other.to_owned(),
+            _ => {
+                let temp = self.temp();
+                self.line(format!("{temp} = {operation} i1 {left}, {right}"));
+                temp
+            }
+        };
+        self.define_flag(result, flag)
+    }
     fn overflow(&mut self, inst: ir::Inst, operation: &str, args: [Value; 2]) -> Tx<()> {
         let results = self.func.dfg.inst_results(inst).to_vec();
         let ty = self.tyn(results[0])?;
@@ -1118,9 +1497,9 @@ impl<'a> Translator<'a> {
                 Opcode::Iadd => self.binary(inst, "add", args)?,
                 Opcode::Isub => self.binary(inst, "sub", args)?,
                 Opcode::Imul => self.binary(inst, "mul", args)?,
-                Opcode::Band => self.binary(inst, "and", args)?,
-                Opcode::Bor => self.binary(inst, "or", args)?,
-                Opcode::Bxor => self.binary(inst, "xor", args)?,
+                Opcode::Band => self.logical(inst, "and", args)?,
+                Opcode::Bor => self.logical(inst, "or", args)?,
+                Opcode::Bxor => self.logical(inst, "xor", args)?,
                 Opcode::Udiv | Opcode::Sdiv | Opcode::Urem | Opcode::Srem => {
                     self.division(inst, opcode, args)?;
                 }
@@ -1175,7 +1554,11 @@ impl<'a> Translator<'a> {
                 let (name, ty) = (self.name(result), self.tyn(result)?);
                 let (from, operand) = (self.tyn(arg)?, self.op(arg));
                 match opcode {
-                    Opcode::Uextend => self.line(format!("{name} = zext {from} {operand} to {ty}")),
+                    Opcode::Uextend => match self.flag_of(arg) {
+                        // Still a zero-extended flag: keep the `i1` form.
+                        Some(flag) => self.define_flag(result, flag)?,
+                        None => self.line(format!("{name} = zext {from} {operand} to {ty}")),
+                    },
                     Opcode::Sextend => self.line(format!("{name} = sext {from} {operand} to {ty}")),
                     Opcode::Ireduce => {
                         self.line(format!("{name} = trunc {from} {operand} to {ty}"));
@@ -1527,6 +1910,7 @@ impl<'a> Translator<'a> {
         let func = self.func;
         let entry = func.layout.entry_block().ok_or("function has no entry")?;
         let reachable = self.reachable();
+        self.forward_trivial_parameters(&reachable);
         // Constants are operands, not instructions, so collect them before
         // any use: block layout order need not be dominance order.
         for block in func.layout.blocks() {
@@ -1612,6 +1996,9 @@ impl<'a> Translator<'a> {
             let _ = writeln!(out, "b{}:", block.as_u32());
             if block != entry {
                 for (index, param) in func.dfg.block_params(block).iter().enumerate() {
+                    if self.forwarded.contains_key(param) {
+                        continue;
+                    }
                     let incoming = self
                         .edges
                         .iter()
@@ -1630,8 +2017,52 @@ impl<'a> Translator<'a> {
             out.push_str(&body);
         }
         out.push_str("}\n");
-        Ok(out)
+        Ok(drop_unused_flags(out))
     }
+}
+
+/// Remove `%vN = zext i1 ...` lines whose value is never used: flags reach
+/// branches and logic as `i1`, so most widened copies are dead. Nothing else
+/// is removed, and a zext has no effects.
+fn drop_unused_flags(text: String) -> String {
+    let mut uses: BTreeMap<&str, usize> = BTreeMap::new();
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    while let Some(found) = text[at..].find("%v") {
+        let start = at + found;
+        let mut end = start + 2;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        let whole = end > start + 2
+            && !(end < bytes.len() && (bytes[end] == b'.' || bytes[end].is_ascii_alphanumeric()));
+        if whole {
+            *uses.entry(&text[start..end]).or_default() += 1;
+        }
+        at = end.max(start + 2);
+    }
+    let dead = |line: &str| {
+        let Some(rest) = line.strip_prefix("  %v") else {
+            return false;
+        };
+        let Some((name, definition)) = rest.split_once(" = ") else {
+            return false;
+        };
+        definition.starts_with("zext i1 ")
+            && name.bytes().all(|byte| byte.is_ascii_digit())
+            && uses.get(&line[2..4 + name.len()]) == Some(&1)
+    };
+    if !text.lines().any(dead) {
+        return text;
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        if !dead(line) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn intrinsic_suffix(ty: &str) -> &str {
@@ -1688,6 +2119,34 @@ mod tests {
         );
         assert!(!interface.signatures.contains_key("helper"));
         assert!(!interface.signatures.contains_key("pair"));
+    }
+
+    #[test]
+    fn widened_flags_nothing_reads_are_dropped() {
+        let text = [
+            "define i64 @f(i64 %v0) {",
+            "b0:",
+            "  %t1 = icmp slt i64 %v0, 0",
+            "  %v1 = zext i1 %t1 to i8",
+            "  %t2 = icmp sgt i64 %v0, 9",
+            "  %v2 = zext i1 %t2 to i64",
+            "  %v12 = zext i1 %t1 to i64",
+            "  br i1 %t1, label %b1, label %b2",
+            "b1:",
+            "  ret i64 %v2",
+            "b2:",
+            "  ret i64 0",
+            "}",
+            "",
+        ]
+        .join("\n");
+        let kept = drop_unused_flags(text);
+        // `%v1` and `%v12` are read nowhere; `%v2` is returned. `%v1` is not
+        // mistaken for a use of `%v12`'s prefix, nor the other way round.
+        assert!(!kept.contains("%v1 = "), "{kept}");
+        assert!(!kept.contains("%v12 = "), "{kept}");
+        assert!(kept.contains("%v2 = zext i1 %t2 to i64"), "{kept}");
+        assert!(kept.contains("icmp slt"), "{kept}");
     }
 
     #[test]
