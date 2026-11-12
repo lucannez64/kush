@@ -34,6 +34,7 @@ mod row_laws_tests;
 mod runtime_types;
 pub mod source;
 mod suspend;
+pub mod timing;
 mod variance;
 
 pub use check::check;

@@ -68,12 +68,21 @@ def main():
                 args.repetitions,
                 dict(os.environ),
             )
+            c = str(root / "main.c")
+            for level in ["-O0", "-O2"]:
+                results[f"`cc {level}`"] = best(
+                    ["cc", level, c, "-o", binary], args.repetitions, dict(os.environ)
+                )
             outputs = set()
-            for command in (builds["Kush, LLVM `--release`"], ["rustc", "-O", rust, "-o", binary]):
+            for command in (
+                builds["Kush, LLVM `--release`"],
+                ["rustc", "-O", rust, "-o", binary],
+                ["cc", "-O2", c, "-o", binary],
+            ):
                 subprocess.run(command, check=True, capture_output=True, env=warm)
                 outputs.add(subprocess.run([binary], capture_output=True).stdout)
             if len(outputs) != 1:
-                raise SystemExit(f"{units} units: the two programs print different results")
+                raise SystemExit(f"{units} units: the programs print different results")
             rows[(units, lines)] = results
     header = " | ".join(f"{units} units ({lines:,} lines)" for units, lines in rows)
     print(f"| Build | {header} |")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate one synthetic program in Kush and in Rust, of a chosen size.
+"""Generate one synthetic program in Kush, Rust and C, of a chosen size.
 
 Each unit is seven small functions (a checked reduction, an element-wise
 kernel, a vector fill, branchy scalar code, a recursion, a search and a
@@ -143,6 +143,69 @@ fn unit_{u}() -> i64 {{
 """
 
 
+def c_unit(u):
+    a, b, c = 3 + u % 7, 11 + u % 13, 5 + u % 5
+    return f"""
+static int64_t sum_{u}(const int64_t *values, int64_t n) {{
+    int64_t acc = {u};
+    for (int64_t i = 0; i < n; i++) acc = acc + values[i] * {a};
+    return acc;
+}}
+
+static void scale_{u}(const int64_t *source, int64_t n, int64_t *target, int64_t factor) {{
+    for (int64_t i = 0; i < n; i++) target[i] = source[i] * factor - {b};
+}}
+
+static int64_t *fill_{u}(int64_t n) {{
+    int64_t *values = malloc((size_t)n * sizeof *values);
+    for (int64_t i = 0; i < n; i++) values[i] = ((i * {7919 + 2 * u} + {u}) & 1023) - 512;
+    return values;
+}}
+
+static int64_t pick_{u}(int64_t x, int64_t y) {{
+    if (x < y) return (x & 1) == 0 ? x * {a} + y : y - x * {c};
+    return y > {b} ? (x - y) * {c} : x + y + {u};
+}}
+
+static int64_t climb_{u}(int64_t n, int64_t acc) {{
+    return n == 0 ? acc : climb_{u}(n - 1, acc + pick_{u}(n, acc & 63));
+}}
+
+static int64_t find_{u}(const int64_t *values, int64_t n, int64_t wanted) {{
+    for (int64_t i = 0; i < n; i++) if (values[i] == wanted) return i;
+    return -1;
+}}
+
+static int64_t unit_{u}(void) {{
+    int64_t n = {64 + u % 32};
+    int64_t *source = fill_{u}(n);
+    int64_t *target = fill_{u}(n);
+    scale_{u}(source, n, target, {c});
+    int64_t found = find_{u}(source, n, {(u * 37) % 512 - 256});
+    int64_t result = sum_{u}(target, n) + climb_{u}({20 + u % 9}, {u}) + found;
+    free(source);
+    free(target);
+    return result;
+}}
+"""
+
+
+def c_program(units):
+    body = "".join(c_unit(u) for u in range(units))
+    calls = "\n".join(f"    result = (result ^ unit_{u}()) + {u & 1};" for u in range(units))
+    return f"""#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+{body}
+int main(void) {{
+    int64_t result = 0;
+{calls}
+    printf("%lld\\n", (long long)result);
+    return 0;
+}}
+"""
+
+
 def kush_program(units):
     body = "".join(kush_unit(u) for u in range(units))
     calls = "\n".join(f"    result = (result ^ unit_{u}()) + {u & 1};" for u in range(units))
@@ -177,6 +240,7 @@ def main():
     args.directory.mkdir(parents=True, exist_ok=True)
     (args.directory / "main.kush").write_text(kush_program(args.units))
     (args.directory / "main.rs").write_text(rust_program(args.units))
+    (args.directory / "main.c").write_text(c_program(args.units))
 
 
 if __name__ == "__main__":

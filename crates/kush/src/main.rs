@@ -767,8 +767,8 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
             writeln!(out, "Checked {name}: {} logical definitions (restricted kernel; ownership/effect/subtype checking is not implemented).", checked.definitions.len()).map_err(output_error)?;
         }
     } else if command == "build" || command == "run" || command == "eval" {
-        let program = load()?;
-        let checked = kush::executable::check_program(&program)
+        let program = kush::timing::time("load and parse", load)?;
+        let checked = kush::timing::time("check", || kush::executable::check_program(&program))
             .map_err(|e| (1, program.sources.render(&e)))?;
         if command == "eval" {
             let argv = std::iter::once(&args[1])
@@ -846,7 +846,11 @@ fn main() -> ExitCode {
             }
         };
     }
-    match run(args, &mut io::stdout().lock()) {
+    let started = std::time::Instant::now();
+    let outcome = run(args, &mut io::stdout().lock());
+    kush::timing::add("total", started.elapsed());
+    kush::timing::report();
+    match outcome {
         Ok(code) => ExitCode::from(code),
         Err((code, message)) => {
             let _ = writeln!(io::stderr().lock(), "{message}");

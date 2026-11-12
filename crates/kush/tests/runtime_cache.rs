@@ -161,3 +161,48 @@ fn a_bare_output_name_still_reuses_the_runtime() {
     assert_eq!(compiles(root), 1);
     assert_eq!(entries[0], entries[1]);
 }
+
+/// With GCC or Clang itself (no wrapper), only what the compiler reads is
+/// part of the key: an unrelated variable or another working directory
+/// reuses the runtime, a variable the compiler reads does not.
+#[test]
+fn only_what_the_compiler_reads_invalidates_the_runtime() {
+    let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+    let root = scratch.path();
+    fs::write(root.join("main.kush"), "fn main()->i64 ! {} {42}\n").unwrap();
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    let entries = || {
+        fs::read_dir(root.join("cache"))
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "cache")
+            })
+            .count()
+    };
+    let build = |output: &str, directory: &Path| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kush"));
+        command
+            .current_dir(directory)
+            .arg("build")
+            .arg(root.join("main.kush"))
+            .arg("-o")
+            .arg(root.join(output))
+            .env("KUSH_RUNTIME_CACHE", root.join("cache"))
+            .env_remove("KUSH_BACKEND")
+            .env_remove("KUSH_NO_RUNTIME_CACHE");
+        command
+    };
+    success(&mut build("first", root));
+    let first = entries();
+    success(build("second", root).env("KUSH_UNRELATED_TEST_VARIABLE", "1"));
+    success(&mut build("third", &elsewhere));
+    assert_eq!(entries(), first);
+    success(build("fourth", root).env("CPATH", root));
+    assert_eq!(entries(), first + 1);
+}

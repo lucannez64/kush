@@ -158,6 +158,33 @@ Overflow checks become `llvm.*.with.overflow` intrinsics, which LLVM removes
 for induction variables and other provably bounded values. Checks on data
 values are handled by [deferred overflow](deferred-overflow.md).
 
+### Parallel partitions
+
+A large program is split into partitions that `clang` optimizes and compiles
+at the same time, one process per partition, each linked with the runtime's
+inlinable bodies. The number of partitions is about one per 30,000 lines of
+IR and at least one per core, but never so many that one holds less than
+8,000 lines; a smaller program stays one module. Functions are grouped so
+that inlining is lost as little as possible:
+
+- a function with one caller joins its caller's group (where LLVM would
+  have inlined it), until a group reaches a share of the program;
+- a function of at most 80 lines with several callers is copied, as
+  `available_externally`, into every partition that calls it, as C++ inline
+  functions are;
+- groups are packed, largest first, into the lightest partition. The split
+  is deterministic.
+
+Functions called across partitions get hidden linkage, so the final
+executable exports nothing new. Splitting still costs run time when a hot
+function is cut from its only caller: forcing the `checked-loops` benchmark
+into two or three partitions made its dot product or scale kernel up to 25%
+slower. That is why small programs stay whole.
+
+`KUSH_LLVM_PARTITIONS=N` forces `N` partitions (1 keeps the program whole);
+`KUSH_EMIT_LLVM=path` then writes partition `k > 0` to `path.k`.
+`KUSH_TIME_PHASES=1` prints the time of each build phase to standard error.
+
 ### Differences from Cranelift
 
 Running out of stack is a panic (`panic: stack exhausted`, then abort) on
@@ -281,12 +308,13 @@ to be nearly all of the front end, is both faster and
 that remembers nothing.
 
 These are small programs, and the release result does not carry over to
-larger ones. On a generated program of 2,300 to 11,500 lines
+larger ones. On a generated program of 775 to 11,500 lines
 ([benchmarks/build-scale](../benchmarks/build-scale/README.md)) a
-development build stays 15% to 45% faster than a `rustc` debug build, but an
-LLVM release build is 2.6 to 3.4 times slower than `rustc -C opt-level=3`,
-mostly LLVM vectorizing deferred-overflow loops. Kush also checks and
-compiles the whole program on every build, in one LLVM module on one core.
+development build is faster than both `cc -O0` and a `rustc` debug build,
+and an LLVM release build is 1.1 to 2 times slower than
+`rustc -C opt-level=3`, mostly LLVM vectorizing deferred-overflow loops.
+Large programs are compiled in [parallel partitions](#parallel-partitions);
+Kush still checks and compiles the whole program on every build.
 
 ## Limits
 
