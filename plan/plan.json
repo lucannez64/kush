@@ -4906,10 +4906,16 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "examples/media: typed Kush API (Window, Event, Key, Button, Axis, Audio) over a dependency-free Rust adapter linking the system SDL2. Gamepads tested with a virtual SDL controller.",
-      "commit": null,
-      "log": []
+      "commit": "a181540",
+      "log": [
+        {
+          "time": "2026-11-12 21:40:40",
+          "who": "agent",
+          "text": "done a181540"
+        }
+      ]
     },
     {
       "id": "GAMEBOY-SOUND",
@@ -4920,10 +4926,16 @@
         "GAMEBOY",
         "MEDIA"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "APU (2 square, wave, noise, frame sequencer on DIV bit 12, mixing); window with sound paced by the audio queue, gamepads. dmg_sound 9/12; wave-RAM-while-playing quirks left.",
-      "commit": null,
-      "log": []
+      "commit": "a181540",
+      "log": [
+        {
+          "time": "2026-11-12 21:40:40",
+          "who": "agent",
+          "text": "done a181540"
+        }
+      ]
     }
   ]
 }
