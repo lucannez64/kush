@@ -431,7 +431,8 @@ fn exclusive_loans_survive_into_later_generic_method_arguments() {
     // Scalar arguments are read before the exclusive receiver borrow starts
     // (two-phase borrow, docs/places.md); a reference argument would alias
     // the receiver for the whole call and is still rejected.
-    for source in ["struct P { x: i64 }
+    {
+        let source = "struct P { x: i64 }
         impl P {
             fn consume<T>(self: &mut Self, value: T) -> Unit ! {panic} {
                 self.x = self.x + 1;
@@ -443,8 +444,7 @@ fn exclusive_loans_survive_into_later_generic_method_arguments() {
             p.consume(p.peek());
             p.consume(p.x);
             p.x
-        }"]
-    {
+        }";
         let program = check(source).unwrap();
         let mut output = Vec::new();
         assert_eq!(program.evaluate(&mut output).unwrap(), 3);
