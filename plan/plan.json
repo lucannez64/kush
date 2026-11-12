@@ -4850,14 +4850,19 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Module-level const; v[i] reads and place[i] = x writes on Vec fields through references; field assignment on let mut records; &self/&mut self methods on fields and through references; two-phase exclusive borrows in calls; records up to 256 words. docs/places.md.",
-      "commit": null,
+      "commit": "b5641cc",
       "log": [
         {
           "time": "2026-11-12 18:36:30",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-12 18:42:06",
+          "who": "agent",
+          "text": "done b5641cc"
         }
       ]
     },
@@ -4877,6 +4882,11 @@
           "time": "2026-11-12 18:36:30",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-12 18:42:06",
+          "who": "agent",
+          "text": "Core done in b5641cc: Blargg cpu_instrs + instr_timing pass, PPU scene test, terminal front end at 60 fps. Blocked on fetching ROMs: dmg-acid2 and homebrew games need RGBDS (building it was not permitted here) or ROM files from the user."
         }
       ]
     }
