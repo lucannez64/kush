@@ -4814,6 +4814,11 @@ struct Functions<'a> {
     /// `Some` is a synthetic lambda/adapter body.
     bodies: Vec<Option<Function>>,
     instances: BTreeMap<InstanceKey, usize>,
+    /// Instances created so far of each declaration; see [`MAX_INSTANCES`].
+    instance_counts: BTreeMap<BindingId, usize>,
+    /// Instances with type, grade, natural, effect or impl arguments; see
+    /// [`MAX_GENERIC_INSTANCES`].
+    generic_instances: usize,
     pending: Vec<usize>,
     /// Synthetic function adapter cache, keyed by optional static source
     /// function index and the source/target arrow types.
@@ -4888,7 +4893,20 @@ struct Functions<'a> {
     union_calls: Vec<UnionCallSpec>,
     logical: &'a crate::check::LogicalEnvironment,
 }
-const MAX_FUNCTIONS: usize = 256;
+/// Most instances of any one declaration. Specialization only multiplies
+/// instances of a declaration through its type, grade, natural or effect
+/// arguments, so this is what stops polymorphic recursion (each call
+/// instantiating the next with a larger type) from specializing forever. The
+/// number of functions in a program is otherwise unbounded: at most this many
+/// per declaration, plus the lambdas and adapters those instances contain.
+const MAX_INSTANCES: usize = 256;
+/// Most instances of generic declarations in a program, all together. In a
+/// polymorphic recursion through several declarations each step wraps the
+/// type once more, so the per-declaration cap alone would allow types
+/// 256 times the number of declarations deep, and checking time grows with
+/// the cube of that (32 declarations took over a minute to reject). Ordinary
+/// functions have one instance each and are not counted.
+const MAX_GENERIC_INSTANCES: usize = 1024;
 /// Total attempts for the bounded cross-parameter partition replay. This is a
 /// deterministic work budget, not a completeness claim: exhausting it is an
 /// explicit diagnostic asking for specialization.
@@ -5091,6 +5109,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         signatures: Vec::new(),
         bodies: Vec::new(),
         instances: BTreeMap::new(),
+        instance_counts: BTreeMap::new(),
+        generic_instances: 0,
         pending: Vec::new(),
         adapter_cache: BTreeMap::new(),
         certificates: Vec::new(),
@@ -9988,11 +10008,28 @@ impl<'a> Functions<'a> {
         }
         let declared = self.declared[&binding];
         let f = declared.ast;
-        if self.signatures.len() >= MAX_FUNCTIONS {
+        let count = self.instance_counts.entry(binding).or_default();
+        if *count >= MAX_INSTANCES {
             return Err(Diagnostic::new(
                 origin.unwrap_or(declared.span),
-                "executable limit exceeded (256 function instances); polymorphic recursion cannot be specialized",
+                "executable limit exceeded (256 instances of one function); polymorphic recursion cannot be specialized",
             ));
+        }
+        *count += 1;
+        let (_, key_types, key_grades, key_naturals, key_effects, key_impl) = &key;
+        if !(key_types.is_empty()
+            && key_grades.is_empty()
+            && key_naturals.is_empty()
+            && key_effects.is_empty()
+            && key_impl.is_none())
+        {
+            if self.generic_instances >= MAX_GENERIC_INSTANCES {
+                return Err(Diagnostic::new(
+                    origin.unwrap_or(declared.span),
+                    "executable limit exceeded (1024 instances of generic functions in all; polymorphic recursion, or very many distinct specializations)",
+                ));
+            }
+            self.generic_instances += 1;
         }
         let mut type_generics = Vec::new();
         let mut grade_generics = Vec::new();
@@ -11263,13 +11300,9 @@ impl<'a> Functions<'a> {
     /// Register a synthetic, already-checked function body (lambda or adapter).
     /// Synthetic entries share the same index space as declared instances, so
     /// an `FnValue` code pointer stays stable.
+    /// Not counted against [`MAX_INSTANCES`]: each one belongs to an instance
+    /// that is.
     fn add_synthetic(&mut self, signature: Signature, function: Function) -> Result<usize> {
-        if self.signatures.len() >= MAX_FUNCTIONS {
-            return Err(Diagnostic::new(
-                function.span,
-                "executable limit exceeded (256 function instances); lambda/adapters require more instances",
-            ));
-        }
         let index = self.signatures.len();
         self.signatures.push(signature);
         self.bodies.push(Some(function));

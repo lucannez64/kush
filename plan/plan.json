@@ -4783,7 +4783,56 @@
       "status": "todo",
       "desc": "Release builds are 2-3.5x slower than rustc -O on benchmarks/build-scale, from LLVM's work on deferred loops. Ideas: defer only where it pays, split the module for parallel codegen. Also: MAX_FUNCTIONS = 256 and the 100,000-token file limit cap programs at about 2,300 and 12,000 lines.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-12 04:22:37",
+          "who": "claude",
+          "text": "MAX_FUNCTIONS (256 per program) replaced by MAX_INSTANCES (256 per declaration); the 100,000-token file limit remains."
+        },
+        {
+          "time": "2026-11-12 05:11:35",
+          "who": "claude",
+          "text": "Release build still 2.6-3.4x rustc -O. Next lever: split the module for parallel LLVM codegen."
+        }
+      ]
+    },
+    {
+      "id": "DEFER-PAYS",
+      "title": "Deferred overflow only where it pays, and cheaper to compile",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "BUILD-SCALE"
+      ],
+      "status": "done",
+      "desc": "Prove element accesses in range per chunk from exact values and emit them unchecked; recognize reduction chains; type-bounded leaves; chunk limit instead of fuel; one fallback copy; defer only loops LLVM vectorizes profitably on the target.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 05:11:35",
+          "who": "claude",
+          "text": "Every deferred loop shape measured gains 1.4-2.3x on baseline x86-64 and 3.9-5.8x native (was: only single-slice loops vectorized). LLVM time on the 6,400-line build-scale program 6.2 -> 5.3 s. 1,735 tests on three settings."
+        }
+      ]
+    },
+    {
+      "id": "DEFER-PAYS-REVIEW",
+      "title": "Independent review of per-chunk bounds proofs",
+      "size": "S",
+      "hard": true,
+      "deps": [
+        "DEFER-PAYS"
+      ],
+      "status": "done",
+      "desc": "Hoisted bounds checks remove per-element checks from memory accesses; needs an independent review before merge.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 05:11:35",
+          "who": "claude",
+          "text": "Fifth independent review: accesses after the counter update were proved one step short (out-of-bounds read and write); fixed and re-reviewed, 0 differences over ~8,000 further fuzzed runs. Also a compile-time blowup from the per-declaration instance cap (mutual polymorphic recursion); fixed with a 1024 total for generic instances."
+        }
+      ]
     }
   ]
 }

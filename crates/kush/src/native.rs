@@ -4217,7 +4217,6 @@ fn lower(
             tracked: vec![],
             function_index: index,
             deferred: None,
-            checked_fuel: None,
             bytes_from,
             read_all,
             read_line,
@@ -4259,6 +4258,8 @@ fn lower(
             regions: Vec::new(),
             aborts: Vec::new(),
             slice_layouts: BTreeMap::new(),
+            proved_accesses: std::collections::BTreeSet::new(),
+            store_proved: false,
             upper_bounds: Vec::new(),
             vec_shadows: BTreeMap::new(),
             pending_pushes: Vec::new(),
@@ -5371,7 +5372,14 @@ struct Generator<'a, 'b> {
     program: &'b Executable,
     codegen: CodegenOptions,
     // Runtime-guarded descriptor facts, scoped to one versioned loop.
-    slice_layouts: BTreeMap<usize, usize>,
+    /// Slice locals whose layout a specialized copy of a loop assumes:
+    /// slot to (stride in bytes, byte flag).
+    slice_layouts: BTreeMap<usize, (i64, i64)>,
+    /// Element accesses (by [`deferred::key`]) a deferred chunk has proved
+    /// in range; they are emitted without checks.
+    proved_accesses: std::collections::BTreeSet<usize>,
+    /// The `Slice.set` being lowered is one of `proved_accesses`.
+    store_proved: bool,
     // Dominating signed `index < length` tests, identified by SSA value.
     upper_bounds: Vec<(Value, Value)>,
     /// Vector locals whose length and capacity a loop keeps in variables:
@@ -5468,8 +5476,6 @@ struct Generator<'a, 'b> {
     function_index: usize,
     /// The innermost loop whose overflow panics are deferred to its exit.
     deferred: Option<DeferredLoop>,
-    /// Fuel of a chunk of a deferred loop that runs with ordinary checks.
-    checked_fuel: Option<Variable>,
 }
 /// State of one loop lowered with deferred overflow checks; see
 /// [`deferred`] for the conditions and the argument that this is unobservable.
@@ -5479,8 +5485,8 @@ struct DeferredLoop {
     sticky: Variable,
     /// OR of the magnitude words of each tracked operand.
     leaves: BTreeMap<usize, Variable>,
-    /// Iterations left before the loop must stop and report.
-    fuel: Variable,
+    /// The chunk's loop test: counter slot, comparison, limit.
+    limit: (usize, IntCC, Value),
 }
 /// An enclosing `AbortScope` during code generation.
 #[derive(Clone, Copy)]
@@ -8869,6 +8875,19 @@ impl Generator<'_, '_> {
                                     .ins()
                                     .load(I64, ir::MemFlagsData::new(), values[0], 0);
                         }
+                        if *op == BytesOp::Get
+                            && self.proved_accesses.contains(&deferred::key(expr))
+                        {
+                            // A deferred chunk proved it in range. Data
+                            // follows the 16-byte header.
+                            let address = self.builder.ins().iadd(values[0], values[1]);
+                            return Some(vec![self.builder.ins().uload8(
+                                I64,
+                                ir::MemFlagsData::new(),
+                                address,
+                                16,
+                            )]);
+                        }
                         if matches!(op, BytesOp::Push | BytesOp::PushReserved)
                             && self.codegen.optimization == Optimization::Speed
                         {
@@ -8962,7 +8981,13 @@ impl Generator<'_, '_> {
                             }
                             _ => None,
                         };
-                        let result = self.vec_call(*op, *element, values);
+                        let op = match op {
+                            VecOp::Get if self.proved_accesses.contains(&deferred::key(expr)) => {
+                                VecOp::At
+                            }
+                            other => *other,
+                        };
+                        let result = self.vec_call(op, *element, values);
                         self.push_shadow = None;
                         return Some(result);
                     }
@@ -8970,7 +8995,16 @@ impl Generator<'_, '_> {
                         return Some(self.alloc_vec_call(*op, *element, values, expr.ty));
                     }
                     Target::Slice(op, element) => {
-                        return Some(self.slice_call(*op, *element, values));
+                        // A deferred chunk proved this access in range.
+                        let proved = self.proved_accesses.contains(&deferred::key(expr));
+                        let op = match op {
+                            SliceOp::Get if proved => SliceOp::At,
+                            other => *other,
+                        };
+                        self.store_proved = proved && op == SliceOp::Set;
+                        let result = self.slice_call(op, *element, values);
+                        self.store_proved = false;
+                        return Some(result);
                     }
                     Target::DynArray(op, element) => {
                         return Some(self.dyn_array_call(*op, *element, values));
@@ -9148,9 +9182,9 @@ impl Generator<'_, '_> {
             .iter()
             .map(|v| self.builder.use_var(*v))
             .collect();
-        if let Some(width) = self.slice_layouts.get(&slot).copied() {
-            words[2] = self.constant((width * 8) as i64);
-            words[3] = self.constant(0);
+        if let Some((stride, bytes)) = self.slice_layouts.get(&slot).copied() {
+            words[2] = self.constant(stride);
+            words[3] = self.constant(bytes);
         }
         words
     }
@@ -9949,14 +9983,15 @@ impl Generator<'_, '_> {
     fn lower_while_checks(&mut self, condition: &Expr, body: &ex::Block) {
         if self.codegen.defers_overflow()
             && self.deferred.is_none()
-            && let Some(plan) = deferred::plan(
+            && let Some((plan, accesses)) = deferred::plan(
                 &self.program.functions[self.function_index],
                 condition,
                 body,
                 self.codegen.wide_multiply(),
+                self.codegen.native_cpu,
             )
         {
-            self.lower_deferred_while(plan, condition, body);
+            self.lower_deferred_while(plan, &accesses, condition, body);
         } else {
             self.lower_checked_while(condition, body);
         }
@@ -9998,7 +10033,7 @@ impl Generator<'_, '_> {
             let join = self.builder.create_block();
             self.builder.ins().brif(matches, fast, &[], generic, &[]);
             self.builder.switch_to_block(fast);
-            self.slice_layouts.insert(slot, width);
+            self.slice_layouts.insert(slot, ((width * 8) as i64, 0));
             self.while_body(condition, body, candidate);
             self.slice_layouts.remove(&slot);
             self.jump(join, &[]);
@@ -10023,26 +10058,19 @@ impl Generator<'_, '_> {
         let depth = self.capture_handler_depth();
         self.jump(head, &[]);
         self.builder.switch_to_block(head);
-        if let Some(test) = self.scalar(condition) {
+        // A deferred chunk runs to its own limit, which implies the
+        // condition (see `lower_deferred_while`).
+        let chunk_test =
+            self.deferred
+                .as_ref()
+                .map(|state| state.limit)
+                .map(|(counter, compare, limit)| {
+                    let value = self.local_words(counter)[0];
+                    self.builder.ins().icmp(compare, value, limit)
+                });
+        if let Some(test) = chunk_test.or_else(|| self.scalar(condition)) {
             let fact = candidate
                 .map(|(index, view, _)| (self.local_words(index)[0], self.local_words(view)[1]));
-            // A deferred loop runs a bounded number of iterations at a time.
-            let fuel = self
-                .deferred
-                .as_ref()
-                .map(|state| state.fuel)
-                .or(self.checked_fuel);
-            let test = match fuel {
-                Some(fuel) => {
-                    let left = self.builder.use_var(fuel);
-                    let some = self.builder.ins().icmp_imm_s(IntCC::NotEqual, left, 0);
-                    let some = self.builder.ins().uextend(I64, some);
-                    let holds = self.builder.ins().icmp_imm_s(IntCC::NotEqual, test, 0);
-                    let holds = self.builder.ins().uextend(I64, holds);
-                    self.builder.ins().band(holds, some)
-                }
-                None => test,
-            };
             self.builder.ins().brif(test, enter, &[], exit, &[]);
             self.builder.seal_block(enter);
             self.builder.switch_to_block(enter);
@@ -10055,11 +10083,6 @@ impl Generator<'_, '_> {
             self.loops.pop();
             self.upper_bounds.truncate(saved);
             if finished.is_some() {
-                if let Some(fuel) = fuel {
-                    let left = self.builder.use_var(fuel);
-                    let left = self.builder.ins().iadd_imm_s(left, -1);
-                    self.builder.def_var(fuel, left);
-                }
                 self.jump(head, &[]);
             }
         }
@@ -10074,8 +10097,10 @@ impl Generator<'_, '_> {
         }
         let index = values[4];
         if op == SliceOp::Set {
-            let invalid = self.slice_out_of_bounds(index, length);
-            self.guard(invalid);
+            if !self.store_proved {
+                let invalid = self.slice_out_of_bounds(index, length);
+                self.guard(invalid);
+            }
             let offset = self.builder.ins().imul(index, stride);
             let address = self.builder.ins().iadd(pointer, offset);
             let value = values[5];
@@ -10715,18 +10740,27 @@ impl Generator<'_, '_> {
     /// Lower an innermost counted loop with its overflow panics deferred to
     /// the exit. `deferred` documents why the result is indistinguishable
     /// from checking every operation.
-    /// The loop body is lowered three times: the deferred chunk, specialized
-    /// to the walked slice being consecutive whole elements; one chunk with
-    /// ordinary checks, shared by a chunk that failed its certificate
-    /// (replayed from its entry state) and a chunk whose upward counter
-    /// starts negative; and the whole loop with ordinary checks, for views
-    /// that overlap or a walked slice with another layout. An ordinary loop
-    /// over a slice is lowered twice.
-    fn lower_deferred_while(&mut self, plan: deferred::Plan, condition: &Expr, body: &ex::Block) {
+    /// The loop body is lowered twice, as an ordinary loop over a slice is:
+    /// once as the deferred chunk, specialized to the plain layout of the
+    /// slices it touches and with its element accesses proved in range, and
+    /// once as the rest of the loop with ordinary checks. The second serves
+    /// everything rare: views that overlap or a slice with another layout
+    /// (the whole loop), accesses not provably in range (from that chunk
+    /// on), and a chunk whose certificate failed (from its entry state).
+    /// After one of those the loop does not go back to chunks: data large
+    /// enough to fail a certificate is usually large throughout, and
+    /// replaying every chunk would do the work twice. Every further copy
+    /// measured about 5 ms of LLVM time per loop.
+    fn lower_deferred_while(
+        &mut self,
+        plan: deferred::Plan,
+        accesses: &[deferred::Access<'_>],
+        condition: &Expr,
+        body: &ex::Block,
+    ) {
         let zero = self.constant(0);
         let sticky = self.builder.declare_var(I64);
         let count = self.builder.declare_var(I64);
-        let fuel = self.builder.declare_var(I64);
         let mut leaves = BTreeMap::new();
         for key in &plan.leaves {
             leaves.insert(*key, self.builder.declare_var(I64));
@@ -10737,10 +10771,8 @@ impl Generator<'_, '_> {
         // further work no matter how long the loop would have run, or what
         // the wrapped values do to it in the meantime.
         let chunk = self.builder.create_block();
+        // The rest of the loop with ordinary checks; see the doc comment.
         let checked = self.builder.create_block();
-        // Where every chunk ends: out of fuel means the loop may have more
-        // to do; anything else is the loop's own exit.
-        let next = self.builder.create_block();
         let mut unsuitable = self.constant(0);
         // A replay re-reads what the first attempt read, so nothing the loop
         // reads may be something it wrote. The borrow rules already say so
@@ -10760,56 +10792,80 @@ impl Generator<'_, '_> {
             let both = self.builder.ins().uextend(I64, both);
             unsuitable = self.builder.ins().bor(unsuitable, both);
         }
-        // The deferred chunk is specialized to the slice the loop walks
-        // being consecutive whole elements; nothing else would vectorize.
+        // The deferred chunk is specialized to every slice the loop reads or
+        // writes being consecutive whole elements; nothing else would
+        // vectorize. (A byte buffer viewed as `&[i64]` is not.)
         let candidate = self.loop_slice(condition);
-        let layout = candidate.filter(|_| {
-            self.codegen.optimization == Optimization::Speed && self.slice_layouts.is_empty()
-        });
-        if let Some((_, slot, width)) = layout {
-            let words = self.local_words(slot);
-            let stride =
-                self.builder
-                    .ins()
-                    .icmp_imm_s(IntCC::NotEqual, words[2], (width * 8) as i64);
-            let stride = self.builder.ins().uextend(I64, stride);
-            unsuitable = self.builder.ins().bor(unsuitable, stride);
-            unsuitable = self.builder.ins().bor(unsuitable, words[3]);
+        let mut layouts: BTreeMap<usize, (i64, i64)> = BTreeMap::new();
+        if self.codegen.optimization == Optimization::Speed && self.slice_layouts.is_empty() {
+            if let Some((_, slot, width)) = candidate {
+                layouts.insert(slot, ((width * 8) as i64, 0));
+            }
+            for access in accesses {
+                if let deferred::Container::Slice(element) = access.container
+                    && let ExprKind::Local(slot) | ExprKind::Peek(slot) = access.receiver.kind
+                {
+                    let width = self.program.width(element);
+                    layouts.insert(slot, ((width * 8) as i64, 0));
+                }
+            }
         }
-        // Such a loop is an ordinary loop: no chunks, no fuel. (Running it
-        // through the checked chunk instead measured 2.4 times slower.)
-        let plain = self.builder.create_block();
-        self.builder.ins().brif(unsuitable, plain, &[], chunk, &[]);
-        self.builder.switch_to_block(plain);
-        self.while_body(condition, body, candidate);
-        self.jump(done, &[]);
-        // Every chunk starts here, so the chunks form one ordinary loop
-        // with a single way in.
+        for (slot, (stride, bytes)) in &layouts {
+            let words = self.local_words(*slot);
+            let stride = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::NotEqual, words[2], *stride);
+            let stride = self.builder.ins().uextend(I64, stride);
+            let flag = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::NotEqual, words[3], *bytes);
+            let flag = self.builder.ins().uextend(I64, flag);
+            unsuitable = self.builder.ins().bor(unsuitable, stride);
+            unsuitable = self.builder.ins().bor(unsuitable, flag);
+        }
+        self.builder
+            .ins()
+            .brif(unsuitable, checked, &[], chunk, &[]);
         self.builder.switch_to_block(chunk);
         self.builder.def_var(sticky, zero);
         self.builder.def_var(count, zero);
-        let full = self.constant(deferred::CHUNK);
-        self.builder.def_var(fuel, full);
         for tracker in leaves.values() {
             self.builder.def_var(*tracker, zero);
         }
-        // An upward counter that starts a chunk non-negative stays so, which
-        // is what removes the lower bounds check of every index it forms.
-        // Inside one loop LLVM sees that for itself; across chunks it has to
-        // be shown the starting sign. A chunk that starts negative (rare,
-        // and legal) runs with ordinary checks.
-        if let Some(counter) = plan.ascending {
-            let start = self.local_words(counter)[0];
-            let negative = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::SignedLessThan, start, 0);
-            let chunked = self.builder.create_block();
-            self.builder
-                .ins()
-                .brif(negative, checked, &[], chunked, &[]);
-            self.builder.switch_to_block(chunked);
+        let ExprKind::Binary(comparison, _, bound) = &condition.kind else {
+            unreachable!("a counted loop compares its counter");
+        };
+        let comparison = comparison.clone();
+        let unsigned = self.program.functions[self.function_index].locals[plan.counter]
+            .ty
+            .int_kind()
+            .is_some_and(|kind| !kind.signed());
+        let start = self.local_words(plan.counter)[0];
+        // The planner's bound has no effects and cannot change in the loop;
+        // evaluating it here makes the checks the condition would make on
+        // its next test, at the same point.
+        let bound = self
+            .scalar(bound)
+            .expect("a loop bound always produces a value");
+        // Prove every element access of this chunk in range, so the chunk
+        // needs no per-element checks: every index is the counter plus a
+        // constant, and the counter, the bound and the lengths are exact
+        // (none of them is ever deferred). A chunk where that fails runs the
+        // rest of the loop with ordinary checks, which panic where they
+        // should.
+        if !accesses.is_empty() {
+            let outside = self.accesses_outside(accesses, &comparison, start, bound);
+            let proved = self.builder.create_block();
+            self.builder.ins().brif(outside, checked, &[], proved, &[]);
+            self.builder.switch_to_block(proved);
         }
+        // The chunk runs while the counter is short of a limit: the bound,
+        // or `CHUNK` steps from here if that comes first. One counted exit,
+        // which is what LLVM vectorizes most cheaply.
+        let limit = self.chunk_limit(&comparison, unsigned, start, bound, plan.step);
+        let compare = self.counter_comparison(&comparison, unsigned);
         let mut entry_magnitudes = BTreeMap::new();
         for slot in &plan.accumulators {
             let value = self.local_words(*slot)[0];
@@ -10821,35 +10877,48 @@ impl Generator<'_, '_> {
             .iter()
             .map(|slot| (*slot, self.local_words(*slot)))
             .collect();
+        let counter = plan.counter;
+        let step = plan.step;
         self.deferred = Some(DeferredLoop {
             plan,
             sticky,
             leaves,
-            fuel,
+            limit: (counter, compare, limit),
         });
-        if let Some((_, slot, width)) = layout {
-            self.slice_layouts.insert(slot, width);
-        }
+        self.slice_layouts
+            .extend(layouts.iter().map(|(slot, layout)| (*slot, *layout)));
+        self.proved_accesses = accesses.iter().map(|access| access.call).collect();
         self.while_body(condition, body, candidate);
-        if let Some((_, slot, _)) = layout {
-            self.slice_layouts.remove(&slot);
+        self.proved_accesses.clear();
+        for slot in layouts.keys() {
+            self.slice_layouts.remove(slot);
         }
         let state = self.deferred.take().expect("deferred loop");
+        let end = self.local_words(counter)[0];
         if !state.plan.obligations.is_empty() {
             // How many terms the reductions took in, at most: each
             // accumulating operation runs at most once per iteration, and
-            // the fuel says how many iterations completed. One more covers
-            // an iteration that left the loop part-way. Counting in the
-            // loop would be exact but costs a vector reduction of its own.
+            // the counter moved by its step once per iteration (a deferred
+            // loop has no `break`, and a panic ends the process). One more
+            // is a margin. Counting in the loop would be exact but costs a
+            // vector reduction of its own.
             let accumulating = state
                 .plan
                 .modes
                 .values()
                 .filter(|mode| **mode == deferred::Mode::Accumulate)
                 .count() as i64;
-            let left = self.builder.use_var(fuel);
-            let limit = self.constant(deferred::CHUNK + 1);
-            let started = self.builder.ins().isub(limit, left);
+            let distance = match comparison {
+                Kind::Lt | Kind::Le => self.builder.ins().isub(end, start),
+                _ => self.builder.ins().isub(start, end),
+            };
+            let iterations = if step == 1 {
+                distance
+            } else {
+                let step = self.constant(step);
+                self.builder.ins().udiv(distance, step)
+            };
+            let started = self.builder.ins().iadd_imm_s(iterations, 1);
             let terms = self.builder.ins().imul_imm_s(started, accumulating);
             self.builder.def_var(count, terms);
             // The certificate: every bound is within the limit.
@@ -10866,8 +10935,8 @@ impl Generator<'_, '_> {
             let certified = self.builder.create_block();
             let replay = self.builder.create_block();
             self.builder.ins().brif(proved, certified, &[], replay, &[]);
-            // Without it nothing is known: run this chunk again from its
-            // entry state with ordinary checks, then go on in chunks.
+            // Without it nothing is known: go back to this chunk's entry
+            // state and run the rest of the loop with ordinary checks.
             self.builder.switch_to_block(replay);
             for (slot, words) in entry {
                 self.assign(slot, &words);
@@ -10883,22 +10952,160 @@ impl Generator<'_, '_> {
             .ins()
             .icmp_imm_s(IntCC::SignedLessThan, overflowed, 0);
         self.guard(overflowed);
-        self.jump(next, &[]);
-        // The one chunk with ordinary checks. Every way in arrives with the
-        // locals of a checked execution: untouched, or a chunk's entry state
-        // restored, or the result of an earlier chunk that passed.
+        // The chunk stopped at its limit or at the loop's own end; the
+        // condition, with the bound evaluated at the chunk's start, says
+        // which.
+        let more = self.builder.ins().icmp(compare, end, bound);
+        self.builder.ins().brif(more, chunk, &[], done, &[]);
+        // The rest of the loop with ordinary checks. Every way in arrives
+        // with the locals of a checked execution: untouched, or a chunk's
+        // entry state restored, or the result of chunks that passed.
         self.builder.switch_to_block(checked);
-        let full = self.constant(deferred::CHUNK);
-        self.builder.def_var(fuel, full);
-        self.checked_fuel = Some(fuel);
         self.while_body(condition, body, candidate);
-        self.checked_fuel = None;
-        self.jump(next, &[]);
-        self.builder.switch_to_block(next);
-        let left = self.builder.use_var(fuel);
-        let exhausted = self.builder.ins().icmp_imm_s(IntCC::Equal, left, 0);
-        self.builder.ins().brif(exhausted, chunk, &[], done, &[]);
+        self.jump(done, &[]);
         self.builder.switch_to_block(done);
+    }
+    /// Whether some element access of a chunk starting at the counter's
+    /// current value could fall outside its container. Every iteration of
+    /// the chunk has its counter between the current value and the bound
+    /// (the loop condition holds at the top of each), so each index lies in
+    /// a range computed here; an overflow while computing one counts as
+    /// outside.
+    fn accesses_outside(
+        &mut self,
+        accesses: &[deferred::Access<'_>],
+        comparison: &Kind,
+        start: Value,
+        bound: Value,
+    ) -> Value {
+        // The counter's extremes: [low, high].
+        let (low, high, mut outside) = match comparison {
+            Kind::Lt | Kind::Le => {
+                let (high, overflow) = if *comparison == Kind::Lt {
+                    let one = self.constant(1);
+                    self.builder.ins().ssub_overflow(bound, one)
+                } else {
+                    (bound, self.builder.ins().iconst(ir::types::I8, 0))
+                };
+                (start, high, overflow)
+            }
+            _ => {
+                let (low, overflow) = if *comparison == Kind::Gt {
+                    let one = self.constant(1);
+                    self.builder.ins().sadd_overflow(bound, one)
+                } else {
+                    (bound, self.builder.ins().iconst(ir::types::I8, 0))
+                };
+                (low, start, overflow)
+            }
+        };
+        let mut lengths: Vec<(usize, Value)> = Vec::new();
+        for access in accesses {
+            let receiver = deferred::key(access.receiver);
+            let length = match lengths.iter().find(|(known, _)| *known == receiver) {
+                Some((_, length)) => *length,
+                None => {
+                    let length = self.container_length(access);
+                    lengths.push((receiver, length));
+                    length
+                }
+            };
+            let offset = self.constant(access.offset);
+            let (first, below) = self.builder.ins().sadd_overflow(low, offset);
+            let (last, above) = self.builder.ins().sadd_overflow(high, offset);
+            let negative = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedLessThan, first, 0);
+            let past = self
+                .builder
+                .ins()
+                .icmp(IntCC::SignedGreaterThanOrEqual, last, length);
+            for flag in [below, above, negative, past] {
+                outside = self.builder.ins().bor(outside, flag);
+            }
+        }
+        outside
+    }
+    /// Where a deferred chunk starting at `start` stops: `bound`, or `CHUNK`
+    /// steps on if that comes first (saturating at the end of the range).
+    fn chunk_limit(
+        &mut self,
+        comparison: &Kind,
+        unsigned: bool,
+        start: Value,
+        bound: Value,
+        step: i64,
+    ) -> Value {
+        // `i < limit` admits `CHUNK` steps from `start`, `i <= limit` one
+        // fewer step and the same number of iterations.
+        let steps = match comparison {
+            Kind::Lt | Kind::Gt => deferred::CHUNK,
+            _ => deferred::CHUNK - 1,
+        };
+        let ascending = matches!(comparison, Kind::Lt | Kind::Le);
+        let far = match step.checked_mul(steps) {
+            Some(span) => {
+                let span = self.constant(span);
+                let (moved, overflow) = match (ascending, unsigned) {
+                    (true, false) => self.builder.ins().sadd_overflow(start, span),
+                    (true, true) => self.builder.ins().uadd_overflow(start, span),
+                    (false, false) => self.builder.ins().ssub_overflow(start, span),
+                    (false, true) => self.builder.ins().usub_overflow(start, span),
+                };
+                let end = match (ascending, unsigned) {
+                    (true, false) => i64::MAX,
+                    (true, true) => -1,
+                    (false, false) => i64::MIN,
+                    (false, true) => 0,
+                };
+                let end = self.constant(end);
+                self.builder.ins().select(overflow, end, moved)
+            }
+            // So many steps that the bound always comes first.
+            None => bound,
+        };
+        match (ascending, unsigned) {
+            (true, false) => self.builder.ins().smin(bound, far),
+            (true, true) => self.builder.ins().umin(bound, far),
+            (false, false) => self.builder.ins().smax(bound, far),
+            (false, true) => self.builder.ins().umax(bound, far),
+        }
+    }
+    /// The comparison a loop condition makes on its counter.
+    fn counter_comparison(&self, comparison: &Kind, unsigned: bool) -> IntCC {
+        match (comparison, unsigned) {
+            (Kind::Lt, false) => IntCC::SignedLessThan,
+            (Kind::Lt, true) => IntCC::UnsignedLessThan,
+            (Kind::Le, false) => IntCC::SignedLessThanOrEqual,
+            (Kind::Le, true) => IntCC::UnsignedLessThanOrEqual,
+            (Kind::Gt, false) => IntCC::SignedGreaterThan,
+            (Kind::Gt, true) => IntCC::UnsignedGreaterThan,
+            (Kind::Ge, false) => IntCC::SignedGreaterThanOrEqual,
+            (_, true) => IntCC::UnsignedGreaterThanOrEqual,
+            (_, false) => IntCC::SignedGreaterThanOrEqual,
+        }
+    }
+    /// The element count of an access's container, read without effects.
+    fn container_length(&mut self, access: &deferred::Access<'_>) -> Value {
+        let values = self
+            .expr(access.receiver)
+            .expect("a container operand always produces a value");
+        match access.container {
+            deferred::Container::Slice(_) => values[1],
+            deferred::Container::Vec(element) => self.vec_call(VecOp::Len, element, values)[0],
+            deferred::Container::Bytes => {
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                self.memory_class(llvm::MemoryClass::BufferHeader, |g| {
+                    g.builder
+                        .ins()
+                        .load(I64, ir::MemFlagsData::new(), handle, 0)
+                })
+            }
+        }
     }
     /// The address range `[start, end)` of a slice local's elements.
     fn view_range(&mut self, slot: usize) -> (Value, Value) {

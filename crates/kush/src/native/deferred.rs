@@ -95,6 +95,32 @@ pub(super) enum Bound {
     },
 }
 
+/// What an element access reads or writes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Container {
+    /// A slice view, of this element type.
+    Slice(Type),
+    /// A vector, of this element type.
+    Vec(Type),
+    /// A byte buffer.
+    Bytes,
+}
+
+/// An element read or write in the loop, at the counter plus a constant.
+/// The lowering proves all of a chunk's accesses in range before the chunk
+/// runs and then emits them without per-element checks; see
+/// `docs/deferred-overflow.md`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Access<'a> {
+    /// The call, by [`key`].
+    pub call: usize,
+    /// The container operand of the call, a local or a borrow of one.
+    pub receiver: &'a Expr,
+    pub container: Container,
+    /// The index is the counter plus this.
+    pub offset: i64,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Plan {
     /// Deferred checked operations, by [`key`].
@@ -113,6 +139,10 @@ pub(super) struct Plan {
     pub disjoint: Vec<(usize, usize)>,
     /// The counter of a loop that counts upward, when it has one.
     pub ascending: Option<usize>,
+    /// The loop counter, and the constant it moves by each iteration (up
+    /// for `<` and `<=`, down for `>` and `>=`).
+    pub counter: usize,
+    pub step: i64,
     /// Whether a certified operation multiplies two non-constant operands.
     multiplies: bool,
 }
@@ -139,8 +169,8 @@ fn local_read(expr: &Expr) -> Option<usize> {
     }
 }
 
-struct Analysis<'a> {
-    function: &'a Function,
+struct Analysis<'f, 'a> {
+    function: &'f Function,
     /// Right-hand sides of every assignment or `let` of a local in the loop.
     assignments: BTreeMap<usize, Vec<&'a Expr>>,
     declared: BTreeSet<usize>,
@@ -148,19 +178,32 @@ struct Analysis<'a> {
     candidates: Vec<&'a Expr>,
     /// Expressions whose value must equal the checked execution's value.
     exact: Vec<&'a Expr>,
-    /// Element indices of the loop's reads and writes.
-    indices: Vec<&'a Expr>,
+    /// The loop's element reads and writes: call, receiver, container,
+    /// index.
+    accesses: Vec<(&'a Expr, &'a Expr, Container, &'a Expr)>,
     /// `local = <checked + or ->` statements.
     updates: Vec<(usize, &'a Expr)>,
     /// Slice locals the loop stores through, and container locals it reads.
     stored: BTreeSet<usize>,
     loaded: BTreeSet<usize>,
+    /// What keeps a loop from vectorizing, so that deferring it would only
+    /// cost: an early exit, a division, a store that runs conditionally.
+    breaks: bool,
+    divides: bool,
+    conditional_store: bool,
+    /// Checked arithmetic that runs conditionally, and byte-buffer reads:
+    /// both vectorize, but on baseline x86-64 (SSE2) the blends and the
+    /// widening of bytes to words cost more than the checks they replace.
+    conditional_arithmetic: bool,
+    byte_reads: bool,
+    /// How deep the walk is inside code that runs conditionally.
+    conditional: usize,
     /// Plain reads of locals, by [`key`]; filtered to loop-invariant ones.
     invariant: BTreeSet<usize>,
     local_reads: BTreeMap<usize, usize>,
 }
 
-impl<'a> Analysis<'a> {
+impl<'a> Analysis<'_, 'a> {
     fn block(&mut self, block: &'a ex::Block) -> Result<(), &'static str> {
         for statement in &block.statements {
             match statement {
@@ -214,6 +257,7 @@ impl<'a> Analysis<'a> {
             ExprKind::Unary(op, operand) => {
                 if *op == Kind::Minus && integer(expr.ty) {
                     self.candidates.push(expr);
+                    self.conditional_arithmetic |= self.conditional > 0;
                 }
                 self.expr(operand)
             }
@@ -221,9 +265,18 @@ impl<'a> Analysis<'a> {
                 match op {
                     Kind::Plus | Kind::Minus | Kind::Star if integer(expr.ty) => {
                         self.candidates.push(expr);
+                        self.conditional_arithmetic |= self.conditional > 0;
                     }
                     // The right operand runs conditionally.
-                    Kind::AmpAmp | Kind::PipePipe => self.exact.push(left),
+                    Kind::AmpAmp | Kind::PipePipe => {
+                        self.exact.push(left);
+                        self.expr(left)?;
+                        self.conditional += 1;
+                        let result = self.expr(right);
+                        self.conditional -= 1;
+                        return result;
+                    }
+                    Kind::Slash | Kind::Percent => self.divides = true,
                     _ => {}
                 }
                 self.expr(left)?;
@@ -242,17 +295,27 @@ impl<'a> Analysis<'a> {
             ExprKind::If(condition, then_block, else_block) => {
                 self.exact.push(condition);
                 self.expr(condition)?;
-                self.block(then_block)?;
-                self.block(else_block)
+                self.conditional += 1;
+                let result = self.block(then_block).and_then(|()| self.block(else_block));
+                self.conditional -= 1;
+                result
             }
-            ExprKind::Break(None, cleanup) if cleanup.is_empty() => Ok(()),
-            ExprKind::Call(target, arguments) => self.call(target, arguments),
+            ExprKind::Break(None, cleanup) if cleanup.is_empty() => {
+                self.breaks = true;
+                Ok(())
+            }
+            ExprKind::Call(target, arguments) => self.call(expr, target, arguments),
             ExprKind::While(..) | ExprKind::Loop(_) => Err("a nested loop"),
             ExprKind::Continue(_) => Err("continue"),
             _ => Err("an operation with effects or ownership"),
         }
     }
-    fn call(&mut self, target: &Target, arguments: &'a [Expr]) -> Result<(), &'static str> {
+    fn call(
+        &mut self,
+        call: &'a Expr,
+        target: &Target,
+        arguments: &'a [Expr],
+    ) -> Result<(), &'static str> {
         #[derive(PartialEq)]
         enum Access {
             Length,
@@ -270,12 +333,21 @@ impl<'a> Analysis<'a> {
             {
                 (Some(Access::Load), None)
             }
-            Target::Bytes(BytesOp::Get) => (Some(Access::Load), None),
+            Target::Bytes(BytesOp::Get) => {
+                self.byte_reads = true;
+                (Some(Access::Load), None)
+            }
             Target::Slice(SliceOp::Set, element) if scalar(*element) => {
                 (Some(Access::Store), arguments.len().checked_sub(1))
             }
             Target::Int(..) | Target::Float(_) => (None, None),
             _ => return Err("a call"),
+        };
+        let container = match target {
+            Target::Slice(_, element) => Some(Container::Slice(*element)),
+            Target::Vec(_, element) => Some(Container::Vec(*element)),
+            Target::Bytes(_) => Some(Container::Bytes),
+            _ => None,
         };
         let receiver = access.is_some();
         for (index, argument) in arguments.iter().enumerate() {
@@ -289,6 +361,7 @@ impl<'a> Analysis<'a> {
                             return Err("a store through a shared view");
                         }
                         self.stored.insert(slot);
+                        self.conditional_store |= self.conditional > 0;
                     }
                     Some(Access::Load) => {
                         self.loaded.insert(slot);
@@ -302,7 +375,12 @@ impl<'a> Analysis<'a> {
             // speculative because a panic discards it.
             if receiver && Some(index) != value {
                 self.exact.push(argument);
-                self.indices.push(argument);
+                if access != Some(Access::Length)
+                    && let Some(container) = container
+                {
+                    self.accesses
+                        .push((call, &arguments[0], container, argument));
+                }
             }
         }
         Ok(())
@@ -321,7 +399,9 @@ fn reads_local(expr: &Expr, slot: usize) -> bool {
 /// The loop's induction local when it has the counted shape
 /// `while i <op> bound { ...; i = i +/- c; ... }` with `c > 0`, one
 /// unconditional update per iteration and a loop-invariant bound.
-fn induction(condition: &Expr, body: &ex::Block) -> Option<usize> {
+/// Also returns where the update is: the index of its top-level statement,
+/// or the number of statements when it is the block's tail.
+fn induction(condition: &Expr, body: &ex::Block) -> Option<(usize, i64, usize)> {
     let ExprKind::Binary(comparison, left, bound) = &condition.kind else {
         return None;
     };
@@ -341,9 +421,9 @@ fn induction(condition: &Expr, body: &ex::Block) -> Option<usize> {
         Kind::Plus => crate::int::ArithOp::Add,
         _ => crate::int::ArithOp::Sub,
     };
-    let is_step = |expr: &Expr| {
+    let step_of = |expr: &Expr| -> Option<i64> {
         let ExprKind::Assign(target, value) = &expr.kind else {
-            return false;
+            return None;
         };
         let (base, amount) = match &value.kind {
             ExprKind::Binary(op, base, amount) if *op == step => (&**base, &**amount),
@@ -352,39 +432,72 @@ fn induction(condition: &Expr, body: &ex::Block) -> Option<usize> {
             {
                 (&arguments[0], &arguments[1])
             }
-            _ => return false,
+            _ => return None,
         };
-        *target == slot
-            && local_read(base) == Some(slot)
-            && matches!(amount.kind, ExprKind::Constant(c) if c > 0)
+        match amount.kind {
+            ExprKind::Constant(c) if c > 0 && *target == slot && local_read(base) == Some(slot) => {
+                Some(c)
+            }
+            _ => None,
+        }
     };
-    let top_level = body
+    let steps: Vec<(i64, usize)> = body
         .statements
         .iter()
-        .filter(|statement| matches!(statement, Statement::Expr(expr) if is_step(expr)))
-        .count()
-        + usize::from(body.tail.as_deref().is_some_and(is_step));
-    (top_level == 1).then_some(slot)
+        .enumerate()
+        .filter_map(|(at, statement)| match statement {
+            Statement::Expr(expr) => step_of(expr).map(|step| (step, at)),
+            _ => None,
+        })
+        .chain(
+            body.tail
+                .as_deref()
+                .and_then(step_of)
+                .map(|step| (step, body.statements.len())),
+        )
+        .collect();
+    match steps.as_slice() {
+        [(step, at)] => Some((slot, *step, *at)),
+        _ => None,
+    }
 }
 
-/// `counter`, or `counter` plus or minus a constant.
-fn follows_counter(index: &Expr, counter: usize) -> bool {
-    if local_read(index) == Some(counter) {
-        return true;
+/// Keys of every call in an expression.
+fn calls(expr: &Expr, found: &mut BTreeSet<usize>) {
+    if matches!(expr.kind, ExprKind::Call(..)) {
+        found.insert(key(expr));
     }
-    let (base, offset) = match &index.kind {
-        ExprKind::Binary(Kind::Plus | Kind::Minus, base, offset) => (&**base, &**offset),
+    expr.for_each_child(&mut |child| calls(child, found));
+}
+
+/// `Some(c)` when `index` is `counter + c`: the counter itself, or the
+/// counter plus or minus a constant.
+fn counter_offset(index: &Expr, counter: usize) -> Option<i64> {
+    if local_read(index) == Some(counter) {
+        return Some(0);
+    }
+    use crate::int::{ArithOp, IntOp};
+    let (subtract, base, offset) = match &index.kind {
+        ExprKind::Binary(op @ (Kind::Plus | Kind::Minus), base, offset) => {
+            (*op == Kind::Minus, &**base, &**offset)
+        }
         ExprKind::Call(
-            Target::Int(
-                crate::int::IntOp::Unchecked(crate::int::ArithOp::Add | crate::int::ArithOp::Sub),
-                _,
-                _,
-            ),
+            Target::Int(IntOp::Unchecked(op @ (ArithOp::Add | ArithOp::Sub)), _, _),
             arguments,
-        ) if arguments.len() == 2 => (&arguments[0], &arguments[1]),
-        _ => return false,
+        ) if arguments.len() == 2 => (*op == ArithOp::Sub, &arguments[0], &arguments[1]),
+        _ => return None,
     };
-    local_read(base) == Some(counter) && matches!(offset.kind, ExprKind::Constant(_))
+    let ExprKind::Constant(constant) = offset.kind else {
+        return None;
+    };
+    if local_read(base) != Some(counter) {
+        return None;
+    }
+    if subtract {
+        constant.checked_neg()
+    } else {
+        Some(constant)
+    }
 }
 
 /// A loop bound made of constants, locals, container lengths and arithmetic
@@ -412,12 +525,13 @@ fn plain_bound(expr: &Expr) -> bool {
 /// it a multiplication is vectorized through three 32-bit multiplies, and a
 /// loop that must also track two or more operands per iteration is faster
 /// with ordinary checks.
-pub(super) fn plan(
+pub(super) fn plan<'a>(
     function: &Function,
-    condition: &Expr,
-    body: &ex::Block,
+    condition: &'a Expr,
+    body: &'a ex::Block,
     wide_multiply: bool,
-) -> Option<Plan> {
+    wide_vectors: bool,
+) -> Option<(Plan, Vec<Access<'a>>)> {
     let trace = |reason: &str| {
         if std::env::var_os("KUSH_TRACE_DEFERRED").is_some() {
             eprintln!(
@@ -433,18 +547,57 @@ pub(super) fn plan(
         reads: BTreeMap::new(),
         candidates: Vec::new(),
         exact: Vec::new(),
-        indices: Vec::new(),
+        accesses: Vec::new(),
         updates: Vec::new(),
         stored: BTreeSet::new(),
         loaded: BTreeSet::new(),
         invariant: BTreeSet::new(),
         local_reads: BTreeMap::new(),
+        breaks: false,
+        divides: false,
+        conditional_store: false,
+        conditional_arithmetic: false,
+        byte_reads: false,
+        conditional: 0,
     };
     if let Err(reason) = analysis.expr(condition).and_then(|()| analysis.block(body)) {
         trace(reason);
         return None;
     }
-    let Some(counter) = induction(condition, body) else {
+    // Deferring pays only where LLVM then vectorizes the loop profitably: a
+    // scalar loop with sticky overflow words is slower than one with
+    // branches, and it still costs compile time. LLVM 18 does not vectorize
+    // a loop with an early exit, x86 has no 64-bit vector division, and a
+    // store that runs conditionally needs masked stores (AVX). On baseline
+    // x86-64 (SSE2), conditional arithmetic and byte reads vectorize but
+    // measured slower than the checked loop; with `--target-cpu native`
+    // (here AVX-512) the same loops ran 2.8 to 2.9 times faster.
+    if analysis.breaks {
+        trace("an early exit (`break`), which keeps it from vectorizing");
+        return None;
+    }
+    if analysis.divides {
+        trace("a division, which does not vectorize");
+        return None;
+    }
+    if !wide_vectors {
+        let reason = if analysis.conditional_store {
+            Some("a store under a condition")
+        } else if analysis.conditional_arithmetic {
+            Some("arithmetic under a condition")
+        } else if analysis.byte_reads {
+            Some("byte-buffer reads")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            trace(&format!(
+                "{reason}, which only pays with `--target-cpu native`"
+            ));
+            return None;
+        }
+    }
+    let Some((counter, step, update)) = induction(condition, body) else {
         trace("it is not a counted loop");
         return None;
     };
@@ -465,13 +618,49 @@ pub(super) fn plan(
     // a sticky flag costs more than the branch it replaces. An element
     // reached by anything but the counter (plus or minus a constant) is a
     // gather, a scatter or a dependence between iterations.
-    if !analysis
-        .indices
-        .iter()
-        .all(|index| follows_counter(index, counter))
+    // An access after the counter's update in the body sees the counter
+    // one step on: within an iteration, its index is the updated counter
+    // plus its offset. The update is a top-level statement, so every access
+    // is either before it or after it in every iteration.
+    let mut after = BTreeSet::new();
+    for statement in body.statements.iter().skip(update + 1) {
+        match statement {
+            Statement::Let(_, expr) | Statement::Expr(expr) => calls(expr, &mut after),
+            Statement::Declare(_) => {}
+        }
+    }
+    if update < body.statements.len()
+        && let Some(tail) = &body.tail
     {
-        trace("an index that does not follow the counter");
-        return None;
+        calls(tail, &mut after);
+    }
+    let moved = match &condition.kind {
+        ExprKind::Binary(Kind::Lt | Kind::Le, _, _) => step,
+        _ => -step,
+    };
+    let mut accesses = Vec::new();
+    for (call, receiver, container, index) in &analysis.accesses {
+        let Some(offset) = counter_offset(index, counter) else {
+            trace("an index that does not follow the counter");
+            return None;
+        };
+        let offset = if after.contains(&key(call)) {
+            match offset.checked_add(moved) {
+                Some(offset) => offset,
+                None => {
+                    trace("an index too far from the counter");
+                    return None;
+                }
+            }
+        } else {
+            offset
+        };
+        accesses.push(Access {
+            call: key(call),
+            receiver,
+            container: *container,
+            offset,
+        });
     }
     analysis.exact.push(condition);
     let assigned: BTreeSet<usize> = analysis.assignments.keys().copied().collect();
@@ -499,7 +688,11 @@ pub(super) fn plan(
         return None;
     }
 
-    let mut plan = Plan::default();
+    let mut plan = Plan {
+        counter,
+        step,
+        ..Plan::default()
+    };
     if matches!(&condition.kind, ExprKind::Binary(Kind::Lt | Kind::Le, _, _)) {
         plan.ascending = Some(counter);
     }
@@ -542,7 +735,7 @@ pub(super) fn plan(
             .filter(|slot| !analysis.declared.contains(slot))
             .collect();
     }
-    Some(plan)
+    Some((plan, accesses))
 }
 
 /// Whether a deferred operation is plain signed 64-bit arithmetic.
@@ -558,41 +751,78 @@ fn certifiable(expr: &Expr) -> bool {
 }
 
 /// Replace exact tests of signed 64-bit operations by a loop certificate.
-fn certify(analysis: &Analysis<'_>, deferred: &BTreeSet<usize>, plan: &mut Plan) {
+fn certify(analysis: &Analysis<'_, '_>, deferred: &BTreeSet<usize>, plan: &mut Plan) {
     let function = analysis.function;
-    // Reductions: every assignment of the local is `acc = acc +/- e`, and the
-    // local is read nowhere else in the loop.
-    let mut steps: BTreeMap<usize, Vec<&Expr>> = BTreeMap::new();
-    for (slot, value) in &analysis.updates {
-        let ExprKind::Binary(op, left, right) = &value.kind else {
-            continue;
+    // Reductions: every assignment of the local is `acc = acc +/- e`, or a
+    // chain `acc = acc + a - b + c` with the local leftmost, and the local is
+    // read nowhere else in the loop. Each operation of a chain adds one term,
+    // and every intermediate value is itself a prefix sum of the terms, so
+    // one bound covers them all; this is what lets `acc = acc + x[i] + y[i]`
+    // vectorize instead of tracking the running sum as an operand.
+    let reducing = |expr: &Expr| {
+        matches!(expr.kind, ExprKind::Binary(Kind::Plus | Kind::Minus, _, _))
+            && certifiable(expr)
+            && deferred.contains(&key(expr))
+    };
+    // The operations and terms of a chain whose leftmost operand is `slot`.
+    fn chain<'e>(
+        expr: &'e Expr,
+        slot: usize,
+        reducing: &dyn Fn(&Expr) -> bool,
+        operations: &mut Vec<&'e Expr>,
+        terms: &mut Vec<&'e Expr>,
+    ) -> bool {
+        let ExprKind::Binary(_, left, right) = &expr.kind else {
+            return false;
         };
-        if !certifiable(value)
-            || function.locals[*slot].ty != Type::I64
-            || function.locals[*slot].pinned
-            || !deferred.contains(&key(value))
-        {
+        if !reducing(expr) || reads_local(right, slot) {
+            return false;
+        }
+        if local_read(left) != Some(slot) && !chain(left, slot, reducing, operations, terms) {
+            return false;
+        }
+        operations.push(expr);
+        terms.push(right);
+        true
+    }
+    #[derive(Default)]
+    struct Reduction<'e> {
+        updates: usize,
+        operations: Vec<&'e Expr>,
+        terms: Vec<&'e Expr>,
+    }
+    let mut steps: BTreeMap<usize, Reduction<'_>> = BTreeMap::new();
+    for (slot, value) in &analysis.updates {
+        if function.locals[*slot].ty != Type::I64 || function.locals[*slot].pinned {
             continue;
         }
-        let on_left = local_read(left) == Some(*slot) && !reads_local(right, *slot);
-        let on_right =
-            *op == Kind::Plus && local_read(right) == Some(*slot) && !reads_local(left, *slot);
-        if on_left {
-            steps.entry(*slot).or_default().push(right);
-        } else if on_right {
-            steps.entry(*slot).or_default().push(left);
+        let mut operations = Vec::new();
+        let mut terms = Vec::new();
+        let found = chain(value, *slot, &reducing, &mut operations, &mut terms)
+            || matches!(&value.kind, ExprKind::Binary(Kind::Plus, left, right)
+            if reducing(value)
+                && local_read(right) == Some(*slot)
+                && !reads_local(left, *slot)
+                && {
+                    operations.push(value);
+                    terms.push(left);
+                    true
+                });
+        if found {
+            let reduction = steps.entry(*slot).or_default();
+            reduction.updates += 1;
+            reduction.operations.extend(operations);
+            reduction.terms.extend(terms);
         }
     }
-    steps.retain(|slot, operands| {
-        analysis.assignments.get(slot).map_or(0, Vec::len) == operands.len()
-            && analysis.reads.get(slot).copied().unwrap_or(0) == operands.len()
+    steps.retain(|slot, reduction| {
+        analysis.assignments.get(slot).map_or(0, Vec::len) == reduction.updates
+            && analysis.reads.get(slot).copied().unwrap_or(0) == reduction.updates
     });
-    let mut reduction_steps = BTreeSet::new();
-    for (slot, value) in &analysis.updates {
-        if steps.contains_key(slot) {
-            reduction_steps.insert(key(value));
-        }
-    }
+    let reduction_steps: BTreeSet<usize> = steps
+        .values()
+        .flat_map(|reduction| reduction.operations.iter().map(|operation| key(operation)))
+        .collect();
     let certified = |expr: &Expr| {
         deferred.contains(&key(expr)) && certifiable(expr) && !reduction_steps.contains(&key(expr))
     };
@@ -610,6 +840,19 @@ fn certify(analysis: &Analysis<'_>, deferred: &BTreeSet<usize>, plan: &mut Plan)
                 0 => 0,
                 _ => u64::BITS - (magnitude - 1).leading_zeros(),
             });
+        }
+        // A value whose range its type already bounds needs no tracking:
+        // a byte read, or a widened narrow integer (narrow values stay
+        // canonical in deferred loops too).
+        match &expr.kind {
+            ExprKind::Call(Target::Bytes(BytesOp::Get), _) => return Bound::Constant(8),
+            ExprKind::Call(Target::Int(crate::int::IntOp::Convert, source, _), _)
+                if source.bits() < 64 =>
+            {
+                let bits = source.bits();
+                return Bound::Constant(if source.signed() { bits - 1 } else { bits });
+            }
+            _ => {}
         }
         if !certified(expr) {
             leaves.insert(key(expr));
@@ -659,8 +902,9 @@ fn certify(analysis: &Analysis<'_>, deferred: &BTreeSet<usize>, plan: &mut Plan)
             plan.obligations.push(result);
         }
     }
-    for (slot, operands) in steps {
-        let operands = operands
+    for (slot, reduction) in steps {
+        let operands = reduction
+            .terms
             .into_iter()
             .map(|operand| {
                 bound(

@@ -434,8 +434,10 @@ fn main() -> i64 ! {io, alloc, panic} {
 }
 
 /// Which loops are deferred, as the planner reports it.
+/// Which loops are deferred, as the planner reports it: those LLVM can
+/// vectorize profitably on the target, and no others.
 #[test]
-fn the_planner_defers_counted_loops_whose_indices_follow_the_counter() {
+fn the_planner_defers_loops_that_vectorize() {
     if !clang_available() {
         return;
     }
@@ -461,24 +463,62 @@ fn stencil(values: &[i64]) -> i64 ! {panic} {
     while i < Slice.len(values) { acc = acc + Slice.get(values, i) - Slice.get(values, i - 1); i = i + 1; }
     acc
 }
+fn listed(values: &Vec<i64>, n: i64) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < n { acc = acc + Vec.get(values, i) * 3; i = i + 1; }
+    acc
+}
+fn later(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) { i = i + 1; acc = acc + Slice.get(values, i - 1); }
+    acc
+}
 fn gather(values: &[i64]) -> i64 ! {panic} {
     let mut acc = 0;
     let mut i = 0;
     while i < Slice.len(values) { acc = acc + Slice.get(values, i & 7); i = i + 1; }
     acc
 }
+fn early(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) { if Slice.get(values, i) == 99 { break; } acc = acc + Slice.get(values, i); i = i + 1; }
+    acc
+}
+fn halves(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) { acc = acc + Slice.get(values, i) / 2; i = i + 1; }
+    acc
+}
+fn some(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) { if Slice.get(values, i) > 3 { acc = acc + Slice.get(values, i); } i = i + 1; }
+    acc
+}
+fn bytes(values: &Bytes) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Bytes.len(values) { acc = acc + Bytes.get(values, i); i = i + 1; }
+    acc
+}
 fn main() -> i64 ! {alloc, panic} {
     let mut values: Vec<i64> = Vec.with_capacity(8);
+    let mut text = Bytes.with_capacity(8);
     let mut i = 0;
-    while i < 8 { values = Vec.push(values, i); i = i + 1; }
-    plain(9, 2) + down(9, 2) + stencil(&values[..]) + gather(&values[..]) - 197
+    while i < 8 { values = Vec.push(values, i); text = Bytes.push(text, i); i = i + 1; }
+    plain(9, 2) + down(9, 2) + stencil(&values[..]) + listed(&values, 8) + later(&values[..]) + gather(&values[..])
+        + early(&values[..]) + halves(&values[..]) + some(&values[..]) + bytes(&text) - 399
 }
 ",
     )
     .unwrap();
-    let built = kush()
-        .current_dir(root)
-        .args([
+    let trace = |native: bool| {
+        let mut command = kush();
+        command.current_dir(root).args([
             "build",
             "main.kush",
             "-o",
@@ -486,28 +526,54 @@ fn main() -> i64 ! {alloc, panic} {
             "--release",
             "--backend",
             "llvm",
-        ])
-        .env("KUSH_TRACE_DEFERRED", "1")
-        .output()
-        .unwrap();
-    let trace = String::from_utf8_lossy(&built.stderr);
-    assert!(built.status.success(), "{trace}");
-    for deferred in ["plain", "down", "stencil"] {
+        ]);
+        if native {
+            command.args(["--target-cpu", "native"]);
+        }
+        let built = command.env("KUSH_TRACE_DEFERRED", "1").output().unwrap();
+        let trace = String::from_utf8_lossy(&built.stderr).into_owned();
+        assert!(built.status.success(), "{trace}");
         assert!(
-            !trace.contains(&format!("loop in {deferred} keeps")),
+            Command::new(root.join("program"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        trace
+    };
+    let keeps = |trace: &str, function: &str, reason: &str| {
+        trace.contains(&format!(
+            "loop in {function} keeps immediate checks: {reason}"
+        ))
+    };
+    for native in [false, true] {
+        let trace = trace(native);
+        for deferred in ["plain", "down", "stencil", "listed", "later"] {
+            assert!(
+                !trace.contains(&format!("loop in {deferred} keeps")),
+                "{trace}"
+            );
+        }
+        assert!(
+            keeps(
+                &trace,
+                "gather",
+                "an index that does not follow the counter"
+            ),
+            "{trace}"
+        );
+        assert!(keeps(&trace, "early", "an early exit"), "{trace}");
+        assert!(keeps(&trace, "halves", "a division"), "{trace}");
+        // Only pays on wide vectors.
+        assert_eq!(
+            keeps(&trace, "some", "arithmetic under a condition"),
+            !native,
+            "{trace}"
+        );
+        assert_eq!(
+            keeps(&trace, "bytes", "byte-buffer reads"),
+            !native,
             "{trace}"
         );
     }
-    assert!(
-        trace.contains(
-            "loop in gather keeps immediate checks: an index that does not follow the counter"
-        ),
-        "{trace}"
-    );
-    assert!(
-        Command::new(root.join("program"))
-            .status()
-            .unwrap()
-            .success()
-    );
 }

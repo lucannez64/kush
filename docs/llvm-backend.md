@@ -211,19 +211,19 @@ build, which does not check.
 
 | Build | Time |
 | --- | ---: |
-| Kush, Cranelift `--release` | 117 |
-| Kush, LLVM, immediate checks | 59 |
-| Kush, LLVM | 58 |
-| Rust checked | 58 |
-| Rust | 54 |
+| Kush, Cranelift `--release` | 125 |
+| Kush, LLVM, immediate checks | 53 |
+| Kush, LLVM | 53 |
+| Rust checked | 65 |
+| Rust | 65 |
 
 `benchmarks/checked-loops`, 4,096 elements × 200,000 repetitions:
 
 | Kernel | Cranelift | LLVM immediate | LLVM | Rust checked | Rust | LLVM native | Rust native |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| sum | 668 | 230 | 147 | 223 | 72 | 57 | 44 |
-| dot | 1113 | 447 | 476 | 441 | 357 | 193 | 149 |
-| scale, then sum | 1768 | 659 | 475 | 661 | 398 | 229 | 229 |
+| sum | 669 | 215 | 159 | 234 | 67 | 61 | 44 |
+| dot | 1171 | 471 | 489 | 491 | 389 | 213 | 159 |
+| scale, then sum | 1764 | 745 | 527 | 661 | 429 | 228 | 267 |
 
 Reading these:
 
@@ -235,13 +235,19 @@ Reading these:
   three dot numbers is this machine's run-to-run spread (pinned runs of one
   binary vary by as much). Sticky flags and a magnitude certificate were
   both measured for this loop and are slower than branches without a
-  64-bit vector multiply. Against unchecked Rust it is between 7% and
-  2× slower. The sum is the worst case: its certificate costs four SSE2
-  instructions per vector next to Rust's one add.
+  64-bit vector multiply. Against unchecked Rust it is between 23% and
+  2.4× slower. The sum is the worst case: its certificate costs four SSE2
+  instructions per vector next to Rust's one add. With `--target-cpu
+  native` Kush is within 0.85 to 1.4 times unchecked Rust.
+- The table is from 2026-11-12, on a day when this machine ran about 10%
+  slower than in earlier measurements; compare within a row. Run-time
+  figures for more loop shapes are in
+  [deferred-overflow.md](deferred-overflow.md), "What it costs and gains".
 - These numbers are with loops checked in chunks of 65,536 iterations (see
   [deferred-overflow.md](deferred-overflow.md)); chunking itself costs
   nothing measurable here.
-- `feature-pipeline` is within 7% of Rust. Stating ownership facts took it
+- `feature-pipeline` measured at least as fast as Rust (53 ms against 65;
+  with this machine's spread, call it even). Stating ownership facts took it
   from 69 ms to 61 ms on the earlier measurement run. A Kush vector keeps its
   length and encoded capacity in the heap block, and a push used to load
   both and decode the capacity every time. A loop that touches a vector
@@ -277,10 +283,10 @@ that remembers nothing.
 These are small programs, and the release result does not carry over to
 larger ones. On a generated program of 2,300 to 11,500 lines
 ([benchmarks/build-scale](../benchmarks/build-scale/README.md)) a
-development build stays 25% to 45% faster than a `rustc` debug build, but an
-LLVM release build is 2 to 3.5 times slower than `rustc -C opt-level=3`,
-almost all of it LLVM's work on deferred-overflow loops. Kush also checks
-and compiles the whole program on every build.
+development build stays 15% to 45% faster than a `rustc` debug build, but an
+LLVM release build is 2.6 to 3.4 times slower than `rustc -C opt-level=3`,
+mostly LLVM vectorizing deferred-overflow loops. Kush also checks and
+compiles the whole program on every build, in one LLVM module on one core.
 
 ## Limits
 

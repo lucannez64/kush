@@ -696,6 +696,13 @@ impl<'a> Translator<'a> {
         }
     }
     /// Whether a value is clearly an offset rather than an address.
+    /// Whether `value` is a word loaded from memory.
+    fn loaded(&self, value: Value) -> bool {
+        matches!(
+            self.defining(self.resolve(value)),
+            Some(InstructionData::Load { .. })
+        )
+    }
     fn offset_like(&self, value: Value) -> bool {
         let value = self.resolve(value);
         if self.constants.contains_key(&value) {
@@ -746,6 +753,14 @@ impl<'a> Translator<'a> {
             } else if self.offset_like(right) && !self.offset_like(left) {
                 Some((left, right))
             } else if self.offset_like(left) && !self.offset_like(right) {
+                Some((right, left))
+            } else if self.loaded(left) && !self.loaded(right) {
+                // A word read from memory plus anything else is a handle or
+                // pointer plus an index far more often than the reverse, and
+                // only as a `getelementptr` from a fixed base can LLVM see
+                // consecutive accesses (a byte buffer read in a loop).
+                Some((left, right))
+            } else if self.loaded(right) && !self.loaded(left) {
                 Some((right, left))
             } else {
                 None
