@@ -6934,14 +6934,19 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Seen in PF-DEMO: match items[i] { A(..) => f(&mut k, ..), B(..) => g(&mut k, ..) } rejected with 'exclusive &mut [T] view of it is live'; the same match inside a helper taking &mut Kernel is accepted.",
-      "commit": null,
+      "commit": "11d2329",
       "log": [
         {
           "time": "2026-11-13 23:34:12",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 23:34:12",
+          "who": "agent",
+          "text": "done 11d2329"
         }
       ]
     }
