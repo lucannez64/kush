@@ -399,5 +399,46 @@ fn dependent_array_layout_and_specialization_budgets_are_explicit() {
         body.push_str(&format!(" s = count::<{n}>(s);"));
     }
     body.push_str(" s }");
-    rejects(&body, "256 function instances");
+    rejects(&body, "256 instances of one function");
+}
+
+/// The cap is per declaration: a program may have any number of functions.
+#[test]
+fn a_program_may_hold_more_than_256_functions() {
+    let mut source = String::new();
+    for n in 0..300 {
+        source.push_str(&format!(
+            "fn step{n}(x: i64) -> i64 ! {{panic}} {{ x + {n} }}\n"
+        ));
+    }
+    // And one generic declaration with 200 instances beside them.
+    source.push_str("fn count<N: Nat>(x: i64) -> i64 ! {} { x }\n");
+    source.push_str("fn main() -> i64 ! {panic} { let mut s = 0;");
+    for n in 0..300 {
+        source.push_str(&format!(" s = step{n}(s);"));
+    }
+    for n in 0..200 {
+        source.push_str(&format!(" s = count::<{n}>(s);"));
+    }
+    source.push_str(" s - 44850 }");
+    assert_eq!(evaluate(&source), 0);
+}
+
+/// Polymorphic recursion through several declarations is stopped by the
+/// total for generic instances, before types grow deep enough to make
+/// checking slow.
+#[test]
+fn mutual_polymorphic_recursion_is_rejected_promptly() {
+    let declarations = 32;
+    let mut source = String::new();
+    for k in 0..declarations {
+        source.push_str(&format!(
+            "fn f{k}<T>(x: i64) -> i64 ! {{panic}} {{ if x > 1000000 {{ x }} else {{ f{}::<Vec<T>>(x + 1) }} }}\n",
+            (k + 1) % declarations
+        ));
+    }
+    source.push_str("fn main() -> i64 ! {panic} { f0::<i64>(0) }");
+    let started = std::time::Instant::now();
+    rejects(&source, "1024 instances of generic functions");
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
 }

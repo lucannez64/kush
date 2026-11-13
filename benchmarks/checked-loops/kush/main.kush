@@ -1,0 +1,79 @@
+module checked_loops;
+
+use std.result.Result;
+use std.text;
+
+// Three array kernels whose every `+`, `-` and `*` is overflow-checked.
+// Arguments: elements, repetitions, kernel (0 sum, 1 dot, 2 scale-and-sum).
+
+fn argument(index: i64) -> i64 ! {io, alloc, panic} {
+    let bytes = match ENV.arg(index, Bytes.with_capacity(64)) { Ok(value) => value, Err(_) => { return -1; } };
+    match text.parse_i64(&bytes) { Ok(value) => value, Err(_) => -1 }
+}
+
+#[noalloc]
+fn sum(values: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(values) {
+        acc = acc + Slice.get(values, i);
+        i = i + 1;
+    }
+    acc
+}
+
+#[noalloc]
+fn dot(left: &[i64], right: &[i64]) -> i64 ! {panic} {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < Slice.len(left) {
+        acc = acc + Slice.get(left, i) * Slice.get(right, i);
+        i = i + 1;
+    }
+    acc
+}
+
+#[noalloc]
+fn scale<'a, 'b>(source: &'a [i64], target: &'b mut [i64], factor: i64) -> Unit ! {panic} {
+    let mut i = 0;
+    while i < Slice.len(source) {
+        Slice.set(target, i, Slice.get(source, i) * factor - 7);
+        i = i + 1;
+    }
+}
+
+fn fill(n: i64, salt: i64) -> Vec<i64> ! {alloc, panic} {
+    let mut values: Vec<i64> = Vec.with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        values = Vec.push(values, ((i * 7919 + salt) & 4095) - 2048);
+        i = i + 1;
+    }
+    values
+}
+
+fn main() -> i64 ! {io, alloc, panic} {
+    let n = argument(1);
+    let repetitions = argument(2);
+    let kernel = argument(3);
+    if n < 1 || n > 8000000 || repetitions < 0 || repetitions > 100000000 || kernel < 0 || kernel > 2 { return 2; }
+    let left = fill(n, 17);
+    let right = fill(n, 4001);
+    let mut scratch = fill(n, 0);
+    let mut result = 0;
+    let mut round = 0;
+    while round < repetitions {
+        let step = if kernel == 0 {
+            sum(&left[..])
+        } else if kernel == 1 {
+            dot(&left[..], &right[..])
+        } else {
+            scale(&left[..], &mut scratch[..], (round & 3) + 2);
+            sum(&scratch[..])
+        };
+        result = (result ^ step) + (round & 1);
+        round = round + 1;
+    }
+    print_i64(result);
+    0
+}

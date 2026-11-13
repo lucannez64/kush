@@ -99,6 +99,10 @@ pub enum ItemKind {
         name: String,
         parameter: Type,
         result: Type,
+        /// `effect Op: P -> R ! { io };`: built-in effects a handler of `Op`
+        /// may have. Every `perform Op` requires them too, so a called
+        /// function's row still shows what its handler may do.
+        effects: Vec<Type>,
     },
     /// `effect row Name = { io, alloc };` declares a named finite effect row.
     ///
@@ -280,6 +284,10 @@ pub struct Field {
     /// `pub` on a struct field: visible outside the struct's module
     /// (FIELD-PRIVACY). Ignored for enum payloads and structural rows.
     pub public: bool,
+    /// `name: Vec<T> where len >= N` on a struct field: the vector always
+    /// holds at least `N` elements (a compile-time integer), so indexes
+    /// proved below `N` need no runtime check. See docs/places.md.
+    pub min_length: Option<Box<Expr>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Variant {
@@ -322,6 +330,9 @@ pub struct Function {
     /// `ensures` postconditions (ENSURES), checked at every return and
     /// available to callers as facts.
     pub ensures: Vec<Ensures>,
+    /// `const NAME: Type = value;`: a parameterless function whose uses are
+    /// replaced by its value expression, checked at each use.
+    pub constant: bool,
 }
 /// One `ensures` clause: `ensures [guard =>] { proposition }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,6 +364,9 @@ pub struct Parameter {
     pub name: String,
     pub ty: Type,
     pub span: Span,
+    /// `v: &mut Vec<T> where len >= N`: callers guarantee the length (proved
+    /// or checked at the call), and the function can never shorten it.
+    pub min_length: Option<Box<Expr>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeKind {
@@ -581,6 +595,10 @@ pub enum ExprKind {
     While {
         condition: Box<Expr>,
         body: Block,
+        /// `while c invariant { P } { .. }`: a linear proposition proved on
+        /// entry and at every back edge, and assumed at the loop head and
+        /// after the loop.
+        invariant: Option<Box<Expr>>,
     },
     Loop(Block),
     Break(Option<Box<Expr>>),

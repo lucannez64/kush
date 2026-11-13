@@ -285,6 +285,11 @@ moved to another binding, returned, stored in data or a box, passed to another
 function, adapted to a union or other function type, or captured by a task. See
 [borrowing and lifetimes](lifetimes.md#scoped-borrowed-closure-captures).
 
+A reference (`&T` or `&mut T`) is captured the same scoped way: the closure
+holds the reference's loan while it is live, so the owner cannot be moved and
+an exclusive reference cannot be used beside it, and the closure cannot
+escape its binding's scope. A spawned task cannot capture a reference.
+
 A mutable scalar local (`i64`, another fixed-width integer, `f32`/`f64`,
 `Char`, `Bool`, or `Unit`) is captured **by reference**. The environment stores
 the address of the caller's binding rather than a copy; a write in the lambda
@@ -295,7 +300,10 @@ loaned until the closure's checked last call or lexical scope end. A lambda
 that assigns the capture holds an exclusive loan: the caller cannot read,
 assign, move, or drop the location while the closure is live. A lambda that
 only reads it holds a shared loan, so unrelated reads remain allowed but a
-write is rejected. The same restrictions reject returning the closure, storing
+write is rejected. Several closures may capture the same location: it is a
+shared cell that each call reads and writes in turn (two effect handlers can
+share a counter or an error code). Inside a lambda no fact about a captured
+cell is assumed, since any call may run another closure that writes it. The same restrictions reject returning the closure, storing
 it in outliving data, passing it to another function, or sending it to a task.
 Both backends implement the pointer representation, so reference evaluation and
 native execution agree. Calling a closure that writes the capture invalidates
@@ -434,7 +442,7 @@ converted by the same checked rules.
   the union discriminator.
 - Function instances, including lambdas, adapters, and thunks, share the
   existing 256-instance budget. Function parameters/results count toward the
-  existing word-layout and 128-word parameter ABI limits.
+  existing word-layout limits; there is no limit on parameter words.
 
 ## Examples and tests
 

@@ -243,8 +243,9 @@ call/expression nesting budget. Exhaustion is a diagnostic. These are evaluator
 limits, not native execution limits or language termination claims. Ordinary
 recursive functions are excluded from the proof kernel.
 
-Implementation limits currently include 256 functions, 64 parameters per
-function, and 1024 local slots per function, in addition to frontend nesting/input limits
+Implementation limits currently include 256 instances (specializations) of
+one function and 1024 instances of generic functions in all, 64 parameters
+per function, and 1024 local slots per function, in addition to frontend nesting/input limits
 and the [enum layout/coverage limits](enums.md). No compilation-speed or runtime-performance comparison is claimed.
 
 Tests compare native output and exit status against the reference evaluator for

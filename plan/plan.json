@@ -5333,6 +5333,421 @@
       "desc": "",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "LLVM-BACKEND",
+      "title": "LLVM release backend (shared lowering, whole-program runtime)",
+      "size": "L",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "CLIF-to-LLVM-IR translator behind CodeModule, pointer forms, runtime IR linked and internalized, --backend llvm, KUSH_BACKEND replay.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 04:16:27",
+          "who": "claude",
+          "text": "1,694 tests pass on both backends (LLVM 18.1.3); docs/llvm-backend.md"
+        },
+        {
+          "time": "2026-11-11 14:48:20",
+          "who": "claude",
+          "text": "Independent review: narrow foreign arguments are now extended for the callee (both backends), runtime cache hits with a bare output name, llvm-link is not taken from beside a compiler wrapper and its failure falls back, flag order no longer matters, one phi entry per switch edge, constants collected before use, handler_restore no longer inlinable. 1,708 tests pass on Cranelift, llvm and llvm-release."
+        },
+        {
+          "time": "2026-11-11 21:11:25",
+          "who": "claude",
+          "text": "Stack exhaustion is a panic on both backends and all stacks (fault handler on a signal stack; stack probes in Cranelift and LLVM code); runtime cache pruned to the 96 files / 256 MiB used most recently; dot loop confirmed instruction-identical to checked Rust. 1,711 tests pass on Cranelift, llvm and llvm-release."
+        }
+      ]
+    },
+    {
+      "id": "LLVM-DEFER",
+      "title": "Deferred overflow checks for counted loops",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LLVM-BACKEND"
+      ],
+      "status": "done",
+      "desc": "Exact sticky bits and magnitude certificates with exact replay; docs/deferred-overflow.md.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 04:16:27",
+          "who": "claude",
+          "text": "tests/deferred_overflow.rs across up to nine configurations; checked sum 260 -> 170 ms"
+        }
+      ]
+    },
+    {
+      "id": "LLVM-DEFER-REVIEW",
+      "title": "Independent hostile review of deferred overflow soundness",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "LLVM-DEFER"
+      ],
+      "status": "done",
+      "desc": "Pinning of control and index values, replay with stores through exclusive slices, certificate arithmetic. Relies on &mut [T] exclusivity.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 14:48:20",
+          "who": "claude",
+          "text": "Independent review found three defects, all fixed with regression tests: out-of-bounds read through a proved Vec.at/Slice.at after a deferred overflow; non-canonical narrow values reaching division (SIGFPE/SIGILL); unbounded delay of the panic (huge bound, float counter, bound read from memory). Loops are now checked in chunks of 65,536 iterations, proved reads are not deferred, narrow results are canonical."
+        }
+      ]
+    },
+    {
+      "id": "LLVM-ALIAS",
+      "title": "Alias information for LLVM (noalias from ownership, vector header vs elements)",
+      "size": "L",
+      "hard": true,
+      "deps": [
+        "LLVM-BACKEND"
+      ],
+      "status": "done",
+      "desc": "Vec.push keeps length/capacity in memory: 14 vs 8 instructions per element against Rust. Type-based tags are unsound while the pool allocator is inlined; needs an allocator boundary.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 05:14:46",
+          "who": "claude",
+          "text": "noalias for owning/exclusive parameters with word thunks, header/element memory classes, allocator kept opaque; feature-pipeline 69 -> 61 ms (Rust 59)"
+        }
+      ]
+    },
+    {
+      "id": "PROOF-CACHE",
+      "title": "Persistent, re-verified cache of arithmetic proof search",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Front end 86 -> 20 ms on checked-loops; remembered Farkas weights are rebuilt and verified, integer fallback remembers failures only. docs/proof-cache.md.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 05:14:46",
+          "who": "claude",
+          "text": "kush check 86 -> 20 ms warm; 1,694 tests pass"
+        },
+        {
+          "time": "2026-11-11 14:48:20",
+          "who": "claude",
+          "text": "Independent review: a fresh search result is verified before it is stored or used; a damaged cache file is truncated to its intact prefix; size and file-count limits."
+        }
+      ]
+    },
+    {
+      "id": "LLVM-ALIAS-MORE",
+      "title": "More ownership facts: readonly shared borrows, fresh allocation results, exclusive locals and fields",
+      "size": "M",
+      "hard": true,
+      "deps": [
+        "LLVM-ALIAS"
+      ],
+      "status": "done",
+      "desc": "Needs a check for interior writes through shared handles (allocator context reference counts).",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 02:45:24",
+          "who": "claude",
+          "text": "Measured before building: noalias on shared slice parameters gained nothing on two kernels (596 vs 620 ms, 617 vs 651 ms; noise). The one visible gap, 5-10% for a loop over views of local vectors, needs scoped alias metadata; not done. Closed without a code change."
+        }
+      ]
+    },
+    {
+      "id": "PROOF-SEARCH-SPEED",
+      "title": "Faster proof search and lazy lowering",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "PROOF-CACHE"
+      ],
+      "status": "done",
+      "desc": "Integer-point witness for unprovable goals, per-component search, vector rows; only reachable functions are lowered. docs/proof-cache.md.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 06:07:25",
+          "who": "claude",
+          "text": "kush check on checked-loops 730M -> 228M instructions uncached, 86M cached; dev build 58 ms, LLVM release 135-159 ms; 1,697 tests pass on both backends"
+        }
+      ]
+    },
+    {
+      "id": "LLVM-DEFER-REVIEW-2",
+      "title": "Second review of the chunked deferred-overflow lowering",
+      "size": "S",
+      "hard": true,
+      "deps": [
+        "LLVM-DEFER-REVIEW"
+      ],
+      "status": "done",
+      "desc": "The chunk loop, the negative-counter fallback and the term-count bound (iterations started times reduction operations) were written in response to the first review and have only been tested, not reviewed.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-11 23:29:09",
+          "who": "claude",
+          "text": "Second independent review of the chunked lowering: no defect in differential tests (chunk boundaries, certificate thresholds, replay with stores, counters, narrow kinds, 630 fuzzed loops x ~15,000 inputs x 6 builds) or by reading. Follow-ups done: a proved (unchecked) counter step now counts as a step, so plain while-i-less-than-n loops are deferred; loops whose indices do not follow the counter are not deferred (they stay scalar and were up to 48% slower); doc overclaims corrected. The reviewer's fuzzer was re-run on the step change with no difference."
+        }
+      ]
+    },
+    {
+      "id": "LLVM-DEFER-REVIEW-3",
+      "title": "Third independent review: changes made after the second",
+      "size": "S",
+      "hard": true,
+      "deps": [
+        "LLVM-DEFER-REVIEW-2"
+      ],
+      "status": "done",
+      "desc": "Planner step and index rules, chunk hand-back, run-time overlap check, stack fault handler, disable-tail-calls.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 00:59:41",
+          "who": "claude",
+          "text": "No defect in the deferral changes (about 3,200 generated deferred loops plus edge cases, up to 8 builds each). Two low-severity defects in the new fault handler, both fixed with tests: a write running off the top of the stack was reported as stack exhaustion, and the first SIGSEGV/SIGBUS sent from outside was swallowed. Doc overclaims corrected; bounded delay has a test on a loop that still qualifies. The handler fixes themselves were made after this review. 1,719 tests pass on Cranelift, llvm and llvm-release."
+        }
+      ]
+    },
+    {
+      "id": "LLVM-FOLLOWUPS",
+      "title": "Push loops, deferred-loop code size, build time at scale",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "LLVM-BACKEND"
+      ],
+      "status": "done",
+      "desc": "Vec.push keeps length and capacity in variables across push-only loops (LLVM); deferred loops lowered three times instead of up to eight; certificate clz operand made non-zero (removes a quadratic LLVM pass); benchmarks/build-scale.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 02:45:24",
+          "who": "claude",
+          "text": "Pre-sized fill 471 -> 430 ms (Rust 466). 100-unit build 12.4 -> 6.3 s (rustc -O 1.95 s). Fourth independent review: no correctness defect in ~46,000 differential runs; its findings (byte-view loops 2.4x slower through the checked chunk, two tests not exercising shadows, stale docs) are fixed. 1,727 tests on three settings."
+        }
+      ]
+    },
+    {
+      "id": "BUILD-SCALE",
+      "title": "Release build time and size limits on larger programs",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Release builds are 2-3.5x slower than rustc -O on benchmarks/build-scale, from LLVM's work on deferred loops. Ideas: defer only where it pays, split the module for parallel codegen. Also: MAX_FUNCTIONS = 256 and the 100,000-token file limit cap programs at about 2,300 and 12,000 lines.",
+      "commit": "3b6c529",
+      "log": [
+        {
+          "time": "2026-11-12 04:22:37",
+          "who": "claude",
+          "text": "MAX_FUNCTIONS (256 per program) replaced by MAX_INSTANCES (256 per declaration); the 100,000-token file limit remains."
+        },
+        {
+          "time": "2026-11-12 05:11:35",
+          "who": "claude",
+          "text": "Release build still 2.6-3.4x rustc -O. Next lever: split the module for parallel LLVM codegen."
+        },
+        {
+          "time": "2026-11-12 06:33:16",
+          "who": "agent",
+          "text": "Parallel LLVM partitions (call-graph grouping, available_externally copies of small shared functions), runtime cache keyed on what the compiler reads, leaner IR (trivial phis forwarded, i1 conditions, one range check per slice, constant slice layout). Release now 1.1-2x rustc -O (was 1.8-3.4x); 180 units 13.1 -> 4.5 s. Small programs stay whole: splitting cost hot kernels up to 25% run time. The 100,000-token file limit remains."
+        },
+        {
+          "time": "2026-11-12 06:33:16",
+          "who": "agent",
+          "text": "done 3b6c529"
+        }
+      ]
+    },
+    {
+      "id": "DEFER-PAYS",
+      "title": "Deferred overflow only where it pays, and cheaper to compile",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "BUILD-SCALE"
+      ],
+      "status": "done",
+      "desc": "Prove element accesses in range per chunk from exact values and emit them unchecked; recognize reduction chains; type-bounded leaves; chunk limit instead of fuel; one fallback copy; defer only loops LLVM vectorizes profitably on the target.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 05:11:35",
+          "who": "claude",
+          "text": "Every deferred loop shape measured gains 1.4-2.3x on baseline x86-64 and 3.9-5.8x native (was: only single-slice loops vectorized). LLVM time on the 6,400-line build-scale program 6.2 -> 5.3 s. 1,735 tests on three settings."
+        }
+      ]
+    },
+    {
+      "id": "DEFER-PAYS-REVIEW",
+      "title": "Independent review of per-chunk bounds proofs",
+      "size": "S",
+      "hard": true,
+      "deps": [
+        "DEFER-PAYS"
+      ],
+      "status": "done",
+      "desc": "Hoisted bounds checks remove per-element checks from memory accesses; needs an independent review before merge.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 05:11:35",
+          "who": "claude",
+          "text": "Fifth independent review: accesses after the counter update were proved one step short (out-of-bounds read and write); fixed and re-reviewed, 0 differences over ~8,000 further fuzzed runs. Also a compile-time blowup from the per-declaration instance cap (mutual polymorphic recursion); fixed with a 1024 total for generic instances."
+        }
+      ]
+    },
+    {
+      "id": "LANG-PLACES",
+      "title": "Constants, element access and methods on places, two-phase borrows, wide records",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Module-level const; v[i] reads and place[i] = x writes on Vec fields through references; field assignment on let mut records; &self/&mut self methods on fields and through references; two-phase exclusive borrows in calls; records up to 256 words. docs/places.md.",
+      "commit": "b5641cc",
+      "log": [
+        {
+          "time": "2026-11-12 18:36:30",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-12 18:42:06",
+          "who": "agent",
+          "text": "done b5641cc"
+        },
+        {
+          "time": "2026-11-12 21:32:53",
+          "who": "agent",
+          "text": "Follow-ups: owning records as intermediate steps of reference places (m.apu.powered); precise field paths for owning-field loans and fields through references, so disjoint owning fields can be borrowed together; struct size/field/argument limits removed."
+        }
+      ]
+    },
+    {
+      "id": "GAMEBOY",
+      "title": "Game Boy emulator example in Kush",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LANG-PLACES"
+      ],
+      "status": "in_progress",
+      "desc": "examples/gameboy: SM83 CPU, PPU, timer, MBC1/3/5, terminal front end. Passes Blargg cpu_instrs and instr_timing; 65x real time in LLVM builds. Left: dmg-acid2 and a real homebrew game (needs RGBDS or ROM files), audio, saves, HALT bug.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 18:36:30",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-12 18:42:06",
+          "who": "agent",
+          "text": "Core done in b5641cc: Blargg cpu_instrs + instr_timing pass, PPU scene test, terminal front end at 60 fps. Blocked on fetching ROMs: dmg-acid2 and homebrew games need RGBDS (building it was not permitted here) or ROM files from the user."
+        },
+        {
+          "time": "2026-11-12 19:14:15",
+          "who": "agent",
+          "text": "Plays a real game: 2048-gb (Homebrew Hub ROM) boots and plays in the terminal at 60 fps. dmg-acid2 still unrun."
+        }
+      ]
+    },
+    {
+      "id": "MEDIA",
+      "title": "media package: SDL2 window, keyboard and gamepad events, audio stream",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "examples/media: typed Kush API (Window, Event, Key, Button, Axis, Audio) over a dependency-free Rust adapter linking the system SDL2. Gamepads tested with a virtual SDL controller.",
+      "commit": "a181540",
+      "log": [
+        {
+          "time": "2026-11-12 21:40:40",
+          "who": "agent",
+          "text": "done a181540"
+        }
+      ]
+    },
+    {
+      "id": "GAMEBOY-SOUND",
+      "title": "Game Boy sound chip and desktop front end",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GAMEBOY",
+        "MEDIA"
+      ],
+      "status": "done",
+      "desc": "APU (2 square, wave, noise, frame sequencer on DIV bit 12, mixing); window with sound paced by the audio queue, gamepads. dmg_sound 9/12; wave-RAM-while-playing quirks left.",
+      "commit": "a181540",
+      "log": [
+        {
+          "time": "2026-11-12 21:40:40",
+          "who": "agent",
+          "text": "done a181540"
+        }
+      ]
+    },
+    {
+      "id": "length-refined-fields",
+      "title": "Length-refined Vec fields with proved element accesses",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Length-refined Vec fields, proved element accesses, KUSH_PROOF_REPORT",
+      "commit": "05ad4a6",
+      "log": [
+        {
+          "time": "2026-11-12 22:32:56",
+          "who": "agent",
+          "text": "done 05ad4a6"
+        }
+      ]
+    },
+    {
+      "id": "stateful-effect-handlers",
+      "title": "Effectful, reusable capturing handlers; reference captures; linear media handles",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "effect Op: P -> R ! {io}; reusable frames for capturing handlers with copyable captures; scoped reference captures; Game Boy front ends as handlers; linear Window/Audio",
+      "commit": "aad49d9",
+      "log": [
+        {
+          "time": "2026-11-12 22:58:55",
+          "who": "agent",
+          "text": "done aad49d9"
+        }
+      ]
+    },
+    {
+      "id": "language-limits-pass",
+      "title": "Lift language limits found in the Game Boy example",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "refined params, loop invariants, join facts, shared cells, Option<&T> params, contextual keywords, saves/scale",
+      "commit": "88b2f46",
+      "log": [
+        {
+          "time": "2026-11-13 01:01:09",
+          "who": "agent",
+          "text": "done 88b2f46"
+        }
+      ]
     }
   ]
 }

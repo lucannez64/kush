@@ -228,7 +228,9 @@ fn thread_rules_are_checked() {
                 }})
             }}"
         ),
-        "assignment requires",
+        // Index assignment writes through an exclusive view, which the
+        // captured (immutable) `data` cannot give.
+        "exclusive '&mut [T]' view of an immutable binding",
     );
     rejects(
         &format!(

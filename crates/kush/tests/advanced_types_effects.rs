@@ -969,9 +969,9 @@ fn declared_effects_reach_handlers_through_called_functions() {
 
 #[test]
 fn capturing_dynamic_handlers_own_their_environment() {
-    // A pure once handler may capture copyable values. The frame owns its
-    // environment, the first dynamic perform consumes it, and the callee frees
-    // the environment exactly once.
+    // A pure handler may capture copyable values. The frame owns its
+    // environment; each dynamic perform calls (and frees) a copy, and the
+    // frame frees the original when it pops.
     let source = r#"
         effect Op: i64 -> i64;
         fn deep() -> i64 ! {Op, panic} { perform Op(20) }
@@ -986,8 +986,8 @@ fn capturing_dynamic_handlers_own_their_environment() {
         }"#;
     let (result, stats) = evaluate(source);
     assert_eq!(result, 1);
-    assert_eq!(stats.allocations, 1);
-    assert_eq!(stats.deallocations, 1);
+    assert_eq!(stats.allocations, 2);
+    assert_eq!(stats.deallocations, 2);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     agrees(source, 1);
 
@@ -1036,19 +1036,19 @@ fn capturing_dynamic_handlers_own_their_environment() {
 
 #[test]
 fn a_once_dynamic_handler_is_consumed_by_its_first_perform() {
-    // The first called function consumes the single owning environment. A
-    // second perform finds no active copyable frame and aborts rather than
-    // reusing freed state.
+    // The first called function consumes the single owning environment (it
+    // owns a box). A second perform finds no active copyable frame and
+    // aborts rather than reusing freed state.
     let source = r#"
         effect Op: i64 -> i64;
         fn a() -> i64 ! {Op, panic} { perform Op(1) }
         fn b() -> i64 ! {Op, panic} { perform Op(2) }
         fn main() -> i64 ! {alloc, panic} {
-            let n = 10;
+            let n = Box.new(10);
             handle Op: i64 -> i64 with fn(
                 x: i64,
                 resume: linear once fn(i64) -> i64 ! {},
-            ) -> i64 ! {} { resume(n) } {
+            ) -> i64 ! {} { resume(Box.take(n)) } {
                 a() + b()
             }
         }"#;

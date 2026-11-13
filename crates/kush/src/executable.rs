@@ -303,6 +303,10 @@ pub struct Executable {
     /// Checked nested in-place maps fused into one traversal. This is a
     /// tooling observation, not a source-language effect or proof fact.
     pub(crate) fusions: usize,
+    /// Element accesses proved in bounds (inline, unchecked) and those left
+    /// to a run-time check: the `KUSH_PROOF_REPORT` numbers.
+    pub(crate) bounds_proved: usize,
+    pub(crate) bounds_checked: usize,
     /// Whether any checked body contains a structured-task operation. Task
     /// programs use the cooperative reference scheduler and buffered host I/O.
     pub(crate) uses_tasks: bool,
@@ -936,6 +940,12 @@ pub(crate) enum VecOp {
     SetBorrowed,
     ClearBorrowed,
     ReserveBorrowed,
+    /// `Vec.replace(&mut place, new)`: store `new` in the place and return
+    /// the vector it held, moving both handles (no element is copied).
+    ReplaceBorrowed,
+    /// `SetBorrowed` of a copyable element whose index was proved in bounds:
+    /// an inline store with no check.
+    SetProved,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SliceOp {
@@ -1297,6 +1307,11 @@ pub(crate) enum ExprKind {
         operation: usize,
         handler: Box<Expr>,
         body: Box<Block>,
+        /// A capturing handler whose captures are all copyable: the frame
+        /// keeps its environment and each perform calls a fresh copy, so it
+        /// serves any number of performs (stateful front ends write through
+        /// by-reference captures).
+        reusable: bool,
     },
     /// `perform` resolved through the dynamic handler stack. The handler
     /// contract is pure; a copyable function is reusable, while a capturing
@@ -2698,7 +2713,9 @@ fn collect_body_returns<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
                 collect_body_returns(base, out);
             }
         }
-        ast::ExprKind::While { condition, body } => {
+        ast::ExprKind::While {
+            condition, body, ..
+        } => {
             collect_body_returns(condition, out);
             collect_block_returns(body, out);
         }
@@ -4921,6 +4938,14 @@ type WitnessLifetimes = (
 /// function gets one per distinct list of type arguments that is used.
 struct Functions<'a> {
     declared: BTreeMap<BindingId, Declared<'a>>,
+    /// `where len >= N` clauses of struct fields, by struct and field name.
+    field_lengths: BTreeMap<BindingId, BTreeMap<String, &'a ast::Expr>>,
+    /// Element accesses whose bound was proved, and those checked at run
+    /// time (reported with KUSH_PROOF_REPORT=1).
+    bounds_proved: usize,
+    bounds_checked: usize,
+    /// Accesses into length-refined fields the prover could not discharge.
+    bounds_unproved: Vec<Span>,
     /// Frozen recursive result-origin summaries, solved once before any body
     /// is checked. Provisional summaries never reach signature construction.
     summaries: recursive_lifetimes::Summaries,
@@ -4929,6 +4954,11 @@ struct Functions<'a> {
     /// `Some` is a synthetic lambda/adapter body.
     bodies: Vec<Option<Function>>,
     instances: BTreeMap<InstanceKey, usize>,
+    /// Instances created so far of each declaration; see [`MAX_INSTANCES`].
+    instance_counts: BTreeMap<BindingId, usize>,
+    /// Instances with type, grade, natural, effect or impl arguments; see
+    /// [`MAX_GENERIC_INSTANCES`].
+    generic_instances: usize,
     pending: Vec<usize>,
     /// Synthetic function adapter cache, keyed by optional static source
     /// function index and the source/target arrow types.
@@ -5010,7 +5040,20 @@ struct Functions<'a> {
     union_calls: Vec<UnionCallSpec>,
     logical: &'a crate::check::LogicalEnvironment,
 }
-const MAX_FUNCTIONS: usize = 256;
+/// Most instances of any one declaration. Specialization only multiplies
+/// instances of a declaration through its type, grade, natural or effect
+/// arguments, so this is what stops polymorphic recursion (each call
+/// instantiating the next with a larger type) from specializing forever. The
+/// number of functions in a program is otherwise unbounded: at most this many
+/// per declaration, plus the lambdas and adapters those instances contain.
+const MAX_INSTANCES: usize = 256;
+/// Most instances of generic declarations in a program, all together. In a
+/// polymorphic recursion through several declarations each step wraps the
+/// type once more, so the per-declaration cap alone would allow types
+/// 256 times the number of declarations deep, and checking time grows with
+/// the cube of that (32 declarations took over a minute to reject). Ordinary
+/// functions have one instance each and are not counted.
+const MAX_GENERIC_INSTANCES: usize = 1024;
 /// Total attempts for the bounded cross-parameter partition replay. This is a
 /// deterministic work budget, not a completeness claim: exhausting it is an
 /// explicit diagnostic asking for specialization.
@@ -5375,12 +5418,32 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     // before `Types::new` instantiates monomorphic layouts.
     let dynamic_traits = dynamic_trait_set(module, resolution);
     let mut types = Types::new(module, resolution, &logical, dynamic_traits)?;
+    let mut field_lengths: BTreeMap<BindingId, BTreeMap<String, &ast::Expr>> = BTreeMap::new();
+    for declaration in &module.items {
+        if let ast::ItemKind::Struct { fields, .. } = &declaration.item.kind
+            && fields.iter().any(|field| field.min_length.is_some())
+        {
+            let id = resolution.declarations[&declaration.item.span.start];
+            let entry = field_lengths.entry(id).or_default();
+            for field in fields {
+                if let Some(length) = &field.min_length {
+                    entry.insert(field.name.clone(), &**length);
+                }
+            }
+        }
+    }
     let mut functions = Functions {
         declared: BTreeMap::new(),
+        field_lengths,
+        bounds_proved: 0,
+        bounds_checked: 0,
+        bounds_unproved: Vec::new(),
         summaries: recursive_lifetimes::Summaries::default(),
         signatures: Vec::new(),
         bodies: Vec::new(),
         instances: BTreeMap::new(),
+        instance_counts: BTreeMap::new(),
+        generic_instances: 0,
         pending: Vec::new(),
         adapter_cache: BTreeMap::new(),
         certificates: Vec::new(),
@@ -5420,6 +5483,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             name,
             parameter,
             result,
+            effects,
         } = &declaration.item.kind
         else {
             continue;
@@ -5457,6 +5521,13 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 "dynamic effect operations cannot carry borrowed payloads or results; a handler stack entry has no caller lifetime to borrow from",
             ));
         }
+        let (latent, variables) = crate::runtime_types::effect_bits_partial(resolution, effects)?;
+        if !variables.is_empty() || latent & !EFFECT_BITS != 0 {
+            return Err(Diagnostic::new(
+                declaration.item.span,
+                "an effect operation's handler effects are built-in effects (io, alloc, panic, suspend)",
+            ));
+        }
         let id = effect_operations.len();
         effect_operations.insert(
             name.clone(),
@@ -5464,6 +5535,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                 id,
                 parameter,
                 result,
+                latent,
             },
         );
         types
@@ -5778,6 +5850,13 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             lambda_hint: None,
             required_effects: std::cell::Cell::new(0),
             pending_capability: None,
+            expanding_constants: Vec::new(),
+            writing_bounded_field: false,
+            replace_min_length: None,
+            body_invariant: None,
+            parameter_lengths: BTreeMap::new(),
+            refined_use_ok: false,
+            lending_spans: BTreeSet::new(),
             abort_labels: 0,
             capability_slots: BTreeSet::new(),
             capability_passable: BTreeSet::new(),
@@ -5859,6 +5938,19 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     let (ty, grade) = runtime.next().unwrap();
                     let slot = checker.bind(p.span, *ty, false)?;
                     ensures_params.push((resolution.binder(p.span).unwrap(), slot));
+                    if let Some(length) = &p.min_length {
+                        let refined = ty.ref_pointee().is_some_and(|pointer| {
+                            matches!(checker.types.pointees[pointer], Type::Vec(_))
+                        });
+                        let Some(length) = checker.ast_integer(length, 0).filter(|_| refined)
+                        else {
+                            return Err(Diagnostic::new(
+                                p.ty.span,
+                                "'where len >= N' on a parameter needs a '&Vec<T>' or '&mut Vec<T>' type and a compile-time N",
+                            ));
+                        };
+                        checker.parameter_lengths.insert(slot, length);
+                    }
                     if matches!(split_grade(&p.ty).0.kind, ast::TypeKind::Capability { .. }) {
                         checker.capability_slots.insert(slot);
                         checker.capability_passable.insert(slot);
@@ -6002,6 +6094,26 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     // source types while bodies are still being checked.
     let automatic = automatic_fusion(&types, &mut functions);
     functions.fusions += automatic;
+    if std::env::var_os("KUSH_PROOF_REPORT").is_some() {
+        eprintln!(
+            "proof report: {} element accesses proved in bounds (no runtime check), {} checked at run time",
+            functions.bounds_proved, functions.bounds_checked
+        );
+        if std::env::var("KUSH_PROOF_REPORT").as_deref() == Ok("verbose") {
+            for span in &functions.bounds_unproved {
+                if let Some(file) = program.sources.file(*span) {
+                    let offset = span.start - file.base;
+                    let before = &file.text[..offset.min(file.text.len())];
+                    let line = before.matches('\n').count() + 1;
+                    let column = before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1;
+                    eprintln!(
+                        "  not proved: {}:{line}:{column} (length-refined field, checked at run time)",
+                        file.name
+                    );
+                }
+            }
+        }
+    }
     let mut foreign_functions = vec![None; functions.bodies.len()];
     for (index, foreign) in functions.foreign_functions {
         foreign_functions[index] = Some(foreign);
@@ -6022,6 +6134,8 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         eval_fuel: crate::eval::DEFAULT_EVAL_FUEL,
         _grade_algebras: resolution.lowered_algebras.values().cloned().collect(),
         fusions: functions.fusions,
+        bounds_proved: functions.bounds_proved,
+        bounds_checked: functions.bounds_checked,
         uses_tasks: functions.uses_tasks,
         // A channel type anywhere needs the threaded runtime (its drop glue).
         uses_threads: functions.uses_threads
@@ -6145,6 +6259,21 @@ fn expr_key(expr: &ast::Expr) -> String {
 /// Split a checked projection chain into its root reference expression and the
 /// combined word offset from the record tag. Used only for field assignments
 /// through `&mut Record`; reads use the ordinary `Project` expression.
+/// A field place of a record held directly in a local (not behind a
+/// reference): the local and the field's word offset.
+fn split_local_projection(expr: &Expr) -> Option<(usize, usize)> {
+    let ExprKind::Project(base, offset) = &expr.kind else {
+        return None;
+    };
+    match &base.kind {
+        ExprKind::Peek(slot) | ExprKind::Local(slot) if !base.ty.is_ref() => Some((*slot, *offset)),
+        ExprKind::Project(..) => {
+            let (slot, inner) = split_local_projection(base)?;
+            Some((slot, inner + offset))
+        }
+        _ => None,
+    }
+}
 fn split_reference_projection(expr: Expr) -> Option<(Expr, usize)> {
     let ExprKind::Project(base, offset) = expr.kind else {
         return None;
@@ -6496,6 +6625,7 @@ impl ContractNames {
                         ty: self.ty(&field.ty),
                         span: field.span,
                         public: field.public,
+                        min_length: None,
                     })
                     .collect(),
                 open: *open,
@@ -7395,6 +7525,12 @@ fn collect_methods<'a>(
                 ));
             }
             for parameter in &f.parameters {
+                if let Some(length) = &parameter.min_length {
+                    return Err(Diagnostic::new(
+                        length.span,
+                        "'where len >= N' parameters are supported on functions, not on methods yet",
+                    ));
+                }
                 if parameter.erased && type_mentions_self(&parameter.ty) {
                     return Err(Diagnostic::new(
                         parameter.ty.span,
@@ -7819,6 +7955,12 @@ fn collect_methods<'a>(
                 }
             }
             for parameter in &f.parameters {
+                if let Some(length) = &parameter.min_length {
+                    return Err(Diagnostic::new(
+                        length.span,
+                        "'where len >= N' parameters are supported on functions, not on methods yet",
+                    ));
+                }
                 if parameter.erased && type_mentions_self(&parameter.ty) {
                     return Err(Diagnostic::new(
                         parameter.ty.span,
@@ -9735,6 +9877,12 @@ fn collect_generic_impl<'a>(
             }
         }
         for parameter in &f.parameters {
+            if let Some(length) = &parameter.min_length {
+                return Err(Diagnostic::new(
+                    length.span,
+                    "'where len >= N' parameters are supported on functions, not on methods yet",
+                ));
+            }
             if parameter.erased && type_mentions_self(&parameter.ty) {
                 return Err(Diagnostic::new(
                     parameter.ty.span,
@@ -10349,11 +10497,28 @@ impl<'a> Functions<'a> {
         }
         let declared = self.declared[&binding];
         let f = declared.ast;
-        if self.signatures.len() >= MAX_FUNCTIONS {
+        let count = self.instance_counts.entry(binding).or_default();
+        if *count >= MAX_INSTANCES {
             return Err(Diagnostic::new(
                 origin.unwrap_or(declared.span),
-                "executable limit exceeded (256 function instances); polymorphic recursion cannot be specialized",
+                "executable limit exceeded (256 instances of one function); polymorphic recursion cannot be specialized",
             ));
+        }
+        *count += 1;
+        let (_, key_types, key_grades, key_naturals, key_effects, key_impl) = &key;
+        if !(key_types.is_empty()
+            && key_grades.is_empty()
+            && key_naturals.is_empty()
+            && key_effects.is_empty()
+            && key_impl.is_none())
+        {
+            if self.generic_instances >= MAX_GENERIC_INSTANCES {
+                return Err(Diagnostic::new(
+                    origin.unwrap_or(declared.span),
+                    "executable limit exceeded (1024 instances of generic functions in all; polymorphic recursion, or very many distinct specializations)",
+                ));
+            }
+            self.generic_instances += 1;
         }
         let mut type_generics = Vec::new();
         let mut grade_generics = Vec::new();
@@ -11118,9 +11283,9 @@ impl<'a> Functions<'a> {
             }
         }
         lifetime_bounds = close_lifetime_bounds(lifetime_bounds);
-        for ty in parameters.iter().chain([&result]) {
-            crate::runtime_types::reject_optional_reference_boundary(types, *ty, f.result.span)?;
-        }
+        // An optional reference may be a parameter: it lives for the call,
+        // like any reference argument. A result still needs provenance.
+        crate::runtime_types::reject_optional_reference_boundary(types, result, f.result.span)?;
         // An explicit result lifetime need not repeat the caller's declared
         // outlives bounds: when the body returns a parameter borrow that does
         // not already outlive the result, infer that relation. Every returned
@@ -11425,12 +11590,6 @@ impl<'a> Functions<'a> {
                 "a function cannot return a task handle; a child handle must not escape its scope",
             ));
         }
-        if parameters.iter().map(|ty| types.width(*ty)).sum::<usize>() > 128 {
-            return Err(Diagnostic::new(
-                declared.span,
-                "function parameters exceed the 128-word ABI limit",
-            ));
-        }
         let specialized =
             !key.1.is_empty() || !key.2.is_empty() || !key.3.is_empty() || !key.4.is_empty();
         let name = if !specialized {
@@ -11625,13 +11784,9 @@ impl<'a> Functions<'a> {
     /// Register a synthetic, already-checked function body (lambda or adapter).
     /// Synthetic entries share the same index space as declared instances, so
     /// an `FnValue` code pointer stays stable.
+    /// Not counted against [`MAX_INSTANCES`]: each one belongs to an instance
+    /// that is.
     fn add_synthetic(&mut self, signature: Signature, function: Function) -> Result<usize> {
-        if self.signatures.len() >= MAX_FUNCTIONS {
-            return Err(Diagnostic::new(
-                function.span,
-                "executable limit exceeded (256 function instances); lambda/adapters require more instances",
-            ));
-        }
         let index = self.signatures.len();
         self.signatures.push(signature);
         self.bodies.push(Some(function));
@@ -12556,6 +12711,11 @@ struct Loop {
     is_while: bool,
     /// Type expected of the whole loop expression, for `break` values.
     expected: Option<Type>,
+    /// Whether a `break` leaves this loop (then exit values need not be
+    /// the loop-head values).
+    broke: bool,
+    /// The checked `invariant { P }` of a `while`, proved at each `continue`.
+    invariant: Option<Expr>,
 }
 /// One inclusion constraint on an effect row during a call: the declared row
 /// `fixed | e1 | e2 ...` must cover the actual callable row. Constraints are
@@ -12598,6 +12758,9 @@ struct EffectOperation {
     id: usize,
     parameter: Type,
     result: Type,
+    /// Built-in effects a handler may have (`effect Op: P -> R ! {..}`);
+    /// every dynamic perform requires them.
+    latent: u16,
 }
 /// The canonical kernel index of an admitted runtime scalar binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12658,6 +12821,9 @@ struct HandlerScope {
     /// Abortive operations that may leave the body through the resumption
     /// token (its row; E-ABORT-INTERACT).
     token_effects: u16,
+    /// A reusable capturing handler (see `HandlerPush::reusable`): its
+    /// performs, lexical ones included, go through the dynamic frame.
+    reusable: bool,
 }
 
 struct Checker<'a, 't> {
@@ -12723,6 +12889,25 @@ struct Checker<'a, 't> {
     required_effects: std::cell::Cell<u16>,
     /// The binder span of `handle Op as op`, consumed by `handle_effect`.
     pending_capability: Option<(String, Span)>,
+    /// Constants whose value is being checked, to reject a cycle.
+    expanding_constants: Vec<BindingId>,
+    /// Set while an element write borrows a `where len >= N` field: the only
+    /// exclusive borrow of such a field that cannot shorten it.
+    writing_bounded_field: bool,
+    /// Set while checking `place.replace(v)` on a length-refined field: the
+    /// length `v` must be checked to have.
+    replace_min_length: Option<i64>,
+    /// The invariant the next checked block (a `while` body) must prove at
+    /// its end.
+    body_invariant: Option<Expr>,
+    /// Reference parameters declared `where len >= N`, by slot.
+    parameter_lengths: BTreeMap<usize, i64>,
+    /// Set just before checking a refined parameter in a use that keeps its
+    /// bound (a non-shortening method receiver).
+    refined_use_ok: bool,
+    /// Spans of call arguments passed to a length-refined parameter: such a
+    /// parameter keeps the bound, so a refined place may be lent there.
+    lending_spans: BTreeSet<(usize, usize)>,
     /// Next `AbortScope` label of this checker (unique per function body).
     abort_labels: usize,
     /// Locals holding a second-class capability (EFF-CAP-LEXICAL).
@@ -13253,7 +13438,78 @@ impl Checker<'_, '_> {
         expected: Option<Type>,
         span: Span,
     ) -> Result<Expr> {
-        let first = self.expr(receiver)?;
+        // A read-only builtin on an owning field (`m.memory.len()`) borrows
+        // the field in place, as `&m.memory` would, instead of moving it out.
+        let read_only = matches!(
+            name,
+            "len"
+                | "capacity"
+                | "get"
+                | "try_get"
+                | "at"
+                | "copy"
+                | "byte_at"
+                | "scalar_at"
+                | "scalar_len"
+                | "as_bytes"
+                | "as_str"
+                | "substr"
+                | "read"
+        );
+        let owning_field = read_only
+            && matches!(receiver.kind, ast::ExprKind::Field { .. })
+            && self.is_place(receiver)
+            && self.place_type(receiver).is_some_and(|ty| {
+                matches!(ty, Type::Vec(_) | Type::Bytes | Type::String | Type::Box(_))
+            });
+        // A mutating Vec builtin on a field (`m.log.push(x)`) updates the
+        // field in place through `&mut m.log`, instead of consuming it.
+        let mutated_field = matches!(name, "push" | "set" | "clear" | "reserve" | "replace")
+            && matches!(receiver.kind, ast::ExprKind::Field { .. })
+            && self.is_place(receiver)
+            && self
+                .place_type(receiver)
+                .is_some_and(|ty| matches!(ty, Type::Vec(_)));
+        let first = if owning_field {
+            self.container_receiver(receiver, false)?
+        } else if mutated_field {
+            if self.place_min_length(receiver).is_some() {
+                if name == "clear" {
+                    return Err(Diagnostic::new(
+                        span,
+                        "this field keeps 'len >= N'; clearing it would break that",
+                    ));
+                }
+                // push, set and reserve cannot shorten the vector; replace
+                // checks the incoming vector's length.
+                self.writing_bounded_field = true;
+                if name == "replace" {
+                    self.replace_min_length = self.place_min_length(receiver);
+                }
+            }
+            let first = self.container_receiver(receiver, true);
+            self.writing_bounded_field = false;
+            first?
+        } else {
+            if matches!(receiver.kind, ast::ExprKind::Name(_))
+                && let Some(length) = self.place_min_length(receiver)
+            {
+                match name {
+                    "clear" => {
+                        return Err(Diagnostic::new(
+                            span,
+                            "this parameter keeps 'len >= N'; clearing it would break that",
+                        ));
+                    }
+                    "replace" => self.replace_min_length = Some(length),
+                    _ => {}
+                }
+                self.refined_use_ok = true;
+            }
+            let first = self.expr(receiver);
+            self.refined_use_ok = false;
+            first?
+        };
         if first.ty == Type::Never {
             return Ok(first);
         }
@@ -13384,7 +13640,7 @@ impl Checker<'_, '_> {
         }
         // Collection and text methods dispatch on the receiver type.
         let pointee = |c: &Self, ty: Type| match ty {
-            Type::Ref(p) => Some(c.types.pointees[p]),
+            Type::Ref(p) | Type::RefMut(p) => Some(c.types.pointees[p]),
             other => Some(other),
         };
         let base = pointee(self, ty);
@@ -13432,7 +13688,7 @@ impl Checker<'_, '_> {
         if matches!(base, Some(Type::Vec(_))) {
             let (method, borrow) = match name {
                 "len" | "get" | "at" => (name, true),
-                "clear" | "push" | "reserve" | "try_reserve" | "set" => (name, false),
+                "clear" | "push" | "reserve" | "try_reserve" | "set" | "replace" => (name, false),
                 _ => return Err(unsupported(self)),
             };
             let first = if borrow {
@@ -14494,6 +14750,44 @@ impl Checker<'_, '_> {
         // A trait object stored in a field (of a local aggregate, or behind a
         // stored record reference) is a checked place: dispatch borrows that
         // exact storage instead of reading or copying the field.
+        // An owning field (a record that owns storage, reached through a
+        // local or a reference) cannot be read as a value. A `&self` or
+        // `&mut self` method borrows it in place instead.
+        if matches!(receiver_ast.kind, ast::ExprKind::Field { .. })
+            && self.is_place(receiver_ast)
+            && let Some(field_ty) = self.place_type(receiver_ast)
+            && self.owned_type(field_ty)
+            && !self.is_object_type(field_ty)
+            && field_ty.layout().is_some()
+        {
+            let definition = self.lookup_method(field_ty, name, trait_selection.clone(), span)?;
+            self.check_method_visibility(definition, name, span)?;
+            let Some(mutable) = self.method_receiver_borrow(definition.binding) else {
+                return Err(Diagnostic::new(
+                    receiver_ast.span,
+                    "cannot move an owned field into a method receiver; destructure the record or tuple into a local first",
+                ));
+            };
+            let borrow = ast::Expr {
+                kind: ast::ExprKind::Unary {
+                    op: Kind::Amp,
+                    mutable,
+                    operand: Box::new(receiver_ast.clone()),
+                },
+                span: receiver_ast.span,
+            };
+            let receiver = self.expr(&borrow)?;
+            return self.invoke_method(
+                definition.binding,
+                definition.impl_arguments,
+                receiver_ast,
+                receiver,
+                explicit,
+                arguments,
+                expected,
+                span,
+            );
+        }
         let mut receiver = if let Some(place) = self.object_field_place(receiver_ast) {
             place
         } else if self.is_place(receiver_ast) {
@@ -14599,16 +14893,59 @@ impl Checker<'_, '_> {
         let definition = self.lookup_method(lookup_ty, name, trait_selection, span)?;
         self.check_method_visibility(definition, name, span)?;
         if let Some(mutable) = self.method_receiver_borrow(definition.binding) {
+            // An existing reference is passed on as the receiver, exactly as
+            // it would be passed to an ordinary function: the call reborrows
+            // it, and `&mut` serves a `&self` method.
             if receiver.ty.is_ref() {
-                return Err(Diagnostic::new(
-                    receiver_ast.span,
-                    "calling a borrowed method through an existing reference is not supported in this call-scoped subset; call it on the owning local, or pass the reference to an ordinary function",
-                ));
+                if mutable && !matches!(receiver.ty, Type::RefMut(_)) {
+                    return Err(Diagnostic::new(
+                        receiver_ast.span,
+                        "this method takes '&mut self', but the receiver is a shared reference",
+                    ));
+                }
+                if let ExprKind::Peek(slot) = receiver.kind {
+                    receiver.kind = ExprKind::Local(slot);
+                }
+                return self.invoke_method(
+                    definition.binding,
+                    definition.impl_arguments,
+                    receiver_ast,
+                    receiver,
+                    explicit,
+                    arguments,
+                    expected,
+                    span,
+                );
+            }
+            // A field (or deeper place) of a local or reference is borrowed in
+            // place, exactly as an explicit `&place` / `&mut place` would be.
+            if !matches!(receiver.kind, ExprKind::Peek(_) | ExprKind::Local(_))
+                && self.is_place(receiver_ast)
+            {
+                let borrow = ast::Expr {
+                    kind: ast::ExprKind::Unary {
+                        op: Kind::Amp,
+                        mutable,
+                        operand: Box::new(receiver_ast.clone()),
+                    },
+                    span: receiver_ast.span,
+                };
+                let receiver = self.expr(&borrow)?;
+                return self.invoke_method(
+                    definition.binding,
+                    definition.impl_arguments,
+                    receiver_ast,
+                    receiver,
+                    explicit,
+                    arguments,
+                    expected,
+                    span,
+                );
             }
             let (ExprKind::Peek(slot) | ExprKind::Local(slot)) = receiver.kind else {
                 return Err(Diagnostic::new(
                     receiver_ast.span,
-                    "a borrowed method receiver must be a direct local binding; borrowed temporaries and projected receivers are not supported",
+                    "a borrowed method receiver must be a place (a local or one of its fields); bind a temporary to a local first",
                 ));
             };
             if mutable {
@@ -16441,6 +16778,7 @@ impl Checker<'_, '_> {
             coerced.push(self.coerce_argument(value, ty, span)?);
         }
         self.apply_effect_writes(signature.effects);
+        let (statements, coerced) = self.two_phase_arguments(coerced, ty)?;
         let value = Expr {
             kind: ExprKind::Call(Target::Function(index), coerced),
             ty,
@@ -16455,9 +16793,116 @@ impl Checker<'_, '_> {
         {
             self.assume_postconditions(f, arguments, span, ty);
         }
+        let value = Self::after(statements, value);
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
+        }
+    }
+    /// Two-phase exclusive borrows for a call's arguments. Passing an
+    /// exclusive reference (`m`, `&mut x`, `&mut m.field`) has no side
+    /// effect, so the call may take it after its other arguments have been
+    /// evaluated. When another argument reads the same root
+    /// (`push(m, m.pc)`), the non-place arguments and those reads are
+    /// evaluated first, in order, into hidden locals, and the reference is
+    /// taken last. Without this, the reborrow would be live while `m.pc` is
+    /// read, and the read would be rejected. Returns the statements to run
+    /// before the call and the call's arguments.
+    fn two_phase_arguments(
+        &mut self,
+        arguments: Vec<Expr>,
+        ty: Type,
+    ) -> Result<(Vec<Statement>, Vec<Expr>)> {
+        fn root(expr: &Expr) -> Option<usize> {
+            match &expr.kind {
+                ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Borrow(slot) => {
+                    Some(*slot)
+                }
+                ExprKind::BorrowPlace(inner) | ExprKind::Project(inner, _) => root(inner),
+                _ => None,
+            }
+        }
+        fn mentions(expr: &Expr, slot: usize) -> bool {
+            if let ExprKind::Local(s) | ExprKind::Peek(s) | ExprKind::Borrow(s) = &expr.kind
+                && *s == slot
+            {
+                return true;
+            }
+            let mut found = false;
+            expr.for_each_child(&mut |child| found = found || mentions(child, slot));
+            found
+        }
+        if ty == Type::Never || arguments.iter().any(|a| a.ty == Type::Never) {
+            return Ok((Vec::new(), arguments));
+        }
+        let exclusive: Vec<Option<usize>> = arguments
+            .iter()
+            .map(|argument| match argument.ty {
+                Type::RefMut(_) => root(argument),
+                _ => None,
+            })
+            .collect();
+        let roots: Vec<usize> = exclusive.iter().flatten().copied().collect();
+        if roots.is_empty() {
+            return Ok((Vec::new(), arguments));
+        }
+        let reads_root = |index: usize, argument: &Expr| {
+            exclusive[index].is_none() && roots.iter().any(|&slot| mentions(argument, slot))
+        };
+        if !arguments.iter().enumerate().any(|(i, a)| reads_root(i, a)) {
+            return Ok((Vec::new(), arguments));
+        }
+        // Reads of a borrowed root, and any argument with effects (which
+        // must keep its order relative to them), are evaluated early.
+        let early: Vec<bool> = arguments
+            .iter()
+            .enumerate()
+            .map(|(i, a)| exclusive[i].is_none() && (reads_root(i, a) || root(a).is_none()))
+            .collect();
+        // A reference or view cannot be parked in a hidden local without a
+        // lifetime of its own; leave such calls as they are.
+        if arguments
+            .iter()
+            .zip(&early)
+            .any(|(a, early)| *early && (a.ty.is_ref() || a.ty.is_view()))
+        {
+            return Ok((Vec::new(), arguments));
+        }
+        let mut statements = Vec::new();
+        let mut values = Vec::with_capacity(arguments.len());
+        for (argument, early) in arguments.into_iter().zip(early) {
+            if !early || matches!(argument.kind, ExprKind::Constant(_)) {
+                values.push(argument);
+                continue;
+            }
+            let slot = self.fresh_local(argument.span, argument.ty)?;
+            let local = Expr {
+                kind: ExprKind::Local(slot),
+                ty: argument.ty,
+                span: argument.span,
+                resource: None,
+            };
+            statements.push(Statement::Let(slot, argument));
+            values.push(local);
+        }
+        Ok((statements, values))
+    }
+    /// Wrap a call in the statements its two-phase arguments need.
+    fn after(statements: Vec<Statement>, call: Expr) -> Expr {
+        if statements.is_empty() {
+            return call;
+        }
+        let ty = call.ty;
+        let span = call.span;
+        Expr {
+            kind: ExprKind::Block(Block {
+                statements,
+                tail: Some(Box::new(call)),
+                ty,
+            }),
+            ty,
+            span,
+            resource: None,
         }
     }
     /// Byte-buffer builtin with an already checked receiver.
@@ -18029,6 +18474,26 @@ impl Checker<'_, '_> {
     }
     /// Try to prove `l op r` for every atom from the facts in scope without
     /// reporting a failure. Proved goals record checked certificates.
+    /// Prove a checked `Bool` proposition (linear comparisons with `&&`,
+    /// `||` and `!`) from the facts here, recording its certificate.
+    fn prove_condition(&mut self, condition: &Expr, what: &str) -> Result<()> {
+        let Some(goal) = self.facts.formula_exact(condition, true) else {
+            return Err(Diagnostic::new(
+                condition.span,
+                format!("{what} must be linear comparisons of integers joined by &&, || and !"),
+            ));
+        };
+        match self.facts.certify(&goal, condition.span, what) {
+            Some(certificates) => {
+                self.functions.certificates.extend(certificates);
+                Ok(())
+            }
+            None => Err(Diagnostic::new(
+                condition.span,
+                format!("cannot prove {what} from what is known here"),
+            )),
+        }
+    }
     fn try_prove(
         &mut self,
         atoms: Vec<(crate::facts::Linear, Kind, crate::facts::Linear)>,
@@ -19156,6 +19621,7 @@ impl Checker<'_, '_> {
                 ty: field.ty.clone(),
                 span: field.span,
                 public: true,
+                min_length: None,
             });
         }
         let mut seen_sources = BTreeSet::new();
@@ -20934,8 +21400,12 @@ impl Checker<'_, '_> {
             })
     }
     fn block(&mut self, block: &ast::Block, expected: Option<Type>) -> Result<Block> {
+        // A loop body proves its loop's invariant at its end, before the
+        // facts it learnt are dropped.
+        let invariant = self.body_invariant.take();
         self.nested(block.span, |c| {
             let mark = c.facts.mark();
+            let stamp = c.facts.version_stamp();
             let kernel_mark = c.kernel_locals.len();
             let result = c.statements(
                 &block.statements,
@@ -20943,7 +21413,17 @@ impl Checker<'_, '_> {
                 block.span,
                 expected,
             );
+            if let (Some(invariant), Ok(checked)) = (&invariant, &result)
+                && checked.ty != Type::Never
+            {
+                c.prove_condition(invariant, "the loop invariant at the end of the body")?;
+            }
+            let preserved = match &result {
+                Ok(checked) if checked.ty != Type::Never => c.facts.preserved_since(&stamp),
+                _ => Vec::new(),
+            };
             c.facts.reset(mark);
+            c.facts.add(preserved);
             c.truncate_kernel(kernel_mark);
             result
         })
@@ -22020,8 +22500,11 @@ impl Checker<'_, '_> {
                 expr.kind,
                 ast::ExprKind::Name(_) | ast::ExprKind::Field { .. }
             ) && let Some(id) = c.resolution.reference(span)
-                && c.functions.declared.contains_key(&id)
+                && let Some(declared) = c.functions.declared.get(&id)
             {
+                if declared.ast.constant {
+                    return c.constant(id, expected, span);
+                }
                 return c.function_value(id, None, expected, span);
             }
             if let ast::ExprKind::Specialize { callee, arguments } = &expr.kind
@@ -22173,6 +22656,20 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::Name(_) => {
                     if let Some(id) = c.resolution.reference(span) {
+                        // A `&mut Vec` parameter that keeps `len >= N` is used
+                        // only where the bound survives: indexing, methods
+                        // that cannot shorten it, and refined parameters.
+                        if let Some(slot) = c.slots.get(&id)
+                            && c.parameter_lengths.contains_key(slot)
+                            && matches!(c.locals[*slot].ty, Type::RefMut(_))
+                            && !std::mem::take(&mut c.refined_use_ok)
+                            && !c.lending_spans.contains(&(span.start, span.end))
+                        {
+                            return Err(Diagnostic::new(
+                                span,
+                                "this parameter keeps 'len >= N'; index it, call push/set/reserve/replace on it, or pass it to a parameter that keeps the bound",
+                            ));
+                        }
                         if let Some(slot) = c.slots.get(&id)
                             && c.capability_slots.contains(slot)
                             && !std::mem::take(&mut c.capability_argument)
@@ -22235,8 +22732,12 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::Record { ty, fields, base } => {
                     return match base {
+                        // `record_update` establishes field lengths itself.
                         Some(base) => c.record_update(ty, fields, base, span, expected),
-                        None => c.record(ty, fields, span, expected),
+                        None => {
+                            let value = c.record(ty, fields, span, expected)?;
+                            c.establish_field_lengths(value)
+                        }
                     };
                 }
                 ast::ExprKind::StructuralLiteral(fields) => {
@@ -22399,6 +22900,9 @@ impl Checker<'_, '_> {
                     return c.vec_literal(values, span, expected);
                 }
                 ast::ExprKind::Index { value, index } => {
+                    if let Some(value) = c.container_index(value, index, expected, span)? {
+                        return Ok(value);
+                    }
                     let base = c.place(value)?;
                     if base.ty.is_text() {
                         return Err(Diagnostic::new(
@@ -22525,18 +23029,57 @@ impl Checker<'_, '_> {
                         expected,
                     );
                 }
-                ast::ExprKind::While { condition, body } => {
+                ast::ExprKind::While {
+                    condition,
+                    body,
+                    invariant,
+                } => {
+                    // The invariant must hold on entry; after the loop-head
+                    // widening it is assumed, so the body and the exit see it.
+                    let invariant = match invariant {
+                        Some(invariant) => {
+                            let checked = c.expr_expected(invariant, Some(Type::Bool))?;
+                            c.expect(checked.ty, Type::Bool, checked.span)?;
+                            c.prove_condition(&checked, "the loop invariant on entry")?;
+                            Some(checked)
+                        }
+                        None => None,
+                    };
                     c.bump_assigned(body, Some(condition));
+                    if let Some(invariant) = &invariant {
+                        c.facts.assume(invariant, true);
+                    }
+                    let before = c.facts.version_stamp();
                     let condition = c.expr(condition)?;
                     c.expect(condition.ty, Type::Bool, condition.span)?;
+                    let unwritten = c.facts.same_stamp(&before);
                     let mark = c.facts.mark();
-                    c.facts.assume(&condition, true);
+                    let head = c.facts.clone();
+                    if unwritten {
+                        c.facts.assume_unwritten(&condition, true);
+                    } else {
+                        c.facts.assume(&condition, true);
+                    }
                     let scalar_baseline = c.scalar_values.clone();
                     let scalar_live = c.kernel_locals.len();
-                    c.loops.push(Loop { value: None, is_while: true, expected: None });
+                    c.loops.push(Loop { value: None, is_while: true, expected: None, broke: false, invariant: invariant.clone() });
+                    c.body_invariant = invariant.clone();
                     let body = c.block(body, Some(Type::Unit));
-                    c.loops.pop();
+                    c.body_invariant = None;
+                    let broke = c.loops.pop().is_some_and(|state| state.broke);
                     c.facts.reset(mark);
+                    // Without `break`, the loop exits only from the head, where
+                    // every value written in the body is at its head version
+                    // (already widened by `bump_assigned`) and the condition is
+                    // false.
+                    if !broke && body.as_ref().is_ok_and(|body| body.ty != Type::Never) {
+                        c.facts.versions_from(&head);
+                        if unwritten {
+                            c.facts.assume_unwritten(&condition, false);
+                        } else {
+                            c.facts.assume(&condition, false);
+                        }
+                    }
                     let body = body?;
                     let body_scalars = c.scalar_values.clone();
                     c.scalar_values = scalar_baseline.clone();
@@ -22548,7 +23091,7 @@ impl Checker<'_, '_> {
                     c.bump_assigned(body, None);
                     let scalar_baseline = c.scalar_values.clone();
                     let scalar_live = c.kernel_locals.len();
-                    c.loops.push(Loop { value: Some(Type::Never), is_while: false, expected });
+                    c.loops.push(Loop { value: Some(Type::Never), is_while: false, expected, broke: false, invariant: None });
                     let body = c.block(body, Some(Type::Unit));
                     let state = c.loops.pop().unwrap();
                     let body = body?;
@@ -22559,9 +23102,11 @@ impl Checker<'_, '_> {
                     (ExprKind::Loop(body), state.value.unwrap())
                 }
                 ast::ExprKind::Break(value) => {
-                    let Some(state) = c.loops.last() else {
+                    let Some(state) = c.loops.last_mut() else {
                         return Err(Diagnostic::new(span, "'break' outside of a loop"));
                     };
+                    state.broke = true;
+                    let state = &*state;
                     let value = match value {
                         Some(value) if state.is_while => {
                             return Err(Diagnostic::new(
@@ -22614,6 +23159,9 @@ impl Checker<'_, '_> {
                     if c.loops.is_empty() {
                         return Err(Diagnostic::new(span, "'continue' outside of a loop"));
                     }
+                    if let Some(invariant) = c.loops.last().and_then(|state| state.invariant.clone()) {
+                        c.prove_condition(&invariant, "the loop invariant at this 'continue'")?;
+                    }
                     (ExprKind::Continue(vec![]), Type::Never)
                 }
                 ast::ExprKind::Block(block) => {
@@ -22634,6 +23182,19 @@ impl Checker<'_, '_> {
                     (ExprKind::Constant(int_literal(text, true, ty, span)?), ty)
                 }
                 ast::ExprKind::Unary { op: Kind::Amp, mutable, operand } => {
+                    // A field that keeps `len >= N` is never lent exclusively
+                    // to code that could shorten it; element writes and pushes
+                    // go through `place[i] = v` and `place.push(v)`.
+                    if *mutable
+                        && !c.writing_bounded_field
+                        && !c.lending_spans.contains(&(span.start, span.end))
+                        && c.place_min_length(operand).is_some()
+                    {
+                        return Err(Diagnostic::new(
+                            span,
+                            "this place keeps 'len >= N', so it cannot be borrowed with '&mut' except by a parameter that keeps the bound; write elements with place[i] = value, append with place.push(value), or swap the vector with place.replace(other)",
+                        ));
+                    }
                     // Explicit reborrow: `&*p` narrows an existing reference
                     // for one call without consuming the reference binding, and
                     // `&mut *p` may only reborrow an exclusive reference. The
@@ -22890,10 +23451,45 @@ impl Checker<'_, '_> {
                     {
                         let target = c.place(left)?;
                         let field_ty = target.ty;
+                        // A field of a `let mut` record local is written
+                        // through an exclusive borrow of that local, exactly
+                        // as through an explicit `&mut` receiver.
+                        let through_local = matches!(
+                            split_local_projection(&target),
+                            Some((slot, _)) if c.locals[slot].mutable
+                        );
+                        let target = match split_local_projection(&target) {
+                            Some((slot, offset)) if c.locals[slot].mutable => {
+                                // Facts about the local's fields are stale
+                                // after a write through a borrow.
+                                c.facts.make_opaque(slot);
+                                let record = c.locals[slot].ty;
+                                let pointer = c.types.pointer(record);
+                                let borrow = Expr {
+                                    kind: ExprKind::Borrow(slot),
+                                    ty: Type::RefMut(pointer),
+                                    span: left.span,
+                                    resource: None,
+                                };
+                                Expr {
+                                    kind: ExprKind::Project(Box::new(borrow), offset),
+                                    ty: field_ty,
+                                    span: target.span,
+                                    resource: None,
+                                }
+                            }
+                            Some(_) => {
+                                return Err(Diagnostic::new(
+                                    left.span,
+                                    "cannot assign to a field of an immutable binding; declare it with let mut",
+                                ));
+                            }
+                            None => target,
+                        };
                         let Some((reference, offset)) = split_reference_projection(target) else {
                             return Err(Diagnostic::new(
                                 left.span,
-                                "field assignment requires an exclusive '&mut Record' receiver; update owning locals by rebinding them instead",
+                                "field assignment requires a 'let mut' record local or an exclusive '&mut Record' receiver",
                             ));
                         };
                         let Some(pointer) = reference.ty.ref_pointee() else {
@@ -22936,10 +23532,46 @@ impl Checker<'_, '_> {
                         } else {
                             Type::Unit
                         };
-                        (
-                            ExprKind::RefAssign(Box::new(reference), offset, Box::new(value)),
-                            ty,
-                        )
+                        if through_local && ty != Type::Never {
+                            // The value may read the local (`r.a = r.a + 1`):
+                            // evaluate it before the write borrows the local.
+                            let slot = c.fresh_local(value.span, field_ty)?;
+                            let value_span = value.span;
+                            let write = Expr {
+                                kind: ExprKind::RefAssign(
+                                    Box::new(reference),
+                                    offset,
+                                    Box::new(Expr {
+                                        kind: ExprKind::Local(slot),
+                                        ty: field_ty,
+                                        span: value_span,
+                                        resource: None,
+                                    }),
+                                ),
+                                ty,
+                                span,
+                                resource: None,
+                            };
+                            (
+                                ExprKind::Block(Block {
+                                    statements: vec![Statement::Let(slot, value)],
+                                    tail: Some(Box::new(write)),
+                                    ty,
+                                }),
+                                ty,
+                            )
+                        } else {
+                            (
+                                ExprKind::RefAssign(Box::new(reference), offset, Box::new(value)),
+                                ty,
+                            )
+                        }
+                    } else if let ast::ExprKind::Index {
+                        value: base,
+                        index,
+                    } = &left.kind
+                    {
+                        return c.index_assign(base, index, right, span);
                     } else if let ast::ExprKind::Unary { op: Kind::Star, operand, .. } = &left.kind {
                         // `*p = value` replaces the referent exactly once. The
                         // old affine (non-linear) payload is destroyed by the
@@ -23305,7 +23937,18 @@ impl Checker<'_, '_> {
                                     span,
                                 );
                             }
-                            if Self::builtin_method(name) {
+                            // `replace` is a Vec method only on a Vec place
+                            // (or a `&mut Vec`): the name stays free for user
+                            // methods on other types.
+                            let vec_replace = name == "replace"
+                                && c.place_type(value).is_some_and(|ty| {
+                                    let ty = match ty {
+                                        Type::RefMut(pointer) => c.types.pointees[pointer],
+                                        ty => ty,
+                                    };
+                                    matches!(ty, Type::Vec(_))
+                                });
+                            if Self::builtin_method(name) || vec_replace {
                                 return c.method_call(
                                     value, name, explicit, arguments, expected, span,
                                 );
@@ -23820,12 +24463,18 @@ impl Checker<'_, '_> {
                             .any(|label| label.starts_with("<argument "))
                     });
                     let branch_tail = std::mem::take(&mut c.branch_tail);
+                    let before = c.facts.version_stamp();
                     let condition = c.expr(condition)?;
                     c.expect(condition.ty, Type::Bool, condition.span)?;
+                    let unwritten = c.facts.same_stamp(&before);
                     let baseline = c.facts.clone();
                     let scalar_baseline = c.scalar_values.clone();
                     let scalar_live = c.kernel_locals.len();
-                    c.facts.assume(&condition, true);
+                    if unwritten {
+                        c.facts.assume_unwritten(&condition, true);
+                    } else {
+                        c.facts.assume(&condition, true);
+                    }
                     let has_else = otherwise.is_some();
                     let then_expected = if has_else { expected } else { Some(Type::Unit) };
                     c.ensures_tail = branch_tail && has_else;
@@ -23836,7 +24485,11 @@ impl Checker<'_, '_> {
                     let then_scalars = c.scalar_values.clone();
                     c.scalar_values = scalar_baseline.clone();
                     let otherwise = if let Some(otherwise) = otherwise {
-                        c.facts.assume(&condition, false);
+                        if unwritten {
+                            c.facts.assume_unwritten(&condition, false);
+                        } else {
+                            c.facts.assume(&condition, false);
+                        }
                         // With the call-argument expectation deferred above,
                         // no fallback context may erase the arm's actual
                         // labels either.
@@ -23859,7 +24512,19 @@ impl Checker<'_, '_> {
                         }
                     };
                     let otherwise_scalars = c.scalar_values.clone();
-                    c.facts = crate::facts::Facts::branch_join(&baseline, &then_facts, &c.facts);
+                    // Only a branch that falls through reaches the join, so
+                    // a diverging branch's rewrites do not weaken the facts
+                    // after it (its opaque slots stay opaque: that set is
+                    // sticky and loop heads rely on it).
+                    if then.ty == Type::Never && otherwise.ty != Type::Never {
+                        c.facts.keep_opaque_of(&then_facts);
+                    } else if otherwise.ty == Type::Never && then.ty != Type::Never {
+                        let mut kept = then_facts;
+                        kept.keep_opaque_of(&c.facts);
+                        c.facts = kept;
+                    } else {
+                        c.facts = crate::facts::Facts::branch_join(&baseline, &then_facts, &c.facts);
+                    }
                     c.join_scalars(
                         &scalar_baseline,
                         &then_scalars,
@@ -24371,6 +25036,7 @@ impl Checker<'_, '_> {
         let borrowed_capture = capture_refs.iter().any(|by_ref| *by_ref)
             || captures.iter().any(|slot| {
                 self.locals[*slot].ty.is_slice()
+                    || self.locals[*slot].ty.is_ref()
                     || self.carrier_type(self.locals[*slot].ty)
                     || crate::runtime_types::is_reference_container(
                         self.types,
@@ -24390,12 +25056,12 @@ impl Checker<'_, '_> {
                 )
                 .with_note(local.span, "joined borrowed result declared here"));
             }
-            if matches!(ty, Type::Ref(_) | Type::RefMut(_)) {
+            if self.parameter_lengths.contains_key(slot) && matches!(ty, Type::RefMut(_)) {
                 return Err(Diagnostic::new(
                     span,
-                    "a lambda cannot capture a borrowed owner reference; pass it as an explicit call argument while its owner is live",
+                    "a lambda cannot capture a parameter that keeps 'len >= N'; the closure could shorten it",
                 )
-                .with_note(self.locals[*slot].span, "captured borrow declared here"));
+                .with_note(self.locals[*slot].span, "refined parameter declared here"));
             }
             if matches!(ty, Type::Task(_) | Type::Thread(_)) {
                 return Err(Diagnostic::new(
@@ -24945,6 +25611,7 @@ impl Checker<'_, '_> {
         let saved_written = std::mem::take(&mut self.written_slots);
         let saved_closure_writes = std::mem::take(&mut self.closure_writes);
         let saved_closure_captures = std::mem::take(&mut self.closure_captures);
+        let saved_parameter_lengths = std::mem::take(&mut self.parameter_lengths);
         let capture_ids = captures
             .iter()
             .map(|slot| {
@@ -24997,6 +25664,15 @@ impl Checker<'_, '_> {
             for index in &capability_captures {
                 self.capability_slots.insert(*index);
                 self.capability_passable.insert(*index);
+            }
+            // A by-reference scalar may also be captured, and written, by
+            // other closures (several handlers sharing a counter), and any
+            // call in the body may run one of them: no fact about it holds
+            // across the body.
+            for (index, by_ref) in capture_refs.iter().enumerate() {
+                if *by_ref {
+                    self.facts.make_opaque(index);
+                }
             }
             // Captured scalars are symbolic indices in the body. A by-value
             // snapshot is frozen at construction; a by-reference mutable
@@ -25068,6 +25744,7 @@ impl Checker<'_, '_> {
         self.facts = saved_facts;
         self.written_slots = saved_written;
         self.closure_writes = saved_closure_writes;
+        self.parameter_lengths = saved_parameter_lengths;
         self.closure_captures = saved_closure_captures;
         let body_required = self.required_effects.replace(saved_required);
         let (body, obligation, written) = checked?;
@@ -25825,6 +26502,18 @@ impl Checker<'_, '_> {
                 span,
                 format!(
                     "'{}' has a capability parameter and can only be called directly; as a function value it would let a capability be forged or escape",
+                    f.name
+                ),
+            ));
+        }
+        if f.parameters
+            .iter()
+            .any(|parameter| parameter.min_length.is_some())
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "'{}' has a 'where len >= N' parameter and can only be called directly, where the length is proved or checked",
                     f.name
                 ),
             ));
@@ -27791,8 +28480,606 @@ impl Checker<'_, '_> {
         }
         go(self.types, ty, 0)
     }
+    /// A use of `const NAME: Type = value;`: `value`, checked here against
+    /// `Type`. A literal value therefore compiles to that literal.
+    fn constant(&mut self, id: BindingId, expected: Option<Type>, span: Span) -> Result<Expr> {
+        let declared = &self.functions.declared[&id];
+        let f = declared.ast;
+        let Some(value) = f.body.as_ref().and_then(|body| body.tail.as_deref()) else {
+            unreachable!("a constant always has a value");
+        };
+        if self.expanding_constants.contains(&id) {
+            return Err(Diagnostic::new(
+                span,
+                "this constant's value refers to itself",
+            ));
+        }
+        let ty = self.ty(&f.result)?;
+        self.expanding_constants.push(id);
+        let checked = self.expr_expected(value, Some(ty));
+        self.expanding_constants.pop();
+        let mut checked = checked?;
+        self.expect(checked.ty, ty, span)?;
+        checked.span = span;
+        match expected {
+            Some(expected) => self.coerce(checked, expected, span),
+            None => Ok(checked),
+        }
+    }
+    /// The value of a compile-time integer expression: literals, constants,
+    /// parentheses, unary minus and `+ - * / % << >> & | ^` over them.
+    fn ast_integer(&self, expr: &ast::Expr, depth: usize) -> Option<i64> {
+        if depth > 64 {
+            return None;
+        }
+        match &expr.kind {
+            ast::ExprKind::Integer(text) => text.parse::<i64>().ok(),
+            ast::ExprKind::Name(_) | ast::ExprKind::Field { .. } => {
+                let id = self.resolution.reference(expr.span)?;
+                let declared = self.functions.declared.get(&id)?;
+                if !declared.ast.constant {
+                    return None;
+                }
+                let value = declared.ast.body.as_ref()?.tail.as_deref()?;
+                self.ast_integer(value, depth + 1)
+            }
+            ast::ExprKind::Unary {
+                op: Kind::Minus,
+                operand,
+                ..
+            } => self.ast_integer(operand, depth + 1)?.checked_neg(),
+            ast::ExprKind::Binary { op, left, right } => {
+                let l = self.ast_integer(left, depth + 1)?;
+                let r = self.ast_integer(right, depth + 1)?;
+                match op {
+                    Kind::Plus => l.checked_add(r),
+                    Kind::Minus => l.checked_sub(r),
+                    Kind::Star => l.checked_mul(r),
+                    Kind::Slash => l.checked_div(r),
+                    Kind::Percent => l.checked_rem(r),
+                    Kind::Shl => u32::try_from(r).ok().and_then(|r| l.checked_shl(r)),
+                    Kind::Shr => u32::try_from(r).ok().and_then(|r| l.checked_shr(r)),
+                    Kind::Amp => Some(l & r),
+                    Kind::Pipe => Some(l | r),
+                    Kind::Caret => Some(l ^ r),
+                    _ => None,
+                }
+            }
+            ast::ExprKind::Block(block) if block.statements.is_empty() => {
+                self.ast_integer(block.tail.as_deref()?, depth + 1)
+            }
+            _ => None,
+        }
+    }
+    /// A record literal whose fields declare `where len >= N`: each such
+    /// vector is checked once here (a read of element N - 1), so every later
+    /// access may rely on the length.
+    /// A `&Vec<T>` / `&mut Vec<T>` argument checked at run time to reach a
+    /// vector of at least `length` elements; the reference itself is passed.
+    fn reference_length_checked(&mut self, value: Expr, length: i64) -> Result<Expr> {
+        let ty = value.ty;
+        let Some(Type::Vec(pointer)) = ty.ref_pointee().map(|pointer| self.types.pointees[pointer])
+        else {
+            return Err(Diagnostic::new(
+                value.span,
+                "'where len >= N' needs a '&Vec<T>' or '&mut Vec<T>' argument",
+            ));
+        };
+        let element = self.unannotate(self.types.pointees[pointer]);
+        if self.owned_type(element) {
+            return Err(Diagnostic::new(
+                value.span,
+                "this argument's length must be known to reach 'len >= N' (its elements own resources, so it cannot be checked by reading one)",
+            ));
+        }
+        if length <= 0 {
+            return Ok(value);
+        }
+        self.require(PANIC, value.span)?;
+        let span = value.span;
+        let slot = self.fresh_local(span, ty)?;
+        let reader = Expr {
+            kind: ExprKind::Peek(slot),
+            ty: Type::Ref(self.types.pointer(Type::Vec(pointer))),
+            span,
+            resource: None,
+        };
+        let check = Expr {
+            kind: ExprKind::Call(
+                Target::Vec(VecOp::Get, element),
+                vec![
+                    reader,
+                    Expr {
+                        kind: ExprKind::Constant(length - 1),
+                        ty: Type::I64,
+                        span,
+                        resource: None,
+                    },
+                ],
+            ),
+            ty: element,
+            span,
+            resource: None,
+        };
+        Ok(Expr {
+            kind: ExprKind::Block(Block {
+                statements: vec![Statement::Let(slot, value), Statement::Expr(check)],
+                tail: Some(Box::new(Expr {
+                    kind: ExprKind::Local(slot),
+                    ty,
+                    span,
+                    resource: None,
+                })),
+                ty,
+            }),
+            ty,
+            span,
+            resource: None,
+        })
+    }
+    /// `value` (a `Vec<T>` of type `ty`), checked at run time to hold at
+    /// least `length` elements: the value of a length-refined field.
+    fn length_checked(&mut self, value: Expr, ty: Type, length: i64) -> Result<Expr> {
+        let Type::Vec(pointer) = ty else {
+            return Err(Diagnostic::new(
+                value.span,
+                "'where len >= N' applies to Vec<T> fields",
+            ));
+        };
+        if value.ty == Type::Never || length <= 0 {
+            return Ok(value);
+        }
+        let element = self.unannotate(self.types.pointees[pointer]);
+        self.require(PANIC, value.span)?;
+        let span = value.span;
+        let slot = self.fresh_local(span, ty)?;
+        let borrow = Expr {
+            kind: ExprKind::Borrow(slot),
+            ty: Type::Ref(self.types.pointer(ty)),
+            span,
+            resource: None,
+        };
+        let check = Expr {
+            kind: ExprKind::Call(
+                Target::Vec(VecOp::Get, element),
+                vec![
+                    borrow,
+                    Expr {
+                        kind: ExprKind::Constant(length - 1),
+                        ty: Type::I64,
+                        span,
+                        resource: None,
+                    },
+                ],
+            ),
+            ty: element,
+            span,
+            resource: None,
+        };
+        Ok(Expr {
+            kind: ExprKind::Block(Block {
+                statements: vec![Statement::Let(slot, value), Statement::Expr(check)],
+                tail: Some(Box::new(Expr {
+                    kind: ExprKind::Local(slot),
+                    ty,
+                    span,
+                    resource: None,
+                })),
+                ty,
+            }),
+            ty,
+            span,
+            resource: None,
+        })
+    }
+    fn establish_field_lengths(&mut self, mut value: Expr) -> Result<Expr> {
+        let target = match &mut value.kind {
+            ExprKind::Coerce { value: inner, .. } => &mut **inner,
+            _ => &mut value,
+        };
+        let ExprKind::Construct {
+            enum_id, fields, ..
+        } = &mut target.kind
+        else {
+            return Ok(value);
+        };
+        let definition = self.types.enums[*enum_id].definition;
+        let Some(lengths) = self.functions.field_lengths.get(&definition).cloned() else {
+            return Ok(value);
+        };
+        let names = self.types.enums[*enum_id].variants[0].names.clone();
+        let types = self.types.enums[*enum_id].variants[0].fields.clone();
+        for (index, name) in names.iter().enumerate() {
+            let Some(length) = lengths.get(name) else {
+                continue;
+            };
+            let Some(length) = self.ast_integer(length, 0) else {
+                return Err(Diagnostic::new(
+                    length.span,
+                    "the length in 'where len >= N' must be a compile-time integer",
+                ));
+            };
+            if !matches!(types[index], Type::Vec(_)) {
+                return Err(Diagnostic::new(
+                    fields[index].span,
+                    "'where len >= N' applies to Vec<T> fields",
+                ));
+            }
+            let field = std::mem::replace(
+                &mut fields[index],
+                Expr {
+                    kind: ExprKind::Constant(0),
+                    ty: Type::I64,
+                    span: target.span,
+                    resource: None,
+                },
+            );
+            fields[index] = self.length_checked(field, types[index], length)?;
+        }
+        Ok(value)
+    }
+    /// The minimum length a field place is declared to keep
+    /// (`where len >= N`), when `place` is such a field.
+    fn place_min_length(&self, place: &ast::Expr) -> Option<i64> {
+        match &place.kind {
+            ast::ExprKind::Name(_) => {
+                return self
+                    .slot(place.span)
+                    .ok()
+                    .and_then(|slot| self.parameter_lengths.get(&slot).copied());
+            }
+            ast::ExprKind::Unary {
+                op: Kind::Star,
+                operand,
+                ..
+            } => return self.place_min_length(operand),
+            _ => {}
+        }
+        let ast::ExprKind::Field { value, name } = &place.kind else {
+            return None;
+        };
+        let record = self.place_type(value)?;
+        let record = match record.ref_pointee() {
+            Some(pointer) => self.types.pointees[pointer],
+            None => record,
+        };
+        let id = record.layout()?;
+        let definition = self.types.enums.get(id)?.definition;
+        let length = self.functions.field_lengths.get(&definition)?.get(name)?;
+        self.ast_integer(length, 0)
+    }
+    /// Try to prove `0 <= index < length` from the facts in scope; count the
+    /// outcome for the proof report.
+    fn prove_in_bounds(&mut self, index: &Expr, length: Option<i64>, span: Span) -> bool {
+        let proved = match (length, self.facts.linear(index)) {
+            (Some(length), Some(position)) => self.try_prove(
+                vec![
+                    (
+                        crate::facts::Linear::constant(0),
+                        Kind::Le,
+                        position.clone(),
+                    ),
+                    (
+                        position,
+                        Kind::Lt,
+                        crate::facts::Linear::constant(i128::from(length)),
+                    ),
+                ],
+                &format!("0 <= index && index < {length}"),
+                span,
+            ),
+            _ => false,
+        };
+        if proved {
+            self.functions.bounds_proved += 1;
+        } else {
+            self.functions.bounds_checked += 1;
+            if length.is_some() {
+                self.functions.bounds_unproved.push(span);
+            }
+        }
+        proved
+    }
+    /// The type of a place (a local or a field chain rooted at one), looked
+    /// up without checking or reading it, so no ownership rule applies yet.
+    fn place_type(&self, expr: &ast::Expr) -> Option<Type> {
+        match &expr.kind {
+            ast::ExprKind::Name(name) if name != "_" => {
+                self.slot(expr.span).ok().map(|slot| self.locals[slot].ty)
+            }
+            ast::ExprKind::Field { value, name }
+                if self.resolution.reference(expr.span).is_none() =>
+            {
+                let base = self.place_type(value)?;
+                let base = match base.ref_pointee() {
+                    Some(pointer) => self.types.pointees[pointer],
+                    None => base,
+                };
+                self.record_offset(base, name, expr.span)
+                    .ok()
+                    .map(|(_, ty)| ty)
+            }
+            _ => None,
+        }
+    }
+    /// The receiver for an element access of an owning `Vec`/`Bytes` place:
+    /// an existing reference is passed on (reborrowed), anything else is
+    /// borrowed in place, as `&place` / `&mut place` would be.
+    fn container_receiver(&mut self, base: &ast::Expr, mutable: bool) -> Result<Expr> {
+        let reference = self.place_type(base).is_some_and(|ty| ty.is_ref());
+        if reference && matches!(base.kind, ast::ExprKind::Name(_)) {
+            let slot = self.slot(base.span)?;
+            let ty = self.locals[slot].ty;
+            if mutable && !matches!(ty, Type::RefMut(_)) {
+                return Err(Diagnostic::new(
+                    base.span,
+                    "cannot write through a shared reference; it must be an exclusive '&mut'",
+                ));
+            }
+            return Ok(match (mutable, ty) {
+                // A shared read through `&mut` reborrows it as shared.
+                (false, Type::RefMut(pointer)) => Expr {
+                    kind: ExprKind::Peek(slot),
+                    ty: Type::Ref(pointer),
+                    span: base.span,
+                    resource: None,
+                },
+                _ => Expr {
+                    kind: ExprKind::Local(slot),
+                    ty,
+                    span: base.span,
+                    resource: None,
+                },
+            });
+        }
+        let borrow = ast::Expr {
+            kind: ast::ExprKind::Unary {
+                op: Kind::Amp,
+                mutable,
+                operand: Box::new(base.clone()),
+            },
+            span: base.span,
+        };
+        self.expr(&borrow)
+    }
+    /// `place[index]` for a `Vec<T>` or `Bytes` place, including a field
+    /// reached through a reference: the same checked read as
+    /// `Vec.get(&place, index)` / `Bytes.get(&place, index)`.
+    fn container_index(
+        &mut self,
+        base: &ast::Expr,
+        index: &ast::Expr,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Result<Option<Expr>> {
+        if !self.is_place(base) {
+            return Ok(None);
+        }
+        let Some(ty) = self.place_type(base) else {
+            return Ok(None);
+        };
+        let pointee = match ty.ref_pointee() {
+            Some(pointer) => self.types.pointees[pointer],
+            None => ty,
+        };
+        match pointee {
+            Type::Vec(pointer) => {
+                let receiver = self.container_receiver(base, false)?;
+                let length = self.place_min_length(base);
+                if length.is_none() {
+                    self.functions.bounds_checked += 1;
+                    return self
+                        .vec_call_with(
+                            "Vec.get",
+                            receiver,
+                            std::slice::from_ref(index),
+                            expected,
+                            span,
+                        )
+                        .map(Some);
+                }
+                // A field that keeps `len >= N`: an index proved below N is
+                // read without a check.
+                let element = self.unannotate(self.types.pointees[pointer]);
+                if self.owned_type(element) {
+                    return Err(Diagnostic::new(
+                        span,
+                        "indexing copies the element, but it owns resources",
+                    ));
+                }
+                let index = self.expr_expected(index, Some(Type::I64))?;
+                self.expect(index.ty, Type::I64, index.span)?;
+                let op = if self.prove_in_bounds(&index, length, span) {
+                    VecOp::At
+                } else {
+                    self.require(PANIC, span)?;
+                    VecOp::Get
+                };
+                let ty = if index.ty == Type::Never {
+                    Type::Never
+                } else {
+                    element
+                };
+                let value = Expr {
+                    kind: ExprKind::Call(Target::Vec(op, element), vec![receiver, index]),
+                    ty,
+                    span,
+                    resource: None,
+                };
+                match expected {
+                    Some(expected) => self.coerce(value, expected, span).map(Some),
+                    None => Ok(Some(value)),
+                }
+            }
+            Type::Bytes => {
+                let receiver = self.container_receiver(base, false)?;
+                self.bytes_method(
+                    BytesOp::Get,
+                    receiver,
+                    std::slice::from_ref(index),
+                    expected,
+                    span,
+                )
+                .map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+    /// `place[index] = value`. The index and the value are evaluated first,
+    /// in that order, into hidden locals; only then is the place borrowed
+    /// exclusively for the write. So the value may read the place's owner
+    /// (`m.memory[i] = m.a`), as a call that took `&mut` first could not.
+    /// A `Vec<T>` place is written as `Vec.set(&mut place, i, v)`; an inline
+    /// array or an exclusive slice view as `Slice.set(&mut place[..], i, v)`.
+    fn index_assign(
+        &mut self,
+        base: &ast::Expr,
+        index: &ast::Expr,
+        value: &ast::Expr,
+        span: Span,
+    ) -> Result<Expr> {
+        let ty = self.place_type(base);
+        let pointee = ty.map(|ty| match ty.ref_pointee() {
+            Some(pointer) => self.types.pointees[pointer],
+            None => ty,
+        });
+        let element = match pointee {
+            Some(Type::Vec(pointer)) => Some(self.types.pointees[pointer]),
+            Some(Type::Bytes) => {
+                return Err(Diagnostic::new(
+                    span,
+                    "a byte of Bytes is written through a byte view: Slice.set(&mut bytes[..], index, value); or store the bytes in a Vec<u8>, which supports place[index] = value",
+                ));
+            }
+            _ => None,
+        };
+        let element = match element {
+            Some(element) => element,
+            None => {
+                // Inline arrays and exclusive slice views: the element type
+                // comes from the view.
+                let probe = match ty {
+                    Some(Type::SliceMut(pointer)) => Some(self.types.pointees[pointer]),
+                    Some(ty) => ty
+                        .layout()
+                        .and_then(|id| self.types.enums[id].array)
+                        .map(|(element, _)| element),
+                    None => None,
+                };
+                let Some(element) = probe else {
+                    return Err(Diagnostic::new(
+                        base.span,
+                        "index assignment needs a Vec<T>, an inline array or an exclusive '&mut [T]' view",
+                    ));
+                };
+                element
+            }
+        };
+        if self.owned_type(element) || self.linear_type(element) {
+            return Err(Diagnostic::new(
+                span,
+                "index assignment replaces a copyable element; this element owns resources or is linear",
+            ));
+        }
+        self.require(PANIC, span)?;
+        let index = self.expr_expected(index, Some(Type::I64))?;
+        self.expect(index.ty, Type::I64, index.span)?;
+        let value = self.expr_expected(value, Some(element))?;
+        self.expect(value.ty, element, value.span)?;
+        if index.ty == Type::Never || value.ty == Type::Never {
+            let mut statements = vec![Statement::Expr(index)];
+            statements.push(Statement::Expr(value));
+            return Ok(Expr {
+                kind: ExprKind::Block(Block {
+                    statements,
+                    tail: None,
+                    ty: Type::Never,
+                }),
+                ty: Type::Never,
+                span,
+                resource: None,
+            });
+        }
+        let index_slot = self.fresh_local(index.span, Type::I64)?;
+        let value_slot = self.fresh_local(value.span, element)?;
+        // The hidden index local equals the index expression, for the proof.
+        self.facts.assign(index_slot, &index);
+        let local = |slot, ty, span| Expr {
+            kind: ExprKind::Local(slot),
+            ty,
+            span,
+            resource: None,
+        };
+        let index_span = index.span;
+        let value_span = value.span;
+        let statements = vec![
+            Statement::Let(index_slot, index),
+            Statement::Let(value_slot, value),
+        ];
+        let call = if matches!(pointee, Some(Type::Vec(_))) {
+            let length = self.place_min_length(base);
+            let probe = local(index_slot, Type::I64, index_span);
+            let op = if length.is_some() && self.prove_in_bounds(&probe, length, span) {
+                VecOp::SetProved
+            } else {
+                if length.is_none() {
+                    self.functions.bounds_checked += 1;
+                }
+                VecOp::SetBorrowed
+            };
+            self.writing_bounded_field = true;
+            let receiver = self.container_receiver(base, true);
+            self.writing_bounded_field = false;
+            let receiver = receiver?;
+            Expr {
+                kind: ExprKind::Call(
+                    Target::Vec(op, element),
+                    vec![
+                        receiver,
+                        local(index_slot, Type::I64, index_span),
+                        local(value_slot, element, value_span),
+                    ],
+                ),
+                ty: Type::Unit,
+                span,
+                resource: None,
+            }
+        } else {
+            let view = self.slice_view(base, None, None, true, span, None)?;
+            Expr {
+                kind: ExprKind::Call(
+                    Target::Slice(SliceOp::Set, element),
+                    vec![
+                        view,
+                        local(index_slot, Type::I64, index_span),
+                        local(value_slot, element, value_span),
+                    ],
+                ),
+                ty: Type::Unit,
+                span,
+                resource: None,
+            }
+        };
+        Ok(Expr {
+            kind: ExprKind::Block(Block {
+                statements,
+                tail: Some(Box::new(call)),
+                ty: Type::Unit,
+            }),
+            ty: Type::Unit,
+            span,
+            resource: None,
+        })
+    }
     /// A non-moving read of a local or a nested record field of one.
     fn place(&mut self, expr: &ast::Expr) -> Result<Expr> {
+        self.place_at(expr, false)
+    }
+    /// `intermediate`: this place is only a step towards a field of it
+    /// (`m.apu` in `m.apu.powered`). An owning record may be such a step
+    /// through a reference: nothing is moved or copied but the final field,
+    /// which must itself be copyable.
+    fn place_at(&mut self, expr: &ast::Expr, intermediate: bool) -> Result<Expr> {
         match &expr.kind {
             ast::ExprKind::Name(name) if name != "_" => {
                 if let Ok(slot) = self.slot(expr.span) {
@@ -27807,12 +29094,15 @@ impl Checker<'_, '_> {
             ast::ExprKind::Field { value, name }
                 if self.resolution.reference(expr.span).is_none() =>
             {
-                let base = self.place(value)?;
+                let base = self.place_at(value, true)?;
                 if base.ty.is_ref() {
                     let pointer = base.ty.ref_pointee().expect("reference pointee");
                     let pointee = self.types.pointees[pointer];
                     let (offset, ty) = self.record_offset(pointee, name, expr.span)?;
-                    if self.owned_type(ty)
+                    let owning_step = intermediate
+                        && ty.layout().is_some_and(|id| self.types.enums[id].record)
+                        && !self.linear_type(ty);
+                    if (self.owned_type(ty) && !owning_step)
                         || self.linear_type(ty)
                         || (ty.is_view() && ty.is_mut_slice())
                         || matches!(ty, Type::RefMut(_))
@@ -28059,7 +29349,9 @@ impl Checker<'_, '_> {
         span: Span,
         expected: Option<Type>,
     ) -> Result<Expr> {
-        let base = self.place(value)?;
+        // The base is only a step towards the field: an owning record may be
+        // reached through a reference when the field read is copyable.
+        let base = self.place_at(value, true)?;
         if base.ty.is_ref() {
             let pointer = base.ty.ref_pointee().expect("reference pointee");
             let pointee = self.types.pointees[pointer];
@@ -31578,19 +32870,58 @@ impl Checker<'_, '_> {
             .collect::<BTreeSet<_>>();
         let lengths = self.call_runtime_lengths(f, 0, arguments)?;
         self.pending_lengths = lengths.clone();
-        let (type_arguments, grade_arguments, const_arguments, effect_arguments, values) = self
-            .infer(
-                &f.generics,
-                explicit,
-                &pairs,
-                hint.as_ref()
-                    .map(|(declared, expected)| (declared, *expected)),
-                Some(&lifetime_binders),
-                None,
-                None,
-                &what,
-                span,
-            )?;
+        // Arguments of length-refined parameters: the callee keeps the bound,
+        // so a refined place may be lent there; what the argument already
+        // guarantees decides whether a run-time check is needed.
+        let mut refined_arguments = Vec::new();
+        let mut runtime_index = 0;
+        for (parameter, argument) in f.parameters.iter().zip(arguments) {
+            let position = runtime_index;
+            if !parameter.erased {
+                runtime_index += 1;
+            }
+            let Some(length) = &parameter.min_length else {
+                continue;
+            };
+            let Some(length) = self.ast_integer(length, 0) else {
+                continue;
+            };
+            let known = match &argument.kind {
+                ast::ExprKind::Unary {
+                    op: Kind::Amp,
+                    operand,
+                    ..
+                } => self.place_min_length(operand),
+                ast::ExprKind::Name(_) => self.place_min_length(argument),
+                _ => None,
+            };
+            self.lending_spans
+                .insert((argument.span.start, argument.span.end));
+            refined_arguments.push((
+                argument.span,
+                position,
+                length,
+                known.is_some_and(|known| known >= length),
+            ));
+        }
+        let inferred = self.infer(
+            &f.generics,
+            explicit,
+            &pairs,
+            hint.as_ref()
+                .map(|(declared, expected)| (declared, *expected)),
+            Some(&lifetime_binders),
+            None,
+            None,
+            &what,
+            span,
+        );
+        for (argument_span, _, _, _) in &refined_arguments {
+            self.lending_spans
+                .remove(&(argument_span.start, argument_span.end));
+        }
+        let (type_arguments, grade_arguments, const_arguments, effect_arguments, values) =
+            inferred?;
         let index = self.functions.instance(
             self.types,
             self.resolution,
@@ -31631,10 +32962,22 @@ impl Checker<'_, '_> {
             self.types.rebind_lengths(result, &lengths, span)?
         };
         let mut coerced = Vec::with_capacity(values.len());
-        for (value, ty) in values.into_iter().zip(&signature.parameters) {
+        for (position, (value, ty)) in values.into_iter().zip(&signature.parameters).enumerate() {
             let ty = self.types.relabel_lifetimes(*ty, &lifetime_map, span)?;
             let ty = self.types.rebind_lengths(ty, &lengths, span)?;
-            coerced.push(self.coerce_argument(value, ty, span)?);
+            let value = self.coerce_argument(value, ty, span)?;
+            // An argument whose length is not already known to be enough is
+            // checked here, once, before the call.
+            let value = match refined_arguments
+                .iter()
+                .find(|(_, index, _, _)| *index == position)
+            {
+                Some((_, _, length, false)) if value.ty != Type::Never => {
+                    self.reference_length_checked(value, *length)?
+                }
+                _ => value,
+            };
+            coerced.push(value);
         }
         let values = coerced;
         // Runtime parameter types aligned with the source parameter list. Erased
@@ -31717,6 +33060,7 @@ impl Checker<'_, '_> {
             ));
         }
         self.apply_effect_writes(signature.effects);
+        let (statements, values) = self.two_phase_arguments(values, ty)?;
         let value = Expr {
             kind: ExprKind::Call(
                 if self.functions.foreign_functions.contains_key(&index) {
@@ -31736,6 +33080,7 @@ impl Checker<'_, '_> {
         {
             self.assume_postconditions(f, arguments, span, ty);
         }
+        let value = Self::after(statements, value);
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
@@ -32258,6 +33603,8 @@ impl Checker<'_, '_> {
             span,
             resource: None,
         };
+        // A `where len >= N` field must hold its length after an update too.
+        let construct = self.establish_field_lengths(construct)?;
         let matched = Expr {
             kind: ExprKind::Match(
                 Box::new(base_value),
@@ -33567,12 +34914,22 @@ impl Checker<'_, '_> {
                     "a dynamically visible handler must be a fn or once fn value",
                 ));
             }
-            // E-ABORT-ENTRIES: a one-shot handler may abort with the
+            // Declared operations name the effects their handlers may have;
+            // E-ABORT-ENTRIES: a one-shot handler may also abort with the
             // abortive operations its token names.
-            if signature.effects & !token_effects.unwrap_or(0) != 0 {
+            let latent = declared.map_or(0, |declared| declared.latent);
+            if signature.effects & !(latent | token_effects.unwrap_or(0)) != 0 {
                 return Err(Diagnostic::new(
                     handler.span,
-                    "a dynamically visible handler must be pure; perform in a called function would otherwise hide the handler's effects from the caller's row",
+                    if latent == 0 {
+                        "a dynamically visible handler must be pure; perform in a called function would otherwise hide the handler's effects from the caller's row. Declare the effects the handler may have on the operation: 'effect Op: P -> R ! { io };'".to_owned()
+                    } else {
+                        format!(
+                            "this handler's effects {} are not among the operation's declared effects {}",
+                            effect_names(self.resolution, signature.effects),
+                            effect_names(self.resolution, latent)
+                        )
+                    },
                 ));
             }
         }
@@ -33681,9 +35038,23 @@ impl Checker<'_, '_> {
         // Types of the handler's captured values. An opaque handler value
         // (not a lambda or function here) was checked where it was built;
         // its captures are not visible.
-        let handler_capture_types = self
-            .closure_capture_types(&handler_value)
-            .unwrap_or_default();
+        let known_captures = self.closure_capture_types(&handler_value);
+        // A capturing tail-resumptive handler of a declared operation whose
+        // captures are all copyable (references, by-reference scalars,
+        // plain values) can serve every perform from a copy of its
+        // environment, like a noncapturing `fn`.
+        let reusable = declared.is_some()
+            && !multishot
+            && !region
+            && matches!(handler_value.ty, Type::Once(_))
+            && !signature.linear
+            && known_captures.as_ref().is_some_and(|captures| {
+                !captures.is_empty()
+                    && captures
+                        .iter()
+                        .all(|ty| !self.owned_type(*ty) && !self.linear_type(*ty))
+            });
+        let handler_capture_types = known_captures.unwrap_or_default();
         self.handlers.push(HandlerScope {
             operation: operation.to_owned(),
             parameter: parameter_ty,
@@ -33698,6 +35069,7 @@ impl Checker<'_, '_> {
             declared: declared.is_some(),
             abort: None,
             token_effects: token_effects.unwrap_or(0),
+            reusable,
         });
         // A lexical handle discharges the declared operation's row requirement
         // for its body: the body is checked as if `Op` were available, while the
@@ -33757,6 +35129,7 @@ impl Checker<'_, '_> {
                         resource: None,
                     }),
                     body: Box::new(inner),
+                    reusable,
                 },
                 ty,
                 span,
@@ -34009,6 +35382,7 @@ impl Checker<'_, '_> {
             declared: declared.is_some(),
             abort: Some(label),
             token_effects: 0,
+            reusable: false,
         });
         let operation_effect = self.operation_effect(operation);
         let saved_effects = self.effects;
@@ -34132,7 +35506,17 @@ impl Checker<'_, '_> {
                 let range = crate::facts::scalar_range(ty)?;
                 Some(self.path_linear(*root, steps, range, ty))
             }
-            Sym::Value(expr) => self.facts.linear(expr),
+            // An argument with no linear form (an element read, say) is
+            // still some value of its type: a fresh term with that range.
+            Sym::Value(expr) => self.facts.linear(expr).or_else(|| {
+                let range = crate::facts::scalar_range(ty)?;
+                let term = crate::facts::path_term(
+                    crate::facts::Root::Value(crate::facts::fresh_value()),
+                    &[],
+                );
+                self.facts.note_term(term, range);
+                Some(crate::facts::Linear::variable(term))
+            }),
             Sym::Unknown => None,
         }
     }
@@ -35563,7 +36947,7 @@ impl Checker<'_, '_> {
                 ),
             ));
         }
-        self.require(PANIC | operation_effect, span)?;
+        self.require(PANIC | operation_effect | declared.latent, span)?;
         let payload = self.expr_expected(value, Some(declared.parameter))?;
         let payload = self.coerce_argument(payload, declared.parameter, span)?;
         Ok(Expr {
@@ -35594,6 +36978,7 @@ impl Checker<'_, '_> {
             .handlers
             .iter()
             .rposition(|scope| scope.operation == operation)
+            && !self.handlers[index].reusable
         {
             return self.lexical_perform(index, operation, operation_effect, value, expected, span);
         }
@@ -35612,7 +36997,7 @@ impl Checker<'_, '_> {
         // a dynamically resolved operation can always panic. A declared
         // operation is a concrete row effect too: the enclosing function must
         // list it (a lexical handle removes it for its body).
-        self.require(PANIC | operation_effect, span)?;
+        self.require(PANIC | operation_effect | declared.latent, span)?;
         let payload = self.expr_expected(value, Some(declared.parameter))?;
         let payload = self.coerce_argument(payload, declared.parameter, span)?;
         let resume = self.resume_value(declared.result, false, span)?;
@@ -36022,7 +37407,8 @@ impl Checker<'_, '_> {
             | "Vec.map_in_place"
             | "Vec.map_in_place_grow"
             | "Vec.reserve"
-            | "Vec.try_reserve" => 2,
+            | "Vec.try_reserve"
+            | "Vec.replace" => 2,
             "Vec.map_chain_in_place" | "Vec.map_chain_in_place_grow" => 3,
             _ => 3,
         };
@@ -36154,7 +37540,24 @@ impl Checker<'_, '_> {
                 None => Ok(value),
             };
         }
-        let first = self.expr(&arguments[0])?;
+        if matches!(arguments[0].kind, ast::ExprKind::Name(_))
+            && let Some(length) = self.place_min_length(&arguments[0])
+        {
+            match name {
+                "Vec.clear" => {
+                    return Err(Diagnostic::new(
+                        span,
+                        "this parameter keeps 'len >= N'; clearing it would break that",
+                    ));
+                }
+                "Vec.replace" => self.replace_min_length = Some(length),
+                _ => {}
+            }
+            self.refined_use_ok = true;
+        }
+        let first = self.expr(&arguments[0]);
+        self.refined_use_ok = false;
+        let first = first?;
         self.vec_call_with(name, first, &arguments[1..], expected, span)
     }
     /// Vector/Bytes `.at` builtin with an already checked receiver. The
@@ -36175,7 +37578,7 @@ impl Checker<'_, '_> {
         };
         let arity = match name {
             "Vec.len" | "Vec.clear" => 0,
-            "Vec.get" | "Vec.push" | "Vec.reserve" | "Vec.try_reserve" => 1,
+            "Vec.get" | "Vec.push" | "Vec.reserve" | "Vec.try_reserve" | "Vec.replace" => 1,
             _ => 2,
         };
         if rest.len() != arity {
@@ -36203,9 +37606,10 @@ impl Checker<'_, '_> {
                 "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" | "Vec.try_reserve",
                 Type::Vec(_),
             ) => first.ty,
-            ("Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve", Type::RefMut(p))
-                if matches!(self.types.pointees[p], Type::Vec(_)) =>
-            {
+            (
+                "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" | "Vec.replace",
+                Type::RefMut(p),
+            ) if matches!(self.types.pointees[p], Type::Vec(_)) => {
                 borrowed_mutation = true;
                 self.types.pointees[p]
             }
@@ -36216,6 +37620,7 @@ impl Checker<'_, '_> {
                     "Vec.push" | "Vec.set" | "Vec.clear" | "Vec.reserve" | "Vec.try_reserve" => {
                         "an owned Vec<T> (it is consumed and returned), or an exclusive '&mut Vec<T>' for an in-place update"
                     }
+                    "Vec.replace" => "an exclusive '&mut Vec<T>' whose vector is swapped out",
                     _ => "&Vec<T>",
                 };
                 return Err(Diagnostic::new(
@@ -36249,6 +37654,23 @@ impl Checker<'_, '_> {
             }
             values.push(value);
         }
+        if name == "Vec.replace" {
+            if crate::runtime_types::has_borrow(self.types, element) {
+                return Err(Diagnostic::new(
+                    span,
+                    "Vec.replace moves vectors of owned or copyable elements; this element holds a borrow",
+                ));
+            }
+            let value = self.expr_expected(&rest[0], Some(buffer))?;
+            self.expect(value.ty, buffer, value.span)?;
+            // Into a length-refined field: the new vector is checked to keep
+            // the promised length, once, like a record construction.
+            let value = match self.replace_min_length.take() {
+                Some(length) => self.length_checked(value, buffer, length)?,
+                None => value,
+            };
+            values.push(value);
+        }
         if matches!(name, "Vec.reserve" | "Vec.try_reserve") {
             let additional = self.expr_expected(&rest[0], Some(Type::I64))?;
             self.expect(additional.ty, Type::I64, additional.span)?;
@@ -36266,6 +37688,7 @@ impl Checker<'_, '_> {
         let (op, effects, ty) = match name {
             "Vec.len" => (VecOp::Len, 0, Type::I64),
             "Vec.clear" if borrowed_mutation => (VecOp::ClearBorrowed, 0, Type::Unit),
+            "Vec.replace" => (VecOp::ReplaceBorrowed, 0, buffer),
             "Vec.clear" => (VecOp::Clear, 0, buffer),
             "Vec.reserve" if borrowed_mutation => {
                 (VecOp::ReserveBorrowed, ALLOC | PANIC, Type::Unit)
@@ -36338,7 +37761,11 @@ impl Checker<'_, '_> {
                 None => Ok(value),
             };
         }
-        let value = unit(ExprKind::Call(Target::Vec(op, element), values), ty);
+        let (statements, values) = self.two_phase_arguments(values, ty)?;
+        let value = Self::after(
+            statements,
+            unit(ExprKind::Call(Target::Vec(op, element), values), ty),
+        );
         match expected {
             Some(expected) => self.coerce(value, expected, span),
             None => Ok(value),
@@ -36989,7 +38416,9 @@ impl Checker<'_, '_> {
                 }
                 K::Specialize { callee, .. } => expr(callee, out, calls),
                 K::Block(b) | K::Loop(b) => block(b, out, calls),
-                K::While { condition, body } => {
+                K::While {
+                    condition, body, ..
+                } => {
                     expr(condition, out, calls);
                     block(body, out, calls);
                 }
@@ -37625,6 +39054,11 @@ impl Checker<'_, '_> {
 }
 
 impl Executable {
+    /// `(proved, checked)`: element accesses proved in bounds, compiled as
+    /// plain loads and stores, and those that keep a run-time check.
+    pub fn bounds_report(&self) -> (usize, usize) {
+        (self.bounds_proved, self.bounds_checked)
+    }
     pub fn function_count(&self) -> usize {
         self.functions.len()
     }
@@ -37815,6 +39249,7 @@ pub(crate) fn substitute_alias_type(
                     ty: substitute_alias_type(resolution, &field.ty, map),
                     span: field.span,
                     public: field.public,
+                    min_length: None,
                 })
                 .collect(),
             open: *open,
@@ -38172,7 +39607,9 @@ pub(crate) fn ast_children<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::E
                 f(&arm.body);
             }
         }
-        E::While { condition, body } => {
+        E::While {
+            condition, body, ..
+        } => {
             f(condition);
             block(body, f);
         }
@@ -38265,7 +39702,9 @@ fn exits_early(expr: &ast::Expr) -> bool {
                     arm.guard.as_ref().is_some_and(exits_early) || exits_early(&arm.body)
                 })
         }
-        E::While { condition, body } => exits_early(condition) || block(body),
+        E::While {
+            condition, body, ..
+        } => exits_early(condition) || block(body),
         E::Break(value) => value.as_deref().is_some_and(exits_early),
     }
 }
@@ -38372,7 +39811,9 @@ fn contains_lexical_perform(expr: &ast::Expr, operation: &str) -> bool {
                     .as_deref()
                     .is_some_and(|base| contains_lexical_perform(base, operation))
         }
-        ast::ExprKind::While { condition, body } => {
+        ast::ExprKind::While {
+            condition, body, ..
+        } => {
             contains_lexical_perform(condition, operation)
                 || block_contains_lexical_perform(body, operation)
         }
@@ -38508,7 +39949,9 @@ fn collect_expr_refs(resolution: &Resolution, expr: &ast::Expr, out: &mut BTreeS
                 collect_expr_refs(resolution, base, out);
             }
         }
-        ast::ExprKind::While { condition, body } => {
+        ast::ExprKind::While {
+            condition, body, ..
+        } => {
             collect_expr_refs(resolution, condition, out);
             collect_lambda_refs(resolution, body, out);
         }

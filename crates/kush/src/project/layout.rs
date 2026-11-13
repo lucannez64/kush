@@ -106,26 +106,36 @@ pub(super) fn layout(source: &str, tokens: &[Token]) -> String {
             && (comparison(kind)
                 || *kind == Kind::Dot
                 || prev_kind.is_some_and(|p| comparison(p) || *p == Kind::Dot));
+        // `fn f(..) -> T ! {..}` may put `ensures` clauses and the body's
+        // `{` on lines of their own; that layout is kept.
+        let clause_break = !closing
+            && gap.contains('\n')
+            && matches!(stack.last(), None | Some(Group::Block))
+            && (ident_is(Some(kind), &["ensures"])
+                || (*kind == Kind::LBrace && prev_kind == Some(&Kind::RBrace)));
+        let continuation = continuation || (clause_break && ident_is(Some(kind), &["ensures"]));
         let starts_line = force_newline
+            || clause_break
             || continuation
             || matches!(closed, Some(Group::Block | Group::ListMulti))
             || out.at_line_start();
         let indent = if continuation { indent + 1 } else { indent };
         // Top-level items: a blank line between groups (imports, foreign
         // declarations, everything else) even if the source had none.
-        let declaration_head =
-            matches!(
-                kind,
-                Kind::Module
-                    | Kind::Use
-                    | Kind::Fn
-                    | Kind::Struct
-                    | Kind::Enum
-                    | Kind::Type
-                    | Kind::Pub
-                    | Kind::Total
-                    | Kind::Hash
-            ) || ident_is(Some(kind), &["foreign", "trait", "impl", "effect", "prop"]);
+        let declaration_head = matches!(
+            kind,
+            Kind::Module
+                | Kind::Use
+                | Kind::Fn
+                | Kind::Struct
+                | Kind::Enum
+                | Kind::Type
+                | Kind::Pub
+                | Kind::Hash
+        ) || ident_is(
+            Some(kind),
+            &["foreign", "trait", "impl", "effect", "prop", "total"],
+        );
         let item_start = stack.is_empty()
             && declaration_head
             && prev_kind.is_none_or(|p| matches!(p, Kind::Semi | Kind::RBrace | Kind::RBracket));
@@ -151,12 +161,11 @@ pub(super) fn layout(source: &str, tokens: &[Token]) -> String {
             }
             out.indent(indent);
         } else if !out.is_empty() && !out.at_line_start() {
-            let generic_close = generic_close[index];
             if needs_space(
                 &tokens,
                 index,
                 prev_kind,
-                generic_close,
+                &generic_close,
                 &generic_open,
                 &stack,
                 closed,
@@ -231,6 +240,9 @@ pub(super) fn layout(source: &str, tokens: &[Token]) -> String {
                             | Kind::Dot
                             | Kind::Question
                             | Kind::RBrace
+                            // `handle Op: .. with fn(..) { .. } { body }`,
+                            // `ensures { P } { body }`, `invariant { P } { .. }`
+                            | Kind::LBrace
                     )
                 ) || next.is_some_and(is_binary_operator);
                 if !continues && matches!(top, None | Some(Group::Block)) {
@@ -323,7 +335,6 @@ fn is_keyword(kind: &Kind) -> bool {
     matches!(
         kind,
         Kind::Fn
-            | Kind::Total
             | Kind::Pub
             | Kind::Let
             | Kind::Mut
@@ -341,7 +352,6 @@ fn is_keyword(kind: &Kind) -> bool {
             | Kind::Loop
             | Kind::Break
             | Kind::Continue
-            | Kind::Handle
             | Kind::Perform
             | Kind::With
     )
@@ -385,12 +395,21 @@ fn generic_brackets(tokens: &[&Token]) -> (Vec<bool>, Vec<bool>) {
     let mut opens = vec![false; tokens.len()];
     let mut closes = vec![false; tokens.len()];
     let mut depth = 0usize;
+    // `<<` is two glued `<` tokens: a shift, never a generic bracket.
+    let glued = |a: usize, b: usize| {
+        b < tokens.len()
+            && tokens[a].kind == Kind::Lt
+            && tokens[b].kind == Kind::Lt
+            && tokens[a].span.end == tokens[b].span.start
+    };
     for index in 0..tokens.len() {
+        let shift = (index > 0 && glued(index - 1, index)) || glued(index, index + 1);
         match tokens[index].kind {
             Kind::Lt
-                if depth > 0
-                    || is_generic_open(tokens, index)
-                    || adjacent_generic(tokens, index) =>
+                if !shift
+                    && (depth > 0
+                        || is_generic_open(tokens, index)
+                        || adjacent_generic(tokens, index)) =>
             {
                 opens[index] = true;
                 depth += 1;
@@ -466,7 +485,7 @@ fn needs_space(
     tokens: &[&Token],
     index: usize,
     prev: Option<&Kind>,
-    generic_close: bool,
+    generic_closes: &[bool],
     generic_open: &[bool],
     stack: &[Group],
     closed: Option<Group>,
@@ -476,6 +495,7 @@ fn needs_space(
         return false;
     };
     let prev_index = index - 1;
+    let generic_close = generic_closes[index];
     let before_prev = prev_index.checked_sub(1).map(|i| &tokens[i].kind);
     let effect_marker = *prev_kind == Kind::Bang && *kind == Kind::LBrace;
     let prev_is_unary = !effect_marker
@@ -524,10 +544,12 @@ fn needs_space(
         }
         Kind::Gt if generic_close => return false,
         Kind::LParen => {
+            // `f<T>(x)` calls a generic; `a >> (b)` shifts.
+            let generic_call = *prev_kind == Kind::Gt && generic_closes[prev_index];
             return !(matches!(
                 prev_kind,
-                Kind::Ident(_) | Kind::RParen | Kind::RBracket | Kind::Gt | Kind::Fn
-            ) || (*prev_kind == Kind::Gt));
+                Kind::Ident(_) | Kind::RParen | Kind::RBracket | Kind::Fn
+            ) || generic_call);
         }
         Kind::LBracket => {
             return !matches!(
@@ -548,7 +570,9 @@ fn block_is_multiline(source: &str, tokens: &[&Token], open: usize, close: Optio
         return true;
     };
     if close == open + 1 {
-        return false;
+        // An empty body keeps a comment written on its own line inside it.
+        let inner = &source[tokens[open].span.end..tokens[close].span.start];
+        return inner.contains('\n') && (inner.contains("//") || inner.contains("/*"));
     }
     // Short blocks written on one line (`if m > n { return false; }`) stay
     // on one line; anything the author spread over lines is re-indented.

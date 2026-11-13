@@ -1,0 +1,124 @@
+module gameboy.emulator;
+
+use std.result.Result;
+use std.text;
+use gameboy.apu;
+use gameboy.cartridge;
+use gameboy.cartridge.Mapper;
+use gameboy.cpu;
+use gameboy.machine;
+use gameboy.machine.Machine;
+use gameboy.ppu;
+
+/// Clock cycles in one frame at 59.7 frames per second.
+
+pub const CYCLES_PER_FRAME: i64 = 70224;
+
+/// Run until the display finishes a frame (or a frame's worth of cycles has
+/// passed with the display off).
+pub fn run_frame<M: Mapper>(m: &mut Machine<M>) -> Unit ! {alloc, panic} {
+    m.frame_done = false;
+    let mut budget = CYCLES_PER_FRAME;
+    while !m.frame_done && budget > 0 {
+        let cycles = cpu.step(m);
+        machine.tick_timer(m, cycles);
+        ppu.advance(m, cycles);
+        apu.tick(&mut m.apu, cycles);
+        m.cycles = m.cycles + cycles;
+        budget = budget - cycles;
+    }
+}
+
+// The core talks to whoever runs it through three operations, once per
+// frame. A front end (window, terminal, headless runner, test) is a set of
+// handlers for them; the core never knows which one it is driving.
+
+/// The buttons held for the next frame (bits as `machine.press` takes them),
+/// or -1 to stop.
+pub effect Buttons: Unit -> i64 ! {io, alloc, panic};
+/// A finished frame, one shade (0-3) per pixel, row-major. The handler gives
+/// the buffer back, with false to stop.
+pub effect Present: Vec<u8> -> (Vec<u8>, Bool) ! {io, alloc, panic};
+/// The frame's sound: interleaved left/right samples at `apu.SAMPLE_RATE`.
+/// The handler gives the buffer back.
+pub effect Play: Vec<i64> -> Vec<i64> ! {io, alloc, panic};
+
+/// Run frames until the front end says stop. Nothing is copied: the core
+/// keeps a second screen and sample buffer, swaps the finished ones out with
+/// `replace`, lends them to the front end and swaps them back.
+pub fn run<M: Mapper>(m: &mut Machine<M>) -> Unit ! {Buttons, Present, Play, io, alloc, panic} {
+    let mut spare = cartridge.zeroed(machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT);
+    let mut sound: Vec<i64> = Vec.with_capacity(2048);
+    let mut held = perform Buttons(());
+    while held >= 0 {
+        machine.press(m, Int.truncate(held & 0xFF));
+        run_frame(m);
+        let (screen, more) = perform Present(m.screen.replace(spare));
+        spare = m.screen.replace(screen);
+        sound = perform Play(m.apu.samples.replace(sound)).clear();
+        held = if more { perform Buttons(()) } else { -1 };
+    }
+}
+
+/// The DMG's four greens, lightest first, as RGB.
+pub fn rgb(shade: u8) -> (i64, i64, i64) ! {} {
+    match shade {
+        0 => (0xE0, 0xF8, 0xD0),
+        1 => (0x88, 0xC0, 0x70),
+        2 => (0x34, 0x68, 0x56),
+        _ => (0x08, 0x18, 0x20),
+    }
+}
+
+/// The screen as a binary PPM image, scaled up by `scale`.
+pub fn screenshot<M>(m: &Machine<M>, scale: i64) -> Bytes ! {alloc, panic} {
+    let width = machine.SCREEN_WIDTH * scale;
+    let height = machine.SCREEN_HEIGHT * scale;
+    let mut out = Bytes.with_capacity(32 + width * height * 3);
+    out = append(out, &Bytes.from("P6\n"));
+    out = text.format_i64_into(out, width);
+    out = out.push(32);
+    out = text.format_i64_into(out, height);
+    out = append(out, &Bytes.from("\n255\n"));
+    // Each source pixel is repeated `scale` times across and down.
+    let mut sy = 0;
+    while sy < machine.SCREEN_HEIGHT {
+        let mut repeat_y = 0;
+        while repeat_y < scale {
+            let mut sx = 0;
+            while sx < machine.SCREEN_WIDTH {
+                let (r, g, b) = rgb(m.screen[sy * machine.SCREEN_WIDTH + sx]);
+                let mut repeat_x = 0;
+                while repeat_x < scale {
+                    out = out.push(r).push(g).push(b);
+                    repeat_x = repeat_x + 1;
+                }
+                sx = sx + 1;
+            }
+            repeat_y = repeat_y + 1;
+        }
+        sy = sy + 1;
+    }
+    out
+}
+
+/// What the program has sent to the serial port so far.
+pub fn serial_text<M>(m: &Machine<M>) -> Bytes ! {alloc, panic} {
+    let mut out = Bytes.with_capacity(m.serial.len());
+    let mut i = 0;
+    while i < m.serial.len() {
+        out = out.push(Int.convert(m.serial[i]));
+        i = i + 1;
+    }
+    out
+}
+
+pub fn append(out: Bytes, more: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut result = out;
+    let mut i = 0;
+    while i < more.len() {
+        result = result.push(more[i]);
+        i = i + 1;
+    }
+    result
+}

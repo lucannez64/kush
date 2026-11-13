@@ -758,10 +758,6 @@
     "named": false
   },
   {
-    "type": "handle",
-    "named": false
-  },
-  {
     "type": "i16",
     "named": false
   },
@@ -884,10 +880,6 @@
   },
   {
     "type": "struct",
-    "named": false
-  },
-  {
-    "type": "total",
     "named": false
   },
   {

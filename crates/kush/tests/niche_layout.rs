@@ -164,10 +164,17 @@ fn main() -> i64 ! {} { let mut p = P { x: 1 }; let r: Maybe<&P> = Maybe.Some(&p
 fn main() -> i64 ! {} { let r: Maybe<&P> = { let p = P { x: 1 }; Maybe.Some(&p) }; match r { Maybe.Some(q) => q.x, Maybe.None => 0 } }"#,
         "outlive",
     );
-    rejects(
+    // A parameter may be an optional reference: it lives for the call.
+    agrees(
         r#"struct P { x: i64 } enum Maybe<T> { None, Some(T) }
 fn use_ref(p: Maybe<&P>) -> i64 ! {} { match p { Maybe.Some(q) => q.x, Maybe.None => 0 } }
 fn main() -> i64 ! {} { let p = P { x: 42 }; use_ref(Maybe.Some(&p)) }"#,
+        42,
+    );
+    rejects(
+        r#"struct P { x: i64 } enum Maybe<T> { None, Some(T) }
+fn give(p: &P) -> Maybe<&P> ! {} { Maybe.Some(p) }
+fn main() -> i64 ! {} { 0 }"#,
         "lexical values",
     );
     rejects(

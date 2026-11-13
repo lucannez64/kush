@@ -29,6 +29,14 @@
 (_ (keyword) @_ensures . (operator) . (identifier) @variable.special
   (#eq? @_ensures "ensures") (#eq? @variable.special "result"))
 
+; Contextual keywords: `total fn` / `total enum`, `handle Op: ..`, and a
+; loop's `invariant { .. }`. Elsewhere these words are ordinary names.
+(_ (identifier) @keyword . (function_item) (#eq? @keyword "total"))
+(_ (identifier) @keyword . (type_item) (#eq? @keyword "total"))
+(_ (identifier) @keyword . (identifier) . (punctuation) @_colon
+  (#eq? @keyword "handle") (#eq? @_colon ":"))
+(_ (identifier) @keyword . (block) (#eq? @keyword "invariant"))
+
 (function_item name: (identifier) @function)
 (type_item name: (identifier) @type)
 

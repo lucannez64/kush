@@ -1,0 +1,2219 @@
+//! LLVM release backend.
+//!
+//! The checked executable IR is lowered exactly once, by `Generator`, into
+//! verified Cranelift IR. The default backend hands that IR to Cranelift's
+//! code generator. This module is the second consumer: it translates the same
+//! verified functions into textual LLVM IR, which `clang` optimizes together
+//! with the C runtime. Both backends therefore share every lowering decision
+//! (evaluation order, checks, layouts, drops, task and handler protocols);
+//! only instruction selection and optimization differ.
+//!
+//! No LLVM library is linked into the compiler and no `unsafe` is needed: the
+//! output is a `.ll` file.
+//!
+//! Value model. Cranelift values are untyped machine words; LLVM optimizes
+//! far better when addresses are real pointers. Every translated value keeps
+//! its integer form, and values with a known pointer origin (stack slots,
+//! symbols, pointers returned by the runtime) additionally keep a pointer
+//! form. Address computations are rebuilt as `getelementptr` from the pointer
+//! form at each memory access, so stack slots are promoted to registers and
+//! array accesses are visible to the loop optimizer.
+use super::Result;
+use super::error;
+use cranelift_codegen::ir::{
+    self, Block, ExternalName, InstructionData, Opcode, Value, ValueDef,
+    condcodes::{FloatCC, IntCC},
+    types,
+};
+use cranelift_module::{DataId, FuncId, Linkage, ModuleDeclarations};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+
+/// A first-class LLVM type used at a C ABI boundary.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Ty {
+    Void,
+    I8,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+    Ptr,
+}
+impl Ty {
+    fn name(self) -> &'static str {
+        match self {
+            Ty::Void => "void",
+            Ty::I8 => "i8",
+            Ty::I16 => "i16",
+            Ty::I32 => "i32",
+            Ty::I64 => "i64",
+            Ty::F32 => "float",
+            Ty::F64 => "double",
+            Ty::Ptr => "ptr",
+        }
+    }
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "void" => Ty::Void,
+            "i8" => Ty::I8,
+            "i16" => Ty::I16,
+            "i32" => Ty::I32,
+            "i64" => Ty::I64,
+            "float" => Ty::F32,
+            "double" => Ty::F64,
+            "ptr" => Ty::Ptr,
+            _ => return None,
+        })
+    }
+    fn of(ty: ir::Type) -> Option<Self> {
+        Some(match ty {
+            types::I8 => Ty::I8,
+            types::I16 => Ty::I16,
+            types::I32 => Ty::I32,
+            types::I64 => Ty::I64,
+            types::F32 => Ty::F32,
+            types::F64 => Ty::F64,
+            _ => return None,
+        })
+    }
+    fn bits(self) -> u32 {
+        match self {
+            Ty::I8 => 8,
+            Ty::I16 => 16,
+            Ty::I32 | Ty::F32 => 32,
+            Ty::I64 | Ty::F64 | Ty::Ptr => 64,
+            Ty::Void => 0,
+        }
+    }
+}
+
+/// The exact LLVM signature `clang` gave one runtime function.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct CSignature {
+    pub ret: Ty,
+    pub params: Vec<Ty>,
+}
+
+/// What the translator needs from the runtime's own LLVM IR: the target
+/// description, and each exported function's real signature so calls match it
+/// exactly (a call through a mismatched type is never inlined).
+#[derive(Default, Debug)]
+pub(super) struct RuntimeInterface {
+    pub header: String,
+    pub signatures: BTreeMap<String, CSignature>,
+}
+impl RuntimeInterface {
+    pub fn parse(ir: &str) -> Self {
+        let mut interface = Self::default();
+        for line in ir.lines() {
+            if line.starts_with("target datalayout") || line.starts_with("target triple") {
+                interface.header.push_str(line);
+                interface.header.push('\n');
+            } else if let Some(rest) = line.strip_prefix("define ")
+                && let Some((name, signature)) = parse_define(rest)
+            {
+                interface.signatures.insert(name, signature);
+            }
+        }
+        interface
+    }
+}
+/// Parse `[attrs] RET @name(TYPE [attrs] %n, ...) ...`. Anything outside the
+/// first-class scalar subset (aggregates, varargs, internal functions) yields
+/// `None`, and calls to that symbol keep the Cranelift signature.
+fn parse_define(rest: &str) -> Option<(String, CSignature)> {
+    let at = rest.find('@')?;
+    let prefix = &rest[..at];
+    if prefix
+        .split_whitespace()
+        .any(|word| word == "internal" || word == "hidden")
+    {
+        return None;
+    }
+    let ret = Ty::parse(prefix.split_whitespace().next_back()?)?;
+    let open = at + rest[at..].find('(')?;
+    let name = rest[at + 1..open].to_owned();
+    let mut depth = 0usize;
+    let mut close = None;
+    for (offset, character) in rest[open..].char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let inside = rest[open + 1..close?].trim();
+    let mut params = Vec::new();
+    if !inside.is_empty() {
+        let mut depth = 0usize;
+        let mut start = 0;
+        let mut pieces = Vec::new();
+        for (offset, character) in inside.char_indices() {
+            match character {
+                '(' | '{' | '[' | '<' => depth += 1,
+                ')' | '}' | ']' | '>' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    pieces.push(&inside[start..offset]);
+                    start = offset + 1;
+                }
+                _ => {}
+            }
+        }
+        pieces.push(&inside[start..]);
+        for piece in pieces {
+            let piece = piece.trim();
+            if piece.contains("byval") || piece.contains("sret") {
+                return None;
+            }
+            params.push(Ty::parse(piece.split_whitespace().next()?)?);
+        }
+    }
+    Some((name, CSignature { ret, params }))
+}
+
+/// The runtime's LLVM module, split for separate compilation.
+pub(super) struct RuntimeSplit {
+    /// The module to compile into the runtime object: unchanged, except that
+    /// internal functions and variables are hidden instead, i.e. visible to
+    /// the program object but not outside the executable.
+    pub exported: String,
+    /// The same module with every definition `available_externally`: LLVM may
+    /// inline these bodies into the program and then discards them. State
+    /// stays single because variables are `available_externally` too and
+    /// resolve to the runtime object's.
+    pub inlinable: String,
+    /// The target description and every function signature line, which is
+    /// all the translator needs to call the runtime with exact types.
+    pub interface: String,
+}
+
+/// Runtime functions whose bodies LLVM may inline into program code: reads,
+/// in-place writes and bookkeeping that never allocate, free or grow.
+pub(super) const INLINABLE: [&str; 23] = [
+    "kush_vec_len",
+    "kush_vec_get",
+    "kush_vec_set",
+    "kush_vec_element",
+    "kush_bytes_len",
+    "kush_bytes_capacity",
+    "kush_bytes_get",
+    "kush_alloc_vec_len",
+    "kush_alloc_vec_get",
+    "kush_alloc_vec_data",
+    "kush_alloc_block_data",
+    "kush_alloc_box_payload",
+    "kush_utf8_scalar_len",
+    "kush_utf8_scalar_at",
+    "kush_str_scalar_len",
+    "kush_str_byte_at",
+    "kush_str_scalar_at",
+    "kush_float_from_int",
+    "kush_float_to_int",
+    "kush_float_int_present",
+    "kush_int_exact_in_float",
+    "kush_handler_depth",
+    "kush_note_reuse",
+];
+
+/// Rewrite the linkage of each top-level definition of the runtime module.
+/// Returns `None` for constructs the scheme does not cover (aliases, special
+/// `@llvm.` variables, thread-local or common storage), so the caller can
+/// report it instead of producing a module that links but misbehaves.
+pub(super) fn split_runtime(ir: &str) -> Option<RuntimeSplit> {
+    let mut split = RuntimeSplit {
+        exported: String::with_capacity(ir.len()),
+        inlinable: String::with_capacity(ir.len() + ir.len() / 16),
+        interface: String::new(),
+    };
+    for line in ir.lines() {
+        let (exported, inlinable);
+        if let Some(rest) = line.strip_prefix("define ") {
+            // Only plain accessors may be inlined into program code. The
+            // allocator in particular must stay an opaque call: the alias
+            // facts the program module states (`noalias` parameters, memory
+            // classes) are about objects, and a recycled block is a new
+            // object only as long as LLVM cannot see through the recycling.
+            let name = rest.split_once('@')?.1.split('(').next()?;
+            let body = rest.strip_suffix('{')?;
+            let opaque = if INLINABLE.contains(&name) {
+                ""
+            } else {
+                "noinline "
+            };
+            (exported, inlinable) = match rest.strip_prefix("internal ") {
+                Some(_) => (
+                    format!("define hidden {}", &rest["internal ".len()..]),
+                    format!(
+                        "define available_externally hidden {}{opaque}{{",
+                        &body["internal ".len()..]
+                    ),
+                ),
+                None => (
+                    line.to_owned(),
+                    format!("define available_externally {body}{opaque}{{"),
+                ),
+            };
+            split.interface.push_str(&exported);
+            split.interface.push('\n');
+        } else if line.starts_with('@')
+            && let Some((name, rest)) = line.split_once(" = ")
+        {
+            let first = rest.split_whitespace().next()?;
+            if name.starts_with("@llvm.")
+                || rest.contains("thread_local")
+                || matches!(
+                    first,
+                    "alias"
+                        | "ifunc"
+                        | "common"
+                        | "weak"
+                        | "weak_odr"
+                        | "linkonce"
+                        | "linkonce_odr"
+                        | "appending"
+                )
+            {
+                return None;
+            }
+            (exported, inlinable) = if let Some(rest) = rest.strip_prefix("internal ") {
+                (
+                    format!("{name} = hidden {rest}"),
+                    format!("{name} = available_externally hidden {rest}"),
+                )
+            } else if matches!(first, "private" | "external" | "extern_weak") {
+                (line.to_owned(), line.to_owned())
+            } else {
+                (
+                    line.to_owned(),
+                    format!("{name} = available_externally {rest}"),
+                )
+            };
+        } else {
+            if line.starts_with("target datalayout") || line.starts_with("target triple") {
+                split.interface.push_str(line);
+                split.interface.push('\n');
+            }
+            (exported, inlinable) = (line.to_owned(), line.to_owned());
+        }
+        split.exported.push_str(&exported);
+        split.exported.push('\n');
+        split.inlinable.push_str(&inlinable);
+        split.inlinable.push('\n');
+    }
+    Some(split)
+}
+
+/// What kind of memory a load or store touches, when the generator knows.
+/// Accesses of different classes never overlap: a buffer's header words
+/// (length, capacity) are never an element of any buffer. The generator
+/// records the class as the instruction's source location.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub(super) enum MemoryClass {
+    BufferHeader = 1,
+    BufferElements = 2,
+}
+
+/// A defined function whose address-taking callers need the plain word
+/// signature: return type, parameter types with extensions, and which
+/// parameters are exclusive pointers.
+struct Typed {
+    ret: String,
+    params: Vec<String>,
+    exclusive: Vec<bool>,
+}
+
+/// The program's LLVM module under construction.
+pub(super) struct LlvmModule {
+    runtime: RuntimeInterface,
+    /// Ownership facts: per function name, the parameters that are owning
+    /// handles or exclusive borrows. They become `ptr noalias` parameters.
+    exclusive: BTreeMap<String, Vec<usize>>,
+    typed: BTreeMap<String, Typed>,
+    /// Functions whose address is taken; each gets a word-typed thunk.
+    address_taken: BTreeSet<String>,
+    /// Translated functions: name and text, in definition order.
+    functions: Vec<(String, String)>,
+    defined: BTreeSet<FuncId>,
+    data: BTreeMap<DataId, Vec<u8>>,
+    intrinsics: BTreeSet<String>,
+}
+impl LlvmModule {
+    pub fn new(runtime: RuntimeInterface) -> Self {
+        Self {
+            runtime,
+            exclusive: BTreeMap::new(),
+            typed: BTreeMap::new(),
+            address_taken: BTreeSet::new(),
+            functions: Vec::new(),
+            defined: BTreeSet::new(),
+            data: BTreeMap::new(),
+            intrinsics: BTreeSet::new(),
+        }
+    }
+    /// Record which parameters of a function the program owns exclusively.
+    /// Must be called before any function body is translated.
+    pub fn exclusive_parameters(&mut self, name: &str, parameters: Vec<usize>) {
+        if !parameters.is_empty() {
+            self.exclusive.insert(name.to_owned(), parameters);
+        }
+    }
+    pub fn define_data(&mut self, id: DataId, bytes: Vec<u8>) {
+        self.data.insert(id, bytes);
+    }
+    pub fn define_function(
+        &mut self,
+        id: FuncId,
+        func: &ir::Function,
+        declarations: &ModuleDeclarations,
+    ) -> Result<()> {
+        let declaration = declarations.get_function_decl(id);
+        let name = declaration.linkage_name(id).into_owned();
+        let text = Translator::new(
+            func,
+            declarations,
+            &self.runtime,
+            &mut self.intrinsics,
+            &self.exclusive,
+            &mut self.address_taken,
+        )
+        .function(&name, declaration.linkage)
+        .map_err(|message| error(format!("LLVM backend: in {name}: {message}")))?;
+        if let Some(exclusive) = self.exclusive.get(&name) {
+            let (ret, params) = clif_signature(&func.signature)
+                .map_err(|message| error(format!("LLVM backend: {name}: {message}")))?;
+            let exclusive = (0..params.len()).map(|i| exclusive.contains(&i)).collect();
+            self.typed.insert(
+                name.clone(),
+                Typed {
+                    ret,
+                    params,
+                    exclusive,
+                },
+            );
+        }
+        self.functions.push((name, text));
+        self.defined.insert(id);
+        Ok(())
+    }
+    /// The program as LLVM modules, each compiled on its own (see
+    /// [`partition`] and [`super::Split`]). One partition is exactly the
+    /// whole program.
+    pub fn finish(
+        self,
+        declarations: &ModuleDeclarations,
+        split: super::Split,
+    ) -> Result<Vec<String>> {
+        // Thunks are functions like any other: a function with pointer
+        // parameters is reached through a function pointer by a thunk with
+        // the plain word signature, so an indirect call always has exactly
+        // the type of what it calls.
+        let mut functions = self.functions.clone();
+        for name in &self.address_taken {
+            let Some(typed) = self.typed.get(name) else {
+                continue;
+            };
+            functions.push((format!("{name}{WORD_THUNK}"), thunk(name, typed)));
+        }
+        let total: usize = functions.iter().map(|(_, text)| text.lines().count()).sum();
+        let wanted = match total.checked_div(split.minimum) {
+            Some(most) => split.cores.max(total.div_ceil(split.target)).min(most),
+            None => split.cores,
+        }
+        .max(1);
+        let plan = partition(&functions, wanted);
+        let mut modules = Vec::new();
+        for part in 0..plan.count {
+            modules.push(self.module(declarations, &functions, &plan, part)?);
+        }
+        Ok(modules)
+    }
+    /// One partition's module text.
+    fn module(
+        &self,
+        declarations: &ModuleDeclarations,
+        functions: &[(String, String)],
+        plan: &Partitioning,
+        part: usize,
+    ) -> Result<String> {
+        let split = plan.count > 1;
+        let mut out = String::new();
+        out.push_str("; Kush program module (LLVM release backend)\n");
+        out.push_str(&self.runtime.header);
+        out.push('\n');
+        // Data lives in the first partition; the others refer to it.
+        for (id, declaration) in declarations.get_data_objects() {
+            let name = declaration.linkage_name(id);
+            match self.data.get(&id) {
+                Some(bytes) if split && part != 0 => {
+                    let _ = writeln!(
+                        out,
+                        "@{name} = external hidden global [{} x i8], align 8",
+                        bytes.len()
+                    );
+                }
+                Some(bytes) => {
+                    let linkage = match declaration.linkage {
+                        Linkage::Local | Linkage::Hidden if split => "hidden ",
+                        Linkage::Local | Linkage::Hidden => "internal ",
+                        _ => "",
+                    };
+                    let kind = if declaration.writable {
+                        "global"
+                    } else {
+                        "constant"
+                    };
+                    let _ = write!(out, "@{name} = {linkage}{kind} [{} x i8] c\"", bytes.len());
+                    for byte in bytes {
+                        let _ = write!(out, "\\{byte:02X}");
+                    }
+                    out.push_str("\", align 8\n");
+                }
+                None => {
+                    let _ = writeln!(out, "@{name} = external global i8");
+                }
+            }
+        }
+        out.push('\n');
+        for (id, declaration) in declarations.get_functions() {
+            if self.defined.contains(&id) {
+                continue;
+            }
+            let name = declaration.linkage_name(id);
+            match self.runtime.signatures.get(name.as_ref()) {
+                Some(signature) if signature.params.len() == declaration.signature.params.len() => {
+                    let params = signature
+                        .params
+                        .iter()
+                        .map(|ty| ty.name())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ = writeln!(out, "declare {} @{name}({params})", signature.ret.name());
+                }
+                _ => {
+                    let (ret, params) = clif_signature(&declaration.signature)
+                        .map_err(|message| error(format!("LLVM backend: {name}: {message}")))?;
+                    let _ = writeln!(out, "declare {ret} @{name}({})", params.join(", "));
+                }
+            }
+        }
+        // Functions defined in another partition and used here.
+        for (index, (_, text)) in functions.iter().enumerate() {
+            if plan.declared[part].contains(&index) {
+                let _ = writeln!(out, "{}", declaration_of(text));
+            }
+        }
+        for intrinsic in &self.intrinsics {
+            out.push_str(intrinsic);
+            out.push('\n');
+        }
+        out.push('\n');
+        for (index, (_, text)) in functions.iter().enumerate() {
+            let text = if plan.home[index] == part {
+                if plan.exported.contains(&index) {
+                    // Called from another partition: visible to the linker,
+                    // but not outside the program.
+                    text.replacen("define internal ", "define hidden ", 1)
+                } else {
+                    text.clone()
+                }
+            } else if plan.copied[part].contains(&index) {
+                // A small function used here and defined elsewhere: a copy
+                // LLVM may inline, never emitted.
+                text.replacen("define internal ", "define available_externally ", 1)
+            } else {
+                continue;
+            };
+            out.push_str(&text);
+            out.push('\n');
+        }
+        // Probe every page of a large frame so it cannot step over the
+        // guard below the stack (see the runtime's fault handler).
+        // And keep every call a call: turning a recursion into a loop would
+        // make the depth a program can reach, and whether a runaway
+        // recursion panics or spins, depend on the backend.
+        out.push_str(
+            "attributes #0 = { nounwind \"probe-stack\"=\"inline-asm\" \"disable-tail-calls\"=\"true\" }\n",
+        );
+        out.push_str(MODULE_METADATA);
+        Ok(out)
+    }
+}
+
+/// The word-signature thunk of a function with pointer parameters.
+fn thunk(name: &str, typed: &Typed) -> String {
+    let mut out = String::new();
+    let params = typed
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| format!("{ty} %a{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        out,
+        "define internal {} @{name}{WORD_THUNK}({params}) #0 {{",
+        typed.ret
+    );
+    let mut arguments = Vec::new();
+    for (index, ty) in typed.params.iter().enumerate() {
+        if typed.exclusive[index] {
+            let _ = writeln!(out, "  %p{index} = inttoptr i64 %a{index} to ptr");
+            arguments.push(format!("ptr %p{index}"));
+        } else {
+            arguments.push(format!("{ty} %a{index}"));
+        }
+    }
+    let arguments = arguments.join(", ");
+    if typed.ret == "void" {
+        let _ = writeln!(out, "  tail call void @{name}({arguments})\n  ret void\n}}");
+    } else {
+        let _ = writeln!(
+            out,
+            "  %r = tail call {ret} @{name}({arguments})\n  ret {ret} %r\n}}",
+            ret = typed.ret
+        );
+    }
+    out
+}
+
+/// `declare hidden RET @name(TYPES)` for a function whose text starts
+/// `define LINKAGE RET @name(TYPE %v, ...) #0 {`.
+fn declaration_of(text: &str) -> String {
+    let header = text.lines().next().unwrap_or_default();
+    let header = header
+        .strip_prefix("define ")
+        .unwrap_or(header)
+        .trim_start_matches("internal ")
+        .trim_start_matches("hidden ");
+    let open = header.find('(').unwrap_or(header.len());
+    let close = header.rfind(')').unwrap_or(header.len());
+    let params = header[open + 1..close]
+        .split(", ")
+        .filter(|param| !param.is_empty())
+        .map(|param| match param.rfind(" %") {
+            Some(at) => &param[..at],
+            None => param,
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("declare hidden {}({params})", &header[..open])
+}
+
+/// Where each function of a split program goes.
+struct Partitioning {
+    count: usize,
+    /// The partition each function is defined in.
+    home: Vec<usize>,
+    /// Functions defined in one partition and called from another.
+    exported: BTreeSet<usize>,
+    /// Per partition, small functions defined elsewhere that it gets a copy
+    /// of for inlining.
+    copied: Vec<BTreeSet<usize>>,
+    /// Per partition, functions defined elsewhere that it refers to.
+    declared: Vec<BTreeSet<usize>>,
+}
+
+/// A function at most this many lines is copied into every partition that
+/// calls it, as C++ inline functions are, so splitting the program does not
+/// stop LLVM from inlining it.
+const SHARED_SMALL: usize = 80;
+
+/// Split the program's functions into at most `wanted` partitions that LLVM
+/// can optimize and compile in parallel, losing as little inlining as it
+/// can. A function with one caller joins its caller's group, where LLVM
+/// would have inlined it, until a group reaches a share of the program; a
+/// small function with several callers is copied into each partition that
+/// calls it (see [`SHARED_SMALL`]). Groups are then packed into partitions
+/// of about equal size. Deterministic: the same program splits the same way.
+fn partition(functions: &[(String, String)], wanted: usize) -> Partitioning {
+    let count = functions.len();
+    let index: BTreeMap<&str, usize> = functions
+        .iter()
+        .enumerate()
+        .map(|(at, (name, _))| (name.as_str(), at))
+        .collect();
+    let sizes: Vec<usize> = functions
+        .iter()
+        .map(|(_, text)| text.lines().count().max(1))
+        .collect();
+    // Which defined functions each function refers to (calls, addresses).
+    let references: Vec<BTreeSet<usize>> = functions
+        .iter()
+        .enumerate()
+        .map(|(at, (_, text))| {
+            let mut found = BTreeSet::new();
+            let bytes = text.as_bytes();
+            let mut position = 0;
+            while let Some(offset) = text[position..].find('@') {
+                let start = position + offset + 1;
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric()
+                        || matches!(bytes[end], b'_' | b'.' | b'$'))
+                {
+                    end += 1;
+                }
+                if let Some(&callee) = index.get(&text[start..end])
+                    && callee != at
+                {
+                    found.insert(callee);
+                }
+                position = end.max(start);
+            }
+            found
+        })
+        .collect();
+    if wanted <= 1 || count <= 1 {
+        return Partitioning {
+            count: 1,
+            home: vec![0; count],
+            exported: BTreeSet::new(),
+            copied: vec![BTreeSet::new()],
+            declared: vec![BTreeSet::new()],
+        };
+    }
+    let mut callers: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); count];
+    for (caller, callees) in references.iter().enumerate() {
+        for callee in callees {
+            callers[*callee].insert(caller);
+        }
+    }
+    let total: usize = sizes.iter().sum();
+    let cap = (total / (wanted * 2)).max(1);
+    // Union-find over groups, with each group's size.
+    let mut parent: Vec<usize> = (0..count).collect();
+    let mut group_size = sizes.clone();
+    fn root(parent: &mut [usize], mut at: usize) -> usize {
+        while parent[at] != at {
+            parent[at] = parent[parent[at]];
+            at = parent[at];
+        }
+        at
+    }
+    let mut order: Vec<usize> = (0..count).collect();
+    order.sort_by_key(|at| (sizes[*at], *at));
+    for callee in order {
+        let [caller] = callers[callee].iter().copied().collect::<Vec<_>>()[..] else {
+            continue;
+        };
+        let (a, b) = (root(&mut parent, caller), root(&mut parent, callee));
+        if a != b && group_size[a] + group_size[b] <= cap {
+            parent[b] = a;
+            group_size[a] += group_size[b];
+        }
+    }
+    // Pack groups, largest first, into the lightest partition.
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for at in 0..count {
+        let group = root(&mut parent, at);
+        groups.entry(group).or_default().push(at);
+    }
+    let mut groups: Vec<(usize, Vec<usize>)> = groups
+        .into_values()
+        .map(|members| (members.iter().map(|at| sizes[*at]).sum(), members))
+        .collect();
+    groups.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    let mut loads = vec![0usize; wanted];
+    let mut home = vec![0; count];
+    for (size, members) in groups {
+        let lightest = (0..wanted)
+            .min_by_key(|part| (loads[*part], *part))
+            .unwrap_or(0);
+        loads[lightest] += size;
+        for at in members {
+            home[at] = lightest;
+        }
+    }
+    // Number the partitions that received anything, in order.
+    let mut used: Vec<usize> = home.clone();
+    used.sort_unstable();
+    used.dedup();
+    for at in home.iter_mut() {
+        *at = used.binary_search(at).unwrap_or(0);
+    }
+    let parts = used.len();
+    let mut copied = vec![BTreeSet::new(); parts];
+    let mut declared = vec![BTreeSet::new(); parts];
+    let mut exported = BTreeSet::new();
+    for (caller, callees) in references.iter().enumerate() {
+        for callee in callees {
+            let part = home[caller];
+            if home[*callee] == part {
+                continue;
+            }
+            exported.insert(*callee);
+            if sizes[*callee] <= SHARED_SMALL && callers[*callee].len() > 1 {
+                copied[part].insert(*callee);
+            } else {
+                declared[part].insert(*callee);
+            }
+        }
+    }
+    // A copy's own references must be visible where it is copied.
+    for part in 0..parts {
+        let copies: Vec<usize> = copied[part].iter().copied().collect();
+        for copy in copies {
+            for callee in &references[copy] {
+                if home[*callee] != part && !copied[part].contains(callee) {
+                    exported.insert(*callee);
+                    declared[part].insert(*callee);
+                }
+            }
+        }
+    }
+    Partitioning {
+        count: parts,
+        home,
+        exported,
+        copied,
+        declared,
+    }
+}
+
+type Tx<T> = std::result::Result<T, String>;
+
+fn ty_name(ty: ir::Type) -> Tx<&'static str> {
+    Ty::of(ty)
+        .map(Ty::name)
+        .ok_or_else(|| format!("unsupported value type {ty}"))
+}
+fn extension(param: &ir::AbiParam) -> &'static str {
+    match param.extension {
+        ir::ArgumentExtension::Uext => " zeroext",
+        ir::ArgumentExtension::Sext => " signext",
+        ir::ArgumentExtension::None => "",
+    }
+}
+fn return_type(signature: &ir::Signature) -> Tx<String> {
+    Ok(match signature.returns.as_slice() {
+        [] => "void".to_owned(),
+        [one] => ty_name(one.value_type)?.to_owned(),
+        many => {
+            let parts = many
+                .iter()
+                .map(|param| ty_name(param.value_type))
+                .collect::<Tx<Vec<_>>>()?;
+            format!("{{ {} }}", parts.join(", "))
+        }
+    })
+}
+fn clif_signature(signature: &ir::Signature) -> Tx<(String, Vec<String>)> {
+    let params = signature
+        .params
+        .iter()
+        .map(|param| {
+            Ok(format!(
+                "{}{}",
+                ty_name(param.value_type)?,
+                extension(param)
+            ))
+        })
+        .collect::<Tx<Vec<_>>>()?;
+    Ok((return_type(signature)?, params))
+}
+
+struct Edge {
+    from: String,
+    target: Block,
+    values: Vec<String>,
+}
+
+struct Translator<'a> {
+    func: &'a ir::Function,
+    declarations: &'a ModuleDeclarations,
+    runtime: &'a RuntimeInterface,
+    intrinsics: &'a mut BTreeSet<String>,
+    exclusive: &'a BTreeMap<String, Vec<usize>>,
+    address_taken: &'a mut BTreeSet<String>,
+    /// Values that are plain literals and never get an SSA name.
+    constants: BTreeMap<Value, String>,
+    /// Pointer form of a value, valid wherever the value itself is.
+    pointers: BTreeMap<Value, String>,
+    /// `i1` form of a comparison or overflow flag.
+    flags: BTreeMap<Value, String>,
+    /// Block parameters that always receive one value (or themselves): they
+    /// get no phi and every use names that value instead.
+    forwarded: BTreeMap<Value, Value>,
+    body: String,
+    label: String,
+    temporaries: usize,
+    splits: usize,
+    edges: Vec<Edge>,
+}
+
+impl<'a> Translator<'a> {
+    fn new(
+        func: &'a ir::Function,
+        declarations: &'a ModuleDeclarations,
+        runtime: &'a RuntimeInterface,
+        intrinsics: &'a mut BTreeSet<String>,
+        exclusive: &'a BTreeMap<String, Vec<usize>>,
+        address_taken: &'a mut BTreeSet<String>,
+    ) -> Self {
+        Self {
+            func,
+            declarations,
+            runtime,
+            intrinsics,
+            exclusive,
+            address_taken,
+            constants: BTreeMap::new(),
+            pointers: BTreeMap::new(),
+            flags: BTreeMap::new(),
+            forwarded: BTreeMap::new(),
+            body: String::new(),
+            label: String::new(),
+            temporaries: 0,
+            splits: 0,
+            edges: Vec::new(),
+        }
+    }
+    fn resolve(&self, value: Value) -> Value {
+        let mut value = self.func.dfg.resolve_aliases(value);
+        while let Some(&next) = self.forwarded.get(&value) {
+            value = self.func.dfg.resolve_aliases(next);
+        }
+        value
+    }
+    /// Find the block parameters that are trivial phis: every incoming value
+    /// is either one other value or the parameter itself. Replacing such a
+    /// parameter by that value keeps SSA valid, and removing one can make
+    /// others trivial, so repeat until nothing changes.
+    fn forward_trivial_parameters(&mut self, reachable: &BTreeSet<Block>) {
+        let func = self.func;
+        let entry = func.layout.entry_block();
+        let mut incoming: BTreeMap<Block, Vec<Vec<Value>>> = BTreeMap::new();
+        for &block in reachable {
+            let Some(last) = func.layout.last_inst(block) else {
+                continue;
+            };
+            let pool = &func.dfg.value_lists;
+            for call in func.dfg.insts[last]
+                .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
+            {
+                let mut values = Vec::new();
+                for argument in call.args(pool) {
+                    match argument.as_value() {
+                        Some(value) => values.push(value),
+                        // Exception arguments are rejected later; forward
+                        // nothing into such a block.
+                        None => return,
+                    }
+                }
+                incoming.entry(call.block(pool)).or_default().push(values);
+            }
+        }
+        loop {
+            let mut changed = false;
+            for (&block, edges) in &incoming {
+                if Some(block) == entry {
+                    continue;
+                }
+                for (index, &param) in func.dfg.block_params(block).iter().enumerate() {
+                    if self.forwarded.contains_key(&param) {
+                        continue;
+                    }
+                    let mut only = None;
+                    let mut trivial = true;
+                    for edge in edges {
+                        let Some(&value) = edge.get(index) else {
+                            trivial = false;
+                            break;
+                        };
+                        let value = self.resolve(value);
+                        if value == param || only == Some(value) {
+                            continue;
+                        }
+                        if only.is_some() {
+                            trivial = false;
+                            break;
+                        }
+                        only = Some(value);
+                    }
+                    if let (true, Some(value)) = (trivial, only) {
+                        self.forwarded.insert(param, value);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    fn ty(&self, value: Value) -> ir::Type {
+        self.func.dfg.value_type(value)
+    }
+    fn tyn(&self, value: Value) -> Tx<&'static str> {
+        ty_name(self.ty(value))
+    }
+    /// The operand text of a value: a literal or its SSA name.
+    fn op(&self, value: Value) -> String {
+        let value = self.resolve(value);
+        match self.constants.get(&value) {
+            Some(literal) => literal.clone(),
+            None => format!("%v{}", value.as_u32()),
+        }
+    }
+    fn name(&self, value: Value) -> String {
+        format!("%v{}", value.as_u32())
+    }
+    fn temp(&mut self) -> String {
+        self.temporaries += 1;
+        format!("%t{}", self.temporaries)
+    }
+    fn line(&mut self, text: impl AsRef<str>) {
+        self.body.push_str("  ");
+        self.body.push_str(text.as_ref());
+        self.body.push('\n');
+    }
+    fn intrinsic(&mut self, declaration: &str) {
+        if !self.intrinsics.contains(declaration) {
+            self.intrinsics.insert(declaration.to_owned());
+        }
+    }
+    fn start_block(&mut self, label: String) {
+        let _ = writeln!(self.body, "{label}:");
+        self.label = label;
+    }
+    fn trap(&mut self) {
+        self.intrinsic("declare void @llvm.trap()");
+        self.line("call void @llvm.trap()");
+        self.line("unreachable");
+    }
+    /// Trap when `condition` (an `i1`) holds, continuing in a fresh block.
+    fn trap_if(&mut self, condition: &str) {
+        self.splits += 1;
+        let trap = format!("{}.t{}", self.label, self.splits);
+        let next = format!("{}.c{}", self.label, self.splits);
+        self.line(format!(
+            "br i1 {condition}, label %{trap}, label %{next}, !prof !0"
+        ));
+        self.start_block(trap);
+        self.trap();
+        self.start_block(next);
+    }
+    /// The `i1` truth of an integer value.
+    fn truth(&mut self, value: Value) -> Tx<String> {
+        let value = self.resolve(value);
+        if let Some(flag) = self.flags.get(&value) {
+            return Ok(flag.clone());
+        }
+        let temp = self.temp();
+        let ty = self.tyn(value)?;
+        let operand = self.op(value);
+        self.line(format!("{temp} = icmp ne {ty} {operand}, 0"));
+        Ok(temp)
+    }
+    /// Define `result` (an integer value) from an `i1`, remembering the flag.
+    fn define_flag(&mut self, result: Value, flag: String) -> Tx<()> {
+        let ty = self.tyn(result)?;
+        let name = self.name(result);
+        self.line(format!("{name} = zext i1 {flag} to {ty}"));
+        self.flags.insert(result, flag);
+        Ok(())
+    }
+    fn defining(&self, value: Value) -> Option<&InstructionData> {
+        match self.func.dfg.value_def(self.resolve(value)) {
+            ValueDef::Result(inst, 0) => Some(&self.func.dfg.insts[inst]),
+            _ => None,
+        }
+    }
+    /// Whether a value is clearly an offset rather than an address.
+    /// Whether `value` is a word loaded from memory.
+    fn loaded(&self, value: Value) -> bool {
+        matches!(
+            self.defining(self.resolve(value)),
+            Some(InstructionData::Load { .. })
+        )
+    }
+    fn offset_like(&self, value: Value) -> bool {
+        let value = self.resolve(value);
+        if self.constants.contains_key(&value) {
+            return true;
+        }
+        match self.defining(value) {
+            Some(InstructionData::Binary { opcode, .. }) => matches!(
+                opcode,
+                Opcode::Imul
+                    | Opcode::Ishl
+                    | Opcode::Ushr
+                    | Opcode::Sshr
+                    | Opcode::Band
+                    | Opcode::Udiv
+                    | Opcode::Sdiv
+                    | Opcode::Urem
+                    | Opcode::Srem
+            ),
+            Some(InstructionData::Unary { opcode, .. }) => {
+                matches!(opcode, Opcode::Uextend | Opcode::Sextend | Opcode::Ineg)
+            }
+            _ => false,
+        }
+    }
+    /// The pointer form of an address-valued word, materialized here.
+    fn pointer(&mut self, value: Value) -> Tx<String> {
+        self.pointer_at(value, 4)
+    }
+    fn pointer_at(&mut self, value: Value, depth: usize) -> Tx<String> {
+        let value = self.resolve(value);
+        if let Some(pointer) = self.pointers.get(&value) {
+            return Ok(pointer.clone());
+        }
+        if self.ty(value) != types::I64 {
+            return Err("address is not a 64-bit word".into());
+        }
+        if depth > 0
+            && let Some(InstructionData::Binary {
+                opcode: Opcode::Iadd,
+                args,
+            }) = self.defining(value)
+        {
+            let (left, right) = (self.resolve(args[0]), self.resolve(args[1]));
+            let choice = if self.pointers.contains_key(&left) {
+                Some((left, right))
+            } else if self.pointers.contains_key(&right) {
+                Some((right, left))
+            } else if self.offset_like(right) && !self.offset_like(left) {
+                Some((left, right))
+            } else if self.offset_like(left) && !self.offset_like(right) {
+                Some((right, left))
+            } else if self.loaded(left) && !self.loaded(right) {
+                // A word read from memory plus anything else is a handle or
+                // pointer plus an index far more often than the reverse, and
+                // only as a `getelementptr` from a fixed base can LLVM see
+                // consecutive accesses (a byte buffer read in a loop).
+                Some((left, right))
+            } else if self.loaded(right) && !self.loaded(left) {
+                Some((right, left))
+            } else {
+                None
+            };
+            if let Some((base, offset)) = choice {
+                let base = self.pointer_at(base, depth - 1)?;
+                let offset = self.op(offset);
+                let temp = self.temp();
+                self.line(format!(
+                    "{temp} = getelementptr i8, ptr {base}, i64 {offset}"
+                ));
+                return Ok(temp);
+            }
+        }
+        let temp = self.temp();
+        let operand = self.op(value);
+        self.line(format!("{temp} = inttoptr i64 {operand} to ptr"));
+        Ok(temp)
+    }
+    fn address(&mut self, base: Value, offset: i64) -> Tx<String> {
+        let pointer = self.pointer(base)?;
+        if offset == 0 {
+            return Ok(pointer);
+        }
+        let temp = self.temp();
+        self.line(format!(
+            "{temp} = getelementptr i8, ptr {pointer}, i64 {offset}"
+        ));
+        Ok(temp)
+    }
+    /// Give `result` both forms from a freshly produced pointer.
+    fn define_pointer(&mut self, result: Value, pointer: String) {
+        let name = self.name(result);
+        self.line(format!("{name} = ptrtoint ptr {pointer} to i64"));
+        self.pointers.insert(result, pointer);
+    }
+    fn function_name(&self, func_ref: ir::FuncRef) -> Tx<(String, &'a ir::Signature)> {
+        let data = &self.func.dfg.ext_funcs[func_ref];
+        let signature = &self.func.dfg.signatures[data.signature];
+        let ExternalName::User(reference) = data.name else {
+            return Err(format!("unsupported callee {:?}", data.name));
+        };
+        let user = &self.func.params.user_named_funcs()[reference];
+        if user.namespace != 0 {
+            return Err("callee is not a function".into());
+        }
+        let id = FuncId::from_u32(user.index);
+        Ok((
+            self.declarations
+                .get_function_decl(id)
+                .linkage_name(id)
+                .into_owned(),
+            signature,
+        ))
+    }
+    /// The symbol to use for a function's address: its word-signature thunk
+    /// when the function itself takes pointer parameters.
+    fn address_of(&mut self, name: String) -> String {
+        if self.exclusive.contains_key(&name) {
+            let symbol = format!("@{name}{WORD_THUNK}");
+            self.address_taken.insert(name);
+            symbol
+        } else {
+            format!("@{name}")
+        }
+    }
+    /// Alias metadata for a load or store whose memory class is known.
+    fn memory_class(&self, inst: ir::Inst) -> &'static str {
+        match self.func.srcloc(inst).bits() {
+            bits if bits == MemoryClass::BufferHeader as u32 => ", !tbaa !4",
+            bits if bits == MemoryClass::BufferElements as u32 => ", !tbaa !5",
+            _ => "",
+        }
+    }
+    fn convert_argument(&mut self, value: Value, to: Ty) -> Tx<Option<String>> {
+        let from = Ty::of(self.ty(value)).ok_or("unsupported argument type")?;
+        if from == to {
+            return Ok(Some(self.op(value)));
+        }
+        if from == Ty::I64 && to == Ty::Ptr {
+            return Ok(Some(self.pointer(value)?));
+        }
+        Ok(None)
+    }
+    fn call(
+        &mut self,
+        inst: ir::Inst,
+        callee: &str,
+        signature: &ir::Signature,
+        arguments: &[Value],
+        runtime: Option<&CSignature>,
+    ) -> Tx<()> {
+        let results = self.func.dfg.inst_results(inst).to_vec();
+        // Use the runtime's exact signature when every word converts to it.
+        if let Some(c) = runtime
+            && c.params.len() == arguments.len()
+            && results.len() <= 1
+            && arguments.iter().zip(&c.params).all(|(value, to)| {
+                let from = Ty::of(self.ty(*value));
+                from == Some(*to) || (from == Some(Ty::I64) && *to == Ty::Ptr)
+            })
+            && match results.first().map(|value| Ty::of(self.ty(*value))) {
+                None => true,
+                Some(Some(Ty::I64)) => matches!(c.ret, Ty::I64 | Ty::Ptr),
+                Some(other) => other == Some(c.ret),
+            }
+        {
+            let mut rendered = Vec::new();
+            for (value, to) in arguments.iter().zip(&c.params) {
+                let operand = self
+                    .convert_argument(*value, *to)?
+                    .ok_or("argument conversion")?;
+                rendered.push(format!("{} {operand}", to.name()));
+            }
+            let arguments = rendered.join(", ");
+            match results.first() {
+                None => self.line(format!("call {} {callee}({arguments})", c.ret.name())),
+                Some(result) if c.ret == Ty::Ptr => {
+                    let temp = self.temp();
+                    self.line(format!("{temp} = call ptr {callee}({arguments})"));
+                    self.define_pointer(*result, temp);
+                }
+                Some(result) => {
+                    let name = self.name(*result);
+                    self.line(format!(
+                        "{name} = call {} {callee}({arguments})",
+                        c.ret.name()
+                    ));
+                }
+            }
+            return Ok(());
+        }
+        let exclusive: &[usize] = callee
+            .strip_prefix('@')
+            .and_then(|name| self.exclusive.get(name))
+            .map_or(&[], Vec::as_slice);
+        let mut rendered = Vec::new();
+        for (index, (value, param)) in arguments.iter().zip(&signature.params).enumerate() {
+            if exclusive.contains(&index) {
+                let pointer = self.pointer(*value)?;
+                rendered.push(format!("ptr {pointer}"));
+                continue;
+            }
+            rendered.push(format!(
+                "{}{} {}",
+                self.tyn(*value)?,
+                extension(param),
+                self.op(*value)
+            ));
+        }
+        let arguments = rendered.join(", ");
+        let ret = return_type(signature)?;
+        match results.as_slice() {
+            [] => self.line(format!("call {ret} {callee}({arguments})")),
+            [result] => {
+                let name = self.name(*result);
+                self.line(format!("{name} = call {ret} {callee}({arguments})"));
+            }
+            many => {
+                let temp = self.temp();
+                self.line(format!("{temp} = call {ret} {callee}({arguments})"));
+                for (index, result) in many.iter().enumerate() {
+                    let name = self.name(*result);
+                    self.line(format!("{name} = extractvalue {ret} {temp}, {index}"));
+                }
+            }
+        }
+        Ok(())
+    }
+    fn edge(&mut self, call: ir::BlockCall) -> Tx<(Block, Vec<String>)> {
+        let pool = &self.func.dfg.value_lists;
+        let target = call.block(pool);
+        let mut values = Vec::new();
+        for argument in call.args(pool) {
+            let value = argument
+                .as_value()
+                .ok_or("exception block arguments are unsupported")?;
+            values.push(self.op(value));
+        }
+        Ok((target, values))
+    }
+    fn binary(&mut self, inst: ir::Inst, operation: &str, args: [Value; 2]) -> Tx<()> {
+        let result = self.func.dfg.first_result(inst);
+        let (name, ty) = (self.name(result), self.tyn(result)?);
+        let (left, right) = (self.op(args[0]), self.op(args[1]));
+        self.line(format!("{name} = {operation} {ty} {left}, {right}"));
+        Ok(())
+    }
+    /// The `i1` a value is the zero extension of, if it is known to be one.
+    fn flag_of(&self, value: Value) -> Option<String> {
+        let value = self.resolve(value);
+        if let Some(flag) = self.flags.get(&value) {
+            return Some(flag.clone());
+        }
+        match self.constants.get(&value).map(String::as_str) {
+            Some("0") => Some("false".into()),
+            Some("1") => Some("true".into()),
+            _ => None,
+        }
+    }
+    /// Bitwise logic, kept in `i1` when both sides are flags so that chains
+    /// of conditions reach their branch without widening at every step.
+    fn logical(&mut self, inst: ir::Inst, operation: &str, args: [Value; 2]) -> Tx<()> {
+        let (Some(left), Some(right)) = (self.flag_of(args[0]), self.flag_of(args[1])) else {
+            return self.binary(inst, operation, args);
+        };
+        let result = self.func.dfg.first_result(inst);
+        let flag = match (operation, left.as_str(), right.as_str()) {
+            ("or", "false", other) | ("or", other, "false") => other.to_owned(),
+            ("and", "true", other) | ("and", other, "true") => other.to_owned(),
+            ("xor", "false", other) | ("xor", other, "false") => other.to_owned(),
+            _ => {
+                let temp = self.temp();
+                self.line(format!("{temp} = {operation} i1 {left}, {right}"));
+                temp
+            }
+        };
+        self.define_flag(result, flag)
+    }
+    fn overflow(&mut self, inst: ir::Inst, operation: &str, args: [Value; 2]) -> Tx<()> {
+        let results = self.func.dfg.inst_results(inst).to_vec();
+        let ty = self.tyn(results[0])?;
+        self.intrinsic(&format!(
+            "declare {{ {ty}, i1 }} @llvm.{operation}.with.overflow.{ty}({ty}, {ty})"
+        ));
+        let pair = self.temp();
+        let (left, right) = (self.op(args[0]), self.op(args[1]));
+        self.line(format!(
+            "{pair} = call {{ {ty}, i1 }} @llvm.{operation}.with.overflow.{ty}({ty} {left}, {ty} {right})"
+        ));
+        let name = self.name(results[0]);
+        self.line(format!("{name} = extractvalue {{ {ty}, i1 }} {pair}, 0"));
+        let flag = self.temp();
+        self.line(format!("{flag} = extractvalue {{ {ty}, i1 }} {pair}, 1"));
+        self.define_flag(results[1], flag)
+    }
+    fn unary_intrinsic(&mut self, inst: ir::Inst, base: &str, arg: Value, extra: &str) -> Tx<()> {
+        let result = self.func.dfg.first_result(inst);
+        let (name, ty) = (self.name(result), self.tyn(result)?);
+        let extra_types = if extra.is_empty() { "" } else { ", i1" };
+        self.intrinsic(&format!(
+            "declare {ty} @llvm.{base}.{suffix}({ty}{extra_types})",
+            suffix = intrinsic_suffix(ty)
+        ));
+        let operand = self.op(arg);
+        self.line(format!(
+            "{name} = call {ty} @llvm.{base}.{suffix}({ty} {operand}{extra})",
+            suffix = intrinsic_suffix(ty)
+        ));
+        Ok(())
+    }
+    fn binary_intrinsic(&mut self, inst: ir::Inst, base: &str, args: [Value; 2]) -> Tx<()> {
+        let result = self.func.dfg.first_result(inst);
+        let (name, ty) = (self.name(result), self.tyn(result)?);
+        let suffix = intrinsic_suffix(ty);
+        self.intrinsic(&format!("declare {ty} @llvm.{base}.{suffix}({ty}, {ty})"));
+        let (left, right) = (self.op(args[0]), self.op(args[1]));
+        self.line(format!(
+            "{name} = call {ty} @llvm.{base}.{suffix}({ty} {left}, {ty} {right})"
+        ));
+        Ok(())
+    }
+    /// A shift amount reduced modulo the width and converted to the shifted
+    /// type, which is Cranelift's defined behaviour for every amount.
+    fn shift_amount(&mut self, value: Value, amount: Value) -> Tx<String> {
+        let to = Ty::of(self.ty(value)).ok_or("shift type")?;
+        let from = Ty::of(self.ty(amount)).ok_or("shift amount type")?;
+        let mut operand = self.op(amount);
+        if from.bits() != to.bits() {
+            let temp = self.temp();
+            let operation = if from.bits() > to.bits() {
+                "trunc"
+            } else {
+                "zext"
+            };
+            self.line(format!(
+                "{temp} = {operation} {} {operand} to {}",
+                from.name(),
+                to.name()
+            ));
+            operand = temp;
+        }
+        let masked = self.temp();
+        self.line(format!(
+            "{masked} = and {} {operand}, {}",
+            to.name(),
+            to.bits() - 1
+        ));
+        Ok(masked)
+    }
+    fn load(&mut self, inst: ir::Inst, opcode: Opcode, base: Value, offset: i64) -> Tx<()> {
+        let result = self.func.dfg.first_result(inst);
+        let (name, ty) = (self.name(result), self.tyn(result)?);
+        let address = self.address(base, offset)?;
+        let narrow = match opcode {
+            Opcode::Load => None,
+            Opcode::Uload8 => Some(("i8", "zext")),
+            Opcode::Sload8 => Some(("i8", "sext")),
+            Opcode::Uload16 => Some(("i16", "zext")),
+            Opcode::Sload16 => Some(("i16", "sext")),
+            Opcode::Uload32 => Some(("i32", "zext")),
+            Opcode::Sload32 => Some(("i32", "sext")),
+            _ => return Err(format!("unsupported load {opcode}")),
+        };
+        let class = self.memory_class(inst);
+        match narrow {
+            None => self.line(format!("{name} = load {ty}, ptr {address}, align 1{class}")),
+            Some((memory, extend)) => {
+                let temp = self.temp();
+                self.line(format!(
+                    "{temp} = load {memory}, ptr {address}, align 1{class}"
+                ));
+                self.line(format!("{name} = {extend} {memory} {temp} to {ty}"));
+            }
+        }
+        Ok(())
+    }
+    fn store(
+        &mut self,
+        inst: ir::Inst,
+        opcode: Opcode,
+        value: Value,
+        base: Value,
+        offset: i64,
+    ) -> Tx<()> {
+        let class = self.memory_class(inst);
+        let address = self.address(base, offset)?;
+        let ty = self.tyn(value)?;
+        let operand = self.op(value);
+        let memory = match opcode {
+            Opcode::Store => None,
+            Opcode::Istore8 => Some("i8"),
+            Opcode::Istore16 => Some("i16"),
+            Opcode::Istore32 => Some("i32"),
+            _ => return Err(format!("unsupported store {opcode}")),
+        };
+        match memory {
+            Some(memory) if memory != ty => {
+                let temp = self.temp();
+                self.line(format!("{temp} = trunc {ty} {operand} to {memory}"));
+                self.line(format!(
+                    "store {memory} {temp}, ptr {address}, align 1{class}"
+                ));
+            }
+            _ => self.line(format!(
+                "store {ty} {operand}, ptr {address}, align 1{class}"
+            )),
+        }
+        Ok(())
+    }
+    fn division(&mut self, inst: ir::Inst, opcode: Opcode, args: [Value; 2]) -> Tx<()> {
+        let result = self.func.dfg.first_result(inst);
+        let (name, ty) = (self.name(result), self.tyn(result)?);
+        let bits = Ty::of(self.ty(result)).ok_or("division type")?.bits();
+        let (left, right) = (self.op(args[0]), self.op(args[1]));
+        // Cranelift traps where LLVM has undefined behaviour.
+        let zero = self.temp();
+        self.line(format!("{zero} = icmp eq {ty} {right}, 0"));
+        self.trap_if(&zero);
+        let minimum = i128::from(-1i64) << (bits - 1);
+        match opcode {
+            Opcode::Udiv => self.line(format!("{name} = udiv {ty} {left}, {right}")),
+            Opcode::Urem => self.line(format!("{name} = urem {ty} {left}, {right}")),
+            Opcode::Sdiv => {
+                let (a, b, both) = (self.temp(), self.temp(), self.temp());
+                self.line(format!("{a} = icmp eq {ty} {left}, {minimum}"));
+                self.line(format!("{b} = icmp eq {ty} {right}, -1"));
+                self.line(format!("{both} = and i1 {a}, {b}"));
+                self.trap_if(&both);
+                self.line(format!("{name} = sdiv {ty} {left}, {right}"));
+            }
+            Opcode::Srem => {
+                // `MIN % -1` is 0 in Cranelift; any `x % 1` is also 0.
+                let (b, divisor) = (self.temp(), self.temp());
+                self.line(format!("{b} = icmp eq {ty} {right}, -1"));
+                self.line(format!("{divisor} = select i1 {b}, {ty} 1, {ty} {right}"));
+                self.line(format!("{name} = srem {ty} {left}, {divisor}"));
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+    fn instruction(&mut self, inst: ir::Inst) -> Tx<()> {
+        let func = self.func;
+        let dfg = &func.dfg;
+        let data = dfg.insts[inst];
+        let opcode = data.opcode();
+        match data {
+            // Collected up front in `function`.
+            InstructionData::UnaryImm { .. } => {}
+            InstructionData::UnaryIeee32 { imm, .. } => {
+                let name = self.name(dfg.first_result(inst));
+                self.line(format!("{name} = bitcast i32 {} to float", imm.bits()));
+            }
+            InstructionData::UnaryIeee64 { imm, .. } => {
+                let name = self.name(dfg.first_result(inst));
+                self.line(format!("{name} = bitcast i64 {} to double", imm.bits()));
+            }
+            InstructionData::NullAry { .. } if opcode == Opcode::Nop => {}
+            InstructionData::Binary { args, .. } => match opcode {
+                Opcode::Iadd => self.binary(inst, "add", args)?,
+                Opcode::Isub => self.binary(inst, "sub", args)?,
+                Opcode::Imul => self.binary(inst, "mul", args)?,
+                Opcode::Band => self.logical(inst, "and", args)?,
+                Opcode::Bor => self.logical(inst, "or", args)?,
+                Opcode::Bxor => self.logical(inst, "xor", args)?,
+                Opcode::Udiv | Opcode::Sdiv | Opcode::Urem | Opcode::Srem => {
+                    self.division(inst, opcode, args)?;
+                }
+                Opcode::Ishl | Opcode::Ushr | Opcode::Sshr => {
+                    let result = dfg.first_result(inst);
+                    let (name, ty) = (self.name(result), self.tyn(result)?);
+                    let amount = self.shift_amount(args[0], args[1])?;
+                    let left = self.op(args[0]);
+                    let operation = match opcode {
+                        Opcode::Ishl => "shl",
+                        Opcode::Ushr => "lshr",
+                        _ => "ashr",
+                    };
+                    self.line(format!("{name} = {operation} {ty} {left}, {amount}"));
+                }
+                Opcode::Rotl | Opcode::Rotr => {
+                    let result = dfg.first_result(inst);
+                    let (name, ty) = (self.name(result), self.tyn(result)?);
+                    let amount = self.shift_amount(args[0], args[1])?;
+                    let left = self.op(args[0]);
+                    let base = if opcode == Opcode::Rotl {
+                        "fshl"
+                    } else {
+                        "fshr"
+                    };
+                    self.intrinsic(&format!("declare {ty} @llvm.{base}.{ty}({ty}, {ty}, {ty})"));
+                    self.line(format!(
+                        "{name} = call {ty} @llvm.{base}.{ty}({ty} {left}, {ty} {left}, {ty} {amount})"
+                    ));
+                }
+                Opcode::Smin => self.binary_intrinsic(inst, "smin", args)?,
+                Opcode::Smax => self.binary_intrinsic(inst, "smax", args)?,
+                Opcode::Umin => self.binary_intrinsic(inst, "umin", args)?,
+                Opcode::Umax => self.binary_intrinsic(inst, "umax", args)?,
+                Opcode::SaddOverflow => self.overflow(inst, "sadd", args)?,
+                Opcode::SsubOverflow => self.overflow(inst, "ssub", args)?,
+                Opcode::SmulOverflow => self.overflow(inst, "smul", args)?,
+                Opcode::UaddOverflow => self.overflow(inst, "uadd", args)?,
+                Opcode::UsubOverflow => self.overflow(inst, "usub", args)?,
+                Opcode::UmulOverflow => self.overflow(inst, "umul", args)?,
+                Opcode::Fadd => self.binary(inst, "fadd", args)?,
+                Opcode::Fsub => self.binary(inst, "fsub", args)?,
+                Opcode::Fmul => self.binary(inst, "fmul", args)?,
+                Opcode::Fdiv => self.binary(inst, "fdiv", args)?,
+                Opcode::Fmin => self.binary_intrinsic(inst, "minimum", args)?,
+                Opcode::Fmax => self.binary_intrinsic(inst, "maximum", args)?,
+                Opcode::Fcopysign => self.binary_intrinsic(inst, "copysign", args)?,
+                _ => return Err(format!("unsupported instruction {opcode}")),
+            },
+            InstructionData::Unary { arg, .. } => {
+                let result = dfg.first_result(inst);
+                let (name, ty) = (self.name(result), self.tyn(result)?);
+                let (from, operand) = (self.tyn(arg)?, self.op(arg));
+                match opcode {
+                    Opcode::Uextend => match self.flag_of(arg) {
+                        // Still a zero-extended flag: keep the `i1` form.
+                        Some(flag) => self.define_flag(result, flag)?,
+                        None => self.line(format!("{name} = zext {from} {operand} to {ty}")),
+                    },
+                    Opcode::Sextend => self.line(format!("{name} = sext {from} {operand} to {ty}")),
+                    Opcode::Ireduce => {
+                        self.line(format!("{name} = trunc {from} {operand} to {ty}"));
+                    }
+                    Opcode::Bnot => self.line(format!("{name} = xor {ty} {operand}, -1")),
+                    Opcode::Ineg => self.line(format!("{name} = sub {ty} 0, {operand}")),
+                    Opcode::Bmask => {
+                        let flag = self.truth(arg)?;
+                        self.line(format!("{name} = sext i1 {flag} to {ty}"));
+                    }
+                    Opcode::Fpromote => {
+                        self.line(format!("{name} = fpext {from} {operand} to {ty}"))
+                    }
+                    Opcode::Fdemote => {
+                        self.line(format!("{name} = fptrunc {from} {operand} to {ty}"));
+                    }
+                    Opcode::Fneg => self.line(format!("{name} = fneg {ty} {operand}")),
+                    Opcode::FcvtFromSint => {
+                        self.line(format!("{name} = sitofp {from} {operand} to {ty}"));
+                    }
+                    Opcode::FcvtFromUint => {
+                        self.line(format!("{name} = uitofp {from} {operand} to {ty}"));
+                    }
+                    Opcode::FcvtToSintSat | Opcode::FcvtToUintSat => {
+                        let base = if opcode == Opcode::FcvtToSintSat {
+                            "fptosi"
+                        } else {
+                            "fptoui"
+                        };
+                        let suffix = intrinsic_suffix(from);
+                        self.intrinsic(&format!(
+                            "declare {ty} @llvm.{base}.sat.{ty}.{suffix}({from})"
+                        ));
+                        self.line(format!(
+                            "{name} = call {ty} @llvm.{base}.sat.{ty}.{suffix}({from} {operand})"
+                        ));
+                    }
+                    Opcode::Sqrt => self.unary_intrinsic(inst, "sqrt", arg, "")?,
+                    Opcode::Fabs => self.unary_intrinsic(inst, "fabs", arg, "")?,
+                    Opcode::Ceil => self.unary_intrinsic(inst, "ceil", arg, "")?,
+                    Opcode::Floor => self.unary_intrinsic(inst, "floor", arg, "")?,
+                    Opcode::Trunc => self.unary_intrinsic(inst, "trunc", arg, "")?,
+                    Opcode::Nearest => self.unary_intrinsic(inst, "roundeven", arg, "")?,
+                    Opcode::Clz => self.unary_intrinsic(inst, "ctlz", arg, ", i1 false")?,
+                    Opcode::Ctz => self.unary_intrinsic(inst, "cttz", arg, ", i1 false")?,
+                    Opcode::Popcnt => self.unary_intrinsic(inst, "ctpop", arg, "")?,
+                    Opcode::Bswap => self.unary_intrinsic(inst, "bswap", arg, "")?,
+                    Opcode::Iabs => self.unary_intrinsic(inst, "abs", arg, ", i1 false")?,
+                    _ => return Err(format!("unsupported instruction {opcode}")),
+                }
+            }
+            InstructionData::LoadNoOffset { arg, .. } if opcode == Opcode::Bitcast => {
+                let result = dfg.first_result(inst);
+                let (name, ty) = (self.name(result), self.tyn(result)?);
+                let (from, operand) = (self.tyn(arg)?, self.op(arg));
+                self.line(format!("{name} = bitcast {from} {operand} to {ty}"));
+            }
+            InstructionData::IntCompare { args, cond, .. } => {
+                let predicate = match cond {
+                    IntCC::Equal => "eq",
+                    IntCC::NotEqual => "ne",
+                    IntCC::SignedLessThan => "slt",
+                    IntCC::SignedGreaterThanOrEqual => "sge",
+                    IntCC::SignedGreaterThan => "sgt",
+                    IntCC::SignedLessThanOrEqual => "sle",
+                    IntCC::UnsignedLessThan => "ult",
+                    IntCC::UnsignedGreaterThanOrEqual => "uge",
+                    IntCC::UnsignedGreaterThan => "ugt",
+                    IntCC::UnsignedLessThanOrEqual => "ule",
+                };
+                let ty = self.tyn(args[0])?;
+                let (left, right) = (self.op(args[0]), self.op(args[1]));
+                let flag = self.temp();
+                self.line(format!("{flag} = icmp {predicate} {ty} {left}, {right}"));
+                self.define_flag(dfg.first_result(inst), flag)?;
+            }
+            InstructionData::FloatCompare { args, cond, .. } => {
+                let predicate = match cond {
+                    FloatCC::Ordered => "ord",
+                    FloatCC::Unordered => "uno",
+                    FloatCC::Equal => "oeq",
+                    FloatCC::NotEqual => "une",
+                    FloatCC::OrderedNotEqual => "one",
+                    FloatCC::UnorderedOrEqual => "ueq",
+                    FloatCC::LessThan => "olt",
+                    FloatCC::LessThanOrEqual => "ole",
+                    FloatCC::GreaterThan => "ogt",
+                    FloatCC::GreaterThanOrEqual => "oge",
+                    FloatCC::UnorderedOrLessThan => "ult",
+                    FloatCC::UnorderedOrLessThanOrEqual => "ule",
+                    FloatCC::UnorderedOrGreaterThan => "ugt",
+                    FloatCC::UnorderedOrGreaterThanOrEqual => "uge",
+                };
+                let ty = self.tyn(args[0])?;
+                let (left, right) = (self.op(args[0]), self.op(args[1]));
+                let flag = self.temp();
+                self.line(format!("{flag} = fcmp {predicate} {ty} {left}, {right}"));
+                self.define_flag(dfg.first_result(inst), flag)?;
+            }
+            InstructionData::Ternary { args, .. }
+                if matches!(opcode, Opcode::Select | Opcode::SelectSpectreGuard) =>
+            {
+                let result = dfg.first_result(inst);
+                let (name, ty) = (self.name(result), self.tyn(result)?);
+                let flag = self.truth(args[0])?;
+                let (yes, no) = (self.op(args[1]), self.op(args[2]));
+                self.line(format!("{name} = select i1 {flag}, {ty} {yes}, {ty} {no}"));
+            }
+            InstructionData::Ternary { args, .. } if opcode == Opcode::Fma => {
+                let result = dfg.first_result(inst);
+                let (name, ty) = (self.name(result), self.tyn(result)?);
+                let suffix = intrinsic_suffix(ty);
+                self.intrinsic(&format!(
+                    "declare {ty} @llvm.fma.{suffix}({ty}, {ty}, {ty})"
+                ));
+                let (a, b, c) = (self.op(args[0]), self.op(args[1]), self.op(args[2]));
+                self.line(format!(
+                    "{name} = call {ty} @llvm.fma.{suffix}({ty} {a}, {ty} {b}, {ty} {c})"
+                ));
+            }
+            InstructionData::Load { arg, offset, .. } => {
+                self.load(inst, opcode, arg, i64::from(offset))?;
+            }
+            InstructionData::LoadNoOffset { arg, .. } => self.load(inst, Opcode::Load, arg, 0)?,
+            InstructionData::Store { args, offset, .. } => {
+                self.store(inst, opcode, args[0], args[1], i64::from(offset))?;
+            }
+            InstructionData::StoreNoOffset { args, .. } => {
+                self.store(inst, Opcode::Store, args[0], args[1], 0)?;
+            }
+            InstructionData::StackAddr {
+                stack_slot, offset, ..
+            } => {
+                let slot = format!("%ss{}", stack_slot.as_u32());
+                let offset = i64::from(offset);
+                let pointer = if offset == 0 {
+                    slot
+                } else {
+                    let temp = self.temp();
+                    self.line(format!(
+                        "{temp} = getelementptr inbounds i8, ptr {slot}, i64 {offset}"
+                    ));
+                    temp
+                };
+                self.define_pointer(dfg.first_result(inst), pointer);
+            }
+            InstructionData::UnaryGlobalValue { global_value, .. }
+                if opcode == Opcode::SymbolValue =>
+            {
+                let ir::GlobalValueData::Symbol { name, offset, .. } =
+                    &self.func.global_values[global_value]
+                else {
+                    return Err("unsupported global value".into());
+                };
+                let ExternalName::User(reference) = name else {
+                    return Err("unsupported symbol".into());
+                };
+                let user = &self.func.params.user_named_funcs()[*reference];
+                let symbol = if user.namespace == 0 {
+                    let id = FuncId::from_u32(user.index);
+                    let name = self
+                        .declarations
+                        .get_function_decl(id)
+                        .linkage_name(id)
+                        .into_owned();
+                    self.address_of(name)[1..].to_owned()
+                } else {
+                    let id = DataId::from_u32(user.index);
+                    self.declarations
+                        .get_data_decl(id)
+                        .linkage_name(id)
+                        .into_owned()
+                };
+                let offset = offset.bits();
+                let pointer = if offset == 0 {
+                    format!("@{symbol}")
+                } else {
+                    let temp = self.temp();
+                    self.line(format!(
+                        "{temp} = getelementptr i8, ptr @{symbol}, i64 {offset}"
+                    ));
+                    temp
+                };
+                self.define_pointer(dfg.first_result(inst), pointer);
+            }
+            InstructionData::FuncAddr { func_ref, .. } => {
+                let (callee, _) = self.function_name(func_ref)?;
+                let symbol = self.address_of(callee);
+                self.define_pointer(dfg.first_result(inst), symbol);
+            }
+            InstructionData::Call { args, func_ref, .. } => {
+                let arguments = args.as_slice(&dfg.value_lists).to_vec();
+                let (callee, signature) = self.function_name(func_ref)?;
+                let interface = self.runtime;
+                let runtime = interface.signatures.get(&callee);
+                self.call(inst, &format!("@{callee}"), signature, &arguments, runtime)?;
+            }
+            InstructionData::CallIndirect { args, sig_ref, .. } => {
+                let arguments = args.as_slice(&dfg.value_lists).to_vec();
+                let signature = &self.func.dfg.signatures[sig_ref];
+                let callee = self.pointer_at(arguments[0], 0)?;
+                self.call(inst, &callee, signature, &arguments[1..], None)?;
+            }
+            InstructionData::Trap { .. } => self.trap(),
+            InstructionData::CondTrap { arg, .. } => {
+                let flag = self.truth(arg)?;
+                let flag = if opcode == Opcode::Trapz {
+                    let inverted = self.temp();
+                    self.line(format!("{inverted} = xor i1 {flag}, true"));
+                    inverted
+                } else {
+                    flag
+                };
+                self.trap_if(&flag);
+            }
+            InstructionData::Jump { destination, .. } => {
+                let (target, values) = self.edge(destination)?;
+                self.line(format!("br label %b{}", target.as_u32()));
+                self.edges.push(Edge {
+                    from: self.label.clone(),
+                    target,
+                    values,
+                });
+            }
+            InstructionData::Brif { arg, blocks, .. } => {
+                let flag = self.truth(arg)?;
+                let (then_target, then_values) = self.edge(blocks[0])?;
+                let (else_target, else_values) = self.edge(blocks[1])?;
+                if then_target == else_target {
+                    // One predecessor edge: merge the two argument lists.
+                    let params = self.func.dfg.block_params(then_target).to_vec();
+                    let mut values = Vec::new();
+                    for ((yes, no), param) in then_values.iter().zip(&else_values).zip(params) {
+                        if yes == no {
+                            values.push(yes.clone());
+                        } else {
+                            let ty = self.tyn(param)?;
+                            let temp = self.temp();
+                            self.line(format!("{temp} = select i1 {flag}, {ty} {yes}, {ty} {no}"));
+                            values.push(temp);
+                        }
+                    }
+                    self.line(format!("br label %b{}", then_target.as_u32()));
+                    self.edges.push(Edge {
+                        from: self.label.clone(),
+                        target: then_target,
+                        values,
+                    });
+                } else {
+                    self.line(format!(
+                        "br i1 {flag}, label %b{}, label %b{}",
+                        then_target.as_u32(),
+                        else_target.as_u32()
+                    ));
+                    for (target, values) in [(then_target, then_values), (else_target, else_values)]
+                    {
+                        self.edges.push(Edge {
+                            from: self.label.clone(),
+                            target,
+                            values,
+                        });
+                    }
+                }
+            }
+            InstructionData::BranchTable { arg, table, .. } => {
+                let table = &self.func.dfg.jump_tables[table];
+                let ty = self.tyn(arg)?;
+                let operand = self.op(arg);
+                // LLVM wants one phi entry per switch edge, so every case
+                // records its own edge, repeated targets included; all edges
+                // from this block to one target must then carry equal values.
+                let (default, default_values) = self.edge(table.default_block())?;
+                let mut seen: BTreeMap<Block, Vec<String>> = BTreeMap::new();
+                seen.insert(default, default_values.clone());
+                let mut edges = vec![(default, default_values)];
+                let mut cases = String::new();
+                for (index, call) in table.as_slice().iter().enumerate() {
+                    let (target, values) = self.edge(*call)?;
+                    if let Some(previous) = seen.get(&target) {
+                        if *previous != values {
+                            return Err("jump table passes different arguments to one block".into());
+                        }
+                    } else {
+                        seen.insert(target, values.clone());
+                    }
+                    let _ = write!(cases, " {ty} {index}, label %b{}", target.as_u32());
+                    edges.push((target, values));
+                }
+                self.line(format!(
+                    "switch {ty} {operand}, label %b{} [{cases} ]",
+                    default.as_u32()
+                ));
+                for (target, values) in edges {
+                    self.edges.push(Edge {
+                        from: self.label.clone(),
+                        target,
+                        values,
+                    });
+                }
+            }
+            InstructionData::MultiAry { args, .. } if opcode == Opcode::Return => {
+                let values = args.as_slice(&dfg.value_lists).to_vec();
+                match values.as_slice() {
+                    [] => self.line("ret void"),
+                    [value] => {
+                        let (ty, operand) = (self.tyn(*value)?, self.op(*value));
+                        self.line(format!("ret {ty} {operand}"));
+                    }
+                    many => {
+                        let ret = return_type(&self.func.signature)?;
+                        let mut aggregate = "poison".to_owned();
+                        for (index, value) in many.iter().enumerate() {
+                            let (ty, operand) = (self.tyn(*value)?, self.op(*value));
+                            let temp = self.temp();
+                            self.line(format!(
+                                "{temp} = insertvalue {ret} {aggregate}, {ty} {operand}, {index}"
+                            ));
+                            aggregate = temp;
+                        }
+                        self.line(format!("ret {ret} {aggregate}"));
+                    }
+                }
+            }
+            _ => return Err(format!("unsupported instruction {opcode}")),
+        }
+        Ok(())
+    }
+    fn reachable(&self) -> BTreeSet<Block> {
+        let mut seen = BTreeSet::new();
+        let Some(entry) = self.func.layout.entry_block() else {
+            return seen;
+        };
+        let mut work = vec![entry];
+        while let Some(block) = work.pop() {
+            if !seen.insert(block) {
+                continue;
+            }
+            if let Some(last) = self.func.layout.last_inst(block) {
+                for call in self.func.dfg.insts[last]
+                    .branch_destination(&self.func.dfg.jump_tables, &self.func.dfg.exception_tables)
+                {
+                    work.push(call.block(&self.func.dfg.value_lists));
+                }
+            }
+        }
+        seen
+    }
+    fn function(mut self, name: &str, linkage: Linkage) -> Tx<String> {
+        let func = self.func;
+        let entry = func.layout.entry_block().ok_or("function has no entry")?;
+        let reachable = self.reachable();
+        self.forward_trivial_parameters(&reachable);
+        // Constants are operands, not instructions, so collect them before
+        // any use: block layout order need not be dominance order.
+        for block in func.layout.blocks() {
+            for inst in func.layout.block_insts(block) {
+                if let InstructionData::UnaryImm { imm, .. } = func.dfg.insts[inst] {
+                    let result = func.dfg.first_result(inst);
+                    let bits = Ty::of(self.ty(result)).ok_or("constant type")?.bits();
+                    let raw = imm.bits();
+                    let value = if bits == 64 {
+                        raw
+                    } else {
+                        (raw << (64 - bits)) >> (64 - bits)
+                    };
+                    self.constants.insert(result, value.to_string());
+                }
+            }
+        }
+        let exclusive: &[usize] = self.exclusive.get(name).map_or(&[], Vec::as_slice);
+        let mut bodies: Vec<(Block, String)> = Vec::new();
+        for block in func.layout.blocks() {
+            if !reachable.contains(&block) {
+                continue;
+            }
+            self.body = String::new();
+            self.label = format!("b{}", block.as_u32());
+            if block == entry {
+                for (slot, data) in func.sized_stack_slots.iter() {
+                    let align = (1u64 << data.align_shift).max(8);
+                    let _ = writeln!(
+                        self.body,
+                        "  %ss{} = alloca [{} x i8], align {align}",
+                        slot.as_u32(),
+                        data.size.max(1)
+                    );
+                }
+                // Exclusive parameters arrive as pointers. Everything derived
+                // from one stays based on it, which is what `noalias` needs.
+                for index in exclusive {
+                    let value = func.dfg.block_params(entry)[*index];
+                    let pointer = format!("%v{}.p", value.as_u32());
+                    self.define_pointer(value, pointer);
+                }
+            }
+            for inst in func.layout.block_insts(block) {
+                self.instruction(inst)?;
+            }
+            bodies.push((block, std::mem::take(&mut self.body)));
+        }
+        if self.edges.iter().any(|edge| edge.target == entry) {
+            return Err("the entry block is a branch target".into());
+        }
+        let mut out = String::new();
+        let ret = return_type(&func.signature)?;
+        let mut params = Vec::new();
+        for (index, (value, param)) in func
+            .dfg
+            .block_params(entry)
+            .iter()
+            .zip(&func.signature.params)
+            .enumerate()
+        {
+            if exclusive.contains(&index) {
+                params.push(format!("ptr noalias %v{}.p", value.as_u32()));
+            } else {
+                params.push(format!(
+                    "{}{} %v{}",
+                    ty_name(param.value_type)?,
+                    extension(param),
+                    value.as_u32()
+                ));
+            }
+        }
+        let linkage = match linkage {
+            Linkage::Local | Linkage::Hidden => "internal ",
+            _ => "",
+        };
+        let _ = writeln!(
+            out,
+            "define {linkage}{ret} @{name}({}) #0 {{",
+            params.join(", ")
+        );
+        for (block, body) in bodies {
+            let _ = writeln!(out, "b{}:", block.as_u32());
+            if block != entry {
+                for (index, param) in func.dfg.block_params(block).iter().enumerate() {
+                    if self.forwarded.contains_key(param) {
+                        continue;
+                    }
+                    let incoming = self
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.target == block)
+                        .map(|edge| format!("[ {}, %{} ]", edge.values[index], edge.from))
+                        .collect::<Vec<_>>();
+                    let _ = writeln!(
+                        out,
+                        "  %v{} = phi {} {}",
+                        param.as_u32(),
+                        ty_name(func.dfg.value_type(*param))?,
+                        incoming.join(", ")
+                    );
+                }
+            }
+            out.push_str(&body);
+        }
+        out.push_str("}\n");
+        Ok(drop_unused_flags(out))
+    }
+}
+
+/// Remove `%vN = zext i1 ...` lines whose value is never used: flags reach
+/// branches and logic as `i1`, so most widened copies are dead. Nothing else
+/// is removed, and a zext has no effects.
+fn drop_unused_flags(text: String) -> String {
+    let mut uses: BTreeMap<&str, usize> = BTreeMap::new();
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    while let Some(found) = text[at..].find("%v") {
+        let start = at + found;
+        let mut end = start + 2;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        let whole = end > start + 2
+            && !(end < bytes.len() && (bytes[end] == b'.' || bytes[end].is_ascii_alphanumeric()));
+        if whole {
+            *uses.entry(&text[start..end]).or_default() += 1;
+        }
+        at = end.max(start + 2);
+    }
+    let dead = |line: &str| {
+        let Some(rest) = line.strip_prefix("  %v") else {
+            return false;
+        };
+        let Some((name, definition)) = rest.split_once(" = ") else {
+            return false;
+        };
+        definition.starts_with("zext i1 ")
+            && name.bytes().all(|byte| byte.is_ascii_digit())
+            && uses.get(&line[2..4 + name.len()]) == Some(&1)
+    };
+    if !text.lines().any(dead) {
+        return text;
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        if !dead(line) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn intrinsic_suffix(ty: &str) -> &str {
+    match ty {
+        "float" => "f32",
+        "double" => "f64",
+        other => other,
+    }
+}
+
+/// Branch weights marking trap edges as never taken, then type-based alias
+/// tags for [`MemoryClass`]: a root of their own (so they say nothing about
+/// the C runtime's accesses), one scalar type per class, and one access tag
+/// per type (`!4` header, `!5` elements).
+const MODULE_METADATA: &str = "!0 = !{!\"branch_weights\", i32 1, i32 2000000}\n\
+!1 = !{!\"kush memory classes\"}\n\
+!2 = !{!\"buffer header\", !1, i64 0}\n\
+!3 = !{!\"buffer elements\", !1, i64 0}\n\
+!4 = !{!2, !2, i64 0}\n\
+!5 = !{!3, !3, i64 0}\n";
+
+/// Suffix of the word-signature thunk of a function with pointer parameters.
+const WORD_THUNK: &str = ".words";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_signatures_are_read_from_clang_output() {
+        let interface = RuntimeInterface::parse(
+            "target triple = \"x86_64-pc-linux-gnu\"\n\
+             define dso_local noalias ptr @kush_grow(ptr noundef %0, i64 noundef %1) #3 {\n\
+             define dso_local void @kush_panic() local_unnamed_addr #0 {\n\
+             define internal fastcc i64 @helper(i64 %0) {\n\
+             define dso_local i64 @kush_buffer_alloc(i64 noundef %0, i64 noundef %1, i32 noundef %2) {\n\
+             define dso_local { i64, i64 } @pair(i64 %0) {\n",
+        );
+        assert_eq!(
+            interface.header,
+            "target triple = \"x86_64-pc-linux-gnu\"\n"
+        );
+        assert_eq!(
+            interface.signatures["kush_grow"],
+            CSignature {
+                ret: Ty::Ptr,
+                params: vec![Ty::Ptr, Ty::I64]
+            }
+        );
+        assert_eq!(interface.signatures["kush_panic"].params, Vec::new());
+        assert_eq!(
+            interface.signatures["kush_buffer_alloc"].params,
+            vec![Ty::I64, Ty::I64, Ty::I32]
+        );
+        assert!(!interface.signatures.contains_key("helper"));
+        assert!(!interface.signatures.contains_key("pair"));
+    }
+
+    #[test]
+    fn widened_flags_nothing_reads_are_dropped() {
+        let text = [
+            "define i64 @f(i64 %v0) {",
+            "b0:",
+            "  %t1 = icmp slt i64 %v0, 0",
+            "  %v1 = zext i1 %t1 to i8",
+            "  %t2 = icmp sgt i64 %v0, 9",
+            "  %v2 = zext i1 %t2 to i64",
+            "  %v12 = zext i1 %t1 to i64",
+            "  br i1 %t1, label %b1, label %b2",
+            "b1:",
+            "  ret i64 %v2",
+            "b2:",
+            "  ret i64 0",
+            "}",
+            "",
+        ]
+        .join("\n");
+        let kept = drop_unused_flags(text);
+        // `%v1` and `%v12` are read nowhere; `%v2` is returned. `%v1` is not
+        // mistaken for a use of `%v12`'s prefix, nor the other way round.
+        assert!(!kept.contains("%v1 = "), "{kept}");
+        assert!(!kept.contains("%v12 = "), "{kept}");
+        assert!(kept.contains("%v2 = zext i1 %t2 to i64"), "{kept}");
+        assert!(kept.contains("icmp slt"), "{kept}");
+    }
+
+    #[test]
+    fn the_runtime_module_splits_into_an_object_and_inlinable_bodies() {
+        let split = split_runtime(
+            "target triple = \"x86_64-pc-linux-gnu\"\n\
+             @.str = private unnamed_addr constant [2 x i8] c\"a\\00\", align 1\n\
+             @kush_pool = internal unnamed_addr global i64 0, align 8\n\
+             @kush_abort_word = local_unnamed_addr global i64 0, align 8\n\
+             @environ = external local_unnamed_addr global ptr, align 8\n\
+             define internal fastcc void @kush_claim(i64 %0) unnamed_addr #1 {\n\
+             }\n\
+             define i64 @kush_alloc(i64 noundef %0) local_unnamed_addr #2 {\n\
+             }\n\
+             define i64 @kush_vec_len(i64 noundef %0) local_unnamed_addr #2 {\n\
+             }\n",
+        )
+        .unwrap();
+        // The object exports former internals as hidden symbols.
+        assert!(
+            split
+                .exported
+                .contains("@kush_pool = hidden unnamed_addr global i64 0")
+        );
+        assert!(
+            split
+                .exported
+                .contains("define hidden fastcc void @kush_claim(i64 %0)")
+        );
+        assert!(split.exported.contains("\ndefine i64 @kush_alloc("));
+        // The inlinable copy defines nothing for real, shares all state, and
+        // keeps the allocator opaque.
+        assert!(
+            split
+                .inlinable
+                .contains("@kush_pool = available_externally hidden unnamed_addr global i64 0")
+        );
+        assert!(
+            split.inlinable.contains(
+                "@kush_abort_word = available_externally local_unnamed_addr global i64 0"
+            )
+        );
+        assert!(
+            split
+                .inlinable
+                .contains("@.str = private unnamed_addr constant")
+        );
+        assert!(
+            split
+                .inlinable
+                .contains("@environ = external local_unnamed_addr")
+        );
+        assert!(split.inlinable.contains(
+            "define available_externally hidden fastcc void @kush_claim(i64 %0) unnamed_addr #1 noinline {"
+        ));
+        assert!(split.inlinable.contains(
+            "define available_externally i64 @kush_alloc(i64 noundef %0) local_unnamed_addr #2 noinline {"
+        ));
+        assert!(split.inlinable.contains(
+            "define available_externally i64 @kush_vec_len(i64 noundef %0) local_unnamed_addr #2 {"
+        ));
+        let interface = RuntimeInterface::parse(&split.interface);
+        assert!(interface.signatures.contains_key("kush_alloc"));
+        assert!(!interface.signatures.contains_key("kush_claim"));
+        // Constructs the scheme does not cover are refused, not guessed.
+        assert!(split_runtime("@a = alias i64, ptr @b\n").is_none());
+        assert!(split_runtime("@t = thread_local global i64 0\n").is_none());
+        assert!(split_runtime("@llvm.used = appending global [1 x ptr] [ptr @a]\n").is_none());
+    }
+}

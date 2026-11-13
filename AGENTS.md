@@ -1,30 +1,22 @@
 # Kush workspace instructions
 
-Keep this computer responsive and prefer Boat for heavy compilation and testing.
-The user explicitly allows local builds and tests when this PC has spare capacity,
-including while Boat access is being migrated. Check available RAM and CPU load
-first, use conservative build concurrency (start with two jobs), and move heavier
-workloads to Boat when local capacity is constrained.
+Builds and tests run on this computer; there is no remote build machine (Boat
+is no longer available, so do not use `scripts/boat-check.sh`). Keep the
+computer responsive: check available RAM, CPU load and free disk space first,
+and use conservative build concurrency (start with two jobs).
 
-- For local builds, prefer `mbx build` / `mbx test` / `mbx clippy` (Mr.
-  Boxington, installed in `~/.cargo/bin`) over plain `cargo`, so worktrees share
-  compiled dependencies through `~/.cache/mbx`. Keep a target directory on one
-  tool: mbx hard-links read-only cached outputs, which plain `cargo` cannot
-  overwrite. The Cargo shim is intentionally not on `PATH`.
-- Use `scripts/boat-check.sh` for source upload and remote checks. With no
-  argument it takes the sandbox from `~/.config/kush/boat.json`, resumes it when
-  stopped, verifies the uploaded tree matches this checkout, runs the checks, and
-  stops the sandbox afterwards. Set `KUSH_KEEP_RUNNING=1` only when you need the
-  VM to stay up between commands.
-- Machine-local sandbox details are in `~/.config/kush/boat.json`; no API key is
-  stored in this repository. Use the authenticated Boat CLI. Never print tokens
-  or copy host credentials to a sandbox.
-- Verify actual trial allowance using `boat limits --all` before provisioning.
-  Use one trial-supported sandbox with automatic stop enabled. No plan upgrades,
-  wallet funding, or paid-overage changes without explicit user authorization.
-- Preserve build caches remotely; do not upload the local target directory.
-- If Boat is unavailable, report the blocker. Local checks are authorized when
-  there is spare capacity; keep resource use conservative and report where checks ran.
+- Prefer `mbx build` / `mbx test` / `mbx clippy` (Mr. Boxington, installed in
+  `~/.cargo/bin`) over plain `cargo`, so worktrees share compiled dependencies
+  through `~/.cache/mbx`. Keep a target directory on one tool: mbx hard-links
+  read-only cached outputs, which plain `cargo` cannot overwrite. The Cargo shim
+  is intentionally not on `PATH`.
+- Disk space is the tightest resource. A debug `mbx test -p kush` build takes
+  about 24 GB with debug info; set `CARGO_PROFILE_DEV_DEBUG=0
+  CARGO_PROFILE_TEST_DEBUG=0` unless you need a debugger, and check `df -h /`
+  before building. mbx storage is capped at 20 GiB (`gc.max_total_size`);
+  `mbx gc` is the safe cleanup, but run it only when no build is in progress.
+- Use `--no-fail-fast` for full test runs so one failing test file does not hide
+  the rest.
 - Preserve all existing uncommitted work. The initial cooperative task system is implemented; see `docs/async.md` for its limits.
 - Work plan: `plan/plan.json` is the dependency graph of remaining work. View it
   with `scripts/plan-server.py` (http://127.0.0.1:4318/). Update it with

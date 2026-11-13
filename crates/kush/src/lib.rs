@@ -29,12 +29,14 @@ mod ownership;
 pub mod parser;
 pub mod program;
 pub mod project;
+mod proof_cache;
 pub mod resolve;
 #[cfg(test)]
 mod row_laws_tests;
 mod runtime_types;
 pub mod source;
 mod suspend;
+pub mod timing;
 mod variance;
 
 pub use check::check;

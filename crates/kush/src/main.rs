@@ -34,7 +34,10 @@ Native adapters (Bridge.toml):\n\
 Editors:\n\
   kush lsp\n\n\
 Native optimization (build/run, files or projects):\n\
-  --release           Cranelift speed optimization + scalar callback inlining\n\
+  --release           speed optimization + scalar callback inlining\n\
+  --backend <cranelift|llvm>  code generator; llvm needs clang and builds slower, runs faster\n\
+  --no-deferred-overflow  (llvm) panic at the overflowing operation, not after its chunk of iterations\n\
+  --target-cpu <baseline|native>  (llvm) tune for the build machine\n\
   --opt-level <none|speed>  select backend optimization independently\n\
   --inline-scalars / --no-inline-scalars  control the restricted inliner\n\n\
   kush --help\n\
@@ -203,8 +206,13 @@ fn project_command(
                 )
                 .map_err(output_error)?;
             } else {
-                writeln!(out, "Built {} with Cranelift.", built.output.display())
-                    .map_err(output_error)?;
+                writeln!(
+                    out,
+                    "Built {} with {}.",
+                    built.output.display(),
+                    codegen.backend_name()
+                )
+                .map_err(output_error)?;
             }
             Ok(0)
         }
@@ -642,7 +650,23 @@ fn codegen_argument(
     command: &str,
 ) -> Result<bool, (u8, String)> {
     match args[*index].to_str() {
-        Some("--release") => *options = kush::native::CodegenOptions::release(),
+        Some("--release") => {
+            // Keeps an earlier `--backend` choice.
+            options.optimization = kush::native::Optimization::Speed;
+            options.inline_scalar_callbacks = true;
+        }
+        Some("--backend") => match value(args, index, command)?.to_str() {
+            Some("cranelift") => options.backend = kush::native::Backend::Cranelift,
+            Some("llvm") => options.backend = kush::native::Backend::Llvm,
+            _ => return Err((2, "--backend requires 'cranelift' or 'llvm'".into())),
+        },
+        Some("--deferred-overflow") => options.deferred_overflow = Some(true),
+        Some("--no-deferred-overflow") => options.deferred_overflow = Some(false),
+        Some("--target-cpu") => match value(args, index, command)?.to_str() {
+            Some("native") => options.native_cpu = true,
+            Some("baseline") => options.native_cpu = false,
+            _ => return Err((2, "--target-cpu requires 'baseline' or 'native'".into())),
+        },
         Some("--inline-scalars") => options.inline_scalar_callbacks = true,
         Some("--no-inline-scalars") => options.inline_scalar_callbacks = false,
         Some("--inline-calls") => options.inline_calls = true,
@@ -806,8 +830,8 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
             writeln!(out, "Checked {name}: {} logical definitions (restricted kernel; ownership/effect/subtype checking is not implemented).", checked.definitions.len()).map_err(output_error)?;
         }
     } else if command == "build" || command == "run" || command == "eval" {
-        let program = load()?;
-        let mut checked = kush::executable::check_program(&program)
+        let program = kush::timing::time("load and parse", load)?;
+        let mut checked = kush::timing::time("check", || kush::executable::check_program(&program))
             .map_err(|e| (1, program.sources.render(&e)))?;
         if let Some(fuel) = fuel {
             checked.set_eval_fuel(fuel);
@@ -840,7 +864,13 @@ fn single_file_command(args: &[OsString], out: &mut impl Write) -> Result<u8, (u
             }
             kush::native::build_with_codegen(&checked, output, stats, &links, codegen)
                 .map_err(diagnostic)?;
-            writeln!(out, "Built {} with Cranelift.", output.display()).map_err(output_error)?;
+            writeln!(
+                out,
+                "Built {} with {}.",
+                output.display(),
+                codegen.backend_name()
+            )
+            .map_err(output_error)?;
         } else {
             let scratch = kush::native::Scratch::new(&env::temp_dir()).map_err(diagnostic)?;
             let binary = scratch.path().join("program");
@@ -882,7 +912,11 @@ fn main() -> ExitCode {
             }
         };
     }
-    match run(args, &mut io::stdout().lock()) {
+    let started = std::time::Instant::now();
+    let outcome = run(args, &mut io::stdout().lock());
+    kush::timing::add("total", started.elapsed());
+    kush::timing::report();
+    match outcome {
         Ok(code) => ExitCode::from(code),
         Err((code, message)) => {
             let _ = writeln!(io::stderr().lock(), "{message}");

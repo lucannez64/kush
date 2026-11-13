@@ -412,7 +412,9 @@ a value graded @[0] is not used consistently before the function returns; grade 
 
 Budgets are explicit: grade expressions have a 128-node evaluation budget and
 64-bit overflow checks; each function has a 1,000,000-step grade-analysis budget;
-function instances retain the existing 256 limit. Exceeding a budget is a
+a function has at most 256 instances (its specializations) and a program at
+most 1024 instances of generic functions, which is what stops polymorphic
+recursion; a program may have any number of ordinary functions. Exceeding a budget is a
 diagnostic, never an assumption that the obligation holds.
 
 ## Examples and tests

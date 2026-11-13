@@ -190,3 +190,21 @@ fn main() -> i64 ! {panic} { 0 }
 "#;
     assert!(check(source).is_err());
 }
+
+#[test]
+fn an_uncheckable_contradiction_does_not_hide_a_checkable_one() {
+    // The facts about `x` are contradictory, but combining them needs
+    // multipliers beyond i128, so that certificate cannot be checked. The
+    // facts about `y` are plainly contradictory. The search must offer the
+    // second, whichever group of facts it looks at first.
+    let source = r#"
+fn take(z: i64, erased p: { z <= 0 }) -> i64 ! {} { z }
+fn forward(y: i64, x: i64, z: i64,
+           erased a: { 4611686018427387904 * (4611686018427387904 * x) >= 1 },
+           erased b: { 16 * x <= 0 - 1 },
+           erased c: { y <= 0 },
+           erased d: { y >= 1 }) -> i64 ! {} { take(z, _) }
+fn main() -> i64 ! {panic} { 0 }
+"#;
+    assert!(check(source).is_ok(), "{:?}", check(source).err());
+}

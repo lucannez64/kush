@@ -1411,7 +1411,9 @@ impl<'a, 'r> Solver<'a, 'r> {
                     self.collect_calls_in_expr(&arm.body, out);
                 }
             }
-            K::While { condition, body } => {
+            K::While {
+                condition, body, ..
+            } => {
                 self.collect_calls_in_expr(condition, out);
                 self.collect_calls_in_block(body, out);
             }
@@ -1505,7 +1507,9 @@ impl<'a, 'r> Solver<'a, 'r> {
                     self.requirements_in_expr(&arm.body, locals, out)?;
                 }
             }
-            K::While { condition, body } => {
+            K::While {
+                condition, body, ..
+            } => {
                 self.requirements_in_expr(condition, locals, out)?;
                 self.collect_requirements(body, locals, out)?;
             }
@@ -2204,7 +2208,9 @@ fn expr_returns<'e>(expr: &'e ast::Expr, out: &mut Vec<&'e ast::Expr>) {
                 expr_returns(&arm.body, out);
             }
         }
-        K::While { condition, body } => {
+        K::While {
+            condition, body, ..
+        } => {
             expr_returns(condition, out);
             block_returns(body, out);
         }

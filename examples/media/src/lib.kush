@@ -1,0 +1,9 @@
+module media;
+
+// media: a window with keyboard and gamepad input (`media.window`,
+// `media.input`) and an audio output stream (`media.audio`), on the
+// system's SDL2. See README.md.
+
+/// The package version, for programs that report it.
+
+pub const VERSION: i64 = 1;

@@ -499,24 +499,102 @@ impl IntegerBudget {
 }
 
 impl Facts {
+    /// Add `other`'s opaque slots (that set is sticky; loop heads rely on it).
+    pub fn keep_opaque_of(&mut self, other: &Self) {
+        self.opaque.extend(other.opaque.iter().copied());
+    }
+    /// Take `other`'s value versions (and aliases), keeping this state's
+    /// opaque slots: used for a branch that never reaches the join.
+    pub fn versions_from(&mut self, other: &Self) {
+        self.versions = other.versions.clone();
+        self.aliases = other.aliases.clone();
+    }
+    /// The value versions alone, to detect writes cheaply.
+    pub fn version_stamp(&self) -> BTreeMap<usize, u32> {
+        self.versions.clone()
+    }
+    pub fn same_stamp(&self, stamp: &BTreeMap<usize, u32>) -> bool {
+        &self.versions == stamp
+    }
     pub fn same_versions(&self, other: &Self) -> bool {
         self.versions == other.versions
     }
-    /// Sibling branches start from identical versions. A join forgets facts
-    /// about every value changed on either path.
+    /// Sibling branches start from identical versions. A value changed on
+    /// either path gets a fresh version after the join; what each path knew
+    /// is kept as one disjunct of a clause, with the fresh version equal to
+    /// that path's version: `(left facts && x' == x_left) || (right facts &&
+    /// x' == x_right)`.
     pub fn branch_join(base: &Self, left: &Self, right: &Self) -> Self {
         let mut result = base.clone();
         result.opaque.extend(left.opaque.iter().copied());
         result.opaque.extend(right.opaque.iter().copied());
-        for slot in left.versions.keys().chain(right.versions.keys()) {
-            let version = left.version(*slot).max(right.version(*slot));
-            if version != base.version(*slot) {
-                result.versions.insert(*slot, version + 1);
+        let mut left_case: Vec<Constraint> = left
+            .known
+            .get(base.known.len()..)
+            .map(<[Constraint]>::to_vec)
+            .unwrap_or_default();
+        let mut right_case: Vec<Constraint> = right
+            .known
+            .get(base.known.len()..)
+            .map(<[Constraint]>::to_vec)
+            .unwrap_or_default();
+        let mut changed = false;
+        let slots: BTreeSet<usize> = left
+            .versions
+            .keys()
+            .chain(right.versions.keys())
+            .copied()
+            .collect();
+        for slot in slots {
+            let version = left.version(slot).max(right.version(slot));
+            if version != base.version(slot) {
+                result.versions.insert(slot, version + 1);
                 // A value replaced on either path no longer has its alias.
-                result.aliases.remove(slot);
+                result.aliases.remove(&slot);
+                if result.opaque.contains(&slot) {
+                    continue;
+                }
+                changed = true;
+                let joined = Term::Var(slot, version + 1);
+                left_case.extend(equal_terms(joined, Term::Var(slot, left.version(slot))));
+                right_case.extend(equal_terms(joined, Term::Var(slot, right.version(slot))));
             }
         }
+        const MAX_JOIN_CASE: usize = 48;
+        if changed && left_case.len() <= MAX_JOIN_CASE && right_case.len() <= MAX_JOIN_CASE {
+            result.clauses.push(vec![left_case, right_case]);
+        }
         result
+    }
+    /// Bounds on every value rewritten since `stamp`, relative to its value
+    /// then and to zero, taken before a block's own facts are dropped so
+    /// that `x = x + 1` inside a block is still known after it.
+    pub fn preserved_since(&self, stamp: &BTreeMap<usize, u32>) -> Vec<Constraint> {
+        let mut out = Vec::new();
+        for (&slot, &version) in &self.versions {
+            let before = stamp.get(&slot).copied().unwrap_or(0);
+            if before == version || self.opaque.contains(&slot) {
+                continue;
+            }
+            let new = Term::Var(slot, version);
+            let old = Term::Var(slot, before);
+            for (from, to) in [(old, new), (new, old), (Term::Zero, new), (new, Term::Zero)] {
+                if let Some(bound) = self.distance(from, to) {
+                    let mut coefficients = BTreeMap::new();
+                    if to != Term::Zero {
+                        coefficients.insert(to, 1);
+                    }
+                    if from != Term::Zero {
+                        coefficients.insert(from, -1);
+                    }
+                    out.push(Constraint {
+                        coefficients,
+                        bound,
+                    });
+                }
+            }
+        }
+        out
     }
 
     pub(crate) fn mark(&self) -> FactsMark {
@@ -658,6 +736,32 @@ impl Facts {
             let mut distinct = Vec::new();
             self.collect_distinct(condition, truth, &mut distinct);
             self.distinct.extend(distinct);
+        }
+    }
+    /// `assume` for a condition whose evaluation wrote no local (the caller
+    /// compared value versions before and after checking it): a conjunct
+    /// that is not itself fact-safe (an element read, say) no longer hides
+    /// its fact-safe siblings, since nothing they mention changed.
+    pub fn assume_unwritten(&mut self, condition: &Expr, truth: bool) {
+        if fact_safe(condition) {
+            return self.assume(condition, truth);
+        }
+        match &condition.kind {
+            ExprKind::Unary(Kind::Bang, inner) => self.assume_unwritten(inner, !truth),
+            ExprKind::Binary(Kind::AmpAmp, l, r) if truth => {
+                self.assume_unwritten(l, true);
+                self.assume_unwritten(r, true);
+            }
+            ExprKind::Binary(Kind::PipePipe, l, r) if !truth => {
+                self.assume_unwritten(l, false);
+                self.assume_unwritten(r, false);
+            }
+            ExprKind::Block(block) if block.statements.is_empty() => {
+                if let Some(tail) = &block.tail {
+                    self.assume_unwritten(tail, truth);
+                }
+            }
+            _ => {}
         }
     }
     fn collect_distinct(&self, expr: &Expr, truth: bool, out: &mut Vec<Linear>) {
@@ -986,9 +1090,16 @@ impl Facts {
                 self.note_term(term, (0, mask));
                 Some(Linear::variable(term))
             }
-            // A lossless widening keeps the value.
+            // A lossless widening keeps the value. When the source has no
+            // linear form (a field read through a reference, a call), it is
+            // still an unknown value within its type's range.
             ExprKind::Call(Target::Int(crate::int::IntOp::Convert, _, _), arguments) => {
-                self.linear(&arguments[0])
+                self.linear(&arguments[0]).or_else(|| {
+                    let range = scalar_range(arguments[0].ty)?;
+                    let term = path_term(Root::Value(fresh_value()), &[]);
+                    self.note_term(term, range);
+                    Some(Linear::variable(term))
+                })
             }
             // Proved in range, so its value is the exact result.
             ExprKind::Call(Target::Int(crate::int::IntOp::Unchecked(arith), _, _), arguments) => {
@@ -1364,23 +1475,22 @@ fn negation(goal: &Constraint) -> Option<Constraint> {
 /// final `0 <= bound` consequences; `None` means a work budget was exceeded or
 /// exact rational arithmetic overflowed.
 fn eliminate(mut rows: Vec<Row>) -> Option<Vec<Row>> {
-    let mut terms = BTreeMap::<Term, usize>::new();
-    for row in &rows {
-        for term in row.coefficients.keys() {
-            terms.insert(*term, 0);
-        }
-    }
-    if terms.len() > MAX_FM_TERMS || rows.len() > MAX_FM_ROWS {
+    let mut variables: Vec<Term> = rows
+        .iter()
+        .flat_map(|row| row.coefficients.iter().map(|(term, _)| *term))
+        .collect();
+    variables.sort_unstable();
+    variables.dedup();
+    if variables.len() > MAX_FM_TERMS || rows.len() > MAX_FM_ROWS {
         return None;
     }
-    let variables = terms.keys().copied().collect::<Vec<_>>();
     let mut pairs = 0usize;
     for variable in variables {
         let mut upper = Vec::new();
         let mut lower = Vec::new();
         let mut zero = Vec::new();
         for row in rows {
-            match row.coefficients.get(&variable).copied() {
+            match row.coefficient(&variable) {
                 Some(coefficient) if coefficient.is_positive() => upper.push((row, coefficient)),
                 Some(coefficient) => lower.push((row, coefficient)),
                 None => zero.push(row),
@@ -1407,37 +1517,352 @@ fn eliminate(mut rows: Vec<Row>) -> Option<Vec<Row>> {
     Some(rows)
 }
 
-/// Turn a contradictory row into a Farkas certificate over `sources`, whose
-/// indices are the row origins.
-fn farkas_from_conflict(conflict: &Row, sources: &[Constraint]) -> Option<Farkas> {
+/// The weights of a contradictory row: a positive denominator and, per
+/// source row (the row origins), a non-negative numerator.
+fn conflict_weights(conflict: &Row) -> Option<(i128, Vec<(u32, i128)>)> {
     let mut denominator = 1i128;
-    for multiplier in conflict.origins.values() {
+    for (_, multiplier) in &conflict.origins {
         denominator = lcm(denominator, multiplier.den);
     }
-    let mut steps = Vec::new();
-    let mut multipliers = Vec::new();
+    let mut weights = Vec::new();
     for (origin, multiplier) in &conflict.origins {
-        let source = sources.get(*origin)?.clone();
         let numerator = multiplier.num.checked_mul(denominator / multiplier.den)?;
-        steps.push(source);
-        multipliers.push(numerator);
+        weights.push((u32::try_from(*origin).ok()?, numerator));
     }
     // Reduce a common factor so certificates stay small.
     let mut divisor = denominator;
-    for numerator in &multipliers {
+    for (_, numerator) in &weights {
         divisor = gcd(divisor, *numerator);
     }
     if divisor > 1 {
         denominator /= divisor;
-        for numerator in &mut multipliers {
+        for (_, numerator) in &mut weights {
             *numerator /= divisor;
         }
+    }
+    Some((denominator, weights))
+}
+
+/// The Farkas certificate those weights describe over `sources`.
+fn farkas_from_weights(
+    denominator: i128,
+    weights: &[(u32, i128)],
+    sources: &[&Constraint],
+) -> Option<Farkas> {
+    let mut steps = Vec::with_capacity(weights.len());
+    let mut multipliers = Vec::with_capacity(weights.len());
+    for (origin, numerator) in weights {
+        steps.push((*sources.get(*origin as usize)?).clone());
+        multipliers.push(*numerator);
     }
     Some(Farkas {
         steps,
         multipliers,
         denominator,
     })
+}
+
+/// Serialize a system for the proof cache with its terms renamed to their
+/// rank in term order. Elimination depends only on the order of terms and of
+/// rows, so systems with equal serializations search identically.
+/// `domain` separates the kinds of question asked about one system.
+fn system_key(sources: &[&Constraint], domain: &[u64]) -> u128 {
+    let mut terms: Vec<Term> = sources
+        .iter()
+        .flat_map(|source| source.coefficients.keys().copied())
+        .collect();
+    terms.sort_unstable();
+    terms.dedup();
+    let mut bytes = Vec::with_capacity(sources.len() * 48 + 16);
+    for word in domain {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    for source in sources {
+        bytes.extend_from_slice(&(source.coefficients.len() as u32).to_le_bytes());
+        for (term, coefficient) in &source.coefficients {
+            let rank = terms.binary_search(term).expect("collected above") as u32;
+            bytes.extend_from_slice(&rank.to_le_bytes());
+            bytes.extend_from_slice(&coefficient.to_le_bytes());
+        }
+        bytes.extend_from_slice(&source.bound.to_le_bytes());
+    }
+    crate::proof_cache::key(&bytes)
+}
+
+/// Search for a rational refutation of `sources`. With `required`, the
+/// refutation must use that row with a positive weight.
+///
+/// Rows only ever combine through a shared term, so a refutation lies within
+/// one connected component of the "shares a term" relation. Searching
+/// components separately finds exactly the refutations the whole system has,
+/// at a fraction of the cost: most facts in scope have nothing to do with
+/// the goal. (The one difference is the pair budget, which now applies per
+/// component, so a search can only succeed where the combined one ran out.)
+fn refute_system(sources: &[Constraint], required: Option<usize>) -> Option<Farkas> {
+    // The documented size limits are about the whole system, as before.
+    let mut terms: Vec<Term> = sources
+        .iter()
+        .flat_map(|source| source.coefficients.keys().copied())
+        .collect();
+    terms.sort_unstable();
+    terms.dedup();
+    if terms.len() > MAX_FM_TERMS || sources.len() > MAX_FM_ROWS {
+        return None;
+    }
+    let components = components(sources);
+    let mut order: Vec<usize> = match required {
+        Some(index) => vec![components[index]],
+        None => components.clone(),
+    };
+    order.sort_unstable();
+    order.dedup();
+    for component in order {
+        let mut local = None;
+        let mut rows: Vec<&Constraint> = Vec::new();
+        for (index, source) in sources.iter().enumerate() {
+            if components[index] == component {
+                if required == Some(index) {
+                    local = Some(rows.len());
+                }
+                rows.push(source);
+            }
+        }
+        if let Some(proof) = refute_component(&rows, local) {
+            return Some(proof);
+        }
+    }
+    None
+}
+
+/// The connected component of each row: rows are linked when they mention a
+/// common term. A row without terms is a component of its own. Components
+/// are named by the index of their first row.
+fn components(sources: &[Constraint]) -> Vec<usize> {
+    fn find(parents: &mut [usize], mut node: usize) -> usize {
+        while parents[node] != node {
+            parents[node] = parents[parents[node]];
+            node = parents[node];
+        }
+        node
+    }
+    let mut parents: Vec<usize> = (0..sources.len()).collect();
+    let mut first_row = BTreeMap::<Term, usize>::new();
+    for (index, source) in sources.iter().enumerate() {
+        for term in source.coefficients.keys() {
+            match first_row.get(term) {
+                Some(other) => {
+                    let (a, b) = (find(&mut parents, index), find(&mut parents, *other));
+                    // The smaller index stays the representative.
+                    parents[a.max(b)] = a.min(b);
+                }
+                None => {
+                    first_row.insert(*term, index);
+                }
+            }
+        }
+    }
+    (0..sources.len())
+        .map(|index| find(&mut parents, index))
+        .collect()
+}
+
+/// Search one component. Outcomes are remembered across builds; a remembered
+/// refutation is rebuilt over the current rows and verified again, so the
+/// cache is never trusted.
+fn refute_component(sources: &[&Constraint], required: Option<usize>) -> Option<Farkas> {
+    let key = system_key(sources, &[required.map_or(u64::MAX, |index| index as u64)]);
+    match crate::proof_cache::get(key) {
+        Some(None) => return None,
+        Some(Some((denominator, weights))) => {
+            let uses_required = required.is_none_or(|index| {
+                weights
+                    .iter()
+                    .any(|(origin, numerator)| *origin as usize == index && *numerator > 0)
+            });
+            if uses_required
+                && let Some(proof) = farkas_from_weights(denominator, &weights, sources)
+                && refutes(&proof)
+            {
+                return Some(proof);
+            }
+        }
+        None => {}
+    }
+    // A search result is held to the same standard as a remembered one. A
+    // combination whose multipliers overflow cannot be checked, so it is not
+    // a proof; saying so here lets the caller try another component instead
+    // of failing later with a certificate nobody can verify.
+    let found = search_refutation(sources, required).and_then(|(denominator, weights)| {
+        let proof = farkas_from_weights(denominator, &weights, sources)?;
+        refutes(&proof).then_some(((denominator, weights), proof))
+    });
+    crate::proof_cache::put(key, found.as_ref().map(|(weights, _)| weights.clone()));
+    found.map(|(_, proof)| proof)
+}
+
+/// Whether a certificate's own steps, which were just taken from the system
+/// at hand, combine to a contradiction: the check `verify_farkas` makes,
+/// without searching the system for each step.
+fn refutes(proof: &Farkas) -> bool {
+    if proof.denominator <= 0 {
+        return false;
+    }
+    let steps = proof.steps.iter().collect::<Vec<_>>();
+    combine_steps(&steps, &proof.multipliers)
+        .is_some_and(|(coefficients, bound)| coefficients.is_empty() && bound < 0)
+}
+
+/// Try to exhibit an integer point that satisfies every row.
+///
+/// A system with such a point has no refutation of any kind, so a search
+/// that would only run out of options can stop before it starts. This is
+/// the common case: most range questions about unconstrained values are
+/// simply not provable. Finding a point is a heuristic (a few candidate
+/// points, each repaired row by row within the single-variable bounds);
+/// accepting one is exact, because the point is checked against every row.
+fn has_integer_point(rows: &[&Constraint]) -> bool {
+    let mut terms: Vec<Term> = rows
+        .iter()
+        .flat_map(|row| row.coefficients.keys().copied())
+        .collect();
+    terms.sort_unstable();
+    terms.dedup();
+    let index = |term: &Term| terms.binary_search(term).expect("collected above");
+    // Single-variable rows give each term its bounds.
+    let mut low: Vec<Option<i128>> = vec![None; terms.len()];
+    let mut high: Vec<Option<i128>> = vec![None; terms.len()];
+    for row in rows {
+        let mut entries = row.coefficients.iter().filter(|(_, c)| **c != 0);
+        let (Some((term, coefficient)), None) = (entries.next(), entries.next()) else {
+            continue;
+        };
+        let at = index(term);
+        if *coefficient > 0 {
+            // c*x <= b  =>  x <= floor(b / c)
+            let bound = row.bound.div_euclid(*coefficient);
+            high[at] = Some(high[at].map_or(bound, |old: i128| old.min(bound)));
+        } else {
+            // c*x <= b, c < 0  =>  x >= ceil(b / c) = -floor(b / -c)
+            let Some(positive) = coefficient.checked_neg() else {
+                return false;
+            };
+            let Some(bound) = row.bound.div_euclid(positive).checked_neg() else {
+                return false;
+            };
+            low[at] = Some(low[at].map_or(bound, |old: i128| old.max(bound)));
+        }
+    }
+    if low
+        .iter()
+        .zip(&high)
+        .any(|(low, high)| matches!((low, high), (Some(low), Some(high)) if low > high))
+    {
+        return false;
+    }
+    let clamp = |at: usize, value: i128| {
+        let value = low[at].map_or(value, |low| value.max(low));
+        high[at].map_or(value, |high| value.min(high))
+    };
+    let slack = |row: &Constraint, point: &[i128]| -> Option<i128> {
+        // bound - sum; non-negative when the row holds.
+        let mut sum = 0i128;
+        for (term, coefficient) in &row.coefficients {
+            sum = sum.checked_add(coefficient.checked_mul(point[index(term)])?)?;
+        }
+        row.bound.checked_sub(sum)
+    };
+    let satisfied = |point: &[i128]| {
+        rows.iter()
+            .all(|row| slack(row, point).is_some_and(|slack| slack >= 0))
+    };
+    // Move one variable of a violated row, within its bounds, far enough to
+    // make the row hold; a few passes settle chains like `i < n <= len`.
+    let repair = |point: &mut Vec<i128>| {
+        for _ in 0..4 {
+            let mut changed = false;
+            for row in rows {
+                let Some(missing) = slack(row, point).filter(|slack| *slack < 0) else {
+                    continue;
+                };
+                for (term, coefficient) in &row.coefficients {
+                    if *coefficient == 0 {
+                        continue;
+                    }
+                    let at = index(term);
+                    // Lower the sum by at least `-missing`.
+                    let Some(size) = coefficient.checked_abs() else {
+                        continue;
+                    };
+                    let Some(steps) = missing
+                        .checked_neg()
+                        .and_then(|need| need.checked_add(size - 1))
+                        .map(|need| need / size)
+                    else {
+                        continue;
+                    };
+                    let moved = if *coefficient > 0 {
+                        point[at].checked_sub(steps)
+                    } else {
+                        point[at].checked_add(steps)
+                    };
+                    if let Some(moved) = moved
+                        && clamp(at, moved) == moved
+                    {
+                        point[at] = moved;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    };
+    let starts: [&dyn Fn(usize) -> i128; 3] = [
+        &|at| clamp(at, 0),
+        &|at| low[at].or(high[at]).unwrap_or(0),
+        &|at| high[at].or(low[at]).unwrap_or(0),
+    ];
+    for start in starts {
+        let mut point: Vec<i128> = (0..terms.len()).map(start).collect();
+        if satisfied(&point) {
+            return true;
+        }
+        repair(&mut point);
+        if satisfied(&point) {
+            return true;
+        }
+    }
+    false
+}
+
+fn search_refutation(
+    sources: &[&Constraint],
+    required: Option<usize>,
+) -> Option<(i128, Vec<(u32, i128)>)> {
+    if has_integer_point(sources) {
+        return None;
+    }
+    let mut rows = Vec::with_capacity(sources.len());
+    for (index, source) in sources.iter().enumerate() {
+        rows.push(Row::from_constraint(source, index)?);
+    }
+    let rows = eliminate(rows)?;
+    // After eliminating every variable, every row is `0 <= bound`. A negative
+    // bound is a contradiction. With a goal, prefer a contradiction that
+    // actually uses the goal's negation, so the certificate is a proof of the
+    // goal rather than merely an observation that the hypotheses are
+    // inconsistent.
+    let conflict = rows.iter().find(|row| {
+        row.coefficients.is_empty()
+            && row.bound.is_negative()
+            && required.is_none_or(|index| {
+                row.origin(index)
+                    .is_some_and(|multiplier| multiplier.is_positive())
+            })
+    })?;
+    conflict_weights(conflict)
 }
 
 fn prove_with(hypotheses: &[Constraint], goal: &Constraint) -> Option<Farkas> {
@@ -1453,39 +1878,14 @@ fn prove_with(hypotheses: &[Constraint], goal: &Constraint) -> Option<Farkas> {
     sources.extend(hypotheses.iter().cloned());
     let negation_index = sources.len();
     sources.push(negated);
-    let mut rows = Vec::with_capacity(sources.len());
-    for (index, source) in sources.iter().enumerate() {
-        rows.push(Row::from_constraint(source, index)?);
-    }
-    let rows = eliminate(rows)?;
-    // After eliminating every variable, every row is `0 <= bound`. A negative
-    // bound is a contradiction. Prefer a contradiction that actually uses the
-    // goal's negation, so the certificate is a proof of the goal rather than
-    // merely an observation that the hypotheses are inconsistent.
-    let conflict = rows.iter().find(|row| {
-        row.coefficients.is_empty()
-            && row.bound.is_negative()
-            && row
-                .origins
-                .get(&negation_index)
-                .is_some_and(|multiplier| multiplier.is_positive())
-    })?;
-    farkas_from_conflict(conflict, &sources)
+    refute_system(&sources, Some(negation_index))
 }
 
 /// Refute a complete integer system without a distinguished goal. This is the
 /// leaf rule used by the integer fallback: any negative constant consequence
 /// of the available constraints is a contradiction.
 fn refute_rational(system: &[Constraint]) -> Option<Farkas> {
-    let mut rows = Vec::with_capacity(system.len());
-    for (index, constraint) in system.iter().enumerate() {
-        rows.push(Row::from_constraint(constraint, index)?);
-    }
-    let rows = eliminate(rows)?;
-    let conflict = rows
-        .iter()
-        .find(|row| row.coefficients.is_empty() && row.bound.is_negative())?;
-    farkas_from_conflict(conflict, system)
+    refute_system(system, None)
 }
 
 /// Exact non-negative rational used by the Fourier–Motzkin search.
@@ -1529,6 +1929,10 @@ impl Ratio {
         if den == 0 {
             return None;
         }
+        // Already in lowest terms; the common case, since weights are integers.
+        if den == 1 {
+            return Some(Ratio { num, den });
+        }
         let (num, den) = if den < 0 {
             (num.checked_neg()?, den.checked_neg()?)
         } else {
@@ -1543,27 +1947,91 @@ impl Ratio {
     }
 }
 
+/// One inequality `sum coefficients * term <= bound` during elimination,
+/// with the non-negative combination of source rows it came from. Both lists
+/// are sorted by key and hold no zero entries; a combination is one merge.
 struct Row {
-    coefficients: BTreeMap<Term, Ratio>,
+    coefficients: Vec<(Term, Ratio)>,
     bound: Ratio,
-    origins: BTreeMap<usize, Ratio>,
+    origins: Vec<(usize, Ratio)>,
+}
+
+/// `weight_left * left + weight_right * right` over sorted sparse lists,
+/// dropping `skip` and entries that cancel.
+fn merge_scaled<K: Ord + Copy>(
+    left: &[(K, Ratio)],
+    right: &[(K, Ratio)],
+    weight_left: Ratio,
+    weight_right: Ratio,
+    skip: Option<&K>,
+) -> Option<Vec<(K, Ratio)>> {
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() || j < right.len() {
+        let order = match (left.get(i), right.get(j)) {
+            (Some((a, _)), Some((b, _))) => a.cmp(b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            _ => std::cmp::Ordering::Greater,
+        };
+        // Step past the entries first: a skipped key is never multiplied.
+        let (key, a, b) = match order {
+            std::cmp::Ordering::Less => {
+                i += 1;
+                (left[i - 1].0, Some(left[i - 1].1), None)
+            }
+            std::cmp::Ordering::Greater => {
+                j += 1;
+                (right[j - 1].0, None, Some(right[j - 1].1))
+            }
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+                (left[i - 1].0, Some(left[i - 1].1), Some(right[j - 1].1))
+            }
+        };
+        if skip == Some(&key) {
+            continue;
+        }
+        let value = match (a, b) {
+            (Some(a), None) => a.checked_mul(weight_left)?,
+            (None, Some(b)) => b.checked_mul(weight_right)?,
+            (Some(a), Some(b)) => a
+                .checked_mul(weight_left)?
+                .checked_add(b.checked_mul(weight_right)?)?,
+            (None, None) => unreachable!("one side advanced"),
+        };
+        if value.num != 0 {
+            out.push((key, value));
+        }
+    }
+    Some(out)
 }
 
 impl Row {
     fn from_constraint(constraint: &Constraint, origin: usize) -> Option<Self> {
-        let mut coefficients = BTreeMap::new();
-        for (term, coefficient) in &constraint.coefficients {
-            if *coefficient != 0 {
-                coefficients.insert(*term, Ratio::integer(*coefficient));
-            }
-        }
-        let mut origins = BTreeMap::new();
-        origins.insert(origin, Ratio::integer(1));
+        let coefficients = constraint
+            .coefficients
+            .iter()
+            .filter(|(_, coefficient)| **coefficient != 0)
+            .map(|(term, coefficient)| (*term, Ratio::integer(*coefficient)))
+            .collect();
         Some(Row {
             coefficients,
             bound: Ratio::integer(constraint.bound),
-            origins,
+            origins: vec![(origin, Ratio::integer(1))],
         })
+    }
+    fn coefficient(&self, term: &Term) -> Option<Ratio> {
+        self.coefficients
+            .binary_search_by(|(candidate, _)| candidate.cmp(term))
+            .ok()
+            .map(|index| self.coefficients[index].1)
+    }
+    fn origin(&self, origin: usize) -> Option<Ratio> {
+        self.origins
+            .binary_search_by(|(candidate, _)| candidate.cmp(&origin))
+            .ok()
+            .map(|index| self.origins[index].1)
     }
     /// `weight_self * self + weight_other * other`; the caller guarantees that
     /// the weights are positive and exactly cancel `eliminated`.
@@ -1574,57 +2042,24 @@ impl Row {
         weight_other: Ratio,
         eliminated: &Term,
     ) -> Option<Self> {
-        let mut coefficients = BTreeMap::new();
-        for (term, coefficient) in &self.coefficients {
-            if term == eliminated {
-                continue;
-            }
-            coefficients.insert(*term, coefficient.checked_mul(weight_self)?);
-        }
-        for (term, coefficient) in &other.coefficients {
-            if term == eliminated {
-                continue;
-            }
-            let value = coefficient.checked_mul(weight_other)?;
-            match coefficients.entry(*term) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(value);
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    let sum = entry.get().checked_add(value)?;
-                    if sum.num == 0 {
-                        entry.remove();
-                    } else {
-                        *entry.get_mut() = sum;
-                    }
-                }
-            }
-        }
+        let coefficients = merge_scaled(
+            &self.coefficients,
+            &other.coefficients,
+            weight_self,
+            weight_other,
+            Some(eliminated),
+        )?;
         let bound = self
             .bound
             .checked_mul(weight_self)?
             .checked_add(other.bound.checked_mul(weight_other)?)?;
-        let mut origins = BTreeMap::new();
-        for (origin, multiplier) in &self.origins {
-            let value = multiplier.checked_mul(weight_self)?;
-            origins.insert(*origin, value);
-        }
-        for (origin, multiplier) in &other.origins {
-            let value = multiplier.checked_mul(weight_other)?;
-            match origins.entry(*origin) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(value);
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    let sum = entry.get().checked_add(value)?;
-                    if sum.num == 0 {
-                        entry.remove();
-                    } else {
-                        *entry.get_mut() = sum;
-                    }
-                }
-            }
-        }
+        let origins = merge_scaled(
+            &self.origins,
+            &other.origins,
+            weight_self,
+            weight_other,
+            None,
+        )?;
         Some(Row {
             coefficients,
             bound,
@@ -1670,7 +2105,7 @@ fn prove_integer(hypotheses: &[Constraint], goal: &Constraint) -> Option<Refutat
 fn prove_integer_with(
     hypotheses: &[Constraint],
     goal: &Constraint,
-    mut budget: IntegerBudget,
+    budget: IntegerBudget,
 ) -> Option<Refutation> {
     let negated = negation(goal)?;
     let mut system = Vec::with_capacity(hypotheses.len() + 1);
@@ -1679,7 +2114,67 @@ fn prove_integer_with(
     if system.len() > MAX_INTEGER_CONSTRAINTS {
         return None;
     }
-    solve_integer(&system, MAX_INTEGER_DEPTH, &mut budget)
+    let goal_row = system.len() - 1;
+    refute_integer(&system, Some(goal_row), budget)
+}
+
+/// Refute an integer system.
+///
+/// With a goal row, the rows connected to the goal through shared terms are
+/// searched first and the remaining rows second. A system is infeasible
+/// exactly when one of the two parts is, since no rule of the search
+/// (rational refutation, cuts of rows, branches on a variable) relates rows
+/// that share no term. The goal's part is small, and the remainder, facts
+/// that have nothing to do with the goal, is the same from one goal to the
+/// next, so its outcome is remembered. Each part gets the full budget.
+///
+/// Most goals that reach the integer search are simply not provable, and
+/// establishing that is the expensive part. Only failures are remembered: a
+/// proof is always searched again, so nothing remembered is ever trusted.
+fn refute_integer(
+    system: &[Constraint],
+    goal: Option<usize>,
+    budget: IntegerBudget,
+) -> Option<Refutation> {
+    // The documented size limits are about the whole system, as before.
+    if integer_term_count(system) > MAX_INTEGER_TERMS {
+        return None;
+    }
+    let mut parts: Vec<Vec<Constraint>> = Vec::new();
+    match goal {
+        Some(goal) => {
+            let components = components(system);
+            let (near, far): (Vec<_>, Vec<_>) = system
+                .iter()
+                .zip(&components)
+                .partition(|(_, component)| **component == components[goal]);
+            parts.push(near.into_iter().map(|(row, _)| row.clone()).collect());
+            if !far.is_empty() {
+                parts.push(far.into_iter().map(|(row, _)| row.clone()).collect());
+            }
+        }
+        None => parts.push(system.to_vec()),
+    }
+    for rows in parts {
+        let key = system_key(
+            &rows.iter().collect::<Vec<_>>(),
+            &[
+                u64::MAX - 1,
+                budget.nodes as u64,
+                budget.cuts as u64,
+                budget.cut_rounds as u64,
+            ],
+        );
+        if crate::proof_cache::get(key) == Some(None) {
+            continue;
+        }
+        let mut remaining = budget;
+        match solve_integer(&rows, MAX_INTEGER_DEPTH, &mut remaining) {
+            Some(proof) => return Some(proof),
+            None => crate::proof_cache::put(key, None),
+        }
+    }
+    None
 }
 
 fn solve_integer(
@@ -1694,6 +2189,10 @@ fn solve_integer(
         return None;
     }
     budget.nodes -= 1;
+    // An integer point rules out every rule below at once.
+    if has_integer_point(&system.iter().collect::<Vec<_>>()) {
+        return None;
+    }
     if let Some(farkas) = refute_rational(system) {
         return Some(Refutation::Farkas(farkas));
     }
@@ -2099,7 +2598,7 @@ fn search_cases(units: &[Constraint], clauses: &[Dnf], budget: &mut usize) -> Op
         if units.len() > MAX_INTEGER_CONSTRAINTS {
             return None;
         }
-        return solve_integer(units, MAX_INTEGER_DEPTH, &mut IntegerBudget::standard());
+        return refute_integer(units, None, IntegerBudget::standard());
     };
     let (index, dead) = candidates.swap_remove(position);
     let clause = &clauses[index];
@@ -2270,6 +2769,15 @@ pub(crate) fn failure(
     )
 }
 
+/// `a == b` as two inequalities.
+fn equal_terms(a: Term, b: Term) -> [Constraint; 2] {
+    let pair = |plus: Term, minus: Term| Constraint {
+        coefficients: BTreeMap::from([(plus, 1), (minus, -1)]),
+        bound: 0,
+    };
+    [pair(a, b), pair(b, a)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2279,6 +2787,125 @@ mod tests {
             coefficients: coefficients.iter().copied().collect(),
             bound,
         }
+    }
+
+    /// The search as it was before any shortcut: eliminate the whole system
+    /// and look for a negative constant row.
+    fn plain_refutation(system: &[Constraint]) -> Option<bool> {
+        let rows = system
+            .iter()
+            .enumerate()
+            .map(|(index, row)| Row::from_constraint(row, index))
+            .collect::<Option<Vec<_>>>()?;
+        let rows = eliminate(rows)?;
+        Some(
+            rows.iter()
+                .any(|row| row.coefficients.is_empty() && row.bound.is_negative()),
+        )
+    }
+
+    /// Small pseudo-random systems over a few terms, some of them split into
+    /// unrelated groups of terms.
+    fn sample_systems() -> Vec<Vec<Constraint>> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |range: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % range
+        };
+        let mut systems = Vec::new();
+        for case in 0..400 {
+            let terms = 2 + next(4) as usize;
+            let rows = 2 + next(7) as usize;
+            let mut system = Vec::new();
+            for _ in 0..rows {
+                // Odd cases keep each row inside one half of the terms.
+                let half = next(2) as usize;
+                let mut coefficients = Vec::new();
+                for term in 0..terms {
+                    if case % 2 == 1 && term % 2 != half {
+                        continue;
+                    }
+                    let coefficient = next(7) as i128 - 3;
+                    if coefficient != 0 && next(3) != 0 {
+                        coefficients.push((Term::Var(term, 0), coefficient));
+                    }
+                }
+                system.push(inequality(&coefficients, next(21) as i128 - 10));
+            }
+            systems.push(system);
+        }
+        systems
+    }
+
+    #[test]
+    fn component_search_agrees_with_plain_elimination() {
+        let mut refuted = 0;
+        for system in sample_systems() {
+            let Some(expected) = plain_refutation(&system) else {
+                continue;
+            };
+            let found = refute_system(&system, None);
+            assert_eq!(found.is_some(), expected, "{system:?}");
+            if let Some(proof) = found {
+                assert!(verify_farkas(&system, &proof), "{system:?}");
+                refuted += 1;
+            }
+        }
+        assert!(refuted > 20, "the sample should contain refutable systems");
+    }
+
+    #[test]
+    fn an_integer_point_is_only_reported_for_satisfiable_systems() {
+        let mut witnessed = 0;
+        for system in sample_systems() {
+            let rows = system.iter().collect::<Vec<_>>();
+            if has_integer_point(&rows) {
+                witnessed += 1;
+                assert_eq!(plain_refutation(&system), Some(false), "{system:?}");
+                assert!(
+                    solve_integer(&system, MAX_INTEGER_DEPTH, &mut IntegerBudget::standard())
+                        .is_none(),
+                    "{system:?}"
+                );
+            }
+        }
+        assert!(
+            witnessed > 20,
+            "the sample should contain satisfiable systems"
+        );
+        // Chains need the repair step: 0 <= i, i < n, n <= len, len <= 5.
+        let (i, n, len) = (Term::Var(0, 0), Term::Var(1, 0), Term::Var(2, 0));
+        let chain = [
+            inequality(&[(i, -1)], 0),
+            inequality(&[(i, 1), (n, -1)], -1),
+            inequality(&[(n, 1), (len, -1)], 0),
+            inequality(&[(len, 1)], 5),
+        ];
+        assert!(has_integer_point(&chain.iter().collect::<Vec<_>>()));
+        // 2x = 1 has rational but no integer solutions.
+        let x = Term::Var(0, 0);
+        let parity = [inequality(&[(x, 2)], 1), inequality(&[(x, -2)], -1)];
+        assert!(!has_integer_point(&parity.iter().collect::<Vec<_>>()));
+    }
+
+    #[test]
+    fn a_required_row_only_sees_its_own_component() {
+        let (x, y) = (Term::Var(0, 0), Term::Var(1, 0));
+        // y is contradictory on its own; the goal about x is not provable
+        // from it by a refutation that uses the goal.
+        let system = [
+            inequality(&[(y, 1)], 0),
+            inequality(&[(y, -1)], -1),
+            inequality(&[(x, 1)], 5),
+            inequality(&[(x, -1)], 0),
+        ];
+        assert!(refute_system(&system, Some(3)).is_none());
+        assert!(refute_system(&system, Some(1)).is_some());
+        assert!(refute_system(&system, None).is_some());
+        let related = [inequality(&[(x, 1)], 5), inequality(&[(x, -1)], -6)];
+        assert!(refute_system(&related, Some(1)).is_some());
     }
 
     fn certificate(hypotheses: Vec<Constraint>, goal: Constraint) -> Certificate {

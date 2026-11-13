@@ -16,31 +16,10 @@ fn digest(bytes: &[u8]) -> u64 {
     hash.finish()
 }
 
-fn compiler_identity(source: &Path, defines: &[String]) -> Option<Vec<u8>> {
-    let path = std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|directory| directory.join("cc"))
-        .find(|path| path.is_file())?;
-    let path = fs::canonicalize(path).ok()?;
-    let metadata = fs::metadata(&path).ok()?;
-    let mut identity = format!(
-        "{path:?}:{:?}:{}",
-        metadata.modified().ok()?,
-        metadata.len()
-    )
-    .into_bytes();
-    for argument in ["--version", "-dumpmachine"] {
-        let output = Command::new("cc").arg(argument).output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        identity.extend_from_slice(&output.stdout);
-        identity.extend_from_slice(&output.stderr);
-    }
-    identity.extend_from_slice(format!("{:?}", std::env::current_dir().ok()?).as_bytes());
-    // Ask this compiler for its real include graph, including system headers.
-    // This prevents a warm hit after a libc/header upgrade or include-path
-    // change. Dependency scanning preprocesses only; it emits no object.
-    let dependencies = Command::new("cc")
+/// Ask the compiler which files the runtime source includes.
+fn include_graph(compiler: &Path, source: &Path, defines: &[String]) -> Option<Vec<PathBuf>> {
+    // Dependency scanning preprocesses only; it emits no object.
+    let dependencies = Command::new(compiler)
         .args(["-std=c11", "-O2"])
         .args(defines)
         .args(["-M", "-MT", "kush_runtime"])
@@ -77,10 +56,157 @@ fn compiler_identity(source: &Path, defines: &[String]) -> Option<Vec<u8>> {
     if escaped || paths.is_empty() {
         return None;
     }
-    for path in paths {
-        if path == source {
-            continue;
+    // The source itself is rewritten for every build and must not count.
+    // The compiler may spell it differently than the caller did (a relative
+    // scratch directory, a leading `./`), so compare resolved paths.
+    let resolved = fs::canonicalize(source).ok();
+    paths.retain(|path| {
+        path != source && (resolved.is_none() || fs::canonicalize(path).ok() != resolved)
+    });
+    Some(paths)
+}
+
+/// Whether a resolved compiler binary is GCC or Clang itself rather than a
+/// wrapper (ccache, distcc, a script).
+fn plain_compiler(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    (name.contains("gcc") || name.contains("clang"))
+        && !["ccache", "distcc", "sccache", "icecc"]
+            .iter()
+            .any(|wrapper| name.contains(wrapper))
+}
+
+/// Environment variables GCC or Clang read when compiling and preprocessing
+/// C, or that select the tools they run.
+fn compiler_reads(name: &std::ffi::OsStr) -> bool {
+    const NAMES: [&str; 12] = [
+        "PATH",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "OBJC_INCLUDE_PATH",
+        "LIBRARY_PATH",
+        "COMPILER_PATH",
+        "SOURCE_DATE_EPOCH",
+        "DEPENDENCIES_OUTPUT",
+        "SUNPRO_DEPENDENCIES",
+        "SDKROOT",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "TMPDIR",
+    ];
+    const PREFIXES: [&str; 3] = ["GCC_", "CLANG_", "CCC_"];
+    let Some(name) = name.to_str() else {
+        return true;
+    };
+    NAMES.contains(&name) || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
+fn compiler_identity(
+    compiler: &Path,
+    source: &Path,
+    defines: &[String],
+    cheap_probes: bool,
+    remembered_graph: Option<(&Path, &str)>,
+) -> Option<Vec<u8>> {
+    let path = if compiler.components().count() > 1 {
+        compiler.to_path_buf()
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|directory| directory.join(compiler))
+            .find(|path| path.is_file())?
+    };
+    let path = fs::canonicalize(path).ok()?;
+    let metadata = fs::metadata(&path).ok()?;
+    let mut identity = format!(
+        "{path:?}:{:?}:{}",
+        metadata.modified().ok()?,
+        metadata.len()
+    )
+    .into_bytes();
+    // A clang start costs about ten times a gcc start. For the LLVM flavour
+    // the binary's identity above, the include graph below (its paths name
+    // the versioned resource directory) and the environment hash already pin
+    // the compiler, so the two extra probes are skipped.
+    let probes: &[&str] = if cheap_probes {
+        &["--version", "-dumpmachine"]
+    } else {
+        &[]
+    };
+    for argument in probes {
+        let output = Command::new(compiler).arg(argument).output().ok()?;
+        if !output.status.success() {
+            return None;
         }
+        identity.extend_from_slice(&output.stdout);
+        identity.extend_from_slice(&output.stderr);
+    }
+    // The working directory is not part of the key: the runtime is compiled
+    // with no debug information and no relative include path, so it cannot
+    // reach the object. The environment is, but only as much of it as the
+    // compiler reads: GCC and Clang read a documented set of variables, and
+    // anything else (`OLDPWD` after a `cd`, a terminal's own variables) used
+    // to cost a 0.8 s rebuild of the runtime. A compiler that resolves to
+    // anything but GCC or Clang may be a wrapper that reads anything, so for
+    // it the whole environment counts. Only a hash is kept, never values.
+    let mut environment: Vec<_> = std::env::vars_os()
+        .filter(|(name, _)| !plain_compiler(&path) || compiler_reads(name))
+        .collect();
+    environment.sort();
+    let mut hash = DefaultHasher::new();
+    environment.hash(&mut hash);
+    identity.extend_from_slice(&hash.finish().to_le_bytes());
+    // The include graph, including system headers, prevents a warm hit after
+    // a libc/header upgrade or include-path change. The LLVM flavour
+    // remembers the graph per compiler, flags, environment and runtime
+    // source, and then only stats the listed headers: asking clang again
+    // costs more than the rest of the lookup. A change to any listed header
+    // is still seen; a new header that shadows a listed one is not, until
+    // something else in that key changes.
+    let graph_file = remembered_graph.map(|(root, runtime)| {
+        let mut key = identity.clone();
+        key.extend_from_slice(runtime.as_bytes());
+        key.extend_from_slice(format!("{defines:?}").as_bytes());
+        root.join(format!("{:016x}.graph", digest(&key)))
+    });
+    let remembered = graph_file.as_ref().and_then(|file| {
+        let text = fs::read_to_string(file).ok()?;
+        let paths: Vec<PathBuf> = text.lines().map(PathBuf::from).collect();
+        (!paths.is_empty()
+            && paths
+                .iter()
+                .all(|path| path.is_absolute() && path.is_file()))
+        .then_some(paths)
+    });
+    let paths = match remembered {
+        Some(paths) => paths,
+        None => {
+            let paths = include_graph(compiler, source, defines)?;
+            let listed: Vec<&PathBuf> = paths.iter().collect();
+            if let Some(file) = &graph_file
+                && let Some(root) = file.parent()
+                && listed.iter().all(|path| {
+                    path.is_absolute() && path.to_str().is_some_and(|p| !p.contains('\n'))
+                })
+            {
+                // Published atomically, like cache entries.
+                let _ = (|| -> std::io::Result<()> {
+                    let stage = Scratch::new(root)
+                        .map_err(|_| std::io::Error::other("cache staging failed"))?;
+                    let temporary = stage.path().join("graph");
+                    let text: String = listed
+                        .iter()
+                        .map(|path| format!("{}\n", path.display()))
+                        .collect();
+                    fs::write(&temporary, text)?;
+                    fs::rename(temporary, file)
+                })();
+            }
+            paths
+        }
+    };
+    for path in paths {
         let metadata = fs::metadata(&path).ok()?;
         identity.extend_from_slice(
             format!(
@@ -91,13 +217,6 @@ fn compiler_identity(source: &Path, defines: &[String]) -> Option<Vec<u8>> {
             .as_bytes(),
         );
     }
-    // Compiler wrappers can depend on arbitrary environment variables. Hash the
-    // complete environment rather than persisting possible credential values.
-    let mut environment: Vec<_> = std::env::vars_os().collect();
-    environment.sort();
-    let mut hash = DefaultHasher::new();
-    environment.hash(&mut hash);
-    identity.extend_from_slice(&hash.finish().to_le_bytes());
     Some(identity)
 }
 
@@ -161,17 +280,104 @@ fn read_entry(path: &Path, key: &[u8]) -> Option<Vec<u8>> {
     if checksum != digest(object).to_le_bytes() || object.is_empty() {
         return None;
     }
+    // Record the use, so pruning removes what has not been needed longest.
+    if let Ok(file) = fs::OpenOptions::new().append(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
     Some(object.to_vec())
 }
 
+/// Most entries (artifacts and remembered include graphs) kept.
+const MAX_ENTRIES: usize = 96;
+/// Most bytes kept.
+const MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Remove the entries used longest ago until the cache is within its limits.
+/// Each toolchain, flag set and runtime revision adds a few entries and
+/// nothing else ever removes them. Only regular files this cache names are
+/// touched; `keep` is the entry just written. Best effort: a concurrent
+/// build that loses an entry compiles cold.
+fn prune(root: &Path, keep: &Path) {
+    let Ok(directory) = fs::read_dir(root) else {
+        return;
+    };
+    let mut entries = Vec::new();
+    for item in directory.flatten() {
+        let path = item.path();
+        let named = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension == "cache" || extension == "graph");
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !named || !metadata.is_file() {
+            continue;
+        }
+        let used = metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        entries.push((used, metadata.len(), path));
+    }
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+    let mut bytes = 0u64;
+    for (index, (_, length, path)) in entries.iter().enumerate() {
+        bytes = bytes.saturating_add(*length);
+        if (index >= MAX_ENTRIES || bytes > MAX_BYTES) && path != keep {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Publish one cache entry atomically. A private staging directory makes this
+/// safe for parallel compiler processes; an existing entry is never opened
+/// or truncated. Best effort: a failure only means a later cold build.
+fn publish(entry: &Path, key: &[u8], bytes: &[u8]) {
+    let Some(root) = entry.parent() else {
+        return;
+    };
+    let _ = (|| -> std::io::Result<()> {
+        let stage =
+            Scratch::new(root).map_err(|_| std::io::Error::other("cache staging failed"))?;
+        let temporary = stage.path().join("entry");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(key)?;
+        file.write_all(&digest(bytes).to_le_bytes())?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(temporary, entry)
+    })();
+    prune(root, entry);
+}
+
+fn run(command: &mut Command, compiler: &Path) -> Result<()> {
+    let output = command.output().map_err(|e| {
+        error(format!(
+            "could not start the native C compiler '{}': {e}",
+            compiler.display()
+        ))
+    })?;
+    if !output.status.success() {
+        return Err(error(format!(
+            "native runtime compilation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn compile(runtime: &str, defines: &[String], scratch: &Scratch) -> Result<PathBuf> {
+    let compiler = Path::new("cc");
     let object = scratch.path().join("runtime.o");
     let source = scratch.path().join("runtime.c");
     fs::write(&source, runtime).map_err(error)?;
     let directory = cache_directory(scratch);
     let identity = directory
         .as_ref()
-        .and_then(|_| compiler_identity(&source, defines));
+        .and_then(|_| compiler_identity(compiler, &source, defines, true, None));
     let cache = directory.zip(identity);
     let mut key = b"kush-c-runtime-v1\0-std=c11\0-O2\0".to_vec();
     key.extend_from_slice(runtime.as_bytes());
@@ -186,41 +392,173 @@ pub(super) fn compile(runtime: &str, defines: &[String], scratch: &Scratch) -> R
         fs::write(&object, bytes).map_err(error)?;
         return Ok(object);
     }
-    let output = Command::new("cc")
-        .args(["-std=c11", "-O2"])
-        .args(defines)
-        .arg("-c")
-        .arg(&source)
-        .arg("-o")
-        .arg(&object)
-        .output()
-        .map_err(|e| error(format!("could not start the native C compiler 'cc': {e}")))?;
-    if !output.status.success() {
-        return Err(error(format!(
-            "native runtime compilation failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    if let Some(entry) = entry {
-        // A private staging directory makes publication atomic even for parallel
-        // compiler processes. Never open/truncate an existing cache entry.
-        if let Some(root) = entry.parent() {
-            let _ = (|| -> std::io::Result<()> {
-                let stage = Scratch::new(root)
-                    .map_err(|_| std::io::Error::other("cache staging failed"))?;
-                let bytes = fs::read(&object)?;
-                let temporary = stage.path().join("entry");
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&temporary)?;
-                file.write_all(&key)?;
-                file.write_all(&digest(&bytes).to_le_bytes())?;
-                file.write_all(&bytes)?;
-                file.sync_all()?;
-                fs::rename(temporary, &entry)
-            })();
-        }
+    run(
+        Command::new(compiler)
+            .args(["-std=c11", "-O2"])
+            .args(defines)
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object),
+        compiler,
+    )?;
+    if let Some(entry) = entry
+        && let Ok(bytes) = fs::read(&object)
+    {
+        publish(&entry, &key, &bytes);
     }
     Ok(object)
+}
+
+/// The runtime prepared for the LLVM backend.
+pub(super) struct LlvmRuntime {
+    /// Target description and the signature line of every runtime function.
+    pub interface: String,
+    /// The runtime object to link. Its formerly internal symbols are hidden
+    /// instead, so inlined copies of runtime code can refer to them.
+    pub object: PathBuf,
+    /// Bitcode holding every runtime definition as `available_externally`:
+    /// bodies LLVM may inline but never emits.
+    pub inline: PathBuf,
+}
+
+/// Compile the runtime once with clang and derive the three artifacts of
+/// [`LlvmRuntime`] from that single LLVM module, so the object and the
+/// inlinable bodies cannot disagree. Each is cached under its own key.
+pub(super) fn compile_llvm(
+    runtime: &str,
+    defines: &[String],
+    scratch: &Scratch,
+    clang: &Path,
+) -> Result<LlvmRuntime> {
+    let source = scratch.path().join("runtime.c");
+    fs::write(&source, runtime).map_err(error)?;
+    let directory = cache_directory(scratch);
+    let identity = directory.as_ref().and_then(|root| {
+        compiler_identity(
+            clang,
+            &source,
+            defines,
+            false,
+            Some((root.as_path(), runtime)),
+        )
+    });
+    let cache = directory.zip(identity);
+    let entry = |artifact: &str| {
+        let mut key =
+            format!("kush-c-runtime-llvm-v5\0{artifact}\0-std=c11\0-O2\0-fPIC\0").into_bytes();
+        // How the runtime is split is part of what the artifacts are.
+        key.extend_from_slice(super::llvm::INLINABLE.join(",").as_bytes());
+        key.push(0);
+        key.extend_from_slice(runtime.as_bytes());
+        key.extend_from_slice(format!("{defines:?}").as_bytes());
+        if let Some((_, identity)) = &cache {
+            key.extend_from_slice(identity);
+        }
+        let path = cache
+            .as_ref()
+            .map(|(root, _)| root.join(format!("{:016x}.cache", digest(&key))));
+        (path, key)
+    };
+    let artifacts = [entry("interface"), entry("object"), entry("inline")];
+    let object = scratch.path().join("runtime.o");
+    let inline = scratch.path().join("runtime-inline.bc");
+    let cached: Option<Vec<Vec<u8>>> = artifacts
+        .iter()
+        .map(|(path, key)| path.as_ref().and_then(|path| read_entry(path, key)))
+        .collect();
+    if let Some(cached) = cached
+        && let Ok(interface) = String::from_utf8(cached[0].clone())
+    {
+        fs::write(&object, &cached[1]).map_err(error)?;
+        fs::write(&inline, &cached[2]).map_err(error)?;
+        return Ok(LlvmRuntime {
+            interface,
+            object,
+            inline,
+        });
+    }
+    let module = scratch.path().join("runtime.ll");
+    run(
+        Command::new(clang)
+            .args(["-std=c11", "-O2"])
+            .args(defines)
+            // Position-independent like the Cranelift program object.
+            .args(["-fPIC", "-S", "-emit-llvm"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&module),
+        clang,
+    )?;
+    let text = fs::read_to_string(&module).map_err(error)?;
+    let split = super::llvm::split_runtime(&text)
+        .ok_or_else(|| error("the LLVM backend does not understand this clang's runtime module"))?;
+    let exported = scratch.path().join("runtime-export.ll");
+    let inlinable = scratch.path().join("runtime-inline.ll");
+    fs::write(&exported, &split.exported).map_err(error)?;
+    fs::write(&inlinable, &split.inlinable).map_err(error)?;
+    run(
+        Command::new(clang)
+            .args(["-O2", "-fPIC", "-c", "-Wno-override-module"])
+            .arg(&exported)
+            .arg("-o")
+            .arg(&object),
+        clang,
+    )?;
+    // A plain format conversion: no optimization level, no passes.
+    run(
+        Command::new(clang)
+            .args(["-x", "ir", "-c", "-emit-llvm", "-Wno-override-module"])
+            .arg(&inlinable)
+            .arg("-o")
+            .arg(&inline),
+        clang,
+    )?;
+    let outputs = [
+        split.interface.clone().into_bytes(),
+        fs::read(&object).map_err(error)?,
+        fs::read(&inline).map_err(error)?,
+    ];
+    for ((path, key), bytes) in artifacts.iter().zip(&outputs) {
+        if let Some(path) = path {
+            publish(path, key, bytes);
+        }
+    }
+    Ok(LlvmRuntime {
+        interface: split.interface,
+        object,
+        inline,
+    })
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    #[test]
+    fn pruning_keeps_the_most_recently_used_entries() {
+        let scratch = Scratch::new(&std::env::temp_dir()).unwrap();
+        let root = scratch.path();
+        let now = std::time::SystemTime::now();
+        for index in 0..MAX_ENTRIES + 8 {
+            let path = root.join(format!("{index:016x}.cache"));
+            fs::write(&path, b"entry").unwrap();
+            // Larger index, used longer ago.
+            let used = now - std::time::Duration::from_secs(60 * (index as u64 + 1));
+            fs::File::options()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(used)
+                .unwrap();
+        }
+        fs::write(root.join("notes.txt"), b"not ours").unwrap();
+        let oldest = root.join(format!("{:016x}.cache", MAX_ENTRIES + 7));
+        prune(root, &oldest);
+        let left = |index: usize| root.join(format!("{index:016x}.cache")).exists();
+        assert!(left(0) && left(MAX_ENTRIES - 1));
+        assert!(!left(MAX_ENTRIES) && !left(MAX_ENTRIES + 6));
+        assert!(oldest.exists());
+        assert!(root.join("notes.txt").exists());
+    }
 }

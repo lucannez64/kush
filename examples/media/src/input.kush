@@ -1,0 +1,118 @@
+module media.input;
+
+use std.option.Option;
+
+// What a window reports: keys, gamepads, and the request to close. The
+// native side packs each event into one i64 (kind in bits 0-7, device in
+// 8-15, code in 16-47, a signed 16-bit value in 48-63); `decode` turns it
+// into these types, so programs never see the packing.
+
+/// A keyboard key, by meaning rather than position.
+
+pub enum Key {
+    Up, Down, Left, Right,
+    Enter, Escape, Space, Backspace, Tab,
+    /// A printable ASCII character, lower case for letters.
+    Char(i64),
+    /// F1 to F12.
+    Function(i64),
+    /// Any other key, as its SDL keycode.
+    Other(i64),
+}
+
+/// A gamepad button, named by the standard (Xbox-style) layout.
+pub enum Button {
+    South, East, West, North,
+    Back, Guide, Start,
+    LeftStick, RightStick, LeftShoulder, RightShoulder,
+    DpadUp, DpadDown, DpadLeft, DpadRight,
+    Other(i64),
+}
+
+pub enum Axis { LeftX, LeftY, RightX, RightY, LeftTrigger, RightTrigger, Other(i64) }
+
+pub enum Event {
+    /// The window was closed.
+    Quit,
+    KeyDown(Key),
+    KeyUp(Key),
+    /// A button on the gamepad with this id.
+    ButtonDown(i64, Button),
+    ButtonUp(i64, Button),
+    /// A stick or trigger moved: -32768 to 32767 (triggers 0 to 32767).
+    AxisMoved(i64, Axis, i64),
+    /// A gamepad was connected (also once for each one present at start).
+    PadAdded(i64),
+    PadRemoved(i64),
+}
+
+const KIND_QUIT: i64 = 1;
+const KIND_KEY_DOWN: i64 = 2;
+const KIND_KEY_UP: i64 = 3;
+const KIND_BUTTON_DOWN: i64 = 4;
+const KIND_BUTTON_UP: i64 = 5;
+const KIND_AXIS: i64 = 6;
+const KIND_PAD_ADDED: i64 = 7;
+const KIND_PAD_REMOVED: i64 = 8;
+
+/// SDL keycodes for keys without a character set bit 30.
+const SCANCODE_KEY: i64 = 0x40000000;
+
+pub fn key(code: i64) -> Key ! {panic} {
+    match code {
+        13 => Key.Enter,
+        27 => Key.Escape,
+        32 => Key.Space,
+        8 => Key.Backspace,
+        9 => Key.Tab,
+        _ => {
+            if code > 32 && code < 127 { return Key.Char(code); }
+            if code == SCANCODE_KEY + 0x52 { return Key.Up; }
+            if code == SCANCODE_KEY + 0x51 { return Key.Down; }
+            if code == SCANCODE_KEY + 0x50 { return Key.Left; }
+            if code == SCANCODE_KEY + 0x4F { return Key.Right; }
+            if code >= SCANCODE_KEY + 0x3A && code <= SCANCODE_KEY + 0x45 {
+                return Key.Function(code - SCANCODE_KEY - 0x39);
+            }
+            Key.Other(code)
+        },
+    }
+}
+
+pub fn button(code: i64) -> Button ! {} {
+    match code {
+        0 => Button.South, 1 => Button.East, 2 => Button.West, 3 => Button.North,
+        4 => Button.Back, 5 => Button.Guide, 6 => Button.Start,
+        7 => Button.LeftStick, 8 => Button.RightStick,
+        9 => Button.LeftShoulder, 10 => Button.RightShoulder,
+        11 => Button.DpadUp, 12 => Button.DpadDown,
+        13 => Button.DpadLeft, 14 => Button.DpadRight,
+        _ => Button.Other(code),
+    }
+}
+
+pub fn axis(code: i64) -> Axis ! {} {
+    match code {
+        0 => Axis.LeftX, 1 => Axis.LeftY, 2 => Axis.RightX, 3 => Axis.RightY,
+        4 => Axis.LeftTrigger, 5 => Axis.RightTrigger,
+        _ => Axis.Other(code),
+    }
+}
+
+/// Decode one packed event; packed 0 is no event, and so is an unknown kind.
+pub fn decode(packed: i64) -> Option<Event> ! {panic} {
+    let kind = packed & 0xFF;
+    let device = (packed >> 8) & 0xFF;
+    let code = (packed >> 16) & 0xFFFFFFFF;
+    let raw = (packed >> 48) & 0xFFFF;
+    let value = if raw >= 0x8000 { raw - 0x10000 } else { raw };
+    if kind == KIND_QUIT { return Option.Some(Event.Quit); }
+    if kind == KIND_KEY_DOWN { return Option.Some(Event.KeyDown(key(code))); }
+    if kind == KIND_KEY_UP { return Option.Some(Event.KeyUp(key(code))); }
+    if kind == KIND_BUTTON_DOWN { return Option.Some(Event.ButtonDown(device, button(code))); }
+    if kind == KIND_BUTTON_UP { return Option.Some(Event.ButtonUp(device, button(code))); }
+    if kind == KIND_AXIS { return Option.Some(Event.AxisMoved(device, axis(code), value)); }
+    if kind == KIND_PAD_ADDED { return Option.Some(Event.PadAdded(device)); }
+    if kind == KIND_PAD_REMOVED { return Option.Some(Event.PadRemoved(device)); }
+    Option.None
+}

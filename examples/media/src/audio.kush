@@ -1,0 +1,54 @@
+module media.audio;
+
+use std.result.Result;
+
+// An audio output stream: the program queues signed 16-bit samples and the
+// device plays them in order. An `Audio` is linear: every path through the
+// program must pass it to `close`.
+
+#[foreign("media_audio_release")]
+struct Device {}
+
+/// An open audio device. Only `open` makes one; `close` ends it.
+#[linear]
+pub struct Audio {
+    device: Device,
+}
+
+foreign "media_audio_open" fn open_device(rate: i64, channels: i64) -> Result<Device, i64> ! {io};
+foreign "media_audio_queue" fn queue_samples(audio: &Device, samples: &Bytes) -> Result<Unit, i64> ! {io};
+foreign "media_audio_queued" fn queued_bytes(audio: &Device) -> i64 ! {io};
+
+/// Open the default output at `rate` samples per second with 1 or 2
+/// channels. Fails with ENODEV (19) when there is no audio device.
+
+pub fn open(rate: i64, channels: i64) -> Result<Audio, i64> ! {io} {
+    match open_device(rate, channels) {
+        Result.Ok(device) => Result.Ok(Audio { device: device }),
+        Result.Err(code) => Result.Err(code),
+    }
+}
+
+/// Close the device; queued sound that has not played is dropped.
+pub fn close(audio: Audio) -> Unit ! {} {
+    match audio {
+        Audio { device } => {},
+    }
+}
+
+/// Queue samples: signed 16-bit little-endian, channels interleaved.
+pub fn queue(audio: &Audio, samples: &Bytes) -> Result<Unit, i64> ! {io} {
+    queue_samples(&audio.device, samples)
+}
+
+/// How many bytes are queued and not yet played (4 per stereo frame).
+pub fn queued(audio: &Audio) -> i64 ! {io} {
+    queued_bytes(&audio.device)
+}
+
+/// Append one sample, clamped to the 16-bit range, in the queue's format.
+pub fn push(out: Bytes, sample: i64) -> Bytes ! {alloc, panic} {
+    let clamped = if sample > 32767 { 32767 } else if sample < -32768 { -32768 } else { sample };
+    let bits = if clamped < 0 { clamped + 65536 } else { clamped };
+    out.push(bits & 0xFF).push(bits >> 8)
+}

@@ -6,27 +6,14 @@ use kush::{
 use std::{fs, process::Command};
 
 const OPTIONS: [CodegenOptions; 5] = [
-    CodegenOptions {
-        optimization: Optimization::None,
-        inline_scalar_callbacks: false,
-        inline_calls: false,
-    },
-    CodegenOptions {
-        optimization: Optimization::Speed,
-        inline_scalar_callbacks: false,
-        inline_calls: false,
-    },
-    CodegenOptions {
-        optimization: Optimization::None,
-        inline_scalar_callbacks: true,
-        inline_calls: false,
-    },
+    CodegenOptions::cranelift(Optimization::None, false),
+    CodegenOptions::cranelift(Optimization::Speed, false),
+    CodegenOptions::cranelift(Optimization::None, true),
     CodegenOptions::release(),
     // NATIVE-INLINE without backend optimization.
     CodegenOptions {
-        optimization: Optimization::None,
-        inline_scalar_callbacks: false,
         inline_calls: true,
+        ..CodegenOptions::cranelift(Optimization::None, false)
     },
 ];
 fn agrees(source: &str) {

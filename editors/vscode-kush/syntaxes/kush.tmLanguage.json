@@ -76,11 +76,15 @@
       "patterns": [
         {
           "name": "keyword.control.kush",
-          "match": "\\b(?:total|pub|let|mut|return|if|else|match|enum|struct|type|trait|impl|module|use|erased|ensures|algebra|dyn|const|while|loop|break|continue|handle|perform|with|effect|prop|true|false|fn)\\b"
+          "match": "\\b(?:pub|let|mut|return|if|else|match|enum|struct|type|trait|impl|module|use|erased|ensures|where|algebra|dyn|const|while|loop|break|continue|perform|with|effect|prop|true|false|fn)\\b"
         },
         {
           "name": "keyword.control.kush",
           "match": "\\b(?:is|as|for)(?=\\s+[A-Za-z_])"
+        },
+        {
+          "name": "keyword.control.kush",
+          "match": "\\btotal(?=\\s+(?:fn|enum)\\b)|\\bhandle(?=\\s+[A-Za-z_]\\w*\\s*:)|\\binvariant(?=\\s*\\{)"
         }
       ]
     },

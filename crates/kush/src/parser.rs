@@ -188,7 +188,15 @@ impl Parser {
             }
             let public = self.eat(&Kind::Pub);
             let start = self.current().span;
-            let total = self.eat(&Kind::Total);
+            // `total` is contextual: a keyword only before `fn` or `enum`.
+            let total = self.word_keyword("total")
+                && self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|token| matches!(token.kind, Kind::Fn | Kind::Enum));
+            if total {
+                self.bump();
+            }
             // `foreign "symbol" fn name(...) -> T ! { ... };` is contextual so
             // `foreign` remains an ordinary identifier elsewhere. The string is
             // the exact C symbol and is not re-derived from the Kush name.
@@ -289,11 +297,17 @@ impl Parser {
                     let parameter = self.ty()?;
                     self.expect(&Kind::Arrow, "'->' in an effect operation signature")?;
                     let result = self.ty()?;
+                    let effects = if self.at(&Kind::Bang) {
+                        self.effects()?
+                    } else {
+                        Vec::new()
+                    };
                     self.expect(&Kind::Semi, "';' after an effect declaration")?;
                     ItemKind::Effect {
                         name,
                         parameter,
                         result,
+                        effects,
                     }
                 }
             } else if self.word_keyword("impl") {
@@ -369,11 +383,43 @@ impl Parser {
                     generics,
                     ty,
                 }
+            } else if self.word_keyword("const") {
+                // `const NAME: Type = value;` is a parameterless function
+                // marked constant; each use is replaced by `value`.
+                if total {
+                    return Err(self.error("'total' applies only to fn and enum declarations"));
+                }
+                self.bump();
+                let name = self.ident()?;
+                self.expect(&Kind::Colon, "':' after the constant's name")?;
+                let result = self.ty()?;
+                self.expect(&Kind::Eq, "'=' before the constant's value")?;
+                let value = self.expr()?;
+                self.expect(&Kind::Semi, "';' after a constant")?;
+                let span = self.since(start);
+                ItemKind::Function(Function {
+                    total: false,
+                    name,
+                    lifetimes: Vec::new(),
+                    generics: Vec::new(),
+                    parameters: Vec::new(),
+                    result,
+                    effects: Vec::new(),
+                    body: Some(Block {
+                        statements: Vec::new(),
+                        tail: Some(Box::new(value)),
+                        span,
+                    }),
+                    foreign: None,
+                    export: None,
+                    ensures: Vec::new(),
+                    constant: true,
+                })
             } else {
                 if total {
                     return Err(self.error("expected 'fn' or 'enum' after 'total'"));
                 }
-                return Err(self.error("expected a declaration; this frontend supports fn, struct, enum, type, module, and use"));
+                return Err(self.error("expected a declaration; this frontend supports fn, const, struct, enum, type, module, and use"));
             };
             items.push(Declaration {
                 public,
@@ -430,12 +476,25 @@ impl Parser {
             let name = p.ident()?;
             p.expect(&Kind::Colon, "':' after field name")?;
             let ty = p.ty()?;
+            // `where len >= N`: a minimum length for a vector field.
+            let min_length = if p.word_keyword("where") {
+                p.bump();
+                if !p.word_keyword("len") {
+                    return Err(p.error("expected 'len >= N' after 'where' on a field"));
+                }
+                p.bump();
+                p.expect(&Kind::Ge, "'>=' in 'where len >= N'")?;
+                Some(Box::new(p.expr()?))
+            } else {
+                None
+            };
             Ok(Field {
                 name,
                 source: None,
                 ty,
                 span: p.since(start),
                 public,
+                min_length,
             })
         })
     }
@@ -550,7 +609,12 @@ impl Parser {
     fn method(&mut self) -> Result<Method> {
         let start = self.current().span;
         let public = self.eat(&Kind::Pub);
-        if self.eat(&Kind::Total) {
+        if self.word_keyword("total")
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| token.kind == Kind::Fn)
+        {
             return Err(self.error("'total' applies only to fn and enum declarations"));
         }
         self.expect(&Kind::Fn, "'fn' in a trait or impl method")?;
@@ -795,17 +859,31 @@ impl Parser {
                     name: receiver,
                     ty,
                     span: p.since(start),
+                    min_length: None,
                 });
             }
             let erased = p.eat(&Kind::Erased);
             let name = p.ident()?;
             p.expect(&Kind::Colon, "':' after parameter name")?;
             let ty = p.ty()?;
+            let span = p.since(start);
+            let min_length = if p.word_keyword("where") {
+                p.bump();
+                if !p.word_keyword("len") {
+                    return Err(p.error("expected 'len' after 'where' in a parameter"));
+                }
+                p.bump();
+                p.expect(&Kind::Ge, "'>=' in 'where len >= N'")?;
+                Some(Box::new(p.expr()?))
+            } else {
+                None
+            };
             Ok(Parameter {
                 erased,
                 name,
                 ty,
-                span: p.since(start),
+                span,
+                min_length,
             })
         })?;
         self.expect(&Kind::Arrow, "'->' and an explicit return type")?;
@@ -839,6 +917,7 @@ impl Parser {
             foreign: None,
             export: None,
             ensures,
+            constant: false,
         })
     }
     /// Contextual `ensures` clauses after the effect row:
@@ -1242,6 +1321,7 @@ impl Parser {
                     ty,
                     span: self.since(field_start),
                     public: true,
+                    min_length: None,
                 });
                 if !self.eat(&Kind::Comma) {
                     break;
@@ -1855,6 +1935,46 @@ impl Parser {
     fn prefix(&mut self) -> Result<Expr> {
         let start = self.current().span;
         let kind = match self.current().kind.clone() {
+            // `handle` is contextual: `handle Name: ...` starts a handler,
+            // anywhere else it is an ordinary identifier.
+            Kind::Ident(word)
+                if word == "handle"
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|token| matches!(token.kind, Kind::Ident(_)))
+                    && self
+                        .tokens
+                        .get(self.pos + 2)
+                        .is_some_and(|token| token.kind == Kind::Colon) =>
+            {
+                self.bump();
+                let operation = self.ident()?;
+                self.expect(&Kind::Colon, "':' after the handled operation name")?;
+                let parameter = Box::new(self.ty()?);
+                self.expect(&Kind::Arrow, "'->' in a handled operation signature")?;
+                let result = Box::new(self.ty()?);
+                // Contextual `as name`: `as` stays an ordinary identifier.
+                let capability = if matches!(&self.current().kind, Kind::Ident(word) if word == "as")
+                {
+                    self.bump();
+                    let span = self.current().span;
+                    Some((self.ident()?, span))
+                } else {
+                    None
+                };
+                self.expect(&Kind::With, "'with' before the handler expression")?;
+                let handler = Box::new(self.expr()?);
+                let body = Box::new(self.block()?);
+                ExprKind::Handle {
+                    operation,
+                    parameter,
+                    result,
+                    handler,
+                    body,
+                    capability,
+                }
+            }
             Kind::Ident(name) => {
                 self.bump();
                 ExprKind::Name(name)
@@ -1940,34 +2060,6 @@ impl Parser {
                 ExprKind::StructuralLiteral(fields)
             }
             Kind::LBrace => ExprKind::Block(self.block()?),
-            Kind::Handle => {
-                self.bump();
-                let operation = self.ident()?;
-                self.expect(&Kind::Colon, "':' after the handled operation name")?;
-                let parameter = Box::new(self.ty()?);
-                self.expect(&Kind::Arrow, "'->' in a handled operation signature")?;
-                let result = Box::new(self.ty()?);
-                // Contextual `as name`: `as` stays an ordinary identifier.
-                let capability = if matches!(&self.current().kind, Kind::Ident(word) if word == "as")
-                {
-                    self.bump();
-                    let span = self.current().span;
-                    Some((self.ident()?, span))
-                } else {
-                    None
-                };
-                self.expect(&Kind::With, "'with' before the handler expression")?;
-                let handler = Box::new(self.expr()?);
-                let body = Box::new(self.block()?);
-                ExprKind::Handle {
-                    operation,
-                    parameter,
-                    result,
-                    handler,
-                    body,
-                    capability,
-                }
-            }
             Kind::Perform => {
                 self.bump();
                 let operation = self.ident()?;
@@ -1980,8 +2072,24 @@ impl Parser {
             Kind::While => {
                 self.bump();
                 let condition = Box::new(self.expr()?);
+                // Contextual `invariant { P }` between condition and body.
+                let invariant = if self.word_keyword("invariant") {
+                    let start = self.current().span;
+                    self.bump();
+                    let block = self.block()?;
+                    Some(Box::new(Node::new(
+                        ExprKind::Block(block),
+                        self.since(start),
+                    )))
+                } else {
+                    None
+                };
                 let body = self.block()?;
-                ExprKind::While { condition, body }
+                ExprKind::While {
+                    condition,
+                    body,
+                    invariant,
+                }
             }
             Kind::Loop => {
                 self.bump();
@@ -2072,6 +2180,7 @@ impl Parser {
                 name,
                 ty,
                 span: p.since(start),
+                min_length: None,
             })
         })?;
         let hole = self.current().span;
