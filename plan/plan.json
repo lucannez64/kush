@@ -6495,10 +6495,16 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "todo",
+      "status": "done",
       "desc": "store mark/rewind (tombstones, cost proportional to what is dropped) used after each definition and query; proof irrelevance tried after the structural comparison; nesting cap 100,000 on a 1 GiB main stack.",
-      "commit": null,
-      "log": []
+      "commit": "756a893",
+      "log": [
+        {
+          "time": "2026-11-13 12:00:22",
+          "who": "agent",
+          "text": "done 756a893"
+        }
+      ]
     }
   ]
 }
