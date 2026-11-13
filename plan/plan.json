@@ -6850,14 +6850,19 @@
       "deps": [
         "PF-ENGINE"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Per-function/package table, --report, --json.",
-      "commit": null,
+      "commit": "46d0597",
       "log": [
         {
           "time": "2026-11-13 18:30:15",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 18:38:56",
+          "who": "agent",
+          "text": "done 46d0597"
         }
       ]
     },
@@ -6871,10 +6876,16 @@
         "PF-ENTRIES",
         "PF-COVERAGE"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Run on examples/kernel and examples/gameboy; README before/after numbers.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 18:38:56",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "PF-SEED",
