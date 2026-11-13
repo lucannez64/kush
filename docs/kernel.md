@@ -76,7 +76,7 @@ Core terms are explicit and use zero-based de Bruijn indices. Index 0 denotes
 the nearest enclosing binder; binder names do not affect equality.
 
 ```text
-t, A, B ::= Var(i) | Global(name) | Universe(u) | Prop
+t, A, B ::= Var(i) | Global(name, [l...]) | Universe(l) | Prop
           | Pi(A, B) | Lam(A, t) | App(t, t)
           | Nat | Zero | Succ(t) | Literal(natural)
           | NatElim(motive, zero, step, value)
@@ -84,6 +84,8 @@ t, A, B ::= Var(i) | Global(name) | Universe(u) | Prop
           | Transport(A, x, y, motive, equality, value)
           | EqElim(A, x, y, motive, refl_case, proof)
           | IndElim(data, motive, branches, scrutinee)
+
+l       ::= c | u_i | succ(l) | max(l, l)       -- c a u32 constant
 ```
 
 Global names include admitted definitions, total logical data families, and
@@ -133,9 +135,43 @@ kernel metavariables or unchecked holes.
 Γ ⊢ App(f, a) : B[a/x]
 ```
 
-Universe levels are explicit `u32` integers with checked successor arithmetic.
-Overflow is an error. There is **no cumulativity**: `Nat : Universe(0)` does not
-also establish `Nat : Universe(1)`. `Universe(0)` never inhabits itself.
+Universe levels are `u32` constants, level parameters `u_i`, successor and
+maximum, with checked successor arithmetic; overflow is an error. There is **no
+cumulativity**: `Nat : Universe(0)` does not also establish
+`Nat : Universe(1)`. `Universe(0)` never inhabits itself. Universe
+polymorphism (below) replaces cumulativity as the way to reuse a definition at
+several levels.
+
+### Universe polymorphism
+
+A definition or data family may declare `n` universe parameters `u_0 ..
+u_{n-1}` (`Kernel::define_polymorphic`, `IndexedDataSpec::levels`). Its type,
+value, parameters and constructors may mention them. Every reference names one
+level per parameter, `Global(name, [l_0, ..., l_{n-1}])`, and sees the
+declaration instantiated at those levels, for typing and for delta unfolding:
+
+```text
+id.{u} : (A : Universe(u_0)) -> A -> A
+id.{0} Nat 3 : Nat          id.{1} Universe(0) Nat : Universe(0)
+```
+
+Levels are kept in a canonical form, `max(c, u_i + k_i, ...)` with each
+parameter once at its largest offset and the constant dropped when a parameter
+offset dominates it (parameters are never negative). Structural equality of
+canonical levels is level equality, so `Universe(max(u + 1, 1))` and
+`Universe(u + 1)` are the same term, and `a <= b` for all assignments is
+`max(a, b) = b`. There is no `imax`: `Prop` is a separate sort, never
+`Universe(l)`, so the `Pi` rule stays as below with `max` on levels.
+
+A level may only mention parameters in scope: those of the declaration being
+admitted, or for the open-term APIs those set by `Kernel::set_level_scope`
+(used by the frontend while elaborating a polymorphic declaration). A wrong
+number of level arguments, or an unbound parameter, is rejected. A data
+family's universe is computed over its own parameters (`List.{u} (A :
+Universe(u_0)) : Universe(u_0)`), field universes are compared with `<=` on
+levels, and a recursive field must use the family at exactly its own
+parameters, in order; any other instantiation is rejected as non-uniform. An
+eliminator takes the family's levels from its scrutinee's type.
 
 Throughout the rules, `Sort` means `Universe(u)` or `Prop`, and
 `level(Prop) = 0`. `Prop` is the sort of propositions. `Prop : Universe(0)`, so

@@ -1072,7 +1072,7 @@ impl Elaborator<'_> {
             BindingKind::Function | BindingKind::Alias => self
                 .names
                 .get(&id)
-                .map(|name| Term::Global(name.clone()))
+                .map(|name| Term::global(name.clone()))
                 .ok_or_else(|| {
                     Diagnostic::new(
                         span,
@@ -1083,7 +1083,7 @@ impl Elaborator<'_> {
                     )
                 }),
             BindingKind::Builtin => match binding.name.as_str() {
-                "Type" => Ok(Term::Universe(0)),
+                "Type" => Ok(Term::universe(0)),
                 "Prop" => Ok(Term::Prop),
                 "Nat" => Ok(Term::Nat),
                 "i64" => Ok(Term::i64_type()),
@@ -1092,7 +1092,7 @@ impl Elaborator<'_> {
                 "Nat.zero" => Ok(Term::Zero),
                 "Nat.succ" => Ok(Term::lam(Term::Nat, Term::succ(Term::Var(0)))),
                 "Eq" => Ok(Term::lam(
-                    Term::Universe(0),
+                    Term::universe(0),
                     Term::lam(
                         Term::Var(0),
                         Term::lam(
@@ -1102,7 +1102,7 @@ impl Elaborator<'_> {
                     ),
                 )),
                 "refl" => Ok(Term::lam(
-                    Term::Universe(0),
+                    Term::universe(0),
                     Term::lam(Term::Var(0), Term::refl(Term::Var(1), Term::Var(0))),
                 )),
                 "Nat.induct" | "Eq.transport" | "Eq.elim" | "Data.elim" => Err(Diagnostic::new(
@@ -1120,7 +1120,7 @@ impl Elaborator<'_> {
             BindingKind::Data => self
                 .data
                 .get(&id)
-                .map(|name| Term::Global(name.clone()))
+                .map(|name| Term::global(name.clone()))
                 .ok_or_else(|| {
                     Diagnostic::new(
                         span,
@@ -1133,7 +1133,7 @@ impl Elaborator<'_> {
             BindingKind::Constructor => self
                 .constructors
                 .get(&id)
-                .map(|name| Term::Global(name.clone()))
+                .map(|name| Term::global(name.clone()))
                 .ok_or_else(|| {
                     Diagnostic::new(
                         span,
@@ -1181,7 +1181,7 @@ impl Elaborator<'_> {
             }
             let domain = match &generic.bound {
                 Some(bound) => self.ty(bound)?,
-                None => Term::Universe(0),
+                None => Term::universe(0),
             };
             domains.push(domain.clone());
             self.bind_ty(generic.span, domain)?;
@@ -1238,7 +1238,7 @@ impl Elaborator<'_> {
             && self.resolution.reference(ty.span) == Some(id)
             && arguments.len() == arity
         {
-            let mut term = Term::Global(name.to_owned());
+            let mut term = Term::global(name.to_owned());
             for (argument, carrier) in arguments.iter().zip(carriers) {
                 term = Term::app(term, self.ty_expected(argument, carrier.as_ref())?);
             }
@@ -1360,6 +1360,7 @@ impl Elaborator<'_> {
             params,
             constructors,
             prop,
+            levels: 0,
         })
     }
     /// The machine carrier an expected kernel type denotes, if any. A literal
@@ -1407,7 +1408,7 @@ impl Elaborator<'_> {
                             if let [Node { kind: TypeKind::Integer(level), .. }] = arguments.as_slice() {
                                 let level = level.parse::<u32>().ok().filter(|level| *level <= 255)
                                     .ok_or_else(|| Diagnostic::new(ty.span, "surface universe levels must be in 0..255"))?;
-                                return Ok(Term::Universe(level));
+                                return Ok(Term::universe(level));
                             }
                             return Err(Diagnostic::new(ty.span, "Type expects one literal universe level"));
                         }
@@ -1437,7 +1438,7 @@ impl Elaborator<'_> {
                 // surrounding context to be admitted while the current family
                 // is still being defined, and keeps literals correctly typed
                 // after a recursive field.
-                if let Term::Global(name) = &term
+                if let Term::Global(name, _) = &term
                     && let Some(info) = e.kernel.data(name).cloned()
                     && info.params.len() == arguments.len()
                 {

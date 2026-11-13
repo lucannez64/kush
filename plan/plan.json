@@ -6033,10 +6033,16 @@
       "deps": [
         "LOGIC-ETA"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Universe level variables for definitions and data families, explicit instantiation; kernel + elaborator + surface syntax; replaces cumulativity and sort-polymorphism gaps. See docs/kernel-in-kush.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 03:44:53",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "STD-BIGNAT",

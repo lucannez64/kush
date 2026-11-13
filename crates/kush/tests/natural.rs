@@ -242,7 +242,7 @@ fn source_large_naturals_and_proofs_check_end_to_end() {
     assert_eq!(
         checked
             .kernel
-            .normalize_closed(&T::Global("large".into()))
+            .normalize_closed(&T::global("large"))
             .unwrap(),
         term("340282366920938463463374607431768211456")
     );

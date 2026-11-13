@@ -17,26 +17,26 @@ fn source_induction_defines_addition_and_proves_right_identity() {
     assert_eq!(checked.definitions.len(), 11);
     let k = &checked.kernel;
     for n in [0, 1, 3] {
-        let sum = T::app(T::app(T::Global("add".into()), nat(n)), nat(2));
+        let sum = T::app(T::app(T::global("add"), nat(n)), nat(2));
         assert_eq!(k.normalize_closed(&sum).unwrap(), nat(n + 2));
-        let proof = T::app(T::Global("right_identity".into()), nat(n));
+        let proof = T::app(T::global("right_identity"), nat(n));
         k.check_closed(&proof, &T::eq(T::Nat, nat(n), nat(n)))
             .unwrap();
         assert_eq!(k.normalize_closed(&proof).unwrap(), T::refl(T::Nat, nat(n)));
     }
     assert_eq!(
-        k.normalize_closed(&T::Global("addition_example".into()))
+        k.normalize_closed(&T::global("addition_example"))
             .unwrap(),
         T::refl(T::Nat, nat(5))
     );
     // The theorem itself quantifies over n. Checking it did not enumerate n.
     k.check_closed(
-        &T::Global("right_identity".into()),
+        &T::global("right_identity"),
         &T::pi(
             T::Nat,
             T::eq(
                 T::Nat,
-                T::app(T::app(T::Global("add".into()), T::Var(0)), T::Zero),
+                T::app(T::app(T::global("add"), T::Var(0)), T::Zero),
                 T::Var(0),
             ),
         ),
@@ -49,7 +49,7 @@ fn source_transport_derives_symmetry_for_a_generic_carrier() {
     let checked = check(include_str!("../../../examples/induction.kush")).unwrap();
     let proof = T::app(
         T::app(
-            T::app(T::app(T::Global("symmetry".into()), T::Nat), nat(2)),
+            T::app(T::app(T::global("symmetry"), T::Nat), nat(2)),
             nat(2),
         ),
         T::refl(T::Nat, nat(2)),
@@ -61,7 +61,7 @@ fn source_transport_derives_symmetry_for_a_generic_carrier() {
     // Distinct endpoints cannot be related by passing bogus reflexivity evidence.
     let bad = T::app(
         T::app(
-            T::app(T::app(T::Global("symmetry".into()), T::Nat), nat(1)),
+            T::app(T::app(T::global("symmetry"), T::Nat), nat(1)),
             nat(2),
         ),
         T::refl(T::Nat, nat(1)),
@@ -80,7 +80,7 @@ fn pure_nondependent_function_types_shift_anonymous_binders() {
     assert_eq!(
         checked
             .kernel
-            .normalize_closed(&T::Global("test".into()))
+            .normalize_closed(&T::global("test"))
             .unwrap(),
         nat(3)
     );
@@ -98,7 +98,7 @@ fn mixed_named_and_anonymous_function_binders_preserve_dependencies() {
     assert_eq!(
         checked
             .kernel
-            .normalize_closed(&T::Global("result".into()))
+            .normalize_closed(&T::global("result"))
             .unwrap(),
         T::refl(T::Nat, nat(2))
     );
@@ -229,6 +229,6 @@ fn induction_infers_the_motives_universe_instead_of_fixing_it_to_zero() {
         }
     ";
     let checked = check(source).unwrap();
-    let selected = T::app(T::Global("selected_type".into()), nat(2));
+    let selected = T::app(T::global("selected_type"), nat(2));
     assert_eq!(checked.kernel.normalize_closed(&selected).unwrap(), T::Nat);
 }
