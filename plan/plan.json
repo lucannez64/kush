@@ -4214,7 +4214,7 @@
       "deps": [
         "EFF-CAP-RESUME-CALLS"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Multishot capabilities across calls: needs new cap syntax for a copyable token (confirm spelling with the user, e.g. cap multi Op) and continuation-chain copying across calls, which does not exist for declared operations either.",
       "commit": null,
       "log": [
@@ -4222,6 +4222,16 @@
           "time": "2026-11-06 18:15:36",
           "who": "agent",
           "text": "BLOCKED (2026-11-06): Kush has no copyable closure with an environment (fn = bare code pointer, capturing closures are once). Multishot resumption across calls needs a copyable token carrying the callee's live values and the caller's continuation: a new callable representation (shared refcounted or copied environments, drop glue, two-word copyable ABI) in both backends and the evaluator, plus 'cap multi Op' (spelling approved). Needs a design decision on that representation before implementation."
+        },
+        {
+          "time": "2026-11-13 13:47:19",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 13:47:19",
+          "who": "agent",
+          "text": "Design written in docs/multishot-capabilities.md (shared refcounted immutable environments, affine 'multi fn' with non-consuming calls, cap multi Op); awaiting user approval before implementation."
         }
       ]
     },
