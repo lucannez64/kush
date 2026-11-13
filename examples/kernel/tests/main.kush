@@ -350,7 +350,8 @@ fn data_families_are_admitted_and_eliminated() -> Unit ! {io, alloc, panic} {
     test.equal_i64(verdicts[1], error.POSITIVITY);
     // Height of ES (ES E0) by elimination is 2.
     let height = parse(&mut k.store, &Bytes.from("(indelim Even (lam (global Even) nat) (zero (lam (global Even) (lam nat (succ (var 0))))) (app (global ES) (app (global ES) (global E0))))"));
-    let value = match check.normalize_closed(&mut k, height) {
+    let result = check.normalize_closed(&mut k, height);
+    let value = match result {
         Result.Ok(n) => printer.term_into(&k.store, Bytes.with_capacity(0), n),
         Result.Err(code) => text.format_i64_into(Bytes.from("error "), code),
     };
