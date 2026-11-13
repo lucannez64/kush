@@ -5640,9 +5640,9 @@
       "deps": [
         "LANG-PLACES"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "examples/gameboy: SM83 CPU, PPU, timer, MBC1/3/5, terminal front end. Passes Blargg cpu_instrs and instr_timing; 65x real time in LLVM builds. Left: dmg-acid2 and a real homebrew game (needs RGBDS or ROM files), audio, saves, HALT bug.",
-      "commit": null,
+      "commit": "2c6b316",
       "log": [
         {
           "time": "2026-11-12 18:36:30",
@@ -5658,6 +5658,11 @@
           "time": "2026-11-12 19:14:15",
           "who": "agent",
           "text": "Plays a real game: 2048-gb (Homebrew Hub ROM) boots and plays in the terminal at 60 fps. dmg-acid2 still unrun."
+        },
+        {
+          "time": "2026-11-13 03:23:03",
+          "who": "agent",
+          "text": "Closed: CPU, PPU, APU, MBC1/3/5, window/terminal/headless front ends, saves; plays 2048-gb. Audio closed as GAMEBOY-SOUND, saves in 88b2f46. Leftovers split into GAMEBOY-ACID2 and GAMEBOY-HALT-BUG."
         }
       ]
     },
@@ -5936,6 +5941,32 @@
       ],
       "status": "todo",
       "desc": "Parser, checker and backend in Kush. See docs/showcase-roadmap.md.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GAMEBOY-ACID2",
+      "title": "Game Boy: pass dmg-acid2",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "GAMEBOY"
+      ],
+      "status": "todo",
+      "desc": "Run the dmg-acid2 PPU test ROM (build it with RGBDS or fetch the release ROM) and fix what it shows. See examples/gameboy/README.md, Not yet.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "GAMEBOY-HALT-BUG",
+      "title": "Game Boy: model the HALT bug",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "GAMEBOY"
+      ],
+      "status": "todo",
+      "desc": "HALT with IME=0 and a pending interrupt fails to increment PC on the next fetch. See examples/gameboy/README.md, Not yet.",
       "commit": null,
       "log": []
     }
