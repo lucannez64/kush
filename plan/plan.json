@@ -6033,14 +6033,19 @@
       "deps": [
         "LOGIC-ETA"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Universe level variables for definitions and data families, explicit instantiation; kernel + elaborator + surface syntax; replaces cumulativity and sort-polymorphism gaps. See docs/kernel-in-kush.md.",
-      "commit": null,
+      "commit": "36d1e83",
       "log": [
         {
           "time": "2026-11-13 03:44:53",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 08:10:36",
+          "who": "agent",
+          "text": "done 36d1e83"
         }
       ]
     },
