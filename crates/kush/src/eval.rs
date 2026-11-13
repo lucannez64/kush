@@ -151,6 +151,8 @@ impl Executable {
             stats: stats.clone(),
             task: None,
             dynamic_handlers: Vec::new(),
+            kstack: Vec::new(),
+            kstack_epoch: 0,
             abort_scopes: Vec::new(),
             next_activation: 0,
             pending_abort: None,
@@ -369,6 +371,8 @@ impl Executable {
                     stats,
                     task: None,
                     dynamic_handlers: Vec::new(),
+                    kstack: Vec::new(),
+                    kstack_epoch: 0,
                     abort_scopes: Vec::new(),
                     next_activation: 0,
                     pending_abort: None,
@@ -424,6 +428,8 @@ impl Executable {
             heap: heap.clone(),
             stats: stats.clone(),
             task: Some(comm),
+            kstack: Vec::new(),
+            kstack_epoch: 0,
             dynamic_handlers: handlers
                 .into_iter()
                 .map(|(operation, function)| HandlerFrame {
@@ -985,6 +991,13 @@ enum Value {
         function: usize,
         environment: Option<usize>,
     },
+    /// A multishot `multi fn` token: a function and, when it captures, an
+    /// entry of the continuation stack with the epoch it was pushed at.
+    /// Copyable; it owns nothing (docs/multishot-capabilities.md).
+    Token {
+        function: usize,
+        environment: Option<(usize, u64)>,
+    },
     /// Captured values stored in a closure environment. The environment cell is
     /// freed when the callable is called or dropped.
     Closure {
@@ -1301,6 +1314,12 @@ struct Evaluator<'a, R: Read, W: Write> {
     /// unwound on every normal or early exit from the handled body, dropping an
     /// unconsumed owning handler exactly once.
     dynamic_handlers: Vec<HandlerFrame>,
+    /// Continuation stack of multishot token environments, each with the
+    /// epoch it was pushed at. A token naming a released entry (wrong
+    /// epoch or beyond the top) is an internal error: the reference check of
+    /// the release-on-return argument (docs/multishot-capabilities.md).
+    kstack: Vec<(u64, Vec<Value>)>,
+    kstack_epoch: u64,
     /// Abortive scopes active on this task: (label, activation id).
     abort_scopes: Vec<(usize, u64)>,
     next_activation: u64,
@@ -5767,6 +5786,13 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
         })
     }
     fn call_value(&mut self, callable: Value, arguments: Vec<Value>) -> Result<Value> {
+        if let Value::Token {
+            function,
+            environment,
+        } = callable
+        {
+            return self.call_token(function, environment, arguments);
+        }
         let Value::Function {
             function,
             environment,
@@ -5904,6 +5930,43 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             }
         }
         self.call(function, physical)
+    }
+    fn kstack_push(&mut self, captures: Vec<Value>) -> (usize, u64) {
+        self.kstack_epoch += 1;
+        self.kstack.push((self.kstack_epoch, captures));
+        self.stats.allocation();
+        (self.kstack.len() - 1, self.kstack_epoch)
+    }
+    fn kstack_restore(&mut self, mark: usize) {
+        while self.kstack.len() > mark {
+            self.kstack.pop();
+            self.stats.deallocation();
+        }
+    }
+    /// Call a multishot token: copy its captures out of the continuation
+    /// stack, and release whatever the call pushes when it returns.
+    fn call_token(
+        &mut self,
+        function: usize,
+        environment: Option<(usize, u64)>,
+        arguments: Vec<Value>,
+    ) -> Result<Value> {
+        let captures = match environment {
+            None => Vec::new(),
+            Some((index, epoch)) => match self.kstack.get(index) {
+                Some((pushed, captures)) if *pushed == epoch => captures.clone(),
+                _ => {
+                    return Err(Diagnostic::new(
+                        self.program.functions[function].span,
+                        "internal error: use of a released continuation environment",
+                    ));
+                }
+            },
+        };
+        let mark = self.kstack.len();
+        let result = self.call_with(function, captures, arguments);
+        self.kstack_restore(mark);
+        result
     }
     fn call(&mut self, index: usize, args: Vec<Value>) -> Result<Value> {
         self.call_with(index, vec![], args)
@@ -6888,6 +6951,20 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
             // Only synthesized adapters use this placeholder, and the callee's
             // erased parameter position drops it. It is never observable.
             ExprKind::Erased(_) => Value::Scalar(0),
+            ExprKind::FnValue { function, captures } if matches!(expr.ty, Type::Multi(_)) => {
+                let mut values = Vec::with_capacity(captures.len());
+                for capture in captures {
+                    values.push(value!(self.expr(capture, frame)));
+                }
+                for capture in captures {
+                    self.consume(capture, frame);
+                }
+                let environment = (!captures.is_empty()).then(|| self.kstack_push(values));
+                Value::Token {
+                    function: *function,
+                    environment,
+                }
+            }
             ExprKind::FnValue { function, captures } => {
                 if captures.is_empty() {
                     Value::Function {
@@ -6937,6 +7014,31 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 self.consume(callee, frame);
                 for argument in arguments {
                     self.consume(argument, frame);
+                }
+                if let Value::Token {
+                    function,
+                    environment,
+                } = callable
+                {
+                    let erased: Vec<bool> = match callee.ty {
+                        Type::Multi(id) => (0..values.len())
+                            .map(|position| {
+                                self.program.function_types[id].parameter_erased(position)
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    let values = values
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(position, _)| erased.get(*position).copied() != Some(true))
+                        .map(|(_, value)| value)
+                        .collect::<Vec<_>>();
+                    return Ok(Flow::Value(self.call_token(
+                        function,
+                        environment,
+                        values,
+                    )?));
                 }
                 let Value::Function {
                     function,
@@ -7590,6 +7692,12 @@ impl<R: Read, W: Write> Evaluator<'_, R, W> {
                 }
             }
             ExprKind::HandlerDepth => Value::Scalar(self.dynamic_handlers.len() as i64),
+            ExprKind::ContinuationScope { body } => {
+                let mark = self.kstack.len();
+                let flow = self.block(body, frame);
+                self.kstack_restore(mark);
+                return flow;
+            }
             ExprKind::HandlerRedirect { depth, body } => {
                 let target = value!(self.expr(depth, frame)).scalar() as usize;
                 let before = self.dynamic_handlers.len();

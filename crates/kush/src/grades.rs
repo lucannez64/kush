@@ -1757,6 +1757,7 @@ impl<'a> Checker<'a> {
             | ExprKind::RegionExit { .. }
             | ExprKind::HandlerDepth
             | ExprKind::HandlerRedirect { .. }
+            | ExprKind::ContinuationScope { .. }
             | ExprKind::TryExit { .. } => {
                 unreachable!("grades run before suspendable bodies are lowered")
             }

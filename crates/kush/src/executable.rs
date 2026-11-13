@@ -1422,6 +1422,12 @@ pub(crate) enum ExprKind {
     },
     /// Lowered form only: the current depth of the dynamic handler stack.
     HandlerDepth,
+    /// Lowered form only: run `body` (a multishot `handle` whose tokens are
+    /// `multi fn`) and release whatever it pushed on the continuation stack
+    /// (docs/multishot-capabilities.md section 6.2).
+    ContinuationScope {
+        body: Block,
+    },
     /// Lowered form only: run `body` with dynamic handler lookups that skip
     /// the frames above `depth` that were pushed before entering it. A
     /// resumed continuation of a declared-operation handle uses it so that
@@ -1761,6 +1767,7 @@ impl Expr {
                 block(body, f);
                 f(handler);
             }
+            ExprKind::ContinuationScope { body } => block(body, f),
             ExprKind::RegionExit { value, .. }
             | ExprKind::TryExit { value, .. }
             | ExprKind::AbortExit { value, .. }
@@ -1990,6 +1997,7 @@ impl Expr {
                 block(body, f);
                 f(handler);
             }
+            ExprKind::ContinuationScope { body } => block(body, f),
             ExprKind::RegionExit { value, .. }
             | ExprKind::TryExit { value, .. }
             | ExprKind::AbortExit { value, .. }
@@ -3037,6 +3045,7 @@ fn fusion_expr_safe(
         | ExprKind::RegionExit { .. }
         | ExprKind::HandlerDepth
         | ExprKind::HandlerRedirect { .. }
+        | ExprKind::ContinuationScope { .. }
         | ExprKind::TryExit { .. }
         // An abort leaves code that a fused stage would have to resume.
         | ExprKind::AbortScope { .. }
@@ -3297,6 +3306,9 @@ fn fuse_expr(
             fuse_expr(handler, types, signatures, safety, fusions);
         }
         ExprKind::HandlerDepth => {}
+        ExprKind::ContinuationScope { body } => {
+            fuse_block(body, types, signatures, safety, fusions);
+        }
         ExprKind::HandlerRedirect { depth, body } => {
             fuse_expr(depth, types, signatures, safety, fusions);
             fuse_block(body, types, signatures, safety, fusions);
@@ -35049,7 +35061,7 @@ impl Checker<'_, '_> {
             &handler_value.kind,
             ExprKind::FnValue { captures, .. } if captures.is_empty()
         ) && matches!(handler_value.ty, Type::Fn(_))
-            && !multishot
+            && (!multishot || multi)
             && tail_resumptive_handler(self.resolution, handler)
             // A handler that performs declared operations would run in place
             // inside the callee, where the callee's own handlers could
@@ -35153,8 +35165,11 @@ impl Checker<'_, '_> {
         }
         // A noncapturing one-shot handler with code after `resume`: calls
         // given its capability become await points.
-        let capability_resumable =
-            capability.is_some() && region && !multishot && (noncapturing || framed);
+        // A noncapturing `multi fn` handler resumes callees through their
+        // `cap multi` entries (docs/multishot-capabilities.md section 6.1).
+        let capability_resumable = capability.is_some()
+            && region
+            && ((!multishot && (noncapturing || framed)) || (multi && noncapturing));
         if capability_resumable {
             self.capability_resumable.insert(slot);
         }
@@ -36928,7 +36943,11 @@ impl Checker<'_, '_> {
         self.require(arrow.effects, span)?;
         let payload = self.expr_expected(value, Some(arrow.parameters[0]))?;
         let payload = self.coerce_argument(payload, arrow.parameters[0], span)?;
-        let resume = self.resume_value(arrow.result, false, span)?;
+        let resume = if matches!(arrow.parameters[1], Type::Multi(_)) {
+            self.multi_identity(arrow.result, span)?
+        } else {
+            self.resume_value(arrow.result, false, span)?
+        };
         let call = Expr {
             kind: ExprKind::CallIndirect {
                 callee: Box::new(Expr {

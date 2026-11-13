@@ -7038,6 +7038,7 @@ impl Checker<'_> {
             | ExprKind::RegionExit { .. }
             | ExprKind::HandlerDepth
             | ExprKind::HandlerRedirect { .. }
+            | ExprKind::ContinuationScope { .. }
             | ExprKind::TryExit { .. } => {
                 unreachable!("ownership runs before suspendable bodies are lowered")
             }
@@ -8247,6 +8248,9 @@ fn expr_live(
             live = expr_live(value, &exit, views, heads, exits, out);
         }
         ExprKind::HandlerDepth => {}
+        ExprKind::ContinuationScope { body } => {
+            live = block_live(body, live_after, views, heads, exits, out);
+        }
         ExprKind::HandlerRedirect { depth, body } => {
             live = block_live(body, live_after, views, heads, exits, out);
             live = expr_live(depth, &live, views, heads, exits, out);

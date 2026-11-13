@@ -10,6 +10,8 @@
 //! before ownership and the suspension lowering (which adds its own rule: a
 //! token is never live across a `perform`).
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::{
     Diagnostic, Span,
     executable::{Executable, Expr, ExprKind, Statement, Type},
@@ -19,24 +21,24 @@ type Result<T> = std::result::Result<T, Diagnostic>;
 
 /// Whether `ty` holds a token anywhere a token may not be. A token at the top
 /// (`top`) is a local, parameter or argument; inside an arrow it may be a
-/// parameter (a handler taking a token) but not the result.
-fn misplaced(program: &Executable, ty: Type, top: bool, depth: usize) -> bool {
-    if depth > 64 {
+/// parameter (a handler taking a token) but not the result. `seen` visits
+/// each (type, position) once, so recursive types cost linear time.
+fn misplaced(program: &Executable, ty: Type, top: bool, seen: &mut BTreeSet<(Type, bool)>) -> bool {
+    if !seen.insert((ty, top)) {
         return false;
     }
-    let pointee = |p: usize| program.pointees[p];
     match ty {
-        Type::Multi(id) => !top || arrow_misplaced(program, id, depth),
-        Type::Fn(id) | Type::Once(id) => arrow_misplaced(program, id, depth),
+        Type::Multi(id) => !top || arrow_misplaced(program, id, seen),
+        Type::Fn(id) | Type::Once(id) => arrow_misplaced(program, id, seen),
         Type::Enum(id) | Type::Variants(id, _) => program.enums[id]
             .variants
             .iter()
             .flat_map(|variant| variant.fields.iter())
-            .any(|field| misplaced(program, *field, false, depth + 1)),
+            .any(|field| misplaced(program, *field, false, seen)),
         Type::Union(id) => program.unions[id]
             .members
             .iter()
-            .any(|member| misplaced(program, *member, false, depth + 1)),
+            .any(|member| misplaced(program, *member, false, seen)),
         Type::Box(p)
         | Type::Vec(p)
         | Type::Ref(p)
@@ -48,18 +50,60 @@ fn misplaced(program: &Executable, ty: Type, top: bool, depth: usize) -> bool {
         | Type::AllocBox(p)
         | Type::AllocVec(p)
         | Type::Task(p)
-        | Type::Thread(p) => misplaced(program, pointee(p), false, depth + 1),
+        | Type::Thread(p) => misplaced(program, program.pointees[p], false, seen),
         _ => false,
     }
 }
 
-fn arrow_misplaced(program: &Executable, id: usize, depth: usize) -> bool {
+fn arrow_misplaced(program: &Executable, id: usize, seen: &mut BTreeSet<(Type, bool)>) -> bool {
     let arrow = &program.function_types[id];
     arrow
         .parameters
         .iter()
-        .any(|parameter| misplaced(program, *parameter, true, depth + 1))
-        || misplaced(program, arrow.result, false, depth + 1)
+        .any(|parameter| misplaced(program, *parameter, true, seen))
+        || misplaced(program, arrow.result, false, seen)
+}
+
+/// `misplaced` from the top of one value, memoized per type.
+struct Checker<'a> {
+    program: &'a Executable,
+    cache: BTreeMap<(Type, bool), bool>,
+}
+
+impl Checker<'_> {
+    fn holds(&mut self, ty: Type, top: bool) -> bool {
+        let program = self.program;
+        *self
+            .cache
+            .entry((ty, top))
+            .or_insert_with(|| misplaced(program, ty, top, &mut BTreeSet::new()))
+    }
+
+    fn expr(&mut self, expr: &Expr) -> Result<()> {
+        if self.holds(expr.ty, true) {
+            return Err(error(
+                expr.span,
+                &format!(
+                    "it cannot be stored in a value of type {}",
+                    self.program.type_name(expr.ty)
+                ),
+            ));
+        }
+        if let ExprKind::FnValue { captures, .. } = &expr.kind
+            && let Some(capture) = captures
+                .iter()
+                .find(|capture| matches!(capture.ty, Type::Multi(_)))
+        {
+            return Err(error(capture.span, "a closure cannot capture it"));
+        }
+        let mut result = Ok(());
+        expr.for_each_child(&mut |child| {
+            if result.is_ok() {
+                result = self.expr(child);
+            }
+        });
+        result
+    }
 }
 
 fn error(span: Span, what: &str) -> Diagnostic {
@@ -71,41 +115,28 @@ fn error(span: Span, what: &str) -> Diagnostic {
     )
 }
 
-fn check_expr(program: &Executable, expr: &Expr) -> Result<()> {
-    if misplaced(program, expr.ty, true, 0) {
-        return Err(error(
-            expr.span,
-            &format!(
-                "it cannot be stored in a value of type {}",
-                program.type_name(expr.ty)
-            ),
-        ));
-    }
-    if let ExprKind::FnValue { captures, .. } = &expr.kind
-        && let Some(capture) = captures
-            .iter()
-            .find(|capture| matches!(capture.ty, Type::Multi(_)))
-    {
-        return Err(error(capture.span, "a closure cannot capture it"));
-    }
-    let mut result = Ok(());
-    expr.for_each_child(&mut |child| {
-        if result.is_ok() {
-            result = check_expr(program, child);
-        }
-    });
-    result
-}
-
 pub(crate) fn check(program: &Executable) -> Result<()> {
+    // Nothing to check in a program without token types.
+    let names_tokens = program.function_types.iter().any(|arrow| {
+        arrow
+            .parameters
+            .iter()
+            .chain([&arrow.result])
+            .any(|ty| matches!(ty, Type::Multi(_)))
+    });
+    if !names_tokens {
+        return Ok(());
+    }
+    let mut checker = Checker {
+        program,
+        cache: BTreeMap::new(),
+    };
     for function in &program.functions {
-        if matches!(function.result, Type::Multi(_))
-            || misplaced(program, function.result, false, 0)
-        {
+        if checker.holds(function.result, false) {
             return Err(error(function.span, "a function cannot return it"));
         }
         for local in &function.locals {
-            if misplaced(program, local.ty, true, 0) {
+            if checker.holds(local.ty, true) {
                 return Err(error(
                     local.span,
                     &format!(
@@ -123,11 +154,11 @@ pub(crate) fn check(program: &Executable) -> Result<()> {
         }
         for statement in &function.body.statements {
             if let Statement::Let(_, value) | Statement::Expr(value) = statement {
-                check_expr(program, value)?;
+                checker.expr(value)?;
             }
         }
         if let Some(tail) = &function.body.tail {
-            check_expr(program, tail)?;
+            checker.expr(tail)?;
         }
     }
     Ok(())
