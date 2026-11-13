@@ -5890,9 +5890,9 @@
         "KIK-SPEC-DIFF",
         "KIK-API"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Lean4Lean-style: universes, J, indexed data, Prop in Kush; the Rust kernel checks its invariants. See docs/showcase-roadmap.md.",
-      "commit": null,
+      "commit": "6f666e5",
       "log": [
         {
           "time": "2026-11-13 03:24:31",
@@ -5908,6 +5908,16 @@
           "time": "2026-11-13 03:41:38",
           "who": "agent",
           "text": "Design approved: same logic, independent algorithm; eta and universe polymorphism land in the Rust kernel first; sub-nodes added"
+        },
+        {
+          "time": "2026-11-13 11:14:42",
+          "who": "agent",
+          "text": "done 6f666e5"
+        },
+        {
+          "time": "2026-11-13 11:14:42",
+          "who": "agent",
+          "text": "All sub-nodes done: Kush kernel checks the corpus, agrees with Rust on corpus, mutants, typing/data cases, generated terms; spec of its syntax checked by both kernels and tested against its substitution; API for TACTICS-HANDLERS."
         }
       ]
     },
@@ -6342,10 +6352,21 @@
       "deps": [
         "KIK-DATA"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "whnf, abstract, structured errors, documented for TACTICS-HANDLERS.",
-      "commit": null,
-      "log": []
+      "commit": "6f666e5",
+      "log": [
+        {
+          "time": "2026-11-13 11:09:56",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 11:14:42",
+          "who": "agent",
+          "text": "done 6f666e5"
+        }
+      ]
     },
     {
       "id": "LANG-DROP-AFTER-BORROW",
