@@ -4232,6 +4232,11 @@
           "time": "2026-11-13 13:47:19",
           "who": "agent",
           "text": "Design written in docs/multishot-capabilities.md (shared refcounted immutable environments, affine 'multi fn' with non-consuming calls, cap multi Op); awaiting user approval before implementation."
+        },
+        {
+          "time": "2026-11-13 13:59:39",
+          "who": "agent",
+          "text": "Design revised: continuation stack released when each token call returns (sound by the no-escape rule), copyable second-class multi fn tokens only; refcounting kept as the option for future general closures. Awaiting approval."
         }
       ]
     },
