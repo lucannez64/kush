@@ -6978,14 +6978,19 @@
       "size": "S",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Leave standard-library checks out of the proved-or-attacked score unless one failed.",
-      "commit": null,
+      "commit": "733df23",
       "log": [
         {
           "time": "2026-11-14 00:37:26",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-14 00:37:27",
+          "who": "agent",
+          "text": "done 733df23"
         }
       ]
     },
