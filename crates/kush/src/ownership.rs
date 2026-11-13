@@ -5099,6 +5099,18 @@ impl Checker<'_> {
         }
         Ok(())
     }
+    /// Check an `if`/`while` condition. It is a `Bool`, so call-scoped record
+    /// loans taken while evaluating it (`if size(&r) > 0`) end with it
+    /// instead of lasting through the branches like the enclosing full
+    /// expression's loans. Loans from before the condition are kept.
+    fn condition(&mut self, condition: &mut Expr) -> Result<()> {
+        let exclusive_loans = self.exclusive_loans.clone();
+        let shared_record_loans = self.shared_record_loans.clone();
+        self.expr(condition)?;
+        self.exclusive_loans = exclusive_loans;
+        self.shared_record_loans = shared_record_loans;
+        Ok(())
+    }
     fn full(&mut self, expr: &mut Expr) -> Result<()> {
         let pending_linear = self.pending_linear.len();
         let temporary_shared = self.temporary_shared.clone();
@@ -7062,7 +7074,7 @@ impl Checker<'_> {
                 }
             }
             ExprKind::If(condition, yes, no) => {
-                self.expr(condition)?;
+                self.condition(condition)?;
                 let before = self.available.clone();
                 let loans = self.loans.clone();
                 self.block(yes)?;
@@ -7309,7 +7321,7 @@ impl Checker<'_> {
             }
             ExprKind::While(condition, body) => {
                 self.enter_loop();
-                self.expr(condition)?;
+                self.condition(condition)?;
                 let after_condition = self.available.clone();
                 self.block(body)?;
                 if body.ty != Type::Never {

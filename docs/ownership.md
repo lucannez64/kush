@@ -107,7 +107,10 @@ fn main() -> Unit ! {io, alloc, panic} {
 }
 ```
 
-Shared owner borrows remain call-scoped for `&Box<T>`, `&Bytes`, and `&Vec<T>`.
+Shared owner borrows remain call-scoped for `&Box<T>`, `&Bytes`, and `&Vec<T>`. A
+call-scoped borrow taken in an `if` or `while` condition ends with the
+condition, which is a `Bool`: `if size(&r) == 0 { drop(r); }` is accepted for
+records as for other owners.
 `&name` borrows an existing owned local, and a borrowed parameter can be forwarded
 to another call. Returning these owner references is still rejected.
 
