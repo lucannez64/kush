@@ -133,12 +133,20 @@ fn corpus_files_seed_an_entry() {
 
 #[test]
 fn an_entry_reports_on_everything_it_reaches() {
-    let path = project("report", TESTS);
+    // The entry also calls into the standard library, whose unproved checks
+    // are not the program's: they stay out of the table.
+    let tests = TESTS.replace(
+        "let _ = lib.peek(&c, input);",
+        "let _ = lib.peek(&c, input);\n        let _ = text.starts_with(input, input);",
+    )
+    .replace("use std.test;", "use std.test;\nuse std.text;");
+    let path = project("report", &tests);
     let (_, output) = kush(&path, &["fuzz", "--runs", "100", "--report", "last_byte"]);
     // The library function the entry reaches has a row; the test target's
     // own tests, which no entry runs, do not.
     assert!(output.lines().any(|l| l.starts_with("demo.lib.peek ")), "{output}");
     assert!(!output.contains("demo.tests.main.adds"), "{output}");
+    assert!(!output.lines().any(|l| l.starts_with("std.")), "{output}");
     assert!(output.contains("package demo"), "{output}");
     let _ = std::fs::remove_dir_all(&path);
 }

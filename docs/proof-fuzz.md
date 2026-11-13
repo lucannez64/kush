@@ -403,7 +403,9 @@ are the gap. "Survived" counts a check reached once; `--json` gives each
 check's hit count and smallest margin, so CI can demand more. `--report`
 prints one row per function that has any check (a function whose checks
 were all proved is included; generic instances count under their function),
-then the package total:
+then the package total. Checks inside the standard library are not the
+package's and are left out (an entry reaches many it never exercises fully),
+unless one of them failed:
 
 ```text
 function                          checks  proved  found  survived  unreached  no-gen

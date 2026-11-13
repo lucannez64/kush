@@ -6971,6 +6971,45 @@
           "text": "done 108c354"
         }
       ]
+    },
+    {
+      "id": "PF-STD-SCORE",
+      "title": "",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "in_progress",
+      "desc": "Leave standard-library checks out of the proved-or-attacked score unless one failed.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-14 00:37:26",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
+    },
+    {
+      "id": "PF-KERNEL-SEEDS",
+      "title": "",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Kernel corpus seeds that reach universe levels, indexed families and table growth.",
+      "commit": null,
+      "log": []
+    },
+    {
+      "id": "PF-RECORDS",
+      "title": "",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "todo",
+      "desc": "Generators for records (all-pub fields: field by field; private: a constructor function), fieldless/tuple enums, and generic functions (type parameters instantiated by an implementing type). Findings through generated records are local.",
+      "commit": null,
+      "log": []
     }
   ]
 }

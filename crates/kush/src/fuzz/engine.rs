@@ -108,6 +108,9 @@ pub struct SiteReport {
     /// Smallest distance from failing seen; `i64::MAX` when never reached.
     pub margin: i64,
     pub finding: Option<Finding>,
+    /// In the standard library: not the program under attack, so it is
+    /// left out of the coverage unless something failed there.
+    pub library: bool,
 }
 
 /// The state a site ends a session in (docs/proof-fuzz.md, section 4).
@@ -309,8 +312,10 @@ impl Session {
             } else {
                 format!("{}.{function}", module.join("."))
             };
+            let library = module.first().is_some_and(|first| first == "std");
             sites.push(Some(reports.len()));
             reports.push(SiteReport {
+                library,
                 function,
                 kind: site.kind,
                 goal: site.goal.clone(),
@@ -841,8 +846,9 @@ impl Session {
             .iter()
             .filter(|report| {
                 report.finding.is_some()
-                    || report.target.is_some_and(|target| self.selected(target, options))
-                    || (entry && (report.hits > 0 || !in_test_target(report)))
+                    || (!report.library
+                        && (report.target.is_some_and(|target| self.selected(target, options))
+                            || (entry && (report.hits > 0 || !in_test_target(report)))))
             })
             .collect()
     }
