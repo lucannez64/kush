@@ -5884,10 +5884,21 @@
       "size": "L",
       "hard": true,
       "deps": [],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Lean4Lean-style: universes, J, indexed data, Prop in Kush; the Rust kernel checks its invariants. See docs/showcase-roadmap.md.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 03:24:31",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 03:27:43",
+          "who": "agent",
+          "text": "Design draft in docs/kernel-in-kush.md (arena + hash-consed de Bruijn terms, exchange format + kush core dump, differential corpus/mutants/generator, logical Tm<n> spec checked by the Rust kernel); awaiting approval"
+        }
+      ]
     },
     {
       "id": "TACTICS-HANDLERS",
