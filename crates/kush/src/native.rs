@@ -2552,9 +2552,27 @@ typedef struct {
     int64_t once;
     int64_t consumed;
 } kush_handler_frame;
+/* Continuation stack of multishot tokens (docs/multishot-capabilities.md):
+   environments of `multi fn` tokens are bump-allocated in chunks, and every
+   token call and multishot `handle` restores the top it saw on entry. */
+typedef struct KushKChunk KushKChunk;
+struct KushKChunk {
+    KushKChunk *previous;
+    uint64_t base;      /* bytes in use below this chunk */
+    uint64_t capacity;
+    uint64_t padding;
+    unsigned char data[];
+};
+#define KUSH_KCHUNK ((uint64_t)64 * 1024)
+typedef struct {
+    KushKChunk *chunk;
+    unsigned char *top;
+    KushKChunk *spare;
+} kush_kstack;
 typedef struct {
     kush_handler_frame frames[KUSH_HANDLER_MAX];
     int64_t depth;
+    kush_kstack kstack;
 } kush_handler_context;
 static kush_handler_context kush_handler_contexts[KUSH_MAX_TASKS];
 #ifdef KUSH_HAS_THREADS
@@ -2568,6 +2586,93 @@ static kush_handler_context *kush_handlers(void) {
     int64_t id = kush_current == NULL ? 0 : (int64_t)kush_current->id;
     if (id < 0 || id >= KUSH_MAX_TASKS) id = 0;
     return &kush_handler_contexts[id];
+}
+static int kush_kstack_poison_flag = -1;
+static uint64_t kush_kstack_peak = 0;
+static int kush_kstack_poisoning(void) {
+    if (kush_kstack_poison_flag < 0)
+        kush_kstack_poison_flag = getenv("KUSH_KSTACK_POISON") != NULL;
+    return kush_kstack_poison_flag;
+}
+static void kush_kstack_release_chunk(kush_kstack *stack, KushKChunk *chunk) {
+    if (kush_kstack_poisoning()) memset(chunk->data, 0xA5, chunk->capacity);
+    if (stack->spare == NULL && chunk->capacity == KUSH_KCHUNK) {
+        stack->spare = chunk;
+    } else {
+        kush_free((uint64_t)(uintptr_t)chunk);
+    }
+}
+/* A word-aligned environment of `bytes` bytes on the current task's stack. */
+uint64_t kush_kstack_push(uint64_t bytes) {
+    kush_kstack *stack = &kush_handlers()->kstack;
+    uint64_t need;
+    if (__builtin_add_overflow(bytes, (uint64_t)15, &need)) kush_panic();
+    need &= ~(uint64_t)15;
+    KushKChunk *chunk = stack->chunk;
+    if (chunk == NULL || (uint64_t)(chunk->data + chunk->capacity - stack->top) < need) {
+        uint64_t base = chunk == NULL ? 0 : chunk->base + (uint64_t)(stack->top - chunk->data);
+        KushKChunk *fresh;
+        if (need <= KUSH_KCHUNK && stack->spare != NULL) {
+            fresh = stack->spare;
+            stack->spare = NULL;
+        } else {
+            uint64_t capacity = need > KUSH_KCHUNK ? need : KUSH_KCHUNK;
+            uint64_t total;
+            if (__builtin_add_overflow(capacity, (uint64_t)sizeof(KushKChunk), &total)) kush_panic();
+            fresh = (KushKChunk *)(uintptr_t)kush_alloc(total);
+            fresh->capacity = capacity;
+        }
+        fresh->previous = chunk;
+        fresh->base = base;
+        stack->chunk = fresh;
+        stack->top = fresh->data;
+        chunk = fresh;
+    }
+    unsigned char *environment = stack->top;
+    stack->top += need;
+    uint64_t used = chunk->base + (uint64_t)(stack->top - chunk->data);
+    if (used > kush_kstack_peak) kush_kstack_peak = used;
+    return (uint64_t)(uintptr_t)environment;
+}
+uint64_t kush_kstack_mark(void) {
+    return (uint64_t)(uintptr_t)kush_handlers()->kstack.top;
+}
+/* Release everything pushed since `mark`. Marks are restored in LIFO
+   order; a mark above the top is an internal error. */
+void kush_kstack_restore(uint64_t mark) {
+    kush_kstack *stack = &kush_handlers()->kstack;
+    unsigned char *target = (unsigned char *)(uintptr_t)mark;
+    while (stack->chunk != NULL
+           && !(target >= stack->chunk->data
+                && target <= stack->chunk->data + stack->chunk->capacity)) {
+        KushKChunk *chunk = stack->chunk;
+        KushKChunk *previous = chunk->previous;
+        stack->chunk = previous;
+        stack->top = previous == NULL ? NULL : previous->data + (chunk->base - previous->base);
+        kush_kstack_release_chunk(stack, chunk);
+    }
+    if (stack->chunk == NULL) {
+        if (target != NULL) kush_panic();
+        return;
+    }
+    if (target > stack->top) kush_panic();
+    if (kush_kstack_poisoning()) memset(target, 0xA5, (size_t)(stack->top - target));
+    stack->top = target;
+    if (target == stack->chunk->data && stack->chunk->previous == NULL) {
+        /* Empty: give the chunk back so a finished program owns nothing. */
+        KushKChunk *chunk = stack->chunk;
+        stack->chunk = NULL;
+        stack->top = NULL;
+        kush_kstack_release_chunk(stack, chunk);
+    }
+}
+/* Free the spare chunk. A chunk still in use is left alone, so the live
+   allocation check at exit reports a missing restore. */
+static void kush_kstack_drain(kush_handler_context *context) {
+    if (context->kstack.spare != NULL) {
+        kush_free((uint64_t)(uintptr_t)context->kstack.spare);
+        context->kstack.spare = NULL;
+    }
 }
 /* Drop an unconsumed owning handler environment. The closure environment
    header stores its drop function at offset zero, exactly like a `once`
@@ -2931,6 +3036,7 @@ static void *kush_thread_main(void *argument) {
     ((void (*)(uint64_t, uint64_t, uint64_t))(uintptr_t)t->wrapper)(
         t->code, t->env, (uint64_t)(uintptr_t)t->result);
     kush_handler_restore(0);
+    kush_kstack_drain(handlers);
     kush_thread_handlers = NULL;
     free(handlers);
     kush_pool_drain();
@@ -3095,6 +3201,8 @@ int main(int argc, char **argv) {
     /* Retained pool storage is physical only; release it before the live
        allocation check so a normal exit owns nothing either way. */
     kush_pool_drain();
+    for (int64_t task = 0; task < KUSH_MAX_TASKS; ++task)
+        kush_kstack_drain(&kush_handler_contexts[task]);
 #ifdef KUSH_STATS
     {
         char line[256];
@@ -3108,6 +3216,12 @@ int main(int argc, char **argv) {
     /* Opt-in native-only allocator observation. It is guarded by both the
        stats build and this environment variable, so the stable one-line
        allocation-stats interface never changes by default. */
+    if (getenv("KUSH_KSTACK_STATS") != NULL) {
+        char line[128];
+        int length = snprintf(line, sizeof(line), "kstack-stats: peak-bytes=%llu\n",
+            (unsigned long long)kush_kstack_peak);
+        if (length > 0) kush_best_effort_write(2, line, (size_t)(length < (int)sizeof(line) ? length : (int)sizeof(line) - 1));
+    }
     if (getenv("KUSH_ALLOCATOR_POOL_STATS") != NULL) {
         char line[256];
         int length = snprintf(line, sizeof(line),
@@ -4779,6 +4893,15 @@ fn lower(
     let handler_depth = module
         .declare_function("kush_handler_depth", Linkage::Import, &handler_depth_sig)
         .map_err(error)?;
+    let mut kstack_push_sig = module.make_signature();
+    kstack_push_sig.params.push(AbiParam::new(I64));
+    kstack_push_sig.returns.push(AbiParam::new(I64));
+    let kstack_push = module
+        .declare_function("kush_kstack_push", Linkage::Import, &kstack_push_sig)
+        .map_err(error)?;
+    let kstack_mark = module
+        .declare_function("kush_kstack_mark", Linkage::Import, &handler_depth_sig)
+        .map_err(error)?;
     let mut handler_restore_sig = module.make_signature();
     handler_restore_sig.params.push(AbiParam::new(I64));
     let handler_restore = module
@@ -4787,6 +4910,9 @@ fn lower(
             Linkage::Import,
             &handler_restore_sig,
         )
+        .map_err(error)?;
+    let kstack_restore = module
+        .declare_function("kush_kstack_restore", Linkage::Import, &handler_restore_sig)
         .map_err(error)?;
     let mut handler_push_sig = module.make_signature();
     handler_push_sig
@@ -5077,6 +5203,9 @@ fn lower(
             channel_close,
             handler_depth,
             handler_restore,
+            kstack_push,
+            kstack_mark,
+            kstack_restore,
             handler_push,
             handler_pop,
             handler_lookup,
@@ -5219,7 +5348,11 @@ fn lower(
                     g.assign(i, &values);
                     g.activate_local(i);
                 }
-                emit_drop(&mut g.builder, g.module, free, &[environment]);
+                // A `multi fn` environment stays on the continuation stack
+                // for later resumptions.
+                if !f.shared_environment {
+                    emit_drop(&mut g.builder, g.module, free, &[environment]);
+                }
             }
         }
         for position in captures..f.parameters {
@@ -7018,6 +7151,10 @@ struct Generator<'a, 'b> {
     channel_recv: FuncId,
     channel_close: FuncId,
     handler_depth: FuncId,
+    /// Continuation stack of multishot tokens (`kush_kstack_*`).
+    kstack_push: FuncId,
+    kstack_mark: FuncId,
+    kstack_restore: FuncId,
     handler_restore: FuncId,
     handler_push: FuncId,
     handler_pop: FuncId,
@@ -7809,10 +7946,23 @@ impl Generator<'_, '_> {
         pointer: Option<Value>,
         values: Vec<Value>,
     ) -> Words {
+        let once = self.program.function_types[id].once;
+        self.finish_indirect_call_mode(id, code, pointer, values, once)
+    }
+    /// An indirect call whose environment word is part of the ABI when
+    /// `environment` is set (`once fn` and `multi fn` values).
+    fn finish_indirect_call_mode(
+        &mut self,
+        id: usize,
+        code: Value,
+        pointer: Option<Value>,
+        values: Vec<Value>,
+        environment: bool,
+    ) -> Words {
         let signature = self.program.function_types[id].clone();
         let result = signature.result;
         let result_erased = signature.result_erased();
-        let ir_signature = self.indirect_signature(id);
+        let ir_signature = self.indirect_signature_mode(id, environment);
         let ir_signature = self.builder.import_signature(ir_signature);
         let call = self
             .builder
@@ -7955,11 +8105,38 @@ impl Generator<'_, '_> {
                     .declare_func_in_func(self.ids[*function], self.builder.func);
                 let code = self.builder.ins().func_addr(I64, reference);
                 if captures.is_empty() {
-                    if matches!(expr.ty, Type::Once(_)) {
+                    if matches!(expr.ty, Type::Once(_) | Type::Multi(_)) {
                         let zero = self.constant(0);
                         return Some(vec![code, zero]);
                     }
                     code
+                } else if matches!(expr.ty, Type::Multi(_)) {
+                    // A multishot token: the captures go on the continuation
+                    // stack, after a word holding the environment size.
+                    let bytes = 8 + captures
+                        .iter()
+                        .map(|capture| self.program.width(capture.ty) * 8)
+                        .sum::<usize>();
+                    let size = self.constant(bytes as i64);
+                    let environment = self.runtime_call(self.kstack_push, &[size]);
+                    self.builder
+                        .ins()
+                        .store(ir::MemFlagsData::new(), size, environment, 0);
+                    let mut offset: i32 = 8;
+                    for capture in captures {
+                        let values = lower!(self.expr(capture));
+                        self.consume(capture);
+                        for value in values.iter().take(self.program.width(capture.ty)) {
+                            self.builder.ins().store(
+                                ir::MemFlagsData::new(),
+                                *value,
+                                environment,
+                                offset,
+                            );
+                            offset += 8;
+                        }
+                    }
+                    return Some(vec![code, environment]);
                 } else {
                     let types = captures
                         .iter()
@@ -8020,11 +8197,12 @@ impl Generator<'_, '_> {
                 let callable = lower!(self.expr(callee));
                 let Some((id, once)) = (match callee.ty {
                     Type::Fn(id) => Some((id, false)),
-                    Type::Once(id) => Some((id, true)),
+                    Type::Once(id) | Type::Multi(id) => Some((id, true)),
                     _ => None,
                 }) else {
                     unreachable!("checked indirect callee")
                 };
+                let multi = matches!(callee.ty, Type::Multi(_));
                 let signature = self.program.function_types[id].clone();
                 let result = signature.result;
                 let result_erased = signature.result_erased();
@@ -8056,6 +8234,15 @@ impl Generator<'_, '_> {
                 for argument in arguments {
                     self.consume(argument);
                 }
+                if multi {
+                    // Everything the token call pushes is released when it
+                    // returns (docs/multishot-capabilities.md section 5).
+                    let mark = self.runtime_call(self.kstack_mark, &[]);
+                    let words =
+                        self.finish_indirect_call_mode(id, callable[0], pointer, values, true);
+                    self.runtime_void(self.kstack_restore, &[mark]);
+                    return Some(words);
+                }
                 return Some(self.finish_indirect_call(id, callable[0], pointer, values));
             }
             ExprKind::Region { body, finish, .. } => {
@@ -8067,7 +8254,7 @@ impl Generator<'_, '_> {
                 let finish_block = match finish {
                     Some(finish) => {
                         let input = match finish.ty {
-                            Type::Fn(id) | Type::Once(id) => {
+                            Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
                                 self.program.function_types[id].parameters[0]
                             }
                             _ => unreachable!("checked region finish callable"),
@@ -8098,11 +8285,12 @@ impl Generator<'_, '_> {
                         self.consume(finish);
                         let Some((id, once)) = (match finish.ty {
                             Type::Fn(id) => Some((id, false)),
-                            Type::Once(id) => Some((id, true)),
+                            Type::Once(id) | Type::Multi(id) => Some((id, true)),
                             _ => None,
                         }) else {
                             unreachable!("checked region finish callable")
                         };
+                        let multi = matches!(finish.ty, Type::Multi(_));
                         let result = self.program.function_types[id].result;
                         let pointer = aggregate_result(self.program, result).then(|| {
                             let slot =
@@ -8121,7 +8309,20 @@ impl Generator<'_, '_> {
                             values.push(callable[1]);
                         }
                         values.extend(arguments);
-                        let words = self.finish_indirect_call(id, callable[0], pointer, values);
+                        let words = if multi {
+                            let mark = self.runtime_call(self.kstack_mark, &[]);
+                            let words = self.finish_indirect_call_mode(
+                                id,
+                                callable[0],
+                                pointer,
+                                values,
+                                true,
+                            );
+                            self.runtime_void(self.kstack_restore, &[mark]);
+                            words
+                        } else {
+                            self.finish_indirect_call(id, callable[0], pointer, values)
+                        };
                         match exit {
                             Some(exit) => self.jump(exit, &words),
                             None => {
@@ -8154,6 +8355,14 @@ impl Generator<'_, '_> {
                     self.builder.append_block_param(aborted, I64);
                 }
                 let depth = self.capture_handler_depth();
+                // An abort can leave a multishot `handle` without its
+                // continuation-stack restore; the landing restores instead.
+                let kstack_mark = self
+                    .program
+                    .functions
+                    .iter()
+                    .any(|function| function.shared_environment)
+                    .then(|| self.runtime_call(self.kstack_mark, &[]));
                 let width = self.program.width(payload);
                 let buffer = operation.map(|operation| {
                     let slot = self.builder.create_sized_stack_slot(ir::StackSlotData::new(
@@ -8184,6 +8393,9 @@ impl Generator<'_, '_> {
                 }
                 self.builder.switch_to_block(aborted);
                 let arguments = self.builder.block_params(aborted).to_vec();
+                if let Some(mark) = kstack_mark {
+                    self.runtime_void(self.kstack_restore, &[mark]);
+                }
                 if let Some(callable) = self.expr(handler) {
                     self.consume(handler);
                     let result = self.program.function_types[id].result;
@@ -8364,6 +8576,12 @@ impl Generator<'_, '_> {
                 return Some(values[1..1 + self.program.width(input.ok)].to_vec());
             }
             ExprKind::HandlerDepth => self.runtime_call(self.handler_depth, &[]),
+            ExprKind::ContinuationScope { body } => {
+                let mark = self.runtime_call(self.kstack_mark, &[]);
+                let values = self.block(body)?;
+                self.runtime_void(self.kstack_restore, &[mark]);
+                return Some(values);
+            }
             ExprKind::HandlerRedirect { depth, body } => {
                 let target = lower!(self.scalar(depth));
                 let before = self.runtime_call(self.handler_redirect, &[target]);

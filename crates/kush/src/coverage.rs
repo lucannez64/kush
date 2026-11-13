@@ -264,6 +264,7 @@ fn useful(
             | Type::StrMut
             | Type::Fn(_)
             | Type::Once(_)
+            | Type::Multi(_)
             | Type::DynObj(_)
             | Type::Bytes
             | Type::String

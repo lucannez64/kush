@@ -1,0 +1,56 @@
+module tactics.prover;
+
+// The driver: the two handlers around the search (docs/tactics-handlers.md).
+
+use tactics.search;
+use tactics.state;
+use tactics.state.Choose;
+use tactics.state.Goal;
+use tactics.state.Query;
+use tactics.state.State;
+
+/// The deepest search tried.
+pub const MAX_DEPTH: i64 = 8;
+
+/// Search with depths 1, 2, ... up to `MAX_DEPTH`; the proof and the depth
+/// it was found at, or `state.FAIL`.
+fn deepen(goal: i64) -> (i64, i64) ! {Goal, alloc, panic} {
+    let mut depth = 1;
+    while depth <= MAX_DEPTH {
+        let proof = handle Choose: i64 -> i64 as op with fn(
+            n: i64,
+            resume: multi fn(i64) -> i64 ! {},
+        ) -> i64 ! {panic} {
+            // Depth first: the first alternative that gives a proof wins.
+            let mut i = 0;
+            while i < n {
+                let proof = resume(i);
+                if proof >= 0 {
+                    return proof;
+                }
+                i = i + 1;
+            }
+            state.FAIL
+        } {
+            let empty = search.ask(Query.Empty);
+            search.auto(op, empty, goal, depth)
+        };
+        if proof >= 0 {
+            return (proof, depth);
+        }
+        depth = depth + 1;
+    }
+    (state.FAIL, MAX_DEPTH)
+}
+
+/// Run the search with the engine's handler around it.
+pub fn prove(st: &mut State, goal: i64) -> (i64, i64) ! {alloc, panic} {
+    handle Goal: Query -> i64 with fn(
+        q: Query,
+        resume: linear once fn(i64) -> i64 ! {},
+    ) -> i64 ! {alloc, panic} {
+        resume(state.answer(st, q))
+    } {
+        deepen(goal)
+    }
+}

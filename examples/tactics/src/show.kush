@@ -1,0 +1,245 @@
+module tactics.show;
+
+// Goals and proofs with names. Binders of `Prop` are named `A`, `B`, ...
+// in order, hypotheses `h1`, `h2`, ...; implications print as `->`,
+// `P -> False` as `~P`. An eliminator prints as `cases h` (or `absurd h`)
+// followed by its arguments: the motive and branches are built by the
+// engine and checked by the kernel, but they are not part of the script.
+
+use std.text;
+use kernel.store.Store;
+use kernel.subst;
+use kernel.term;
+use tactics.state.State;
+
+/// Names in scope, innermost last: a letter (its byte) or `-n` for `hn`.
+struct Names {
+    stack: Vec<i64>,
+    /// Entries in use (`stack` keeps its storage when a binder is left).
+    depth: i64,
+    letters: i64,
+    hypotheses: i64,
+}
+
+fn put(out: Bytes, text: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < text.len() {
+        out = out.push(text[i]);
+        i = i + 1;
+    }
+    out
+}
+
+/// The name code of variable `index`, or `UNKNOWN`.
+fn code_of(names: &Names, index: i64) -> i64 ! {panic} {
+    let n = names.depth;
+    if index >= n {
+        return UNKNOWN;
+    }
+    names.stack[n - 1 - index]
+}
+
+const UNKNOWN: i64 = -1000000;
+
+fn name(out: Bytes, names: &Names, index: i64) -> Bytes ! {alloc, panic} {
+    write_name(out, code_of(names, index))
+}
+
+fn write_name(out: Bytes, code: i64) -> Bytes ! {alloc, panic} {
+    if code == UNKNOWN {
+        return put(out, &Bytes.from("?"));
+    }
+    if code >= 0 {
+        out.push(code)
+    } else {
+        text.format_i64_into(out.push(104), 0 - code)
+    }
+}
+
+fn bind(st: &State, names: &mut Names, prop: Bool) -> Unit ! {alloc, panic} {
+    if prop {
+        let letter = if names.letters < st.atoms.len() { st.atoms[names.letters] } else { 97 + names.letters };
+        names.letters = names.letters + 1;
+        push(names, letter);
+    } else {
+        names.hypotheses = names.hypotheses + 1;
+        let code = 0 - names.hypotheses;
+        push(names, code);
+    }
+}
+
+fn push(names: &mut Names, code: i64) -> Unit ! {alloc, panic} {
+    let depth = names.depth;
+    if depth < names.stack.len() {
+        names.stack[depth] = code;
+    } else {
+        names.stack.push(code);
+    }
+    names.depth = depth + 1;
+}
+
+fn unbind(names: &mut Names) -> Unit ! {panic} {
+    names.depth = names.depth - 1;
+}
+
+/// Precedence: 0 implication, 1 or, 2 and, 3 atoms and negations.
+fn proposition(st: &State, out: Bytes, names: &mut Names, t: i64, level: i64) -> Bytes ! {alloc, panic} {
+    let s = &st.kernel.store;
+    let tag = term.tag(s, t);
+    if tag == term.VAR {
+        return name(out, names, term.field(s, t, 0));
+    }
+    if t == st.false_type {
+        return put(out, &Bytes.from("False"));
+    }
+    if tag == term.PROP {
+        return put(out, &Bytes.from("Prop"));
+    }
+    if tag == term.PI {
+        let domain = term.field(s, t, 0);
+        let body = term.field(s, t, 1);
+        if term.tag(s, domain) == term.PROP {
+            // (A B : Prop) -> body
+            let mut out = put(out, &Bytes.from("("));
+            let mut current = t;
+            let mut count = 0;
+            while term.tag(s, current) == term.PI && term.tag(s, term.field(s, current, 0)) == term.PROP {
+                if count > 0 {
+                    out = out.push(32);
+                }
+                bind(st, names, true);
+                out = name(out, names, 0);
+                count = count + 1;
+                current = term.field(s, current, 1);
+            }
+            out = put(out, &Bytes.from(" : Prop) -> "));
+            out = proposition(st, out, names, current, 0);
+            let mut i = 0;
+            while i < count {
+                unbind(names);
+                i = i + 1;
+            }
+            return out;
+        }
+        if body == st.false_type {
+            let out = out.push(126);
+            return proposition(st, out, names, domain, 3);
+        }
+        let mut out = if level > 0 { out.push(40) } else { out };
+        out = proposition(st, out, names, domain, 1);
+        out = put(out, &Bytes.from(" -> "));
+        // An implication's binder is never referred to: no name.
+        push(names, UNKNOWN);
+        out = proposition(st, out, names, body, 0);
+        unbind(names);
+        return if level > 0 { out.push(41) } else { out };
+    }
+    if tag == term.APP && subst.argument_count(s, t) == 2 {
+        let head = subst.head(s, t);
+        let (symbol, own) = if head == st.and_type { (38, 2) } else { (124, 1) };
+        let left = term.field(s, term.field(s, t, 0), 1);
+        let right = term.field(s, t, 1);
+        let mut out = if level > own { out.push(40) } else { out };
+        out = proposition(st, out, names, left, own);
+        out = out.push(32).push(symbol).push(32);
+        out = proposition(st, out, names, right, own + 1);
+        return if level > own { out.push(41) } else { out };
+    }
+    put(out, &Bytes.from("?"))
+}
+
+/// Print a goal.
+pub fn goal(st: &State, t: i64) -> Bytes ! {alloc, panic} {
+    let mut names = Names { stack: Vec.new::<i64>(), depth: 0, letters: 0, hypotheses: 0 };
+    proposition(st, Bytes.with_capacity(128), &mut names, t, 0)
+}
+
+fn is_prop(s: &Store, t: i64) -> Bool ! {panic} {
+    term.tag(s, t) == term.PROP
+}
+
+/// Proof terms. `atomic` asks for parentheses around anything but a name.
+fn proof(st: &State, out: Bytes, names: &mut Names, t: i64, atomic: Bool) -> Bytes ! {alloc, panic} {
+    let s = &st.kernel.store;
+    let tag = term.tag(s, t);
+    if tag == term.VAR {
+        return name(out, names, term.field(s, t, 0));
+    }
+    if tag == term.LAM {
+        let mut out = if atomic { out.push(40) } else { out };
+        out = put(out, &Bytes.from("fun"));
+        let mut current = t;
+        let mut count = 0;
+        while term.tag(s, current) == term.LAM {
+            let domain = term.field(s, current, 0);
+            if is_prop(s, domain) {
+                out = out.push(32);
+                bind(st, names, true);
+                out = name(out, names, 0);
+            } else {
+                out = put(out, &Bytes.from(" ("));
+                // The binder's own name; its domain is printed before the
+                // binder is in scope.
+                out = write_name(out, 0 - (names.hypotheses + 1));
+                out = put(out, &Bytes.from(" : "));
+                out = proposition(st, out, names, domain, 0);
+                out = out.push(41);
+                bind(st, names, false);
+            }
+            count = count + 1;
+            current = term.field(s, current, 1);
+        }
+        out = put(out, &Bytes.from(" => "));
+        out = proof(st, out, names, current, false);
+        let mut i = 0;
+        while i < count {
+            unbind(names);
+            i = i + 1;
+        }
+        return if atomic { out.push(41) } else { out };
+    }
+    if tag == term.APP {
+        let head = subst.head(s, t);
+        let count = subst.argument_count(s, t);
+        let arguments = subst.arguments(s, t);
+        // Constructors drop their two proposition arguments.
+        let (label, skip) = if head == st.and_intro {
+            (Bytes.from("intro"), 2)
+        } else if head == st.or_left {
+            (Bytes.from("left"), 2)
+        } else if head == st.or_right {
+            (Bytes.from("right"), 2)
+        } else {
+            (Bytes.with_capacity(0), 0)
+        };
+        let mut out = if atomic { out.push(40) } else { out };
+        out = if skip > 0 {
+            put(out, &label)
+        } else {
+            proof(st, out, names, head, term.tag(s, head) != term.INDELIM)
+        };
+        let mut i = skip;
+        while i < count {
+            out = out.push(32);
+            out = proof(st, out, names, arguments[i], true);
+            i = i + 1;
+        }
+        return if atomic { out.push(41) } else { out };
+    }
+    if tag == term.INDELIM {
+        let data = term.field(s, t, 0);
+        let scrutinee = term.field(s, t, 3);
+        let mut out = if atomic { out.push(40) } else { out };
+        out = put(out, &(if data == st.false_name { Bytes.from("absurd ") } else { Bytes.from("cases ") }));
+        out = proof(st, out, names, scrutinee, true);
+        return if atomic { out.push(41) } else { out };
+    }
+    put(out, &Bytes.from("?"))
+}
+
+/// Print a proof term.
+pub fn proof_term(st: &State, t: i64) -> Bytes ! {alloc, panic} {
+    let mut names = Names { stack: Vec.new::<i64>(), depth: 0, letters: 0, hypotheses: 0 };
+    proof(st, Bytes.with_capacity(256), &mut names, t, false)
+}

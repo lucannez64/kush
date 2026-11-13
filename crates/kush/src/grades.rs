@@ -1099,15 +1099,14 @@ impl<'a> Checker<'a> {
                 })
             }
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
-                Type::Fn(id) | Type::Once(id) => {
-                    self.program
-                        .function_types
-                        .get(id)
-                        .is_some_and(|signature| {
-                            signature.result_grade.is_some_and(Grade::is_one)
-                                && self.moves(signature.result)
-                        })
-                }
+                Type::Fn(id) | Type::Once(id) | Type::Multi(id) => self
+                    .program
+                    .function_types
+                    .get(id)
+                    .is_some_and(|signature| {
+                        signature.result_grade.is_some_and(Grade::is_one)
+                            && self.moves(signature.result)
+                    }),
                 _ => false,
             },
             ExprKind::Block(block) => self.block_value_moves_linear(block),
@@ -1180,7 +1179,7 @@ impl<'a> Checker<'a> {
                 .first()
                 .is_some_and(|owner| self.value_has_grade_one(owner)),
             ExprKind::CallIndirect { callee, .. } => match callee.ty {
-                Type::Fn(id) | Type::Once(id) => self
+                Type::Fn(id) | Type::Once(id) | Type::Multi(id) => self
                     .program
                     .function_types
                     .get(id)
@@ -1758,6 +1757,7 @@ impl<'a> Checker<'a> {
             | ExprKind::RegionExit { .. }
             | ExprKind::HandlerDepth
             | ExprKind::HandlerRedirect { .. }
+            | ExprKind::ContinuationScope { .. }
             | ExprKind::TryExit { .. } => {
                 unreachable!("grades run before suspendable bodies are lowered")
             }
@@ -2083,7 +2083,7 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
                 let id = match callee.ty {
-                    Type::Fn(id) | Type::Once(id) => Some(id),
+                    Type::Fn(id) | Type::Once(id) | Type::Multi(id) => Some(id),
                     _ => None,
                 };
                 for (index, argument) in arguments.iter().enumerate() {

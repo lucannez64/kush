@@ -1,0 +1,134 @@
+module tactics;
+
+// A prover whose tactics are effect handlers (docs/tactics-handlers.md).
+//
+//     tactics "(A -> B) -> (B -> C) -> A -> C"
+//     tactics --kcore "A & B -> B & A"     the proof as a kernel exchange file
+//
+// The search runs under two handlers: `Goal`, which owns the Kush kernel
+// and answers every question about goals in place, and `Choose`, which
+// backtracks by resuming the rest of the search once per alternative. The
+// proof it finds is then checked by the Kush kernel; nothing else is
+// trusted.
+
+use std.env;
+use std.io;
+use std.result.Result;
+use std.text;
+use kernel.api;
+use kernel.printer;
+use tactics.formula;
+use tactics.prover;
+use tactics.state;
+use tactics.state.State;
+use tactics.show;
+
+fn say(message: &Bytes) -> Unit ! {io} {
+    match io.write(io.stdout(), message) {
+        Result.Ok(_) => {},
+        Result.Err(_) => {},
+    }
+}
+
+fn line(label: &Bytes, value: Bytes) -> Unit ! {io, alloc, panic} {
+    let mut out = Bytes.with_capacity(label.len() + value.len() + 1);
+    let mut i = 0;
+    while i < label.len() {
+        out = out.push(label[i]);
+        i = i + 1;
+    }
+    i = 0;
+    while i < value.len() {
+        out = out.push(value[i]);
+        i = i + 1;
+    }
+    say(&out.push(10));
+}
+
+fn usage() -> i64 ! {io, alloc, panic} {
+    say(&Bytes.from("usage: tactics [--kcore] FORMULA\n  e.g. tactics \"(A -> B) -> (B -> C) -> A -> C\"\n"));
+    2
+}
+
+fn argument(i: i64) -> Result<Bytes, i64> ! {io, alloc, panic} {
+    env.arg(i, Bytes.with_capacity(4096))
+}
+
+// The kernel and the search recurse; give them room.
+#[stack_size(256)]
+fn main() -> i64 ! {io, alloc, panic} {
+    let count = match env.arg_count() {
+        Result.Ok(count) => count,
+        Result.Err(_) => 0,
+    };
+    if count < 2 || count > 3 {
+        return usage();
+    }
+    let kcore = count == 3;
+    if kcore {
+        let flag = match argument(1) {
+            Result.Ok(bytes) => bytes,
+            Result.Err(_) => return usage(),
+        };
+        if !text.eq(&flag, &Bytes.from("--kcore")) {
+            return usage();
+        }
+    }
+    let source = match argument(count - 1) {
+        Result.Ok(bytes) => bytes,
+        Result.Err(_) => return usage(),
+    };
+    let mut st = state.new();
+    let goal = match formula.read(&mut st, &source) {
+        Result.Ok(goal) => goal,
+        Result.Err(at) => {
+            say(&text.format_i64_into(Bytes.from("error: cannot read the formula at byte "), at).push(10));
+            return 2;
+        },
+    };
+    let found = prover.prove(&mut st, goal);
+    let proof = found.0;
+    let depth = found.1;
+    if kcore {
+        if proof < 0 {
+            return 1;
+        }
+        let mut out = state.prelude();
+        out = printer.term_into(&st.kernel.store, put(out, &Bytes.from("(check ")), proof);
+        out = out.push(32);
+        out = printer.term_into(&st.kernel.store, out, goal);
+        say(&out.push(41).push(10));
+        return 0;
+    }
+    line(&Bytes.from("goal:    "), show.goal(&st, goal));
+    if proof < 0 {
+        line(&Bytes.from("proof:   "), text.format_i64_into(Bytes.from("none up to depth "), depth));
+        return 1;
+    }
+    line(&Bytes.from("proof:   "), show.proof_term(&st, proof));
+    let stats = text.format_i64_into(Bytes.from(""), st.choices);
+    let stats = text.format_i64_into(put(stats, &Bytes.from(" choices, ")), st.backtracks);
+    let stats = text.format_i64_into(put(stats, &Bytes.from(" backtracks, depth ")), depth);
+    line(&Bytes.from("search:  "), stats);
+    let none: Vec<i64> = Vec.new();
+    match api.check_term(&mut st.kernel, &none, proof, goal) {
+        Result.Ok(_) => {
+            line(&Bytes.from("kernel:  "), Bytes.from("checked by the Kush kernel"));
+            0
+        },
+        Result.Err(code) => {
+            line(&Bytes.from("kernel:  "), put(Bytes.from("rejected: "), &api.describe(code)));
+            3
+        },
+    }
+}
+
+fn put(out: Bytes, value: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut out = out;
+    let mut i = 0;
+    while i < value.len() {
+        out = out.push(value[i]);
+        i = i + 1;
+    }
+    out
+}

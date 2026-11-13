@@ -1075,7 +1075,9 @@ impl WitnessCheck<'_, '_> {
                     self.exact_enum(a, b, path, fields, depth)
                 }
             }
-            (Type::Fn(a), Type::Fn(b)) | (Type::Once(a), Type::Once(b)) => {
+            (Type::Fn(a), Type::Fn(b))
+            | (Type::Once(a), Type::Once(b))
+            | (Type::Multi(a), Type::Multi(b)) => {
                 let (left, right) = (&self.types.function_types[a], &self.types.function_types[b]);
                 self.callable(left, right, path, depth)
             }

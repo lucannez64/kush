@@ -218,9 +218,11 @@ perform it with the identity token). Tests:
 
 Scoped on 2026-11-06 to **non-tail, one-shot, noncapturing** handlers;
 capturing (`once`) handlers across calls (EFF-CAP-RESUME-CAPTURING, done
-below for declared operations) and multishot handlers across calls (EFF-CAP-RESUME-MULTISHOT, which needs new
-`cap` syntax for a copyable token) stay rejected with "this capability's
-handler is capturing or multishot ...". Tests:
+below for declared operations) and multishot handlers across calls stay
+rejected with "this capability's handler is capturing or multishot ...".
+Multishot handlers across calls are now `cap multi Op` capabilities
+(EFF-CAP-RESUME-MULTISHOT, [multishot capabilities](multishot-capabilities.md)).
+Tests:
 `crates/kush/tests/effect_capabilities.rs`
 (`capability_resumption_across_calls*`).
 
@@ -291,7 +293,8 @@ their token). Tests: `capturing_capabilit*` in
   uses; only its trampoline looks that id up, so performs by name still
   reach outer handlers (tested). The trampoline's row is the handler's row
   plus `panic`, so the parameter must be `cap Op ! {e, panic}`.
-- Still rejected: multishot capturing handlers, and performing a `once`
+- Still rejected: multishot capturing handlers with owned captures (copyable
+  ones work through `cap multi`, [multishot capabilities](multishot-capabilities.md)), and performing a `once`
   handler both in its own body and through a callee (the frame owns it).
 
 **Use-after-free review.** The environment is owned by the frame from the

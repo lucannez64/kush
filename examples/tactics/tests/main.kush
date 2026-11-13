@@ -1,0 +1,123 @@
+module tactics.tests.main;
+
+use std.result.Result;
+use std.test;
+use kernel.api;
+use kernel.term;
+use tactics.formula;
+use tactics.prover;
+use tactics.state;
+use tactics.state.State;
+
+/// Search for a proof of a formula; the proof, or `state.FAIL`. Every proof
+/// returned here has been checked by the kernel.
+fn search(st: &mut State, text: &Bytes) -> i64 ! {alloc, panic} {
+    let goal = match formula.read(st, text) {
+        Result.Ok(goal) => goal,
+        Result.Err(_) => return -2,
+    };
+    let found = prover.prove(st, goal);
+    let proof = found.0;
+    if proof < 0 {
+        return state.FAIL;
+    }
+    let none: Vec<i64> = Vec.new();
+    match api.check_term(&mut st.kernel, &none, proof, goal) {
+        Result.Ok(_) => proof,
+        Result.Err(_) => -3,
+    }
+}
+
+fn proves(text: &Bytes) -> Unit ! {alloc, panic} {
+    let mut st = state.new();
+    test.is_true(search(&mut st, text) >= 0);
+}
+
+#[test]
+fn formulas_read_into_closed_goals() -> Unit ! {io, alloc, panic} {
+    let mut st = state.new();
+    match formula.read(&mut st, &Bytes.from("(A -> B) -> A -> B")) {
+        Result.Ok(goal) => test.is_true(goal >= 0),
+        Result.Err(_) => test.fail(),
+    }
+    match formula.read(&mut st, &Bytes.from("A -> ")) {
+        Result.Ok(_) => test.fail(),
+        Result.Err(at) => test.equal_i64(at, 5),
+    }
+    match formula.read(&mut st, &Bytes.from("A & (B")) {
+        Result.Ok(_) => test.fail(),
+        Result.Err(at) => test.equal_i64(at, 6),
+    }
+}
+
+#[test]
+fn implications_are_proved_and_checked() -> Unit ! {io, alloc, panic} {
+    proves(&Bytes.from("A -> A"));
+    proves(&Bytes.from("A -> B -> A"));
+    proves(&Bytes.from("(A -> B) -> (B -> C) -> A -> C"));
+    proves(&Bytes.from("(A -> B -> C) -> (A -> B) -> A -> C"));
+}
+
+#[test]
+fn conjunctions_and_disjunctions_are_proved_and_checked() -> Unit ! {io, alloc, panic} {
+    proves(&Bytes.from("A & B -> B & A"));
+    proves(&Bytes.from("A | B -> B | A"));
+    proves(&Bytes.from("A & (B | C) -> A & B | A & C"));
+    proves(&Bytes.from("(A -> C) -> (B -> C) -> A | B -> C"));
+}
+
+#[test]
+fn negations_are_proved_and_checked() -> Unit ! {io, alloc, panic} {
+    proves(&Bytes.from("False -> A"));
+    proves(&Bytes.from("A -> ~~A"));
+    proves(&Bytes.from("(A -> B) -> ~B -> ~A"));
+    proves(&Bytes.from("~~(A | ~A)"));
+}
+
+#[test]
+fn non_theorems_have_no_proof() -> Unit ! {io, alloc, panic} {
+    let mut st = state.new();
+    test.equal_i64(search(&mut st, &Bytes.from("A -> B")), state.FAIL);
+    // Peirce's law and excluded middle are classical.
+    test.equal_i64(search(&mut st, &Bytes.from("((A -> B) -> A) -> A")), state.FAIL);
+    test.equal_i64(search(&mut st, &Bytes.from("A | ~A")), state.FAIL);
+}
+
+#[test]
+fn the_search_backtracks() -> Unit ! {io, alloc, panic} {
+    let mut st = state.new();
+    // Which side of `B | A` to prove is only known after taking `A | B`
+    // apart, so the first tries fail and the search goes back.
+    test.is_true(search(&mut st, &Bytes.from("A | B -> B | A")) >= 0);
+    test.is_true(st.choices > 0);
+    test.is_true(st.backtracks > 0);
+}
+
+#[test]
+fn a_goal_with_one_way_to_prove_it_needs_no_backtracking() -> Unit ! {io, alloc, panic} {
+    // The engine lists only the alternatives that apply, so a proof with
+    // no real alternative is found without going back.
+    let mut st = state.new();
+    test.is_true(search(&mut st, &Bytes.from("(A -> B) -> (B -> C) -> A -> C")) >= 0);
+    test.equal_i64(st.backtracks, 0);
+}
+
+#[test]
+fn the_kernel_rejects_a_wrong_proof() -> Unit ! {io, alloc, panic} {
+    // `fun A (h : A) => A` does not prove `(A : Prop) -> A -> A`.
+    let mut st = state.new();
+    let goal = match formula.read(&mut st, &Bytes.from("A -> A")) {
+        Result.Ok(goal) => goal,
+        Result.Err(_) => -1,
+    };
+    let prop = term.prop(&mut st.kernel.store);
+    let a = term.var(&mut st.kernel.store, 0);
+    let wrong_body = term.var(&mut st.kernel.store, 1);
+    let inner = term.lam(&mut st.kernel.store, a, wrong_body);
+    let wrong = term.lam(&mut st.kernel.store, prop, inner);
+    let none: Vec<i64> = Vec.new();
+    match api.check_term(&mut st.kernel, &none, wrong, goal) {
+        Result.Ok(_) => test.fail(),
+        Result.Err(_) => {},
+    }
+}

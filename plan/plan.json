@@ -4212,16 +4212,47 @@
       "size": "L",
       "hard": false,
       "deps": [
-        "EFF-CAP-RESUME-CALLS"
+        "EFF-CAP-RESUME-CALLS",
+        "MS-STRESS-DOCS"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Multishot capabilities across calls: needs new cap syntax for a copyable token (confirm spelling with the user, e.g. cap multi Op) and continuation-chain copying across calls, which does not exist for declared operations either.",
-      "commit": null,
+      "commit": "9506122",
       "log": [
         {
           "time": "2026-11-06 18:15:36",
           "who": "agent",
           "text": "BLOCKED (2026-11-06): Kush has no copyable closure with an environment (fn = bare code pointer, capturing closures are once). Multishot resumption across calls needs a copyable token carrying the callee's live values and the caller's continuation: a new callable representation (shared refcounted or copied environments, drop glue, two-word copyable ABI) in both backends and the evaluator, plus 'cap multi Op' (spelling approved). Needs a design decision on that representation before implementation."
+        },
+        {
+          "time": "2026-11-13 13:47:19",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 13:47:19",
+          "who": "agent",
+          "text": "Design written in docs/multishot-capabilities.md (shared refcounted immutable environments, affine 'multi fn' with non-consuming calls, cap multi Op); awaiting user approval before implementation."
+        },
+        {
+          "time": "2026-11-13 13:59:39",
+          "who": "agent",
+          "text": "Design revised: continuation stack released when each token call returns (sound by the no-escape rule), copyable second-class multi fn tokens only; refcounting kept as the option for future general closures. Awaiting approval."
+        },
+        {
+          "time": "2026-11-13 14:05:01",
+          "who": "agent",
+          "text": "Design approved by the user (section 10, decisions 1-5): continuation stack, copyable second-class multi fn tokens, copyable ungraded live values, cap/cap multi distinct, epochs + poisoning."
+        },
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "done 9506122"
+        },
+        {
+          "time": "2026-11-13 15:42:35",
+          "who": "agent",
+          "text": "Follow-ups done in 4711be4: capturing multishot handlers across calls (private reusable frames), multi tokens naming abortive operations, benchmarks/effects rows; cap-bound multishot handlers made capability-only (pure tail-resumptive ones now run in place)."
         }
       ]
     },
@@ -5930,10 +5961,36 @@
         "KERNEL-IN-KUSH",
         "EFF-CAP-RESUME-MULTISHOT"
       ],
-      "status": "todo",
+      "status": "done",
       "desc": "Goal/Choose/Fail effects, backtracking as a multishot handler, terms checked by the Kush kernel. See docs/showcase-roadmap.md.",
-      "commit": null,
-      "log": []
+      "commit": "488e7fd",
+      "log": [
+        {
+          "time": "2026-11-13 14:56:37",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 14:56:37",
+          "who": "agent",
+          "text": "Design written in docs/tactics-handlers.md (Choose as cap multi, Fail = Choose(0), Goal as a tail-resumptive kernel-owning handler; propositional demo). Spike confirmed a &mut-capturing tail-resumptive handler serves performs from cap multi branches. Awaiting user approval."
+        },
+        {
+          "time": "2026-11-13 15:09:59",
+          "who": "agent",
+          "text": "Design approved by the user (decisions 1-3)."
+        },
+        {
+          "time": "2026-11-13 15:24:14",
+          "who": "agent",
+          "text": "done 488e7fd"
+        },
+        {
+          "time": "2026-11-13 15:42:35",
+          "who": "agent",
+          "text": "Goal-directed alternatives: cee7b19."
+        }
+      ]
     },
     {
       "id": "SESSION-TYPES",
@@ -6516,6 +6573,121 @@
           "time": "2026-11-13 03:31:42",
           "who": "agent",
           "text": "done 66f0800"
+        }
+      ]
+    },
+    {
+      "id": "MS-TYPE",
+      "title": "multi fn token type and cap multi in the checker",
+      "size": "S",
+      "hard": false,
+      "deps": [
+        "EFF-CAP-RESUME-CALLS"
+      ],
+      "status": "done",
+      "desc": "docs/multishot-capabilities.md section 9 step 1",
+      "commit": "d87f4cd",
+      "log": [
+        {
+          "time": "2026-11-13 14:05:18",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 14:15:45",
+          "who": "agent",
+          "text": "done d87f4cd"
+        }
+      ]
+    },
+    {
+      "id": "MS-KSTACK",
+      "title": "Continuation stack in evaluator and native runtime",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "MS-TYPE"
+      ],
+      "status": "done",
+      "desc": "docs/multishot-capabilities.md section 9 step 2",
+      "commit": "2c36d04",
+      "log": [
+        {
+          "time": "2026-11-13 14:15:45",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "done 2c36d04"
+        }
+      ]
+    },
+    {
+      "id": "MS-TOKEN",
+      "title": "Lexical performs with multi fn tokens",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "MS-KSTACK"
+      ],
+      "status": "done",
+      "desc": "docs/multishot-capabilities.md section 9 step 3",
+      "commit": "2c36d04",
+      "log": [
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "done 2c36d04"
+        }
+      ]
+    },
+    {
+      "id": "MS-CAP",
+      "title": "cap multi across calls through resumable entries",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "MS-TOKEN"
+      ],
+      "status": "done",
+      "desc": "docs/multishot-capabilities.md section 9 step 4",
+      "commit": "2c36d04",
+      "log": [
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "done 2c36d04"
+        }
+      ]
+    },
+    {
+      "id": "MS-STRESS-DOCS",
+      "title": "Multishot stack stress, review and as-built docs",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "MS-CAP"
+      ],
+      "status": "done",
+      "desc": "docs/multishot-capabilities.md section 9 step 5",
+      "commit": "9506122",
+      "log": [
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "Stress test (peak stack proportional to depth), example, LLVM parity and as-built docs in 9506122. Review done by the implementer (no subagent): escape paths checked against multishot.rs and the lowering. Not done: benchmarks/effects row, capturing multishot handlers across calls, tokens naming abortive operations."
+        },
+        {
+          "time": "2026-11-13 14:54:15",
+          "who": "agent",
+          "text": "done 9506122"
         }
       ]
     }

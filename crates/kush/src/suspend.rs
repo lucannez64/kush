@@ -695,6 +695,7 @@ fn block_children<'a>(
             on_expr(depth);
             on_block(body);
         }
+        ExprKind::ContinuationScope { body } => on_block(body),
         ExprKind::Suspendable(suspendable) => on_block(&suspendable.body),
         ExprKind::Region { body, finish, .. } => {
             on_block(body);
@@ -1791,6 +1792,14 @@ fn build(
         });
     }
     let locals = &host.locals;
+    // Multishot points hand out `multi fn` tokens whose environments live on
+    // the continuation stack (docs/multishot-capabilities.md): no handler
+    // specialization is needed.
+    let multi_tokens = matches!(spec.token, Type::Multi(_))
+        || spec
+            .entries
+            .values()
+            .any(|(_, token)| matches!(token, Type::Multi(_)));
     let finish_live = spec.finish.into_iter().collect::<Slots>();
     let mut liveness = Live {
         finish_live: finish_live.clone(),
@@ -1875,8 +1884,18 @@ fn build(
                 .with_note(local.span, "value declared here"));
             }
         }
+        if let Some(slot) = slots
+            .iter()
+            .find(|slot| Some(**slot) != spec.finish && matches!(locals[**slot].ty, Type::Multi(_)))
+        {
+            return Err(Diagnostic::new(
+                at,
+                "a multishot resumption token ('multi fn') cannot stay live across a 'perform': the continuation would keep it after the call that made it returns. Use it before the perform",
+            )
+            .with_note(locals[*slot].span, "token declared here"));
+        }
         if spec.multishot && !slots.is_empty() {
-            if spec.multishot_handler.is_none() {
+            if spec.multishot_handler.is_none() && !multi_tokens {
                 return Err(Diagnostic::new(
                     at,
                     "multishot resumption requires a continuation with no captured values unless the handler is a lambda (or function name) without captures that only calls its resumption directly; the copyable resumption token cannot own an environment",
@@ -1965,7 +1984,7 @@ fn build(
     let specialized = order
         .iter()
         .copied()
-        .filter(|point| spec.multishot && !captures[point].is_empty())
+        .filter(|point| spec.multishot && !multi_tokens && !captures[point].is_empty())
         .collect::<Vec<_>>();
     // A one-shot continuation records the
     // handler-stack depth at its point and resumes under a redirect, so
@@ -2181,9 +2200,10 @@ fn build(
         continuations.push(Function {
             name: format!("{}::resume#{point}", host.name),
             parameters,
-            // Once tokens carry an environment word even without captures;
-            // a capture-free multishot token is a plain code pointer.
-            closure: matches!(tokens[point], Type::Once(_)).then_some(environment),
+            // Once and multi tokens carry an environment word even without
+            // captures; a capture-free `fn` multishot token is a plain code
+            // pointer.
+            closure: matches!(tokens[point], Type::Once(_) | Type::Multi(_)).then_some(environment),
             capture_refs: vec![false; environment],
             capture_writes: vec![false; environment],
             locals: cont_locals,
@@ -2207,6 +2227,7 @@ fn build(
             local_borrowed: vec![],
             local_copyable: vec![],
             capability_parameters: vec![],
+            shared_environment: matches!(tokens[point], Type::Multi(_)),
         });
     }
     // Handler specializations: `resume(y)` calls the point's continuation
@@ -2383,8 +2404,7 @@ fn lower_one(
             ),
         };
         let (entry, allocates) = resumable_entry(program, context, callee, key, result)?;
-        let input = program.functions[callee].result;
-        let token = Type::Once(function_type(program, input, result));
+        let token = entry_token(program, callee, capability, result);
         entries.insert((callee, capability), (entry, token));
         awaited_allocates |= allocates;
     }
@@ -2454,14 +2474,32 @@ fn lower_one(
             multishot_handler: multishot_handler.clone(),
             span,
         };
+        let multi = matches!(spec.token, Type::Multi(_));
         let built = build(&host, &spec, body, first_function, &owns)?;
         continuations = built.continuations;
         if !built.points {
             return Ok(ExprKind::Block(built.body));
         }
-        Ok(ExprKind::Region {
+        let region = ExprKind::Region {
             body: built.body,
             finish: None,
+        };
+        if !multi {
+            return Ok(region);
+        }
+        // Release the continuation environments of this `handle` when it
+        // ends (docs/multishot-capabilities.md section 6.2).
+        Ok(ExprKind::ContinuationScope {
+            body: Block {
+                statements: vec![],
+                tail: Some(Box::new(Expr {
+                    kind: region,
+                    ty: result,
+                    span,
+                    resource: None,
+                })),
+                ty: result,
+            },
         })
     };
     let mut lower: Option<&mut dyn FnMut(Box<Suspendable>) -> Result<ExprKind>> = Some(&mut lower);
@@ -2476,6 +2514,62 @@ fn lower_one(
 }
 
 /// Intern the linear one-shot callable type `linear once fn(input) -> result`.
+/// The arrow of a `multi fn(input) -> result` token, interned like the
+/// checker's (`Types::multi_token`): not once, not linear.
+fn multi_function_type(program: &mut Executable, input: Type, result: Type) -> usize {
+    let wanted = crate::runtime_types::FunctionType {
+        parameters: vec![input],
+        result,
+        effects: 0,
+        parameter_grades: vec![None],
+        result_grade: None,
+        once: false,
+        linear: false,
+        borrows: crate::runtime_types::BorrowSig::default(),
+    };
+    if let Some(index) = program
+        .function_types
+        .iter()
+        .position(|existing| *existing == wanted)
+    {
+        return index;
+    }
+    program.function_types.push(wanted);
+    program.function_types.len() - 1
+}
+
+/// Whether parameter `slot` of `function` is a `cap multi` capability: its
+/// handler arrow takes a `multi fn` token (docs/multishot-capabilities.md).
+fn capability_multi(program: &Executable, function: usize, slot: usize) -> bool {
+    match program.functions[function]
+        .locals
+        .get(slot)
+        .map(|local| local.ty)
+    {
+        Some(Type::Fn(arrow)) => matches!(
+            program.function_types[arrow].parameters.get(1),
+            Some(Type::Multi(_))
+        ),
+        _ => false,
+    }
+}
+
+/// The token a resumable entry of `callee` receives as its continuation:
+/// `multi fn` for a `cap multi` parameter, otherwise `linear once fn`.
+fn entry_token(
+    program: &mut Executable,
+    callee: usize,
+    capability: Option<usize>,
+    result: Type,
+) -> Type {
+    let input = program.functions[callee].result;
+    if capability.is_some_and(|slot| capability_multi(program, callee, slot)) {
+        Type::Multi(multi_function_type(program, input, result))
+    } else {
+        Type::Once(function_type(program, input, result))
+    }
+}
+
 fn function_type(program: &mut Executable, input: Type, result: Type) -> usize {
     let wanted = crate::runtime_types::FunctionType {
         parameters: vec![input],
@@ -2510,7 +2604,7 @@ fn performs(program: &Executable) -> Vec<BTreeSet<usize>> {
             .collect::<BTreeSet<_>>()
     };
     let callable_effects = |ty: Type| match ty {
-        Type::Fn(id) | Type::Once(id) => program.function_types[id].effects,
+        Type::Fn(id) | Type::Once(id) | Type::Multi(id) => program.function_types[id].effects,
         _ => 0,
     };
     let mut result = vec![BTreeSet::new(); program.functions.len()];
@@ -2655,7 +2749,7 @@ pub(crate) fn mark_abort_calls(program: &mut Executable) -> Result<()> {
             .collect()
     };
     let callable_effects = |ty: Type| match ty {
-        Type::Fn(id) | Type::Once(id) => program.function_types[id].effects,
+        Type::Fn(id) | Type::Once(id) | Type::Multi(id) => program.function_types[id].effects,
         _ => 0,
     };
     // Abortive operations each call may leave with, computed on the
@@ -2939,7 +3033,9 @@ fn check_unresumable_paths(
     fn walk(expr: &Expr, program: &Executable, context: &Context, operation: usize) -> Result<()> {
         let bit = program.effect_bits[operation];
         let callable = |ty: Type| match ty {
-            Type::Fn(id) | Type::Once(id) => program.function_types[id].effects & bit != 0,
+            Type::Fn(id) | Type::Once(id) | Type::Multi(id) => {
+                program.function_types[id].effects & bit != 0
+            }
             _ => false,
         };
         let performs = |function: usize| {
@@ -3311,7 +3407,15 @@ fn resumable_entry(
     program.functions.push(source.clone());
     program.foreign_functions.push(None);
     context.entries.insert((function, key), (index, true));
-    let continuation = Type::Once(function_type(program, source.result, result));
+    // A `cap multi` entry is resumed several times: its continuation and its
+    // tokens are `multi fn` values on the continuation stack.
+    let multi =
+        matches!(key, EntryKey::Capability(slot) if capability_multi(program, function, slot));
+    let continuation = if multi {
+        Type::Multi(multi_function_type(program, source.result, result))
+    } else {
+        Type::Once(function_type(program, source.result, result))
+    };
     let mut locals = source.locals.clone();
     let mut resources = source.resources.clone();
     let mut local_resources = source.local_resources.clone();
@@ -3323,15 +3427,19 @@ fn resumable_entry(
     locals.push(Local {
         ty: continuation,
         mutable: false,
-        linear: true,
+        linear: !multi,
         pinned: false,
         grade: None,
         span: source.span,
     });
-    resources.push(continuation);
-    local_resources.push(Some(resources.len() - 1));
+    if multi {
+        local_resources.push(None);
+    } else {
+        resources.push(continuation);
+        local_resources.push(Some(resources.len() - 1));
+    }
     borrowed.push(false);
-    copyable.push(false);
+    copyable.push(multi);
     let mut body = source.body.clone();
     let mut points = 0;
     let mut awaited = BTreeSet::new();
@@ -3356,7 +3464,11 @@ fn resumable_entry(
                 unreachable!("a capability parameter is a handler arrow")
             };
             let answer = program.function_types[arrow].result;
-            capability_token = Type::Once(function_type(program, answer, result));
+            capability_token = if multi {
+                Type::Multi(multi_function_type(program, answer, result))
+            } else {
+                Type::Once(function_type(program, answer, result))
+            };
             for_each_value_mut(&mut body, &mut |value| {
                 mark_capability_points(
                     value,
@@ -3377,8 +3489,7 @@ fn resumable_entry(
             (None, key) => key,
         };
         let (entry, allocates) = resumable_entry(program, context, callee, callee_key, result)?;
-        let input = program.functions[callee].result;
-        let token = Type::Once(function_type(program, input, result));
+        let token = entry_token(program, callee, capability, result);
         entries.insert((callee, capability), (entry, token));
         awaited_allocates |= allocates;
     }
@@ -3420,7 +3531,7 @@ fn resumable_entry(
     let spec = Spec {
         result,
         token: capability_token,
-        multishot: false,
+        multishot: multi,
         handler_writes: vec![],
         handler_refs: vec![],
         effects: None,
@@ -3486,6 +3597,7 @@ fn resumable_entry(
         local_borrowed: host.borrowed,
         local_copyable: host.copyable,
         capability_parameters: source.capability_parameters.clone(),
+        shared_environment: false,
     };
     for continuation in built.continuations {
         program.functions.push(continuation);
