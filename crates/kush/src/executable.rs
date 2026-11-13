@@ -312,6 +312,9 @@ pub struct Executable {
     pub(crate) uses_tasks: bool,
     /// THREAD-SCOPE: the program runs OS threads (thread-safe runtime paths).
     pub(crate) uses_threads: bool,
+    /// LANG-STACK-SIZE: `#[stack_size(N)]` on main, in bytes. The native
+    /// runtime runs the program on a thread with a stack this large.
+    pub(crate) main_stack: Option<u64>,
     /// GPU-SUBSET: per function instance, whether it is a `#[gpu]` function.
     /// Functions added after checking (continuations) are never GPU code.
     pub(crate) gpu_functions: Vec<bool>,
@@ -5571,6 +5574,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
     }
     let effect_operations = &effect_operations;
     let mut monomorphic = Vec::new();
+    let mut main_stack = None;
     for declaration in &module.items {
         let span = declaration.item.span;
         // `#[kernel_steps(N)]` raises the kernel budget of a logical
@@ -5614,6 +5618,38 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         );
         for attribute in &declaration.attributes {
             if attribute.kind == "kernel_steps" {
+                continue;
+            }
+            if attribute.kind == "stack_size" {
+                // LANG-STACK-SIZE: only the program's own main, in MiB.
+                let is_main = matches!(&declaration.item.kind, ast::ItemKind::Function(f) if f.name == "main")
+                    && resolution
+                        .declarations
+                        .get(&span.start)
+                        .is_some_and(|binding| resolution.unit_of.get(binding) == Some(&0));
+                if !is_main {
+                    return Err(Diagnostic::new(
+                        attribute.span,
+                        "#[stack_size(N)] applies to the program's main function only",
+                    ));
+                }
+                let mebibytes = attribute
+                    .argument
+                    .as_deref()
+                    .and_then(|text| text.parse::<u64>().ok())
+                    .filter(|value| (1..=65536).contains(value))
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            attribute.span,
+                            "#[stack_size(N)] takes the main stack size in MiB, from 1 to 65536",
+                        )
+                    })?;
+                if main_stack.replace(mebibytes << 20).is_some() {
+                    return Err(Diagnostic::new(
+                        attribute.span,
+                        "#[stack_size(N)] may appear once",
+                    ));
+                }
                 continue;
             }
             let valid = if function {
@@ -6180,6 +6216,7 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
         bounds_proved: functions.bounds_proved,
         bounds_checked: functions.bounds_checked,
         uses_tasks: functions.uses_tasks,
+        main_stack,
         // A channel type anywhere needs the threaded runtime (its drop glue).
         uses_threads: functions.uses_threads
             || types

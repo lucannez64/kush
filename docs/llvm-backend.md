@@ -203,6 +203,22 @@ interrupted stack pointer to two pages above it) and below the frame the
 process started in. Every other fault, and any SIGSEGV or SIGBUS sent by
 another process, gets its default action.
 
+**A larger main stack** (LANG-STACK-SIZE). The process stack is the
+system's (usually 8 MiB) and OS threads get 64 MiB. A program that recurses
+deeply, such as the [Kush kernel](kernel-in-kush.md), asks for more on its
+`main`:
+
+```kush
+#[stack_size(1024)]          // MiB, 1 to 65536
+fn main() -> i64 ! {io, alloc, panic} { ... }
+```
+
+The native runtime then runs the program on a thread with a stack that
+large (reserved address space, committed as it is used), with its own
+signal stack, so exhausting it is still `panic: stack exhausted`. The
+attribute is accepted only on the program's own `main`. The reference
+evaluator has no native stack and ignores it.
+
 Limits: the handler exists on Linux x86-64 and AArch64, which is also where
 the native backends run. Only generated code is probed. The C runtime's own
 frames are about 1 KiB at most, but a libc built without stack-clash
