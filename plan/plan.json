@@ -6009,14 +6009,19 @@
       "size": "M",
       "hard": false,
       "deps": [],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Eta conversion for functions in the Rust kernel (f = fun x => f x); tests; docs/kernel.md. Before the Kush port, see docs/kernel-in-kush.md.",
-      "commit": null,
+      "commit": "b6ffe6c",
       "log": [
         {
           "time": "2026-11-13 03:41:46",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 03:44:02",
+          "who": "agent",
+          "text": "done b6ffe6c"
         }
       ]
     },
