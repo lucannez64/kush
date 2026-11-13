@@ -45,12 +45,50 @@ pub(super) fn layout(source: &str, tokens: &[Token]) -> String {
     let mut force_newline = false;
     let mut blank_after_item = false;
     let mut last_item_group: Option<u8> = None;
+    // Whether the current line is a continuation line (see below).
+    let mut in_continuation = false;
 
     for (index, token) in tokens.iter().enumerate() {
         let gap_start = prev.map_or(0, |p| tokens[p].span.end);
         let gap = &source[gap_start..token.span.start];
         let indent = indent_level(&stack);
 
+        // Top-level items: a blank line between groups (imports, foreign
+        // declarations, everything else) even if the source had none. It is
+        // decided before the comments in front of the item are written, so
+        // the blank line goes above an item's doc comment, not between the
+        // comment and the item.
+        let declaration_head = matches!(
+            &token.kind,
+            Kind::Module
+                | Kind::Use
+                | Kind::Fn
+                | Kind::Struct
+                | Kind::Enum
+                | Kind::Type
+                | Kind::Pub
+                | Kind::Hash
+        ) || ident_is(
+            Some(&token.kind),
+            &["foreign", "trait", "impl", "effect", "prop", "total"],
+        );
+        let item_start = stack.is_empty()
+            && declaration_head
+            && prev
+                .map(|p| &tokens[p].kind)
+                .is_none_or(|p| matches!(p, Kind::Semi | Kind::RBrace | Kind::RBracket));
+        if item_start {
+            let group = match &token.kind {
+                Kind::Module | Kind::Use => 0,
+                Kind::Ident(name) if name == "foreign" => 1,
+                Kind::Hash | Kind::Pub => last_item_group.unwrap_or(2).max(2),
+                _ => 2,
+            };
+            if last_item_group.is_some_and(|last| last != group) {
+                blank_after_item = true;
+            }
+            last_item_group = Some(group);
+        }
         // Comments and blank lines in the gap before this token.
         let comments = split_gap(gap);
         let mut newline_seen = prev.is_none();
@@ -112,7 +150,10 @@ pub(super) fn layout(source: &str, tokens: &[Token]) -> String {
             && gap.contains('\n')
             && matches!(stack.last(), None | Some(Group::Block))
             && (ident_is(Some(kind), &["ensures"])
-                || (*kind == Kind::LBrace && prev_kind == Some(&Kind::RBrace)));
+                || (*kind == Kind::LBrace && prev_kind == Some(&Kind::RBrace))
+                // `if a\n    && b\n{`: after a condition continued over
+                // several lines, a `{` the author put on its own line stays.
+                || (*kind == Kind::LBrace && in_continuation));
         let continuation = continuation || (clause_break && ident_is(Some(kind), &["ensures"]));
         let starts_line = force_newline
             || clause_break
@@ -120,36 +161,8 @@ pub(super) fn layout(source: &str, tokens: &[Token]) -> String {
             || matches!(closed, Some(Group::Block | Group::ListMulti))
             || out.at_line_start();
         let indent = if continuation { indent + 1 } else { indent };
-        // Top-level items: a blank line between groups (imports, foreign
-        // declarations, everything else) even if the source had none.
-        let declaration_head = matches!(
-            kind,
-            Kind::Module
-                | Kind::Use
-                | Kind::Fn
-                | Kind::Struct
-                | Kind::Enum
-                | Kind::Type
-                | Kind::Pub
-                | Kind::Hash
-        ) || ident_is(
-            Some(kind),
-            &["foreign", "trait", "impl", "effect", "prop", "total"],
-        );
-        let item_start = stack.is_empty()
-            && declaration_head
-            && prev_kind.is_none_or(|p| matches!(p, Kind::Semi | Kind::RBrace | Kind::RBracket));
-        if item_start {
-            let group = match kind {
-                Kind::Module | Kind::Use => 0,
-                Kind::Ident(name) if name == "foreign" => 1,
-                Kind::Hash | Kind::Pub => last_item_group.unwrap_or(2).max(2),
-                _ => 2,
-            };
-            if last_item_group.is_some_and(|last| last != group) {
-                blank_after_item = true;
-            }
-            last_item_group = Some(group);
+        if starts_line {
+            in_continuation = continuation;
         }
         if starts_line && !out.is_empty() {
             let blank = (out.blank_wanted && stack.iter().all(|g| *g == Group::Block) && !closing)

@@ -484,6 +484,24 @@ mod tests {
     }
 
     #[test]
+    fn the_blank_line_before_a_new_group_goes_above_its_doc_comment() {
+        formats_to(
+            "module app;\nuse std.sys;\n/// The answer.\npub fn answer() -> i64 ! {} { 42 }\n",
+            "module app;\nuse std.sys;\n\n/// The answer.\npub fn answer() -> i64 ! {} { 42 }\n",
+        );
+        // Already separated: unchanged.
+        let source =
+            "module app;\n\nuse std.sys;\n\n/// The answer.\npub fn answer() -> i64 ! {} { 42 }\n";
+        formats_to(source, source);
+    }
+
+    #[test]
+    fn a_brace_after_a_continued_condition_keeps_its_own_line() {
+        let source = "fn f(a: Bool, b: Bool) -> i64 ! {} {\n    if a\n        && b\n    {\n        return 1;\n    }\n    0\n}\n";
+        formats_to(source, source);
+    }
+
+    #[test]
     fn operators_after_a_try_are_binary() {
         // `?` is postfix: what follows it is a binary operator, not a borrow
         // or a negation.
