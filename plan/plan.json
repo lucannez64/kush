@@ -6826,14 +6826,19 @@
       "deps": [
         "PF-ENGINE"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "User-declared fuzz entries in the test target for deep state.",
-      "commit": null,
+      "commit": "2aca7eb",
       "log": [
         {
           "time": "2026-11-13 18:19:01",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 18:30:15",
+          "who": "agent",
+          "text": "done 2aca7eb"
         }
       ]
     },
@@ -6845,10 +6850,16 @@
       "deps": [
         "PF-ENGINE"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Per-function/package table, --report, --json.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 18:30:15",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "PF-DEMO",
