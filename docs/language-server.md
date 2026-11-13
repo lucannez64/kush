@@ -15,8 +15,13 @@ The process speaks the Language Server Protocol over stdin/stdout using
 `Content-Length` framing. It does not accept extra arguments; point the editor
 at a `kush` executable with the VS Code `kush.server.path` setting instead. The
 server discovers `Kush.toml` from the `initialize` `rootUri`/first workspace
-folder, then from the process working directory. If there is no manifest, open
-files are still parsed and checked with sibling-path imports.
+folder, then from the process working directory. Each opened file that no
+loaded project owns also has its nearest `Kush.toml` above it loaded, so a
+project in a subfolder of the workspace (a monorepo, or this repository's
+`examples/kernel`) resolves its imports through its own manifest; the server
+keeps several projects and analyzes each file with the innermost project whose
+package contains it. A file outside every project is still parsed and checked
+with sibling-path imports.
 
 ## Protocol surface
 
@@ -180,7 +185,8 @@ URI escaping, shutdown, and unknown methods. Stdio integration tests spawn
 `kush lsp` and cover project diagnostics, unsaved invalid text, cross-file and
 local definitions, imported module definitions, stale versions, Unicode
 columns, `didClose` clearing, JSON escaping, malformed input, unknown methods,
-and the absence of disk mutations, `Kush.lock`, or a native `target/` directory.
+projects nested in the workspace (entry, sibling module, test file and a second
+project), and the absence of disk mutations, `Kush.lock`, or a native `target/` directory.
 
 ## Review corrections
 

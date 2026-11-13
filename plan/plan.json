@@ -6455,6 +6455,23 @@
       "desc": "Kush programs run recursion on a fixed native stack (8 MB main thread) and abort with 'stack exhausted' past it; there is no way to request a larger stack. The Kush kernel therefore caps nesting at 8,000 where the Rust kernel (which moves to fresh 256 MiB stacks as it recurses) caps at 100,000. Add a stack size to Thread.spawn (and possibly the entry point), or segmented stack growth. See docs/kernel-in-kush.md.",
       "commit": null,
       "log": []
+    },
+    {
+      "id": "LSP-NESTED-PROJECTS",
+      "title": "Language server: projects nested in the workspace",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "in_progress",
+      "desc": "The server found Kush.toml only from the workspace root, so files of a project in a subfolder (examples/kernel opened from the repository root) were analyzed alone and their imports failed ('a module cannot import itself'). Keep several projects; load the nearest manifest above each opened file; analyze each file with the innermost owning project.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-13 11:40:32",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     }
   ]
 }

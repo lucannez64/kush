@@ -884,3 +884,76 @@ fn symlink_aliases_clear_old_diagnostics_and_keep_unsaved_document_identity() {
     }
     client.shutdown();
 }
+
+/// A project in a subfolder of the editor's workspace (a monorepo, or this
+/// repository's examples): its files must resolve their imports through the
+/// project's own manifest, which is found from the file, not the workspace.
+#[test]
+fn nested_projects_resolve_imports_from_the_files_manifest() {
+    let scratch = Scratch::new("nested");
+    scratch.write("README.md", "a workspace that is not itself a project\n");
+    scratch.write(
+        "app/Kush.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nentry = \"src/main.kush\"\ntest = \"tests/main.kush\"\n",
+    );
+    let main = scratch.write(
+        "app/src/main.kush",
+        "module demo;\n\nuse demo.util;\n\nfn main() -> i64 ! {panic} {\n    util.answer()\n}\n",
+    );
+    let util = scratch.write(
+        "app/src/util.kush",
+        "module demo.util;\n\npub fn answer() -> i64 ! {panic} {\n    42\n}\n",
+    );
+    let tests = scratch.write(
+        "app/tests/main.kush",
+        "module demo.tests.main;\n\nuse demo.util;\n\nfn helper() -> i64 ! {panic} {\n    util.answer()\n}\n",
+    );
+    let other = scratch.write(
+        "lib/Kush.toml",
+        "[package]\nname = \"other\"\nversion = \"0.1.0\"\nentry = \"src/lib.kush\"\n",
+    );
+    let _ = other;
+    let lib = scratch.write(
+        "lib/src/lib.kush",
+        "module other;\n\nuse other.part;\n\npub fn value() -> i64 ! {panic} {\n    part.seven()\n}\n",
+    );
+    scratch.write(
+        "lib/src/part.kush",
+        "module other.part;\n\npub fn seven() -> i64 ! {panic} {\n    7\n}\n",
+    );
+
+    let mut client = Client::spawn(&scratch.path);
+    client.initialize(&scratch.path);
+    for path in [&main, &util, &tests, &lib] {
+        let uri = path_to_uri(path);
+        client.open(&uri, 1, &fs::read_to_string(path).unwrap());
+        let diagnostics = client.receive_diagnostics_for(&uri);
+        assert!(
+            diagnostics["params"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{}: {diagnostics}",
+            path.display()
+        );
+    }
+    // Go to definition crosses into the imported module of the nested project.
+    let main_uri = path_to_uri(&main);
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 5, "character": 10 }
+        }
+    }));
+    let response = loop {
+        let message = client.receive();
+        if message["id"] == 7 {
+            break message;
+        }
+    };
+    assert_eq!(response["result"]["uri"], path_to_uri(&util), "{response}");
+    client.shutdown();
+}
