@@ -2340,7 +2340,18 @@ int64_t kush_handler_lookup(int64_t operation, int64_t *out) {
         out[0] = frame->code;
         out[1] = frame->environment;
         out[2] = frame->once;
-        if (frame->once) {
+        if (frame->once == 2) {
+            /* A reusable handler (all captures copyable) keeps its
+               environment; each call owns and frees a fresh copy. */
+            KushAllocHeader *header =
+                (KushAllocHeader *)(uintptr_t)frame->environment - 1;
+            uint64_t copy = kush_alloc(header->usable);
+            memcpy((void *)(uintptr_t)copy,
+                   (const void *)(uintptr_t)frame->environment,
+                   (size_t)header->usable);
+            out[1] = (int64_t)copy;
+            out[2] = 1;
+        } else if (frame->once) {
             /* A once handler transfers its environment to this call. The
                callee frees it, so the frame must never drop it again. */
             frame->consumed = 1;
@@ -6909,12 +6920,13 @@ impl Generator<'_, '_> {
                 operation,
                 handler,
                 body,
+                reusable,
             } => {
                 let values = lower!(self.expr(handler));
                 let code = values[0];
                 let (environment, once) = if matches!(handler.ty, Type::Once(_)) {
                     let environment = values.get(1).copied().unwrap_or_else(|| self.constant(0));
-                    (environment, self.constant(1))
+                    (environment, self.constant(if *reusable { 2 } else { 1 }))
                 } else {
                     (self.constant(0), self.constant(0))
                 };
@@ -10533,6 +10545,17 @@ impl Generator<'_, '_> {
                 let owner = self.builder.ins().select(failed, values[0], grown);
                 vec![tag, owner]
             }
+            VecOp::ReplaceBorrowed => {
+                let reference = values[0];
+                let old = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), reference, 0);
+                self.builder
+                    .ins()
+                    .store(ir::MemFlagsData::new(), values[1], reference, 0);
+                vec![old]
+            }
             VecOp::ClearBorrowed => {
                 let reference = values[0];
                 let handle = self
@@ -10604,6 +10627,19 @@ impl Generator<'_, '_> {
                 call(self, VecOp::Set, &[handle, values[1], item, old]);
                 let previous = self.load_words(old, 0, width);
                 self.drop_value(element, &previous);
+                vec![self.constant(0)]
+            }
+            VecOp::SetProved => {
+                // Proved in bounds, copyable element: a direct store after the
+                // 16-byte header, nothing to drop.
+                let handle = self
+                    .builder
+                    .ins()
+                    .load(I64, ir::MemFlagsData::new(), values[0], 0);
+                let stride = self.builder.ins().imul_imm_s(values[1], (width * 8) as i64);
+                let base = self.builder.ins().iadd(handle, stride);
+                let slot = self.builder.ins().iadd_imm_s(base, 16);
+                self.store_words(slot, &values[2..2 + width]);
                 vec![self.constant(0)]
             }
             VecOp::Clear => {

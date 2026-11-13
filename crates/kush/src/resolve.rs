@@ -357,6 +357,7 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "Vec.map_in_place_grow",
     "Vec.map_chain_in_place_grow",
     "Vec.clear",
+    "Vec.replace",
     "Vec.reserve",
     "Vec.try_reserve",
     "Slice.len",
@@ -949,7 +950,14 @@ impl Resolver {
                             generics,
                             GenericContext::Unsupported("a record declaration"),
                         )?;
-                        r.fields(fields)
+                        r.fields(fields)?;
+                        // `where len >= N`: N names constants in scope.
+                        for field in fields {
+                            if let Some(length) = &field.min_length {
+                                r.expr(length)?;
+                            }
+                        }
+                        Ok(())
                     }
                     ItemKind::Enum {
                         generics, variants, ..
@@ -971,10 +979,17 @@ impl Resolver {
                         r.ty(ty)
                     }
                     ItemKind::Effect {
-                        parameter, result, ..
+                        parameter,
+                        result,
+                        effects,
+                        ..
                     } => {
                         r.ty(parameter)?;
-                        r.ty(result)
+                        r.ty(result)?;
+                        for effect in effects {
+                            r.ty(effect)?;
+                        }
+                        Ok(())
                     }
                     ItemKind::EffectRow { effects, .. } => {
                         for effect in effects {
@@ -1007,6 +1022,9 @@ impl Resolver {
         )?;
         for p in &f.parameters {
             self.ty(&p.ty)?;
+            if let Some(length) = &p.min_length {
+                self.expr(length)?;
+            }
             self.local(&p.name, BindingKind::Parameter, p.span, false)?;
         }
         self.ty(&f.result)?;
@@ -1445,8 +1463,15 @@ impl Resolver {
                     r.ty(ty)?;
                     r.expr(value)?;
                 }
-                ExprKind::While { condition, body } => {
+                ExprKind::While {
+                    condition,
+                    body,
+                    invariant,
+                } => {
                     r.expr(condition)?;
+                    if let Some(invariant) = invariant {
+                        r.expr(invariant)?;
+                    }
                     r.block(body)?;
                 }
                 ExprKind::Loop(body) => r.block(body)?,

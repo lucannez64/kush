@@ -2,10 +2,14 @@
 " server's semantic tokens take over when it is.
 " Reserved words (Kind variants and contextual identifiers).
 syntax keyword kushKeyword use let mut return if else while loop break continue match enum
-syntax keyword kushKeyword struct type module erased handle perform with total
+syntax keyword kushKeyword struct type module erased perform with where
 syntax keyword kushKeyword pub trait impl prop effect row foreign test ensures algebra dyn const
 " Contextual words, keywords only before a name (`x is Some`, `y as i64`).
 syntax match kushKeyword "\<\(is\|as\|for\)\ze\s\+\h"
+" Contextual: `total fn|enum`, `handle Op:`, a loop's `invariant {`.
+syntax match kushKeyword "\<total\ze\s\+\(fn\|enum\)\>"
+syntax match kushKeyword "\<handle\ze\s\+\h\w*\s*:"
+syntax match kushKeyword "\<invariant\ze\s*{"
 syntax keyword kushBoolean true false
 
 " Strings, characters, and numbers.

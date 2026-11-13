@@ -120,17 +120,41 @@ string tag. A declared operation may be handled lexically and in addition:
 - a dynamically resolved `perform` additionally requires `panic` in the
   enclosing row: when no handler is active at run time the program aborts.
 
-A dynamic frame accepts a pure handler of either callable mode. A copyable
+A dynamic frame accepts a handler of either callable mode. A copyable
 noncapturing `fn` frame serves any number of performs. A capturing `once fn`
-frame owns its environment: the first perform transfers it to the call (the
-callee frees it), a second perform aborts with no active handler (the
-consumed frame still discharges its operation, so the lookup does not fall
-through to an outer handler for the same operation), and an unconsumed frame is dropped exactly once when the frame pops, or when an early
-`return`, `break`, or `continue` leaves the handled body. A handler with
-arbitrary effects is rejected because a called function's row would otherwise
-omit them. A lexical handler for a declared operation is checked by the same
-rules. Handlers for undeclared operation names keep the original lexical
-behavior.
+frame owns its environment. When every capture is copyable (references,
+by-reference scalars, plain values) and the handler is written at the
+`handle` and resumes in tail position, the frame is **reusable**: each
+perform, lexical ones included, calls a fresh copy of the environment (the
+callee frees the copy) and the frame frees the original when it pops, so the
+handler serves any number of performs and keeps its state in what it captures
+by reference. Any other capturing handler is consumed: the first perform
+transfers the environment to the call, a second perform aborts with no
+active handler (the consumed frame still discharges its operation, so the
+lookup does not fall through to an outer handler for the same operation), and
+an unconsumed frame is dropped exactly once when the frame pops, or when an
+early `return`, `break`, or `continue` leaves the handled body. A handler's
+borrowed captures stay borrowed until the handled body ends, so the body
+cannot touch state the handler writes.
+
+A handler's own effects must be declared on the operation:
+
+```text
+effect Present: Bytes -> Bool ! {io, alloc, panic};
+```
+
+Every `perform Present(..)` then requires `{io, alloc, panic}` (besides
+`Present` and `panic`) in its row, so a called function's row still shows
+everything its handler may do, and a handler may have only those effects.
+Only built-in effects can be declared; an operation without a list keeps
+requiring pure handlers. A lexical handler for a declared operation is
+checked by the same rules. Handlers for undeclared operation names keep the
+original lexical behavior.
+
+The [Game Boy example](../examples/gameboy/README.md) uses both: its core
+performs `Buttons`, `Present` and `Play` once per frame, and the window,
+terminal, headless runner and a test are each a set of handlers that share a
+window, controls and pacing state through captured references.
 
 The reference evaluator and the native runtime both implement the same stack.
 The native stack is per structured task (task 0 is the root) and is restored by
@@ -295,8 +319,9 @@ reference evaluator.
 - a child task resumes inherited copyable frames with the identity token;
 - frames a multishot handler installs around its `resume` calls remain
   visible to the resumed code (one-shot continuations hide them);
-- a capturing (`once`) handler for a declared operation cannot resume
-  performs in called functions (it is consumed by the first one);
+- a capturing handler for a declared operation that owns a capture (or is not
+  a tail-resuming lambda at the `handle`) cannot resume performs in called
+  functions (it is consumed by the first one);
 - declared effect rows are a finite 16-bit universe: four built-in bits plus at
   most twelve `effect` operations. There is no effect-polymorphic handler type
   over operation names, and the handler contract is a single operation per

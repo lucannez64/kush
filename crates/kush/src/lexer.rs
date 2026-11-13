@@ -12,7 +12,6 @@ pub enum Kind {
     /// A lifetime name such as `'a`, distinct from a character literal.
     Lifetime(String),
     Fn,
-    Total,
     Pub,
     Let,
     Mut,
@@ -31,7 +30,6 @@ pub enum Kind {
     Break,
     Continue,
     /// Lexical tail-resumptive effect handler and operation perform.
-    Handle,
     Perform,
     With,
     True,
@@ -201,7 +199,6 @@ impl Lexer<'_> {
             }
             return Ok(match &self.source[start..self.pos] {
                 "fn" => Kind::Fn,
-                "total" => Kind::Total,
                 "pub" => Kind::Pub,
                 "let" => Kind::Let,
                 "mut" => Kind::Mut,
@@ -221,7 +218,6 @@ impl Lexer<'_> {
                 "loop" => Kind::Loop,
                 "break" => Kind::Break,
                 "continue" => Kind::Continue,
-                "handle" => Kind::Handle,
                 "perform" => Kind::Perform,
                 "with" => Kind::With,
                 text => Kind::Ident(text.to_owned()),

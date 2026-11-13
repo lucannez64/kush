@@ -1406,7 +1406,29 @@ fn semantic_token_data(text: &str) -> Value {
                 events.push((start, end, KEYWORD));
                 expected = Expected::Type;
             }
-            Kind::Module | Kind::Use | Kind::Handle | Kind::Perform | Kind::With => {
+            // Contextual keywords: `handle Name:` and `total fn|enum`.
+            Kind::Ident(word)
+                if (word == "handle"
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|t| matches!(t.kind, Kind::Ident(_)))
+                    && tokens.get(index + 2).is_some_and(|t| t.kind == Kind::Colon))
+                    || (word == "total"
+                        && tokens
+                            .get(index + 1)
+                            .is_some_and(|t| matches!(t.kind, Kind::Fn | Kind::Enum)))
+                    // `invariant {` after a loop condition, `where len >= N`.
+                    || (word == "invariant"
+                        && tokens.get(index + 1).is_some_and(|t| t.kind == Kind::LBrace))
+                    || (word == "where"
+                        && tokens
+                            .get(index + 1)
+                            .is_some_and(|t| matches!(&t.kind, Kind::Ident(next) if next == "len"))) =>
+            {
+                events.push((start, end, KEYWORD));
+                expected = Expected::None;
+            }
+            Kind::Module | Kind::Use | Kind::Perform | Kind::With => {
                 events.push((start, end, KEYWORD));
                 expected = if matches!(token.kind, Kind::Module | Kind::Use) {
                     Expected::Namespace
@@ -1486,7 +1508,6 @@ fn semantic_token_data(text: &str) -> Value {
                 events.push((start, end, KEYWORD));
             }
             Kind::Return
-            | Kind::Total
             | Kind::If
             | Kind::Else
             | Kind::Match
@@ -2034,6 +2055,32 @@ mod tests {
         assert_eq!(
             keyword_words(text),
             ["total", "fn", "ensures", "is", "let", "let", "dyn", "as"],
+        );
+    }
+
+    #[test]
+    fn handle_total_invariant_and_where_are_keywords_only_in_place() {
+        let text = "fn f(io: &mut Vec<u8> where len >= 8) -> i64 ! {Op, panic} {\n\
+                    let handle = 1;\n\
+                    let total = handle;\n\
+                    let invariant = total;\n\
+                    while total < 3 invariant { total <= 3 } { }\n\
+                    handle Op: i64 -> i64 with g { 0 }\n\
+                    }\n";
+        assert_eq!(
+            keyword_words(text),
+            [
+                "fn",
+                "mut",
+                "where",
+                "let",
+                "let",
+                "let",
+                "while",
+                "invariant",
+                "handle",
+                "with"
+            ],
         );
     }
 

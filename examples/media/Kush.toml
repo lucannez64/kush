@@ -1,0 +1,11 @@
+[package]
+name = "media"
+version = "0.1.0"
+entry = "src/lib.kush"
+test = "tests/main.kush"
+
+# A window with keyboard and gamepad input, and an audio stream, on the
+# system's SDL2 (linked, not bundled).
+[native]
+cargo-manifests = ["native/Cargo.toml"]
+libraries = ["SDL2"]

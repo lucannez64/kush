@@ -188,8 +188,10 @@ fn a_borrowing_closure_cannot_escape_its_lexical_block() {
 }
 
 #[test]
-fn two_exclusive_captures_of_one_location_are_rejected() {
-    rejects(
+fn two_closures_may_share_one_scalar_location() {
+    // A by-reference scalar is a shared cell: both closures write it in
+    // turn; the owner reads it once they are done.
+    agrees(
         r#"
         fn main() -> i64 ! {alloc, panic} {
             let mut n = 0;
@@ -200,7 +202,8 @@ fn two_exclusive_captures_of_one_location_are_rejected() {
             n
         }
         "#,
-        "cannot create an exclusive",
+        3,
+        "",
     );
 }
 

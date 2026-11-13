@@ -4843,6 +4843,150 @@
           "text": "Fifth independent review: accesses after the counter update were proved one step short (out-of-bounds read and write); fixed and re-reviewed, 0 differences over ~8,000 further fuzzed runs. Also a compile-time blowup from the per-declaration instance cap (mutual polymorphic recursion); fixed with a 1024 total for generic instances."
         }
       ]
+    },
+    {
+      "id": "LANG-PLACES",
+      "title": "Constants, element access and methods on places, two-phase borrows, wide records",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Module-level const; v[i] reads and place[i] = x writes on Vec fields through references; field assignment on let mut records; &self/&mut self methods on fields and through references; two-phase exclusive borrows in calls; records up to 256 words. docs/places.md.",
+      "commit": "b5641cc",
+      "log": [
+        {
+          "time": "2026-11-12 18:36:30",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-12 18:42:06",
+          "who": "agent",
+          "text": "done b5641cc"
+        },
+        {
+          "time": "2026-11-12 21:32:53",
+          "who": "agent",
+          "text": "Follow-ups: owning records as intermediate steps of reference places (m.apu.powered); precise field paths for owning-field loans and fields through references, so disjoint owning fields can be borrowed together; struct size/field/argument limits removed."
+        }
+      ]
+    },
+    {
+      "id": "GAMEBOY",
+      "title": "Game Boy emulator example in Kush",
+      "size": "L",
+      "hard": false,
+      "deps": [
+        "LANG-PLACES"
+      ],
+      "status": "in_progress",
+      "desc": "examples/gameboy: SM83 CPU, PPU, timer, MBC1/3/5, terminal front end. Passes Blargg cpu_instrs and instr_timing; 65x real time in LLVM builds. Left: dmg-acid2 and a real homebrew game (needs RGBDS or ROM files), audio, saves, HALT bug.",
+      "commit": null,
+      "log": [
+        {
+          "time": "2026-11-12 18:36:30",
+          "who": "agent",
+          "text": "started"
+        },
+        {
+          "time": "2026-11-12 18:42:06",
+          "who": "agent",
+          "text": "Core done in b5641cc: Blargg cpu_instrs + instr_timing pass, PPU scene test, terminal front end at 60 fps. Blocked on fetching ROMs: dmg-acid2 and homebrew games need RGBDS (building it was not permitted here) or ROM files from the user."
+        },
+        {
+          "time": "2026-11-12 19:14:15",
+          "who": "agent",
+          "text": "Plays a real game: 2048-gb (Homebrew Hub ROM) boots and plays in the terminal at 60 fps. dmg-acid2 still unrun."
+        }
+      ]
+    },
+    {
+      "id": "MEDIA",
+      "title": "media package: SDL2 window, keyboard and gamepad events, audio stream",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "examples/media: typed Kush API (Window, Event, Key, Button, Axis, Audio) over a dependency-free Rust adapter linking the system SDL2. Gamepads tested with a virtual SDL controller.",
+      "commit": "a181540",
+      "log": [
+        {
+          "time": "2026-11-12 21:40:40",
+          "who": "agent",
+          "text": "done a181540"
+        }
+      ]
+    },
+    {
+      "id": "GAMEBOY-SOUND",
+      "title": "Game Boy sound chip and desktop front end",
+      "size": "M",
+      "hard": false,
+      "deps": [
+        "GAMEBOY",
+        "MEDIA"
+      ],
+      "status": "done",
+      "desc": "APU (2 square, wave, noise, frame sequencer on DIV bit 12, mixing); window with sound paced by the audio queue, gamepads. dmg_sound 9/12; wave-RAM-while-playing quirks left.",
+      "commit": "a181540",
+      "log": [
+        {
+          "time": "2026-11-12 21:40:40",
+          "who": "agent",
+          "text": "done a181540"
+        }
+      ]
+    },
+    {
+      "id": "length-refined-fields",
+      "title": "Length-refined Vec fields with proved element accesses",
+      "size": "S",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "Length-refined Vec fields, proved element accesses, KUSH_PROOF_REPORT",
+      "commit": "05ad4a6",
+      "log": [
+        {
+          "time": "2026-11-12 22:32:56",
+          "who": "agent",
+          "text": "done 05ad4a6"
+        }
+      ]
+    },
+    {
+      "id": "stateful-effect-handlers",
+      "title": "Effectful, reusable capturing handlers; reference captures; linear media handles",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "effect Op: P -> R ! {io}; reusable frames for capturing handlers with copyable captures; scoped reference captures; Game Boy front ends as handlers; linear Window/Audio",
+      "commit": "aad49d9",
+      "log": [
+        {
+          "time": "2026-11-12 22:58:55",
+          "who": "agent",
+          "text": "done aad49d9"
+        }
+      ]
+    },
+    {
+      "id": "language-limits-pass",
+      "title": "Lift language limits found in the Game Boy example",
+      "size": "M",
+      "hard": false,
+      "deps": [],
+      "status": "done",
+      "desc": "refined params, loop invariants, join facts, shared cells, Option<&T> params, contextual keywords, saves/scale",
+      "commit": "88b2f46",
+      "log": [
+        {
+          "time": "2026-11-13 01:01:09",
+          "who": "agent",
+          "text": "done 88b2f46"
+        }
+      ]
     }
   ]
 }

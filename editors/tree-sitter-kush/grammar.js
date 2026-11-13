@@ -32,8 +32,10 @@ module.exports = grammar({
     block: $ => seq('{', repeat($._element), '}'),
     parenthesized: $ => seq('(', repeat($._element), ')'),
     bracketed: $ => seq('[', repeat($._element), ']'),
-    keyword: $ => choice('pub', 'total', 'foreign', 'let', 'mut', 'return', 'if', 'else', 'match', 'while', 'loop', 'break',
-      'continue', 'handle', 'perform', 'with', 'erased', 'as', 'from', 'in', 'where', 'linear', 'once',
+    // `total`, `handle` and `invariant` are contextual: identifiers to the
+    // grammar, highlighted as keywords by the queries where they act as one.
+    keyword: $ => choice('pub', 'foreign', 'let', 'mut', 'return', 'if', 'else', 'match', 'while', 'loop', 'break',
+      'continue', 'perform', 'with', 'erased', 'as', 'from', 'in', 'where', 'linear', 'once',
       'ensures', 'is', 'const', 'dyn', 'for'),
     boolean: $ => choice('true', 'false'),
     primitive_type: $ => choice('i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64',

@@ -234,12 +234,13 @@ fn review_regressions_for_postconditions() {
          fn main() -> i64 ! {} { 0 }",
         "cannot prove 'ensures { x > 0 }'",
     );
-    // A Bool goal is never weakened by dropping an unknown part.
+    // A Bool goal is never weakened by dropping an unknown part: the
+    // opaque call is some Bool, so `result` is not proved.
     rejects(
         "fn opaque(y: i64) -> Bool ! {} { y == 3 }
          fn always(x: i64) -> Bool ! {} ensures { result } { true && opaque(x) }
          fn main() -> i64 ! {} { 0 }",
-        "cannot be stated",
+        "cannot prove 'ensures { result }'",
     );
     rejects(
         "fn opaque(y: i64) -> Bool ! {} { y == 3 }

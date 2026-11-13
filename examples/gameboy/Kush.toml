@@ -1,0 +1,11 @@
+[package]
+name = "gameboy"
+version = "0.1.0"
+entry = "src/main.kush"
+test = "tests/main.kush"
+
+[native]
+cargo-manifests = ["terminal/Cargo.toml"]
+
+[dependencies]
+media = { path = "../media" }

@@ -51,8 +51,11 @@ exclusive references are supported; exclusive values remain affine. Replacing,
 dropping or escaping the referenced owner is rejected, including through
 branches, loop results and closure capture.
 
-Function/callable signatures and declared record fields containing optional
-references are explicitly rejected. They require named enum lifetime contracts,
+A named function may take an optional reference as a parameter
+(`fn queue(speaker: Option<&Audio>, ..)`): like any reference argument it lives
+for the call, and the caller's loans stay in force while it runs. Results,
+function-value signatures and declared record fields containing optional
+references are still rejected. They require named enum lifetime contracts,
 which are not currently part of the enum grammar. General borrowed enum
 payloads, slices and borrowed-record payloads keep their existing restrictions;
 the conventional borrowed `TaskExit<T>` remains its separate checked path.

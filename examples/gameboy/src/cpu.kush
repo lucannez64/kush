@@ -1,0 +1,578 @@
+module gameboy.cpu;
+
+use gameboy.cartridge.Mapper;
+use gameboy.machine;
+use gameboy.machine.Machine;
+
+// The Sharp SM83: a Z80 relative with an 8080-like register file. An opcode
+// splits into the fields x = bits 7-6, y = bits 5-3, z = bits 2-0, and the
+// operand fields decode into the enums below, so each instruction family is
+// written once.
+
+/// An 8-bit operand; `Hl` is the byte at address HL.
+
+pub enum Reg8 { B, C, D, E, H, L, Hl, A }
+/// A 16-bit operand for loads and arithmetic.
+pub enum Pair { Bc, De, Hl, Sp }
+/// The eight accumulator operations.
+pub enum Alu { Add, Adc, Sub, Sbc, And, Xor, Or, Cp }
+/// The four branch conditions.
+pub enum Cond { NotZero, Zero, NoCarry, Carry }
+/// The eight CB-prefixed rotates and shifts.
+pub enum Shift { Rlc, Rrc, Rl, Rr, Sla, Sra, Swap, Srl }
+
+fn reg8(field: u8) -> Reg8 ! {} {
+    match field & 7 {
+        0 => Reg8.B, 1 => Reg8.C, 2 => Reg8.D, 3 => Reg8.E,
+        4 => Reg8.H, 5 => Reg8.L, 6 => Reg8.Hl, _ => Reg8.A,
+    }
+}
+
+fn pair(field: u8) -> Pair ! {} {
+    match field & 3 { 0 => Pair.Bc, 1 => Pair.De, 2 => Pair.Hl, _ => Pair.Sp }
+}
+
+fn alu(field: u8) -> Alu ! {} {
+    match field & 7 {
+        0 => Alu.Add, 1 => Alu.Adc, 2 => Alu.Sub, 3 => Alu.Sbc,
+        4 => Alu.And, 5 => Alu.Xor, 6 => Alu.Or, _ => Alu.Cp,
+    }
+}
+
+fn cond(field: u8) -> Cond ! {} {
+    match field & 3 { 0 => Cond.NotZero, 1 => Cond.Zero, 2 => Cond.NoCarry, _ => Cond.Carry }
+}
+
+fn shift(field: u8) -> Shift ! {} {
+    match field & 7 {
+        0 => Shift.Rlc, 1 => Shift.Rrc, 2 => Shift.Rl, 3 => Shift.Rr,
+        4 => Shift.Sla, 5 => Shift.Sra, 6 => Shift.Swap, _ => Shift.Srl,
+    }
+}
+
+// --- Small helpers ------------------------------------------------------------
+
+fn wide(value: u8) -> i64 ! {} ensures { result == value } { Int.convert(value) }
+fn byte(value: i64) -> u8 ! {} { Int.truncate(value) }
+fn word(value: i64) -> u16 ! {} { Int.truncate(value) }
+fn flag(on: Bool, bit: u8) -> u8 ! {} { if on { bit } else { 0 } }
+/// The byte with only bit `n` set.
+fn mask(n: u8) -> u8 ! {panic} { let one: u8 = 1; one << n }
+
+fn join(high: u8, low: u8) -> u16 ! {panic} {
+    (Int.convert::<u16>(high) << 8) | Int.convert::<u16>(low)
+}
+
+fn high(value: u16) -> u8 ! {panic} { Int.truncate(value >> 8) }
+fn low(value: u16) -> u8 ! {} { Int.truncate(value) }
+
+fn set_flags<M>(m: &mut Machine<M>, zero: Bool, subtract: Bool, half: Bool, carry: Bool) -> Unit ! {} {
+    m.f = flag(zero, machine.ZERO)
+        | flag(subtract, machine.SUBTRACT)
+        | flag(half, machine.HALF)
+        | flag(carry, machine.CARRY);
+}
+
+fn carry<M>(m: &Machine<M>) -> Bool ! {} { (m.f & machine.CARRY) != 0 }
+
+fn hl<M>(m: &Machine<M>) -> u16 ! {panic} { join(m.h, m.l) }
+
+fn set_hl<M>(m: &mut Machine<M>, value: u16) -> Unit ! {panic} {
+    m.h = high(value);
+    m.l = low(value);
+}
+
+fn fetch<M: Mapper>(m: &mut Machine<M>) -> u8 ! {panic} {
+    let value = machine.read(m, m.pc);
+    m.pc = Int.wrapping_add(m.pc, 1);
+    value
+}
+
+fn fetch16<M: Mapper>(m: &mut Machine<M>) -> u16 ! {panic} {
+    let low = fetch(m);
+    join(fetch(m), low)
+}
+
+fn get<M: Mapper>(m: &Machine<M>, r: Reg8) -> u8 ! {panic} {
+    match r {
+        Reg8.B => m.b, Reg8.C => m.c, Reg8.D => m.d, Reg8.E => m.e,
+        Reg8.H => m.h, Reg8.L => m.l, Reg8.Hl => machine.read(m, hl(m)), Reg8.A => m.a,
+    }
+}
+
+fn set<M: Mapper>(m: &mut Machine<M>, r: Reg8, value: u8) -> Unit ! {alloc, panic} {
+    match r {
+        Reg8.B => { m.b = value; }, Reg8.C => { m.c = value; },
+        Reg8.D => { m.d = value; }, Reg8.E => { m.e = value; },
+        Reg8.H => { m.h = value; }, Reg8.L => { m.l = value; },
+        Reg8.Hl => { machine.write(m, hl(m), value); },
+        Reg8.A => { m.a = value; },
+    }
+}
+
+fn get_pair<M>(m: &Machine<M>, p: Pair) -> u16 ! {panic} {
+    match p {
+        Pair.Bc => join(m.b, m.c),
+        Pair.De => join(m.d, m.e),
+        Pair.Hl => join(m.h, m.l),
+        Pair.Sp => m.sp,
+    }
+}
+
+fn set_pair<M>(m: &mut Machine<M>, p: Pair, value: u16) -> Unit ! {panic} {
+    match p {
+        Pair.Bc => { m.b = high(value); m.c = low(value); },
+        Pair.De => { m.d = high(value); m.e = low(value); },
+        Pair.Hl => { m.h = high(value); m.l = low(value); },
+        Pair.Sp => { m.sp = value; },
+    }
+}
+
+fn push<M: Mapper>(m: &mut Machine<M>, value: u16) -> Unit ! {alloc, panic} {
+    m.sp = Int.wrapping_sub(m.sp, 1);
+    machine.write(m, m.sp, high(value));
+    m.sp = Int.wrapping_sub(m.sp, 1);
+    machine.write(m, m.sp, low(value));
+}
+
+fn pop<M: Mapper>(m: &mut Machine<M>) -> u16 ! {panic} {
+    let low = machine.read(m, m.sp);
+    m.sp = Int.wrapping_add(m.sp, 1);
+    let high = machine.read(m, m.sp);
+    m.sp = Int.wrapping_add(m.sp, 1);
+    join(high, low)
+}
+
+fn holds<M>(m: &Machine<M>, c: Cond) -> Bool ! {} {
+    match c {
+        Cond.NotZero => (m.f & machine.ZERO) == 0,
+        Cond.Zero => (m.f & machine.ZERO) != 0,
+        Cond.NoCarry => (m.f & machine.CARRY) == 0,
+        Cond.Carry => (m.f & machine.CARRY) != 0,
+    }
+}
+
+// --- Arithmetic ---------------------------------------------------------------
+
+fn accumulate<M>(m: &mut Machine<M>, op: Alu, operand: u8) -> Unit ! {panic} {
+    let a = wide(m.a);
+    let v = wide(operand);
+    let c = if carry(m) { 1 } else { 0 };
+    match op {
+        Alu.Add => {
+            let r = a + v;
+            set_flags(m, (r & 0xFF) == 0, false, (a & 0xF) + (v & 0xF) > 0xF, r > 0xFF);
+            m.a = byte(r);
+        },
+        Alu.Adc => {
+            let r = a + v + c;
+            set_flags(m, (r & 0xFF) == 0, false, (a & 0xF) + (v & 0xF) + c > 0xF, r > 0xFF);
+            m.a = byte(r);
+        },
+        Alu.Sub => {
+            let r = a - v;
+            set_flags(m, (r & 0xFF) == 0, true, (a & 0xF) < (v & 0xF), r < 0);
+            m.a = byte(r);
+        },
+        Alu.Sbc => {
+            let r = a - v - c;
+            set_flags(m, (r & 0xFF) == 0, true, (a & 0xF) - (v & 0xF) - c < 0, r < 0);
+            m.a = byte(r);
+        },
+        Alu.And => {
+            m.a = m.a & operand;
+            set_flags(m, m.a == 0, false, true, false);
+        },
+        Alu.Xor => {
+            m.a = m.a ^ operand;
+            set_flags(m, m.a == 0, false, false, false);
+        },
+        Alu.Or => {
+            m.a = m.a | operand;
+            set_flags(m, m.a == 0, false, false, false);
+        },
+        Alu.Cp => {
+            let r = a - v;
+            set_flags(m, r == 0, true, (a & 0xF) < (v & 0xF), r < 0);
+        },
+    }
+}
+
+/// INC and DEC of an 8-bit operand leave the carry flag alone.
+fn step_by<M>(m: &mut Machine<M>, value: u8, up: Bool) -> u8 ! {} {
+    let keep = m.f & machine.CARRY;
+    let result = if up { Int.wrapping_add(value, 1) } else { Int.wrapping_sub(value, 1) };
+    let half = if up { (value & 0x0F) == 0x0F } else { (value & 0x0F) == 0 };
+    m.f = keep | flag(result == 0, machine.ZERO) | flag(!up, machine.SUBTRACT) | flag(half, machine.HALF);
+    result
+}
+
+fn rotate<M>(m: &mut Machine<M>, op: Shift, value: u8) -> u8 ! {panic} {
+    let v = wide(value);
+    let c = if carry(m) { 1 } else { 0 };
+    let (result, out) = match op {
+        Shift.Rlc => (((v << 1) | (v >> 7)) & 0xFF, v >> 7),
+        Shift.Rrc => (((v >> 1) | (v << 7)) & 0xFF, v & 1),
+        Shift.Rl => (((v << 1) | c) & 0xFF, v >> 7),
+        Shift.Rr => ((v >> 1) | (c << 7), v & 1),
+        Shift.Sla => ((v << 1) & 0xFF, v >> 7),
+        Shift.Sra => ((v >> 1) | (v & 0x80), v & 1),
+        Shift.Swap => (((v << 4) | (v >> 4)) & 0xFF, 0),
+        Shift.Srl => (v >> 1, v & 1),
+    };
+    set_flags(m, result == 0, false, false, out == 1);
+    byte(result)
+}
+
+fn add_hl<M>(m: &mut Machine<M>, operand: u16) -> Unit ! {panic} {
+    let a = machine.wide(hl(m));
+    let v = machine.wide(operand);
+    let r = a + v;
+    let zero = m.f & machine.ZERO;
+    m.f = zero | flag((a & 0xFFF) + (v & 0xFFF) > 0xFFF, machine.HALF) | flag(r > 0xFFFF, machine.CARRY);
+    set_hl(m, word(r));
+}
+
+/// SP plus a signed byte, as ADD SP,e and LD HL,SP+e compute it: the flags
+/// come from the unsigned low-byte addition.
+fn sp_offset<M: Mapper>(m: &mut Machine<M>) -> u16 ! {panic} {
+    let e = fetch(m);
+    let sp = machine.wide(m.sp);
+    let v = wide(e);
+    let signed = if v >= 0x80 { v - 0x100 } else { v };
+    set_flags(m, false, false, (sp & 0xF) + (v & 0xF) > 0xF, (sp & 0xFF) + v > 0xFF);
+    word(sp + signed)
+}
+
+fn daa<M>(m: &mut Machine<M>) -> Unit ! {panic} {
+    let mut a = wide(m.a);
+    let mut carry_out = carry(m);
+    let half = (m.f & machine.HALF) != 0;
+    if (m.f & machine.SUBTRACT) == 0 {
+        if carry_out || a > 0x99 { a = a + 0x60; carry_out = true; }
+        if half || (a & 0x0F) > 0x09 { a = a + 0x06; }
+    } else {
+        if carry_out { a = a - 0x60; }
+        if half { a = a - 0x06; }
+    }
+    m.a = byte(a);
+    let subtract = m.f & machine.SUBTRACT;
+    m.f = subtract | flag(m.a == 0, machine.ZERO) | flag(carry_out, machine.CARRY);
+}
+
+fn jump_relative<M: Mapper>(m: &mut Machine<M>, taken: Bool) -> i64 ! {panic} {
+    let e = wide(fetch(m));
+    if !taken { return 8; }
+    let signed = if e >= 0x80 { e - 0x100 } else { e };
+    m.pc = word(machine.wide(m.pc) + signed);
+    12
+}
+
+// --- Execution ----------------------------------------------------------------
+
+/// Service a pending interrupt or run one instruction; the clock cycles it
+/// took.
+pub fn step<M: Mapper>(m: &mut Machine<M>) -> i64 ! {alloc, panic} {
+    let pending = m.ie & m.io[0x0F] & 0x1F;
+    if pending != 0 {
+        m.halted = false;
+        if m.ime {
+            m.ime = false;
+            let mut bit: u8 = 0;
+            while ((pending >> bit) & 1) == 0 { bit = bit + 1; }
+            m.io[0x0F] = m.io[0x0F] & !mask(bit);
+            push(m, m.pc);
+            m.pc = 0x40 + 8 * Int.convert::<u16>(bit);
+            return 20;
+        }
+    }
+    if m.halted { return 4; }
+    // EI takes effect after the instruction that follows it.
+    let enable = m.ime_pending;
+    m.ime_pending = false;
+    let cycles = execute(m, fetch(m));
+    if enable { m.ime = true; }
+    cycles
+}
+
+fn execute<M: Mapper>(m: &mut Machine<M>, op: u8) -> i64 ! {alloc, panic} {
+    let x = op >> 6;
+    let y = (op >> 3) & 7;
+    let z = op & 7;
+    match x {
+        0 => block0(m, op, y, z),
+        1 => {
+            if op == 0x76 {
+                m.halted = true;
+                return 4;
+            }
+            let value = get(m, reg8(z));
+            set(m, reg8(y), value);
+            if z == 6 || y == 6 { 8 } else { 4 }
+        },
+        2 => {
+            let value = get(m, reg8(z));
+            accumulate(m, alu(y), value);
+            if z == 6 { 8 } else { 4 }
+        },
+        _ => block3(m, op, y, z),
+    }
+}
+
+fn block0<M: Mapper>(m: &mut Machine<M>, op: u8, y: u8, z: u8) -> i64 ! {alloc, panic} {
+    let p = pair(y >> 1);
+    let q = y & 1;
+    match z {
+        0 => match y {
+            0 => 4,
+            1 => {
+                let address = fetch16(m);
+                machine.write(m, address, low(m.sp));
+                machine.write(m, Int.wrapping_add(address, 1), high(m.sp));
+                20
+            },
+            2 => { fetch(m); 4 },
+            3 => jump_relative(m, true),
+            _ => jump_relative(m, holds(m, cond(y - 4))),
+        },
+        1 => {
+            if q == 0 {
+                let value = fetch16(m);
+                set_pair(m, p, value);
+                12
+            } else {
+                add_hl(m, get_pair(m, p));
+                8
+            }
+        },
+        2 => {
+            let address = match y >> 1 {
+                0 => join(m.b, m.c),
+                1 => join(m.d, m.e),
+                _ => hl(m),
+            };
+            if (y >> 1) == 2 { set_hl(m, Int.wrapping_add(address, 1)); }
+            if (y >> 1) == 3 { set_hl(m, Int.wrapping_sub(address, 1)); }
+            if q == 0 { machine.write(m, address, m.a); } else { m.a = machine.read(m, address); }
+            8
+        },
+        3 => {
+            let value = get_pair(m, p);
+            set_pair(m, p, if q == 0 { Int.wrapping_add(value, 1) } else { Int.wrapping_sub(value, 1) });
+            8
+        },
+        4 => {
+            let value = get(m, reg8(y));
+            let result = step_by(m, value, true);
+            set(m, reg8(y), result);
+            if y == 6 { 12 } else { 4 }
+        },
+        5 => {
+            let value = get(m, reg8(y));
+            let result = step_by(m, value, false);
+            set(m, reg8(y), result);
+            if y == 6 { 12 } else { 4 }
+        },
+        6 => {
+            let value = fetch(m);
+            set(m, reg8(y), value);
+            if y == 6 { 12 } else { 8 }
+        },
+        _ => {
+            match y {
+                0 | 1 | 2 | 3 => {
+                    // RLCA, RRCA, RLA, RRA: as the CB forms, but Z is clear.
+                    m.a = rotate(m, shift(y), m.a);
+                    m.f = m.f & machine.CARRY;
+                },
+                4 => daa(m),
+                5 => {
+                    m.a = !m.a;
+                    m.f = (m.f & (machine.ZERO | machine.CARRY)) | machine.SUBTRACT | machine.HALF;
+                },
+                6 => { m.f = (m.f & machine.ZERO) | machine.CARRY; },
+                _ => { m.f = (m.f & (machine.ZERO | machine.CARRY)) ^ machine.CARRY; },
+            }
+            4
+        },
+    }
+}
+
+fn block3<M: Mapper>(m: &mut Machine<M>, op: u8, y: u8, z: u8) -> i64 ! {alloc, panic} {
+    let q = y & 1;
+    match z {
+        0 => match y {
+            4 => {
+                let address = 0xFF00 | Int.convert::<u16>(fetch(m));
+                machine.write(m, address, m.a);
+                12
+            },
+            5 => {
+                m.sp = sp_offset(m);
+                16
+            },
+            6 => {
+                let address = 0xFF00 | Int.convert::<u16>(fetch(m));
+                m.a = machine.read(m, address);
+                12
+            },
+            7 => {
+                let value = sp_offset(m);
+                set_hl(m, value);
+                12
+            },
+            _ => {
+                if holds(m, cond(y)) {
+                    m.pc = pop(m);
+                    20
+                } else {
+                    8
+                }
+            },
+        },
+        1 => {
+            if q == 0 {
+                let value = pop(m);
+                match y >> 1 {
+                    0 => set_pair(m, Pair.Bc, value),
+                    1 => set_pair(m, Pair.De, value),
+                    2 => set_pair(m, Pair.Hl, value),
+                    _ => {
+                        m.a = high(value);
+                        m.f = low(value) & 0xF0;
+                    },
+                }
+                12
+            } else {
+                match y >> 1 {
+                    0 => { m.pc = pop(m); 16 },
+                    1 => { m.pc = pop(m); m.ime = true; 16 },
+                    2 => { m.pc = hl(m); 4 },
+                    _ => { m.sp = hl(m); 8 },
+                }
+            }
+        },
+        2 => match y {
+            4 => {
+                machine.write(m, 0xFF00 | Int.convert::<u16>(m.c), m.a);
+                8
+            },
+            5 => {
+                let address = fetch16(m);
+                machine.write(m, address, m.a);
+                16
+            },
+            6 => {
+                m.a = machine.read(m, 0xFF00 | Int.convert::<u16>(m.c));
+                8
+            },
+            7 => {
+                let address = fetch16(m);
+                m.a = machine.read(m, address);
+                16
+            },
+            _ => {
+                let target = fetch16(m);
+                if holds(m, cond(y)) {
+                    m.pc = target;
+                    16
+                } else {
+                    12
+                }
+            },
+        },
+        3 => match y {
+            0 => {
+                m.pc = fetch16(m);
+                16
+            },
+            1 => prefixed(m, fetch(m)),
+            6 => {
+                m.ime = false;
+                m.ime_pending = false;
+                4
+            },
+            7 => {
+                m.ime_pending = true;
+                4
+            },
+            _ => illegal(m, op),
+        },
+        4 => {
+            if y >= 4 { return illegal(m, op); }
+            let target = fetch16(m);
+            if holds(m, cond(y)) {
+                push(m, m.pc);
+                m.pc = target;
+                24
+            } else {
+                12
+            }
+        },
+        5 => {
+            if q == 0 {
+                let value = match y >> 1 {
+                    0 => join(m.b, m.c),
+                    1 => join(m.d, m.e),
+                    2 => hl(m),
+                    _ => join(m.a, m.f),
+                };
+                push(m, value);
+                16
+            } else if y == 1 {
+                let target = fetch16(m);
+                push(m, m.pc);
+                m.pc = target;
+                24
+            } else {
+                illegal(m, op)
+            }
+        },
+        6 => {
+            let value = fetch(m);
+            accumulate(m, alu(y), value);
+            8
+        },
+        _ => {
+            push(m, m.pc);
+            m.pc = Int.convert::<u16>(y) * 8;
+            16
+        },
+    }
+}
+
+/// The eleven unused opcodes lock up a real CPU; here they halt it for good.
+fn illegal<M>(m: &mut Machine<M>, op: u8) -> i64 ! {} {
+    m.halted = true;
+    m.ime = false;
+    m.ie = 0;
+    4
+}
+
+fn prefixed<M: Mapper>(m: &mut Machine<M>, op: u8) -> i64 ! {alloc, panic} {
+    let x = op >> 6;
+    let y = (op >> 3) & 7;
+    let target = reg8(op);
+    let value = get(m, target);
+    let memory = (op & 7) == 6;
+    match x {
+        0 => {
+            let result = rotate(m, shift(y), value);
+            set(m, target, result);
+            if memory { 16 } else { 8 }
+        },
+        1 => {
+            let zero = (value & mask(y)) == 0;
+            m.f = (m.f & machine.CARRY) | flag(zero, machine.ZERO) | machine.HALF;
+            if memory { 12 } else { 8 }
+        },
+        2 => {
+            set(m, target, value & !mask(y));
+            if memory { 16 } else { 8 }
+        },
+        _ => {
+            set(m, target, value | mask(y));
+            if memory { 16 } else { 8 }
+        },
+    }
+}

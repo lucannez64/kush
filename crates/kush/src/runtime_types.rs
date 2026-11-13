@@ -11,6 +11,9 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 type Result<T> = std::result::Result<T, Diagnostic>;
+/// The width limit of inline layouts other than nominal records. A `struct`
+/// has no size or field-count limit: it is the natural home of a large
+/// state, and its cost is in by-value copies, which the program chooses.
 pub(crate) const MAX_WORDS: usize = 32;
 /// A normalized union has at most this many alternatives. Larger unions are
 /// rejected rather than causing unbounded dispatchers and layout searches.
@@ -651,12 +654,6 @@ impl<'a> Types<'a> {
                 return Err(Diagnostic::new(
                     declaration.item.span,
                     "runtime enums require 1..64 variants",
-                ));
-            }
-            if fields.is_some_and(|f| f.len() > 64) {
-                return Err(Diagnostic::new(
-                    declaration.item.span,
-                    "records support at most 64 fields",
                 ));
             }
             for generic in generics {
@@ -4968,7 +4965,7 @@ impl<'a> Types<'a> {
                 }
                 largest = largest.max(words);
             }
-            if largest > MAX_WORDS {
+            if !enums[id].record && largest > MAX_WORDS {
                 return Err(Diagnostic::new(
                     span,
                     "inline enum exceeds the 32-word layout limit",

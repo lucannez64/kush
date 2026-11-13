@@ -369,10 +369,6 @@
         },
         {
           "type": "STRING",
-          "value": "total"
-        },
-        {
-          "type": "STRING",
           "value": "foreign"
         },
         {
@@ -414,10 +410,6 @@
         {
           "type": "STRING",
           "value": "continue"
-        },
-        {
-          "type": "STRING",
-          "value": "handle"
         },
         {
           "type": "STRING",

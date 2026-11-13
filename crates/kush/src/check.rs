@@ -504,7 +504,9 @@ fn alias_refs_in_expr(resolution: &Resolution, expr: &Expr, out: &mut BTreeSet<B
                 alias_refs_in_expr(resolution, &arm.body, out);
             }
         }
-        ExprKind::While { condition, body } => {
+        ExprKind::While {
+            condition, body, ..
+        } => {
             alias_refs_in_expr(resolution, condition, out);
             alias_refs_in_block(resolution, body, out);
         }

@@ -1,0 +1,248 @@
+module gameboy.tests.main;
+
+use std.test;
+use gameboy.cartridge;
+use gameboy.cartridge.Mapper;
+use gameboy.cpu;
+use gameboy.emulator;
+use gameboy.machine;
+use gameboy.machine.Machine;
+
+// Each test assembles a few instructions at 0x0100 of a blank 32 KiB ROM and
+// runs them. The Blargg test ROMs check every instruction exhaustively; these
+// pin down the behaviours around them: flags, the stack, interrupts, banking
+// and frame timing.
+
+fn rom(code: &Vec<u8>) -> Vec<u8> ! {alloc, panic} {
+    let mut image = cartridge.zeroed(0x8000);
+    let mut i = 0;
+    while i < code.len() {
+        image[0x100 + i] = code[i];
+        i = i + 1;
+    }
+    image
+}
+
+fn assemble(bytes: &Bytes) -> Vec<u8> ! {alloc, panic} {
+    let mut out: Vec<u8> = Vec.with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        out = out.push(Int.truncate(bytes[i]));
+        i = i + 1;
+    }
+    out
+}
+
+fn machine_for(code: &Vec<u8>) -> Machine<cartridge.Plain> ! {alloc, panic} {
+    machine.new(cartridge.plain(&rom(code)))
+}
+
+/// Run until HALT (or a step budget runs out).
+fn run<M: Mapper>(m: &mut Machine<M>, budget: i64) -> Unit ! {alloc, panic} {
+    let mut steps = 0;
+    while !m.halted && steps < budget {
+        let cycles = cpu.step(m);
+        machine.tick_timer(m, cycles);
+        steps = steps + 1;
+    }
+}
+
+fn wide(value: u8) -> i64 ! {} { Int.convert(value) }
+
+#[test]
+fn decimal_adjust_turns_binary_sums_into_bcd() -> Unit ! {io, alloc, panic} {
+    // LD A,0x15; ADD A,0x27; DAA; HALT
+    let mut code: Vec<u8> = Vec.new();
+    code = code.push(0x3E).push(0x15).push(0xC6).push(0x27).push(0x27).push(0x76);
+    let mut m = machine_for(&code);
+    run(&mut m, 100);
+    test.equal_i64(wide(m.a), 0x42);
+    test.equal_i64(wide(m.f) & 0x80, 0);
+}
+
+#[test]
+fn push_and_pop_move_pairs_through_the_stack() -> Unit ! {io, alloc, panic} {
+    // LD SP,0xDFF0; LD BC,0x1234; PUSH BC; POP DE; HALT
+    let mut code: Vec<u8> = Vec.new();
+    code = code.push(0x31).push(0xF0).push(0xDF);
+    code = code.push(0x01).push(0x34).push(0x12);
+    code = code.push(0xC5).push(0xD1).push(0x76);
+    let mut m = machine_for(&code);
+    run(&mut m, 100);
+    test.equal_i64(wide(m.d), 0x12);
+    test.equal_i64(wide(m.e), 0x34);
+    test.equal_i64(machine.wide(m.sp), 0xDFF0);
+}
+
+#[test]
+fn a_timer_interrupt_wakes_halt_and_jumps_to_its_vector() -> Unit ! {io, alloc, panic} {
+    // TIMA = 0xFE, TAC = enabled at 16 cycles, IE = timer, EI, HALT. The
+    // vector at 0x50 loads B and halts again.
+    let mut code: Vec<u8> = Vec.new();
+    code = code.push(0x3E).push(0xFE).push(0xE0).push(0x05);
+    code = code.push(0x3E).push(0x05).push(0xE0).push(0x07);
+    code = code.push(0x3E).push(0x04).push(0xE0).push(0xFF);
+    code = code.push(0xFB).push(0x76);
+    let mut m = machine_for(&code);
+    // Patch the interrupt vector: LD B,0x77; HALT.
+    let mut vector: Vec<u8> = Vec.new();
+    vector = vector.push(0x06).push(0x77).push(0x76);
+    let mut image = rom(&code);
+    image[0x50] = vector[0];
+    image[0x51] = vector[1];
+    image[0x52] = vector[2];
+    m = machine.new(cartridge.plain(&image));
+    run(&mut m, 50);
+    // Halted at the first HALT; the timer keeps counting and wakes it.
+    m.halted = false;
+    let mut steps = 0;
+    while wide(m.b) != 0x77 && steps < 200 {
+        let cycles = cpu.step(&mut m);
+        machine.tick_timer(&mut m, cycles);
+        steps = steps + 1;
+    }
+    test.equal_i64(wide(m.b), 0x77);
+    test.is_false(m.ime);
+}
+
+#[test]
+fn mbc1_switches_the_upper_rom_window() -> Unit ! {io, alloc, panic} {
+    // Four 16 KiB banks, each starting with its own number.
+    let mut image = cartridge.zeroed(0x10000);
+    image[0x4000] = 1;
+    image[0x8000] = 2;
+    image[0xC000] = 3;
+    let mut board = cartridge.mbc1(&image);
+    test.equal_i64(wide(board.load(0x4000)), 1);
+    board.store(0x2000, 3);
+    test.equal_i64(wide(board.load(0x4000)), 3);
+    // Bank 0 is not selectable in the upper window: it means bank 1.
+    board.store(0x2000, 0);
+    test.equal_i64(wide(board.load(0x4000)), 1);
+    // RAM reads as open bus until it is enabled.
+    test.equal_i64(wide(board.load(0xA000)), 0xFF);
+    board.store(0x0000, 0x0A);
+    board.store(0xA000, 0x5A);
+    test.equal_i64(wide(board.load(0xA000)), 0x5A);
+}
+
+#[test]
+fn a_frame_is_70224_cycles_and_raises_vblank() -> Unit ! {io, alloc, panic} {
+    // JR -2: spin forever with the display on.
+    let mut code: Vec<u8> = Vec.new();
+    code = code.push(0x18).push(0xFE);
+    let mut m = machine_for(&code);
+    emulator.run_frame(&mut m);
+    let first = m.cycles;
+    emulator.run_frame(&mut m);
+    let second = m.cycles - first;
+    test.is_true(second >= 70224 - 12 && second <= 70224 + 12);
+    test.equal_i64(wide(m.io[0x0F]) & 0x01, 1);
+}
+
+#[test]
+fn a_triggered_square_wave_sounds_and_its_length_runs_out() -> Unit ! {io, alloc, panic} {
+    let mut code: Vec<u8> = Vec.new();
+    code = code.push(0x18).push(0xFE);
+    let mut m = machine_for(&code);
+    // Channel 1, both sides, full volume, 50% duty, 440-ish Hz, with a
+    // length of 64 - 0x3C = 4 ticks of 256 Hz (about 16 ms).
+    machine.write(&mut m, 0xFF26, 0x80);
+    machine.write(&mut m, 0xFF24, 0x77);
+    machine.write(&mut m, 0xFF25, 0x11);
+    machine.write(&mut m, 0xFF12, 0xF0);
+    machine.write(&mut m, 0xFF11, 0xBC);
+    machine.write(&mut m, 0xFF13, 0x00);
+    machine.write(&mut m, 0xFF14, 0xC7);
+    test.equal_i64(wide(machine.read(&m, 0xFF26)) & 0x01, 1);
+    m.apu.samples.clear();
+    let start = m.cycles;
+    emulator.run_frame(&mut m);
+    // The channel played, swinging both ways, then its length expired.
+    let mut highest = 0;
+    let mut lowest = 0;
+    let mut i = 0;
+    while i < m.apu.samples.len() {
+        let s = m.apu.samples[i];
+        if s > highest { highest = s; }
+        if s < lowest { lowest = s; }
+        i = i + 1;
+    }
+    test.is_true(highest > 1000 && lowest < -1000);
+    test.equal_i64(wide(machine.read(&m, 0xFF26)) & 0x01, 0);
+    // 48,000 stereo samples per 4,194,304 cycles, within one sample.
+    let expected = (m.cycles - start) * 48000 / 4194304 * 2;
+    test.is_true(m.apu.samples.len() >= expected - 2 && m.apu.samples.len() <= expected + 2);
+}
+
+#[test]
+fn the_core_runs_under_a_scripted_front_end() -> Unit ! {io, alloc, panic} {
+    // The program copies the button row of P1 to 0xC000 forever:
+    // LD A,0x10; LDH (0x00),A; loop: LDH A,(0x00); LD (0xC000),A; JR loop
+    let mut code: Vec<u8> = Vec.new();
+    code = code.push(0x3E).push(0x10).push(0xE0).push(0x00);
+    code = code.push(0xF0).push(0x00).push(0xEA).push(0x00).push(0xC0).push(0x18).push(0xF9);
+    let mut m = machine_for(&code);
+    // A test front end: hold A from the third frame, stop after four, and
+    // count what the core hands over.
+    let mut frame = 0;
+    let mut pictures = 0;
+    let mut samples = 0;
+    handle Buttons: Unit -> i64 with fn(
+        nothing: Unit,
+        resume: linear once fn(i64) -> i64 ! {},
+    ) -> i64 ! {panic} {
+        frame = frame + 1;
+        if frame > 4 { resume(-1) } else if frame >= 3 { resume(0x10) } else { resume(0) }
+    } {
+        handle Present: Vec<u8> -> (Vec<u8>, Bool) with fn(
+            screen: Vec<u8>,
+            resume: linear once fn((Vec<u8>, Bool)) -> (Vec<u8>, Bool) ! {},
+        ) -> (Vec<u8>, Bool) ! {panic} {
+            if screen.len() == machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT { pictures = pictures + 1; }
+            resume((screen, true))
+        } {
+            handle Play: Vec<i64> -> Vec<i64> with fn(
+                sound: Vec<i64>,
+                resume: linear once fn(Vec<i64>) -> Vec<i64> ! {},
+            ) -> Vec<i64> ! {panic} {
+                samples = samples + sound.len();
+                resume(sound)
+            } {
+                emulator.run(&mut m)
+            }
+        }
+    };
+    test.equal_i64(frame, 5);
+    test.equal_i64(pictures, 4);
+    // 4 frames of stereo at 48 kHz, about 800 pairs each.
+    test.is_true(samples > 6000 && samples < 7000);
+    // A (bit 0 of the button row) reads as 0 while held.
+    test.equal_i64(wide(machine.read(&m, 0xC000)), 0xDE);
+}
+
+#[test]
+fn battery_ram_survives_a_save_and_a_restore() -> Unit ! {io, alloc, panic} {
+    // MBC1 with RAM and a battery (type 0x03), 8 KiB of RAM (size code 2).
+    let mut image = cartridge.zeroed(0x8000);
+    image[0x147] = 0x03;
+    image[0x149] = 0x02;
+    let mut board = cartridge.mbc1(&image);
+    board.store(0x0000, 0x0A);
+    board.store(0xA123, 0x42);
+    // RAM banks wrap within the board's 8 KiB.
+    board.store(0x6000, 1);
+    board.store(0x4000, 1);
+    test.equal_i64(wide(board.load(0xA123)), 0x42);
+    let saved = board.saved();
+    test.equal_i64(saved.len(), 0x2000);
+    let mut fresh = cartridge.mbc1(&image);
+    fresh.restore(&saved);
+    fresh.store(0x0000, 0x0A);
+    test.equal_i64(wide(fresh.load(0xA123)), 0x42);
+    // Without a battery nothing is saved.
+    image[0x147] = 0x01;
+    let plain = cartridge.mbc1(&image);
+    let nothing = plain.saved();
+    test.equal_i64(nothing.len(), 0);
+}

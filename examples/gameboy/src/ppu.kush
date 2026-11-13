@@ -1,0 +1,214 @@
+module gameboy.ppu;
+
+use gameboy.machine;
+use gameboy.machine.Machine;
+
+// The picture processing unit. A frame is 154 lines of 456 dots; lines
+// 0-143 are visible and each passes through OAM search (mode 2, 80 dots),
+// drawing (mode 3, 172 dots) and horizontal blank (mode 0). Lines 144-153 are
+// vertical blank (mode 1). A visible line is drawn whole when its drawing
+// ends, which is when a DMG has finished reading the registers for it.
+
+const DOTS_PER_LINE: i64 = 456;
+const LINES: i64 = 154;
+const VISIBLE_LINES: i64 = 144;
+
+// LCDC bits.
+const DISPLAY_ON: u8 = 0x80;
+const WINDOW_MAP: u8 = 0x40;
+const WINDOW_ON: u8 = 0x20;
+const UNSIGNED_TILES: u8 = 0x10;
+const BACKGROUND_MAP: u8 = 0x08;
+const TALL_SPRITES: u8 = 0x04;
+const SPRITES_ON: u8 = 0x02;
+const BACKGROUND_ON: u8 = 0x01;
+
+fn wide(value: u8) -> i64 ! {} ensures { result == value } { Int.convert(value) }
+
+/// Advance the display by `cycles` dots.
+pub fn advance<M>(m: &mut Machine<M>, cycles: i64) -> Unit ! {panic} {
+    if (m.io[0x40] & DISPLAY_ON) == 0 {
+        // With the display off the line counter rests at 0 in mode 0.
+        m.dot = 0;
+        m.window_line = 0;
+        m.io[0x44] = 0;
+        m.io[0x41] = m.io[0x41] & 0xFC;
+        return;
+    }
+    m.dot = m.dot + cycles;
+    if m.dot >= DOTS_PER_LINE {
+        m.dot = m.dot - DOTS_PER_LINE;
+        next_line(m);
+    }
+    let line = wide(m.io[0x44]);
+    let mode: u8 = if line >= VISIBLE_LINES { 1 } else if m.dot < 80 { 2 } else if m.dot < 252 { 3 } else { 0 };
+    let previous = m.io[0x41] & 0x03;
+    if mode != previous {
+        if previous == 3 && line < VISIBLE_LINES { draw_line(m, line, _); }
+        m.io[0x41] = (m.io[0x41] & 0xFC) | mode;
+    }
+    update_stat(m);
+}
+
+fn next_line<M>(m: &mut Machine<M>) -> Unit ! {panic} {
+    let mut line = wide(m.io[0x44]) + 1;
+    if line == VISIBLE_LINES {
+        machine.request(m, machine.VBLANK);
+        m.frame_done = true;
+    }
+    if line == LINES {
+        line = 0;
+        m.window_line = 0;
+    }
+    m.io[0x44] = Int.truncate(line);
+}
+
+/// The coincidence flag, and the STAT interrupt on a rising edge of any
+/// enabled source.
+fn update_stat<M>(m: &mut Machine<M>) -> Unit ! {panic} {
+    let stat = m.io[0x41];
+    let coincidence = m.io[0x44] == m.io[0x45];
+    m.io[0x41] = if coincidence { stat | 0x04 } else { stat & 0xFB };
+    let mode = stat & 0x03;
+    let line = (coincidence && (stat & 0x40) != 0)
+        || (mode == 0 && (stat & 0x08) != 0)
+        || (mode == 1 && (stat & 0x10) != 0)
+        || (mode == 2 && (stat & 0x20) != 0);
+    if line && !m.stat_line { machine.request(m, machine.LCD_STAT); }
+    m.stat_line = line;
+}
+
+/// The colour index (0-3) of pixel `column` (0-7, left to right) of the
+/// tile row whose two bytes start at `at` in VRAM. The erased range is
+/// proved by every caller, so both reads are unchecked loads.
+fn tile_pixel<M>(
+    m: &Machine<M>,
+    at: i64,
+    column: i64,
+    erased inside: { 0 <= at && at < 0x1FFF },
+) -> u8 ! {panic} {
+    let low = m.vram[at];
+    let high = m.vram[at + 1];
+    let bit: u8 = Int.truncate(7 - column);
+    (((high >> bit) & 1) << 1) | ((low >> bit) & 1)
+}
+
+/// Where a background or window tile's data starts, from its map entry.
+fn tile_address(lcdc: u8, entry: u8) -> i64 ! {panic}
+    ensures { 0 <= result && result <= 0x17F0 }
+{
+    let index: i64 = Int.convert(entry);
+    // Unsigned indices count from 0x8000. Signed ones count from 0x9000,
+    // so 128-255 (-128 to -1) land on the same 0x8800-0x8FFF tiles.
+    if (lcdc & UNSIGNED_TILES) != 0 || index >= 128 { return index * 16; }
+    0x1000 + index * 16
+}
+
+fn shade(palette: u8, index: u8) -> u8 ! {panic} {
+    (palette >> (index * 2)) & 0x03
+}
+
+/// Choose the (at most ten) sprites on this line in OAM order, then order
+/// them by drawing priority: smaller X first, then lower OAM index.
+fn select_sprites<M>(m: &mut Machine<M>, lcdc: u8, line: i64, height: i64) -> i64 ! {panic}
+    ensures { 0 <= result && result <= 10 }
+{
+    if (lcdc & SPRITES_ON) == 0 { return 0; }
+    let mut count = 0;
+    let mut index = 0;
+    while index < 40 && count < 10 invariant { 0 <= count && count <= 10 } {
+        let top = wide(m.oam[index * 4]) - 16;
+        if line >= top && line < top + height {
+            // Insertion by X; a later sprite at the same X stays behind.
+            // `sprites` keeps OAM byte offsets (index * 4).
+            let x = m.oam[index * 4 + 1];
+            let mut at = count;
+            while at > 0 && m.oam[sprite_byte(m.sprites[at - 1], 1, _)] > x invariant { 0 <= at && at <= 9 } {
+                m.sprites[at] = m.sprites[at - 1];
+                at = at - 1;
+            }
+            m.sprites[at] = Int.truncate(index * 4);
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    count
+}
+
+/// Byte `field` (0-3) of the sprite whose OAM offset is `offset`. Offsets
+/// are multiples of four below 0xA0; the mask keeps that visible to the
+/// prover, so the read needs no check (OAM is backed by 0x100 bytes).
+fn sprite_byte(offset: u8, field: i64, erased small: { 0 <= field && field <= 3 }) -> i64 ! {}
+    ensures { 0 <= result && result <= 0xFF }
+{
+    let base: i64 = Int.convert(offset & 0xFC);
+    base + field
+}
+
+fn draw_line<M>(
+    m: &mut Machine<M>,
+    line: i64,
+    erased visible: { 0 <= line && line < 144 },
+) -> Unit ! {panic} {
+    let lcdc = m.io[0x40];
+    let scroll_y = wide(m.io[0x42]);
+    let scroll_x = wide(m.io[0x43]);
+    let window_y = wide(m.io[0x4A]);
+    let window_x = wide(m.io[0x4B]) - 7;
+    let background = (lcdc & BACKGROUND_ON) != 0;
+    let window = background && (lcdc & WINDOW_ON) != 0 && line >= window_y && window_x < 160;
+    // 0x1800 or 0x1C00, by the map-select bits (0x08 and 0x40).
+    let background_map = 0x1800 + wide(lcdc & BACKGROUND_MAP) * 0x80;
+    let window_map = 0x1800 + wide(lcdc & WINDOW_MAP) * 0x10;
+    let height = if (lcdc & TALL_SPRITES) != 0 { 16 } else { 8 };
+    let sprites = select_sprites(m, lcdc, line, height);
+    let row = line * machine.SCREEN_WIDTH;
+    let mut x = 0;
+    while x < machine.SCREEN_WIDTH {
+        // Background or window colour index; 0 when both are off.
+        let mut index: u8 = 0;
+        if window && x >= window_x {
+            let wx = x - window_x;
+            let wy = m.window_line;
+            let entry = m.vram[window_map + ((wy >> 3) & 31) * 32 + ((wx >> 3) & 31)];
+            index = tile_pixel(m, tile_address(lcdc, entry) + (wy & 7) * 2, wx & 7, _);
+        } else if background {
+            let bx = (x + scroll_x) & 0xFF;
+            let by = (line + scroll_y) & 0xFF;
+            let entry = m.vram[background_map + ((by >> 3) & 31) * 32 + ((bx >> 3) & 31)];
+            index = tile_pixel(m, tile_address(lcdc, entry) + (by & 7) * 2, bx & 7, _);
+        }
+        let mut colour = shade(m.io[0x47], index);
+        // The best sprite with an opaque pixel here decides; if it sits
+        // behind a non-zero background, the background shows, not a
+        // lower-priority sprite.
+        let mut s = 0;
+        while s < sprites {
+            let sprite = m.sprites[s];
+            let left = wide(m.oam[sprite_byte(sprite, 1, _)]) - 8;
+            if x >= left && x < left + 8 {
+                let attributes = m.oam[sprite_byte(sprite, 3, _)];
+                let mut row_in = line - (wide(m.oam[sprite_byte(sprite, 0, _)]) - 16);
+                if (attributes & 0x40) != 0 { row_in = height - 1 - row_in; }
+                let mut column = x - left;
+                if (attributes & 0x20) != 0 { column = 7 - column; }
+                let mut number = m.oam[sprite_byte(sprite, 2, _)];
+                if height == 16 { number = number & 0xFE; }
+                let tile: i64 = Int.convert(number);
+                // row_in is 0-15 for a selected sprite; the mask says so.
+                let pixel = tile_pixel(m, tile * 16 + (row_in & 15) * 2, column, _);
+                if pixel != 0 {
+                    if (attributes & 0x80) == 0 || index == 0 {
+                        let palette = if (attributes & 0x10) != 0 { m.io[0x49] } else { m.io[0x48] };
+                        colour = shade(palette, pixel);
+                    }
+                    break;
+                }
+            }
+            s = s + 1;
+        }
+        m.screen[row + x] = colour;
+        x = x + 1;
+    }
+    if window { m.window_line = m.window_line + 1; }
+}

@@ -123,6 +123,29 @@ rejected and has a regression test (`review_regressions_for_postconditions`):
 - `IntOp::Unchecked` wraps like the machine operation in the evaluator too,
   so a wrong proof could never make the two backends disagree.
 
+## Loop invariants
+
+A `while` loop may state what holds at every iteration:
+
+```kush
+while index < 40 && count < 10 invariant { 0 <= count && count <= 10 } {
+    if visible(index) { count = count + 1; }
+    index = index + 1;
+}
+// here: 0 <= count <= 10, and the condition is false
+```
+
+The invariant is a proposition of the same fragment as `ensures`. It is proved
+on entry, at the end of the body and at every `continue`, each with a
+certificate; it is assumed at the loop head, and after a loop without `break`
+together with the negated condition. A wrong invariant is a compile error at
+the place it fails.
+
+Two smaller additions help such proofs: a block's bounds on the values it
+rewrote survive the block (`x = x + 1` inside an `if` is still known as
+`x == old + 1` after it), and a branch join keeps what each path knew as one
+disjunctive fact, instead of forgetting every value either path changed.
+
 ## Limits
 
 - Method calls (`value.method()`) do not yet receive postcondition facts;

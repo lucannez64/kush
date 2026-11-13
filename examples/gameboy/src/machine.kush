@@ -1,0 +1,287 @@
+module gameboy.machine;
+
+use gameboy.apu;
+use gameboy.apu.Apu;
+use gameboy.cartridge;
+use gameboy.cartridge.Mapper;
+
+// The whole console state: CPU registers, the memories the console owns,
+// the I/O registers, and the cartridge. Generic over the cartridge's memory
+// bank controller, so `read` and `write` are specialized per controller.
+
+pub const SCREEN_WIDTH: i64 = 160;
+pub const SCREEN_HEIGHT: i64 = 144;
+
+// Interrupt bits in IE (0xFFFF) and IF (0xFF0F).
+pub const VBLANK: u8 = 0x01;
+pub const LCD_STAT: u8 = 0x02;
+pub const TIMER: u8 = 0x04;
+pub const SERIAL: u8 = 0x08;
+pub const JOYPAD: u8 = 0x10;
+
+// Flag bits in F.
+pub const ZERO: u8 = 0x80;
+pub const SUBTRACT: u8 = 0x40;
+pub const HALF: u8 = 0x20;
+pub const CARRY: u8 = 0x10;
+
+pub struct Machine<M> {
+    // CPU registers.
+    pub a: u8, pub f: u8,
+    pub b: u8, pub c: u8,
+    pub d: u8, pub e: u8,
+    pub h: u8, pub l: u8,
+    pub sp: u16, pub pc: u16,
+    /// Interrupt master enable, and EI's one-instruction delay.
+    pub ime: Bool,
+    pub ime_pending: Bool,
+    pub halted: Bool,
+
+    pub cartridge: M,
+    pub vram: Vec<u8> where len >= 0x2000,
+    pub wram: Vec<u8> where len >= 0x2000,
+    /// 0xA0 bytes of OAM, backed by 0x100 so any byte offset is in bounds.
+    pub oam: Vec<u8> where len >= 0x100,
+    pub hram: Vec<u8> where len >= 0x7F,
+    /// 0xFF00-0xFF7F as last written; reads of live registers are computed.
+    pub io: Vec<u8> where len >= 0x80,
+    pub ie: u8,
+
+    /// The 16-bit counter whose high byte is DIV; TIMA ticks on falling
+    /// edges of one of its bits.
+    pub divider: i64,
+    /// Dots into the current scanline (456 per line).
+    pub dot: i64,
+    /// Lines of the window drawn so far this frame.
+    pub window_line: i64,
+    /// Whether the STAT interrupt line was high, for edge detection.
+    pub stat_line: Bool,
+    pub frame_done: Bool,
+    /// Shades 0-3, one per pixel, row-major.
+    pub screen: Vec<u8> where len >= SCREEN_WIDTH * SCREEN_HEIGHT,
+    /// OAM indices of the sprites on the line being drawn, best first.
+    pub sprites: Vec<u8> where len >= 10,
+    /// Pressed buttons: bit 0-3 right, left, up, down; bit 4-7 A, B, select, start.
+    pub buttons: u8,
+    pub apu: Apu,
+    /// Everything written to the serial port.
+    pub serial: Vec<u8>,
+    pub cycles: i64,
+}
+
+pub fn new<M: Mapper>(board: M) -> Machine<M> ! {alloc, panic} {
+    let mut io = cartridge.zeroed(0x80);
+    io[0x00] = 0xCF;
+    io[0x40] = 0x91; // LCD on, background on
+    io[0x47] = 0xFC; // BGP
+    io[0x48] = 0xFF;
+    io[0x49] = 0xFF;
+    // Sound registers as the boot ROM leaves them.
+    io[0x10] = 0x80;
+    io[0x11] = 0xBF;
+    io[0x12] = 0xF3;
+    io[0x14] = 0xBF;
+    io[0x16] = 0x3F;
+    io[0x19] = 0xBF;
+    io[0x1A] = 0x7F;
+    io[0x1B] = 0xFF;
+    io[0x1C] = 0x9F;
+    io[0x1E] = 0xBF;
+    io[0x20] = 0xFF;
+    io[0x23] = 0xBF;
+    io[0x24] = 0x77;
+    io[0x25] = 0xF3;
+    let mut sound = apu.new();
+    sound.square1.dac = true;
+    sound.square1.duty = 2;
+    sound.right_enables = 0x3;
+    Machine {
+        // The state the boot ROM leaves behind on a DMG.
+        a: 0x01, f: 0xB0, b: 0x00, c: 0x13, d: 0x00, e: 0xD8, h: 0x01, l: 0x4D,
+        sp: 0xFFFE, pc: 0x0100,
+        ime: false, ime_pending: false, halted: false,
+        cartridge: board,
+        vram: cartridge.zeroed(0x2000),
+        wram: cartridge.zeroed(0x2000),
+        oam: cartridge.zeroed(0x100),
+        hram: cartridge.zeroed(0x7F),
+        io: io,
+        ie: 0,
+        divider: 0xABCC,
+        dot: 0,
+        window_line: 0,
+        stat_line: false,
+        frame_done: false,
+        screen: cartridge.zeroed(SCREEN_WIDTH * SCREEN_HEIGHT),
+        sprites: cartridge.zeroed(10),
+        buttons: 0,
+        apu: sound,
+        serial: Vec.with_capacity(256),
+        cycles: 0,
+    }
+}
+
+/// Widen a byte or word for arithmetic. The postcondition hands callers the
+/// value's range (0-255 for a byte), which the bounds proofs use.
+pub fn wide(value: u16) -> i64 ! {} ensures { result == value } { Int.convert(value) }
+
+pub fn request<M>(m: &mut Machine<M>, interrupt: u8) -> Unit ! {panic} {
+    m.io[0x0F] = m.io[0x0F] | interrupt;
+}
+
+/// A CPU read, as the bus routes it.
+pub fn read<M: Mapper>(m: &Machine<M>, address: u16) -> u8 ! {panic} {
+    let at: i64 = Int.convert(address);
+    if address < 0x8000 { return m.cartridge.load(address); }
+    if address < 0xA000 { return m.vram[at - 0x8000]; }
+    if address < 0xC000 { return m.cartridge.load(address); }
+    if address < 0xE000 { return m.wram[at - 0xC000]; }
+    if address < 0xFE00 { return m.wram[at - 0xE000]; }
+    if address < 0xFEA0 { return m.oam[at - 0xFE00]; }
+    if address < 0xFF00 { return cartridge.OPEN_BUS; }
+    if address < 0xFF80 { return read_io(m, at - 0xFF00, _); }
+    if address < 0xFFFF { return m.hram[at - 0xFF80]; }
+    m.ie
+}
+
+fn read_io<M>(
+    m: &Machine<M>,
+    register: i64,
+    erased inside: { 0 <= register && register < 0x80 },
+) -> u8 ! {panic} {
+    match register {
+        0x00 => joypad(m),
+        0x04 => Int.truncate(m.divider >> 8),
+        0x0F => m.io[0x0F] | 0xE0,
+        0x26 => apu.status(&m.apu),
+        0x41 => m.io[0x41] | 0x80,
+        _ => {
+            if register >= 0x30 && register < 0x40 { return m.apu.wave_ram[register - 0x30]; }
+            if register >= 0x10 && register < 0x30 { return m.io[register] | apu.read_mask(register); }
+            m.io[register]
+        },
+    }
+}
+
+/// P1: the selected button group, active low.
+fn joypad<M>(m: &Machine<M>) -> u8 ! {panic} {
+    let select = m.io[0x00] & 0x30;
+    let mut pressed: u8 = 0;
+    if (select & 0x10) == 0 { pressed = pressed | (m.buttons & 0x0F); }
+    if (select & 0x20) == 0 { pressed = pressed | (m.buttons >> 4); }
+    0xC0 | select | (!pressed & 0x0F)
+}
+
+pub fn press<M>(m: &mut Machine<M>, buttons: u8) -> Unit ! {panic} {
+    let newly = buttons & !m.buttons;
+    m.buttons = buttons;
+    if newly != 0 { request(m, JOYPAD); }
+}
+
+/// A CPU write, as the bus routes it.
+pub fn write<M: Mapper>(m: &mut Machine<M>, address: u16, value: u8) -> Unit ! {alloc, panic} {
+    let at: i64 = Int.convert(address);
+    if address < 0x8000 { m.cartridge.store(address, value); return; }
+    if address < 0xA000 { m.vram[at - 0x8000] = value; return; }
+    if address < 0xC000 { m.cartridge.store(address, value); return; }
+    if address < 0xE000 { m.wram[at - 0xC000] = value; return; }
+    if address < 0xFE00 { m.wram[at - 0xE000] = value; return; }
+    if address < 0xFEA0 { m.oam[at - 0xFE00] = value; return; }
+    if address < 0xFF00 { return; }
+    if address < 0xFF80 { write_io(m, at - 0xFF00, value, _); return; }
+    if address < 0xFFFF { m.hram[at - 0xFF80] = value; return; }
+    m.ie = value;
+}
+
+fn write_io<M: Mapper>(
+    m: &mut Machine<M>,
+    register: i64,
+    value: u8,
+    erased inside: { 0 <= register && register < 0x80 },
+) -> Unit ! {alloc, panic} {
+    match register {
+        0x00 => { m.io[0x00] = value & 0x30; },
+        0x02 => {
+            // A transfer with the internal clock completes at once: the
+            // byte is captured, and nothing is connected to send one back.
+            if (value & 0x81) == 0x81 {
+                m.serial.push(m.io[0x01]);
+                m.io[0x01] = 0xFF;
+                m.io[0x02] = value & 0x7F;
+                request(m, SERIAL);
+            } else {
+                m.io[0x02] = value;
+            }
+        },
+        0x04 => { set_divider(m, 0); },
+        0x07 => {
+            // Changing TAC can itself make the watched bit fall.
+            let before = timer_bit(m);
+            m.io[0x07] = value;
+            if before && !timer_bit(m) { tick_tima(m); }
+        },
+        0x0F => { m.io[0x0F] = value & 0x1F; },
+        0x41 => { m.io[0x41] = (m.io[0x41] & 0x07) | (value & 0x78); },
+        0x44 => {},
+        0x46 => { dma(m, value); },
+        _ => {
+            if register >= 0x10 && register < 0x40 {
+                // Registers keep their byte only while the APU is powered
+                // (NR52 itself and wave RAM always).
+                if m.apu.powered || register >= 0x26 { m.io[register] = value; }
+                apu.write(&mut m.apu, &mut m.io, register, value);
+            } else {
+                m.io[register] = value;
+            }
+        },
+    }
+}
+
+/// OAM DMA: 160 bytes from `source * 0x100`, done at once.
+fn dma<M: Mapper>(m: &mut Machine<M>, source: u8) -> Unit ! {alloc, panic} {
+    m.io[0x46] = source;
+    let base: u16 = Int.convert(source) << 8;
+    let mut i = 0;
+    while i < 0xA0 {
+        let offset: u16 = Int.truncate(i);
+        m.oam[i] = read(m, base | offset);
+        i = i + 1;
+    }
+}
+
+// --- Timer -----------------------------------------------------------------
+
+/// The divider bit TAC selects, gated by TAC's enable bit.
+fn timer_bit<M>(m: &Machine<M>) -> Bool ! {panic} {
+    let tac = m.io[0x07];
+    if (tac & 0x04) == 0 { return false; }
+    let shift = match tac & 0x03 { 0 => 9, 1 => 3, 2 => 5, _ => 7 };
+    ((m.divider >> shift) & 1) == 1
+}
+
+fn tick_tima<M>(m: &mut Machine<M>) -> Unit ! {panic} {
+    if m.io[0x05] == 0xFF {
+        m.io[0x05] = m.io[0x06];
+        request(m, TIMER);
+    } else {
+        m.io[0x05] = m.io[0x05] + 1;
+    }
+}
+
+fn set_divider<M>(m: &mut Machine<M>, value: i64) -> Unit ! {panic} {
+    let before = timer_bit(m);
+    let sequencer_bit = (m.divider & 0x1000) != 0;
+    m.divider = value & 0xFFFF;
+    if before && !timer_bit(m) { tick_tima(m); }
+    // The APU's frame sequencer steps on falling edges of divider bit 12.
+    if sequencer_bit && (m.divider & 0x1000) == 0 { apu.sequence(&mut m.apu, &mut m.io); }
+}
+
+/// Advance the timer by `cycles` clock cycles, four at a time.
+pub fn tick_timer<M>(m: &mut Machine<M>, cycles: i64) -> Unit ! {panic} {
+    let mut left = cycles;
+    while left > 0 {
+        set_divider(m, m.divider + 4);
+        left = left - 4;
+    }
+}

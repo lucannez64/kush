@@ -341,6 +341,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             index_relations: function.index_relations.clone(),
             capture_site: None,
             callee_site: None,
+            creating_cell: false,
             borrowed_values: BTreeMap::new(),
             borrowed_closures: BTreeMap::new(),
             guard: false,
@@ -1312,6 +1313,8 @@ struct Checker<'a> {
     /// The one `Local` expression allowed to consume a borrowed-capture closure
     /// as the callee of an indirect call.
     callee_site: Option<usize>,
+    /// Set while checking a by-reference scalar capture (a shared cell).
+    creating_cell: bool,
     /// Borrowed capture provenance keyed by `FnValue` expression.
     borrowed_values: BTreeMap<usize, BorrowedCapture>,
     /// Locals holding a closure with borrowed captures, keyed by local slot.
@@ -1480,7 +1483,14 @@ impl Checker<'_> {
                         }
                         _ => return None,
                     };
-                    return Some((root, Vec::new()));
+                    // A field of the referent: fields of one referent are as
+                    // disjoint as fields of a local record.
+                    let path = self
+                        .referent(base.ty)
+                        .and_then(|referent| self.field_index(referent, *offset))
+                        .map(|index| vec![index])
+                        .unwrap_or_default();
+                    return Some((root, path));
                 }
                 let (root, mut path) = self.place_ident(base)?;
                 path.push(self.field_index(base.ty, *offset)?);
@@ -1541,7 +1551,20 @@ impl Checker<'_> {
         if !leaf.origins.is_empty() && !matches!(place.kind, ExprKind::PlaceIndex { .. }) {
             let mut loan = leaf;
             if let Some((root, path)) = self.place_ident(place) {
-                loan.field.get_or_insert(FieldBorrow { root, path });
+                // An owning field's handle loan names its root with an empty
+                // path (the whole record); the place's own field path is the
+                // precise one, so `&mut o.a` and `&mut o.b` stay disjoint.
+                match &mut loan.field {
+                    Some(field)
+                        if field.root == root
+                            && field.path.len() < path.len()
+                            && path.starts_with(&field.path) =>
+                    {
+                        field.path = path;
+                    }
+                    Some(_) => {}
+                    None => loan.field = Some(FieldBorrow { root, path }),
+                }
             }
             return loan;
         }
@@ -3977,7 +4000,12 @@ impl Checker<'_> {
             }
         }
         let roots = self.origins_roots(origins);
-        for retained in &self.temporary_regions {
+        // Closures may share a scalar cell; their loans on it never conflict.
+        let cell = self.creating_cell
+            && roots
+                .iter()
+                .all(|root| crate::executable::is_live_scalar(self.locals[*root].ty));
+        for retained in self.temporary_regions.iter().filter(|_| !cell) {
             let overlaps = origins.iter().any(|slot| retained.origins.contains(slot))
                 || roots.iter().any(|root| retained.roots.contains(root));
             let fields_disjoint = field
@@ -4010,7 +4038,7 @@ impl Checker<'_> {
             ));
         }
         for view in self.live_views_at(ptr) {
-            if !self.available[*view] {
+            if !self.available[*view] || (cell && self.borrowed_closures.contains_key(view)) {
                 continue;
             }
             if origins.contains(view) {
@@ -4632,7 +4660,16 @@ impl Checker<'_> {
             }
             ExprKind::HandlerPush { body, .. } => self.block_value_moves_linear(body),
             ExprKind::AbortScope { body, .. } => self.block_value_moves_linear(body),
-            ExprKind::DynamicPerform { .. } => self.moves(expr.ty),
+            // An operation result is an ordinary value: owned results are
+            // affine, and only a linear result type carries an obligation.
+            ExprKind::DynamicPerform { .. } => is_linear(
+                expr.ty,
+                self.linear,
+                self.unions,
+                self.pointees,
+                self.functions,
+                self.dyn_linear,
+            ),
             ExprKind::FnValue { captures, .. } => captures
                 .iter()
                 .any(|capture| self.value_moves_linear(capture)),
@@ -4956,7 +4993,11 @@ impl Checker<'_> {
         let origins = self.view_origins(expr);
         let splits = self.split_labels(expr);
         let mutable = expr.ty.is_mut_slice() || matches!(expr.ty, Type::RefMut(_));
-        let field = self.view_loan(expr).field;
+        // A borrowed place (`&mut o.x`) covers exactly that field path.
+        let field = match &expr.kind {
+            ExprKind::BorrowPlace(place) => self.place_loan(place).field,
+            _ => self.view_loan(expr).field,
+        };
         // `&mut record` is exclusive over the record and its exclusive leaves,
         // but only shared over the storage behind its shared leaves: through
         // the reference a shared leaf can be read or replaced, never written.
@@ -6064,16 +6105,19 @@ impl Checker<'_> {
                         crate::executable::VecOp::WithCapacity
                         | crate::executable::VecOp::Clear
                         | crate::executable::VecOp::ClearBorrowed
+                        | crate::executable::VecOp::ReplaceBorrowed
                         | crate::executable::VecOp::TryReserve { .. } => {}
                         crate::executable::VecOp::Push
                         | crate::executable::VecOp::Set
                         | crate::executable::VecOp::PushBorrowed
-                        | crate::executable::VecOp::SetBorrowed => {
+                        | crate::executable::VecOp::SetBorrowed
+                        | crate::executable::VecOp::SetProved => {
                             provenance = self.container_provenance(&args[0]);
                             let setting = matches!(
                                 op,
                                 crate::executable::VecOp::Set
                                     | crate::executable::VecOp::SetBorrowed
+                                    | crate::executable::VecOp::SetProved
                             );
                             let value_index = if setting { 2 } else { 1 };
                             if self.is_carrier_type(element) {
@@ -6148,6 +6192,7 @@ impl Checker<'_> {
                                     op,
                                     crate::executable::VecOp::PushBorrowed
                                         | crate::executable::VecOp::SetBorrowed
+                                        | crate::executable::VecOp::SetProved
                                 ) {
                                     let updated = provenance.clone();
                                     if !self.merge_container_provenance(&args[0], updated, false) {
@@ -6215,6 +6260,7 @@ impl Checker<'_> {
                                     op,
                                     crate::executable::VecOp::PushBorrowed
                                         | crate::executable::VecOp::SetBorrowed
+                                        | crate::executable::VecOp::SetProved
                                 ) {
                                     let updated = provenance
                                         .leaves
@@ -6521,6 +6567,12 @@ impl Checker<'_> {
                 let mut lent = Vec::new();
                 if let ExprKind::FnValue { captures, .. } = &site.kind {
                     for capture in captures {
+                        if capture.ty.is_ref() {
+                            return Err(Diagnostic::new(
+                                capture.span,
+                                "a spawned task cannot capture a borrowed owner reference; pass the storage as a slice view, or move the value into the task",
+                            ));
+                        }
                         if capture.ty.is_slice() {
                             lent.push((
                                 self.view_origins(capture),
@@ -6650,9 +6702,11 @@ impl Checker<'_> {
                             || capabilities.contains(index)
                     })
                     .collect::<Vec<_>>();
+                // References are scoped borrowed captures exactly like slice
+                // views: the closure holds their loans while it is live.
                 let borrowed = captures
                     .iter()
-                    .filter(|capture| capture.ty.is_slice())
+                    .filter(|capture| capture.ty.is_slice() || capture.ty.is_ref())
                     .collect::<Vec<_>>();
                 let records = captures
                     .iter()
@@ -6682,14 +6736,20 @@ impl Checker<'_> {
                         };
                         let capture_origins = BTreeSet::from([slot]);
                         let capture_mut = capture_write.get(*index).copied().unwrap_or(false);
-                        self.check_view_creation(
+                        // A scalar captured by reference is a shared cell:
+                        // other closures may capture it too (each call reads
+                        // and writes it in turn), only its owner is locked out.
+                        self.creating_cell = crate::executable::is_live_scalar(capture.ty);
+                        let checked = self.check_view_creation(
                             &capture_origins,
                             capture_mut,
                             &SplitLabels::default(),
                             None,
                             expr_ptr,
                             capture.span,
-                        )?;
+                        );
+                        self.creating_cell = false;
+                        checked?;
                         if capture_mut {
                             exclusive_origins.extend(capture_origins.iter().copied());
                         }
@@ -6699,8 +6759,13 @@ impl Checker<'_> {
                     for capture in &borrowed {
                         let capture_origins = self.view_origins(capture);
                         let labels = self.split_labels(capture);
-                        let capture_mut = capture.ty.is_mut_slice();
-                        let capture_field = self.view_loan(capture).field;
+                        let capture_mut =
+                            capture.ty.is_mut_slice() || matches!(capture.ty, Type::RefMut(_));
+                        let capture_field = if capture.ty.is_ref() {
+                            None
+                        } else {
+                            self.view_loan(capture).field
+                        };
                         self.check_view_creation(
                             &capture_origins,
                             capture_mut,
@@ -6821,7 +6886,24 @@ impl Checker<'_> {
                         "closure must preserve captured linear obligations in a linear-once type",
                     ));
                 }
-                for capture in captures {
+                for (index, capture) in captures.iter_mut().enumerate() {
+                    // A by-reference scalar capture takes the cell's address;
+                    // it does not read it, so another closure sharing the
+                    // cell does not conflict. It must still be initialized.
+                    if capture_ref.get(index).copied().unwrap_or(false)
+                        && crate::executable::is_live_scalar(capture.ty)
+                        && let ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) =
+                            capture.kind
+                    {
+                        if !self.available[slot] {
+                            return Err(self.use_after_move(
+                                slot,
+                                capture.span,
+                                "use of an uninitialized binding",
+                            ));
+                        }
+                        continue;
+                    }
                     self.expr(capture)?;
                 }
             }
@@ -6864,8 +6946,53 @@ impl Checker<'_> {
                 self.expr(array)?;
             }
             ExprKind::HandlerPush { handler, body, .. } => {
-                self.expr(handler)?;
+                // A handler closure with borrowed captures (by-reference
+                // scalars, views) is called by performs throughout the body,
+                // so its loans stay live until the body ends, exactly as a
+                // scoped closure's loans do across a call's arguments.
+                let loans = self.loans.clone();
+                let capture_info = match &handler.kind {
+                    ExprKind::Local(slot) => self.borrowed_closures.get(slot).cloned(),
+                    _ => None,
+                };
+                let old_callee_site = self.callee_site;
+                if capture_info.is_some() {
+                    self.callee_site = Some(&**handler as *const Expr as usize);
+                }
+                let checked = self.expr(handler);
+                self.callee_site = old_callee_site;
+                checked?;
+                if let Some(info) = &capture_info {
+                    for mutable in [false, true] {
+                        let origins = if mutable {
+                            info.exclusive_origins.clone()
+                        } else {
+                            info.origins
+                                .difference(&info.exclusive_origins)
+                                .copied()
+                                .collect()
+                        };
+                        if origins.is_empty() {
+                            continue;
+                        }
+                        let roots = self.origins_roots(&origins);
+                        self.temporary_regions.push(RetainedView {
+                            origins: origins.clone(),
+                            roots,
+                            mutable,
+                            splits: info.splits.clone(),
+                            field: None,
+                        });
+                        self.loans.extend(origins.iter().copied());
+                        if mutable {
+                            self.temporary_exclusive.extend(origins);
+                        } else {
+                            self.temporary_shared.extend(origins);
+                        }
+                    }
+                }
                 self.block(body)?;
+                self.loans = loans;
             }
             ExprKind::Suspendable(suspendable) => self.block(&mut suspendable.body)?,
             ExprKind::Suspend { call, .. } => self.expr(call)?,

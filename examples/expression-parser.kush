@@ -20,7 +20,7 @@ fn number_tail(source: &Bytes, index: i64, value: i64) -> Result<Parsed, ParseEr
     let byte = Bytes.get(source, index);
     if byte < 48 || byte > 57 { return Ok(Parsed.At(Expr.Number(value), index)); }
     let digit = byte - 48;
-    if value >(9223372036854775807 - digit) / 10 { return Err(ParseError.Overflow); }
+    if value > (9223372036854775807 - digit) / 10 { return Err(ParseError.Overflow); }
     number_tail(source, index + 1, value * 10 + digit)
 }
 
