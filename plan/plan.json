@@ -6729,14 +6729,19 @@
       "deps": [
         "PF-OBLIGATIONS"
       ],
-      "status": "in_progress",
+      "status": "done",
       "desc": "Obligation ids in IR, inline margins, kush_fuzz_check, runtime table to KUSH_FUZZ_OUT, deferred overflow off. docs/proof-fuzz.md 2.3.",
-      "commit": null,
+      "commit": "ba83927",
       "log": [
         {
           "time": "2026-11-13 17:14:03",
           "who": "agent",
           "text": "started"
+        },
+        {
+          "time": "2026-11-13 17:25:00",
+          "who": "agent",
+          "text": "done ba83927"
         }
       ]
     },
@@ -6748,10 +6753,16 @@
       "deps": [
         "PF-OBLIGATIONS"
       ],
-      "status": "todo",
+      "status": "in_progress",
       "desc": "Tape decoder in Kush; generated harnesses per function from parameter types, dictionary, precondition guards; argv dispatch.",
       "commit": null,
-      "log": []
+      "log": [
+        {
+          "time": "2026-11-13 17:25:00",
+          "who": "agent",
+          "text": "started"
+        }
+      ]
     },
     {
       "id": "PF-ENGINE",
