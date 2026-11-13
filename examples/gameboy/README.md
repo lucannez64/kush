@@ -58,6 +58,8 @@ From this directory, with a current `kush`, Cargo and a C linker:
 ```sh
 kush build --release --backend llvm      # or plain `kush build` for a fast build
 ./target/kush/gameboy game.gb             # play in a window, with sound
+./target/kush/gameboy game.gb --scale 6   # a 960x864 window (default 4: 640x576)
+./target/kush/gameboy game.gb --fullscreen  # start full screen; F11 switches
 ./target/kush/gameboy game.gb --terminal  # play in the terminal
 ./target/kush/gameboy test.gb 3000        # run 3000 frames headless; print serial output
 ./target/kush/gameboy test.gb 600 shot.ppm  # ...and save the last frame
@@ -65,7 +67,13 @@ kush test                                 # the emulator's own tests
 ```
 
 Controls: arrows or WASD, X or K for A, Z or J for B, Enter for Start, Space
-or Backspace for Select; Escape closes the window (Q quits in the terminal).
+or Backspace for Select; F11 switches full screen; Escape closes the window
+(Q quits in the terminal). The window can be resized freely: the picture keeps
+its aspect ratio with sharp pixels.
+
+Saved games: a cartridge with a battery keeps its RAM in `game.sav` next to
+`game.gb`. It is loaded when the game starts and written when the window or
+the terminal closes. Headless runs neither load nor write it.
 A gamepad is laid out like a Nintendo pad: the right face button is A, the
 bottom one B, plus Start, Back (Select), the d-pad and the left stick.
 Building needs SDL2 (`libsdl2-dev` or your distribution's package); without a
@@ -122,11 +130,16 @@ Some choices that show the language:
   after `if address < 0xA000 { .. }` is a plain load. Helpers state ranges
   with `ensures` (`fn wide(value: u8) -> i64 ensures { result == value }`)
   and erased parameters (`tile_pixel(m, at, column, erased inside: { 0 <= at
-  && at < 0x1FFF })`). `KUSH_PROOF_REPORT=verbose kush check` lists what is
-  left: 118 accesses are proved, every memory-bus read and write and every
-  per-pixel access; the I/O registers keep their checks. It took 3600 frames
-  of a commercial game from 6.6 s to 4.9 s with Cranelift (LLVM, which
-  already hoisted most checks, stays at about 1.2 s).
+  && at < 0x1FFF })`). The sound chip takes the I/O registers as
+  `io: &mut Vec<u8> where len >= 0x80`, and loops state invariants
+  (`while .. invariant { 0 <= count && count <= 10 }`). Each controller keeps
+  its ROM mirrored up to the largest size it can address, and its RAM in a
+  fixed 128 KiB store, so every bank calculation ends in a constant mask.
+  `KUSH_PROOF_REPORT=verbose kush check` lists what is left: 353 accesses are
+  proved, every memory, I/O register, cartridge and per-pixel access; the
+  rest is start-up and text handling. It took 3600 frames of a commercial game
+  from 6.6 s to 3.9 s with Cranelift (LLVM, which already hoisted most checks,
+  stays at about 1.35 s).
 - **The window and the audio device are linear.** `window.open` returns a
   `Window` that every path must pass to `window.close`; forgetting one is a
   compile error.
@@ -161,8 +174,7 @@ references as scoped borrows ([functions](../../docs/functions.md)).
 
 ## Not yet
 
-- No Game Boy Color, no serial link, no saved games (cartridge RAM lives as
-  long as the process), and the MBC3 clock reads as stopped.
+- No Game Boy Color, no serial link, and the MBC3 clock reads as stopped.
 - The HALT bug and the exact timing of reads and writes inside an instruction
   are not modelled: an instruction's memory accesses happen at its start, and
   the picture processor draws each line whole when it finishes.

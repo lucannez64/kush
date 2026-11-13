@@ -23,6 +23,7 @@ foreign "media_window_open" fn open_window(title: &Bytes, width: i64, height: i6
 foreign "media_window_present" fn present_pixels(window: &Handle, pixels: &Bytes) -> Result<Unit, i64> ! {io};
 foreign "media_window_set_title" fn title_window(window: &Handle, title: &Bytes) -> Result<Unit, i64> ! {io};
 foreign "media_window_next_event" fn next_packed(window: &Handle) -> i64 ! {io};
+foreign "media_window_set_fullscreen" fn fullscreen_window(window: &Handle, on: i64) -> Result<Unit, i64> ! {io};
 
 /// Open a window for a `width` x `height` image, shown `scale` times as
 /// large. Fails with ENODEV (19) when there is no display.
@@ -44,6 +45,11 @@ pub fn close(window: Window) -> Unit ! {} {
 /// bottom, exactly the size the window was opened for (EINVAL otherwise).
 pub fn present(window: &Window, pixels: &Bytes) -> Result<Unit, i64> ! {io} {
     present_pixels(&window.raw, pixels)
+}
+
+/// Fill the screen (the image keeps its aspect ratio) or return to a window.
+pub fn set_fullscreen(window: &Window, on: Bool) -> Result<Unit, i64> ! {io} {
+    fullscreen_window(&window.raw, if on { 1 } else { 0 })
 }
 
 pub fn set_title(window: &Window, title: &Bytes) -> Result<Unit, i64> ! {io} {

@@ -341,6 +341,7 @@ pub(crate) fn check(program: &mut Executable) -> Result<()> {
             index_relations: function.index_relations.clone(),
             capture_site: None,
             callee_site: None,
+            creating_cell: false,
             borrowed_values: BTreeMap::new(),
             borrowed_closures: BTreeMap::new(),
             guard: false,
@@ -1312,6 +1313,8 @@ struct Checker<'a> {
     /// The one `Local` expression allowed to consume a borrowed-capture closure
     /// as the callee of an indirect call.
     callee_site: Option<usize>,
+    /// Set while checking a by-reference scalar capture (a shared cell).
+    creating_cell: bool,
     /// Borrowed capture provenance keyed by `FnValue` expression.
     borrowed_values: BTreeMap<usize, BorrowedCapture>,
     /// Locals holding a closure with borrowed captures, keyed by local slot.
@@ -3997,7 +4000,12 @@ impl Checker<'_> {
             }
         }
         let roots = self.origins_roots(origins);
-        for retained in &self.temporary_regions {
+        // Closures may share a scalar cell; their loans on it never conflict.
+        let cell = self.creating_cell
+            && roots
+                .iter()
+                .all(|root| crate::executable::is_live_scalar(self.locals[*root].ty));
+        for retained in self.temporary_regions.iter().filter(|_| !cell) {
             let overlaps = origins.iter().any(|slot| retained.origins.contains(slot))
                 || roots.iter().any(|root| retained.roots.contains(root));
             let fields_disjoint = field
@@ -4030,7 +4038,7 @@ impl Checker<'_> {
             ));
         }
         for view in self.live_views_at(ptr) {
-            if !self.available[*view] {
+            if !self.available[*view] || (cell && self.borrowed_closures.contains_key(view)) {
                 continue;
             }
             if origins.contains(view) {
@@ -6728,14 +6736,20 @@ impl Checker<'_> {
                         };
                         let capture_origins = BTreeSet::from([slot]);
                         let capture_mut = capture_write.get(*index).copied().unwrap_or(false);
-                        self.check_view_creation(
+                        // A scalar captured by reference is a shared cell:
+                        // other closures may capture it too (each call reads
+                        // and writes it in turn), only its owner is locked out.
+                        self.creating_cell = crate::executable::is_live_scalar(capture.ty);
+                        let checked = self.check_view_creation(
                             &capture_origins,
                             capture_mut,
                             &SplitLabels::default(),
                             None,
                             expr_ptr,
                             capture.span,
-                        )?;
+                        );
+                        self.creating_cell = false;
+                        checked?;
                         if capture_mut {
                             exclusive_origins.extend(capture_origins.iter().copied());
                         }
@@ -6872,7 +6886,24 @@ impl Checker<'_> {
                         "closure must preserve captured linear obligations in a linear-once type",
                     ));
                 }
-                for capture in captures {
+                for (index, capture) in captures.iter_mut().enumerate() {
+                    // A by-reference scalar capture takes the cell's address;
+                    // it does not read it, so another closure sharing the
+                    // cell does not conflict. It must still be initialized.
+                    if capture_ref.get(index).copied().unwrap_or(false)
+                        && crate::executable::is_live_scalar(capture.ty)
+                        && let ExprKind::Local(slot) | ExprKind::Peek(slot) | ExprKind::Move(slot) =
+                            capture.kind
+                    {
+                        if !self.available[slot] {
+                            return Err(self.use_after_move(
+                                slot,
+                                capture.span,
+                                "use of an uninitialized binding",
+                            ));
+                        }
+                        continue;
+                    }
                     self.expr(capture)?;
                 }
             }

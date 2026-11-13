@@ -300,7 +300,10 @@ loaned until the closure's checked last call or lexical scope end. A lambda
 that assigns the capture holds an exclusive loan: the caller cannot read,
 assign, move, or drop the location while the closure is live. A lambda that
 only reads it holds a shared loan, so unrelated reads remain allowed but a
-write is rejected. The same restrictions reject returning the closure, storing
+write is rejected. Several closures may capture the same location: it is a
+shared cell that each call reads and writes in turn (two effect handlers can
+share a counter or an error code). Inside a lambda no fact about a captured
+cell is assumed, since any call may run another closure that writes it. The same restrictions reject returning the closure, storing
 it in outliving data, passing it to another function, or sending it to a task.
 Both backends implement the pointer representation, so reference evaluation and
 native execution agree. Calling a closure that writes the capture invalidates

@@ -46,6 +46,7 @@ unsafe extern "C" {
     fn SDL_CreateWindow(title: *const c_char, x: c_int, y: c_int, w: c_int, h: c_int, flags: u32) -> *mut SDL_Window;
     fn SDL_DestroyWindow(window: *mut SDL_Window);
     fn SDL_SetWindowTitle(window: *mut SDL_Window, title: *const c_char);
+    fn SDL_SetWindowFullscreen(window: *mut SDL_Window, flags: u32) -> c_int;
     fn SDL_CreateRenderer(window: *mut SDL_Window, index: c_int, flags: u32) -> *mut SDL_Renderer;
     fn SDL_DestroyRenderer(renderer: *mut SDL_Renderer);
     fn SDL_RenderSetLogicalSize(renderer: *mut SDL_Renderer, w: c_int, h: c_int) -> c_int;
@@ -230,6 +231,19 @@ pub extern "C" fn media_window_set_title(handle: i64, title: *const u8, length: 
     let Some(state) = window(handle) else { return EINVAL };
     let title = c_string(title, length);
     unsafe { SDL_SetWindowTitle(state.window, title.as_ptr() as *const c_char) };
+    0
+}
+
+/// Fill the screen (keeping the aspect ratio, as when resized) or go back to
+/// a window.
+#[unsafe(no_mangle)]
+pub extern "C" fn media_window_set_fullscreen(handle: i64, on: i64) -> i64 {
+    const FULLSCREEN_DESKTOP: u32 = 0x0000_1001;
+    let Some(state) = window(handle) else { return EINVAL };
+    let flags = if on != 0 { FULLSCREEN_DESKTOP } else { 0 };
+    if unsafe { SDL_SetWindowFullscreen(state.window, flags) } != 0 {
+        return ENODEV;
+    }
     0
 }
 

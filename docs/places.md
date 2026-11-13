@@ -160,6 +160,25 @@ proof:
   of its parameter type, so `ensures { result == value }` on
   `fn wide(value: u8) -> i64` gives the caller `0 <= result <= 255`.
 
+## Length-refined parameters
+
+A `&Vec<T>` or `&mut Vec<T>` parameter may promise a minimum length too:
+
+```kush
+fn sequence(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80) -> Unit ! {panic} {
+    io[0x26] = io[0x26] | 0x80;   // proved
+}
+```
+
+At the call, a refined field or parameter with at least that bound is passed as
+is, and may be lent with `&mut` (the callee keeps the bound); any other vector
+is checked once, before the call. Inside, the parameter is used only where the
+bound survives: indexing, `push`, `set`, `reserve`, `replace` (which checks the
+new vector), and refined parameters. Clearing it, rebinding it, returning it,
+passing it to an unrefined parameter or capturing it is rejected, and a
+function with such a parameter can only be called directly. Methods cannot
+declare one yet.
+
 ## Swapping a vector out of a place
 
 `place.replace(new)` (or `Vec.replace(&mut v, new)`) stores `new` in a `Vec`

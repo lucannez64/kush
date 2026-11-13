@@ -499,6 +499,10 @@ impl IntegerBudget {
 }
 
 impl Facts {
+    /// Add `other`'s opaque slots (that set is sticky; loop heads rely on it).
+    pub fn keep_opaque_of(&mut self, other: &Self) {
+        self.opaque.extend(other.opaque.iter().copied());
+    }
     /// Take `other`'s value versions (and aliases), keeping this state's
     /// opaque slots: used for a branch that never reaches the join.
     pub fn versions_from(&mut self, other: &Self) {
@@ -515,21 +519,82 @@ impl Facts {
     pub fn same_versions(&self, other: &Self) -> bool {
         self.versions == other.versions
     }
-    /// Sibling branches start from identical versions. A join forgets facts
-    /// about every value changed on either path.
+    /// Sibling branches start from identical versions. A value changed on
+    /// either path gets a fresh version after the join; what each path knew
+    /// is kept as one disjunct of a clause, with the fresh version equal to
+    /// that path's version: `(left facts && x' == x_left) || (right facts &&
+    /// x' == x_right)`.
     pub fn branch_join(base: &Self, left: &Self, right: &Self) -> Self {
         let mut result = base.clone();
         result.opaque.extend(left.opaque.iter().copied());
         result.opaque.extend(right.opaque.iter().copied());
-        for slot in left.versions.keys().chain(right.versions.keys()) {
-            let version = left.version(*slot).max(right.version(*slot));
-            if version != base.version(*slot) {
-                result.versions.insert(*slot, version + 1);
+        let mut left_case: Vec<Constraint> = left
+            .known
+            .get(base.known.len()..)
+            .map(<[Constraint]>::to_vec)
+            .unwrap_or_default();
+        let mut right_case: Vec<Constraint> = right
+            .known
+            .get(base.known.len()..)
+            .map(<[Constraint]>::to_vec)
+            .unwrap_or_default();
+        let mut changed = false;
+        let slots: BTreeSet<usize> = left
+            .versions
+            .keys()
+            .chain(right.versions.keys())
+            .copied()
+            .collect();
+        for slot in slots {
+            let version = left.version(slot).max(right.version(slot));
+            if version != base.version(slot) {
+                result.versions.insert(slot, version + 1);
                 // A value replaced on either path no longer has its alias.
-                result.aliases.remove(slot);
+                result.aliases.remove(&slot);
+                if result.opaque.contains(&slot) {
+                    continue;
+                }
+                changed = true;
+                let joined = Term::Var(slot, version + 1);
+                left_case.extend(equal_terms(joined, Term::Var(slot, left.version(slot))));
+                right_case.extend(equal_terms(joined, Term::Var(slot, right.version(slot))));
             }
         }
+        const MAX_JOIN_CASE: usize = 48;
+        if changed && left_case.len() <= MAX_JOIN_CASE && right_case.len() <= MAX_JOIN_CASE {
+            result.clauses.push(vec![left_case, right_case]);
+        }
         result
+    }
+    /// Bounds on every value rewritten since `stamp`, relative to its value
+    /// then and to zero, taken before a block's own facts are dropped so
+    /// that `x = x + 1` inside a block is still known after it.
+    pub fn preserved_since(&self, stamp: &BTreeMap<usize, u32>) -> Vec<Constraint> {
+        let mut out = Vec::new();
+        for (&slot, &version) in &self.versions {
+            let before = stamp.get(&slot).copied().unwrap_or(0);
+            if before == version || self.opaque.contains(&slot) {
+                continue;
+            }
+            let new = Term::Var(slot, version);
+            let old = Term::Var(slot, before);
+            for (from, to) in [(old, new), (new, old), (Term::Zero, new), (new, Term::Zero)] {
+                if let Some(bound) = self.distance(from, to) {
+                    let mut coefficients = BTreeMap::new();
+                    if to != Term::Zero {
+                        coefficients.insert(to, 1);
+                    }
+                    if from != Term::Zero {
+                        coefficients.insert(from, -1);
+                    }
+                    out.push(Constraint {
+                        coefficients,
+                        bound,
+                    });
+                }
+            }
+        }
+        out
     }
 
     pub(crate) fn mark(&self) -> FactsMark {
@@ -2680,6 +2745,15 @@ pub(crate) fn failure(
     )
 }
 
+/// `a == b` as two inequalities.
+fn equal_terms(a: Term, b: Term) -> [Constraint; 2] {
+    let pair = |plus: Term, minus: Term| Constraint {
+        coefficients: BTreeMap::from([(plus, 1), (minus, -1)]),
+        bound: 0,
+    };
+    [pair(a, b), pair(b, a)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2989,3 +3063,4 @@ mod tests {
         assert!(prove_with(&hypotheses, &inequality(&[], 3)).is_some());
     }
 }
+

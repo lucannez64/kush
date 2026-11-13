@@ -116,14 +116,14 @@ fn select_sprites<M>(m: &mut Machine<M>, lcdc: u8, line: i64, height: i64) -> i6
     if (lcdc & SPRITES_ON) == 0 { return 0; }
     let mut count = 0;
     let mut index = 0;
-    while index < 40 && count < 10 {
+    while index < 40 && count < 10 invariant { 0 <= count && count <= 10 } {
         let top = wide(m.oam[index * 4]) - 16;
         if line >= top && line < top + height {
             // Insertion by X; a later sprite at the same X stays behind.
             // `sprites` keeps OAM byte offsets (index * 4).
             let x = m.oam[index * 4 + 1];
             let mut at = count;
-            while at > 0 && m.oam[sprite_byte(m.sprites[at - 1], 1, _)] > x {
+            while at > 0 && m.oam[sprite_byte(m.sprites[at - 1], 1, _)] > x invariant { 0 <= at && at <= 9 } {
                 m.sprites[at] = m.sprites[at - 1];
                 at = at - 1;
             }
@@ -132,9 +132,6 @@ fn select_sprites<M>(m: &mut Machine<M>, lcdc: u8, line: i64, height: i64) -> i6
         }
         index = index + 1;
     }
-    // The loop stops at ten; the prover does not track that bound through
-    // the loop, so say it once here.
-    if count > 10 { return 10; }
     count
 }
 

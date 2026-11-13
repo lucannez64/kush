@@ -79,15 +79,24 @@ pub fn screenshot<M>(m: &Machine<M>, scale: i64) -> Bytes ! {alloc, panic} {
     out = out.push(32);
     out = text.format_i64_into(out, height);
     out = append(out, &Bytes.from("\n255\n"));
-    let mut y = 0;
-    while y < height {
-        let mut x = 0;
-        while x < width {
-            let (r, g, b) = rgb(m.screen[(y / scale) * machine.SCREEN_WIDTH + x / scale]);
-            out = out.push(r).push(g).push(b);
-            x = x + 1;
+    // Each source pixel is repeated `scale` times across and down.
+    let mut sy = 0;
+    while sy < machine.SCREEN_HEIGHT {
+        let mut repeat_y = 0;
+        while repeat_y < scale {
+            let mut sx = 0;
+            while sx < machine.SCREEN_WIDTH {
+                let (r, g, b) = rgb(m.screen[sy * machine.SCREEN_WIDTH + sx]);
+                let mut repeat_x = 0;
+                while repeat_x < scale {
+                    out = out.push(r).push(g).push(b);
+                    repeat_x = repeat_x + 1;
+                }
+                sx = sx + 1;
+            }
+            repeat_y = repeat_y + 1;
         }
-        y = y + 1;
+        sy = sy + 1;
     }
     out
 }

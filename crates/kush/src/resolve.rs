@@ -1022,6 +1022,9 @@ impl Resolver {
         )?;
         for p in &f.parameters {
             self.ty(&p.ty)?;
+            if let Some(length) = &p.min_length {
+                self.expr(length)?;
+            }
             self.local(&p.name, BindingKind::Parameter, p.span, false)?;
         }
         self.ty(&f.result)?;
@@ -1460,8 +1463,15 @@ impl Resolver {
                     r.ty(ty)?;
                     r.expr(value)?;
                 }
-                ExprKind::While { condition, body } => {
+                ExprKind::While {
+                    condition,
+                    body,
+                    invariant,
+                } => {
                     r.expr(condition)?;
+                    if let Some(invariant) = invariant {
+                        r.expr(invariant)?;
+                    }
                     r.block(body)?;
                 }
                 ExprKind::Loop(body) => r.block(body)?,

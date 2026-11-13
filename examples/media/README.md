@@ -41,7 +41,7 @@ a window or device is never leaked or used once released.
 
 | Module | What it has |
 | --- | --- |
-| `media.window` | `Window` (linear), `open`, `close`, `present`, `set_title`, `next_event` |
+| `media.window` | `Window` (linear), `open`, `close`, `present`, `set_title`, `set_fullscreen`, `next_event` |
 | `media.input` | `Event` (`Quit`, `KeyDown`/`KeyUp`, `ButtonDown`/`ButtonUp`, `AxisMoved`, `PadAdded`/`PadRemoved`), `Key`, `Button`, `Axis` |
 | `media.audio` | `Audio` (linear), `open`, `close`, `queue`, `queued`, `push` (encode one sample) |
 

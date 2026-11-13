@@ -47,6 +47,8 @@ struct Controls {
     stick_x: i64,
     stick_y: i64,
     quit: Bool,
+    /// F11 was pressed: switch between window and full screen.
+    toggle_fullscreen: Bool,
 }
 
 fn key_bit(key: Key) -> i64 ! {} {
@@ -93,6 +95,7 @@ fn handle_events(win: &Window, c: &mut Controls) -> Unit ! {io, panic} {
             Option.Some(event) => match event {
                 Event.Quit => { c.quit = true; },
                 Event.KeyDown(Key.Escape) => { c.quit = true; },
+                Event.KeyDown(Key.Function(11)) => { c.toggle_fullscreen = true; },
                 Event.KeyDown(key) => {
                     let bit = key_bit(key);
                     c.keys = c.keys | bit;
@@ -114,14 +117,15 @@ fn handle_events(win: &Window, c: &mut Controls) -> Unit ! {io, panic} {
 }
 
 fn controls() -> Controls ! {} {
-    Controls { keys: 0, pad: 0, tapped: 0, stick_x: 0, stick_y: 0, quit: false }
+    Controls { keys: 0, pad: 0, tapped: 0, stick_x: 0, stick_y: 0, quit: false, toggle_fullscreen: false }
 }
 
 /// A frame's shades as RGB bytes for the window.
-fn pixels(screen: &Vec<u8>) -> Bytes ! {alloc, panic} {
-    let mut out = Bytes.with_capacity(screen.len() * 3);
+fn pixels(screen: &Vec<u8> where len >= 23040) -> Bytes ! {alloc, panic} {
+    let size = machine.SCREEN_WIDTH * machine.SCREEN_HEIGHT;
+    let mut out = Bytes.with_capacity(size * 3);
     let mut i = 0;
-    while i < screen.len() {
+    while i < size {
         let (r, g, b) = emulator.rgb(screen[i]);
         out = out.push(r).push(g).push(b);
         i = i + 1;
@@ -155,8 +159,9 @@ fn show_rate(win: &Window, title: &Bytes, rate: i64) -> Unit ! {io, alloc, panic
 /// the window's events, `Present` draws the frame and keeps the frame rate
 /// in the title, `Play` queues the sound and paces the game. They share the
 /// window and the controls through references the handlers capture.
-pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64) -> Result<Unit, i64> ! {io, alloc, panic} {
+pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64, fullscreen: Bool) -> Result<Unit, i64> ! {io, alloc, panic} {
     let win = window.open(&emulator.append(Bytes.from("Kush Game Boy - "), title), machine.SCREEN_WIDTH, machine.SCREEN_HEIGHT, scale)?;
+    if fullscreen { let _ = window.set_fullscreen(&win, true); }
     // Sound is handled out here, so `session` works the same with or
     // without it: its `emulator.run` performs `Play` and reaches whichever
     // handler is active.
@@ -175,7 +180,7 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64) -> Result<
                 }
                 resume(samples)
             } {
-                session(m, &win, title)
+                session(m, &win, title, fullscreen)
             };
             audio.close(device);
             result
@@ -197,7 +202,7 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64) -> Result<
                 }
                 resume(samples)
             } {
-                session(m, &win, title)
+                session(m, &win, title, fullscreen)
             }
         },
     };
@@ -209,7 +214,8 @@ pub fn play<M: Mapper>(m: &mut Machine<M>, title: &Bytes, scale: i64) -> Result<
 /// `Present` draws each frame and keeps the frame rate in the title. The
 /// handlers share the window and the controls through references they
 /// capture; `Play` is left to the caller.
-fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes) -> Result<Unit, i64> ! {Play, io, alloc, panic} {
+fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes, fullscreen: Bool) -> Result<Unit, i64> ! {Play, io, alloc, panic} {
+    let mut full = fullscreen;
     let mut c = controls();
     let pad = &mut c;
     let mut second = match TIME.monotonic_ns() { Result.Ok(t) => t, Result.Err(_) => 0 };
@@ -220,6 +226,11 @@ fn session<M: Mapper>(m: &mut Machine<M>, shown: &Window, title: &Bytes) -> Resu
         resume: linear once fn(i64) -> i64 ! {},
     ) -> i64 ! {io, panic} {
         handle_events(shown, pad);
+        if pad.toggle_fullscreen {
+            pad.toggle_fullscreen = false;
+            full = !full;
+            let _ = window.set_fullscreen(shown, full);
+        }
         let buttons = held(pad);
         pad.tapped = 0;
         if pad.quit { resume(-1) } else { resume(buttons) }

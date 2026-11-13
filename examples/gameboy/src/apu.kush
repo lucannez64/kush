@@ -158,7 +158,7 @@ fn sweep_target(a: &mut Apu) -> i64 ! {panic} {
     target
 }
 
-fn clock_sweep(a: &mut Apu, io: &mut Vec<u8>) -> Unit ! {panic} {
+fn clock_sweep(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80) -> Unit ! {panic} {
     a.sweep_timer = a.sweep_timer - 1;
     if a.sweep_timer > 0 { return; }
     a.sweep_timer = if a.sweep_period == 0 { 8 } else { a.sweep_period };
@@ -174,7 +174,7 @@ fn clock_sweep(a: &mut Apu, io: &mut Vec<u8>) -> Unit ! {panic} {
 }
 
 /// One frame-sequencer step, on a falling edge of divider bit 12.
-pub fn sequence(a: &mut Apu, io: &mut Vec<u8>) -> Unit ! {panic} {
+pub fn sequence(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80) -> Unit ! {panic} {
     if !a.powered { return; }
     let step = a.step;
     if step % 2 == 0 {
@@ -228,7 +228,7 @@ fn square_period(v: &Voice) -> i64 ! {panic} { (2048 - v.frequency) * 4 }
 
 /// A write to 0xFF10-0xFF3F (`register` is the offset from 0xFF00). The
 /// register byte itself is stored by the caller.
-pub fn write(a: &mut Apu, io: &mut Vec<u8>, register: i64, value: u8) -> Unit ! {alloc, panic} {
+pub fn write(a: &mut Apu, io: &mut Vec<u8> where len >= 0x80, register: i64, value: u8) -> Unit ! {alloc, panic} {
     let v = wide(value);
     if register >= 0x30 && register < 0x40 {
         a.wave_ram[register - 0x30] = value;

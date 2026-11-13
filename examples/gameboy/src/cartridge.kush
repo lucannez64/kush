@@ -14,6 +14,67 @@ pub trait Mapper {
     fn load(self: &Self, address: u16) -> u8 ! {panic};
     /// A write in the same windows: ROM writes program the controller.
     fn store(self: &mut Self, address: u16, value: u8) -> Unit ! {panic};
+    /// The battery-backed RAM as it is saved to disk; empty when the board
+    /// keeps nothing.
+    fn saved(self: &Self) -> Bytes ! {alloc, panic};
+    /// Put back RAM saved earlier (as much of it as fits).
+    fn restore(self: &mut Self, saved: &Bytes) -> Unit ! {panic};
+}
+
+// Every controller keeps its ROM and RAM in fixed-size, mirrored storage:
+// the ROM image repeated up to the largest size the controller can address,
+// and RAM in a 128 KiB store addressed through the board's size mask. Every
+// bank calculation then ends in a constant mask, so the prover shows each
+// cartridge access in bounds and none is checked at run time.
+
+/// Largest RAM on any supported board (MBC5), and the store all boards use.
+pub const RAM_SPACE: i64 = 0x20000;
+
+/// `size` bytes holding `image` repeated: byte i is image[i % len], what the
+/// address lines of a real board select.
+pub fn mirrored(image: &Vec<u8>, size: i64) -> Vec<u8> ! {alloc, panic} {
+    let mut out: Vec<u8> = Vec.with_capacity(size);
+    let length = image.len();
+    if length == 0 { return zeroed(size); }
+    let mut i = 0;
+    while i < size {
+        let mut j = 0;
+        while j < length && i < size {
+            out = out.push(image[j]);
+            j = j + 1;
+            i = i + 1;
+        }
+    }
+    out
+}
+
+/// Whether the header's cartridge type has a battery.
+pub fn battery(rom: &Vec<u8>) -> Bool ! {panic} {
+    if rom.len() < 0x150 { return false; }
+    match rom[0x147] {
+        0x03 | 0x06 | 0x09 | 0x0D | 0x0F | 0x10 | 0x13 | 0x1B | 0x1E => true,
+        _ => false,
+    }
+}
+
+/// The battery RAM's first `size` bytes, or nothing without a battery.
+fn saved_bytes(ram: &Vec<u8>, size: i64, battery: Bool) -> Bytes ! {alloc, panic} {
+    if !battery { return Bytes.with_capacity(0); }
+    let mut out = Bytes.with_capacity(size);
+    let mut i = 0;
+    while i < size && i < ram.len() {
+        out = out.push(Int.convert(ram[i]));
+        i = i + 1;
+    }
+    out
+}
+
+fn restore_bytes(ram: &mut Vec<u8> where len >= 0x20000, size: i64, saved: &Bytes) -> Unit ! {panic} {
+    let mut i = 0;
+    while i < size && i < saved.len() && i < RAM_SPACE {
+        ram[i] = Int.truncate(saved[i]);
+        i = i + 1;
+    }
 }
 
 /// What the header at 0x0147 says is on the board.
@@ -62,30 +123,51 @@ pub fn zeroed(size: i64) -> Vec<u8> ! {alloc, panic} {
     out
 }
 
-/// A ROM byte at `bank * 0x4000 + offset`, wrapping banks past the end of
-/// the image as the address lines do on a real board.
-fn rom_byte(rom: &Vec<u8>, bank: i64, offset: i64) -> u8 ! {panic} {
-    rom[(bank * 0x4000 + offset) % rom.len()]
+/// The address within a 16 KiB ROM window.
+fn rom_offset(address: u16) -> i64 ! {} ensures { 0 <= result && result <= 0x3FFF } {
+    let at: i64 = Int.convert(address);
+    at & 0x3FFF
 }
 
-fn offset(address: u16, window: u16) -> i64 ! {} {
-    Int.convert(address & window)
+/// The address within an 8 KiB RAM window.
+fn ram_offset(address: u16) -> i64 ! {} ensures { 0 <= result && result <= 0x1FFF } {
+    let at: i64 = Int.convert(address);
+    at & 0x1FFF
 }
 
 // --- No controller: 32 KiB of ROM, optionally 8 KiB of RAM. -------------
 
-pub struct Plain { pub rom: Vec<u8>, pub ram: Vec<u8> }
+pub struct Plain {
+    pub rom: Vec<u8> where len >= 0x8000,
+    pub ram: Vec<u8> where len >= 0x2000,
+    pub ram_size: i64,
+    pub battery: Bool,
+}
+
+pub fn plain(rom: &Vec<u8>) -> Plain ! {alloc, panic} {
+    let size = if rom.len() >= 0x150 && rom[0x149] != 0 { 0x2000 } else { 0 };
+    Plain { rom: mirrored(rom, 0x8000), ram: zeroed(0x2000), ram_size: size, battery: battery(rom) }
+}
 
 impl Mapper for Plain {
     pub fn load(self: &Self, address: u16) -> u8 ! {panic} {
-        if address < 0x8000 { return rom_byte(&self.rom, 0, Int.convert(address)); }
-        let at = offset(address, 0x1FFF);
-        if at < self.ram.len() { self.ram[at] } else { OPEN_BUS }
+        let at: i64 = Int.convert(address);
+        if address < 0x8000 { return self.rom[at]; }
+        let ram_at = ram_offset(address);
+        if ram_at < self.ram_size { self.ram[ram_at] } else { OPEN_BUS }
     }
     pub fn store(self: &mut Self, address: u16, value: u8) -> Unit ! {panic} {
         if address >= 0xA000 {
-            let at = offset(address, 0x1FFF);
-            if at < self.ram.len() { self.ram[at] = value; }
+            let at = ram_offset(address);
+            if at < self.ram_size { self.ram[at] = value; }
+        }
+    }
+    pub fn saved(self: &Self) -> Bytes ! {alloc, panic} { saved_bytes(&self.ram, self.ram_size, self.battery) }
+    pub fn restore(self: &mut Self, saved: &Bytes) -> Unit ! {panic} {
+        let mut i = 0;
+        while i < self.ram_size && i < saved.len() && i < 0x2000 {
+            self.ram[i] = Int.truncate(saved[i]);
+            i = i + 1;
         }
     }
 }
@@ -93,26 +175,39 @@ impl Mapper for Plain {
 // --- MBC1: up to 2 MiB ROM / 32 KiB RAM. ----------------------------------
 
 pub struct Mbc1 {
-    pub rom: Vec<u8>,
-    pub ram: Vec<u8>,
+    pub rom: Vec<u8> where len >= 0x200000,
+    pub ram: Vec<u8> where len >= 0x20000,
+    /// RAM size minus one: bank arithmetic wraps within the board's RAM.
+    pub ram_mask: i64,
+    pub ram_size: i64,
+    pub battery: Bool,
     pub ram_enabled: Bool,
     pub low: i64,
     pub high: i64,
     pub advanced: Bool,
 }
 
+pub fn mbc1(rom: &Vec<u8>) -> Mbc1 ! {alloc, panic} {
+    let size = ram_size(rom);
+    Mbc1 {
+        rom: mirrored(rom, 0x200000), ram: zeroed(RAM_SPACE), ram_mask: size - 1, ram_size: size,
+        battery: battery(rom), ram_enabled: false, low: 1, high: 0, advanced: false,
+    }
+}
+
 impl Mapper for Mbc1 {
     pub fn load(self: &Self, address: u16) -> u8 ! {panic} {
         if address < 0x4000 {
             let bank = if self.advanced { self.high << 5 } else { 0 };
-            return rom_byte(&self.rom, bank, offset(address, 0x3FFF));
+            return self.rom[(bank * 0x4000 + rom_offset(address)) & 0x1FFFFF];
         }
         if address < 0x8000 {
-            return rom_byte(&self.rom, (self.high << 5) | self.low, offset(address, 0x3FFF));
+            let bank = (self.high << 5) | self.low;
+            return self.rom[(bank * 0x4000 + rom_offset(address)) & 0x1FFFFF];
         }
         if !self.ram_enabled { return OPEN_BUS; }
         let bank = if self.advanced { self.high } else { 0 };
-        self.ram[(bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len()]
+        self.ram[((bank * 0x2000 + ram_offset(address)) & self.ram_mask) & 0x1FFFF]
     }
     pub fn store(self: &mut Self, address: u16, value: u8) -> Unit ! {panic} {
         let v: i64 = Int.convert(value);
@@ -128,29 +223,44 @@ impl Mapper for Mbc1 {
             self.advanced = (v & 1) == 1;
         } else if self.ram_enabled {
             let bank = if self.advanced { self.high } else { 0 };
-            let at = (bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len();
-            self.ram[at] = value;
+            self.ram[((bank * 0x2000 + ram_offset(address)) & self.ram_mask) & 0x1FFFF] = value;
         }
+    }
+    pub fn saved(self: &Self) -> Bytes ! {alloc, panic} { saved_bytes(&self.ram, self.ram_size, self.battery) }
+    pub fn restore(self: &mut Self, saved: &Bytes) -> Unit ! {panic} {
+        let size = self.ram_size;
+        restore_bytes(&mut self.ram, size, saved);
     }
 }
 
 // --- MBC3: up to 2 MiB ROM / 32 KiB RAM; the clock reads as stopped. ----
 
 pub struct Mbc3 {
-    pub rom: Vec<u8>,
-    pub ram: Vec<u8>,
+    pub rom: Vec<u8> where len >= 0x200000,
+    pub ram: Vec<u8> where len >= 0x20000,
+    pub ram_mask: i64,
+    pub ram_size: i64,
+    pub battery: Bool,
     pub ram_enabled: Bool,
     pub rom_bank: i64,
     pub ram_bank: i64,
 }
 
+pub fn mbc3(rom: &Vec<u8>) -> Mbc3 ! {alloc, panic} {
+    let size = ram_size(rom);
+    Mbc3 {
+        rom: mirrored(rom, 0x200000), ram: zeroed(RAM_SPACE), ram_mask: size - 1, ram_size: size,
+        battery: battery(rom), ram_enabled: false, rom_bank: 1, ram_bank: 0,
+    }
+}
+
 impl Mapper for Mbc3 {
     pub fn load(self: &Self, address: u16) -> u8 ! {panic} {
-        if address < 0x4000 { return rom_byte(&self.rom, 0, offset(address, 0x3FFF)); }
-        if address < 0x8000 { return rom_byte(&self.rom, self.rom_bank, offset(address, 0x3FFF)); }
+        if address < 0x4000 { return self.rom[rom_offset(address)]; }
+        if address < 0x8000 { return self.rom[(self.rom_bank * 0x4000 + rom_offset(address)) & 0x1FFFFF]; }
         if !self.ram_enabled { return OPEN_BUS; }
         if self.ram_bank > 3 { return 0; }
-        self.ram[(self.ram_bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len()]
+        self.ram[((self.ram_bank * 0x2000 + ram_offset(address)) & self.ram_mask) & 0x1FFFF]
     }
     pub fn store(self: &mut Self, address: u16, value: u8) -> Unit ! {panic} {
         let v: i64 = Int.convert(value);
@@ -164,28 +274,43 @@ impl Mapper for Mbc3 {
         } else if address < 0x8000 {
             // Latching the real-time clock: there is no clock to latch.
         } else if self.ram_enabled && self.ram_bank <= 3 {
-            let at = (self.ram_bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len();
-            self.ram[at] = value;
+            self.ram[((self.ram_bank * 0x2000 + ram_offset(address)) & self.ram_mask) & 0x1FFFF] = value;
         }
+    }
+    pub fn saved(self: &Self) -> Bytes ! {alloc, panic} { saved_bytes(&self.ram, self.ram_size, self.battery) }
+    pub fn restore(self: &mut Self, saved: &Bytes) -> Unit ! {panic} {
+        let size = self.ram_size;
+        restore_bytes(&mut self.ram, size, saved);
     }
 }
 
 // --- MBC5: up to 8 MiB ROM / 128 KiB RAM. ---------------------------------
 
 pub struct Mbc5 {
-    pub rom: Vec<u8>,
-    pub ram: Vec<u8>,
+    pub rom: Vec<u8> where len >= 0x800000,
+    pub ram: Vec<u8> where len >= 0x20000,
+    pub ram_mask: i64,
+    pub ram_size: i64,
+    pub battery: Bool,
     pub ram_enabled: Bool,
     pub rom_bank: i64,
     pub ram_bank: i64,
 }
 
+pub fn mbc5(rom: &Vec<u8>) -> Mbc5 ! {alloc, panic} {
+    let size = ram_size(rom);
+    Mbc5 {
+        rom: mirrored(rom, 0x800000), ram: zeroed(RAM_SPACE), ram_mask: size - 1, ram_size: size,
+        battery: battery(rom), ram_enabled: false, rom_bank: 1, ram_bank: 0,
+    }
+}
+
 impl Mapper for Mbc5 {
     pub fn load(self: &Self, address: u16) -> u8 ! {panic} {
-        if address < 0x4000 { return rom_byte(&self.rom, 0, offset(address, 0x3FFF)); }
-        if address < 0x8000 { return rom_byte(&self.rom, self.rom_bank, offset(address, 0x3FFF)); }
+        if address < 0x4000 { return self.rom[rom_offset(address)]; }
+        if address < 0x8000 { return self.rom[(self.rom_bank * 0x4000 + rom_offset(address)) & 0x7FFFFF]; }
         if !self.ram_enabled { return OPEN_BUS; }
-        self.ram[(self.ram_bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len()]
+        self.ram[((self.ram_bank * 0x2000 + ram_offset(address)) & self.ram_mask) & 0x1FFFF]
     }
     pub fn store(self: &mut Self, address: u16, value: u8) -> Unit ! {panic} {
         let v: i64 = Int.convert(value);
@@ -198,8 +323,12 @@ impl Mapper for Mbc5 {
         } else if address < 0x6000 {
             self.ram_bank = v & 0x0F;
         } else if address >= 0xA000 && self.ram_enabled {
-            let at = (self.ram_bank * 0x2000 + offset(address, 0x1FFF)) % self.ram.len();
-            self.ram[at] = value;
+            self.ram[((self.ram_bank * 0x2000 + ram_offset(address)) & self.ram_mask) & 0x1FFFF] = value;
         }
+    }
+    pub fn saved(self: &Self) -> Bytes ! {alloc, panic} { saved_bytes(&self.ram, self.ram_size, self.battery) }
+    pub fn restore(self: &mut Self, saved: &Bytes) -> Unit ! {panic} {
+        let size = self.ram_size;
+        restore_bytes(&mut self.ram, size, saved);
     }
 }

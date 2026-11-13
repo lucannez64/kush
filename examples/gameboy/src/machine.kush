@@ -44,7 +44,7 @@ pub struct Machine<M> {
     pub oam: Vec<u8> where len >= 0x100,
     pub hram: Vec<u8> where len >= 0x7F,
     /// 0xFF00-0xFF7F as last written; reads of live registers are computed.
-    pub io: Vec<u8>,
+    pub io: Vec<u8> where len >= 0x80,
     pub ie: u8,
 
     /// The 16-bit counter whose high byte is DIV; TIMA ticks on falling
@@ -129,12 +129,16 @@ pub fn read<M: Mapper>(m: &Machine<M>, address: u16) -> u8 ! {panic} {
     if address < 0xFE00 { return m.wram[at - 0xE000]; }
     if address < 0xFEA0 { return m.oam[at - 0xFE00]; }
     if address < 0xFF00 { return cartridge.OPEN_BUS; }
-    if address < 0xFF80 { return read_io(m, at - 0xFF00); }
+    if address < 0xFF80 { return read_io(m, at - 0xFF00, _); }
     if address < 0xFFFF { return m.hram[at - 0xFF80]; }
     m.ie
 }
 
-fn read_io<M>(m: &Machine<M>, register: i64) -> u8 ! {panic} {
+fn read_io<M>(
+    m: &Machine<M>,
+    register: i64,
+    erased inside: { 0 <= register && register < 0x80 },
+) -> u8 ! {panic} {
     match register {
         0x00 => joypad(m),
         0x04 => Int.truncate(m.divider >> 8),
@@ -174,12 +178,17 @@ pub fn write<M: Mapper>(m: &mut Machine<M>, address: u16, value: u8) -> Unit ! {
     if address < 0xFE00 { m.wram[at - 0xE000] = value; return; }
     if address < 0xFEA0 { m.oam[at - 0xFE00] = value; return; }
     if address < 0xFF00 { return; }
-    if address < 0xFF80 { write_io(m, at - 0xFF00, value); return; }
+    if address < 0xFF80 { write_io(m, at - 0xFF00, value, _); return; }
     if address < 0xFFFF { m.hram[at - 0xFF80] = value; return; }
     m.ie = value;
 }
 
-fn write_io<M: Mapper>(m: &mut Machine<M>, register: i64, value: u8) -> Unit ! {alloc, panic} {
+fn write_io<M: Mapper>(
+    m: &mut Machine<M>,
+    register: i64,
+    value: u8,
+    erased inside: { 0 <= register && register < 0x80 },
+) -> Unit ! {alloc, panic} {
     match register {
         0x00 => { m.io[0x00] = value & 0x30; },
         0x02 => {

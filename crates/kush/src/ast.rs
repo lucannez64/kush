@@ -361,6 +361,9 @@ pub struct Parameter {
     pub name: String,
     pub ty: Type,
     pub span: Span,
+    /// `v: &mut Vec<T> where len >= N`: callers guarantee the length (proved
+    /// or checked at the call), and the function can never shorten it.
+    pub min_length: Option<Box<Expr>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeKind {
@@ -586,6 +589,10 @@ pub enum ExprKind {
     While {
         condition: Box<Expr>,
         body: Block,
+        /// `while c invariant { P } { .. }`: a linear proposition proved on
+        /// entry and at every back edge, and assumed at the loop head and
+        /// after the loop.
+        invariant: Option<Box<Expr>>,
     },
     Loop(Block),
     Break(Option<Box<Expr>>),

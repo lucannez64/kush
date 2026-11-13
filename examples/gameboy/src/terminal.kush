@@ -39,7 +39,7 @@ fn colour(out: Bytes, ground: i64, shade: u8) -> Bytes ! {alloc, panic} {
 }
 
 /// Append the cells that differ from `shown`, and record them there.
-fn draw(screen: &Vec<u8>, shown: &mut Vec<u8>, out: Bytes) -> Bytes ! {alloc, panic} {
+fn draw(screen: &Vec<u8> where len >= 23040, shown: &mut Vec<u8> where len >= 23040, out: Bytes) -> Bytes ! {alloc, panic} {
     let mut o = out;
     let width = machine.SCREEN_WIDTH;
     let mut foreground: u8 = 255;
@@ -49,9 +49,9 @@ fn draw(screen: &Vec<u8>, shown: &mut Vec<u8>, out: Bytes) -> Bytes ! {alloc, pa
     let mut row = 0;
     while row < ROWS {
         let mut x = 0;
-        while x < width {
-            let top_at = row * 2 * width + x;
-            let bottom_at = top_at + width;
+        while x < machine.SCREEN_WIDTH {
+            let top_at = row * 2 * machine.SCREEN_WIDTH + x;
+            let bottom_at = top_at + machine.SCREEN_WIDTH;
             let top = screen[top_at];
             let bottom = screen[bottom_at];
             if top != shown[top_at] || bottom != shown[bottom_at] {

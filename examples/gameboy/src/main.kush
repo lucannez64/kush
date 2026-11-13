@@ -11,14 +11,31 @@ use gameboy.desktop;
 use gameboy.machine.Machine;
 use gameboy.terminal;
 
-// gameboy ROM                         play in a window, with sound
-// gameboy ROM --terminal              play in the terminal
-// gameboy ROM FRAMES [SCREENSHOT.ppm]  run headless
+// gameboy ROM [--scale N] [--fullscreen]   play in a window, with sound
+// gameboy ROM --terminal                   play in the terminal
+// gameboy ROM FRAMES [SCREENSHOT.ppm]      run headless
+//
+// A window starts N times the Game Boy's 160x144 (default 4), can be resized
+// freely (the picture keeps its aspect ratio), and F11 switches full screen.
+// Games with a battery keep their saves in ROM.sav next to the ROM: loaded
+// at start, written when the window or terminal closes.
 //
 // Headless, the ROM runs for FRAMES frames (about 60 per second of game
 // time), whatever it sent to the serial port is printed, and the last frame
 // can be saved as an image. Test ROMs report through the serial port, so this
-// is also how the emulator is checked.
+// is also how the emulator is checked. Headless runs never write saves.
+
+/// What the command line asked for.
+struct Options {
+    /// 0 plays in a window (falling back to the terminal), -1 plays in the
+    /// terminal, more runs headless.
+    frames: i64,
+    screenshot: Bytes,
+    scale: i64,
+    fullscreen: Bool,
+    /// Where battery RAM is kept.
+    save: Bytes,
+}
 
 fn say(text: &Bytes) -> Unit ! {io, alloc, panic} {
     let _ = IO.write(IO.stdout(), text);
@@ -44,27 +61,65 @@ fn load(path: &Bytes) -> Result<Vec<u8>, i64> ! {io, alloc, panic} {
     Ok(rom)
 }
 
-/// Frames: 0 plays in a window (falling back to the terminal), -1 plays in
-/// the terminal, more runs headless.
-fn play<M: Mapper>(board: M, frames: i64, screenshot: &Bytes, title: &Bytes) -> i64 ! {io, alloc, panic} {
-    let mut m = machine.new(board);
-    if frames == 0 {
-        match desktop.play(&mut m, title, 4) {
-            Ok(_) => { return 0; },
+/// The save file for a ROM: its path with the extension replaced by `.sav`.
+fn save_path(rom: &Bytes) -> Bytes ! {alloc, panic} {
+    let mut cut = rom.len();
+    let mut i = rom.len();
+    while i > 0 {
+        i = i - 1;
+        let c = rom[i];
+        if c == 47 { i = 0; } else if c == 46 { cut = i; i = 0; }
+    }
+    let mut out = Bytes.with_capacity(cut + 4);
+    let mut j = 0;
+    while j < cut { out = out.push(rom[j]); j = j + 1; }
+    emulator.append(out, &Bytes.from(".sav"))
+}
+
+/// Load a save into the cartridge, if there is one.
+fn load_save<M: Mapper>(board: &mut M, path: &Bytes) -> Unit ! {io, alloc, panic} {
+    let size = match FS.size(path) { Ok(n) => n, Err(_) => { return; } };
+    match FS.read(path, Bytes.with_capacity(size)) {
+        Ok(saved) => board.restore(&saved),
+        Err(_) => {},
+    }
+}
+
+/// Write the cartridge's battery RAM, if it has any.
+fn write_save<M: Mapper>(m: &Machine<M>, path: &Bytes) -> Unit ! {io, alloc, panic} {
+    let saved = m.cartridge.saved();
+    if saved.len() == 0 { return; }
+    match FS.write(path, &saved) {
+        Ok(_) => {},
+        Err(_) => line(Bytes.from("could not write the save file")),
+    }
+}
+
+fn play<M: Mapper>(board: M, options: &Options, title: &Bytes) -> i64 ! {io, alloc, panic} {
+    let mut cartridge = board;
+    if options.frames <= 0 { load_save(&mut cartridge, &options.save); }
+    let mut m = machine.new(cartridge);
+    if options.frames == 0 {
+        let shown = desktop.play(&mut m, title, options.scale, options.fullscreen);
+        match shown {
+            Ok(_) => { write_save(&m, &options.save); return 0; },
             Err(19) => {},
-            Err(code) => { return code; },
+            Err(code) => { write_save(&m, &options.save); return code; },
         }
     }
-    if frames <= 0 {
-        return match terminal.play(&mut m, title) {
+    if options.frames <= 0 {
+        let played = terminal.play(&mut m, title);
+        let status = match played {
             Ok(_) => 0,
             Err(code) => {
                 line(Bytes.from("the terminal front end needs an interactive terminal"));
                 code
             },
         };
+        write_save(&m, &options.save);
+        return status;
     }
-    headless(&mut m, frames, screenshot)
+    headless(&mut m, options.frames, &options.screenshot)
 }
 
 /// Run `frames` frames, stopping early once a test ROM has reported. The
@@ -137,53 +192,75 @@ fn headless<M: Mapper>(m: &mut Machine<M>, frames: i64, screenshot: &Bytes) -> i
     0
 }
 
+fn same(a: &Bytes, b: &Bytes) -> Bool ! {panic} {
+    if a.len() != b.len() { return false; }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+fn usage() -> i64 ! {io, alloc, panic} {
+    line(Bytes.from("usage: gameboy ROM [--scale N] [--fullscreen]  (play in a window, with sound)"));
+    line(Bytes.from("       gameboy ROM --terminal                  (play in the terminal)"));
+    line(Bytes.from("       gameboy ROM FRAMES [SCREENSHOT.ppm]     (run headless)"));
+    2
+}
+
 fn main() -> i64 ! {io, alloc, panic} {
     let count = match ENV.arg_count() { Ok(n) => n, Err(_) => 0 };
-    if count < 2 {
-        line(Bytes.from("usage: gameboy ROM                        (play in a window, with sound)"));
-        line(Bytes.from("       gameboy ROM --terminal             (play in the terminal)"));
-        line(Bytes.from("       gameboy ROM FRAMES [SCREENSHOT.ppm] (run headless)"));
-        return 2;
-    }
+    if count < 2 { return usage(); }
     let path = match argument(1) { Ok(p) => p, Err(_) => { return 2; } };
-    let frames = if count > 2 {
-        match argument(2) {
-            Ok(text_value) => {
-                if text.contains(&text_value, &Bytes.from("--terminal")) { -1 } else {
-                    match text.parse_i64(&text_value) { Ok(n) => n, Err(_) => 600 }
-                }
-            },
-            Err(_) => 600,
+    let mut frames = 0;
+    let mut screenshot = Bytes.from("");
+    let mut scale = 4;
+    let mut fullscreen = false;
+    let mut positional = 0;
+    let mut index = 2;
+    while index < count {
+        let word = match argument(index) { Ok(w) => w, Err(_) => { return 2; } };
+        if same(&word, &Bytes.from("--terminal")) {
+            frames = -1;
+        } else if same(&word, &Bytes.from("--fullscreen")) {
+            fullscreen = true;
+        } else if same(&word, &Bytes.from("--scale")) {
+            index = index + 1;
+            let value = match argument(index) { Ok(v) => v, Err(_) => { return usage(); } };
+            scale = match text.parse_i64(&value) {
+                Ok(n) => if n >= 1 && n <= 16 { n } else { return usage(); },
+                Err(_) => { return usage(); },
+            };
+        } else if positional == 0 {
+            frames = match text.parse_i64(&word) { Ok(n) => n, Err(_) => { return usage(); } };
+            positional = 1;
+        } else if positional == 1 {
+            screenshot = word;
+            positional = 2;
+        } else {
+            return usage();
         }
-    } else { 0 };
-    let screenshot = if count > 3 {
-        match argument(3) { Ok(p) => p, Err(_) => Bytes.from("") }
-    } else { Bytes.from("") };
+        index = index + 1;
+    }
+    let options = Options {
+        frames: frames, screenshot: screenshot, scale: scale, fullscreen: fullscreen, save: save_path(&path),
+    };
     let rom = match load(&path) {
         Ok(rom) => rom,
         Err(_) => { line(Bytes.from("cannot read the ROM")); return 1; },
     };
     let title = cartridge.title(&rom);
-    if frames > 0 {
+    if options.frames > 0 {
         let mut name = Bytes.from("cartridge: ");
         name = emulator.append(name, &title);
         line(name);
     }
-    let ram = cartridge.zeroed(cartridge.ram_size(&rom));
     match cartridge.kind(&rom) {
-        Kind.Plain => play(cartridge.Plain { rom: rom, ram: ram }, frames, &screenshot, &title),
-        Kind.Mbc1 => play(
-            cartridge.Mbc1 { rom: rom, ram: ram, ram_enabled: false, low: 1, high: 0, advanced: false },
-            frames, &screenshot, &title,
-        ),
-        Kind.Mbc3 => play(
-            cartridge.Mbc3 { rom: rom, ram: ram, ram_enabled: false, rom_bank: 1, ram_bank: 0 },
-            frames, &screenshot, &title,
-        ),
-        Kind.Mbc5 => play(
-            cartridge.Mbc5 { rom: rom, ram: ram, ram_enabled: false, rom_bank: 1, ram_bank: 0 },
-            frames, &screenshot, &title,
-        ),
+        Kind.Plain => play(cartridge.plain(&rom), &options, &title),
+        Kind.Mbc1 => play(cartridge.mbc1(&rom), &options, &title),
+        Kind.Mbc3 => play(cartridge.mbc3(&rom), &options, &title),
+        Kind.Mbc5 => play(cartridge.mbc5(&rom), &options, &title),
         Kind.Unsupported(code) => {
             let mut message = Bytes.from("unsupported cartridge type ");
             message = text.format_i64_into(message, Int.convert(code));

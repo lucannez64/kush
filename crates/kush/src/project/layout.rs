@@ -113,19 +113,20 @@ pub(super) fn layout(source: &str, tokens: &[Token]) -> String {
         let indent = if continuation { indent + 1 } else { indent };
         // Top-level items: a blank line between groups (imports, foreign
         // declarations, everything else) even if the source had none.
-        let declaration_head =
-            matches!(
-                kind,
-                Kind::Module
-                    | Kind::Use
-                    | Kind::Fn
-                    | Kind::Struct
-                    | Kind::Enum
-                    | Kind::Type
-                    | Kind::Pub
-                    | Kind::Total
-                    | Kind::Hash
-            ) || ident_is(Some(kind), &["foreign", "trait", "impl", "effect", "prop"]);
+        let declaration_head = matches!(
+            kind,
+            Kind::Module
+                | Kind::Use
+                | Kind::Fn
+                | Kind::Struct
+                | Kind::Enum
+                | Kind::Type
+                | Kind::Pub
+                | Kind::Hash
+        ) || ident_is(
+            Some(kind),
+            &["foreign", "trait", "impl", "effect", "prop", "total"],
+        );
         let item_start = stack.is_empty()
             && declaration_head
             && prev_kind.is_none_or(|p| matches!(p, Kind::Semi | Kind::RBrace | Kind::RBracket));
@@ -323,7 +324,6 @@ fn is_keyword(kind: &Kind) -> bool {
     matches!(
         kind,
         Kind::Fn
-            | Kind::Total
             | Kind::Pub
             | Kind::Let
             | Kind::Mut
@@ -341,7 +341,6 @@ fn is_keyword(kind: &Kind) -> bool {
             | Kind::Loop
             | Kind::Break
             | Kind::Continue
-            | Kind::Handle
             | Kind::Perform
             | Kind::With
     )

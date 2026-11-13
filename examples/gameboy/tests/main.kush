@@ -34,7 +34,7 @@ fn assemble(bytes: &Bytes) -> Vec<u8> ! {alloc, panic} {
 }
 
 fn machine_for(code: &Vec<u8>) -> Machine<cartridge.Plain> ! {alloc, panic} {
-    machine.new(cartridge.Plain { rom: rom(code), ram: cartridge.zeroed(0x2000) })
+    machine.new(cartridge.plain(&rom(code)))
 }
 
 /// Run until HALT (or a step budget runs out).
@@ -91,7 +91,7 @@ fn a_timer_interrupt_wakes_halt_and_jumps_to_its_vector() -> Unit ! {io, alloc, 
     image[0x50] = vector[0];
     image[0x51] = vector[1];
     image[0x52] = vector[2];
-    m = machine.new(cartridge.Plain { rom: image, ram: cartridge.zeroed(0x2000) });
+    m = machine.new(cartridge.plain(&image));
     run(&mut m, 50);
     // Halted at the first HALT; the timer keeps counting and wakes it.
     m.halted = false;
@@ -112,10 +112,7 @@ fn mbc1_switches_the_upper_rom_window() -> Unit ! {io, alloc, panic} {
     image[0x4000] = 1;
     image[0x8000] = 2;
     image[0xC000] = 3;
-    let mut board = cartridge.Mbc1 {
-        rom: image, ram: cartridge.zeroed(0x2000),
-        ram_enabled: false, low: 1, high: 0, advanced: false,
-    };
+    let mut board = cartridge.mbc1(&image);
     test.equal_i64(wide(board.load(0x4000)), 1);
     board.store(0x2000, 3);
     test.equal_i64(wide(board.load(0x4000)), 3);
@@ -222,4 +219,30 @@ fn the_core_runs_under_a_scripted_front_end() -> Unit ! {io, alloc, panic} {
     test.is_true(samples > 6000 && samples < 7000);
     // A (bit 0 of the button row) reads as 0 while held.
     test.equal_i64(wide(machine.read(&m, 0xC000)), 0xDE);
+}
+
+#[test]
+fn battery_ram_survives_a_save_and_a_restore() -> Unit ! {io, alloc, panic} {
+    // MBC1 with RAM and a battery (type 0x03), 8 KiB of RAM (size code 2).
+    let mut image = cartridge.zeroed(0x8000);
+    image[0x147] = 0x03;
+    image[0x149] = 0x02;
+    let mut board = cartridge.mbc1(&image);
+    board.store(0x0000, 0x0A);
+    board.store(0xA123, 0x42);
+    // RAM banks wrap within the board's 8 KiB.
+    board.store(0x6000, 1);
+    board.store(0x4000, 1);
+    test.equal_i64(wide(board.load(0xA123)), 0x42);
+    let saved = board.saved();
+    test.equal_i64(saved.len(), 0x2000);
+    let mut fresh = cartridge.mbc1(&image);
+    fresh.restore(&saved);
+    fresh.store(0x0000, 0x0A);
+    test.equal_i64(wide(fresh.load(0xA123)), 0x42);
+    // Without a battery nothing is saved.
+    image[0x147] = 0x01;
+    let plain = cartridge.mbc1(&image);
+    let nothing = plain.saved();
+    test.equal_i64(nothing.len(), 0);
 }

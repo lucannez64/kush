@@ -1406,7 +1406,22 @@ fn semantic_token_data(text: &str) -> Value {
                 events.push((start, end, KEYWORD));
                 expected = Expected::Type;
             }
-            Kind::Module | Kind::Use | Kind::Handle | Kind::Perform | Kind::With => {
+            // Contextual keywords: `handle Name:` and `total fn|enum`.
+            Kind::Ident(word)
+                if (word == "handle"
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|t| matches!(t.kind, Kind::Ident(_)))
+                    && tokens.get(index + 2).is_some_and(|t| t.kind == Kind::Colon))
+                    || (word == "total"
+                        && tokens
+                            .get(index + 1)
+                            .is_some_and(|t| matches!(t.kind, Kind::Fn | Kind::Enum))) =>
+            {
+                events.push((start, end, KEYWORD));
+                expected = Expected::None;
+            }
+            Kind::Module | Kind::Use | Kind::Perform | Kind::With => {
                 events.push((start, end, KEYWORD));
                 expected = if matches!(token.kind, Kind::Module | Kind::Use) {
                     Expected::Namespace
@@ -1486,7 +1501,6 @@ fn semantic_token_data(text: &str) -> Value {
                 events.push((start, end, KEYWORD));
             }
             Kind::Return
-            | Kind::Total
             | Kind::If
             | Kind::Else
             | Kind::Match

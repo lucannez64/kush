@@ -2598,7 +2598,9 @@ fn collect_body_returns<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
                 collect_body_returns(field, out);
             }
         }
-        ast::ExprKind::While { condition, body } => {
+        ast::ExprKind::While {
+            condition, body, ..
+        } => {
             collect_body_returns(condition, out);
             collect_block_returns(body, out);
         }
@@ -5525,6 +5527,10 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
             expanding_constants: Vec::new(),
             writing_bounded_field: false,
             replace_min_length: None,
+            body_invariant: None,
+            parameter_lengths: BTreeMap::new(),
+            refined_use_ok: false,
+            lending_spans: BTreeSet::new(),
             abort_labels: 0,
             capability_slots: BTreeSet::new(),
             capability_passable: BTreeSet::new(),
@@ -5602,6 +5608,19 @@ pub fn check_program(program: &crate::program::Program) -> Result<Executable> {
                     let (ty, grade) = runtime.next().unwrap();
                     let slot = checker.bind(p.span, *ty, false)?;
                     ensures_params.push((resolution.binder(p.span).unwrap(), slot));
+                    if let Some(length) = &p.min_length {
+                        let refined = ty.ref_pointee().is_some_and(|pointer| {
+                            matches!(checker.types.pointees[pointer], Type::Vec(_))
+                        });
+                        let Some(length) = checker.ast_integer(length, 0).filter(|_| refined)
+                        else {
+                            return Err(Diagnostic::new(
+                                p.ty.span,
+                                "'where len >= N' on a parameter needs a '&Vec<T>' or '&mut Vec<T>' type and a compile-time N",
+                            ));
+                        };
+                        checker.parameter_lengths.insert(slot, length);
+                    }
                     if matches!(split_grade(&p.ty).0.kind, ast::TypeKind::Capability { .. }) {
                         checker.capability_slots.insert(slot);
                         checker.capability_passable.insert(slot);
@@ -7146,6 +7165,12 @@ fn collect_methods<'a>(
                 ));
             }
             for parameter in &f.parameters {
+                if let Some(length) = &parameter.min_length {
+                    return Err(Diagnostic::new(
+                        length.span,
+                        "'where len >= N' parameters are supported on functions, not on methods yet",
+                    ));
+                }
                 if parameter.erased && type_mentions_self(&parameter.ty) {
                     return Err(Diagnostic::new(
                         parameter.ty.span,
@@ -7569,6 +7594,12 @@ fn collect_methods<'a>(
                 }
             }
             for parameter in &f.parameters {
+                if let Some(length) = &parameter.min_length {
+                    return Err(Diagnostic::new(
+                        length.span,
+                        "'where len >= N' parameters are supported on functions, not on methods yet",
+                    ));
+                }
                 if parameter.erased && type_mentions_self(&parameter.ty) {
                     return Err(Diagnostic::new(
                         parameter.ty.span,
@@ -9485,6 +9516,12 @@ fn collect_generic_impl<'a>(
             }
         }
         for parameter in &f.parameters {
+            if let Some(length) = &parameter.min_length {
+                return Err(Diagnostic::new(
+                    length.span,
+                    "'where len >= N' parameters are supported on functions, not on methods yet",
+                ));
+            }
             if parameter.erased && type_mentions_self(&parameter.ty) {
                 return Err(Diagnostic::new(
                     parameter.ty.span,
@@ -10885,9 +10922,9 @@ impl<'a> Functions<'a> {
             }
         }
         lifetime_bounds = close_lifetime_bounds(lifetime_bounds);
-        for ty in parameters.iter().chain([&result]) {
-            crate::runtime_types::reject_optional_reference_boundary(types, *ty, f.result.span)?;
-        }
+        // An optional reference may be a parameter: it lives for the call,
+        // like any reference argument. A result still needs provenance.
+        crate::runtime_types::reject_optional_reference_boundary(types, result, f.result.span)?;
         // An explicit result lifetime need not repeat the caller's declared
         // outlives bounds: when the body returns a parameter borrow that does
         // not already outlive the result, infer that relation. Every returned
@@ -12315,6 +12352,8 @@ struct Loop {
     /// Whether a `break` leaves this loop (then exit values need not be
     /// the loop-head values).
     broke: bool,
+    /// The checked `invariant { P }` of a `while`, proved at each `continue`.
+    invariant: Option<Expr>,
 }
 /// One inclusion constraint on an effect row during a call: the declared row
 /// `fixed | e1 | e2 ...` must cover the actual callable row. Constraints are
@@ -12496,6 +12535,17 @@ struct Checker<'a, 't> {
     /// Set while checking `place.replace(v)` on a length-refined field: the
     /// length `v` must be checked to have.
     replace_min_length: Option<i64>,
+    /// The invariant the next checked block (a `while` body) must prove at
+    /// its end.
+    body_invariant: Option<Expr>,
+    /// Reference parameters declared `where len >= N`, by slot.
+    parameter_lengths: BTreeMap<usize, i64>,
+    /// Set just before checking a refined parameter in a use that keeps its
+    /// bound (a non-shortening method receiver).
+    refined_use_ok: bool,
+    /// Spans of call arguments passed to a length-refined parameter: such a
+    /// parameter keeps the bound, so a refined place may be lent there.
+    lending_spans: BTreeSet<(usize, usize)>,
     /// Next `AbortScope` label of this checker (unique per function body).
     abort_labels: usize,
     /// Locals holding a second-class capability (EFF-CAP-LEXICAL).
@@ -13065,7 +13115,24 @@ impl Checker<'_, '_> {
             self.writing_bounded_field = false;
             first?
         } else {
-            self.expr(receiver)?
+            if matches!(receiver.kind, ast::ExprKind::Name(_))
+                && let Some(length) = self.place_min_length(receiver)
+            {
+                match name {
+                    "clear" => {
+                        return Err(Diagnostic::new(
+                            span,
+                            "this parameter keeps 'len >= N'; clearing it would break that",
+                        ));
+                    }
+                    "replace" => self.replace_min_length = Some(length),
+                    _ => {}
+                }
+                self.refined_use_ok = true;
+            }
+            let first = self.expr(receiver);
+            self.refined_use_ok = false;
+            first?
         };
         if first.ty == Type::Never {
             return Ok(first);
@@ -18021,6 +18088,26 @@ impl Checker<'_, '_> {
     }
     /// Try to prove `l op r` for every atom from the facts in scope without
     /// reporting a failure. Proved goals record checked certificates.
+    /// Prove a checked `Bool` proposition (linear comparisons with `&&`,
+    /// `||` and `!`) from the facts here, recording its certificate.
+    fn prove_condition(&mut self, condition: &Expr, what: &str) -> Result<()> {
+        let Some(goal) = self.facts.formula_exact(condition, true) else {
+            return Err(Diagnostic::new(
+                condition.span,
+                format!("{what} must be linear comparisons of integers joined by &&, || and !"),
+            ));
+        };
+        match self.facts.certify(&goal, condition.span, what) {
+            Some(certificates) => {
+                self.functions.certificates.extend(certificates);
+                Ok(())
+            }
+            None => Err(Diagnostic::new(
+                condition.span,
+                format!("cannot prove {what} from what is known here"),
+            )),
+        }
+    }
     fn try_prove(
         &mut self,
         atoms: Vec<(crate::facts::Linear, Kind, crate::facts::Linear)>,
@@ -20926,8 +21013,12 @@ impl Checker<'_, '_> {
             })
     }
     fn block(&mut self, block: &ast::Block, expected: Option<Type>) -> Result<Block> {
+        // A loop body proves its loop's invariant at its end, before the
+        // facts it learnt are dropped.
+        let invariant = self.body_invariant.take();
         self.nested(block.span, |c| {
             let mark = c.facts.mark();
+            let stamp = c.facts.version_stamp();
             let kernel_mark = c.kernel_locals.len();
             let result = c.statements(
                 &block.statements,
@@ -20935,7 +21026,17 @@ impl Checker<'_, '_> {
                 block.span,
                 expected,
             );
+            if let (Some(invariant), Ok(checked)) = (&invariant, &result)
+                && checked.ty != Type::Never
+            {
+                c.prove_condition(invariant, "the loop invariant at the end of the body")?;
+            }
+            let preserved = match &result {
+                Ok(checked) if checked.ty != Type::Never => c.facts.preserved_since(&stamp),
+                _ => Vec::new(),
+            };
             c.facts.reset(mark);
+            c.facts.add(preserved);
             c.truncate_kernel(kernel_mark);
             result
         })
@@ -22166,6 +22267,20 @@ impl Checker<'_, '_> {
                 }
                 ast::ExprKind::Name(_) => {
                     if let Some(id) = c.resolution.reference(span) {
+                        // A `&mut Vec` parameter that keeps `len >= N` is used
+                        // only where the bound survives: indexing, methods
+                        // that cannot shorten it, and refined parameters.
+                        if let Some(slot) = c.slots.get(&id)
+                            && c.parameter_lengths.contains_key(slot)
+                            && matches!(c.locals[*slot].ty, Type::RefMut(_))
+                            && !std::mem::take(&mut c.refined_use_ok)
+                            && !c.lending_spans.contains(&(span.start, span.end))
+                        {
+                            return Err(Diagnostic::new(
+                                span,
+                                "this parameter keeps 'len >= N'; index it, call push/set/reserve/replace on it, or pass it to a parameter that keeps the bound",
+                            ));
+                        }
                         if let Some(slot) = c.slots.get(&id)
                             && c.capability_slots.contains(slot)
                             && !std::mem::take(&mut c.capability_argument)
@@ -22519,8 +22634,26 @@ impl Checker<'_, '_> {
                         expected,
                     );
                 }
-                ast::ExprKind::While { condition, body } => {
+                ast::ExprKind::While {
+                    condition,
+                    body,
+                    invariant,
+                } => {
+                    // The invariant must hold on entry; after the loop-head
+                    // widening it is assumed, so the body and the exit see it.
+                    let invariant = match invariant {
+                        Some(invariant) => {
+                            let checked = c.expr_expected(invariant, Some(Type::Bool))?;
+                            c.expect(checked.ty, Type::Bool, checked.span)?;
+                            c.prove_condition(&checked, "the loop invariant on entry")?;
+                            Some(checked)
+                        }
+                        None => None,
+                    };
                     c.bump_assigned(body, Some(condition));
+                    if let Some(invariant) = &invariant {
+                        c.facts.assume(invariant, true);
+                    }
                     let before = c.facts.version_stamp();
                     let condition = c.expr(condition)?;
                     c.expect(condition.ty, Type::Bool, condition.span)?;
@@ -22534,8 +22667,10 @@ impl Checker<'_, '_> {
                     }
                     let scalar_baseline = c.scalar_values.clone();
                     let scalar_live = c.kernel_locals.len();
-                    c.loops.push(Loop { value: None, is_while: true, expected: None, broke: false });
+                    c.loops.push(Loop { value: None, is_while: true, expected: None, broke: false, invariant: invariant.clone() });
+                    c.body_invariant = invariant.clone();
                     let body = c.block(body, Some(Type::Unit));
+                    c.body_invariant = None;
                     let broke = c.loops.pop().is_some_and(|state| state.broke);
                     c.facts.reset(mark);
                     // Without `break`, the loop exits only from the head, where
@@ -22561,7 +22696,7 @@ impl Checker<'_, '_> {
                     c.bump_assigned(body, None);
                     let scalar_baseline = c.scalar_values.clone();
                     let scalar_live = c.kernel_locals.len();
-                    c.loops.push(Loop { value: Some(Type::Never), is_while: false, expected, broke: false });
+                    c.loops.push(Loop { value: Some(Type::Never), is_while: false, expected, broke: false, invariant: None });
                     let body = c.block(body, Some(Type::Unit));
                     let state = c.loops.pop().unwrap();
                     let body = body?;
@@ -22629,6 +22764,9 @@ impl Checker<'_, '_> {
                     if c.loops.is_empty() {
                         return Err(Diagnostic::new(span, "'continue' outside of a loop"));
                     }
+                    if let Some(invariant) = c.loops.last().and_then(|state| state.invariant.clone()) {
+                        c.prove_condition(&invariant, "the loop invariant at this 'continue'")?;
+                    }
                     (ExprKind::Continue(vec![]), Type::Never)
                 }
                 ast::ExprKind::Block(block) => {
@@ -22652,10 +22790,14 @@ impl Checker<'_, '_> {
                     // A field that keeps `len >= N` is never lent exclusively
                     // to code that could shorten it; element writes and pushes
                     // go through `place[i] = v` and `place.push(v)`.
-                    if *mutable && !c.writing_bounded_field && c.place_min_length(operand).is_some() {
+                    if *mutable
+                        && !c.writing_bounded_field
+                        && !c.lending_spans.contains(&(span.start, span.end))
+                        && c.place_min_length(operand).is_some()
+                    {
                         return Err(Diagnostic::new(
                             span,
-                            "this field keeps 'len >= N', so it cannot be borrowed with '&mut'; write elements with place[i] = value, append with place.push(value), or swap the vector with place.replace(other)",
+                            "this place keeps 'len >= N', so it cannot be borrowed with '&mut' except by a parameter that keeps the bound; write elements with place[i] = value, append with place.push(value), or swap the vector with place.replace(other)",
                         ));
                     }
                     // Explicit reborrow: `&*p` narrows an existing reference
@@ -23952,13 +24094,15 @@ impl Checker<'_, '_> {
                     // a diverging branch's rewrites do not weaken the facts
                     // after it (its opaque slots stay opaque: that set is
                     // sticky and loop heads rely on it).
-                    let mut then_facts = then_facts;
                     if then.ty == Type::Never && otherwise.ty != Type::Never {
-                        then_facts.versions_from(&baseline);
+                        c.facts.keep_opaque_of(&then_facts);
                     } else if otherwise.ty == Type::Never && then.ty != Type::Never {
-                        c.facts.versions_from(&baseline);
+                        let mut kept = then_facts;
+                        kept.keep_opaque_of(&c.facts);
+                        c.facts = kept;
+                    } else {
+                        c.facts = crate::facts::Facts::branch_join(&baseline, &then_facts, &c.facts);
                     }
-                    c.facts = crate::facts::Facts::branch_join(&baseline, &then_facts, &c.facts);
                     c.join_scalars(
                         &scalar_baseline,
                         &then_scalars,
@@ -24489,6 +24633,13 @@ impl Checker<'_, '_> {
                     "a lambda or task cannot capture TaskExit<T> with a borrowed payload; match it inside the scope that joined it",
                 )
                 .with_note(local.span, "joined borrowed result declared here"));
+            }
+            if self.parameter_lengths.contains_key(slot) && matches!(ty, Type::RefMut(_)) {
+                return Err(Diagnostic::new(
+                    span,
+                    "a lambda cannot capture a parameter that keeps 'len >= N'; the closure could shorten it",
+                )
+                .with_note(self.locals[*slot].span, "refined parameter declared here"));
             }
             if matches!(ty, Type::Task(_)) {
                 return Err(Diagnostic::new(
@@ -25037,6 +25188,7 @@ impl Checker<'_, '_> {
         let saved_written = std::mem::take(&mut self.written_slots);
         let saved_closure_writes = std::mem::take(&mut self.closure_writes);
         let saved_closure_captures = std::mem::take(&mut self.closure_captures);
+        let saved_parameter_lengths = std::mem::take(&mut self.parameter_lengths);
         let capture_ids = captures
             .iter()
             .map(|slot| {
@@ -25087,6 +25239,15 @@ impl Checker<'_, '_> {
             for index in &capability_captures {
                 self.capability_slots.insert(*index);
                 self.capability_passable.insert(*index);
+            }
+            // A by-reference scalar may also be captured, and written, by
+            // other closures (several handlers sharing a counter), and any
+            // call in the body may run one of them: no fact about it holds
+            // across the body.
+            for (index, by_ref) in capture_refs.iter().enumerate() {
+                if *by_ref {
+                    self.facts.make_opaque(index);
+                }
             }
             // Captured scalars are symbolic indices in the body. A by-value
             // snapshot is frozen at construction; a by-reference mutable
@@ -25156,6 +25317,7 @@ impl Checker<'_, '_> {
         self.facts = saved_facts;
         self.written_slots = saved_written;
         self.closure_writes = saved_closure_writes;
+        self.parameter_lengths = saved_parameter_lengths;
         self.closure_captures = saved_closure_captures;
         let body_required = self.required_effects.replace(saved_required);
         let (body, obligation, written) = checked?;
@@ -25912,6 +26074,18 @@ impl Checker<'_, '_> {
                 span,
                 format!(
                     "'{}' has a capability parameter and can only be called directly; as a function value it would let a capability be forged or escape",
+                    f.name
+                ),
+            ));
+        }
+        if f.parameters
+            .iter()
+            .any(|parameter| parameter.min_length.is_some())
+        {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "'{}' has a 'where len >= N' parameter and can only be called directly, where the length is proved or checked",
                     f.name
                 ),
             ));
@@ -27948,6 +28122,69 @@ impl Checker<'_, '_> {
     /// A record literal whose fields declare `where len >= N`: each such
     /// vector is checked once here (a read of element N - 1), so every later
     /// access may rely on the length.
+    /// A `&Vec<T>` / `&mut Vec<T>` argument checked at run time to reach a
+    /// vector of at least `length` elements; the reference itself is passed.
+    fn reference_length_checked(&mut self, value: Expr, length: i64) -> Result<Expr> {
+        let ty = value.ty;
+        let Some(Type::Vec(pointer)) = ty.ref_pointee().map(|pointer| self.types.pointees[pointer])
+        else {
+            return Err(Diagnostic::new(
+                value.span,
+                "'where len >= N' needs a '&Vec<T>' or '&mut Vec<T>' argument",
+            ));
+        };
+        let element = self.unannotate(self.types.pointees[pointer]);
+        if self.owned_type(element) {
+            return Err(Diagnostic::new(
+                value.span,
+                "this argument's length must be known to reach 'len >= N' (its elements own resources, so it cannot be checked by reading one)",
+            ));
+        }
+        if length <= 0 {
+            return Ok(value);
+        }
+        self.require(PANIC, value.span)?;
+        let span = value.span;
+        let slot = self.fresh_local(span, ty)?;
+        let reader = Expr {
+            kind: ExprKind::Peek(slot),
+            ty: Type::Ref(self.types.pointer(Type::Vec(pointer))),
+            span,
+            resource: None,
+        };
+        let check = Expr {
+            kind: ExprKind::Call(
+                Target::Vec(VecOp::Get, element),
+                vec![
+                    reader,
+                    Expr {
+                        kind: ExprKind::Constant(length - 1),
+                        ty: Type::I64,
+                        span,
+                        resource: None,
+                    },
+                ],
+            ),
+            ty: element,
+            span,
+            resource: None,
+        };
+        Ok(Expr {
+            kind: ExprKind::Block(Block {
+                statements: vec![Statement::Let(slot, value), Statement::Expr(check)],
+                tail: Some(Box::new(Expr {
+                    kind: ExprKind::Local(slot),
+                    ty,
+                    span,
+                    resource: None,
+                })),
+                ty,
+            }),
+            ty,
+            span,
+            resource: None,
+        })
+    }
     /// `value` (a `Vec<T>` of type `ty`), checked at run time to hold at
     /// least `length` elements: the value of a length-refined field.
     fn length_checked(&mut self, value: Expr, ty: Type, length: i64) -> Result<Expr> {
@@ -28052,6 +28289,20 @@ impl Checker<'_, '_> {
     /// The minimum length a field place is declared to keep
     /// (`where len >= N`), when `place` is such a field.
     fn place_min_length(&self, place: &ast::Expr) -> Option<i64> {
+        match &place.kind {
+            ast::ExprKind::Name(_) => {
+                return self
+                    .slot(place.span)
+                    .ok()
+                    .and_then(|slot| self.parameter_lengths.get(&slot).copied());
+            }
+            ast::ExprKind::Unary {
+                op: Kind::Star,
+                operand,
+                ..
+            } => return self.place_min_length(operand),
+            _ => {}
+        }
         let ast::ExprKind::Field { value, name } = &place.kind else {
             return None;
         };
@@ -31687,19 +31938,58 @@ impl Checker<'_, '_> {
             .collect::<BTreeSet<_>>();
         let lengths = self.call_runtime_lengths(f, 0, arguments)?;
         self.pending_lengths = lengths.clone();
-        let (type_arguments, grade_arguments, const_arguments, effect_arguments, values) = self
-            .infer(
-                &f.generics,
-                explicit,
-                &pairs,
-                hint.as_ref()
-                    .map(|(declared, expected)| (declared, *expected)),
-                Some(&lifetime_binders),
-                None,
-                None,
-                &what,
-                span,
-            )?;
+        // Arguments of length-refined parameters: the callee keeps the bound,
+        // so a refined place may be lent there; what the argument already
+        // guarantees decides whether a run-time check is needed.
+        let mut refined_arguments = Vec::new();
+        let mut runtime_index = 0;
+        for (parameter, argument) in f.parameters.iter().zip(arguments) {
+            let position = runtime_index;
+            if !parameter.erased {
+                runtime_index += 1;
+            }
+            let Some(length) = &parameter.min_length else {
+                continue;
+            };
+            let Some(length) = self.ast_integer(length, 0) else {
+                continue;
+            };
+            let known = match &argument.kind {
+                ast::ExprKind::Unary {
+                    op: Kind::Amp,
+                    operand,
+                    ..
+                } => self.place_min_length(operand),
+                ast::ExprKind::Name(_) => self.place_min_length(argument),
+                _ => None,
+            };
+            self.lending_spans
+                .insert((argument.span.start, argument.span.end));
+            refined_arguments.push((
+                argument.span,
+                position,
+                length,
+                known.is_some_and(|known| known >= length),
+            ));
+        }
+        let inferred = self.infer(
+            &f.generics,
+            explicit,
+            &pairs,
+            hint.as_ref()
+                .map(|(declared, expected)| (declared, *expected)),
+            Some(&lifetime_binders),
+            None,
+            None,
+            &what,
+            span,
+        );
+        for (argument_span, _, _, _) in &refined_arguments {
+            self.lending_spans
+                .remove(&(argument_span.start, argument_span.end));
+        }
+        let (type_arguments, grade_arguments, const_arguments, effect_arguments, values) =
+            inferred?;
         let index = self.functions.instance(
             self.types,
             self.resolution,
@@ -31740,10 +32030,22 @@ impl Checker<'_, '_> {
             self.types.rebind_lengths(result, &lengths, span)?
         };
         let mut coerced = Vec::with_capacity(values.len());
-        for (value, ty) in values.into_iter().zip(&signature.parameters) {
+        for (position, (value, ty)) in values.into_iter().zip(&signature.parameters).enumerate() {
             let ty = self.types.relabel_lifetimes(*ty, &lifetime_map, span)?;
             let ty = self.types.rebind_lengths(ty, &lengths, span)?;
-            coerced.push(self.coerce_argument(value, ty, span)?);
+            let value = self.coerce_argument(value, ty, span)?;
+            // An argument whose length is not already known to be enough is
+            // checked here, once, before the call.
+            let value = match refined_arguments
+                .iter()
+                .find(|(_, index, _, _)| *index == position)
+            {
+                Some((_, _, length, false)) if value.ty != Type::Never => {
+                    self.reference_length_checked(value, *length)?
+                }
+                _ => value,
+            };
+            coerced.push(value);
         }
         let values = coerced;
         // Runtime parameter types aligned with the source parameter list. Erased
@@ -35597,7 +35899,24 @@ impl Checker<'_, '_> {
                 None => Ok(value),
             };
         }
-        let first = self.expr(&arguments[0])?;
+        if matches!(arguments[0].kind, ast::ExprKind::Name(_))
+            && let Some(length) = self.place_min_length(&arguments[0])
+        {
+            match name {
+                "Vec.clear" => {
+                    return Err(Diagnostic::new(
+                        span,
+                        "this parameter keeps 'len >= N'; clearing it would break that",
+                    ));
+                }
+                "Vec.replace" => self.replace_min_length = Some(length),
+                _ => {}
+            }
+            self.refined_use_ok = true;
+        }
+        let first = self.expr(&arguments[0]);
+        self.refined_use_ok = false;
+        let first = first?;
         self.vec_call_with(name, first, &arguments[1..], expected, span)
     }
     /// Vector/Bytes `.at` builtin with an already checked receiver. The
@@ -36448,7 +36767,9 @@ impl Checker<'_, '_> {
                 }
                 K::Specialize { callee, .. } => expr(callee, out, calls),
                 K::Block(b) | K::Loop(b) => block(b, out, calls),
-                K::While { condition, body } => {
+                K::While {
+                    condition, body, ..
+                } => {
                     expr(condition, out, calls);
                     block(body, out, calls);
                 }
@@ -37564,7 +37885,9 @@ pub(crate) fn ast_children<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::E
                 f(&arm.body);
             }
         }
-        E::While { condition, body } => {
+        E::While {
+            condition, body, ..
+        } => {
             f(condition);
             block(body, f);
         }
@@ -37656,7 +37979,9 @@ fn exits_early(expr: &ast::Expr) -> bool {
                     arm.guard.as_ref().is_some_and(exits_early) || exits_early(&arm.body)
                 })
         }
-        E::While { condition, body } => exits_early(condition) || block(body),
+        E::While {
+            condition, body, ..
+        } => exits_early(condition) || block(body),
         E::Break(value) => value.as_deref().is_some_and(exits_early),
     }
 }
@@ -37758,7 +38083,9 @@ fn contains_lexical_perform(expr: &ast::Expr, operation: &str) -> bool {
         ast::ExprKind::Record { fields, .. } => fields
             .iter()
             .any(|(_, value)| contains_lexical_perform(value, operation)),
-        ast::ExprKind::While { condition, body } => {
+        ast::ExprKind::While {
+            condition, body, ..
+        } => {
             contains_lexical_perform(condition, operation)
                 || block_contains_lexical_perform(body, operation)
         }
@@ -37891,7 +38218,9 @@ fn collect_expr_refs(resolution: &Resolution, expr: &ast::Expr, out: &mut BTreeS
                 collect_expr_refs(resolution, value, out);
             }
         }
-        ast::ExprKind::While { condition, body } => {
+        ast::ExprKind::While {
+            condition, body, ..
+        } => {
             collect_expr_refs(resolution, condition, out);
             collect_lambda_refs(resolution, body, out);
         }
